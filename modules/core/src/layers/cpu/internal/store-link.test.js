@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeValue, encodeValue } from '../../../system/codec.js';
+import { decodeValue, encodeValue } from '@bottlify/cellar';
 import { createDirectoryTranslationStore, createMemoryDirectory } from './translation-store.js';
 import { remoteStore, storeHandlers, withHeldModules } from './store-link.js';
 

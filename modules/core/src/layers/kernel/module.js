@@ -20,6 +20,7 @@ import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 import { createStackPool } from './internal/stacks.js';
 import { wholeAddress } from '../../system/address.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 
 /** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
 const TURN_MS = 0.25;
@@ -116,11 +117,11 @@ function published(cpu, log){
     const metrics = typeof log.metrics?.table === 'function' ? log.metrics : null;
     if (!metrics)
     {
-        return { pages: new Float64Array(pageRows) };
+        return { pages: openTable(createTableMemory(
+            { rows: pageRows, columns: ['instructions'] })) };
     }
     return {
-        pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'] })
-            .values,
+        pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'] }),
         counters: metrics.counters('kernel', SCHEDULER_COUNTERS),
         threadTable: metrics.table('kernel', 'threads',
             { rows: THREAD_ROWS, columns: THREAD_COLUMNS }),

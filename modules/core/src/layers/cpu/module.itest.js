@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { noCache } from '../cache/module.js';
 import { cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
-import { readTable } from '../log/internal/table.js';
+import { openTable } from '@bottlify/cellar';
 
 const GUEST_CODE = 0x8000;
 const CORK = new URL('../../../../cork/src/index.js', import.meta.url).href;
@@ -47,7 +47,7 @@ async function booted(code, at, config = {}){
     await api.boot();
     api.writePhysical(at, code);
     api.writePhysical(0x7000, new Uint8Array(u32(at)));
-    const counters = ()=>readTable(metrics.describe().cpu.counters).row(0);
+    const counters = ()=>openTable(metrics.describe().cpu.counters).row(0);
     return { api, metrics, counters };
 }
 
@@ -63,7 +63,7 @@ test('the frame counters carry what the host wrote into guest memory', async()=>
     api.writePhysical(0x7000, new Uint8Array(u32(GUEST_CODE)));
     api.runSlice(100);
     metrics.sample();
-    const row = readTable(metrics.describe().cpu.counters).row(0);
+    const row = openTable(metrics.describe().cpu.counters).row(0);
     assert.ok(row.hostWrittenBytes >= 5, `${row.hostWrittenBytes} bytes`);
     assert.ok(row.instructions > 0);
     await cpuModule.dispose();

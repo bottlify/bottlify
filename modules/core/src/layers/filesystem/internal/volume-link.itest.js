@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { testPageFile } from '../../../process/page-file.fixture.js';
 import { createFilesystemModule } from '../module.js';
-import { decodeValue, encodeValue } from '../../../system/codec.js';
+import { decodeValue, encodeValue } from '@bottlify/cellar';
 import { createMemoryStore } from './memory-store.fixture.js';
 import { createSharingMemory, openSharedSharing } from './shared-sharing.js';
 import { CHUNK, remoteVolume, volumeHandlers } from './volume-link.js';

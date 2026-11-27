@@ -41,10 +41,10 @@ export const SAMPLE_COLUMNS = ['address', 'instructions'];
  * reader on another thread -- the log keeper -- ranks the buckets itself,
  * and nothing here sorts or copies on anyone's request.
  *
- * @param {import('../../log/internal/table.js').TableWriter | null} [published]
+ * @param {import('@bottlify/cellar').Table | null} [published]
  */
 export function createSampleTable(published = null){
-    published?.used(0);
+    published?.use(0);
     return {
         published,
         /** @type {Map<number, Bucket>} */
@@ -81,7 +81,7 @@ export function creditSample(table, eip, instructions, hot = Infinity){
         bucket.eip = eip >>> 0;
         if (table.published)
         {
-            table.published.values[bucket.row * 2 + 1] = bucket.instructions;
+            table.published.set(bucket.row, 1, bucket.instructions);
         }
     }
     else if (table.buckets.size >= BUCKET_CAP)
@@ -100,7 +100,7 @@ export function creditSample(table, eip, instructions, hot = Infinity){
         {
             table.published.set(bucket.row, 0, key * (1 << BUCKET_SHIFT));
             table.published.set(bucket.row, 1, instructions);
-            table.published.used(table.buckets.size);
+            table.published.use(table.buckets.size);
         }
     }
     if (!bucket.due && bucket.instructions >= hot && bucket.noted !== bucket.eip)

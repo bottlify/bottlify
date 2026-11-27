@@ -201,7 +201,7 @@ const PROCESS = `
         .then(async([{ openLink }, { remoteCacheReader, remoteCacheOwners },
             { createCacheModule, channelSpace }])=>{
             const link = openLink(workerData.end, {});
-            const ask = (method, args)=>link.callWaiting('cache', method, args);
+            const ask = (method, args)=>link.ask('cache', method, args);
             const reader = remoteCacheReader(workerData.joined,
                 { ask, call: (method, args)=>link.call('cache', method, args) });
             const owners = remoteCacheOwners({ ask }, message=>parentPort.postMessage(message));
@@ -228,7 +228,7 @@ test('a process in a worker of its own is served names of its own: its scratches
     + 'roots are the run\'s, counted under each owner, read in place, and gone with it, no tail',
 { timeout: 60_000 }, async()=>{
     const { Worker } = await import('node:worker_threads');
-    const { createLinkMemory, openLink } = await import('../system/link.js');
+    const { createLinkMemory, openLink } = await import('@bottlify/cellar');
     /** @type {import('../layers/cache/module.js').OwnerTail[]} */
     const tails = [];
     const run = await openRunCache({ onTail: tail=>tails.push(tail) });
@@ -238,7 +238,7 @@ test('a process in a worker of its own is served names of its own: its scratches
     const serving = system.serve();
     const joined = run.join(()=>{});
     const worker = new Worker(PROCESS, { eval: true, workerData: {
-        link: new URL('../system/link.js', import.meta.url).href,
+        link: import.meta.resolve('@bottlify/cellar'),
         runCache: new URL('./run-cache.js', import.meta.url).href,
         cache: new URL('../layers/cache/module.js', import.meta.url).href,
         end: b, joined: { shared: joined.shared, segments: joined.segments } } });

@@ -54,9 +54,10 @@
  * without a GPU) and a run without a graphics worker leave them 0, which a
  * reader says as "not measured" rather than as zero.
  */
+/** The layer's counters; times in nanoseconds (`log.metrics`). */
 const GRAPHICS_COUNTERS = [
-    'shown', 'device', 'draws', 'gpuFrames', 'gpuMs',
-    'worker', 'workerBatches', 'workerReadSelfMs', 'workerSweepMs',
+    'shown', 'device', 'draws', 'gpuFrames', 'gpuNs',
+    'worker', 'workerBatches', 'workerReadSelfNs', 'workerSweepNs',
 ];
 
 /** The last frame's row (`LastFrame`, in its order). */
@@ -73,10 +74,10 @@ const SHOWN_ROWS = 32;
  * `log.metrics.onFrame`.
  *
  * @param {Object} options
- * @param {{ counters: (layer: string, names: string[]) => Float64Array,
+ * @param {{ counters: (layer: string, names: string[]) => import('@bottlify/cellar').Table,
  *     table: (layer: string, name: string, spec: { rows: number, columns: string[] }) =>
  *         { set: (row: number, column: number, value: number) => void,
- *             used: (count: number) => void } }} options.metrics
+ *             use: (count: number) => void } }} options.metrics
  *     The log's registry (`log.metrics`).
  * @param {(text: string) => number} options.intern
  * @param {() => { count: number, by: Readonly<Record<string, number>> } | null} options.shown
@@ -96,7 +97,7 @@ export function publishFigures({ metrics, intern, shown, figures, worker }){
     const last = metrics.table('graphics', 'lastFrame', { rows: 1, columns: LAST_FRAME_COLUMNS });
     return ()=>{
         const canvas = shown();
-        counters[0] = canvas?.count ?? 0;
+        counters.set(0, 0, canvas?.count ?? 0);
         if (canvas)
         {
             let row = 0;
@@ -110,13 +111,13 @@ export function publishFigures({ metrics, intern, shown, figures, worker }){
                 shownBy.set(row, 1, canvas.by[name]);
                 row++;
             }
-            shownBy.used(row);
+            shownBy.use(row);
         }
         const device = figures();
-        counters[1] = device ? 1 : 0;
-        counters[2] = device?.draws ?? 0;
-        counters[3] = device?.gpuFrames ?? 0;
-        counters[4] = device?.gpuMs ?? 0;
+        counters.set(0, 1, device ? 1 : 0);
+        counters.set(0, 2, device?.draws ?? 0);
+        counters.set(0, 3, device?.gpuFrames ?? 0);
+        counters.set(0, 4, (device?.gpuMs ?? 0) * 1e6);
         const frame = device?.last ?? null;
         if (frame)
         {
@@ -125,11 +126,11 @@ export function publishFigures({ metrics, intern, shown, figures, worker }){
                 last.set(0, column, /** @type {any} */ (frame)[LAST_FRAME_COLUMNS[column]]);
             }
         }
-        last.used(frame ? 1 : 0);
+        last.use(frame ? 1 : 0);
         const phases = worker();
-        counters[5] = phases ? 1 : 0;
-        counters[6] = phases?.['batch-read'].count ?? 0;
-        counters[7] = phases?.['batch-read'].selfMs ?? 0;
-        counters[8] = phases?.['batch-sweep'].ms ?? 0;
+        counters.set(0, 5, phases ? 1 : 0);
+        counters.set(0, 6, phases?.['batch-read'].count ?? 0);
+        counters.set(0, 7, (phases?.['batch-read'].selfMs ?? 0) * 1e6);
+        counters.set(0, 8, (phases?.['batch-sweep'].ms ?? 0) * 1e6);
     };
 }

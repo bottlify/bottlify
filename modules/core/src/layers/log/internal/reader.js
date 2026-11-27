@@ -5,7 +5,7 @@
  */
 
 import { createJournalCursor, openJournalMemory, INLINE_TEMPLATE } from './shared-journal.js';
-import { readTable } from './table.js';
+import { openTable } from '@bottlify/cellar';
 import { Level, formatText, levelName } from './journal.js';
 import { FRAME_DELTAS, NOTES_PER_FRAME, PhaseKind } from './profiler.js';
 
@@ -13,6 +13,30 @@ import { FRAME_DELTAS, NOTES_PER_FRAME, PhaseKind } from './profiler.js';
 const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT];
 /** The page size the kernel credits instructions by. */
 const PAGE = 0x10000;
+
+/**
+ * A row as a reader takes it: a column in nanoseconds (`…Ns`) as milliseconds
+ * under its name in `…Ms`, one in millionths (`…Ppm`) as the number itself
+ * under its name without it (`metrics.js`).
+ *
+ * @param {Record<string, number>} row
+ * @returns {Record<string, number>}
+ */
+const readable = row=>{
+    /** @type {Record<string, number>} */
+    const out = {};
+    for (const name in row)
+    {
+        const unit = name.slice(-3) === 'Ppm' ? 3 : name.slice(-2) === 'Ns' ? 2 : 0;
+        out[unit === 0 ? name : unit === 2 ? `${name.slice(0, -2)}Ms` : name.slice(0, -3)]
+            = unit === 0 ? row[name] : row[name] / 1e6;
+    }
+    return out;
+};
+/** A table's rows in use, readable. @param {import('@bottlify/cellar').TableMemory} descriptor */
+const rowsOf = descriptor=>openTable(descriptor).all().map(readable);
+/** A table's first row, readable. @param {import('@bottlify/cellar').TableMemory} descriptor */
+const rowOf = descriptor=>readable(openTable(descriptor).row(0));
 
 /**
  * The other side of the log: whoever reads it, on whatever thread they have.
@@ -36,7 +60,7 @@ const PAGE = 0x10000;
  * Read once and searched per address, on this thread: naming the code a frame
  * was spent in is a reader's question, and the engine stores only the address.
  *
- * @param {Record<string, Record<string, import('./table.js').TableDescriptor>>} tables
+ * @param {Record<string, Record<string, import('@bottlify/cellar').TableMemory>>} tables
  * @param {{ word: (id: number) => string }} cursor
  * @returns {(address: number) => string | null}
  */
@@ -46,7 +70,7 @@ function regionNamer(tables, cursor){
     {
         return ()=>null;
     }
-    const regions = readTable(descriptor).all()
+    const regions = rowsOf(descriptor)
         .map(row=>({ base: row.base, end: row.base + row.size, name: cursor.word(row.name) }))
         .sort((one, two)=>one.base - two.base);
     return address=>{
@@ -81,7 +105,7 @@ const LIVE_SAMPLES = 64;
  * address: ranked here, on the reader's thread, from the counts the engine
  * stores as it credits them.
  *
- * @param {import('./table.js').TableDescriptor | undefined} descriptor
+ * @param {import('@bottlify/cellar').TableMemory | undefined} descriptor
  * @param {number} count
  * @returns {{ address: number, instructions: number }[]}
  */
@@ -90,19 +114,8 @@ function topBuckets(descriptor, count){
     {
         return [];
     }
-    const table = readTable(descriptor);
-    const used = table.used();
-    const { values, columns } = table;
-    const address = columns.indexOf('address');
-    const instructions = columns.indexOf('instructions');
-    /** @type {{ address: number, instructions: number }[]} */
-    const buckets = [];
-    for (let row = 0; row < used; row++)
-    {
-        const at = row * columns.length;
-        buckets.push({ address: values[at + address], instructions: values[at + instructions] });
-    }
-    return buckets.sort((one, two)=>two.instructions - one.instructions).slice(0, count);
+    return rowsOf(descriptor).map(row=>({ address: row.address, instructions: row.instructions }))
+        .sort((one, two)=>two.instructions - one.instructions).slice(0, count);
 }
 
 /**
@@ -115,7 +128,7 @@ function topBuckets(descriptor, count){
 /**
  * @typedef {Object} LogMemory
  * @property {import('./shared-journal.js').JournalBuffers} journal
- * @property {Record<string, Record<string, import('./table.js').TableDescriptor>>} [tables]
+ * @property {Record<string, Record<string, import('@bottlify/cellar').TableMemory>>} [tables]
  */
 
 /**
@@ -276,7 +289,7 @@ export function createLogReader({ memory }){
          */
         table(layer, name){
             const descriptor = tables[layer]?.[name];
-            return descriptor ? readTable(descriptor) : null;
+            return descriptor ? openTable(descriptor) : null;
         },
 
         /**
@@ -288,7 +301,7 @@ export function createLogReader({ memory }){
          */
         counters(layer){
             const descriptor = tables[layer]?.counters;
-            return descriptor ? readTable(descriptor).row(0) : {};
+            return descriptor ? rowOf(descriptor) : {};
         },
 
         /**
@@ -304,7 +317,7 @@ export function createLogReader({ memory }){
             {
                 return [];
             }
-            const rows = readTable(table).all();
+            const rows = rowsOf(table);
             const named = regionNamer(tables, cursor);
             const from = Math.max(0, rows.length - count);
             return rows.slice(from).map((row, at)=>{
@@ -334,11 +347,11 @@ export function createLogReader({ memory }){
                 }
                 return {
                     index: row.index,
-                    startedAt: row.startedAt,
-                    ms: row.ms,
-                    byKind: Object.fromEntries(KINDS.map(kind=>[kind, row[kind]])),
+                    startedAt: row.startedAtMs,
+                    ms: row.frameMs,
+                    byKind: Object.fromEntries(KINDS.map(kind=>[kind, row[`${kind}Ms`]])),
                     sampled: Object.fromEntries(KINDS.map(kind=>[kind,
-                        row[`sampled${kind[0].toUpperCase()}${kind.slice(1)}`]])),
+                        row[`sampled${kind[0].toUpperCase()}${kind.slice(1)}Ms`]])),
                     hostShare: row.hostShare,
                     longest: { name: cursor.word(row.longest), ms: row.longestMs },
                     // With the rate it managed, in instructions per second:
@@ -398,9 +411,9 @@ export function createLogReader({ memory }){
                 totalMs += frame.ms;
                 hostMs += frame.byKind.host + frame.sampled.host;
             }
-            const phases = tables.log?.phases ? readTable(tables.log.phases).all() : [];
+            const phases = tables.log?.phases ? rowsOf(tables.log.phases) : [];
             return {
-                frames: tables.log?.frames ? readTable(tables.log.frames).written() : 0,
+                frames: tables.log?.frames ? openTable(tables.log.frames).written() : 0,
                 hostShare: totalMs > 0 ? hostMs / totalMs : 0,
                 averageFrameMs: recent.length > 0 ? totalMs / recent.length : 0,
                 phases: phases
@@ -422,18 +435,18 @@ export function createLogReader({ memory }){
          * @returns {Record<string, number>} region name to instructions, heaviest first
          */
         guestByModule(){
-            const pages = tables.kernel?.pages ? readTable(tables.kernel.pages).values : null;
+            const pages = tables.kernel?.pages ? openTable(tables.kernel.pages) : null;
             if (!pages)
             {
                 return {};
             }
-            const regions = tables.memory?.regions ? readTable(tables.memory.regions).all() : [];
+            const regions = tables.memory?.regions ? rowsOf(tables.memory.regions) : [];
             /** @type {Map<string, number>} */
             const byName = new Map();
             let region = 0;
-            for (let page = 0; page < pages.length; page++)
+            for (let page = 0; page < pages.rows; page++)
             {
-                const instructions = pages[page];
+                const instructions = pages.get(page, 0);
                 if (instructions === 0)
                 {
                     continue;
@@ -450,7 +463,7 @@ export function createLogReader({ memory }){
                     ? regions[region] : null;
                 // The last row is where the kernel puts an address outside
                 // guest memory altogether, which no region can name.
-                const name = page === pages.length - 1 ? 'elsewhere'
+                const name = page === pages.rows - 1 ? 'elsewhere'
                     : hit ? cursor.word(hit.name) : 'unmapped';
                 byName.set(name, (byName.get(name) ?? 0) + instructions);
             }
@@ -470,7 +483,7 @@ export function createLogReader({ memory }){
             {
                 return [];
             }
-            return readTable(table).all()
+            return rowsOf(table)
                 .filter(row=>row.writes > 0)
                 .map(row=>({ name: cursor.word(row.name), bytes: row.bytes,
                     writes: row.writes }))
@@ -485,30 +498,29 @@ export function createLogReader({ memory }){
          * leaves its part empty or null, never zero.
          */
         live(){
-            const cpu = tables.cpu?.counters ? readTable(tables.cpu.counters).row(0) : null;
-            const graphics = tables.graphics?.counters
-                ? readTable(tables.graphics.counters).row(0) : null;
-            const last = tables.graphics?.lastFrame
-                ? readTable(tables.graphics.lastFrame).all() : [];
+            const cpu = tables.cpu?.counters ? rowOf(tables.cpu.counters) : null;
+            const graphics = tables.graphics?.counters ? rowOf(tables.graphics.counters) : null;
+            const last = tables.graphics?.lastFrame ? rowsOf(tables.graphics.lastFrame) : [];
             return {
                 instructions: cpu ? cpu.instructions : null,
                 // Every phase, not a top few: what no phase covered is the wall
                 // time less all of them, which a top few would overstate.
-                phases: tables.log?.phases ? readTable(tables.log.phases).all()
+                phases: tables.log?.phases ? rowsOf(tables.log.phases)
                     .map(row=>({ name: cursor.word(row.name), kind: KINDS[row.kind] ?? 'host',
                         count: row.count, selfMs: row.selfMs })) : [],
                 threads: this.threads().map((/** @type {any} */ thread)=>({ id: thread.id,
                     name: thread.name, instructions: thread.instructions, state: thread.state })),
-                regions: tables.memory?.regions ? readTable(tables.memory.regions).all()
+                regions: tables.memory?.regions ? rowsOf(tables.memory.regions)
                     .map(row=>({ name: cursor.word(row.name), base: row.base, size: row.size }))
                     : [],
                 samples: topBuckets(tables.cpu?.samples, LIVE_SAMPLES),
-                hooks: tables.bridge?.hooks ? readTable(tables.bridge.hooks).all()
-                    .map(row=>({ name: cursor.word(row.name), calls: row.calls, ms: row.ms })) : [],
+                hooks: tables.bridge?.hooks ? rowsOf(tables.bridge.hooks)
+                    .map(row=>({ name: cursor.word(row.name), calls: row.calls, ms: row.hookMs }))
+                    : [],
                 graphics: graphics && {
                     shown: graphics.shown,
                     shownBy: tables.graphics?.shownBy ? Object.fromEntries(
-                        readTable(tables.graphics.shownBy).all()
+                        rowsOf(tables.graphics.shownBy)
                             .map(row=>[cursor.word(row.name), row.count])) : {},
                     device: graphics.device === 1 ? { draws: graphics.draws,
                         gpuFrames: graphics.gpuFrames, gpuMs: graphics.gpuMs } : null,
@@ -530,7 +542,7 @@ export function createLogReader({ memory }){
             {
                 return [];
             }
-            return readTable(table).all().map(row=>({
+            return rowsOf(table).map(row=>({
                 ...row,
                 name: cursor.word(row.name),
                 state: ['ready', 'running', 'blocked', 'terminated'][row.state] ?? '?',

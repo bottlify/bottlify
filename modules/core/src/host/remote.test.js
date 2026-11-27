@@ -124,7 +124,7 @@ function fakeApp({ capacity = 4096 } = {}){
             profiler.begin('turn', 'guest');
             profiler.end('turn');
             const closed = profiler.endFrame();
-            own[0] = journal.rejected();
+            own.set(0, 0, journal.rejected());
             registry.sample();
             return closed;
         },

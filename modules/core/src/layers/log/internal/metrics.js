@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { createTable } from './table.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 
 /**
  * The registry of what the layers publish as numbers.
@@ -21,24 +21,29 @@ import { createTable } from './table.js';
  * into their table once a frame, by a sampler the layer registers here and
  * the profiler runs when the frame closes -- one moment on the engine thread,
  * a few dozen stores, instead of a walk on every request.
+ *
+ * A cell is an integer (Cellar's table). A figure with a fraction is stored
+ * in millionths, as its column's name says: a time in nanoseconds (`…Ns`,
+ * milliseconds times 1e6), a share or an amount in parts per million
+ * (`…Ppm`). The reader turns them back (`reader.js`, `readable`).
  */
 
 /**
  * @typedef {Object} MetricsRegistry
- * @property {(layer: string, names: string[]) => Float64Array} counters
- * @property {(layer: string, name: string) => import('./table.js').TableWriter | null} find
+ * @property {(layer: string, names: string[]) => import('@bottlify/cellar').Table} counters
+ * @property {(layer: string, name: string) => import('@bottlify/cellar').Table | null} find
  * @property {(layer: string, name: string, spec: { rows: number, columns: string[] })
- *     => import('./table.js').TableWriter} table
+ *     => import('@bottlify/cellar').Table} table
  * @property {(sampler: () => void) => () => void} onFrame
  * @property {() => void} sample
- * @property {() => Record<string, Record<string, import('./table.js').TableDescriptor>>} describe
+ * @property {() => Record<string, Record<string, import('@bottlify/cellar').TableMemory>>} describe
  */
 
 /**
  * @returns {MetricsRegistry}
  */
 export function createMetrics(){
-    /** @type {Map<string, Map<string, import('./table.js').TableWriter>>} */
+    /** @type {Map<string, Map<string, import('@bottlify/cellar').Table>>} */
     const layers = new Map();
     /** @type {(() => void)[]} */
     const samplers = [];
@@ -55,7 +60,7 @@ export function createMetrics(){
         {
             throw new Error(`log: ${layer} already publishes a table named "${name}"`);
         }
-        const made = createTable({ rows, columns });
+        const made = openTable(createTableMemory({ rows, columns }));
         tables.set(name, made);
         return made;
     };
@@ -74,14 +79,15 @@ export function createMetrics(){
         find: (layer, name)=>layers.get(layer)?.get(name) ?? null,
 
         /**
-         * One row of named counters, for the figures a layer keeps as it runs.
+         * A table of one row of named counters, for the figures a layer keeps
+         * as it runs.
          *
          * @param {string} layer @param {string[]} names
          */
         counters(layer, names){
             const made = table(layer, 'counters', { rows: 1, columns: names });
-            made.used(1);
-            return made.values;
+            made.use(1);
+            return made;
         },
 
         onFrame(sampler){
@@ -103,14 +109,14 @@ export function createMetrics(){
         },
 
         describe(){
-            /** @type {Record<string, Record<string, import('./table.js').TableDescriptor>>} */
+            /** @type {Record<string, Record<string, import('@bottlify/cellar').TableMemory>>} */
             const out = {};
             for (const [layer, tables] of layers)
             {
                 out[layer] = {};
                 for (const [name, made] of tables)
                 {
-                    out[layer][name] = made.describe();
+                    out[layer][name] = made.memory;
                 }
             }
             return out;

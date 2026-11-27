@@ -202,7 +202,11 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     made ready, whoever made it ready, or when another executor's slice ends.
   - **Workers and translations.** An executor past the first is a cork host in a worker of its own
     over the process's memory ([`core/src/layers/cpu/internal/executor.worker.js`](../../modules/core/src/layers/cpu/internal/executor.worker.js)), with its own state
-    page, entry hash and instances of translations. Their translations are shared: made for the
+    page, entry hash and instances of translations. The process asks it for a slice and answers
+    each trap and fault the slice raises over a link of their own (Cellar's `link`: a call of a
+    few shared words for a slice and for a trap, a value call for a fault), the executor waiting
+    in the middle of its instruction ([`executor-channel.js`](../../modules/core/src/layers/cpu/internal/executor-channel.js)).
+    Their translations are shared: made for the
     process's shared layout (`sharedLayout`), which addresses the state block and the tables from
     two bases each instance is given, their bytes are the same on each of them, and the run's
     cache of emitted functions serves them all and their translators. The process's own executor translates

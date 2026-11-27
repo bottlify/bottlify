@@ -25,7 +25,7 @@
  */
 
 import { createApp, createMacrotask } from '../app.js';
-import { openLink } from '../system/link.js';
+import { openLink } from '@bottlify/cellar';
 import { remoteSystem } from '../system-link.js';
 import { remoteStore } from '../layers/cpu/internal/store-link.js';
 import { ringPacing } from './ring-pacing.js';
@@ -141,7 +141,7 @@ export const plainOf = (read, failed = ()=>null)=>{
 /**
  * Runs one process to its end.
  *
- * @param {{ end: import('../system/link.js').LinkEnd,
+ * @param {{ end: import('@bottlify/cellar').LinkEnd,
  *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
@@ -191,7 +191,7 @@ export async function serveProcess(start){
         ask: (/** @type {any} */ call)=>made.then(()=>app?.answerCall(call) ?? null),
     };
     /** @param {string} target @param {string} method @param {any[]} args */
-    const ask = (target, method, args)=>link.callWaiting(target, method, args);
+    const ask = (target, method, args)=>link.ask(target, method, args);
     // The run's cache, read here in place, its keeper asked across the link.
     const cacheReader = cache === null ? null : remoteCacheReader(cache, {
         ask: (method, args)=>ask('cache', method, args),

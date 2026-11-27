@@ -23,7 +23,7 @@
  * and after, and whether -- and as which -- the caller waits for its answer.
  */
 
-import { textOf } from '../../../system/codec.js';
+import { textOf } from '@bottlify/cellar';
 
 /** What a record is. */
 export const OP = { CALL: 1, GET: 2, SET: 3, WROTE: 4, LENT: 5 };

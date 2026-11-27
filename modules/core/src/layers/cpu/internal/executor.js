@@ -19,9 +19,9 @@
  * stacks need no carrying.
  */
 
-import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor }
+import { BELL_BYTES, Bell, LINK_BYTES, STATE_BYTES, Said, Word, lookFor }
     from './executor-channel.js';
-import { deadlineOf, ring as ringWord, waitFor, waitForAsync } from '@bottlify/cellar';
+import { createLinkMemory, openDoorbell, openLink } from '@bottlify/cellar';
 import { answerStoreAsks } from './store-relay.js';
 
 /**
@@ -61,6 +61,9 @@ async function openWorker(url){
     };
 }
 
+/** How a step answers when nothing is run about it. @param {() => void} reply */
+const DIRECT = reply=>reply();
+
 /**
  * What a slice on another executor ended with.
  *
@@ -74,36 +77,40 @@ async function openWorker(url){
 
 /**
  * The word a process waits on for all its executors: each rings it at the end
- * of every turn of its own, so one wait covers every channel.
+ * of every turn of its own, so one wait covers every link.
  *
  * Its waits look longer before they sleep while the host has a core to spare
  * (`lookFor`).
  */
 export function createBell(){
-    // The count of turns rung, whether an executor may go on with its thread
-    // past a slice (1 on, 0 not, 2 for a turn's length: `goOn`, `hold`), the
-    // process's waits asleep on the count, which alone an executor's ring wakes,
-    // and the slices out, which the executors count (`Bell.RUNNING`).
+    // A doorbell every executor's link rings at the end of each turn of its
+    // own, whether an executor may go on with its thread past a slice (1 on, 0
+    // not, 2 for a turn's length: `goOn`, `hold`), and the slices out, which the
+    // executors count (`Bell.RUNNING`).
     const buffer = new SharedArrayBuffer(BELL_BYTES);
     const word = new Int32Array(buffer);
+    const memory = { buffer, index: Bell.RUNG };
+    const doorbell = openDoorbell(memory);
     const look = lookFor(word, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
     return {
         buffer,
+        /** The doorbell's memory, the process's side of each executor's link. */
+        memory,
         /** The count now: what a wait is from. */
-        rung: ()=>Atomics.load(word, Bell.RUNG),
+        rung: doorbell.seen,
         /**
          * Rings it from the process's side: an executor whose worker is gone
          * rings no more, and the process waiting on its turn would wait for good.
          */
         ring(){
-            ringWord(word, Bell.RUNG, Bell.SLEEPING);
+            doorbell.ring();
         },
         /**
          * Waits until the bell rings past `seen`, at most `ms`.
          * @param {number} seen @param {number} [ms]
          */
         wait(seen, ms = Infinity){
-            waitFor(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms), look());
+            doorbell.wait(seen, ms, look());
         },
         /**
          * The same wait without blocking: for a caller whose other wake comes
@@ -116,7 +123,7 @@ export function createBell(){
          * @returns {Promise<import('@bottlify/cellar').WaitEnd>}
          */
         waitAsync(seen, ms){
-            return waitForAsync(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms));
+            return doorbell.waitAsync(seen, ms);
         },
         /**
          * Whether no ready thread waits for an executor: then one whose slice
@@ -174,11 +181,10 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     {
         throw new Error('executor: another executor needs the process\'s memory shared');
     }
-    const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
-    const channel = channelOf(buffer);
-    // The milliseconds its translator emitted on its own thread, as it last
-    // wrote them: what a pool lending it a worker reads as a want.
-    const emittedHere = new Int32Array(new SharedArrayBuffer(4));
+    // Two words a call each way: a slice's budget, answered with what it retired
+    // and how it ended; a trap's value, answered with what the answer did to it.
+    const linked = createLinkMemory({ capacity: LINK_BYTES, words: 2, bellA: bell.memory });
+    const state = new Int32Array(new SharedArrayBuffer(STATE_BYTES));
     const worker = await openWorker(workerUrl);
     /** @type {string | null} */
     let failed = null;
@@ -265,8 +271,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 host.cork().keepHanded?.(data.entries);
             }
         });
-        worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
-            unbroken, store: store !== null, emittedHere: emittedHere.buffer,
+        worker.post({ type: 'start', engineUrl, memory, link: linked.b, state: state.buffer,
+            bell: bell.buffer, unbroken, store: store !== null,
             cache: joined === null ? null : { shared: joined.shared, segments: joined.segments },
             config: { ...config, executor: index } });
     });
@@ -355,11 +361,47 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     let running = false;
     /** Whether an answer halted or stopped the slice's thread: its end is coming, not yet taken. */
     let ending = false;
-    /** What the process's side said last, which the executor's next turn ends.
-     * @type {number} */
-    let mine = Turn.IDLE;
     /** What the slices taken so far retired, together. */
     let retiredTaken = 0;
+    /** What `step` runs its answers in, while it pumps the link. @type {(reply: () => void) => void} */
+    let around = DIRECT;
+    /** What an answer threw, thrown again from `step` once the executor is told. @type {unknown} */
+    let thrown = null;
+    /** The fault no handler took that the slice ends with, said before its end. @type {any} */
+    let endFault = null;
+    /**
+     * Answers the executor with `handler` run inside `around`: the flags of the
+     * reply. What it throws fails the executor's call, and `step` throws it too.
+     *
+     * @param {() => number} handler
+     */
+    const answerAround = handler=>{
+        let flags = 0;
+        try
+        {
+            around(()=>{
+                flags = answer(handler);
+            });
+        }
+        catch (e){
+            thrown ??= e;
+            throw e;
+        }
+        ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
+        return flags;
+    };
+    const link = openLink(linked.a, { executor: {
+        fault: (/** @type {any} */ record)=>answerAround(()=>(host.offerFault(record) ? Said.CLAIMED : 0)),
+        ended: (/** @type {any} */ record)=>{
+            endFault = record;
+        },
+    } }, { words: (request, reply)=>{
+        const value = request[0] >>> 0;
+        reply[0] = answerAround(()=>{
+            host.raiseTrap(value);
+            return 0;
+        });
+    } });
 
     const executor = {
         index,
@@ -390,20 +432,20 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 throw new Error(`executor ${index}: busy with a slice`);
             }
             running = true;
-            mine = Turn.RUN;
-            Atomics.store(channel.words, Word.RETIRED, 0);
-            channel.say(Turn.RUN, budget);
+            Atomics.store(state, Word.RETIRED, 0);
+            link.request[0] = budget;
+            link.sendWords();
         },
         /**
          * Answers what the executor raised since the last step, if anything:
-         * a trap or a fault, with `around` run about the answer (the process
+         * a trap or a fault, with `answering` run about the answer (the process
          * makes the executor's thread its current one there); the slice's end
          * as its record, once.
          *
-         * @param {(reply: () => void) => void} [around]
+         * @param {(reply: () => void) => void} [answering]
          * @returns {RemoteSlice | null}
          */
-        step(around = reply=>reply()){
+        step(answering = DIRECT){
             if (!running)
             {
                 return null;
@@ -414,60 +456,38 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 const instructions = executor.retiredSoFar();
                 running = false;
                 ending = false;
-                mine = Turn.IDLE;
                 retiredTaken += instructions;
                 tellGone();
                 return { instructions, halted: false, fault: null, lost };
             }
-            const state = Atomics.load(channel.words, 0);
-            if (state === mine)
+            // Its traps and faults are answered here, by the link's handlers.
+            around = answering;
+            try
             {
-                return null;
+                link.pump();
             }
-            if (state === Turn.TRAP)
+            finally
             {
-                const value = channel.value() >>> 0;
-                /** @type {number} */
-                let flags = 0;
-                around(()=>{
-                    flags = answer(()=>{
-                        host.raiseTrap(value);
-                        return 0;
-                    });
-                });
-                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
-                mine = Turn.REPLY;
-                channel.say(Turn.REPLY, 0, flags);
-                return null;
+                around = DIRECT;
             }
-            if (state === Turn.FAULT)
+            if (thrown !== null)
             {
-                const fault = channel.read();
-                /** @type {number} */
-                let flags = 0;
-                around(()=>{
-                    flags = answer(()=>(host.offerFault(fault) ? Said.CLAIMED : 0));
-                });
-                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
-                mine = Turn.REPLY;
-                channel.say(Turn.REPLY, 0, flags);
-                return null;
+                const e = thrown;
+                thrown = null;
+                throw e;
             }
-            if (state !== Turn.DONE)
+            if (!link.answered())
             {
                 return null;
             }
             running = false;
             ending = false;
-            mine = Turn.IDLE;
-            const flags = channel.flags();
-            const instructions = channel.value() >>> 0;
+            const instructions = link.answer[0] >>> 0;
+            const flags = link.answer[1];
+            const fault = (flags & Said.FAULTED) !== 0 ? endFault : null;
+            endFault = null;
             retiredTaken += instructions;
-            return {
-                instructions,
-                halted: (flags & Said.HALTED) !== 0,
-                fault: (flags & Said.FAULTED) !== 0 ? channel.read() : null,
-            };
+            return { instructions, halted: (flags & Said.HALTED) !== 0, fault };
         },
         /**
          * Runs a slice to its end, answering what it raises.
@@ -503,11 +523,11 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         /** The executor's block: the state of the thread it runs. */
         block: ()=>theirs,
         /** Its runs of guest code so far, odd while one is on (`Word.EPOCH`). */
-        epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
+        epoch: ()=>Atomics.load(state, Word.EPOCH),
         /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
-        retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
-        /** The process's side of its channel: the turns it ended, and the executor's sleeps they woke. */
-        waits: ()=>({ ...channel.counts }),
+        retiredSoFar: ()=>(running ? Atomics.load(state, Word.RETIRED) >>> 0 : 0),
+        /** The process's side of its link: what it sent, and the executor's sleeps it woke. */
+        waits: ()=>link.diagnostics(),
         /**
          * The processor it plays from its next slice, the one `cpuid` names
          * there (`Word.PLAYS`); undefined, its own.
@@ -515,7 +535,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
          * @param {number | undefined} processor
          */
         playProcessor(processor){
-            Atomics.store(channel.words, Word.PLAYS, processor === undefined ? 0 : processor + 1);
+            Atomics.store(state, Word.PLAYS, processor === undefined ? 0 : processor + 1);
         },
         /** What it has retired since it opened: the slices taken, and the one out so far. */
         retired: ()=>retiredTaken + executor.retiredSoFar(),
@@ -545,7 +565,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             worker.post({ type: 'recall', token });
         },
         /** The milliseconds its translator emitted on its own thread, ever. */
-        translatedHere: ()=>Atomics.load(emittedHere, 0),
+        translatedHere: ()=>Atomics.load(state, Word.EMITTED),
         /** Why its worker went after it was ready, the process not ending it; null while it runs. */
         lost: ()=>lost,
         /**
@@ -571,7 +591,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         close(){
             closing = true;
             joined?.leave();
-            channel.say(Turn.CLOSE);
+            link.close();
             return worker.terminate();
         },
         /** How the store's records this executor asked for crossed to it. */

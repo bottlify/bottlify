@@ -7,14 +7,13 @@
 /**
  * An executor's worker that goes the first time the process hands it a slice
  * while it sleeps between slices, as one a crash or the tab's memory takes:
- * the executor worker as it is, ended by `process.exit` when its sleep on the
- * channel (`Atomics.waitAsync`) wakes to a `RUN` turn. The process then holds
- * a slice out on a worker that is gone, its thread on it.
+ * the executor worker as it is, ended by `process.exit` when its sleep on its
+ * doorbell between slices (`Atomics.waitAsync`) is woken, by a slice asked
+ * for. The process then holds a slice out on a worker that is gone, its
+ * thread on it.
  *
  * For the gates of a lost executor (node's worker_threads only).
  */
-
-import { Turn } from './executor-channel.js';
 
 const waitAsync = /** @type {any} */ (Atomics).waitAsync.bind(Atomics);
 /**
@@ -27,7 +26,7 @@ const waitOrGo = (word, index, value, ms)=>{
         return waiting;
     }
     return { async: true, value: waiting.value.then((/** @type {string} */ how)=>{
-        if (index === 0 && Atomics.load(word, 0) === Turn.RUN)
+        if (how === 'ok')
         {
             process.exit(7);
         }

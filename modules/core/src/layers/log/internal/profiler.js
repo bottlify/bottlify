@@ -6,9 +6,6 @@
 
 import { createRing } from './ring.js';
 
-/** What a mirrored column reads from when no layer publishes its counter. */
-const ABSENT = /* @__PURE__ */ new Float64Array(1);
-
 /**
  * The phase profiler: where a frame went, and how much of it was ours.
  *
@@ -119,19 +116,20 @@ export const FRAME_MIRROR = /* @__PURE__ */ Object.freeze([...FRAME_DELTAS, ...F
 
 // Built by one call the bundler is told is pure, so a production bundle, which
 // makes no profiler, drops the table's layout with it.
+// Times are in nanoseconds and shares and amounts in millionths (`metrics.js`).
 export const FRAME_COLUMNS = /* @__PURE__ */ [
-    'index', 'startedAt', 'ms',
-    'host', 'guest', 'gpu', 'present',
-    'sampledHost', 'sampledGuest', 'sampledGpu', 'sampledPresent',
-    'hostShare', 'longest', 'longestMs', 'longestGuestMs', 'longestGuestInstructions',
-    'waits', 'compiles', 'idleMs',
+    'index', 'startedAtNs', 'frameNs',
+    'hostNs', 'guestNs', 'gpuNs', 'presentNs',
+    'sampledHostNs', 'sampledGuestNs', 'sampledGpuNs', 'sampledPresentNs',
+    'hostSharePpm', 'longest', 'longestNs', 'longestGuestNs', 'longestGuestInstructions',
+    'waits', 'compiles', 'idleNs',
 ].concat(
     /* @__PURE__ */ FRAME_MIRROR.map(entry=>entry.column),
     /* @__PURE__ */ (/* @__PURE__ */ Array.from({ length: NOTES_PER_FRAME },
-        (_, i)=>[`note${i}`, `amount${i}`])).flat(),
+        (_, i)=>[`note${i}`, `amount${i}Ppm`])).flat(),
 );
 /** One row per phase name, kept up to date as phases close. */
-export const PHASE_COLUMNS = ['name', 'kind', 'count', 'totalMs', 'selfMs', 'worstMs'];
+export const PHASE_COLUMNS = ['name', 'kind', 'count', 'totalNs', 'selfNs', 'worstNs'];
 export const PHASE_ROWS = 512;
 
 /**
@@ -214,7 +212,7 @@ const copyFrame = frame=>({
  * @param {Object} options
  * @param {() => number} options.now
  * @param {number} [options.frames]  Frames of history kept.
- * @param {{ frames: import('./table.js').TableWriter, phases: import('./table.js').TableWriter }}
+ * @param {{ frames: import('@bottlify/cellar').Table, phases: import('@bottlify/cellar').Table }}
  *     [options.tables]  Where each frame and each phase row is mirrored for a reader elsewhere.
  * @param {(text: string) => number} [options.intern]  Names as ids, for those tables.
  * @returns {any}
@@ -232,9 +230,9 @@ export function createProfiler(options){
      * this one -- and a column nobody answers reads from a row of zeroes, so
      * the frame's layout never depends on which layers a build has.
      *
-     * @type {Float64Array[]}
+     * @type {(import('@bottlify/cellar').Table | null)[]}
      */
-    const mirrorRows = new Array(FRAME_MIRROR.length).fill(ABSENT);
+    const mirrorRows = new Array(FRAME_MIRROR.length).fill(null);
     const mirrorAt = new Int32Array(FRAME_MIRROR.length);
 
     /**
@@ -304,37 +302,39 @@ export function createProfiler(options){
      * numbers, which is the whole cost of a reader elsewhere seeing frames.
      *
      * @param {FrameRecord} frame
-     * @param {import('./table.js').TableWriter} table
+     * @param {import('@bottlify/cellar').Table} table
      */
     const publishFrame = (frame, table)=>{
         const row = table.advance();
         let column = 0;
         const put = (/** @type {number} */ value)=>{ table.set(row, column++, value); };
+        /** In millionths: milliseconds as nanoseconds, a share or an amount as parts per million. */
+        const putMillionths = (/** @type {number} */ value)=>put(value * 1e6);
         put(frame.index);
-        put(frame.startedAt);
-        put(frame.ms);
+        putMillionths(frame.startedAt);
+        putMillionths(frame.ms);
         for (const kind of KINDS)
         {
-            put(frame.byKind[kind]);
+            putMillionths(frame.byKind[kind]);
         }
         for (const kind of KINDS)
         {
-            put(frame.sampled[kind]);
+            putMillionths(frame.sampled[kind]);
         }
-        put(frame.hostShare);
+        putMillionths(frame.hostShare);
         put(intern(frame.longest.name));
-        put(frame.longest.ms);
-        put(frame.longestGuest.ms);
+        putMillionths(frame.longest.ms);
+        putMillionths(frame.longestGuest.ms);
         put(frame.longestGuest.instructions);
         put(frame.waits);
         put(frame.compiles);
-        put(frame.idleMs);
+        putMillionths(frame.idleMs);
         // The counters other layers keep, as they stand now. A copy per
         // column and no more: the subtraction that turns them into this
         // frame's own figures is the reader's, on the reader's thread.
         for (let at = 0; at < mirrorRows.length; at++)
         {
-            put(mirrorRows[at][mirrorAt[at]]);
+            put(mirrorRows[at]?.get(0, mirrorAt[at]) ?? 0);
         }
         let noted = 0;
         for (const name in frame.notes)
@@ -344,7 +344,7 @@ export function createProfiler(options){
                 break;
             }
             put(intern(name));
-            put(frame.notes[name]);
+            putMillionths(frame.notes[name]);
             noted++;
         }
         for (; noted < NOTES_PER_FRAME; noted++)
@@ -427,7 +427,7 @@ export function createProfiler(options){
                 {
                     tables.phases.set(slot, 0, intern(entry.name));
                     tables.phases.set(slot, 1, KINDS.indexOf(entry.kind));
-                    tables.phases.used(rows.size);
+                    tables.phases.use(rows.size);
                 }
             }
             row.count += weight;
@@ -440,9 +440,9 @@ export function createProfiler(options){
             if (tables && row.slot >= 0)
             {
                 tables.phases.set(row.slot, 2, row.count);
-                tables.phases.set(row.slot, 3, row.totalMs);
-                tables.phases.set(row.slot, 4, row.selfMs);
-                tables.phases.set(row.slot, 5, row.worstMs);
+                tables.phases.set(row.slot, 3, row.totalMs * 1e6);
+                tables.phases.set(row.slot, 4, row.selfMs * 1e6);
+                tables.phases.set(row.slot, 5, row.worstMs * 1e6);
             }
             if (open)
             {
@@ -488,14 +488,14 @@ export function createProfiler(options){
          * and the index in that row, in the order of `FRAME_MIRROR`. A null
          * source leaves the column reading zero.
          *
-         * @param {(Float64Array | null)[]} sources
+         * @param {(import('@bottlify/cellar').Table | null)[]} sources
          * @param {number[]} indices
          */
         mirror(sources, indices){
             for (let at = 0; at < FRAME_MIRROR.length; at++)
             {
                 const row = sources[at] ?? null;
-                mirrorRows[at] = row ?? ABSENT;
+                mirrorRows[at] = row;
                 mirrorAt[at] = row ? indices[at] : 0;
             }
         },

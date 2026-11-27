@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeValue, encodeValue } from './codec.js';
+import { decodeValue, encodeValue } from '@bottlify/cellar';
 import { eventFrom, plainEvent } from './events-across.js';
 
 /** A payload across the link and back, as the run's bus hears it. @param {any} payload */
