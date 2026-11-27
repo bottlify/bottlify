@@ -18,7 +18,7 @@ import {
     DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DDBLT_ROP, DDBLT_DDFX,
     DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN, DDERR_NORASTEROPHW, ROP,
 } from './constants.js';
-import { blt, bltFast, readPixel, writePixel } from './blit.js';
+import { blitHeldBytes, blt, bltFast, readPixel, writePixel } from './blit.js';
 
 const BASE = 0x100;
 
@@ -560,4 +560,26 @@ test('blocks decoded into a format without alpha fill its unused bits with the t
         channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
     assert.equal(blt({ memory, dest: r5g6b5, src, flags: 0 }), 0);
     assert.equal(readPixel(memory, r5g6b5, 0, 0), 0x001f, 'no bits to spare');
+});
+
+test('byte-exact: a blit larger than the kept snapshot copies all of it, keeps none of its room, '
+    + 'and the next small blit reads its own source', ()=>{
+    const held = blitHeldBytes();
+    const memory = ram(0x140000);
+    // 256 by 160 at four bytes: 160 KiB, past the 64 KiB kept between blits.
+    const src = surface(BASE, 256, 160, 4);
+    const dest = surface(BASE + 0xa0000, 256, 160, 4);
+    number(memory, src);
+    assert.equal(blt({ memory, dest, src, flags: 0 }), 0);
+    assert.deepEqual(bytesOf(memory, dest), bytesOf(memory, src));
+    assert.equal(blitHeldBytes(), held, 'the growth went with the call');
+    assert.equal(bltFast({ memory, dest, x: 0, y: 0, src, flags: 0 }), 0);
+    assert.deepEqual(bytesOf(memory, dest), bytesOf(memory, src));
+    assert.equal(blitHeldBytes(), held);
+    const small = surface(BASE + 0x13f000, 4, 4, 4);
+    number(memory, small);
+    assert.equal(blt({ memory, dest, destRect: { left: 0, top: 0, right: 4, bottom: 4 },
+        src: small, flags: 0 }), 0);
+    assert.deepEqual(readPixel(memory, dest, 3, 3), 16);
+    assert.deepEqual(readPixel(memory, dest, 4, 0), 5);
 });
