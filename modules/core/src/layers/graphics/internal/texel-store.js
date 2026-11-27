@@ -16,17 +16,17 @@
  * once, in place (`with`), or taken back as the caller's own (`take`), until
  * it is dropped. Where it lies is the store's to say: as it was handed over
  * while the cache has not granted its room (room is asked for without
- * waiting), for a body smaller than the cache's unit of room, and where there
- * is no cache under the store (OpenGL's, until its services carry its
- * owner's names) - the same contract, the bytes in this heap. A body whose
- * room the cache refused is a loss, as one it cannot give back. Each body is the
+ * waiting), and for a body smaller than the cache's unit of room - the same
+ * contract, the bytes in this heap. A body whose room the cache refused, or
+ * that has no cache under it, is a loss, as one it cannot give back. Each body is the
  * only copy of what it holds for this run (a level's texels as the program
  * made them, an upload's as they stood when it was recorded), which is why
  * the owner's names go to the disk when idle (`disk: 'run'`) and never away;
  * what a device can make again from guest memory at once (an upload that goes
  * to the GPU in the same call) is never kept here.
  *
- * A body the cache refused room for, or cannot give back, is a loss: said
+ * A body the cache refused room for (none under the store refuses every
+ * one), or cannot give back, is a loss: said
  * once a body (`divergence(detail, 'loss')`), counted, and read as zeros of
  * its length, so the level draws blank instead of the device stopping.
  */
@@ -69,7 +69,7 @@ export const KEPT_FROM = 4 * 1024;
  * @param {{ cache?: TexelCache | null,
  *     divergence?: ((detail: string, severity: 'loss') => void) | null,
  *     from?: number }} [options]
- *     `cache`: the owner's names, none for plain memory; `divergence`: where a
+ *     `cache`: the owner's names, none to refuse every body kept; `divergence`: where a
  *     loss is said; `from`: the bytes below which a body stays in plain memory
  */
 export function createTexelStore({ cache = null, divergence = null, from = KEPT_FROM } = {}){
@@ -123,22 +123,40 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
                 return;
             }
             // Still held under its key, a body has not moved: its bytes are here.
-            // Refused, they go all the same, and the body is lost at its read.
-            const moved = granted && into.put(name, /** @type {Uint8Array} */ (body.bytes));
-            body.bytes = null;
-            counts.plainBytes -= body.length;
-            counts.cachedBytes += body.length;
-            counts[moved ? 'moved' : 'refused']++;
-            counts.movedBytes += moved ? body.length : 0;
+            if (granted && into.put(name, /** @type {Uint8Array} */ (body.bytes)))
+            {
+                gone(body);
+                counts.moved++;
+                counts.movedBytes += body.length;
+                return;
+            }
+            refuse(body);
         }, ()=>{
-            counts.refused++;
             if (bodies.get(key) === body)
             {
-                body.bytes = null;
-                counts.plainBytes -= body.length;
-                counts.cachedBytes += body.length;
+                refuse(body);
+                return;
             }
+            counts.refused++;
         });
+    };
+
+    /** A body's bytes gone from this heap: in the cache, or lost. @param {Body} body */
+    const gone = body=>{
+        body.bytes = null;
+        counts.plainBytes -= body.length;
+        counts.cachedBytes += body.length;
+    };
+
+    /**
+     * A body the cache refused room for, or that has no cache under it: its
+     * bytes go all the same, and it is lost at its read.
+     *
+     * @param {Body} body
+     */
+    const refuse = body=>{
+        gone(body);
+        counts.refused++;
     };
 
     /**
@@ -173,7 +191,7 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
     };
 
     return {
-        /** Whether bodies go into the run's cache: without one, a move is no move. */
+        /** Whether bodies go into the run's cache: without one, every body kept is lost. */
         cached: cache !== null,
 
         /**
@@ -194,10 +212,16 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
             counts.put++;
             counts.putBytes += body.length;
             counts.plainBytes += body.length;
-            if (cache !== null && body.length >= from)
+            if (body.length < from)
             {
-                move(key, body, cache);
+                return;
             }
+            if (cache === null)
+            {
+                refuse(body);
+                return;
+            }
+            move(key, body, cache);
         },
 
         /**
