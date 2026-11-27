@@ -35,6 +35,7 @@ import { fileURLToPath } from 'node:url';
 import { compileShader } from '../../modules/core/src/layers/win32/d3dx9/hlsl-compile.js';
 import { parseConstantTable } from '../../modules/core/src/layers/win32/d3dx9/constants.js';
 import { decode, execute } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
+import { fnv1aString } from '../../modules/core/src/system/hash.js';
 
 const FXC = resolve(fileURLToPath(new URL('.', import.meta.url)), 'shader-diff-fxc.ps1');
 const argv = process.argv.slice(2);
@@ -52,11 +53,7 @@ if (!dir || !existsSync(dir))
 
 /** A number from a seed and a key, in 0..1: the same for both programs. @param {string} key */
 function unit(key){
-    let h = 2166136261;
-    for (let i = 0; i < key.length; i++)
-    {
-        h = Math.imul(h ^ key.charCodeAt(i), 16777619);
-    }
+    let h = fnv1aString(key);
     h = Math.imul(h ^ h >>> 15, 0x2c1b3c6d);
     h = Math.imul(h ^ h >>> 12, 0x297a2d39);
     return ((h ^ h >>> 15) >>> 0) / 4294967296;
