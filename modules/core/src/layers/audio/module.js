@@ -42,7 +42,7 @@ const DSSCL_WRITEPRIMARY = 4;
  *
  * The output's memory - the table the mixer writes and the device reads - is
  * held in the run's cache (`cache`), where every byte the run holds is counted
- * and budgeted: one segment of it, for as long as the output stands. A machine
+ * and budgeted: one body of it, for as long as the output stands. A machine
  * with no cache around it makes a buffer of its own, and says so.
  *
  * The mixer is where sound leaves. It is host-independent on purpose: it adds

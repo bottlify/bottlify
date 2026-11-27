@@ -65,7 +65,7 @@ flowchart TB
   of its own is served names the same way, numbered by the keeper across its link, its roots in
   the graphics worker by a channel it sends the keeper's thread (`process/run-cache.js`
   `remoteCacheOwners`). A body under 4 KiB (the cache's unit of room) stays as it was handed
-  over. A body the cache refused room for (past a segment of 16 MiB, or none left), one with no
+  over. A body the cache refused room for (none left), one with no
   names under its store, or one the cache cannot give back is a `loss` and reads as zeros: no
   copy is kept outside the cache. An OpenGL level's texels are the
   device's once a draw uploads them. Until then the graphics thread hands them, and the blocks of
@@ -154,10 +154,10 @@ flowchart TB
   address, and an unmap reads the pages written since (`d3d10/render.js`, `GuestStorage`).
   The host's copy of every resource's bytes, which a copy, an update and a read-back work in,
   is held in the run's cache for the resource's life (`backingOf`, `cache/scratch.js` `hold`):
-  zero when made, in a block of a power of two from 4 KiB, under the process's `scratch/<n>/`
+  zero when made, of its length rounded to a page (the cache places it in a block of a power of
+  two, or past a quarter of a segment in a segment of its own), under the process's `scratch/<n>/`
   names on the program's thread (in a worker of its own too) and under the root's `resources/<n>/` names in the graphics
-  worker; refused (`NoRoom`, the call fails) where the cache has no room (a resource past a
-  segment of 16 MiB) or there is no cache. It is let go of when the backing is collected - a
+  worker; refused (`NoRoom`, the call fails) where the cache has no room or there is no cache. It is let go of when the backing is collected - a
   view, a share's other device or a read-back in flight outlives the program's last
   reference - and the root or the process going takes back what is still held. A
   dynamic buffer's map and unmap run in the guest too: NO_OVERWRITE hands out the storage the

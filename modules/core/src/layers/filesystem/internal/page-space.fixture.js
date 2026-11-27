@@ -21,17 +21,17 @@ import { opfsDisk } from './opfs-disk.js';
  * @param {(reader: import('@bottlify/cellar').Reader, name: string,
  *     options: { onlyCopy: boolean, disk: 'run' }) => import('./page-file.js').PieceSpace}
  *     cacheSpace
- * @param {{ budget?: number, quota?: number, disk?: boolean }} [made]
+ * @param {{ budget?: number, segmentBytes?: number, quota?: number, disk?: boolean }} [made]
  *     `disk: false`: a cache in memory alone, as a run with no folder has
  */
-export async function pieceSpace(cacheSpace, { budget = 64 << 20, quota = Infinity,
-    disk = true } = {})
+export async function pieceSpace(cacheSpace, { budget = 64 << 20,
+    segmentBytes = Math.min(budget, 16 << 20), quota = Infinity, disk = true } = {})
 {
     const opfs = fakeOpfs({ quota });
     /** @type {import('@bottlify/cellar').Reader | null} */
     let reader = null;
     const keeper = await openKeeper({
-        budget, segmentBytes: Math.min(budget, 16 << 20), coldAfterMs: 1e9, now: ()=>0,
+        budget, segmentBytes, coldAfterMs: 1e9, now: ()=>0,
         disk: disk ? opfsDisk(await opfs.root.getDirectoryHandle('cache', { create: true })) : null,
         announce: message=>reader?.adopt(message),
     });

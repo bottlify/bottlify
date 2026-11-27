@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../app.js';
 import { RUN_CACHE_BYTES } from './run-cache.js';
+import { TABLE_BYTES } from '../layers/audio/output/mix.js';
 import { buildExe } from '../../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value */
@@ -38,8 +39,12 @@ test('a run answers its cache\'s figures, with the budget it was given and what 
         {
             assert.equal(typeof figures[name], 'number', name);
         }
+        // The sound output's table, a segment of its own, beside the shared one.
+        assert.ok(figures.peakSegmentBytes >= (16 << 20) + TABLE_BYTES,
+            `${figures.peakSegmentBytes}`);
 
-        const smaller = await createApp({ executable: exitAtOnce(), cache: { budget: 32 << 20 } });
+        // Room for the sound table beside the shared segment, and little more.
+        const smaller = await createApp({ executable: exitAtOnce(), cache: { budget: 48 << 20 } });
         t.after(()=>smaller.dispose());
-        assert.equal(smaller.runCache().budget, 32 << 20, 'the budget the run named');
+        assert.equal(smaller.runCache().budget, 48 << 20, 'the budget the run named');
     });

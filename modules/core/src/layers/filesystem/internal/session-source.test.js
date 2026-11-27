@@ -104,9 +104,17 @@ test('a session is listed whole and nothing of it is read until a read asks', as
  * @param {any} t @param {any[]} files @param {number} room
  */
 async function sessionWithRoom(t, files, room){
-    const keeper = await openKeeper({ budget: room, segmentBytes: room });
+    // Room for `room` of pieces, each a segment of its own, and the shared
+    // segment the keeper keeps beside them; the reader told of each segment.
+    // Its clock moves before each read, as a run's sweep moves it: the piece
+    // read the longest ago goes first.
+    /** @type {import('@bottlify/cellar').Reader | null} */
+    let told = null;
+    let clock = 0;
+    const keeper = await openKeeper({ budget: 2 * room, segmentBytes: room, now: ()=>clock,
+        announce: message=>told?.adopt(message) });
     t.after(()=>keeper.close());
-    const reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
+    const reader = told = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
             reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
             raise: (name, options)=>keeper.raise(name, options),
@@ -119,7 +127,11 @@ async function sessionWithRoom(t, files, room){
         } });
     return createSessionSource(files, { kept: {
         look: key=>reader.look(`session/${key}`),
-        with: (key, read, options)=>reader.with(`session/${key}`, read, options),
+        with: (key, read, options)=>{
+            clock++;
+            keeper.sweep();
+            return reader.with(`session/${key}`, read, options);
+        },
         put: (key, bytes)=>reader.put(`session/${key}`, bytes, { disk: 'never' }),
     } });
 }

@@ -147,7 +147,7 @@ test('a hold is memory of its own length for an object\'s life: held in a block 
     cache.idle(10 * 60_000);
     assert.equal(held.bytes[69_999], 5);
     assert.deepEqual(scratches.figures(), { scratches: 0, holds: 3, held: 2,
-        heldBytes: 2 * 128 * 1024, grows: 0, refused: 0 });
+        heldBytes: 2 * 18 * 4096, grows: 0, refused: 0 });
     assert.equal(cache.keeper.under('scratch/').bodies, 2);
     held.release();
     held.release();

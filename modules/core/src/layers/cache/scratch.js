@@ -25,7 +25,7 @@
  *
  * A hold (`hold`) is memory of one length kept for the life of what keeps
  * it - a Direct3D 10 resource's bytes - rather than between calls: held in
- * the cache the same way, and zero, as new memory is.
+ * the cache at that length in whole pages, and zero, as new memory is.
  */
 
 /** The smallest room: the cache's block, one page. */
@@ -169,14 +169,15 @@ export function createScratches(hold){
         },
         /**
          * Memory of `length` bytes, zero, kept until `release`: held in the
-         * cache under `name`, in a block of it, which the figures count.
-         * Every hold is one of its own, two of one name included.
+         * cache under `name` (its pages, which the figures count, placed as
+         * the cache places any body). Every hold is one of its own, two of
+         * one name included.
          *
          * @param {string} name @param {number} length @returns {Held}
          */
         hold(name, length){
             const number = ++counts.holds;
-            const size = roomFor(length);
+            const size = Math.max(UNIT, Math.ceil(length / UNIT) * UNIT);
             const got = take(`${name}/${number}`, size);
             // A block of the cache holds what its last holder left in it.
             const bytes = got.bytes.subarray(0, length).fill(0);

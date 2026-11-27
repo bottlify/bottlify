@@ -156,7 +156,8 @@ async function machine(){
     };
 
     // A cache of the machine's own, gone with it: a file of machines holds no table each.
-    const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
+    // Room for its one table (20 MiB, a segment of its own) beside the shared spare.
+    const cache = (await testCache({ budget: 48 << 20, segmentBytes: 16 << 20 })).api;
     const api = await createAudioModule().create({
         now: ()=>ms,
         sampleRate: DEVICE_RATE,

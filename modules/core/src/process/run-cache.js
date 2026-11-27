@@ -41,7 +41,10 @@ const MIB = 1024 * 1024;
  */
 export const RUN_CACHE_BYTES = 160 * MIB;
 
-/** The shared memory the keeper adds and lets go of at a time. */
+/**
+ * The shared memory the keeper adds and lets go of at a time, bodies shared
+ * in it; a body over a quarter of it has a segment of its own.
+ */
 const SEGMENT_BYTES = 16 * MIB;
 
 /** A body idle so long goes: the reads kept before were let go after as long. */
@@ -64,12 +67,12 @@ export async function openRunCache(opened = {}){
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
     /**
-     * The most the keeper held at once: its segments, counted as each is made
-     * and let go of, and the bytes placed in them, read at each sweep and each
-     * look. What the budget is weighed against, which the keeper's figures, as
-     * they stand at the end, do not say.
+     * The most placed in the keeper's segments at once, read at each sweep and
+     * each look (the most its segments held, the keeper counts itself): what
+     * the budget is weighed against, which the keeper's figures, as they stand
+     * at the end, do not say.
      */
-    const peak = { segments: 0, live: 0, placedBytes: 0,
+    const peak = { placedBytes: 0,
         /**
          * At the most placed: what rounding to blocks cost then, and each space
          * as it stood. A run's bodies go cold as it goes on, so at its end the
@@ -81,11 +84,6 @@ export async function openRunCache(opened = {}){
     const open = disk=>openKeeper({
         budget, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
         announce: message=>{
-            if (message.segment !== undefined)
-            {
-                peak.live += message.buffer ? 1 : -1;
-                peak.segments = Math.max(peak.segments, peak.live);
-            }
             for (const tell of told)
             {
                 tell(message);
@@ -232,7 +230,7 @@ export async function openRunCache(opened = {}){
             peak.roundingBytes = figures.roundingBytes;
             peak.spaces = weighSpaces();
         }
-        return { ...figures, budget, peakSegmentBytes: peak.segments * SEGMENT_BYTES,
+        return { ...figures, budget,
             peakPlacedBytes: peak.placedBytes, peakRoundingBytes: peak.roundingBytes,
             peakSpaces: peak.spaces, owners, ownerTails: { ...tails },
             // Threads joined but this one's own reader, and owners' channels open.

@@ -377,8 +377,8 @@ test('memory an owner on the keeper\'s own thread holds goes through its reader,
     }
 });
 
-test('a worker owner\'s scratches and holds are held under its names, refused where there is '
-    + 'no room, and nothing is left when it goes', { timeout: 60_000 }, async()=>{
+test('a worker owner\'s scratches and holds are held under its names, one past a segment too, '
+    + 'and nothing is left when it goes', { timeout: 60_000 }, async()=>{
     /** @type {import('./module.js').OwnerTail[]} */
     const tails = [];
     const run = await openRunCache({ onTail: tail=>tails.push(tail) });
@@ -394,30 +394,24 @@ test('a worker owner\'s scratches and holds are held under its names, refused wh
             blit.bytes(1000).fill(1);
             const grown = blit.bytes(300_000);
             const resource = rooms.hold('resource', 50_000);
-            // Past a segment of the cache: no block holds it.
-            let refused = '';
-            try
-            {
-                rooms.hold('large', 20 << 20);
-            }
-            catch (error)
-            {
-                refused = error.name;
-            }
-            const during = { figures: rooms.figures(), holding: owner.holding(), refused,
+            // Past a segment of the cache: a segment of its own, which the
+            // worker heard of before it asked.
+            const large = rooms.hold('large', 20 << 20);
+            const during = { figures: rooms.figures(), holding: owner.holding(),
                 shared: [grown.buffer instanceof SharedArrayBuffer,
-                    resource.bytes.buffer instanceof SharedArrayBuffer],
+                    resource.bytes.buffer instanceof SharedArrayBuffer,
+                    large.bytes.buffer instanceof SharedArrayBuffer],
                 zero: resource.bytes.every(byte=>byte === 0) };
             rooms.releaseAll();
             post({ during, after: owner.holding(), released: await owner.close() });`,
         { joined: { shared: joined.shared, segments: joined.segments }, served,
             scratch: new URL('./scratch.js', import.meta.url).href });
-        assert.deepEqual(said.during.shared, [true, true]);
+        assert.deepEqual(said.during.shared, [true, true, true]);
         assert.equal(said.during.zero, true);
-        assert.equal(said.during.refused, 'NoRoom');
-        assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 2,
-            heldBytes: 512 * 1024 + 64 * 1024, grows: 2, refused: 1 });
-        assert.deepEqual(said.during.holding, { holds: 2, bytes: 512 * 1024 + 64 * 1024 },
+        const heldBytes = 512 * 1024 + 13 * 4096 + (20 << 20);
+        assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 3, heldBytes,
+            grows: 2, refused: 0 });
+        assert.deepEqual(said.during.holding, { holds: 3, bytes: heldBytes },
             'the owner counts what its scratches hold');
         assert.deepEqual(said.after, { holds: 0, bytes: 0 });
         assert.deepEqual(said.released, { bodies: 0, bytes: 0, waiting: 0 });

@@ -103,12 +103,16 @@ async()=>{
     // The keeper's first pack opens behind a promise, as every file on OPFS.
     await new Promise(resolve=>setTimeout(resolve, 0));
     const MIB = 1 << 20;
-    const texels = new Uint8Array(6 * MIB).map((_, i)=>i * 7);
+    // Bodies of a quarter of it, four to the segment.
+    const texels = new Uint8Array(4 * MIB).map((_, i)=>i * 7);
     assert.ok(run.reader.put('texels/1', texels, { onlyCopy: true, disk: 'run' }));
     const reads = cacheSpace(run.reader, 'reads');
-    assert.ok(reads.put('a', new Uint8Array(6 * MIB)));
-    assert.ok(reads.put('b', new Uint8Array(6 * MIB)), 'room made');
-    assert.ok(reads.put('c', new Uint8Array(6 * MIB)), 'and again');
+    for (const key of ['a', 'b', 'c'])
+    {
+        assert.ok(reads.put(key, new Uint8Array(4 * MIB)));
+    }
+    assert.ok(reads.put('d', new Uint8Array(4 * MIB)), 'room made');
+    assert.ok(reads.put('e', new Uint8Array(4 * MIB)), 'and again');
     const figures = run.figures();
     assert.equal(figures.written, 1, 'the texels written, the reads not');
     assert.ok(figures.gone >= 1, 'a read that can be made again went away');
@@ -278,9 +282,9 @@ test('a process in a worker of its own is served names of its own: its scratches
         const out = run.figures().ownersOut;
         assert.deepEqual(Object.keys(out), ['scratch/1/', held.texels],
             'its scratches and its in-thread root, numbered by the run');
-        assert.deepEqual(out['scratch/1/'], { bodies: 2, bytes: 128 * 1024 + 64 * 1024,
-            hotBytes: 128 * 1024 + 64 * 1024, placedBytes: 128 * 1024 + 64 * 1024 },
-        'the scratch and the hold, each in a block of the budget');
+        assert.deepEqual(out['scratch/1/'], { bodies: 2, bytes: 128 * 1024 + 13 * 4096,
+            hotBytes: 128 * 1024 + 13 * 4096, placedBytes: 128 * 1024 + 64 * 1024 },
+        'the scratch and the hold (its pages), each in a block of the budget');
         assert.equal(out[held.texels].bodies, 1);
         assert.equal(run.reader.with(`${held.texels}a`, body=>body[8191], { wait: true }), 7,
             'its root\'s texels read in place on the keeper\'s thread');
