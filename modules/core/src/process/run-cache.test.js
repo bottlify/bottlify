@@ -6,9 +6,22 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReader } from '@bottlify/cellar';
+import { createLinkMemory, createReader, linkCarrier, openKeeperClient, openLink }
+    from '@bottlify/cellar';
 import { openRunCache } from './run-cache.js';
 import { relayedJoin } from '../layers/cache/module.js';
+
+/**
+ * The remote keeper a process in a worker of its own calls (`across`), both
+ * sides of its link on this thread: a call is answered in place.
+ *
+ * @param {import('./run-cache.js').RunCache} run @param {ReturnType<import('./run-cache.js').RunCache['across']>} [across]
+ */
+const acrossOf = (run, across = run.across())=>{
+    const { a, b } = createLinkMemory({ capacity: 1 << 16 });
+    openLink(a, across.handlers);
+    return openKeeperClient(linkCarrier(openLink(b)));
+};
 
 /** A reader over what `join` handed a thread, told what the keeper says after. */
 const joinedReader = (/** @type {{ join: (post: (message: any) => void) => any }} */ run)=>{
@@ -66,7 +79,8 @@ test('the figures weigh each space on its own: its bodies, those in memory, the 
             assert.ok(run.reader.put('reads/a', new Uint8Array(256)));
             assert.ok(run.reader.put('reads/b', new Uint8Array(4096)));
             // Through the handlers a process in a worker of its own calls.
-            const place = run.across().handlers.cache.reserve('translations/m', 5000, {});
+            const place = acrossOf(run).keeper.reserve('translations/m', 5000,
+                { onlyCopy: false, known: 1 });
             assert.ok(place !== null);
             const standing = {
                 reads: { bodies: 2, bytes: 4352, hotBytes: 4352, placedBytes: 2 * 4096 },
@@ -202,15 +216,14 @@ const PROCESS = `
     const { workerData, parentPort } = require('node:worker_threads');
     const next = ()=>new Promise(resolve=>parentPort.once('message', resolve));
     Promise.all([import(workerData.link), import(workerData.runCache), import(workerData.cache)])
-        .then(async([{ openLink }, { remoteCacheReader, remoteCacheOwners },
-            { createCacheModule, channelSpace }])=>{
+        .then(async([{ openLink }, { remoteCache }, { createCacheModule, channelSpace }])=>{
             const link = openLink(workerData.end, {});
-            const ask = (method, args)=>link.ask('cache', method, args);
-            const reader = remoteCacheReader(workerData.joined,
-                { ask, call: (method, args)=>link.call('cache', method, args) });
-            const owners = remoteCacheOwners({ ask }, message=>parentPort.postMessage(message));
+            link.serve();
+            const owners = remoteCache(workerData.joined, link,
+                message=>parentPort.postMessage(message));
             const module = createCacheModule();
-            const api = await module.create({ reader, own: owners.own, serve: owners.serve });
+            const api = await module.create({ reader: owners.reader, own: owners.own,
+                serve: owners.serve });
             const room = api.scratch('blit').bytes(100_000).fill(5);
             const resource = api.hold('resource', 50_000);
             resource.bytes.fill(6);
@@ -232,7 +245,6 @@ test('a process in a worker of its own is served names of its own: its scratches
     + 'roots are the run\'s, counted under each owner, read in place, and gone with it, no tail',
 { timeout: 60_000 }, async()=>{
     const { Worker } = await import('node:worker_threads');
-    const { createLinkMemory, openLink } = await import('@bottlify/cellar');
     /** @type {import('../layers/cache/module.js').OwnerTail[]} */
     const tails = [];
     const run = await openRunCache({ onTail: tail=>tails.push(tail) });
@@ -328,10 +340,11 @@ test('a process in a worker that goes without letting go of its names leaves a t
     try
     {
         const across = run.across();
-        const prefix = across.handlers.cache.own('scratch');
-        const late = across.handlers.cache.own('texels');
+        const asking = acrossOf(run, across);
+        const prefix = /** @type {string} */ (asking.own('scratch'));
+        const late = /** @type {string} */ (asking.own('texels'));
         assert.ok(run.reader.hold(`${prefix}x`, 4096));
-        assert.equal(across.handlers.cache.release('scratch/99/', 0), null, 'not its own');
+        assert.equal(asking.release('scratch/99/', 0), null, 'not its own');
         across.end();
         assert.deepEqual(tails.map(tail=>[tail.prefix, tail.bodies, tail.why]),
             [[prefix, 1, 'unreleased']]);

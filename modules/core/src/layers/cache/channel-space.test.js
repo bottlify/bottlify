@@ -7,8 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createChannel, openClient, openKeeper, openServer } from '@bottlify/cellar';
-import { createCacheModule, serveKeeper } from './module.js';
+import { answerKeeper, createChannel, openClient, openKeeper, serveKeeperChannel }
+    from '@bottlify/cellar';
+import { createCacheModule } from './module.js';
 import { openRunCache } from '../../process/run-cache.js';
 
 test('a worker\'s bodies reach the keeper as the only copy for this run, to its disk and never '
@@ -19,15 +20,14 @@ test('a worker\'s bodies reach the keeper as the only copy for this run, to its 
     /** @type {any[]} */
     const asked = [];
     const channel = createChannel();
-    const served = serveKeeper(openServer(channel), {
+    const served = serveKeeperChannel(channel, answerKeeper({ keeper: {
         reserve: (name, length, options)=>{
             asked.push(options);
             return keeper.reserve(name, length, options);
         },
         raise: (name, options)=>keeper.raise(name, options),
         drop: name=>keeper.drop(name),
-        release: prefix=>keeper.release(prefix),
-    }, { owner: 'texels/1/' });
+    } }));
     const worker = new Worker(`
         const { parentPort, workerData } = require('node:worker_threads');
         import(workerData.url).then(async({ channelSpace })=>{
@@ -61,29 +61,16 @@ test('a worker\'s bodies reach the keeper as the only copy for this run, to its 
 });
 
 /**
- * The keeper served over `channels` channels, owners numbered from 1, and
- * what owners left behind as they went.
- *
- * @param {number} channels @param {{ inflate?: number }} [options]  `inflate`: bodies a
- *     release finds past those there, as a keeper holding what an owner forgot would
+ * The run's cache serving `channels` owners' channels, and what owners left
+ * behind as they went.
  */
-async function servedKeeper(channels, { inflate = 0 } = {}){
-    const keeper = await openKeeper({ budget: 1 << 20, segmentBytes: 1 << 20 });
+async function servedKeeper(channels = 1){
     /** @type {import('./module.js').OwnerTail[]} */
     const tails = [];
-    const memories = Array.from({ length: channels }, (_, n)=>({ channel: createChannel(),
-        prefix: `texels/${n + 1}/` }));
-    const served = memories.map(({ channel, prefix })=>serveKeeper(openServer(channel), {
-        reserve: (name, length, options)=>keeper.reserve(name, length, options),
-        raise: (name, options)=>keeper.raise(name, options),
-        drop: name=>keeper.drop(name),
-        release: owned=>{
-            const left = keeper.release(owned);
-            return { ...left, bodies: left.bodies + inflate };
-        },
-    }, { owner: prefix, onTail: tail=>tails.push(tail) }));
-    return { keeper, memories, served, tails,
-        joined: { shared: keeper.shared, segments: keeper.segmentBuffers() } };
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    const memories = Array.from({ length: channels }, ()=>run.serve('texels'));
+    const joined = run.join(()=>{});
+    return { run, memories, tails, joined: { shared: joined.shared, segments: joined.segments } };
 }
 
 /**
@@ -147,9 +134,18 @@ test('two owners of one kind - two roots\' texels - the run serves names of thei
     }
 });
 
+/** Until the run serves no channel: each one's end let go of its owner. @param {any} run */
+const unserved = async run=>{
+    for (let turns = 0; turns < 200 && run.figures().served > 0; turns++)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 5));
+    }
+    assert.equal(run.figures().served, 0);
+};
+
 test('an owner that goes lets go of every name it held, after the calls it sent before, and '
     + 'leaves no tail', { timeout: 60_000 }, async()=>{
-    const { keeper, memories, served, tails, joined } = await servedKeeper(1);
+    const { run, memories, tails, joined } = await servedKeeper(1);
     try
     {
         const said = await inWorker(`
@@ -169,41 +165,41 @@ test('an owner that goes lets go of every name it held, after the calls it sent 
         assert.equal(said.held, 4);
         assert.deepEqual(said.released, { bodies: 5, bytes: 500, waiting: 1 },
             'the four it held and the room granted it, which waits for a writer that is gone');
-        await served[0].ended;
-        assert.deepEqual(keeper.under(said.prefix),
+        await unserved(run);
+        assert.deepEqual(run.under(said.prefix),
             { bodies: 1, bytes: 100, hotBytes: 100, placedBytes: 4096 },
             'only the reservation left, which the keeper takes back after its age');
         assert.deepEqual(tails, []);
     }
     finally
     {
-        served.forEach(one=>one.close());
-        keeper.close();
+        run.close();
     }
 });
 
 test('an owner that leaves bodies past what it held, or goes without letting go, leaves a tail '
     + 'that is counted, and nothing under its names', { timeout: 60_000 }, async()=>{
     {
-        const { keeper, memories, served, tails, joined } = await servedKeeper(1, { inflate: 2 });
+        const { run, memories, tails, joined } = await servedKeeper(1);
         try
         {
+            // A body under its names it never put: the keeper holds more than it says.
+            assert.ok(run.reader.put(`${memories[0].prefix}stray`, new Uint8Array(10)));
             const said = await inWorker(`
                 const space = channelSpace(joined, channels[0]);
                 space.put('a', new Uint8Array(10));
                 await space.close();
                 post({ prefix: space.prefix });`, { joined, channels: memories });
             assert.deepEqual(tails,
-                [{ prefix: said.prefix, bodies: 2, bytes: 10, held: 1, why: 'unknown' }]);
+                [{ prefix: said.prefix, bodies: 1, bytes: 20, held: 1, why: 'unknown' }]);
         }
         finally
         {
-            served.forEach(one=>one.close());
-            keeper.close();
+            run.close();
         }
     }
     {
-        const { keeper, memories, served, tails, joined } = await servedKeeper(1);
+        const { run, memories, tails, joined } = await servedKeeper(1);
         try
         {
             const said = await inWorker(`
@@ -213,28 +209,27 @@ test('an owner that leaves bodies past what it held, or goes without letting go,
                 post({ prefix: space.prefix });`, { joined, channels: memories });
             // Its channel closed from its end with its names out: its worker gone.
             openClient(memories[0].channel).close();
-            await served[0].ended;
+            await unserved(run);
             assert.deepEqual(tails,
                 [{ prefix: said.prefix, bodies: 2, bytes: 30, held: 0, why: 'unreleased' }]);
-            assert.deepEqual(keeper.under(said.prefix),
+            assert.deepEqual(run.under(said.prefix),
                 { bodies: 0, bytes: 0, hotBytes: 0, placedBytes: 0 });
         }
         finally
         {
-            keeper.close();
+            run.close();
         }
     }
     {
         // The run going closes every channel: what owners held then is no tail.
-        const { keeper, memories, served, tails, joined } = await servedKeeper(1);
+        const { run, memories, tails, joined } = await servedKeeper(1);
         await inWorker(`
             const space = channelSpace(joined, channels[0]);
             space.put('a', new Uint8Array(10));
             post({});`, { joined, channels: memories });
-        served[0].close();
-        await served[0].ended;
+        run.close();
+        await new Promise(resolve=>setTimeout(resolve, 20));
         assert.deepEqual(tails, []);
-        keeper.close();
     }
 });
 

@@ -33,7 +33,7 @@ import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
-import { remoteCacheOwners, remoteCacheReader } from '../process/run-cache.js';
+import { remoteCache } from '../process/run-cache.js';
 import { ownedSpace, relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
@@ -192,16 +192,12 @@ export async function serveProcess(start){
     };
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.ask(target, method, args);
-    // The run's cache, read here in place, its keeper asked across the link.
-    const cacheReader = cache === null ? null : remoteCacheReader(cache, {
-        ask: (method, args)=>ask('cache', method, args),
-        call: (method, args)=>link.call('cache', method, args),
-    });
+    // The run's cache, read here in place, its keeper asked across the link,
+    // its owners' names numbered by the keeper as every owner of the run is.
+    const cacheOwners = cache === null ? null : remoteCache(cache, link, toRun);
+    const cacheReader = cacheOwners?.reader ?? null;
     // And passed on to the process's executors, each a reader of its own.
     const cacheRelay = cache === null ? null : relayedJoin(cache);
-    // Its owners' names, numbered by the keeper as every owner of the run is.
-    const cacheOwners = cache === null ? null : remoteCacheOwners(
-        { ask: (method, args)=>ask('cache', method, args) }, toRun);
     if (cacheReader !== null)
     {
         cacheReaders.add(cacheReader);

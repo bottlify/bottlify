@@ -32,7 +32,6 @@ const LEFT = Object.freeze({
     'process/bundle-mount.js': 1,
     'process/image-resources.js': 1,
     'host/inbound.js': 1,
-    'layers/cache/module.js': 2,
     'layers/graphics/remote/wire.js': 1,
     'layers/graphics/remote/capture.js': 2,
     'layers/win32/msvcrt/mbcs.js': 1,

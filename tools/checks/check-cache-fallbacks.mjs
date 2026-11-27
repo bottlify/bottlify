@@ -48,7 +48,7 @@ const BASELINE = {
     'modules/core/src/layers/win32/kernel32/heap.js': 1,
     // Not a fallback: what a child process is handed of its parent's cache.
     'modules/core/src/process/beside.js': 1,
-    'modules/core/src/host/process.worker.js': 3,
+    'modules/core/src/host/process.worker.js': 2,
 };
 
 /** @param {string} dir @returns {string[]} */
