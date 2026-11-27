@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { createSha1 } from '../crypto/digest.js';
 import { PROP } from './certificates.js';
 import { CLIENT, INTERMEDIATE, LEAF, ROOT, STRANGER, setup } from './pki.fixtures.test.js';
+import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
 
 const CRYPT_E_NOT_FOUND = 0x80092004;
 const ERROR_MORE_DATA = 234;
@@ -209,6 +210,19 @@ test('usages, time validity, extensions and names compared', ()=>{
     const keyUsage = put(new Uint8Array(2));
     assert.equal(call('CertGetIntendedKeyUsage', 1, info, keyUsage, 2), 1);
     assert.equal(bytes[keyUsage], 0xa0, 'digitalSignature and keyEncipherment');
+    const wider = put(new Uint8Array(4).fill(0xcc));
+    assert.equal(call('CertGetIntendedKeyUsage', 1, info, wider, 3), 1);
+    assert.deepEqual([...bytes.subarray(wider, wider + 4)], [0xa0, 0, 0, 0xcc],
+        'zeros after the bits, to the length and no further');
+    // A length the buffer does not have: written where it lies, refused where
+    // the memory ends, never a host buffer of that length first.
+    for (const of of [info, u32(root + 12)])
+    {
+        const { grown, error } = externalGrowth(()=>call('CertGetIntendedKeyUsage', 1, of,
+            keyUsage, 0xdeadbeef));
+        assert.ok(error !== null, 'past the memory, the write refused');
+        assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
+    }
     const extensions = u32(info + 108);
     const found = call('CertFindExtension', put('2.5.29.17'), u32(info + 104), extensions);
     assert.equal(ascii(u32(found)), '2.5.29.17');

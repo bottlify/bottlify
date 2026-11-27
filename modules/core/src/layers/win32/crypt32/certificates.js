@@ -41,6 +41,7 @@ import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
 import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
+import { writeMade, writeZeros } from '../common/guest.js';
 import { fromBase64 } from '../../../system/base64.js';
 import { utf16z } from '../common/utf16.js';
 
@@ -1945,15 +1946,16 @@ export function createCertificateFunctions(host){
                         }
                         return fail(CRYPT_E_ASN1_BADTAG);
                     }
-                    const written = new Uint8Array(length >>> 0);
-                    written.set(bits.subarray(0, written.length));
-                    host.writeMemory(wholeAddress(out), written);
+                    // The bits, and zeros to the buffer's length: made as they
+                    // are written, so a length the buffer does not have faults
+                    // where it ends.
+                    writeMade(host.writeMemory, wholeAddress(out), length >>> 0, (chunk, offset)=>{
+                        chunk.fill(0);
+                        chunk.set(bits.subarray(offset, offset + chunk.length));
+                    });
                     return 1;
                 }
-                if ((length >>> 0) > 0)
-                {
-                    host.writeMemory(wholeAddress(out), new Uint8Array(length >>> 0));
-                }
+                writeZeros(host.writeMemory, wholeAddress(out), length >>> 0);
                 host.setLastError(0);
                 return 0;
             },

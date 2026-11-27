@@ -28,6 +28,7 @@ import { FONT_STYLE, SIMULATION, familiesOf, localized, matching, readFace } fro
 import { FontFormatError, analyzeFile, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
+import { writeZeros } from '../common/guest.js';
 import { utf16z } from '../common/utf16.js';
 import { readGuid } from '../../../system/guid.js';
 
@@ -765,7 +766,7 @@ export function createDwriteFunctions(host){
             {
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(out), new Uint8Array(n * 2));
+                    writeZeros(host.writeMemory, wholeAddress(out), n * 2);
                 }
                 return E_INVALIDARG;
             }
