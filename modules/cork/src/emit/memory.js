@@ -794,7 +794,7 @@ const SAVED_RBP = /** @type {import('../decode/decoder.js').Operand} */ ({
  */
 function accessOf(ins, word = 4){
     const { op, operands } = ins;
-    const [dst] = operands;
+    const dst = operands[0];
     if (ins.prefixes.operand && (op === 'call' || op === 'ret' || op === 'leave'))
     {
         return null;
@@ -895,7 +895,7 @@ function groupAccessesOf(ins, word = 4){
     {
         return NO_PLACES;
     }
-    const [dst] = operands;
+    const dst = operands[0];
     if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem'
         && dst.size === word && !prefixes.operand && dst.addressSize !== (word === 8 ? 32 : 16)
         && dst.segment !== 4 && dst.segment !== 5)

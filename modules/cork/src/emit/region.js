@@ -218,7 +218,7 @@ export const CallStack = Object.freeze({
  * call site's; `stores` what `planPaths` has it store.
  *
  * @typedef {{ kind: 'exit' | 'ret' | 'full', segment: Segment | null,
- *     written: LocalSet, must: LocalSet, stores?: Set<number>,
+ *     written: LocalSet, must: LocalSet, stores?: LocalSet,
  *     entry?: number }} StorePoint
  */
 
@@ -1170,6 +1170,8 @@ export class RegionEmitter {
         this.flagRecord = /** @type {number} */ (context.layout.flagRecord);
         /** The record's fields there. */
         this.recordFields = recordFieldsOf(context.layout);
+        /** Their locals (`isRecordField`). */
+        this.recordLocals = new LocalSet(this.recordFields.map(field=>field.local));
         /** What the function of the region's copies takes of this one's planning. */
         this.planned = planned;
         /** This function's index, handed out before its copies are written (`emitCopies`). */
@@ -1227,6 +1229,8 @@ export class RegionEmitter {
         this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
         /** `successorsOf`, once asked. @type {number[][] | null} */
         this.successors = null;
+        /** By block, `jumpsOf` it, once asked (`jumpsAt`). @type {number[][]} */
+        this.jumps = [];
         /** By block start, its index in the region as formed, for a diagnostic build's marks. */
         this.formedIndex = import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.markBlocks
             ? new Map(region.blocks.map(block=>[block.start,
@@ -1564,43 +1568,45 @@ export class RegionEmitter {
         if (context.features.simd)
         {
             this.localTypes.push(ValType.v128, ValType.v128, ValType.v128, ...this.width.upper);
-            for (const block of region.blocks)
+            // The operands' registers, in one pass of index loops: this constructor runs
+            // once a region, much of it before V8 optimizes it, and unoptimized a `for...of`
+            // makes an iterator and a result for every element it steps over.
+            /** @type {number[]} */
+            const mms = [];
+            for (let k = 0; k < region.blocks.length; k++)
             {
-                for (const instruction of block.instructions)
+                const { instructions } = region.blocks[k];
+                for (let i = 0; i < instructions.length; i++)
                 {
-                    for (const operand of instruction.operands)
+                    const { operands } = instructions[i];
+                    for (let o = 0; o < operands.length; o++)
                     {
-                        if (operand.kind === 'xmm' && !this.xmmLocals.has(/** @type {number} */ (operand.reg)))
+                        const { kind, reg } = operands[o];
+                        if (kind === 'xmm' && !this.xmmLocals.has(/** @type {number} */ (reg)))
                         {
-                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
+                            this.xmmLocals.set(/** @type {number} */ (reg),
+                                this.localTypes.length + STATE_PARAMS);
                             this.localTypes.push(ValType.v128);
                         }
-                    }
-                }
-            }
-            if (mixed)
-            {
-                for (let p = 0; p < 8; p++)
-                {
-                    this.mmLocals.set(p, this.localTypes.length + STATE_PARAMS);
-                    this.localTypes.push(ValType.i64);
-                }
-            }
-            else
-            {
-                for (const block of region.blocks)
-                {
-                    for (const instruction of block.instructions)
-                    {
-                        for (const operand of instruction.operands)
+                        else if (kind === 'mm' && !mixed)
                         {
-                            if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
-                            {
-                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
-                                this.localTypes.push(ValType.i64);
-                            }
+                            mms.push(/** @type {number} */ (reg));
                         }
                     }
+                }
+            }
+            // The mm locals after every xmm one.
+            for (let p = 0; p < (mixed ? 8 : 0); p++)
+            {
+                this.mmLocals.set(p, this.localTypes.length + STATE_PARAMS);
+                this.localTypes.push(ValType.i64);
+            }
+            for (const reg of mms)
+            {
+                if (!this.mmLocals.has(reg))
+                {
+                    this.mmLocals.set(reg, this.localTypes.length + STATE_PARAMS);
+                    this.localTypes.push(ValType.i64);
                 }
             }
         }
@@ -1877,8 +1883,9 @@ export class RegionEmitter {
         }
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, b.toBytes(),
-            { hints: b.hints, ...this.selfIndex >= 0 ? { at: this.selfIndex } : {} });
+            this.context.regionType, this.localTypes, this.b.toBytes(),
+            { hints: this.b.hints, ...this.selfIndex >= 0 ? { at: this.selfIndex } : {} });
+        this.b.release();
         return {
             functionIndex, copiesIndex: this.copiesIndex,
             // A callee's copy has no entry: its blocks are no labels of the region's.
@@ -2149,7 +2156,7 @@ export class RegionEmitter {
 
     /** Whether a local is one of the record's fields. @param {number} local */
     isRecordField(local){
-        return this.recordFields.some(field=>field.local === local);
+        return this.recordLocals.has(local);
     }
 
     /**
@@ -2166,6 +2173,16 @@ export class RegionEmitter {
     recordOf(must, written){
         return must?.has(Local.kind) === true
             ? local=>!this.isRecordField(local) || written.has(local) : ()=>true;
+    }
+
+    /**
+     * What `recordOf(must, written)` answers of one local, without a function made for
+     * each store asked.
+     *
+     * @param {LocalSet | undefined} must @param {LocalSet} written @param {number} local
+     */
+    recordTakes(must, written, local){
+        return must?.has(Local.kind) !== true || !this.isRecordField(local) || written.has(local);
     }
 
     /**
@@ -2323,17 +2340,27 @@ export class RegionEmitter {
         const onEntry = this.pathStores || this.deferred.some(one=>one.site !== undefined)
             ? this.writtenOnEntry() : [];
         const kinds = this.pathStores ? this.planPaths(onEntry) : [];
-        /** @type {{ at: number, body: Body }[]} */
-        const pieces = [];
-        for (const one of this.deferred.reverse())
+        // Every piece written into one body, the last place's first, each one's place and
+        // span in it noted from the end of `places`, which is then by place.
+        const b = this.b = new Body(1024);
+        b.guest = this.guest;
+        const places = new Array(this.deferred.length * 3);
+        let placed = places.length;
+        /** @param {number} at @param {number} start */
+        const piece = (at, start)=>{
+            places[--placed] = b.length;
+            places[--placed] = start;
+            places[--placed] = at;
+        };
+        for (let next = this.deferred.length - 1; next >= 0; next--)
         {
+            const one = this.deferred[next];
             const { at, kind, regs, x87, site, record, point, chained } = one;
-            const b = this.b = new Body();
-            b.guest = this.guest;
+            const start = b.length;
             if (kind === 'exit')
             {
                 b.br(/** @type {number} */ (one.depth) + /** @type {number} */ (point?.entry));
-                pieces.push({ at, body: b });
+                piece(at, start);
                 continue;
             }
             if (kind === 'record')
@@ -2350,7 +2377,7 @@ export class RegionEmitter {
                     }
                     b.end();
                 }
-                pieces.push({ at, body: b });
+                piece(at, start);
                 continue;
             }
             if (kind === 'open' || kind === 'kinds')
@@ -2387,7 +2414,7 @@ export class RegionEmitter {
                         b.byte(0x0b);
                     }
                 }
-                pieces.push({ at, body: b });
+                piece(at, start);
                 continue;
             }
             // At a guest call, what the state block holds already stays: only
@@ -2499,9 +2526,10 @@ export class RegionEmitter {
                     }
                 }
             }
-            pieces.push({ at, body: b });
+            piece(at, start);
         }
-        main.insertAll(pieces.reverse());
+        main.insertFrom(b, places);
+        b.release();
         this.b = main;
     }
 
@@ -2514,10 +2542,10 @@ export class RegionEmitter {
     successorsOf(){
         if (this.successors === null)
         {
-            this.successors = this.region.blocks.map(block=>{
+            this.successors = this.region.blocks.map((block, s)=>{
                 /** @type {number[]} */
                 const reached = [];
-                for (const target of jumpsOf(block, this.returns, this.callReturn, this.labels))
+                for (const target of this.jumpsAt(s))
                 {
                     const at = this.labels.get(target);
                     if (at !== undefined)
@@ -2529,6 +2557,18 @@ export class RegionEmitter {
             });
         }
         return this.successors;
+    }
+
+    /**
+     * `jumpsOf` the block at `at`, worked out once: the passes over the function walk the
+     * same edges, and each walk made the lists again.
+     *
+     * @param {number} at  of the block in the emitting order
+     * @returns {readonly number[]}
+     */
+    jumpsAt(at){
+        return this.jumps[at] ??= jumpsOf(this.region.blocks[at], this.returns, this.callReturn,
+            this.labels);
     }
 
     /**
@@ -2558,27 +2598,48 @@ export class RegionEmitter {
     planPaths(onEntry){
         const main = this.b;
         const { width } = this;
-        const carried = width.carried.map(r=>width.regLocal[r]);
         const stored = [...width.regLocal, ...this.recordFields.map(field=>field.local),
             Local.flags].filter(local=>this.pathStored(local) && main.writes(local));
-        /** @param {StorePoint} point */
-        const dirty = point=>(point.segment === null || point.segment.after !== null ? stored
-            : stored.filter(local=>point.written.has(local)
-                || onEntry[/** @type {Segment} */ (point.segment).block].has(local)))
+        const carried = new LocalSet(width.carried.map(r=>width.regLocal[r]));
+        /** @param {StorePoint} point @returns {number[]} */
+        const dirty = point=>{
+            const { segment, must, written } = point;
+            const entered = segment === null || segment.after !== null ? null
+                : onEntry[segment.block];
             // A way out's fields are not narrowed to its block's own: the ways
             // out share a few sets of stores (`kinds`), and narrower sets
             // reshuffled which set each took - on a loop of calls formed in
             // (cork-bench vcall) V8 then moved seven registers at the back edge,
             // +3 % on x64 and +1.3 % on arm64, for stores no round of it runs.
-            .filter(point.kind === 'exit' ? ()=>true
-                : this.recordOf(point.must, point.written));
+            const mine = point.kind !== 'exit' && must.has(Local.kind);
+            if (entered === null && !mine)
+            {
+                return stored;
+            }
+            /** @type {number[]} */
+            const due = [];
+            for (const local of stored)
+            {
+                if ((entered === null || written.has(local) || entered.has(local))
+                    && (!mine || this.recordTakes(must, written, local)))
+                {
+                    due.push(local);
+                }
+            }
+            return due;
+        };
         const exits = this.points.filter(point=>point.kind === 'exit');
-        const needs = exits.map(point=>dirty(point));
+        const needs = exits.map(dirty);
         // The sets most ways out need, besides all of them, by how many need each.
         /** @type {Map<string, { locals: number[], ways: number }>} */
         const sets = new Map();
         for (const need of needs)
         {
+            if (need === stored)
+            {
+                // All of them: the first kind, whatever the rest.
+                continue;
+            }
             const key = need.join();
             const set = sets.get(key) ?? { locals: need, ways: 0 };
             set.ways++;
@@ -2588,52 +2649,75 @@ export class RegionEmitter {
             .filter(set=>set.locals.length < stored.length)
             .sort((one, other)=>other.ways - one.ways).slice(0, EXIT_KINDS - 1)
             .map(set=>set.locals)];
-        exits.forEach((point, k)=>{
-            // The least of the kinds that stores all this way out needs.
+        /** Each kind's locals with the carried ones, which every way out stores too: one
+         * set for all the ways out of that kind. */
+        const kindStores = kinds.map(locals=>{
+            const stores = new LocalSet(locals);
+            stores.addAll(carried);
+            return stores;
+        });
+        for (let k = 0; k < exits.length; k++)
+        {
+            // The least of the kinds that stores all this way out needs (none needs a
+            // carried one: `stored` has none).
+            const need = needs[k];
             let entry = 0;
-            kinds.forEach((locals, j)=>{
-                if (locals.length < kinds[entry].length
-                    && needs[k].every(local=>locals.includes(local)))
+            for (let j = 1; j < kinds.length; j++)
+            {
+                if (kinds[j].length < kinds[entry].length && need.every(local=>
+                    kindStores[j].has(local)))
                 {
                     entry = j;
                 }
-            });
-            point.entry = entry;
-            point.stores = new Set([...kinds[entry], ...carried]);
-        });
+            }
+            exits[k].entry = entry;
+            exits[k].stores = kindStores[entry];
+        }
         for (const point of this.points)
         {
-            if (point.kind !== 'exit')
+            if (point.kind === 'ret')
             {
-                point.stores = new Set([...point.kind === 'ret' ? dirty(point) : stored,
-                    ...carried]);
+                const stores = new LocalSet(dirty(point));
+                stores.addAll(carried);
+                point.stores = stores;
+            }
+            else if (point.kind !== 'exit')
+            {
+                point.stores = kindStores[0];
             }
         }
         // What the stores read, where the code before them did not write it.
-        /** @param {Segment | null | undefined} segment @param {Iterable<number>} locals
+        /** @param {Segment | null | undefined} segment @param {number} local
          *  @param {LocalSet} must */
-        const read = (segment, locals, must)=>{
-            for (const local of locals)
+        const read = (segment, local, must)=>{
+            // A store of the record on a way that may not have written it:
+            // its fields are loaded then, not left in the block.
+            this.recordMixed ||= this.isRecordField(local) && !must.has(Local.kind);
+            if (!must.has(local))
             {
-                // A store of the record on a way that may not have written it:
-                // its fields are loaded then, not left in the block.
-                this.recordMixed ||= this.isRecordField(local) && !must.has(Local.kind);
-                if (!must.has(local))
-                {
-                    segment?.exposed.add(local);
-                }
+                segment?.exposed.add(local);
             }
         };
         for (const point of this.points)
         {
-            read(point.segment, /** @type {Set<number>} */ (point.stores), point.must);
+            const stores = /** @type {LocalSet} */ (point.stores);
+            for (let local = stores.after(0); local >= 0; local = stores.after(local + 1))
+            {
+                read(point.segment, local, point.must);
+            }
         }
         for (const site of this.sites)
         {
             const entered = onEntry[site.block];
-            read(site.segment, stored.filter(local=>site.written.has(local)
-                || entered.has(local)).filter(this.recordOf(site.must, site.written)),
-            /** @type {LocalSet} */ (site.must));
+            const must = /** @type {LocalSet} */ (site.must);
+            for (const local of stored)
+            {
+                if ((site.written.has(local) || entered.has(local))
+                    && this.recordTakes(must, site.written, local))
+                {
+                    read(site.segment, local, must);
+                }
+            }
         }
         // What is read before written from the start of each block on, the way a
         // call's return goes on into its block after the call, its reloads.
@@ -2643,7 +2727,15 @@ export class RegionEmitter {
         const sitesOf = new Map();
         for (const site of this.sites)
         {
-            sitesOf.set(site.block, [...sitesOf.get(site.block) ?? [], site]);
+            const here = sitesOf.get(site.block);
+            if (here === undefined)
+            {
+                sitesOf.set(site.block, [site]);
+            }
+            else
+            {
+                here.push(site);
+            }
         }
         const live = blocks.map(()=>new LocalSet());
         for (let changed = true; changed;)
@@ -2751,11 +2843,12 @@ export class RegionEmitter {
         const into = blocks.map(()=>new LocalSet());
         const ways = this.successorsOf();
         const work = blocks.map((_, i)=>i);
-        const queued = new Set(work);
+        /** By block, whether it is in `work`: a byte, not a set's entry made each time. */
+        const queued = new Uint8Array(blocks.length).fill(1);
         while (work.length > 0)
         {
             const i = /** @type {number} */ (work.pop());
-            queued.delete(i);
+            queued[i] = 0;
             const written = this.blockWrites[i];
             if (written === undefined || this.callSites.has(i)
                 || callsOut(blocks[i], this.labels))
@@ -2765,9 +2858,9 @@ export class RegionEmitter {
             for (const j of ways[i])
             {
                 const grew = j !== i && into[j].addAll(into[i]);
-                if ((into[j].addAll(written) || grew) && !queued.has(j))
+                if ((into[j].addAll(written) || grew) && queued[j] === 0)
                 {
-                    queued.add(j);
+                    queued[j] = 1;
                     work.push(j);
                 }
             }
@@ -2849,8 +2942,7 @@ export class RegionEmitter {
                 continue;
             }
             seen.add(at);
-            for (const target of jumpsOf(this.region.blocks[at], this.returns, this.callReturn,
-                index))
+            for (const target of this.jumpsAt(at))
             {
                 const to = index.get(target);
                 if (to !== undefined && this.interior.has(to))
@@ -3946,9 +4038,28 @@ export class RegionEmitter {
             .some(ins=>HOST_OPS.has(ins.op)) ? -1 : registersChanged(blocks[s].instructions, word);
         const index = this.labels;
         /** @type {number[][]} by block, the blocks its ways out reach, calls and returns too */
-        const ways = blocks.map(block=>[...jumpsOf(block, this.returns, this.callReturn,
-            this.labels), ...block.exit.targets, block.exit.next]
-            .map(target=>index.get(target ?? -1) ?? -1).filter(t=>t >= 0));
+        const ways = blocks.map((block, s)=>{
+            /** @type {number[]} */
+            const reached = [];
+            /** @param {number | undefined} target */
+            const add = target=>{
+                const t = index.get(target ?? -1);
+                if (t !== undefined)
+                {
+                    reached.push(t);
+                }
+            };
+            for (const target of this.jumpsAt(s))
+            {
+                add(target);
+            }
+            for (const target of block.exit.targets)
+            {
+                add(target);
+            }
+            add(block.exit.next);
+            return reached;
+        });
         /** @type {number[][]} */
         const from = blocks.map(()=>[]);
         ways.forEach((targets, s)=>targets.forEach(t=>from[t].push(s)));
@@ -4015,15 +4126,27 @@ export class RegionEmitter {
         const from = blocks.map(()=>[]);
         blocks.forEach((block, s)=>{
             const { kind, targets, next } = block.exit;
-            const ways = [...new Set([...jumpsOf(block, this.returns, this.callReturn, this.labels),
-                ...targets, ...CARRY_NEXT.has(kind) ? [next] : []])];
-            for (const target of ways)
-            {
+            // Each block reached once: a way to it is pushed unless this block's is there
+            // already, the last pushed, as `from` is filled block by block.
+            /** @param {number | undefined} target */
+            const reach = target=>{
                 const t = index.get(target ?? -1);
-                if (t !== undefined)
+                if (t !== undefined && from[t][from[t].length - 1] !== s)
                 {
                     from[t].push(s);
                 }
+            };
+            for (const target of this.jumpsAt(s))
+            {
+                reach(target);
+            }
+            for (const target of targets)
+            {
+                reach(target);
+            }
+            if (CARRY_NEXT.has(kind))
+            {
+                reach(next);
             }
         });
         for (const t of this.interior)
@@ -6103,35 +6226,42 @@ function naturalLoops(successors, roots){
     {
         isRoot[root] = 1;
     }
-    const starts = [...roots, ...successors.map((_, i)=>i)];
-    for (const start of starts)
+    // The depth-first walk's stack as two typed columns, the block and how many of its
+    // successors it went to: no pair made for every block it enters.
+    const stackAt = new Int32Array(count);
+    const stackNext = new Int32Array(count);
+    for (let k = 0; k < roots.length + count; k++)
     {
+        const start = k < roots.length ? roots[k] : k - roots.length;
         if (state[start] !== 0)
         {
             continue;
         }
         isRoot[start] = 1;
-        /** @type {[number, number][]} */
-        const stack = [[start, 0]];
+        let depth = 0;
+        stackAt[0] = start;
+        stackNext[0] = 0;
         state[start] = 1;
-        while (stack.length > 0)
+        while (depth >= 0)
         {
-            const top = stack[stack.length - 1];
-            const [at, k] = top;
-            if (k < successors[at].length)
+            const at = stackAt[depth];
+            const next = stackNext[depth];
+            if (next < successors[at].length)
             {
-                top[1]++;
-                const to = successors[at][k];
+                stackNext[depth]++;
+                const to = successors[at][next];
                 if (state[to] === 0)
                 {
                     state[to] = 1;
-                    stack.push([to, 0]);
+                    depth++;
+                    stackAt[depth] = to;
+                    stackNext[depth] = 0;
                 }
                 continue;
             }
             state[at] = 2;
             finished.push(at);
-            stack.pop();
+            depth--;
         }
     }
     const rpo = finished.reverse();

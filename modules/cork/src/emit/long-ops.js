@@ -84,16 +84,20 @@ export function translatesLong(instruction){
     {
         // The x87 emitter's (`x87.js`), which leaves the whole state's images
         // and packed BCD to the interpreter.
-        return !X87_LEFT.has(op) && operands.every(operand=>operand.kind !== 'mem'
-            || operand.addressSize === 64 && operand.segment !== 4 && operand.segment !== 5);
+        return !X87_LEFT.has(op) && flatMemory(operands);
     }
-    const simd = operands.some(operand=>operand.kind === 'xmm' || operand.kind === 'mm')
-        || LONG_SIMD_QUAD.has(op);
+    let simd = LONG_SIMD_QUAD.has(op);
+    let quadRegister = false;
+    for (let at = 0; at < operands.length; at++)
+    {
+        const { kind, size } = operands[at];
+        simd ||= kind === 'xmm' || kind === 'mm';
+        quadRegister ||= kind === 'reg' && size === 8;
+    }
     if (simd)
     {
         // A general register other SIMD operations read or write as a dword only.
-        if (LONG_SIMD_LEFT.has(op) || operands.some(operand=>operand.kind === 'reg'
-            && operand.size === 8 && !LONG_SIMD_QUAD.has(op)))
+        if (LONG_SIMD_LEFT.has(op) || quadRegister && !LONG_SIMD_QUAD.has(op))
         {
             return false;
         }
@@ -101,8 +105,7 @@ export function translatesLong(instruction){
     else if (STRING_OPS.has(op))
     {
         // rsi, rdi and rcx as quadwords, and a source of a segment with no base.
-        return operands.every(operand=>operand.kind !== 'mem'
-            || operand.addressSize === 64 && operand.segment !== 4 && operand.segment !== 5);
+        return flatMemory(operands);
     }
     else if (op === 'out')
     {
@@ -114,8 +117,32 @@ export function translatesLong(instruction){
     {
         return false;
     }
-    return operands.every(operand=>(operand.kind === 'reg' && operand.size > 0)
-        || operand.kind === 'xmm' || operand.kind === 'mm'
-        || operand.kind === 'imm' || operand.kind === 'rel'
-        || (operand.kind === 'mem' && (operand.addressSize === 64 || op === 'lea')));
+    for (let at = 0; at < operands.length; at++)
+    {
+        const { kind, size, addressSize } = operands[at];
+        if (!(kind === 'reg' && size > 0 || kind === 'xmm' || kind === 'mm' || kind === 'imm'
+            || kind === 'rel' || kind === 'mem' && (addressSize === 64 || op === 'lea')))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Whether every memory operand of `operands` is addressed at 64 bits in a segment with no
+ * base. Loops rather than `every` with a closure: forming asks it of every instruction.
+ *
+ * @param {Instruction['operands']} operands
+ */
+function flatMemory(operands){
+    for (let at = 0; at < operands.length; at++)
+    {
+        const { kind, addressSize, segment } = operands[at];
+        if (kind === 'mem' && !(addressSize === 64 && segment !== 4 && segment !== 5))
+        {
+            return false;
+        }
+    }
+    return true;
 }

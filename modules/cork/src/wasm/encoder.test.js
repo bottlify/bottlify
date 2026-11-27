@@ -247,6 +247,116 @@ test('a branch marked unlikely is named in the branch-hint section, at its offse
         assert.deepEqual([f(0), f(1)], [5, 7]);
     });
 
+test('pieces put in at their places in one pass leave what inserting each, last first, does',
+    ()=>{
+        for (let seed = 1; seed <= 50; seed++)
+        {
+            // A seeded xorshift, so a failing case is the same again.
+            let x = seed;
+            const next = (/** @type {number} */ below)=>{
+                x ^= x << 13;
+                x ^= x >>> 17;
+                x ^= x << 5;
+                return (x >>> 0) % below;
+            };
+            // A body of nops with hinted branches, and pieces of drops and hinted ifs at
+            // places in order, two sometimes at one place, past the copy by hand's 32
+            // bytes sometimes: through one source body, and inserted one at a time.
+            const main = ()=>{
+                const b = new Body(1);
+                for (let i = 0; i < 40; i++)
+                {
+                    if (next(5) === 0)
+                    {
+                        b.i32const(i).unlikely().if(EMPTY).end();
+                    }
+                    else
+                    {
+                        b.byte(0x01);
+                    }
+                }
+                return b;
+            };
+            const start = x;
+            const one = main();
+            /** @type {{ at: number, body: Body }[]} */
+            const pieces = [];
+            for (let at = next(4); at < one.length; at += 1 + next(6))
+            {
+                const body = new Body();
+                for (let k = next(40); k > 0; k--)
+                {
+                    if (next(7) === 0)
+                    {
+                        body.i32const(k).unlikely().if(EMPTY).end();
+                    }
+                    else
+                    {
+                        body.i32const(k).drop();
+                    }
+                }
+                pieces.push({ at, body });
+            }
+            x = start;
+            const many = main();
+            // The source the pieces are written into, the last place's first.
+            const source = new Body();
+            const places = [];
+            for (let k = pieces.length - 1; k >= 0; k--)
+            {
+                const from = source.length;
+                const { body } = pieces[k];
+                for (let i = 0; i < body.length; i++)
+                {
+                    if (body.hints.includes(i))
+                    {
+                        source.hints.push(source.length);
+                    }
+                    source.byte(body.buffer[i]);
+                }
+                places.unshift(pieces[k].at, from, source.length);
+            }
+            one.insertFrom(source, places);
+            for (let k = pieces.length - 1; k >= 0; k--)
+            {
+                many.insert(pieces[k].at, pieces[k].body);
+            }
+            assert.deepEqual([...one.toBytes()], [...many.toBytes()], `seed ${seed}`);
+            assert.deepEqual(one.hints, many.hints, `seed ${seed}`);
+        }
+    });
+
+test('a body done with hands its buffer to the next as big, its bytes taken first', ()=>{
+    const first = new Body(4096);
+    for (let i = 0; i < 3000; i++)
+    {
+        first.byte(i & 0x7f);
+    }
+    const kept = first.toBytes();
+    first.release();
+    assert.equal(first.length, 0);
+    const second = new Body(4096);
+    for (let i = 0; i < 3000; i++)
+    {
+        second.byte(0x7f - (i & 0x7f));
+    }
+    assert.deepEqual(kept.subarray(0, 3), Uint8Array.of(0, 1, 2), 'taken bytes are a copy');
+    assert.deepEqual(second.toBytes().subarray(0, 3), Uint8Array.of(0x7f, 0x7e, 0x7d));
+    // Written again, a released body takes a buffer of its own.
+    first.byte(5);
+    assert.deepEqual([...first.toBytes()], [5, 0x0b]);
+});
+
+test('an i64 constant is its signed LEB128 at any value', ()=>{
+    for (const value of [0n, 1n, -1n, 63n, 64n, -64n, -65n, 0x7fffffffn, -0x80000000n,
+        0x80000000n, -0x80000001n, 0xffffffffn, 1n << 62n, -(1n << 63n), (1n << 63n) - 1n])
+    {
+        const body = new Body().i64const(value);
+        assert.deepEqual([...body.buffer.subarray(0, body.length)], [0x42, ...leb128s64(value)],
+            String(value));
+    }
+});
+
 test('a body with a block left open is refused with its depth', ()=>{
     const b = new Body().block(EMPTY).i32const(1).drop();
     assert.throws(()=>b.toBytes(), { message: 'encoder: block left open (1 deep)' });
