@@ -71,13 +71,15 @@ test('a layer that is not built refuses loudly', async()=>{
     // layer now has an implementation, and the stub is what a module something
     // still requires is replaced by when it is switched off. That is the same
     // mechanism and the one that will still exist in a finished engine.
-    const core = await assembleModules({ win32: false, filesystem: { pageFile: await testPageFile() },
+    const core = await assembleModules({ win32: false,
+        filesystem: { pageFile: await testPageFile() },
         cache: { reader: roomy.reader } });
     assert.throws(()=>core.api('win32').anything(), { code: 'NOT_IMPLEMENTED' });
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{
-    const core = await assembleModules({ graphics: false, filesystem: { pageFile: await testPageFile() },
+    const core = await assembleModules({ graphics: false,
+        filesystem: { pageFile: await testPageFile() },
         cache: { reader: roomy.reader } });
     const names = core.diagnostics().map(d=>d.name);
     assert.ok(!names.includes('graphics'));
@@ -85,7 +87,8 @@ test('disabling a leaf nobody requires removes it from the build', async()=>{
 });
 
 test('disabling a required module installs a stub in its place', async()=>{
-    const core = await assembleModules({ win32: false, filesystem: { pageFile: await testPageFile() },
+    const core = await assembleModules({ win32: false,
+        filesystem: { pageFile: await testPageFile() },
         cache: { reader: roomy.reader } });
     const win32 = core.diagnostics().find(d=>d.name === 'win32');
     assert.ok(win32);
