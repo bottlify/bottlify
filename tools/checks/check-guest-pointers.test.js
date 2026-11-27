@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { KNOWN, STAND_IN, classify, standIn, sweep } from './check-guest-pointers.mjs';
+import { GROWTH, KNOWN, STAND_IN, classify, standIn, sweep } from './check-guest-pointers.mjs';
 
 const fault = ()=>Object.assign(new Error('Unmapped read at 0x0'), { code: 'GUEST_ACCESS' });
 
@@ -73,6 +73,30 @@ test('a stand-in answers what it was given, and any other member is not measured
     const result = await sweep(libraries, [['NULL', 0]]);
     assert.deepEqual([...result.unmeasured], ['C.dll!Spawns']);
     assert.deepEqual(result.offences, []);
+});
+
+test('a call growing external memory past the bound is named, garbage before hides none', async()=>{
+    /** @type {ArrayBuffer[]} */
+    const held = [];
+    const libraries = {
+        'D.dll': {
+            // Sized by the guest's length, and kept: what a handler that fills
+            // a host buffer before it writes it out does for the call's length.
+            Sized: { argBytes: 8, handler: ([, length])=>{
+                held.push(new ArrayBuffer(length));
+                return 0;
+            } },
+            // Made and dropped by the call before: collected, not counted
+            // against the next one.
+            Drops: { argBytes: 4, handler: ()=>new ArrayBuffer(GROWTH * 2).byteLength },
+            Small: { argBytes: 4, handler: ()=>new ArrayBuffer(1024).byteLength },
+        },
+    };
+    const result = await sweep(libraries, [['small', 16], ['huge', GROWTH * 2]]);
+    assert.deepEqual(result.growths.map(growth=>`${growth.key} ${growth.label}`),
+        ['D.dll!Sized huge', 'D.dll!Drops small', 'D.dll!Drops huge']);
+    assert.ok(result.growths.every(growth=>growth.bytes >= GROWTH * 2));
+    held.length = 0;
 });
 
 test('every known throw says whose it is and why', ()=>{
