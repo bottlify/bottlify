@@ -263,7 +263,8 @@ test('mbsrtowcs and wcsrtombs move the caller\'s pointer, a quadword in a 64-bit
     {
         const memory = fakeMemory();
         const table = /** @type {Record<string, any>} */ (createWideFunctions({ ...memory,
-            guest: guestWindow(memory.bytes, { pointerSize }), pointerSize }));
+            guest: guestWindow(memory.bytes, { pointerSize: /** @type {4 | 8} */ (pointerSize) }),
+            pointerSize }));
         const source = memory.put('abcd');
         const from = memory.allocate(8);
         const view = new DataView(memory.bytes.buffer);

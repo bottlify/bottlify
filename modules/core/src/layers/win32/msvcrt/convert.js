@@ -620,7 +620,7 @@ export function createConversionFunctions(host){
             {
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
-            (wide ? writeWideString : writeString)(buffer, signed && radix === 10
+            (wide ? guest.writeWide : guest.writeAnsi)(buffer, signed && radix === 10
                 ? BigInt.asIntN(bits, pattern).toString(10)
                 : pattern.toString(radix));
             return buffer;

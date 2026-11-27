@@ -651,3 +651,14 @@ test('at 64 bits past 4 GiB: every end pointer is written whole, the null text\'
     table.strtod.handler([text, end]);
     assert.equal(quad(end), text + 2, 'strtod\'s end');
 });
+
+test('the _*toa and _*tow handlers write their text, narrow and wide, terminated', ()=>{
+    const { memory, table } = build();
+    const buffer = memory.allocate(40);
+    assert.equal(table.ltoa.handler([-1, buffer, 10]), buffer);
+    assert.equal(memory.text(buffer), '-1');
+    assert.equal(table.ltoa.handler([-1, buffer, 16]), buffer);
+    assert.equal(memory.text(buffer), 'ffffffff', 'every other radix the bit pattern');
+    assert.equal(table._itow.handler([255, buffer, 2]), buffer);
+    assert.equal(memory.wide(buffer), '11111111');
+});

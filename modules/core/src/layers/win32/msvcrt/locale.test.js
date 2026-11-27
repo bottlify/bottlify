@@ -49,10 +49,12 @@ test('a 64-bit lconv holds its ten strings as quadword pointers, whole past 4 Gi
     assert.equal(conventions, base + 0x100);
     for (let at = 0; at < 10; at++)
     {
+        /** @type {number} */
         const offset = conventions - base + at * 8;
-        const string = view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 2 ** 32;
-        assert.ok(string > base, `string ${at}, whole`);
-        assert.equal(bytes[string - base], at === 0 ? 0x2e : 0, `string ${at}`);
+        /** @type {number} */
+        const text = view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 2 ** 32;
+        assert.ok(text > base, `string ${at}, whole`);
+        assert.equal(bytes[text - base], at === 0 ? 0x2e : 0, `string ${at}`);
     }
     assert.deepEqual([...bytes.subarray(0x100 + 80, 0x100 + 88)],
         new Array(8).fill(127), 'every number CHAR_MAX, past the pointers');
