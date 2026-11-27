@@ -753,7 +753,55 @@ export function checkReturns(text, { exported = false } = {}){
             }
         }
     }
+    if (exported)
+    {
+        found.push(...helperSignatures(text, found, sigLine));
+    }
     return found;
+}
+
+/**
+ * The signatures a helper's comment gives on a later line, after the prose
+ * (`whenFormat`'s `int GetDateFormatA/W(...)`, `calendarInfo`'s
+ * `BOOL EnumCalendarInfo(...)`): each the signature of the specs of the file
+ * the helper makes under that name, at either width (`GetDateFormatA:
+ * whenFormat(false, true)`), where no comment of their own said one.
+ *
+ * @param {string} text @param {{ name: string }[]} found  what was read already
+ * @param {RegExp} sigLine
+ */
+function helperSignatures(text, found, sigLine){
+    const named = new Set(found.map(one=>one.name));
+    const out = [];
+    for (const h of text.matchAll(/\/\*\*((?:(?!\*\/)[^])*)\*\/\s*(?:export\s+)?(?:const|function)\s+(\w+)/g))
+    {
+        for (const one of h[1].split('\n').slice(1))
+        {
+            const sig = sigLine.exec(one);
+            if (!sig)
+            {
+                continue;
+            }
+            for (const name of namesOf(sig[2]))
+            {
+                const made = new RegExp(
+                    String.raw`\n\s*['"]?(${name}[AW]?)['"]?\s*:\s*${h[2]}\(`, 'g');
+                for (const [, key] of text.matchAll(made))
+                {
+                    if (named.has(key))
+                    {
+                        continue;
+                    }
+                    named.add(key);
+                    out.push({ name: key, line: line0(text, h.index) + 1,
+                        params: paramsAfter(text, Object.assign([h[0], sig[1], sig[2]],
+                            { index: h.index })),
+                        ...resultProblem(sig[1], key, undefined) });
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /**

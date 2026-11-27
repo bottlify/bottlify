@@ -148,6 +148,25 @@ test('a signature that names several functions at once is each of them', ()=>{
     assert.deepEqual(layoutOf('HDC hdc, const DEVMODEA/W *init').quad, []);
 });
 
+test('a helper\'s signature on a later line is the specs it makes under that name', ()=>{
+    const text = `/**
+         * EnumCalendarInfo at either width:
+         *
+         *     BOOL EnumCalendarInfo(CALINFO_ENUMPROC, LCID, CALID Calendar, CALTYPE)
+         */
+        const calendarInfo = wide=>({ argBytes: 16, handler: ()=>1 });
+        /** BOOL Beep(DWORD dwFreq, DWORD dwDuration) */
+        Beep: { argBytes: 8, handler: ()=>1 },
+        EnumCalendarInfoA: calendarInfo(false),
+        EnumCalendarInfoW: calendarInfo(true),
+        EnumCalendarInfoExA: other(false),`;
+    const read = checkReturns(text, { exported: true });
+    const places = read.map(one=>[one.name, pointersOf(one.params ?? '', { addresses: true })]);
+    assert.deepEqual(places, [['Beep', []], ['EnumCalendarInfoA', [0]], ['EnumCalendarInfoW', [0]]],
+        'only the specs that helper makes; and only for the table');
+    assert.deepEqual(checkReturns(text).map(one=>one.name), ['Beep']);
+});
+
 test('the gate tries only addresses: a size is wide but no address', ()=>{
     assert.deepEqual(pointersOf('LPVOID at, SIZE_T size', { addresses: true }), [0]);
     assert.deepEqual(pointersOf('ULONG_PTR key, void *p', { addresses: true }), [1]);

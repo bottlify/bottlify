@@ -21,6 +21,8 @@ test('the table is the signature comments\' address places, by every name a func
     assert.match(source, /\n {4}EnumSystemLocalesA: \[0\],/);
     assert.match(source, /\n {4}EnumSystemLocalesW: \[0\],/);
     assert.match(source, /\n {4}GetTextExtentExPointI: \[1, 4, 5, 6\],/);
+    // A helper's comment, its signature after the prose.
+    assert.match(source, /\n {4}EnumCalendarInfoW: \[0\],/);
     assert.doesNotMatch(source, /\n {4}'#/, 'no name by number: it is one library\'s');
     assert.deepEqual(POINTER_ARGUMENTS.PathIsUNCW, [0]);
 });
