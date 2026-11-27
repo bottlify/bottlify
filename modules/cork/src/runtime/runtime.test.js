@@ -13,6 +13,7 @@ import { eflagsOf } from '../emit/flags.js';
 import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { threadCpuMs } from '../../../../tools/fixtures/cpu-time.mjs';
+import { bytesPerCall } from '../../../../tools/fixtures/allocation.mjs';
 
 /** Why a test of the entry hash cannot run here. */
 const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
@@ -457,6 +458,21 @@ test('the slice counters carry the snapshot\'s numbers without its sorted exit t
     }
     assert.deepEqual(cheap.exits, whole.exits);
     assert.ok(!('exitsByTarget' in cheap), 'no sorted targets on the slice path');
+});
+
+test('the slice counters are one record filled in place', async()=>{
+    // Asked at every slice and twice a turn: a record a time was 88 bytes
+    // (node) of an engine thread's garbage.
+    const m = machine({ batchRegions: 4 });
+    const first = m.runtime.counters();
+    assert.equal(m.runtime.counters(), first, 'the same record each time');
+    /** @type {any} */
+    let kept = null;
+    const bytes = await bytesPerCall(()=>{
+        kept = m.runtime.counters();
+    });
+    assert.equal(kept, first);
+    assert.ok(bytes < 8, `${bytes.toFixed(1)} bytes a reading`);
 });
 
 test('the hottest candidate is formed first, whatever order the candidates arrived in', async()=>{

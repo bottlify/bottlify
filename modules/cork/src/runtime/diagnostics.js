@@ -527,21 +527,25 @@ export function createDiagnostics(state){
     // whole snapshot below sorts the exit targets and names each one's
     // reason across the candidate queue -- a third of a loading phase's
     // engine time when it was asked that often.
+    // One record, filled in place and read at once by its caller: asked at
+    // every slice and twice a turn, a record a time was garbage.
+    /** @type {ReturnType<Runtime['counters']>} */
+    const sliceCounters = { regions: 0, modules: 0, invalidations: 0, translatedShare: 0,
+        retired: 0, timed: false, translateMs: 0, exits };
     /** @type {Runtime['counters']} */
     const counters = ()=>{
         fold();
-        return {
-            regions: rt.regions.size,
-            modules: counts.modules,
-            invalidations: counts.invalidations,
-            translatedShare: counted > 0 ? rt.corkRetired / counted : 0,
-            retired: rt.corkRetired,
-            // Whether the milliseconds below were measured (`timings`): 0 otherwise.
-            timed: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
-            translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
-                + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
-            exits,
-        };
+        sliceCounters.regions = rt.regions.size;
+        sliceCounters.modules = counts.modules;
+        sliceCounters.invalidations = counts.invalidations;
+        sliceCounters.translatedShare = counted > 0 ? rt.corkRetired / counted : 0;
+        sliceCounters.retired = rt.corkRetired;
+        // Whether the milliseconds below were measured (`timings`): 0 otherwise.
+        sliceCounters.timed = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+            && settings.timings === true;
+        sliceCounters.translateMs = counts.formingMs + counts.lookupMs + counts.emitMs
+            + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs;
+        return sliceCounters;
     };
     const diagnostics = ()=>{
         fold();
