@@ -526,7 +526,7 @@ export function addCodeHitHelper(m, layout, shared = false){
     b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges + 1 })
         .op(I32.ltU);
     b.op(I32.and);
-    return m.function(type, [ValType.i32, ValType.i32, ValType.i32], b.toBytes());
+    return m.function(type, [ValType.i32, ValType.i32, ValType.i32], b);
 }
 
 /**
@@ -573,7 +573,7 @@ export function addSpanHitHelper(m, codeHit, wide = false){
     b.end();
     b.end();
     b.localGet(1).call(codeHit);
-    return m.function(type, [ValType.i32], b.toBytes());
+    return m.function(type, [ValType.i32], b);
 }
 
 /**
@@ -635,7 +635,7 @@ export function addWindowHitHelper(m, layout, spanHit){
     past(2);
     past(3);
     b.call(spanHit);
-    return m.function(type, [], b.toBytes());
+    return m.function(type, [], b);
 }
 
 /**
@@ -2805,7 +2805,7 @@ export function addUndoHelper(m, layout){
         .store('i64', { offset: ring + 16 });
     body.i32const(0).i32const(0).load('i32', { offset: head }).i32const(1).op(I32.add)
         .store('i32', { offset: head });
-    return m.function(type, [ValType.i32], body.toBytes());
+    return m.function(type, [ValType.i32], body);
 }
 
 /**

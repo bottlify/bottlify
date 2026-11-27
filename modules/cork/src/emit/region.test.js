@@ -944,8 +944,8 @@ test('the function of a region\'s copies, planned from the region\'s own plannin
             const m = new ModuleBuilder();
             const index = emit(prepareModule(m, layout, features, {},
                 { hash: true, resume: true }));
-            const { locals, body, hints } = m.functions[index - m.importedFunctions];
-            return { locals, body: [...body], hints };
+            const { locals, hints } = m.functions[index - m.importedFunctions];
+            return { locals, body: [...m.bodyOf(index)], hints };
         };
         const shared = functionOf(context=>emitRegion(context, region,
             { entryTop: 0, checked: false }).copiesIndex);
@@ -1063,7 +1063,8 @@ test('a call made as a wasm call has its rare ways out hinted unlikely', ()=>{
         const m = new ModuleBuilder();
         const index = emitRegion(prepareModule(m, layout, features, {},
             { hash: true, callReturn }), region, { entryTop: 0, checked: false }).functionIndex;
-        const { body, hints } = m.functions[index - m.importedFunctions];
+        const { hints } = m.functions[index - m.importedFunctions];
+        const body = m.bodyOf(index);
         assert.ok(hints.every(at=>body[at] === 0x04 || body[at] === 0x0d), 'every hint an if');
         return hints.length;
     };

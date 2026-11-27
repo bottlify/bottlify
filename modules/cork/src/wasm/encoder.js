@@ -194,6 +194,8 @@ export const SIMD_SCALAR = new Map([
 
 /** A body's touched locals before it touches one: shared, never written. */
 const UNTOUCHED = new Uint8Array(0);
+/** A reserved function's body until it is written: `unreachable`. */
+const TRAPS = Uint8Array.of(0x00, 0x0b);
 /** Up to how many bytes `insertFrom` copies a piece by hand. */
 const SMALL_COPY = 32;
 
@@ -205,8 +207,13 @@ const SMALL_COPY = 32;
  * @type {Map<number, Uint8Array[]>}
  */
 const SPARE = new Map();
-/** The least buffer kept, and how many of a size: as many as bodies grow at once. */
-const SPARE_LEAST = 1024;
+/**
+ * The least buffer kept, and how many of a size: as many as bodies grow at once. A typed
+ * array of 64 bytes or fewer lives in its object on V8's heap; past that it has a backing
+ * store of its own, which a body growing from sixty-four bytes would make and drop at
+ * every doubling.
+ */
+const SPARE_LEAST = 128;
 const SPARE_KEPT = 4;
 
 /**
@@ -372,6 +379,7 @@ export class Body {
         spare(this.buffer);
         this.buffer = new Uint8Array(0);
         this.length = 0;
+        this.hints = [];
         return this;
     }
 
@@ -937,8 +945,21 @@ export class ModuleBuilder {
         this.imports = [];
         this.importedFunctions = 0;
         this.importedGlobals = 0;
-        /** @type {{ typeIndex: number, locals: number[], body: Uint8Array, hints: number[] }[]} */
+        /** By function, its body's place in `code`, `end` included.
+         * @type {{ typeIndex: number, locals: number[], at: number, length: number,
+         *     hints: number[] }[]} */
         this.functions = [];
+        /**
+         * Every function's body, one after another as they are added, in a buffer the
+         * bodies share (`bufferOf`): a body handed over is copied here once and its own
+         * buffer goes to the next body, and `toBytes` lays these out into the module, so
+         * the module's bytes are the one buffer a module leaves behind - where an exact
+         * copy of each body, made to be held until then, was most of a region's garbage
+         * beside its module.
+         */
+        this.code = new Body();
+        /** Whether `toBytes` has been asked: the bodies' buffer is given back then. */
+        this.encoded = false;
         /** @type {number[][]} */
         this.globals = [];
         /** @type {number[][]} */
@@ -1069,33 +1090,81 @@ export class ModuleBuilder {
      */
     reserveFunction(typeIndex){
         const index = this.importedFunctions + this.functions.length;
-        this.functions.push({ typeIndex, locals: [], body: Uint8Array.of(0x00, 0x0b), hints: [] });
+        this.functions.push({ typeIndex, locals: [], ...this.stored(TRAPS), hints: [] });
         return index;
     }
 
     /**
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
-     * @param {Uint8Array} body  from `Body.toBytes()`
+     * @param {Body | Uint8Array} body  a finished body, which the module takes: its bytes
+     *     and `end` are copied into the module's and it is released (`Body.release`); or a
+     *     body's bytes as `Body.toBytes()` gives them, copied
      * @param {{ exportAs?: string, hints?: number[], at?: number }} [options]  hints: the
      *     body's `hints`; at: an index `reserveFunction` handed out, written here
      * @returns {number} the function index
      */
     function(typeIndex, locals, body, { exportAs, hints = [], at = undefined } = {}){
         const index = at ?? this.importedFunctions + this.functions.length;
+        const entry = { typeIndex, locals, ...this.stored(body), hints };
         if (at === undefined)
         {
-            this.functions.push({ typeIndex, locals, body, hints });
+            this.functions.push(entry);
         }
         else
         {
-            this.functions[at - this.importedFunctions] = { typeIndex, locals, body, hints };
+            this.functions[at - this.importedFunctions] = entry;
         }
         if (exportAs !== undefined)
         {
             this.exports.push([...name(exportAs), 0x00, ...leb128u(index)]);
         }
         return index;
+    }
+
+    /**
+     * A body's bytes put after the others in `code`, `end` included; a Body is released.
+     *
+     * @param {Body | Uint8Array} body
+     * @returns {{ at: number, length: number }}
+     */
+    stored(body){
+        if (this.encoded)
+        {
+            throw new Error('encoder: a function added to a module already encoded');
+        }
+        const code = this.code;
+        const at = code.length;
+        if (body instanceof Body)
+        {
+            if (body.depth !== 0)
+            {
+                throw new Error(`encoder: block left open (${body.depth} deep)`);
+            }
+            code.reserve(body.length + 1);
+            code.buffer.set(body.buffer.subarray(0, body.length), at);
+            code.buffer[at + body.length] = 0x0b;
+            code.length += body.length + 1;
+            body.release();
+        }
+        else
+        {
+            code.reserve(body.length);
+            code.buffer.set(body, at);
+            code.length += body.length;
+        }
+        return { at, length: code.length - at };
+    }
+
+    /**
+     * A function's body, `end` included: a view of the module's own bytes, good until the
+     * next function is added or the module encoded, so one to keep is copied.
+     *
+     * @param {number} functionIndex
+     */
+    bodyOf(functionIndex){
+        const { at, length } = this.functions[functionIndex - this.importedFunctions];
+        return this.code.buffer.subarray(at, at + length);
     }
 
     /**
@@ -1140,8 +1209,17 @@ export class ModuleBuilder {
         return this;
     }
 
-    /** @returns {Uint8Array<ArrayBuffer>} */
+    /**
+     * The module's bytes; once asked, the module is done with and its bodies' buffer goes
+     * to the next body (`code`).
+     *
+     * @returns {Uint8Array<ArrayBuffer>}
+     */
     toBytes(){
+        if (this.encoded)
+        {
+            throw new Error('encoder: a module encoded twice');
+        }
         // The module's pieces, laid out once into its bytes at the end: a body is
         // a typed array and stays one, never spread through a JavaScript array
         // nor copied into a buffer of its own function's first (a batch of
@@ -1191,7 +1269,8 @@ export class ModuleBuilder {
         let codeLength = 0;
         for (let at = 0; at < this.functions.length; at++)
         {
-            const { locals, body, hints: marked } = this.functions[at];
+            const { locals, at: bodyAt, length, hints: marked } = this.functions[at];
+            const body = this.code.buffer.subarray(bodyAt, bodyAt + length);
             // Runs of one type are one entry: "3 × i32, 1 × f64".
             /** @type {number[][]} */
             const runs = [];
@@ -1293,6 +1372,9 @@ export class ModuleBuilder {
             out.set(piece, at);
             at += piece.length;
         }
+        this.encoded = true;
+        this.code.release();
+        hints.release();
         return out;
     }
 }

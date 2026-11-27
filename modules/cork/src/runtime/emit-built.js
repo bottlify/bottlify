@@ -383,9 +383,10 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
                     && types.length === before[1] && globals.length === before[2]
                     && imports.length === before[3])
                 {
-                    const { typeIndex, locals, body, hints } =
+                    const { typeIndex, locals, hints } =
                         m.functions[functionIndex - m.importedFunctions];
-                    cache.keep(key, shape, { typeIndex, locals, body, hints, region: built });
+                    cache.keep(key, shape, { typeIndex, locals,
+                        body: m.bodyOf(functionIndex).slice(), hints, region: built });
                 }
             }
             const exportName = `r${index}`;

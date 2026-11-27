@@ -42,7 +42,7 @@ function noTierEntry(){
     {
         const m = new ModuleBuilder();
         const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
-        m.function(type, [], new Body().i32const(0).toBytes(), { exportAs: 'none' });
+        m.function(type, [], new Body().i32const(0), { exportAs: 'none' });
         const bytes = /** @type {Uint8Array<ArrayBuffer>} */ (m.toBytes());
         noTier = /** @type {Function} */ (
             new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.none);

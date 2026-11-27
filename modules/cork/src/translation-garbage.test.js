@@ -164,8 +164,6 @@ for (const variant of /** @type {const} */ (['x87', 'x64']))
     });
 
     test(`emitting one of the ${variant} image's regions makes no buffer but its module`,
-        { todo: 'the emitter makes about 17 KB of buffers a region beside a module of about'
-            + ' 7.7 KB, x87 and x64 alike (2026-11-27); where in it they are made is not traced' },
         async t=>{
             const layout = ownLayout({ ramSize: 64 << 20,
                 ...wide ? { ramBase: 0, bits: 64 } : {} });

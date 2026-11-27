@@ -347,6 +347,42 @@ test('a body done with hands its buffer to the next as big, its bytes taken firs
     assert.deepEqual([...first.toBytes()], [5, 0x0b]);
 });
 
+test('a body handed to a module is copied in and released; an encoded module takes no more', ()=>{
+    /** @param {(m: ModuleBuilder, b: Body) => number} add */
+    const built = add=>{
+        const m = new ModuleBuilder();
+        const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+        const reserved = m.reserveFunction(type);
+        const b = new Body(256);
+        for (let i = 0; i < 200; i++)
+        {
+            b.localGet(0).i32const(i).op(0x6a).localSet(0);
+        }
+        b.localGet(0);
+        const index = add(m, b);
+        m.function(type, [], new Body().localGet(0), { at: reserved, exportAs: 'echo' });
+        m.exportFunction('sum', index);
+        return { m, b, index };
+    };
+    const copied = built((m, b)=>m.function(m.types.length - 1, [], b.toBytes()));
+    const handed = built((m, b)=>m.function(m.types.length - 1, [], b));
+    assert.equal(handed.b.length, 0, 'the body handed over is released');
+    assert.deepEqual([...handed.m.bodyOf(handed.index)], [...copied.m.bodyOf(copied.index)]);
+    assert.equal(handed.m.bodyOf(handed.index).at(-1), 0x0b, 'its end put after it');
+    const bytes = handed.m.toBytes();
+    assert.deepEqual([...bytes], [...copied.m.toBytes()]);
+    const { sum, echo } = /** @type {{ sum: (x: number) => number, echo: (x: number) => number }} */ (
+        new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports);
+    assert.equal(sum(1), 1 + 199 * 100);
+    assert.equal(echo(7), 7);
+    // Its bodies' buffer went to the next body: what used it again would be another's bytes.
+    assert.throws(()=>handed.m.toBytes(), { message: 'encoder: a module encoded twice' });
+    assert.throws(()=>handed.m.function(0, [], new Body()),
+        { message: 'encoder: a function added to a module already encoded' });
+    assert.throws(()=>new ModuleBuilder().function(0, [], new Body().block(EMPTY)),
+        { message: 'encoder: block left open (1 deep)' });
+});
+
 test('an i64 constant is its signed LEB128 at any value', ()=>{
     for (const value of [0n, 1n, -1n, 63n, 64n, -64n, -65n, 0x7fffffffn, -0x80000000n,
         0x80000000n, -0x80000001n, 0xffffffffn, 1n << 62n, -(1n << 63n), (1n << 63n) - 1n])
