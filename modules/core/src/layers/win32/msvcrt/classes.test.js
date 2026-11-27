@@ -12,6 +12,7 @@ import { guestEntry } from './guest-code.js';
 import { __RTDynamicCast } from './inguest-rtti.js';
 import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /**
  * The classes' table over a fake memory, its variables placed there as the
@@ -26,16 +27,13 @@ function build(pointerSize){
     /** @type {Map<string, number>} */
     const addresses = new Map();
     const table = createClassFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: guestWindow(memory.bytes, { pointerSize: pointerSize ?? 4 }),
         allocate: memory.allocate,
         free: address=>{
             freed.push(address);
             return true;
         },
         addressOf: name=>addresses.get(name) ?? null,
-        ...pointerSize ? { pointerSize } : {},
         callGuest: async(_entry, [bytes])=>memory.allocate(bytes),
     });
     const variables = Object.entries(table).filter(([, entry])=>entry.data);
@@ -58,8 +56,7 @@ function build(pointerSize){
             memory.setU32(start + at, /** @type {number} */ (addresses.get(to)));
         }
     }
-    const cxx = createCxxFunctions({ readMemory: memory.readMemory,
-        readCString: memory.readCString });
+    const cxx = createCxxFunctions({ guest: memory.guest, readCString: memory.readCString });
     /** @param {string} name @param {number[]} args */
     const call = (name, args)=>(table[name] ?? /** @type {any} */ (table)[UNIVERSAL_CXX][name])
         .handler(args);

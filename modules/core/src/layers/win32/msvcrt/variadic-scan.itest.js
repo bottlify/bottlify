@@ -19,6 +19,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createMsvcrtFunctions } from './functions.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { KEPT_64, QUADS, callLong, longMachine } from '../../../../scripts/guest-code/long.mjs';
 import { random } from '../../../../scripts/guest-code/equivalence.mjs';
@@ -52,6 +53,7 @@ const bytesOf = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff
  */
 const tableOver = (read, write, pointerSize)=>/** @type {Record<string, any>} */ (
     createMsvcrtFunctions(/** @type {any} */ ({
+        guest: guestThrough(read, write, pointerSize === 8 ? 8 : 4),
         readMemory: read,
         writeMemory: write,
         fillMemory: (/** @type {number} */ at, /** @type {number} */ value,

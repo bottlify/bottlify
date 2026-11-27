@@ -18,6 +18,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { RAND_CODE, SRAND_CODE, createMsvcrtFunctions } from './functions.js';
+import { guestThrough } from './guest-window.fixture.js';
 
 const PROGRAM = 0x8000;
 const RAND = 0x9000;
@@ -100,6 +101,8 @@ test('srand and rand in the guest draw what their handlers draw, from any seed',
         return host.readReg32('eax') >>> 0;
     };
     const fns = createMsvcrtFunctions(/** @type {any} */ ({
+        guest: guestThrough((address, length)=>host.readPhysical(address, length).slice(),
+            (address, bytes)=>host.writePhysical(address, bytes)),
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
             host.readPhysical(address, length).slice(),
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>

@@ -17,7 +17,7 @@ import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ErrorHost
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(bytes: number) => number} allocate
  * @property {() => number} errno  The calling thread's errno.
  * @property {(code: number) => void} setErrno
@@ -53,18 +53,7 @@ const MESSAGE_ROOM = Math.max(...MESSAGES.map(message=>message.length)) + 1;
  * @param {ErrorHost} host
  */
 export function createErrorFunctions(host){
-    /** @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        host.writeMemory(pointer, Uint8Array.from(`${text}\0`, character=>character
-            .charCodeAt(0)));
-    };
-
-    /** @param {number} pointer @param {number} value */
-    const writeInt = (pointer, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(pointer, bytes);
-    };
+    const { guest } = host;
 
     /**
      * The buffer strerror answers with, written over by the next call, as
@@ -88,7 +77,7 @@ export function createErrorFunctions(host){
             {
                 return EINVAL;
             }
-            writeInt(pointer, read());
+            guest.set32(pointer, read());
             return 0;
         },
     });
@@ -127,7 +116,7 @@ export function createErrorFunctions(host){
                 }
                 if (messageBuffer !== 0)
                 {
-                    writeString(messageBuffer, messageOf(code | 0));
+                    guest.writeAnsi(messageBuffer, messageOf(code | 0));
                 }
                 return messageBuffer;
             },
@@ -151,7 +140,7 @@ export function createErrorFunctions(host){
                     host.setErrno(EINVAL);
                     return EINVAL;
                 }
-                writeString(buffer, messageOf(code | 0).slice(0, room - 1));
+                guest.writeAnsi(buffer, messageOf(code | 0).slice(0, room - 1));
                 return 0;
             },
         },

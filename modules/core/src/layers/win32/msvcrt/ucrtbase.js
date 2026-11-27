@@ -41,7 +41,7 @@ import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -72,12 +72,13 @@ const PROCESS_DETACH = 0;
 
 /**
  * @typedef {Object} UcrtHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest  At the process's pointer width.
+ * @property {(address: number, length: number) => Uint8Array} readMemory  For the
+ *           functions whose code runs in the guest (`guestEntry`) and the math.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(entry: number, args: number[], thread?: any) => any} callGuest
  * @property {() => any} [currentThread]
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
- * @property {(address: number, maxLength: number) => string} [readCString]
  * @property {{ narrow: () => number, wide: () => number }} [commandLine]  Where
  *     GetCommandLineA and GetCommandLineW keep the process's command line.
  * @property {import('./float.js').FloatHost} [fpu]  Absent, nothing that
@@ -93,22 +94,12 @@ const PROCESS_DETACH = 0;
  * @returns {Record<string, any>}
  */
 export function createUcrtbaseFunctions(crt, host){
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
+    const { guest } = host;
     /** A pointer's bytes: four, or eight in a 64-bit process. */
-    const pointer = host.pointerSize ?? 4;
-    /** A pointer read and written whole. */
-    const { read: readPointer, write: writePointer } = pointerIo(host, pointer);
+    const pointer = guest.pointerSize;
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
-        writeU32(crt._errno.handler([]), code);
+        guest.set32(crt._errno.handler([]), code);
         seam?.watch.note(code);
         return code;
     };
@@ -199,13 +190,13 @@ export function createUcrtbaseFunctions(crt, host){
             }
             const room = (count >>> 0) - 1;
             crt._vsnprintf.handler([buffer, room, format, list]);
-            host.writeMemory(wholeAddress(buffer) + Math.min(length, room), Uint8Array.of(0));
+            guest.set8(wholeAddress(buffer) + Math.min(length, room), 0);
             return length;
         }
         const written = crt._vsnprintf.handler([buffer, count, format, list]) | 0;
         if (written < 0 && (options & LEGACY_VSPRINTF_NULL_TERMINATION) && (count >>> 0) > 0)
         {
-            host.writeMemory(wholeAddress(buffer) + (count >>> 0) - 1, Uint8Array.of(0));
+            guest.set8(wholeAddress(buffer) + (count >>> 0) - 1, 0);
         }
         return written;
     };
@@ -230,14 +221,13 @@ export function createUcrtbaseFunctions(crt, host){
             }
             const room = (count >>> 0) - 1;
             crt._vsnwprintf.handler([buffer, room, format, list]);
-            host.writeMemory(wholeAddress(buffer) + Math.min(length, room) * 2, Uint8Array.of(0,
-                0));
+            guest.set16(wholeAddress(buffer) + Math.min(length, room) * 2, 0);
             return length;
         }
         const written = crt._vsnwprintf.handler([buffer, count, format, list]) | 0;
         if (written < 0 && (options & LEGACY_VSPRINTF_NULL_TERMINATION) && (count >>> 0) > 0)
         {
-            host.writeMemory(wholeAddress(buffer) + ((count >>> 0) - 1) * 2, Uint8Array.of(0, 0));
+            guest.set16(wholeAddress(buffer) + ((count >>> 0) - 1) * 2, 0);
         }
         return written;
     };
@@ -249,7 +239,7 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} list
      */
     const pointersAt = list=>Array.from({ length: VARIADIC_SLOTS },
-        (_, index)=>readPointer(wholeAddress(list) + index * pointer));
+        (_, index)=>guest.ptr(wholeAddress(list) + index * pointer));
 
     /** What `_register_thread_local_exe_atexit_callback` was given, until exit calls it. */
     let threadLocalExit = 0;
@@ -270,10 +260,7 @@ export function createUcrtbaseFunctions(crt, host){
             return 0;
         }
         /** @param {number} at */
-        const read = at=>{
-            const bytes = host.readMemory(at, unit);
-            return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
-        };
+        const read = at=>(unit === 1 ? guest.u8(at) : guest.u16(at));
         let at = wholeAddress(line);
         let quoted = false;
         for (let code = read(at); code > 0x20 || code !== 0 && quoted; code = read(at))
@@ -313,21 +300,16 @@ export function createUcrtbaseFunctions(crt, host){
         argBytes: 0,
         handler: ()=>{
             const text = narrow.handler([]) >>> 0;
-            if (text === 0 || !host.readCString)
+            if (text === 0)
             {
                 return text;
             }
-            const read = host.readCString(text, 4096);
+            const read = guest.cstr(text, 4096);
             crt.free.handler([text]);
-            const bytes = new Uint8Array((read.length + 1) * 2);
-            for (let at = 0; at < read.length; at++)
-            {
-                bytes[at * 2] = read.charCodeAt(at) & 0xff;
-            }
-            const wide = crt.malloc.handler([bytes.length]) >>> 0;
+            const wide = crt.malloc.handler([(read.length + 1) * 2]) >>> 0;
             if (wide !== 0)
             {
-                host.writeMemory(wide, bytes);
+                guest.writeWide(wide, read);
             }
             return wide;
         },
@@ -352,7 +334,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([index])=>((crt.__iob_func.handler([]) >>> 0)
-                + (index >>> 0) * fileLayout(host.pointerSize).size) >>> 0,
+                + (index >>> 0) * fileLayout(pointer).size) >>> 0,
         },
 
         /**
@@ -509,7 +491,7 @@ export function createUcrtbaseFunctions(crt, host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>readU32(crt.__p__environ.handler([])),
+            handler: ()=>guest.ptr(crt.__p__environ.handler([])),
         },
 
         /** wchar_t **_get_initial_wide_environment(void) */
@@ -517,7 +499,7 @@ export function createUcrtbaseFunctions(crt, host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>readU32(crt.__p__wenviron.handler([])),
+            handler: ()=>guest.ptr(crt.__p__wenviron.handler([])),
         },
 
         /** int _crt_atexit(_PVFV function): `atexit` as the start-up registers it. */
@@ -574,7 +556,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return -1;
                 }
-                host.writeMemory(wholeAddress(table), new Uint8Array(3 * pointer));
+                guest.fill(table, 0, 3 * pointer);
                 return 0;
             },
         },
@@ -595,9 +577,9 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = wholeAddress(table);
-                let first = readPointer(at);
-                let last = readPointer(at + pointer);
-                let end = readPointer(at + 2 * pointer);
+                let first = guest.ptr(at);
+                let last = guest.ptr(at + pointer);
+                let end = guest.ptr(at + 2 * pointer);
                 if (last === end)
                 {
                     const used = first === 0 ? 0 : (last - first) / pointer;
@@ -611,10 +593,10 @@ export function createUcrtbaseFunctions(crt, host){
                     last = grown + used * pointer;
                     end = grown + room * pointer;
                 }
-                writePointer(last, fn);
-                writePointer(at, first);
-                writePointer(at + pointer, last + pointer);
-                writePointer(at + 2 * pointer, end);
+                guest.setPtr(last, fn);
+                guest.setPtr(at, first);
+                guest.setPtr(at + pointer, last + pointer);
+                guest.setPtr(at + 2 * pointer, end);
                 return 0;
             },
         },
@@ -636,12 +618,12 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = wholeAddress(table);
-                const first = readPointer(at);
-                const last = readPointer(at + pointer);
+                const first = guest.ptr(at);
+                const last = guest.ptr(at + pointer);
                 const functions = first === 0 ? [] : Array.from(
                     { length: (last - first) / pointer },
-                    (_, index)=>readPointer(first + index * pointer));
-                host.writeMemory(at, new Uint8Array(3 * pointer));
+                    (_, index)=>guest.ptr(first + index * pointer));
+                guest.fill(at, 0, 3 * pointer);
                 if (first !== 0)
                 {
                     crt.free.handler([first]);
@@ -760,7 +742,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return fail(EINVAL);
                 }
-                writeU32(crt.__p__fmode.handler([]), mode);
+                guest.set32(crt.__p__fmode.handler([]), mode);
                 return 0;
             },
         },
@@ -773,7 +755,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return fail(EINVAL);
                 }
-                writeU32(out, readU32(crt.__p__fmode.handler([])));
+                guest.set32(out, guest.u32(crt.__p__fmode.handler([])));
                 return 0;
             },
         },
@@ -782,18 +764,17 @@ export function createUcrtbaseFunctions(crt, host){
          * float strtof(const char *str, char **end): strtod's reading, rounded
          * to a float, ERANGE for one past a float's range.
          */
-        ...host.fpu && host.readCString ? {
+        ...host.fpu ? {
             strtof: {
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([text, end])=>{
                     const scanned = wholeAddress(text) === 0 ? null
-                        : scanStandardDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
-                            host.readCString)(wholeAddress(text), 1024));
+                        : scanStandardDecimal(guest.cstr(text, 1024));
                     if (wholeAddress(end) !== 0)
                     {
-                        writePointer(end, scanned ? text + scanned.end : text);
+                        guest.setPtr(end, scanned ? text + scanned.end : text);
                     }
                     const value = Math.fround(scanned?.value ?? 0);
                     // Past a float's range from a finite double; an infinity or
@@ -849,7 +830,7 @@ export function createUcrtbaseFunctions(crt, host){
                     errorCount = crt.malloc.handler([4]) >>> 0;
                     if (errorCount !== 0)
                     {
-                        writeU32(errorCount, SYSTEM_ERRORS);
+                        guest.set32(errorCount, SYSTEM_ERRORS);
                     }
                 }
                 return errorCount;
@@ -977,7 +958,7 @@ export function createUcrtbaseFunctions(crt, host){
                     .forEach(([out, field])=>{
                         if ((out >>> 0) !== 0)
                         {
-                            writePointer(out, field);
+                            guest.setPtr(out, field);
                         }
                     });
                 return 0;
@@ -1010,7 +991,7 @@ export function createUcrtbaseFunctions(crt, host){
                 }
                 if (wanted > (size >>> 0))
                 {
-                    host.writeMemory(wholeAddress(buffer), new Uint8Array(size >>> 0));
+                    guest.fill(buffer, 0, size >>> 0);
                     fail(ERANGE);
                     return 0;
                 }

@@ -33,6 +33,7 @@
 
 import { LOCALES } from '../kernel32/locales.js';
 import { LCTYPE, localeValues } from '../kernel32/locale-data.js';
+import { WHOLE } from '../common/guest.js';
 
 /** ios_base::iostate. */
 const GOODBIT = 0;
@@ -204,8 +205,7 @@ const FOPEN_MODES = new Map([
 
 /**
  * @typedef {Object} Msvcp60Host  What MSVCP60's host gives it (`createMsvcp60Functions`).
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, in place.
  * @property {(name: string) => number} addressOf  This library's own export, placed.
  * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
  */
@@ -221,8 +221,6 @@ const FOPEN_MODES = new Map([
  * @property {Record<number, StringMembers>} strings  By element size.
  * @property {(size: number) => number} allocate
  * @property {(block: number) => void} free
- * @property {(address: number) => number} u32
- * @property {(address: number, value: number) => void} setU32
  */
 
 /**
@@ -230,39 +228,19 @@ const FOPEN_MODES = new Map([
  * @returns {Record<string, any>}
  */
 export function createStreams(context){
-    const { crt, host, thiscall, cdecl, raise, strings, allocate, free, u32, setU32 } = context;
-
-    /** @param {number} address */
-    const i32 = address=>u32(address) | 0;
-    /** @param {number} address */
-    const u16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
-        return bytes[0] | bytes[1] << 8;
-    };
-    /** @param {number} address @param {number} value */
-    const setU16 = (address, value)=>host.writeMemory(address >>> 0,
-        Uint8Array.of(value & 0xff, value >>> 8 & 0xff));
+    const { crt, host, thiscall, cdecl, raise, strings, allocate, free } = context;
+    const { guest } = host;
+    const { u32, i32, set32: setU32, u16, set16: setU16 } = guest;
     /** @param {number} address @param {number} count */
-    const zero = (address, count)=>host.writeMemory(address >>> 0, new Uint8Array(count));
+    const zero = (address, count)=>guest.fill(address, 0, count);
 
-    /** A C string of the guest's. @param {number} address */
-    const cString = address=>{
-        let text = '';
-        for (let at = address >>> 0; ; at++)
-        {
-            const byte = host.readMemory(at, 1)[0];
-            if (byte === 0)
-            {
-                return text;
-            }
-            text += String.fromCharCode(byte);
-        }
-    };
+    /** A C string of the guest's, whole: a locale's name. @param {number} address */
+    const cString = address=>guest.cstr(address, WHOLE);
 
-    /** Bytes of a C string, its terminator after them, on the runtime's heap. @param {string} text */
+    /** A C string, its terminator after it, on the runtime's heap. @param {string} text */
     const heapString = text=>{
         const at = crt.malloc.handler([text.length + 1]) >>> 0;
-        host.writeMemory(at, Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff));
+        guest.writeAnsi(at, text);
         return at;
     };
 
@@ -411,10 +389,9 @@ export function createStreams(context){
             /** @param {number} c */
             isEof: c=>(unit === 1 ? (c | 0) === -1 : (c & 0xffff) === 0xffff),
             /** to_int_type: a char is read unsigned. @param {number} at */
-            get: at=>(unit === 1 ? host.readMemory(at >>> 0, 1)[0] : u16(at)),
+            get: at=>(unit === 1 ? guest.u8(at) : u16(at)),
             /** @param {number} at @param {number} c */
-            put: (at, c)=>(unit === 1 ? host.writeMemory(at >>> 0, Uint8Array.of(c & 0xff))
-                : setU16(at, c)),
+            put: (at, c)=>(unit === 1 ? guest.set8(at, c & 0xff) : setU16(at, c & 0xffff)),
             /** The element value of an int_type or char argument. @param {number} c */
             of: c=>(unit === 1 ? c & 0xff : c & 0xffff),
         };
@@ -604,15 +581,13 @@ export function createStreams(context){
 
     /** An fpos read from memory. @param {number} at */
     const readFpos = at=>({ off: i32(at + FPOS.OFF),
-        pos: new DataView(host.readMemory(at + FPOS.POS, 8).buffer).getBigInt64(0, true) });
+        pos: guest.i64(at + FPOS.POS) });
     /** An fpos written: offset, file position, no conversion state. */
     /** @param {number} at @param {number} off @param {bigint} pos */
     const writeFpos = (at, off, pos)=>{
         zero(at, FPOS.SIZE);
         setU32(at + FPOS.OFF, off);
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigInt64(0, pos, true);
-        host.writeMemory(at + FPOS.POS, bytes);
+        guest.set64(at + FPOS.POS, pos);
         return at;
     };
     /** An fpos as the six dwords it is passed by value in. @param {{ off: number, pos: bigint }} at */
@@ -1266,7 +1241,7 @@ export function createStreams(context){
             if (count !== 0 && (state & (NOREAD | CONSTANT)) !== (NOREAD | CONSTANT))
             {
                 const at = allocate(count * unit);
-                host.writeMemory(at, text);
+                guest.setBytes(at, text);
                 const end = at + count * unit;
                 setU32(x + STRBUF.SEEKHIGH, end);
                 if (!(state & NOREAD))
@@ -1305,11 +1280,11 @@ export function createStreams(context){
             if (!(state & CONSTANT) && b.pptr(x) !== 0)
             {
                 const end = Math.max(b.pptr(x), u32(x + STRBUF.SEEKHIGH));
-                return host.readMemory(b.pbase(x), end - b.pbase(x));
+                return guest.bytes(b.pbase(x), end - b.pbase(x));
             }
             if (!(state & NOREAD) && b.gptr(x) !== 0)
             {
-                return host.readMemory(b.eback(x), b.egptr(x) - b.eback(x));
+                return guest.bytes(b.eback(x), b.egptr(x) - b.eback(x));
             }
             return new Uint8Array(0);
         };
@@ -1336,7 +1311,7 @@ export function createStreams(context){
                 const at = allocate(grown * unit);
                 if (old !== 0)
                 {
-                    host.writeMemory(at, host.readMemory(first, old * unit));
+                    guest.setBytes(at, guest.bytes(first, old * unit));
                 }
                 const moved = (/** @type {number} */ p)=>at + (p - first);
                 if (old === 0)
@@ -1490,7 +1465,7 @@ export function createStreams(context){
             [`?str@${STRBC}QAEXABV${STRING}2@@Z`]: thiscall(8, ([x, text])=>setStr(x, text)),
             [`?_Init@${STRBC}IAEXPB${E}IH@Z`]: thiscall(16, ([x, at, count, state])=>{
                 initString(x, (count >>> 0) === 0 ? new Uint8Array(0)
-                    : host.readMemory(at, (count >>> 0) * unit), state);
+                    : guest.bytes(at, (count >>> 0) * unit), state);
                 return 0;
             }),
             [`?_Tidy@${STRBC}IAEXXZ`]: thiscall(4, ([x])=>(tidyString(x), 0)),
@@ -1589,9 +1564,7 @@ export function createStreams(context){
                 {
                     return writeFpos(answer, BADOFF, 0n);
                 }
-                const pos = new DataView(host.readMemory(at, 8).buffer)
-                    .getBigInt64(0, true);
-                return writeFpos(answer, 0, pos);
+                return writeFpos(answer, 0, guest.i64(at));
             }
             finally
             {
@@ -1644,9 +1617,7 @@ export function createStreams(context){
                 const scratch = allocate(8);
                 try
                 {
-                    const bytes = new Uint8Array(8);
-                    new DataView(bytes.buffer).setBigInt64(0, at.pos, true);
-                    host.writeMemory(scratch, bytes);
+                    guest.set64(scratch, at.pos);
                     if (file('fsetpos', [fileOf(x), scratch]) !== 0
                         || at.off !== 0 && file('fseek', [fileOf(x), at.off, CUR]) !== 0)
                     {
@@ -1940,15 +1911,11 @@ export function createStreams(context){
                 }
                 if (type === 'float')
                 {
-                    const view = new DataView(new ArrayBuffer(4));
-                    view.setFloat32(0, value, true);
-                    host.writeMemory(to, new Uint8Array(view.buffer));
+                    guest.setF32(to, value);
                 }
                 else
                 {
-                    const view = new DataView(new ArrayBuffer(8));
-                    view.setFloat64(0, value, true);
-                    host.writeMemory(to, new Uint8Array(view.buffer));
+                    guest.setF64(to, value);
                 }
                 addState(ios, state);
                 return part;
@@ -1964,9 +1931,15 @@ export function createStreams(context){
             else
             {
                 const bits = BigInt.asUintN(64, value);
-                const out8 = new Uint8Array(8);
-                new DataView(out8.buffer).setBigUint64(0, bits, true);
-                host.writeMemory(to, out8.subarray(0, bytes));
+                if (bytes === 8)
+                {
+                    guest.set64(to, bits);
+                }
+                else
+                {
+                    (bytes === 4 ? guest.set32 : bytes === 2 ? setU16 : guest.set8)(to,
+                        Number(BigInt.asUintN(bytes * 8, bits)));
+                }
             }
             addState(ios, state);
             return part;
@@ -1990,7 +1963,7 @@ export function createStreams(context){
             let state = e.isEof(c) ? EOFBIT : 0;
             if (text === 'true' || text === 'false')
             {
-                host.writeMemory(to, Uint8Array.of(text === 'true' ? 1 : 0));
+                guest.set8(to, text === 'true' ? 1 : 0);
             }
             else
             {
@@ -2741,7 +2714,7 @@ export function createStreams(context){
          * @param {number} p @param {number} room
          * @returns {number[] | null} null when the stream was not good
          */
-        const readWord = (p, room)=>{
+        const readToken = (p, room)=>{
             const ios = iosOf(p);
             if (!ipfx(p, false))
             {
@@ -2818,10 +2791,10 @@ export function createStreams(context){
             for (const name of both('5', `${ISTREAM_RESULT}PA${code}@Z`))
             {
                 out[name] = cdecl(8, ([p, to])=>{
-                    const word = readWord(p, 1);
+                    const word = readToken(p, 1);
                     if (word)
                     {
-                        host.writeMemory(to, bytesOf([...word, 0]));
+                        guest.setBytes(to, bytesOf([...word, 0]));
                     }
                     return p;
                 });
@@ -2834,7 +2807,7 @@ export function createStreams(context){
         for (const name of both('5', `${ISTREAM_RESULT}AA${STRING_ARG}@Z`, true))
         {
             out[name] = cdecl(8, ([p, text])=>{
-                const word = readWord(p, 0);
+                const word = readToken(p, 0);
                 if (word)
                 {
                     strings[unit].assignElements(text, bytesOf(word));

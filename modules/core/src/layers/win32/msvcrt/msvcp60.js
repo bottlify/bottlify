@@ -28,6 +28,14 @@
  * exception classes are the runtime's `exception` (three words) with the
  * message after them as a string, and carry the type data a throw and a
  * catch read, under the names the compiler gives it.
+ *
+ * This is the 32-bit library: every name here is one a 32-bit compiler gives
+ * (`QAE` a member, `PBD` a `const char *`, `I` a size), every layout and the
+ * throw data are 32-bit x86's, and Visual C++ 6 made no 64-bit program to
+ * import it. A 64-bit process's compiler names a member `QEAA` and lays its
+ * string out a pointer wide, so it would bind to none of these and could only
+ * be misread by them (an address past 2 GiB answered as a negative dword):
+ * the library offers it nothing, and its imports are missing as they are.
  */
 
 import { createStreams } from './msvcp60-streams.js';
@@ -87,7 +95,7 @@ const copierOf = name=>(name === 'exception' ? '??0exception@@QAE@ABV0@@Z'
  * @property {(self: number, built?: boolean) => void} tidy
  * @property {(self: number, elements: Uint8Array) => number} assignElements
  * @property {(self: number, other: number) => number} assignString
- * @property {(self: number) => number} cstr
+ * @property {(self: number) => number} cText  c_str(): the text, or the static empty one.
  * @property {(self: number) => Uint8Array} whole  The text's elements, as a copy.
  */
 
@@ -111,22 +119,15 @@ const stringOf = element=>`?$basic_string@${element}U?$char_traits@${element}@st
  * @param {Record<string, any>} crt  msvcrt's table: operator new and delete, malloc,
  *        its `exception` and `_CxxThrowException`.
  * @param {Msvcp60Host} host
- * @returns {Record<string, any>}
+ * @returns {Record<string, any>}  Empty in a 64-bit process (above).
  */
 export function createMsvcp60Functions(crt, host){
-    /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
-    };
-    /** @param {number} address */
-    const u8 = address=>host.readMemory(address >>> 0, 1)[0];
-    /** @param {number} address @param {number} value */
-    const setU8 = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(value & 0xff));
+    const { guest } = host;
+    if (guest.pointerSize !== 4)
+    {
+        return {};
+    }
+    const { u8, u32, set8, set32 } = guest;
     /** @param {number} size */
     const allocate = size=>crt['??2@YAPAXI@Z'].handler([size]) >>> 0;
     /** @param {number} block */
@@ -217,16 +218,13 @@ export function createMsvcp60Functions(crt, host){
         const NULLSTR = `?_C@?1??_Nullstr@${STRING}CAP${CPTR.slice(1)}XZ@4${element}B`;
 
         /** @param {number} at @param {number} index */
-        const elementAt = (at, index)=>{
-            const bytes = host.readMemory((at + index * unit) >>> 0, unit);
-            return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
-        };
+        const elementAt = (at, index)=>(unit === 1 ? u8(at + index) : guest.u16(at + index * 2));
         /** @param {number} at @param {number} value */
-        const setElement = (at, value)=>host.writeMemory(at >>> 0, unit === 1
-            ? Uint8Array.of(value & 0xff) : Uint8Array.of(value & 0xff, value >>> 8 & 0xff));
+        const setElement = (at, value)=>(unit === 1 ? set8(at, value & 0xff)
+            : guest.set16(at, value & 0xffff));
         /** The elements at a place, as a copy. @param {number} at @param {number} count */
         const read = (at, count)=>(count === 0 ? new Uint8Array(0)
-            : host.readMemory(at >>> 0, count * unit));
+            : guest.bytes(at, count * unit));
         /**
          * Elements written at a place: none written is no access, as a
          * string of no text has no place (its `_Ptr` is null).
@@ -236,7 +234,7 @@ export function createMsvcp60Functions(crt, host){
         const write = (at, elements)=>{
             if (elements.length > 0)
             {
-                host.writeMemory(at >>> 0, elements);
+                guest.setBytes(at, elements);
             }
         };
         /** @param {number} at */
@@ -249,7 +247,7 @@ export function createMsvcp60Functions(crt, host){
             return length;
         };
 
-        const ptr = (/** @type {number} */ self)=>u32(self + PTR);
+        const textOf = (/** @type {number} */ self)=>guest.ptr(self + PTR);
         const len = (/** @type {number} */ self)=>u32(self + LEN);
         const res = (/** @type {number} */ self)=>u32(self + RES);
         /** @param {number} text */
@@ -258,17 +256,17 @@ export function createMsvcp60Functions(crt, host){
         const shared = text=>text !== 0 && refcnt(text) !== 0 && refcnt(text) !== FROZEN;
         const nullstr = ()=>host.addressOf(NULLSTR);
         /** c_str(): the text, or the static empty one. @param {number} self */
-        const cstr = self=>ptr(self) || nullstr();
+        const cText = self=>textOf(self) || nullstr();
 
         /** _Eos: the length set and the terminator after it. @param {number} self @param {number} n */
         const eos = (self, n)=>{
-            setU32(self + LEN, n);
-            setElement(ptr(self) + n * unit, 0);
+            set32(self + LEN, n);
+            setElement(textOf(self) + n * unit, 0);
         };
 
         /** _Tidy(built): the text given up - freed, or one count fewer. */
         const tidy = (/** @type {number} */ self, built = false)=>{
-            const text = ptr(self);
+            const text = textOf(self);
             if (built && text !== 0)
             {
                 if (refcnt(text) === 0 || refcnt(text) === FROZEN)
@@ -277,12 +275,12 @@ export function createMsvcp60Functions(crt, host){
                 }
                 else
                 {
-                    setU8(text - 1, refcnt(text) - 1);
+                    set8(text - 1, refcnt(text) - 1);
                 }
             }
-            setU32(self + PTR, 0);
-            setU32(self + LEN, 0);
-            setU32(self + RES, 0);
+            guest.setPtr(self + PTR, 0);
+            set32(self + LEN, 0);
+            set32(self + RES, 0);
         };
 
         /**
@@ -302,12 +300,12 @@ export function createMsvcp60Functions(crt, host){
             const kept = Math.min(len(self), room);
             if (kept > 0)
             {
-                write(text, read(ptr(self), kept));
+                write(text, read(textOf(self), kept));
             }
             tidy(self, true);
-            setU32(self + PTR, text);
-            setU8(text - 1, 0);
-            setU32(self + RES, room);
+            guest.setPtr(self + PTR, text);
+            set8(text - 1, 0);
+            set32(self + RES, room);
             eos(self, kept);
         };
 
@@ -322,11 +320,11 @@ export function createMsvcp60Functions(crt, host){
             {
                 fail('length');
             }
-            if (shared(ptr(self)))
+            if (shared(textOf(self)))
             {
                 if (n === 0)
                 {
-                    setU8(ptr(self) - 1, refcnt(ptr(self)) - 1);
+                    set8(textOf(self) - 1, refcnt(textOf(self)) - 1);
                     tidy(self);
                     return false;
                 }
@@ -339,7 +337,7 @@ export function createMsvcp60Functions(crt, host){
                 {
                     tidy(self, true);
                 }
-                else if (ptr(self) !== 0)
+                else if (textOf(self) !== 0)
                 {
                     eos(self, 0);
                 }
@@ -359,21 +357,21 @@ export function createMsvcp60Functions(crt, host){
 
         /** _Freeze: the text this string's own and never shared again. @param {number} self */
         const freeze = self=>{
-            if (shared(ptr(self)))
+            if (shared(textOf(self)))
             {
                 grow(self, len(self));
             }
-            if (ptr(self) !== 0)
+            if (textOf(self) !== 0)
             {
-                setU8(ptr(self) - 1, FROZEN);
+                set8(textOf(self) - 1, FROZEN);
             }
         };
 
         /** _Split: a shared text copied, so this string can change its own. @param {number} self */
         const split = self=>{
-            if (shared(ptr(self)))
+            if (shared(textOf(self)))
             {
-                const elements = read(ptr(self), len(self));
+                const elements = read(textOf(self), len(self));
                 tidy(self, true);
                 assignElements(self, elements);
             }
@@ -384,7 +382,7 @@ export function createMsvcp60Functions(crt, host){
             const n = elements.length / unit;
             if (grow(self, n, true))
             {
-                write(ptr(self), elements);
+                write(textOf(self), elements);
                 eos(self, n);
             }
             return self;
@@ -403,16 +401,16 @@ export function createMsvcp60Functions(crt, host){
                 erase(self, pos + n, npos);
                 erase(self, 0, pos);
             }
-            else if (n > 0 && n === size && refcnt(cstr(other)) < FROZEN - 1)
+            else if (n > 0 && n === size && refcnt(cText(other)) < FROZEN - 1)
             {
                 tidy(self, true);
-                setU32(self + PTR, ptr(other));
-                setU32(self + LEN, size);
-                setU8(ptr(self) - 1, refcnt(ptr(self)) + 1);
+                guest.setPtr(self + PTR, textOf(other));
+                set32(self + LEN, size);
+                set8(textOf(self) - 1, refcnt(textOf(self)) + 1);
             }
             else if (grow(self, n, true))
             {
-                write(ptr(self), read(cstr(other) + pos * unit, n));
+                write(textOf(self), read(cText(other) + pos * unit, n));
                 eos(self, n);
             }
             return self;
@@ -426,7 +424,7 @@ export function createMsvcp60Functions(crt, host){
             }
             if (grow(self, n >>> 0, true))
             {
-                write(ptr(self), filled(n >>> 0, c));
+                write(textOf(self), filled(n >>> 0, c));
                 eos(self, n >>> 0);
             }
             return self;
@@ -456,7 +454,7 @@ export function createMsvcp60Functions(crt, host){
             }
             if (m > 0 && grow(self, length + m))
             {
-                write(ptr(self) + length * unit, elements);
+                write(textOf(self) + length * unit, elements);
                 eos(self, length + m);
             }
             return self;
@@ -470,7 +468,7 @@ export function createMsvcp60Functions(crt, host){
                 return fail('range');
             }
             const n = Math.min(size - pos, count >>> 0);
-            return appendElements(self, read(cstr(other) + pos * unit, n));
+            return appendElements(self, read(cText(other) + pos * unit, n));
         };
 
         /** erase(pos, count). @param {number} self @param {number} pos @param {number} count */
@@ -484,7 +482,7 @@ export function createMsvcp60Functions(crt, host){
             const m = Math.min(length - pos, count >>> 0);
             if (m > 0)
             {
-                const text = ptr(self);
+                const text = textOf(self);
                 write(text + pos * unit, read(text + (pos + m) * unit,
                     length - pos - m));
                 if (grow(self, length - m))
@@ -515,18 +513,18 @@ export function createMsvcp60Functions(crt, host){
                 return fail('length');
             }
             split(self);
-            const tail = read(ptr(self) + (pos + n0) * unit, length - pos - n0);
+            const tail = read(textOf(self) + (pos + n0) * unit, length - pos - n0);
             const n = length - n0 + m;
             if (grow(self, n))
             {
-                const text = ptr(self);
+                const text = textOf(self);
                 write(text + pos * unit, elements);
                 write(text + (pos + m) * unit, tail);
                 eos(self, n);
             }
             else if (n === 0)
             {
-                setU32(self + LEN, 0);
+                set32(self + LEN, 0);
             }
             return self;
         };
@@ -539,7 +537,7 @@ export function createMsvcp60Functions(crt, host){
                 fail('range');
                 return new Uint8Array(0);
             }
-            return read(cstr(other) + pos * unit, Math.min(size - pos, count >>> 0));
+            return read(cText(other) + pos * unit, Math.min(size - pos, count >>> 0));
         };
 
         /**
@@ -563,7 +561,7 @@ export function createMsvcp60Functions(crt, host){
         };
 
         /** @param {number} self */
-        const whole = self=>read(cstr(self), len(self));
+        const whole = self=>read(cText(self), len(self));
         /** @param {number} at */
         const zeroTerminated = at=>read(at, lengthAt(at));
 
@@ -743,8 +741,8 @@ export function createMsvcp60Functions(crt, host){
             [`?append@${STRING}QAEAAV12@${CPTR}I@Z`]: thiscall(12, ([self, from, count])=>
                 appendElements(self, read(from, count >>> 0))),
 
-            [`?c_str@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cstr(self)),
-            [`?data@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cstr(self)),
+            [`?c_str@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cText(self)),
+            [`?data@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cText(self)),
             [`?size@${STRING}QBEIXZ`]: thiscall(4, ([self])=>len(self)),
             [`?length@${STRING}QBEIXZ`]: thiscall(4, ([self])=>len(self)),
             [`?capacity@${STRING}QBEIXZ`]: thiscall(4, ([self])=>res(self)),
@@ -752,48 +750,48 @@ export function createMsvcp60Functions(crt, host){
             [`?empty@${STRING}QBE_NXZ`]: thiscall(4, ([self])=>(len(self) === 0 ? 1 : 0)),
             [`?begin@${STRING}QAE${PTRN}XZ`]: thiscall(4, ([self])=>{
                 freeze(self);
-                return ptr(self);
+                return textOf(self);
             }),
-            [`?begin@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>ptr(self)),
+            [`?begin@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>textOf(self)),
             [`?end@${STRING}QAE${PTRN}XZ`]: thiscall(4, ([self])=>{
                 freeze(self);
-                return (ptr(self) + len(self) * unit) >>> 0;
+                return (textOf(self) + len(self) * unit) >>> 0;
             }),
             [`?end@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>
-                (ptr(self) + len(self) * unit) >>> 0),
+                (textOf(self) + len(self) * unit) >>> 0),
             [`??A${STRING}QAEAA${element}I@Z`]: thiscall(8, ([self, pos])=>{
-                if (len(self) < (pos >>> 0) || ptr(self) === 0)
+                if (len(self) < (pos >>> 0) || textOf(self) === 0)
                 {
                     return nullstr();
                 }
                 freeze(self);
-                return (ptr(self) + (pos >>> 0) * unit) >>> 0;
+                return (textOf(self) + (pos >>> 0) * unit) >>> 0;
             }),
             [`??A${STRING}QBEAB${element}I@Z`]: thiscall(8, ([self, pos])=>
-                (ptr(self) === 0 ? nullstr() : (ptr(self) + (pos >>> 0) * unit) >>> 0)),
+                (textOf(self) === 0 ? nullstr() : (textOf(self) + (pos >>> 0) * unit) >>> 0)),
             [`?at@${STRING}QAEAA${element}I@Z`]: thiscall(8, ([self, pos])=>{
                 if (len(self) <= (pos >>> 0))
                 {
                     return fail('range');
                 }
                 freeze(self);
-                return (ptr(self) + (pos >>> 0) * unit) >>> 0;
+                return (textOf(self) + (pos >>> 0) * unit) >>> 0;
             }),
             [`?at@${STRING}QBEAB${element}I@Z`]: thiscall(8, ([self, pos])=>
                 (len(self) <= (pos >>> 0) ? fail('range')
-                    : (ptr(self) + (pos >>> 0) * unit) >>> 0)),
+                    : (textOf(self) + (pos >>> 0) * unit) >>> 0)),
 
             [`?erase@${STRING}QAEAAV12@II@Z`]: thiscall(12, ([self, pos, count])=>
                 erase(self, pos >>> 0, count)),
             [`?erase@${STRING}QAE${PTRN}${PTRN}@Z`]: thiscall(8, ([self, at])=>{
-                const pos = ((at >>> 0) - ptr(self)) / unit;
+                const pos = ((at >>> 0) - textOf(self)) / unit;
                 erase(self, pos, 1);
-                return (ptr(self) + pos * unit) >>> 0;
+                return (textOf(self) + pos * unit) >>> 0;
             }),
             [`?erase@${STRING}QAE${PTRN}${PTRN}0@Z`]: thiscall(12, ([self, first, last])=>{
-                const pos = ((first >>> 0) - ptr(self)) / unit;
+                const pos = ((first >>> 0) - textOf(self)) / unit;
                 erase(self, pos, ((last >>> 0) - (first >>> 0)) / unit);
-                return (ptr(self) + pos * unit) >>> 0;
+                return (textOf(self) + pos * unit) >>> 0;
             }),
             [`?copy@${STRING}QBEI${PTRN}II@Z`]: thiscall(16, ([self, to, count, pos])=>{
                 const length = len(self);
@@ -804,7 +802,7 @@ export function createMsvcp60Functions(crt, host){
                 const n = Math.min(length - (pos >>> 0), count >>> 0);
                 if (n > 0)
                 {
-                    write(to >>> 0, read(ptr(self) + (pos >>> 0) * unit, n));
+                    write(to >>> 0, read(textOf(self) + (pos >>> 0) * unit, n));
                 }
                 return n;
             }),
@@ -812,8 +810,8 @@ export function createMsvcp60Functions(crt, host){
                 for (const at of [PTR, LEN, RES])
                 {
                     const mine = u32(self + at);
-                    setU32(self + at, u32(other + at));
-                    setU32(other + at, mine);
+                    set32(self + at, u32(other + at));
+                    set32(other + at, mine);
                 }
                 return 0;
             }),
@@ -889,7 +887,7 @@ export function createMsvcp60Functions(crt, host){
             [`?insert@${STRING}QAE${PTRN}${PTRN}${element}@Z`]: thiscall(12, ([self, at, c])=>{
                 const pos = offsetOf(self, at);
                 replaceElements(self, pos, 0, one(c));
-                return (ptr(self) + pos * unit) >>> 0;
+                return (textOf(self) + pos * unit) >>> 0;
             }),
             [`?insert@${STRING}QAEX${PTRN}I${element}@Z`]: thiscall(16, ([self, at, n, c])=>{
                 replaceElements(self, offsetOf(self, at), 0, filled(n >>> 0, c));
@@ -903,25 +901,25 @@ export function createMsvcp60Functions(crt, host){
 
             [rbegin(false)]: thiscall(8, ([self, out])=>{
                 freeze(self);
-                setU32(out, ptr(self) + len(self) * unit);
+                set32(out, textOf(self) + len(self) * unit);
                 return out;
             }),
             [rbegin(true)]: thiscall(8, ([self, out])=>{
-                setU32(out, ptr(self) + len(self) * unit);
+                set32(out, textOf(self) + len(self) * unit);
                 return out;
             }),
             [rend(false)]: thiscall(8, ([self, out])=>{
                 freeze(self);
-                setU32(out, ptr(self));
+                set32(out, textOf(self));
                 return out;
             }),
             [rend(true)]: thiscall(8, ([self, out])=>{
-                setU32(out, ptr(self));
+                set32(out, textOf(self));
                 return out;
             }),
             [`?get_allocator@${STRING}QBE?AV?$allocator@${element}@2@XZ`]: thiscall(8,
                 ([, out])=>{
-                    setU8(out, 0);
+                    set8(out, 0);
                     return out;
                 }),
             ...Object.fromEntries(setFinds()),
@@ -960,7 +958,7 @@ export function createMsvcp60Functions(crt, host){
 
         /** A pointer into the text as a position. @param {number} self @param {number} at */
         function offsetOf(self, at){
-            return ((at >>> 0) - ptr(self)) / unit;
+            return ((at >>> 0) - textOf(self)) / unit;
         }
         /** The elements of a run [first, last). @param {number} first @param {number} last */
         function between(first, last){
@@ -1115,15 +1113,15 @@ export function createMsvcp60Functions(crt, host){
         {
             table[name] = cdecl(12, ([out, c, right])=>made(out, join(one(c), whole(right))));
         }
-        stringsBy[unit] = { tidy, assignElements, assignString, cstr, whole };
+        stringsBy[unit] = { tidy, assignElements, assignString, cText, whole };
         return table;
     }
 
     const strings1 = strings(1, 'D');
     const strings2 = strings(2, 'G');
     return { ...strings1, ...strings2, ...errors(), ...restartable(),
-        ...createStreams({ crt, host, thiscall, cdecl, raise, strings: stringsBy, allocate, free,
-            u32, setU32 }) };
+        ...createStreams({ crt, host, thiscall, cdecl, raise, strings: stringsBy, allocate,
+            free }) };
 
     /**
      * The C library's restartable conversions, which the C runtime Visual
@@ -1144,10 +1142,10 @@ export function createMsvcp60Functions(crt, host){
     function constructError(self, name, message){
         const members = narrowOf();
         const empty = crt.malloc.handler([1]) >>> 0;
-        setU8(empty, 0);
-        setU32(self, host.addressOf(`??_7${name}@std@@6B@`));
-        setU32(self + 4, empty);
-        setU32(self + 8, empty === 0 ? 0 : 1);
+        set8(empty, 0);
+        set32(self, host.addressOf(`??_7${name}@std@@6B@`));
+        set32(self + 4, empty);
+        set32(self + 8, empty === 0 ? 0 : 1);
         members.tidy(self + EXCEPTION_SIZE);
         members.assignString(self + EXCEPTION_SIZE, message);
         return self;
@@ -1168,7 +1166,7 @@ export function createMsvcp60Functions(crt, host){
         /** @param {number} self @param {number} other @param {string} name */
         const copy = (self, other, name)=>{
             crt['??0exception@@QAE@ABV0@@Z'].handler([self, other]);
-            setU32(self, host.addressOf(`??_7${name}@std@@6B@`));
+            set32(self, host.addressOf(`??_7${name}@std@@6B@`));
             members.tidy(self + EXCEPTION_SIZE);
             members.assignString(self + EXCEPTION_SIZE, other + EXCEPTION_SIZE);
             return self;
@@ -1253,7 +1251,7 @@ export function createMsvcp60Functions(crt, host){
                 // what(): the message the string holds; an object of no
                 // string answers as an empty one.
                 exports[`?what@${name}@std@@UBEPBDXZ`] = thiscall(4, ([self])=>
-                    members.cstr(self + EXCEPTION_SIZE));
+                    members.cText(self + EXCEPTION_SIZE));
             }
         }
         exports['?_Xran@std@@YAXXZ'] = cdecl(0, ()=>fail('range'));

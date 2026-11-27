@@ -243,6 +243,9 @@ flowchart TD
   `basic_ios` through its vbtable; a locale says the decimal point Windows' locale data gives.
   A stream buffer or manipulator of the program's own class, whose virtual functions are its
   code, is not run from the library: the call reads as end of stream, said once as a loss.
+  It is the 32-bit library alone - its names, layouts and throw data are 32-bit x86's - so a
+  64-bit process finds it with no exports, its imports of it missing; MSVCP71, 80 and 90 give
+  a 64-bit process their members under its compiler's names, in its layout.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers

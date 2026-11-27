@@ -21,7 +21,7 @@
  */
 
 import { undecorateName, undecorateType } from './undname.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * A class's fields by the pointer's width. An exception: its vtable, where it
@@ -164,9 +164,7 @@ function rttiOf(name, pointer = 4){
 
 /**
  * @typedef {Object} ClassesHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  At the process's pointer width.
  * @property {(bytes: number) => number} allocate  The runtime's malloc.
  * @property {(address: number) => boolean} free   And its free.
  * @property {(name: string) => number | null} [addressOf]
@@ -174,7 +172,6 @@ function rttiOf(name, pointer = 4){
  *           its class's vtable into the object it builds.
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
  * @property {() => any} [currentThread]
- * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -194,34 +191,25 @@ const FNV64 = Object.freeze({ BASIS: 14695981039346656037n, PRIME: 1099511628211
  */
 export function createClassFunctions(host){
     /** A pointer's bytes, and where the second field of a two-pointer record is. */
-    const pointer = host.pointerSize ?? 4;
+    const { guest } = host;
+    const pointer = guest.pointerSize;
     const { NAME, DO_FREE, EXCEPTION_SIZE, UNDECORATED, DECORATED } = layoutOf(pointer);
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address, 4).buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-    /** A pointer written whole. @param {number} address @param {number} value */
-    const writePointer = pointerIo(host, pointer).write;
+    // Every message, name and list entry is a pointer, read and written whole;
+    // an object's do-free flag is an int.
+    const { ptr, setPtr } = guest;
 
     /** A copy of a C string on the runtime's heap, or 0. @param {string} text */
     const copyString = text=>{
-        const bytes = new Uint8Array(text.length + 1);
-        bytes.set([...text].map(character=>character.charCodeAt(0) & 0xff));
-        const at = host.allocate(bytes.length);
+        const at = host.allocate(text.length + 1);
         if (at !== 0)
         {
-            host.writeMemory(at, bytes);
+            guest.writeAnsi(at, text);
         }
         return at;
     };
 
     /** @param {number} address */
-    const readString = address=>host.readCString(address, 0x10000);
+    const cText = address=>guest.cstr(address, 0x10000);
 
     /** What `what()` says of an exception with no message. */
     let unknown = 0;
@@ -236,10 +224,10 @@ export function createClassFunctions(host){
      * @param {number} self @param {number} message @param {string} name
      */
     const construct = (self, message, name)=>{
-        writePointer(self, vtable(name));
-        const copy = message === 0 ? 0 : copyString(readString(message));
-        writePointer(self + NAME, copy);
-        writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
+        setPtr(self, vtable(name));
+        const copy = message === 0 ? 0 : copyString(cText(message));
+        setPtr(self + NAME, copy);
+        guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
         return self;
     };
 
@@ -250,30 +238,30 @@ export function createClassFunctions(host){
      * @param {number} self @param {number} other
      */
     const copyFields = (self, other)=>{
-        const message = readU32(other + NAME);
-        if (readU32(other + DO_FREE) !== 0 && message !== 0)
+        const message = ptr(other + NAME);
+        if (guest.u32(other + DO_FREE) !== 0 && message !== 0)
         {
-            const copy = copyString(readString(message));
-            writePointer(self + NAME, copy);
-            writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
+            const copy = copyString(cText(message));
+            setPtr(self + NAME, copy);
+            guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
         }
         else
         {
-            writePointer(self + NAME, message);
-            writeU32(self + DO_FREE, 0);
+            setPtr(self + NAME, message);
+            guest.set32(self + DO_FREE, 0);
         }
     };
 
     /** @param {number} self */
     const destroy = self=>{
-        if (readU32(self + DO_FREE) !== 0)
+        if (guest.u32(self + DO_FREE) !== 0)
         {
-            const message = readU32(self + NAME);
+            const message = ptr(self + NAME);
             if (message !== 0)
             {
                 host.free(message);
             }
-            writeU32(self + DO_FREE, 0);
+            guest.set32(self + DO_FREE, 0);
         }
         return 0;
     };
@@ -289,7 +277,7 @@ export function createClassFunctions(host){
         if ((flags & ARRAY) !== 0)
         {
             // The count new[] kept before the first object, a size_t.
-            const count = readU32(self - pointer);
+            const count = ptr(self - pointer);
             for (let index = count - 1; index >= 0; index--)
             {
                 each(self + index * size);
@@ -324,7 +312,7 @@ export function createClassFunctions(host){
      */
     const members = name=>{
         table[`??0${name}@@QAE@ABV0@@Z`] = thiscall(8, ([self, other])=>{
-            writePointer(self, vtable(name));
+            setPtr(self, vtable(name));
             copyFields(self, other);
             return self;
         });
@@ -353,13 +341,13 @@ export function createClassFunctions(host){
     Object.assign(table, {
         /** exception::exception(const char * const &message) */
         '??0exception@@QAE@ABQBD@Z': thiscall(8, ([self, message])=>
-            construct(self, readU32(message), 'exception')),
+            construct(self, ptr(message), 'exception')),
 
         /** exception::exception(const char * const &message, int) -- the message only pointed at */
         '??0exception@@QAE@ABQBDH@Z': thiscall(12, ([self, message])=>{
-            writePointer(self, vtable('exception'));
-            writePointer(self + NAME, readU32(message));
-            writeU32(self + DO_FREE, 0);
+            setPtr(self, vtable('exception'));
+            setPtr(self + NAME, ptr(message));
+            guest.set32(self + DO_FREE, 0);
             return self;
         }),
 
@@ -368,7 +356,7 @@ export function createClassFunctions(host){
 
         /** const char *exception::what() const */
         '?what@exception@@UBEPBDXZ': thiscall(4, ([self])=>{
-            const message = readU32(self + NAME);
+            const message = ptr(self + NAME);
             if (message !== 0)
             {
                 return message;
@@ -385,18 +373,18 @@ export function createClassFunctions(host){
         '??_Fbad_typeid@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_typeid');
             const copy = copyString('bad typeid');
-            writePointer(self + NAME, copy);
-            writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
+            setPtr(self + NAME, copy);
+            guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
             return self;
         }),
 
         /** bad_cast::bad_cast(const char * const &message) */
         '??0bad_cast@@QAE@ABQBD@Z': thiscall(8, ([self, message])=>
-            construct(self, readU32(message), 'bad_cast')),
+            construct(self, ptr(message), 'bad_cast')),
 
         /** bad_cast::bad_cast(const char * const *message), the older spelling */
         '??0bad_cast@@AAE@PBQBD@Z': thiscall(8, ([self, message])=>
-            construct(self, readU32(message), 'bad_cast')),
+            construct(self, ptr(message), 'bad_cast')),
 
         /** bad_cast::bad_cast(const char *message) */
         '??0bad_cast@@QAE@PBD@Z': thiscall(8, ([self, message])=>
@@ -406,8 +394,8 @@ export function createClassFunctions(host){
         '??_Fbad_cast@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_cast');
             const copy = copyString('bad cast');
-            writePointer(self + NAME, copy);
-            writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
+            setPtr(self + NAME, copy);
+            guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
             return self;
         }),
 
@@ -417,11 +405,11 @@ export function createClassFunctions(host){
 
         /** type_info::~type_info() -- frees the name name() made */
         '??1type_info@@UAE@XZ': thiscall(4, ([self])=>{
-            const undecorated = readU32(self + UNDECORATED);
+            const undecorated = ptr(self + UNDECORATED);
             if (undecorated !== 0)
             {
                 host.free(undecorated);
-                writePointer(self + UNDECORATED, 0);
+                setPtr(self + UNDECORATED, 0);
             }
             return 0;
         }),
@@ -429,7 +417,7 @@ export function createClassFunctions(host){
         /** type_info's deleting destructor, its vtable's one slot. */
         '??_Etype_info@@UAEPAXI@Z': thiscall(8, ([self, flags])=>
             deleting(self, flags, DECORATED + 8, object=>{
-                const undecorated = readU32(object + UNDECORATED);
+                const undecorated = ptr(object + UNDECORATED);
                 if (undecorated !== 0)
                 {
                     host.free(undecorated);
@@ -443,28 +431,28 @@ export function createClassFunctions(host){
          * where the destructor frees it.
          */
         '?name@type_info@@QBEPBDXZ': thiscall(4, ([self])=>{
-            const kept = readU32(self + UNDECORATED);
+            const kept = ptr(self + UNDECORATED);
             if (kept !== 0)
             {
                 return kept;
             }
-            const decorated = readString(self + DECORATED);
+            const decorated = cText(self + DECORATED);
             const made = copyString(undecorateType(decorated.slice(1)) ?? decorated);
-            writePointer(self + UNDECORATED, made);
+            setPtr(self + UNDECORATED, made);
             return made;
         }),
 
         /** int type_info::before(const type_info &other) const -- the names' order, past their first character */
         '?before@type_info@@QBEHABV1@@Z': thiscall(8, ([self, other])=>
-            (readString(self + DECORATED + 1) < readString(other + DECORATED + 1) ? 1 : 0)),
+            (cText(self + DECORATED + 1) < cText(other + DECORATED + 1) ? 1 : 0)),
 
         /** int type_info::operator==(const type_info &other) const */
         '??8type_info@@QBEHABV0@@Z': thiscall(8, ([self, other])=>
-            (readString(self + DECORATED + 1) === readString(other + DECORATED + 1) ? 1 : 0)),
+            (cText(self + DECORATED + 1) === cText(other + DECORATED + 1) ? 1 : 0)),
 
         /** int type_info::operator!=(const type_info &other) const */
         '??9type_info@@QBEHABV0@@Z': thiscall(8, ([self, other])=>
-            (readString(self + DECORATED + 1) === readString(other + DECORATED + 1) ? 0 : 1)),
+            (cText(self + DECORATED + 1) === cText(other + DECORATED + 1) ? 0 : 1)),
 
         /** type_info &type_info::operator=(const type_info &) -- private, and does nothing */
         '??4type_info@@AAEAAV0@ABV0@@Z': thiscall(8, ([self])=>self),
@@ -489,7 +477,7 @@ export function createClassFunctions(host){
                 {
                     return 0;
                 }
-                const text = readString(mangled);
+                const text = cText(mangled);
                 const undecorated = (text.startsWith('?A') ? undecorateType(text) : null)
                     ?? undecorateName(text, flags & 0xffff);
                 const bytes = new Uint8Array(undecorated.length + 1);
@@ -503,7 +491,7 @@ export function createClassFunctions(host){
                     }
                     const kept = bytes.slice(0, room);
                     kept[kept.length - 1] = 0;
-                    host.writeMemory(wholeAddress(buffer), kept);
+                    guest.setBytes(buffer, kept);
                     return wholeAddress(buffer);
                 }
                 if (wholeAddress(allocate) === 0)
@@ -514,7 +502,7 @@ export function createClassFunctions(host){
                     thread) >>> 0;
                 if (at !== 0)
                 {
-                    host.writeMemory(at, bytes);
+                    guest.setBytes(at, bytes);
                 }
                 return at;
             },
@@ -544,11 +532,11 @@ export function createClassFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([from, to])=>{
-                const message = readU32(wholeAddress(from));
-                const owned = (host.readMemory(wholeAddress(from) + pointer, 1)[0] & 0xff) !== 0;
-                const copy = owned && message !== 0 ? copyString(readString(message)) : 0;
-                writeU32(wholeAddress(to), owned && message !== 0 ? copy : message);
-                host.writeMemory(wholeAddress(to) + pointer, Uint8Array.of(copy !== 0 ? 1 : 0));
+                const message = ptr(wholeAddress(from));
+                const owned = guest.u8(wholeAddress(from) + pointer) !== 0;
+                const copy = owned && message !== 0 ? copyString(cText(message)) : 0;
+                setPtr(wholeAddress(to), owned && message !== 0 ? copy : message);
+                guest.set8(wholeAddress(to) + pointer, copy !== 0 ? 1 : 0);
                 return 0;
             },
         },
@@ -563,14 +551,13 @@ export function createClassFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([data])=>{
-                const message = readU32(wholeAddress(data));
-                if ((host.readMemory(wholeAddress(data) + pointer,
-                    1)[0] & 0xff) !== 0 && message !== 0)
+                const message = ptr(wholeAddress(data));
+                if (guest.u8(wholeAddress(data) + pointer) !== 0 && message !== 0)
                 {
                     host.free(message);
                 }
-                writeU32(wholeAddress(data), 0);
-                host.writeMemory(wholeAddress(data) + pointer, Uint8Array.of(0));
+                setPtr(wholeAddress(data), 0);
+                guest.set8(wholeAddress(data) + pointer, 0);
                 return 0;
             },
         },
@@ -591,8 +578,8 @@ export function createClassFunctions(host){
                 {
                     return 0;
                 }
-                const a = readString(wholeAddress(left) + pointer + 1);
-                const b = readString(wholeAddress(right) + pointer + 1);
+                const a = cText(wholeAddress(left) + pointer + 1);
+                const b = cText(wholeAddress(right) + pointer + 1);
                 return a === b ? 0 : a < b ? -1 : 1;
             },
         },
@@ -608,7 +595,7 @@ export function createClassFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([data])=>{
-                const name = readString(wholeAddress(data) + pointer + 1);
+                const name = cText(wholeAddress(data) + pointer + 1);
                 if (pointer === 8)
                 {
                     /** @type {bigint} */
@@ -644,12 +631,12 @@ export function createClassFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([data, root])=>{
-                const kept = readU32(wholeAddress(data));
+                const kept = ptr(wholeAddress(data));
                 if (kept !== 0)
                 {
                     return kept;
                 }
-                const decorated = readString(wholeAddress(data) + pointer);
+                const decorated = cText(wholeAddress(data) + pointer);
                 const text = undecorateType(decorated.slice(1)) ?? decorated;
                 const bytes = new Uint8Array(text.length + 1);
                 bytes.set([...text].map(character=>character.charCodeAt(0) & 0xff));
@@ -659,16 +646,14 @@ export function createClassFunctions(host){
                     return 0;
                 }
                 const name = entry + pointer;
-                host.writeMemory(name, bytes);
+                guest.setBytes(name, bytes);
                 // Pushed on the caller's list, which owns it from then on.
                 const head = wholeAddress(root) + listHead;
-                writeU32(entry, readU32(head));
-                writeU32(head, entry);
+                setPtr(entry, ptr(head));
+                setPtr(head, entry);
                 const depth = wholeAddress(root) + (pointer === 8 ? 0 : 4);
-                const count = host.readMemory(depth, 2);
-                host.writeMemory(depth, Uint8Array.of((count[0] + 1) & 0xff,
-                    (count[1] + ((count[0] + 1) >> 8)) & 0xff));
-                writeU32(wholeAddress(data), name);
+                guest.set16(depth, (guest.u16(depth) + 1) & 0xffff);
+                setPtr(wholeAddress(data), name);
                 return name;
             },
         },
@@ -680,15 +665,15 @@ export function createClassFunctions(host){
             /** @param {number[]} args */
             handler: ([root])=>{
                 const head = wholeAddress(root) + listHead;
-                let entry = readU32(head);
+                let entry = ptr(head);
                 // A list damaged past this many names is not walked further.
                 for (let walked = 0; entry !== 0 && walked < 0x100000; walked++)
                 {
-                    const next = readU32(entry);
+                    const next = ptr(entry);
                     host.free(entry);
                     entry = next;
                 }
-                host.writeMemory(wholeAddress(root), new Uint8Array(pointer * 2));
+                guest.fill(wholeAddress(root), 0, pointer * 2);
                 return 0;
             },
         },

@@ -80,6 +80,8 @@ const STAND_IN = 'STAND_IN';
 /** The places a pointer is tried at, and what every other argument is. */
 const MOST_PLACES = 8;
 const SMALL = 0x10;
+/** The sizes of the heap blocks whose places say whether two layers' arenas parted. */
+const PROBES = [16, 0x8000];
 
 /** Calls whose answer is the end of the process or thread, not a return. */
 const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAndExitThread|RtlExitUserThread|RtlExitUserProcess|(Nt|Zw)Terminate(Process|Thread)|Terminate(Process|Thread|JobObject)|_?_?c?exit|_Exit|_amsg_exit|quick_exit|abort)$/;
@@ -512,26 +514,36 @@ function argumentsAt(shape, base){
 /** @typedef {Awaited<ReturnType<typeof layerAt>>} Layer */
 
 /**
- * Where the next 16 bytes of a layer's process heap lie, from its base: the
- * same on both layers while their arenas keep step. A block is taken and
- * given back; null where the heap answers nothing.
+ * Where the next blocks of a layer's process heap lie, from its base: the same
+ * on both layers while their arenas keep step. A small block and a large one
+ * are taken and given back: a heap keeps blocks of a size apart, and a call
+ * that left a large block on one side alone (a copy sized by a count read
+ * from the data, kept where it then faulted) parts the large ones while the
+ * small ones still agree - a later call's large block then lies over another
+ * call's bytes in one window alone. Null where the heap answers nothing.
  *
  * @param {Layer} layer
- * @returns {number | null}
+ * @returns {string | null}
  */
 function nextBlock(layer){
     const kernel = layer.libraries['KERNEL32.dll'];
     try
     {
-        const at = kernel?.LocalAlloc?.handler?.([0, 16]);
-        if (typeof at !== 'number' || at === 0)
+        const blocks = PROBES.map(bytes=>kernel?.LocalAlloc?.handler?.([0, bytes]));
+        for (const at of blocks)
+        {
+            if (typeof at === 'number' && at !== 0)
+            {
+                kernel?.LocalFree?.handler?.([at]);
+            }
+        }
+        if (blocks.some(at=>typeof at !== 'number' || at === 0))
         {
             return null;
         }
-        kernel?.LocalFree?.handler?.([at]);
         // A handler answers a dword: the block's place in the window by the base's
         // own low half, so a window past 4 GiB compares as one below it.
-        return ((at >>> 0) - layer.base % 2 ** 32 + 2 ** 32) % 2 ** 32;
+        return blocks.map(at=>((at >>> 0) - layer.base % 2 ** 32 + 2 ** 32) % 2 ** 32).join(',');
     }
     catch {
         return null;

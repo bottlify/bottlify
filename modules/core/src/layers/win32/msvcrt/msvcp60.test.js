@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcp60Functions } from './msvcp60.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
 const WSTRING = '?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@';
@@ -55,14 +56,7 @@ function setup(){
     };
     const fns = createMsvcp60Functions(crt, {
         // The first page closed, as a process's is: a null text is never touched.
-        readMemory: (address, length)=>{
-            assert.ok(address >= 0x100, `read of ${length} at ${address}`);
-            return memory.slice(address, address + length);
-        },
-        writeMemory: (address, bytes)=>{
-            assert.ok(address >= 0x100, `write of ${bytes.length} at ${address}`);
-            memory.set(bytes, address);
-        },
+        guest: guestWindow(memory, { closed: 0x100 }),
         addressOf: name=>(name === NULLSTR ? 0x500 : names.indexOf(name) + 0x600),
     });
     /** @param {string} name @param {number[]} args */

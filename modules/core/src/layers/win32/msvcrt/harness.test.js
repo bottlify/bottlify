@@ -16,6 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 /** How much the fake's scan reads at a time, as the real memory layer does. */
 const SCAN_CHUNK = 256;
@@ -31,6 +32,12 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 
     const memory = {
         bytes,
+
+        /**
+         * The same bytes as a handler's `host.guest` reads them, in a 32-bit
+         * process: a 64-bit test makes its own over `bytes` (`guestWindow`).
+         */
+        guest: guestWindow(bytes),
 
         /**
          * Bytes the handlers asked memory for, reads only. The real layer

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcp60Functions } from './msvcp60.js';
+import { guestWindow } from './guest-window.fixture.js';
 import { LAYOUT, OPENMODE } from './msvcp60-streams.js';
 
 const T = (/** @type {'D' | 'G'} */ E)=>`${E}U?$char_traits@${E}@std@@`;
@@ -132,8 +133,7 @@ function setup(files = {}){
     /** @type {Map<string, number>} */
     const placed = new Map();
     const fns = createMsvcp60Functions(crt, {
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        guest: guestWindow(memory),
         addressOf: name=>placed.get(name) ?? 0,
         divergence: (api, detail, kind)=>said.push(`${api}: ${detail}${kind ? ` (${kind})` : ''}`),
     });

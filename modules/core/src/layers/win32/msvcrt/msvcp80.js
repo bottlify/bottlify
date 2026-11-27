@@ -37,10 +37,12 @@ const STRING_ARG = '$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@';
 
 /**
  * @typedef {Object} Msvcp80Host
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, at its
+ *     pointer width: 8 in a 64-bit process, whose string is 40 bytes.
+ * @property {(address: number, length: number) => Uint8Array} readMemory  For the
+ *     members whose code runs in the guest (`guestEntry`).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
- * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose string is 40 bytes.
  * @property {import('./float.js').FloatHost} [fpu]  Where a float is answered.
  */
 
@@ -81,53 +83,51 @@ export function createMsvcp80Functions(crt, host){
      * list, sixteen bytes of text or the pointer to it, the length and the
      * capacity, the three words a pointer wide.
      */
-    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    const POINTER = host.guest.pointerSize;
     const BUFFER = POINTER === 8 ? 8 : STRING_BUFFER;
     const SIZE = POINTER === 8 ? 24 : STRING_SIZE;
     const RESERVED = POINTER === 8 ? 32 : STRING_RESERVED;
-    /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
-    /** A length, a capacity or a pointer: a word of the pointer's width. */
-    const setWord = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        setU32(address, value);
-        if (POINTER === 8)
-        {
-            setU32(address + 4, 0);
-        }
-    };
+    const { guest } = host;
+    /** What the code of a member that runs in the guest is made over. */
+    const code = { ...host, pointerSize: POINTER };
+    /**
+     * The text's pointer, its length and its capacity: each a word of the
+     * pointer's width, read and written whole (a size_t is a pointer wide).
+     */
+    const { ptr: field, setPtr: setField } = guest;
+    /**
+     * An address computed from another: whole in a 64-bit process, where one
+     * past 4 GiB is the program's own, a dword's in a 32-bit one.
+     */
+    const address = POINTER === 8 ? wholeAddress : (/** @type {number} */ at)=>at >>> 0;
     /** @param {number} self */
-    const textOf = self=>(u32(self + RESERVED) > STRING_INLINE
-        ? u32(self + BUFFER) : self + BUFFER);
-    /** @param {number} address */
-    const lengthOf = address=>{
+    const textOf = self=>(field(self + RESERVED) > STRING_INLINE
+        ? field(self + BUFFER) : self + BUFFER);
+    /** @param {number} at */
+    const lengthOf = at=>{
         let length = 0;
-        while (host.readMemory(address + length, 1)[0] !== 0)
+        while (guest.u8(at + length) !== 0)
         {
             length++;
         }
         return length;
     };
+    /** operator new's block. @param {number} bytes */
+    const allocate = bytes=>address(crt['??2@YAPAXI@Z'].handler([bytes]));
 
     /** The length set and the terminator after it. @param {number} self @param {number} length */
     const endAt = (self, length)=>{
-        setWord(self + SIZE, length);
-        host.writeMemory(textOf(self) + length, Uint8Array.of(0));
+        setField(self + SIZE, length);
+        guest.set8(textOf(self) + length, 0);
     };
 
     /** Empty and inline, the heap text freed. @param {number} self */
     const tidy = self=>{
-        if (u32(self + RESERVED) > STRING_INLINE)
+        if (field(self + RESERVED) > STRING_INLINE)
         {
-            crt['??3@YAXPAX@Z'].handler([u32(self + BUFFER)]);
+            crt['??3@YAXPAX@Z'].handler([field(self + BUFFER)]);
         }
-        setWord(self + RESERVED, STRING_INLINE);
+        setField(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
     };
 
@@ -138,7 +138,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} wanted @param {number} kept
      */
     const regrow = (self, wanted, kept)=>{
-        const before = u32(self + RESERVED);
+        const before = field(self + RESERVED);
         let reserved = (wanted | STRING_INLINE) >>> 0;
         if (reserved > MAX_SIZE)
         {
@@ -149,18 +149,18 @@ export function createMsvcp80Functions(crt, host){
         {
             reserved = before + Math.floor(before / 2);
         }
-        const block = crt['??2@YAPAXI@Z'].handler([reserved + 1]) >>> 0;
+        const block = allocate(reserved + 1);
         if (block === 0)
         {
             return false;
         }
         if (kept > 0)
         {
-            host.writeMemory(block, host.readMemory(textOf(self), kept));
+            guest.setBytes(block, guest.bytes(textOf(self), kept));
         }
         tidy(self);
-        setWord(self + BUFFER, block);
-        setWord(self + RESERVED, reserved);
+        setField(self + BUFFER, block);
+        setField(self + RESERVED, reserved);
         endAt(self, kept);
         return true;
     };
@@ -172,8 +172,8 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} wanted @param {boolean} trim
      */
     const grow = (self, wanted, trim)=>{
-        const reserved = u32(self + RESERVED);
-        const length = u32(self + SIZE);
+        const reserved = field(self + RESERVED);
+        const length = field(self + SIZE);
         if (reserved < wanted)
         {
             return regrow(self, wanted, Math.min(length, wanted));
@@ -181,11 +181,11 @@ export function createMsvcp80Functions(crt, host){
         if (trim && wanted <= STRING_INLINE && reserved > STRING_INLINE)
         {
             const kept = Math.min(wanted, length);
-            const heap = u32(self + BUFFER);
-            const text = host.readMemory(heap, kept);
+            const heap = field(self + BUFFER);
+            const text = guest.bytes(heap, kept);
             crt['??3@YAXPAX@Z'].handler([heap]);
-            setWord(self + RESERVED, STRING_INLINE);
-            host.writeMemory(self + BUFFER, text);
+            setField(self + RESERVED, STRING_INLINE);
+            guest.setBytes(self + BUFFER, text);
             endAt(self, kept);
             return false;
         }
@@ -198,14 +198,14 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} from @param {number} length
      */
     const assign = (self, from, length)=>{
-        const text = host.readMemory(from, length);
-        setWord(self + RESERVED, STRING_INLINE);
+        const text = guest.bytes(from, length);
+        setField(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
         if (length > STRING_INLINE)
         {
             regrow(self, length, 0);
         }
-        host.writeMemory(textOf(self), text);
+        guest.setBytes(textOf(self), text);
         endAt(self, length);
         return self;
     };
@@ -216,7 +216,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {keyof typeof COMPILED} name @param {(args: number[]) => number} handler
      */
     const member = (name, handler)=>guestEntry(/** @type {Function} */ (inGuest[name]),
-        COMPILED[name], host, { argBytes: COMPILED[name].params.length * 4, handler });
+        COMPILED[name], code, { argBytes: COMPILED[name].params.length * 4, handler });
 
     /**
      * The string's text set to `bytes`: room made first when they do not
@@ -226,33 +226,33 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {Uint8Array} bytes
      */
     const assignBytes = (self, bytes)=>{
-        if (bytes.length > u32(self + RESERVED)
-            && !regrow(self, bytes.length, u32(self + SIZE)))
+        if (bytes.length > field(self + RESERVED)
+            && !regrow(self, bytes.length, field(self + SIZE)))
         {
             return self;
         }
-        host.writeMemory(textOf(self), bytes);
+        guest.setBytes(textOf(self), bytes);
         endAt(self, bytes.length);
         return self;
     };
 
     /** @param {number} self @param {Uint8Array} bytes */
     const appendBytes = (self, bytes)=>{
-        const length = u32(self + SIZE);
-        if (length + bytes.length > u32(self + RESERVED)
+        const length = field(self + SIZE);
+        if (length + bytes.length > field(self + RESERVED)
             && !grow(self, length + bytes.length, false))
         {
             return self;
         }
-        host.writeMemory(textOf(self) + length, bytes);
+        guest.setBytes(textOf(self) + length, bytes);
         endAt(self, length + bytes.length);
         return self;
     };
 
     /** A string's text, copied out. @param {number} self */
-    const bytesOf = self=>host.readMemory(textOf(self), u32(self + SIZE));
+    const bytesOf = self=>guest.bytes(textOf(self), field(self + SIZE));
     /** A C string's bytes, copied out. @param {number} at */
-    const bytesAt = at=>host.readMemory(wholeAddress(at), lengthOf(at >>> 0));
+    const bytesAt = at=>guest.bytes(at, lengthOf(at));
     /** @param {Uint8Array} a @param {Uint8Array} b */
     const same = (a, b)=>a.length === b.length && a.every((byte, at)=>byte === b[at]);
 
@@ -270,30 +270,47 @@ export function createMsvcp80Functions(crt, host){
     function longMembers(){
         const ALLOCATOR = '?$allocator@D@std@@';
         const COMPLEX = 'V?$complex@M@0@';
-        /** @param {number} at */
-        const f32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
-            .getFloat32(0, true);
+        const { f32 } = guest;
+        /**
+         * A member answering an address - `this`, the caller's result, a
+         * block - which a 64-bit caller reads from RAX whole, however signed
+         * the dword it was handed, and whose address arguments (`places`)
+         * it is handed whole past 4 GiB.
+         *
+         * @param {{ convention: string, argBytes: number,
+         *     handler: (args: number[]) => number }} spec @param {number[]} places
+         */
+        const answering = (spec, places)=>({ ...spec, addresses: places, returns: 'pointer',
+            handler: (/** @type {number[]} */ args)=>address(spec.handler(args)) });
+        /**
+         * One answering a value, its address arguments whole.
+         *
+         * @param {{ convention: string, argBytes: number,
+         *     handler: (args: number[]) => number }} spec @param {number[]} places
+         */
+        const taking = (spec, places)=>({ ...spec, addresses: places });
         /** A complex<float> written to the caller's result. @param {number} out */
         const complex = (out, /** @type {number} */ re, /** @type {number} */ im)=>{
-            host.writeMemory(wholeAddress(out), new Uint8Array(Float32Array.of(re, im).buffer));
+            guest.setF32(out, re);
+            guest.setF32(out + 4, im);
             return out;
         };
         /** An empty string: no iterators, inline, no text. @param {number} self */
         const fresh = self=>{
-            setWord(self, 0);
+            setField(self, 0);
             return self;
         };
         /** @param {number} self @param {number} count */
         const resize = (self, count)=>{
-            const length = u32(self + SIZE);
+            const length = field(self + SIZE);
             const wanted = count >>> 0;
-            if (wanted > u32(self + RESERVED) && !grow(self, wanted, false))
+            if (wanted > field(self + RESERVED) && !grow(self, wanted, false))
             {
                 return 0;
             }
             if (wanted > length)
             {
-                host.writeMemory(textOf(self) + length, new Uint8Array(wanted - length));
+                guest.fill(textOf(self) + length, 0, wanted - length);
             }
             endAt(self, wanted);
             return 0;
@@ -307,7 +324,7 @@ export function createMsvcp80Functions(crt, host){
          *     handler: (args: number[]) => number }} own
          */
         const inGuestLong = (name, own)=>guestEntry(/** @type {Function} */ (inGuest[name]),
-            COMPILED[name], host, { argBytes: own.argBytes, handler: own.handler });
+            COMPILED[name], code, { argBytes: own.argBytes, handler: own.handler });
         /** @type {import('./float.js').FloatHost | undefined} */
         const fpu = host.fpu;
         return {
@@ -319,7 +336,7 @@ export function createMsvcp80Functions(crt, host){
                 assign(fresh(self), from, lengthOf(from)))),
             /** basic_string::basic_string(const basic_string &) */
             [`??0${STRING}QEAA@AEBV01@@Z`]: inGuestLong('stringCopy', cdecl(8, ([self, other])=>
-                assign(fresh(self), textOf(other), u32(other + SIZE)))),
+                assign(fresh(self), textOf(other), field(other + SIZE)))),
             /** basic_string::~basic_string() */
             [`??1${STRING}QEAA@XZ`]: inGuestLong('stringDestroy', cdecl(4, ([self])=>{
                 tidy(self);
@@ -327,30 +344,30 @@ export function createMsvcp80Functions(crt, host){
             })),
             /** char &basic_string::operator[](_Size_type_nosscl) */
             [`??A${STRING}QEAAAEADU_Size_type_nosscl@01@@Z`]: inGuestLong('stringAt',
-                cdecl(8, ([self, index])=>(textOf(self) + index) >>> 0)),
+                cdecl(8, ([self, index])=>address(textOf(self) + (index >>> 0)))),
             /** const char &basic_string::operator[](_Size_type_nosscl) const */
             [`??A${STRING}QEBAAEBDU_Size_type_nosscl@01@@Z`]: inGuestLong('stringAt',
-                cdecl(8, ([self, index])=>(textOf(self) + index) >>> 0)),
+                cdecl(8, ([self, index])=>address(textOf(self) + (index >>> 0)))),
             /** basic_string &basic_string::operator+=(char) */
             [`??Y${STRING}QEAAAEAV01@D@Z`]: inGuestLong('stringAppendChar',
                 cdecl(8, ([self, c])=>appendBytes(self, Uint8Array.of(c & 0xff)))),
             /** basic_string &basic_string::operator+=(const char *) */
-            [`??Y${STRING}QEAAAEAV01@PEBD@Z`]: cdecl(8, ([self, from])=>
-                appendBytes(self, bytesAt(from))),
+            [`??Y${STRING}QEAAAEAV01@PEBD@Z`]: answering(cdecl(8, ([self, from])=>
+                appendBytes(self, bytesAt(from))), [0, 1]),
             /** basic_string &basic_string::operator+=(const basic_string &) */
-            [`??Y${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
-                appendBytes(self, bytesOf(other))),
+            [`??Y${STRING}QEAAAEAV01@AEBV01@@Z`]: answering(cdecl(8, ([self, other])=>
+                appendBytes(self, bytesOf(other))), [0, 1]),
             /** basic_string &basic_string::append(const basic_string &) */
-            [`?append@${STRING}QEAAAEAV12@AEBV12@@Z`]: cdecl(8, ([self, other])=>
-                appendBytes(self, bytesOf(other))),
+            [`?append@${STRING}QEAAAEAV12@AEBV12@@Z`]: answering(cdecl(8, ([self, other])=>
+                appendBytes(self, bytesOf(other))), [0, 1]),
             /** basic_string &basic_string::append(const char *) */
-            [`?append@${STRING}QEAAAEAV12@PEBD@Z`]: cdecl(8, ([self, from])=>
-                appendBytes(self, bytesAt(from))),
+            [`?append@${STRING}QEAAAEAV12@PEBD@Z`]: answering(cdecl(8, ([self, from])=>
+                appendBytes(self, bytesAt(from))), [0, 1]),
             /** void basic_string::reserve(size_type) */
             [`?reserve@${STRING}QEAAX_K@Z`]: inGuestLong('stringReserve',
                 cdecl(8, ([self, count])=>{
-                    const length = u32(self + SIZE);
-                    if (length <= (count >>> 0) && u32(self + RESERVED) !== (count >>> 0)
+                    const length = field(self + SIZE);
+                    if (length <= (count >>> 0) && field(self + RESERVED) !== (count >>> 0)
                         && grow(self, count >>> 0, true))
                     {
                         endAt(self, length);
@@ -358,8 +375,8 @@ export function createMsvcp80Functions(crt, host){
                     return 0;
                 })),
             /** basic_string &basic_string::operator=(const basic_string &) */
-            [`??4${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
-                (self === other ? self : assignBytes(self, bytesOf(other)))),
+            [`??4${STRING}QEAAAEAV01@AEBV01@@Z`]: answering(cdecl(8, ([self, other])=>
+                (self === other ? self : assignBytes(self, bytesOf(other)))), [0, 1]),
             /** const char *basic_string::c_str() const */
             [`?c_str@${STRING}QEBAPEBDXZ`]: inGuestLong('stringText',
                 cdecl(4, ([self])=>textOf(self))),
@@ -368,28 +385,28 @@ export function createMsvcp80Functions(crt, host){
                 ([self, count])=>resize(self, count))),
             /** size_type basic_string::size() const */
             [`?size@${STRING}QEBA_KXZ`]: inGuestLong('stringSize',
-                cdecl(4, ([self])=>u32(self + SIZE))),
+                cdecl(4, ([self])=>field(self + SIZE))),
             /** static const size_type basic_string::npos */
             [`?npos@${STRING}2_KB`]: { data: ()=>new Uint8Array(8).fill(0xff) },
 
             /** allocator<char>::allocator(), and from another: nothing to build. */
-            [`??0${ALLOCATOR}QEAA@XZ`]: { ...cdecl(4, ([self])=>self),
+            [`??0${ALLOCATOR}QEAA@XZ`]: { ...answering(cdecl(4, ([self])=>self), [0]),
                 long: ()=>LONG_LEAVES.self },
-            [`??0${ALLOCATOR}QEAA@AEBV01@@Z`]: { ...cdecl(8, ([self])=>self),
+            [`??0${ALLOCATOR}QEAA@AEBV01@@Z`]: { ...answering(cdecl(8, ([self])=>self), [0, 1]),
                 long: ()=>LONG_LEAVES.self },
             /** char *allocator<char>::allocate(size_type): operator new's. */
-            [`?allocate@${ALLOCATOR}QEAAPEAD_K@Z`]: cdecl(8, ([, count])=>
-                crt['??2@YAPAXI@Z'].handler([count >>> 0]) >>> 0),
+            [`?allocate@${ALLOCATOR}QEAAPEAD_K@Z`]: answering(cdecl(8, ([, count])=>
+                allocate(count >>> 0)), [0]),
             /** void allocator<char>::deallocate(char *, size_type) */
-            [`?deallocate@${ALLOCATOR}QEAAXPEAD_K@Z`]: cdecl(12, ([, block])=>{
-                crt['??3@YAXPAX@Z'].handler([block >>> 0]);
+            [`?deallocate@${ALLOCATOR}QEAAXPEAD_K@Z`]: taking(cdecl(12, ([, block])=>{
+                crt['??3@YAXPAX@Z'].handler([block]);
                 return 0;
-            }),
+            }), [0, 1]),
             /** void allocator<char>::construct(char *, const char &) */
-            [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: { ...cdecl(12, ([, at, from])=>{
-                host.writeMemory(wholeAddress(at), host.readMemory(wholeAddress(from), 1));
+            [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: { ...taking(cdecl(12, ([, at, from])=>{
+                guest.set8(at, guest.u8(from));
                 return 0;
-            }), long: ()=>LONG_LEAVES.construct },
+            }), [0, 1, 2]), long: ()=>LONG_LEAVES.construct },
             /** void allocator<char>::destroy(char *): a char has nothing to destroy. */
             [`?destroy@${ALLOCATOR}QEAAXPEAD@Z`]: { ...cdecl(8, ()=>0),
                 long: ()=>LONG_LEAVES.nothing },
@@ -416,17 +433,17 @@ export function createMsvcp80Functions(crt, host){
             // complex<float>'s operators: the result is a class, returned through
             // the pointer the caller passes first.
             /** complex<float> operator*(const complex<float> &, const complex<float> &) */
-            [`??$?DM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: cdecl(12, ([out, left, right])=>{
+            [`??$?DM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: answering(cdecl(12, ([out, left, right])=>{
                 const [a, b, c, d] = [f32(left), f32(left + 4), f32(right), f32(right + 4)];
                 return complex(out, Math.fround(Math.fround(a * c) - Math.fround(b * d)),
                     Math.fround(Math.fround(a * d) + Math.fround(b * c)));
-            }),
+            }), [0, 1, 2]),
             /** complex<float> operator+(const complex<float> &, const complex<float> &) */
-            [`??$?HM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: cdecl(12, ([out, left, right])=>
-                complex(out, f32(left) + f32(right), f32(left + 4) + f32(right + 4))),
+            [`??$?HM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: answering(cdecl(12, ([out, left, right])=>
+                complex(out, f32(left) + f32(right), f32(left + 4) + f32(right + 4))), [0, 1, 2]),
             /** complex<float> conj(const complex<float> &) */
-            [`??$conj@M@std@@YA?A${COMPLEX}AEBV10@@Z`]: cdecl(8, ([out, of])=>
-                complex(out, f32(of), -f32(of + 4))),
+            [`??$conj@M@std@@YA?A${COMPLEX}AEBV10@@Z`]: answering(cdecl(8, ([out, of])=>
+                complex(out, f32(of), -f32(of + 4))), [0, 1]),
 
             '?_Nomemory@std@@YAXXZ': cdecl(0, ()=>crt.abort.handler([])),
         };
@@ -438,7 +455,7 @@ export function createMsvcp80Functions(crt, host){
     }
 
     const text = member('stringText', ([self])=>textOf(self));
-    const at = member('stringAt', ([self, index])=>(textOf(self) + index) >>> 0);
+    const at = member('stringAt', ([self, index])=>address(textOf(self) + (index >>> 0)));
 
     return {
         /** basic_string::basic_string() */
@@ -450,7 +467,7 @@ export function createMsvcp80Functions(crt, host){
 
         /** basic_string::basic_string(const basic_string &) */
         [`??0${STRING}QAE@ABV01@@Z`]: member('stringCopy', ([self, other])=>
-            assign(self, textOf(other), u32(other + SIZE))),
+            assign(self, textOf(other), field(other + SIZE))),
 
         /** basic_string::~basic_string() */
         [`??1${STRING}QAE@XZ`]: member('stringDestroy', ([self])=>{
@@ -465,12 +482,12 @@ export function createMsvcp80Functions(crt, host){
 
         /** basic_string &basic_string::operator+=(char) */
         [`??Y${STRING}QAEAAV01@D@Z`]: member('stringAppendChar', ([self, c])=>{
-            const length = u32(self + SIZE);
-            if (length >= u32(self + RESERVED) && !grow(self, length + 1, false))
+            const length = field(self + SIZE);
+            if (length >= field(self + RESERVED) && !grow(self, length + 1, false))
             {
                 return self;
             }
-            host.writeMemory(textOf(self) + length, Uint8Array.of(c & 0xff));
+            guest.set8(textOf(self) + length, c & 0xff);
             endAt(self, length + 1);
             return self;
         }),
@@ -483,8 +500,8 @@ export function createMsvcp80Functions(crt, host){
 
         /** void basic_string::reserve(size_type) */
         [`?reserve@${STRING}QAEXI@Z`]: member('stringReserve', ([self, count])=>{
-            const length = u32(self + SIZE);
-            if (length <= (count >>> 0) && u32(self + RESERVED) !== (count >>> 0)
+            const length = field(self + SIZE);
+            if (length <= (count >>> 0) && field(self + RESERVED) !== (count >>> 0)
                 && grow(self, count >>> 0, true))
             {
                 endAt(self, length);
@@ -494,15 +511,15 @@ export function createMsvcp80Functions(crt, host){
 
         /** void basic_string::resize(size_type) -- padded with zeros */
         [`?resize@${STRING}QAEXI@Z`]: member('stringResize', ([self, count])=>{
-            const length = u32(self + SIZE);
+            const length = field(self + SIZE);
             const wanted = count >>> 0;
-            if (wanted > u32(self + RESERVED) && !grow(self, wanted, false))
+            if (wanted > field(self + RESERVED) && !grow(self, wanted, false))
             {
                 return 0;
             }
             if (wanted > length)
             {
-                host.writeMemory(textOf(self) + length, new Uint8Array(wanted - length));
+                guest.fill(textOf(self) + length, 0, wanted - length);
             }
             endAt(self, wanted);
             return 0;
@@ -540,6 +557,6 @@ export function createMsvcp80Functions(crt, host){
         '?_Nomemory@std@@YAXXZ': cdecl(0, ()=>crt.abort.handler([])),
 
         /** size_type basic_string::size() const */
-        [`?size@${STRING}QBEIXZ`]: member('stringSize', ([self])=>u32(self + SIZE)),
+        [`?size@${STRING}QBEIXZ`]: member('stringSize', ([self])=>field(self + SIZE)),
     };
 }

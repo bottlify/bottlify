@@ -4775,6 +4775,7 @@ export function createWin32Module(){
                     // the frame an unwind reaches (`kernel32/seh64.js`).
                     ...seh64 ? seh64.crt : {},
                     ...createMsvcrtFunctions({
+                        guest,
                         pointerSize,
                         readMemory,
                         writeMemory,
@@ -7207,13 +7208,13 @@ export function createWin32Module(){
                     files: volume }),
             }));
             lazyLibraries.define('MSVCR80.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize,
+                { guest, readMemory, writeMemory, pointerSize,
                     // What calls the program's invalid-parameter handler.
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             // And its C++ library, over that runtime's operator new and delete.
             lazyLibraries.define('MSVCP80.dll', ()=>createMsvcp80Functions(libraries['MSVCR80.dll'],
-                { readMemory, writeMemory, fillMemory, pointerSize,
+                { guest, readMemory, writeMemory, fillMemory,
                     ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
@@ -7221,10 +7222,10 @@ export function createWin32Module(){
             // functions, reached through the entries its headers call instead.
             lazyLibraries.define('ucrtbase.dll', ()=>createUcrtbaseFunctions(
                 libraries['MSVCR80.dll'], {
+                    guest,
                     pointerSize,
                     readMemory,
                     writeMemory,
-                    readCString,
                     commandLine: {
                         narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
                         wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
@@ -7261,21 +7262,22 @@ export function createWin32Module(){
             // no copy in the bottle finds them here, as on a Windows the
             // redistributable was installed on.
             lazyLibraries.define('MSVCR90.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
+                { guest, readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             lazyLibraries.define('MSVCP90.dll', ()=>createMsvcp80Functions(libraries['MSVCR90.dll'],
-                { readMemory, writeMemory, fillMemory, pointerSize,
+                { guest, readMemory, writeMemory, fillMemory,
                     ...floatResults ? { fpu: floatResults } : {} }));
             lazyLibraries.define('MSVCR71.dll', ()=>({ ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter }));
             lazyLibraries.define('MSVCP71.dll', ()=>createMsvcp80Functions(libraries['MSVCR71.dll'],
-                { readMemory, writeMemory, fillMemory }));
+                { guest, readMemory, writeMemory, fillMemory,
+                    ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 6's C++ library, which Windows itself carries: its
             // strings are shared by count, as that compiler's headers inline.
             lazyLibraries.define('MSVCP60.dll', ()=>createMsvcp60Functions(
                 libraries['msvcrt.dll'], {
-                    readMemory, writeMemory,
+                    guest,
                     addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
                     divergence: config?.divergence,
                 }));

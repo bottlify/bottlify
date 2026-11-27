@@ -200,6 +200,8 @@ const seededCode = (made, long, argBytes, handler)=>({
 
 /**
  * @typedef {Object} MsvcrtHost
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, read
+ *           and written in place at its pointer width (`host.guest`).
  * @property {(address: number, length: number) => Uint8Array} readMemory
  *           Bytes of the caller's own, never a window on guest memory: a
  *           handler keeps them across a guest step or a write, decodes them
@@ -1305,7 +1307,7 @@ export function createMsvcrtFunctions(host){
         ...wideClasses,
         ...secure,
         ...createErrorFunctions({
-            writeMemory: host.writeMemory,
+            guest: host.guest,
             allocate,
             errno: ()=>globals.get(errnoName()),
             setErrno: errno,
@@ -1430,8 +1432,7 @@ export function createMsvcrtFunctions(host){
             },
         },
         ...wideStrings,
-        ...createRestartableFunctions({ readMemory: host.readMemory,
-            writeMemory: host.writeMemory, readCString: host.readCString, errno }),
+        ...createRestartableFunctions({ guest: host.guest, errno }),
 
         // The `_l` forms take a locale, and the C locale is the only one a
         // program can hold here: each is its plain form, the locale an
@@ -1506,13 +1507,10 @@ export function createMsvcrtFunctions(host){
         // The exception classes own their messages on the heap.
         ...(host.allocate && host.free
             ? createClassFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
-                readCString: host.readCString,
+                guest: host.guest,
                 allocate: host.allocate,
                 free: host.free,
                 callGuest: host.callGuest,
-                pointerSize: host.pointerSize,
                 ...host.addressOf ? { addressOf: host.addressOf } : {},
                 ...host.currentThread ? { currentThread: host.currentThread } : {},
             })

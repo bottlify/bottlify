@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRestartableFunctions } from './mbstate.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const build = ()=>{
     const memory = fakeMemory();
@@ -127,3 +128,27 @@ test('mbstowcs_s converts the bytes and counts the terminator', ()=>{
     assert.equal(table.mbstowcs_s.handler([converted, 0, 0, memory.put('text'), 2]), 0);
     assert.equal(memory.u32(converted), 3);
 });
+
+test('at 64 bits past 4 GiB: *src and a size_t * are a pointer wide, read and written whole',
+    ()=>{
+        const base = 0x140000000;
+        const bytes = new Uint8Array(0x1000);
+        const view = new DataView(bytes.buffer);
+        const table = /** @type {Record<string, any>} */ (createRestartableFunctions({
+            guest: guestWindow(bytes, { base, pointerSize: 8 }) }));
+        bytes.set([...'ab'].map(c=>c.charCodeAt(0)).concat(0), 0x100);
+        const source = base + 0x200;
+        view.setUint32(0x200, (base + 0x100) % 2 ** 32, true);
+        view.setUint32(0x204, Math.floor(base / 2 ** 32), true);
+        assert.equal(table.mbsrtowcs.handler([base + 0x300, source, 1, 0]), 1);
+        assert.equal(view.getUint16(0x300, true), 0x61);
+        assert.equal(view.getUint32(0x200, true) + view.getUint32(0x204, true) * 2 ** 32,
+            base + 0x101, '*src moved past one, whole');
+        const length = base + 0x400;
+        bytes.fill(0xcc, 0x400, 0x408);
+        assert.equal(table.wcrtomb_s.handler([length, base + 0x500, 4, 0x41, 0]), 0);
+        assert.deepEqual([view.getUint32(0x400, true), view.getUint32(0x404, true)], [1, 0]);
+        table.wcrtomb_s.handler([length, base + 0x500, 4, 0x1234, 0]);
+        assert.deepEqual([view.getUint32(0x400, true), view.getUint32(0x404, true)],
+            [0xffffffff, 0xffffffff], '(size_t)-1 every bit');
+    });

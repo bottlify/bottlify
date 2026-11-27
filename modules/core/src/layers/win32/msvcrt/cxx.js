@@ -24,7 +24,7 @@ const TYPE_NAME = 8;
 
 /**
  * @typedef {Object} CxxHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(message: string) => void} [abort]  How the runtime stops a
  *           program that has already lost: a pure virtual call has no
@@ -58,17 +58,10 @@ export const CHKESP_CODE = Uint8Array.of(0xc3);
  * @param {CxxHost} host
  */
 export function createCxxFunctions(host){
-    /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-
-    /** @param {number} address */
-    const readI32 = address=>readU32(address) | 0;
+    const { u32, i32 } = host.guest;
 
     /** The locator sits at vtable[-1], one slot below what the object points at. */
-    const locatorOf = (/** @type {number} */ object)=>readU32(readU32(object) - 4);
+    const locatorOf = (/** @type {number} */ object)=>u32(u32(object) - 4);
 
     return {
         /**
@@ -102,7 +95,7 @@ export function createCxxFunctions(host){
             /** @param {number[]} args */
             handler: ([object])=>(wholeAddress(object) === 0
                 ? 0
-                : object - readI32(locatorOf(object) + LOCATOR.OFFSET)),
+                : object - i32(locatorOf(object) + LOCATOR.OFFSET)),
         },
 
         /** void *__RTtypeid(void *object) */
@@ -113,7 +106,7 @@ export function createCxxFunctions(host){
             /** @param {number[]} args */
             handler: ([object])=>(wholeAddress(object) === 0
                 ? 0
-                : readU32(locatorOf(object) + LOCATOR.TYPE)),
+                : u32(locatorOf(object) + LOCATOR.TYPE)),
         },
 
         /**

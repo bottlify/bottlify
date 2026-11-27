@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcp80Functions } from './msvcp80.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
 
@@ -30,9 +31,9 @@ function library(){
         '??3@YAXPAX@Z': { handler: ()=>0 },
     };
     const table = createMsvcp80Functions(crt, {
+        guest: guestWindow(memory, { pointerSize: 8 }),
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
-        pointerSize: 8,
     });
     /** @param {number} at @param {string} value */
     const put = (at, value)=>memory.set([...value].map(c=>c.charCodeAt(0)).concat(0), at);

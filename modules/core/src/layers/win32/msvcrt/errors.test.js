@@ -13,7 +13,7 @@ const build = ()=>{
     const memory = fakeMemory();
     const cells = { errno: 9, doserrno: 5 };
     const table = /** @type {Record<string, any>} */ (createErrorFunctions({
-        writeMemory: memory.writeMemory,
+        guest: memory.guest,
         allocate: memory.allocate,
         errno: ()=>cells.errno,
         setErrno: code=>{

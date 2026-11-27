@@ -10,6 +10,7 @@ import { createMsvcrtFunctions } from './functions.js';
 import { INVALID_PARAMETERS, createInvalidParameterRuntime, watchedExports }
     from './invalid-parameter.js';
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { COMPILED } from './inguest.x86.js';
 
@@ -30,7 +31,7 @@ function fakeHost(size = 0x1000){
     /** Bytes the handlers asked memory for, reads only; tests reset it. */
     let asked = 0;
 
-    return {
+    const host = {
         bytes,
         output,
         guests,
@@ -115,6 +116,9 @@ function fakeHost(size = 0x1000){
          */
         callGuest: (entry, args)=>Promise.resolve(guests.get(entry)?.(args) ?? 0),
     };
+    // The handlers' view through the same reads and writes, so what they ask is counted.
+    return Object.assign(host, {
+        guest: guestThrough(host.readMemory, (at, data)=>host.writeMemory(at, data)) });
 }
 
 function setup(){

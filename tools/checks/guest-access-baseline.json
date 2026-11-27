@@ -688,20 +688,11 @@
    "accessor i32": 1,
    "accessor u32": 1
   },
-  "msvcrt/classes.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1,
-   "string readString": 1
-  },
   "msvcrt/convert.js": {
    "accessor writeInt": 1,
    "string readString": 1,
    "string writeString": 1,
    "string writeWideString": 1
-  },
-  "msvcrt/cxx.js": {
-   "accessor readI32": 1,
-   "accessor readU32": 1
   },
   "msvcrt/eh.js": {
    "accessor readI32": 1,
@@ -715,10 +706,6 @@
    "accessor writePointer": 1,
    "accessor writeU32": 1,
    "string readWide": 1
-  },
-  "msvcrt/errors.js": {
-   "accessor writeInt": 1,
-   "string writeString": 1
   },
   "msvcrt/float.js": {
    "accessor readDouble": 1
@@ -748,38 +735,9 @@
    "accessor setU8": 1,
    "accessor u8": 1
   },
-  "msvcrt/mbstate.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
   "msvcrt/mbstring.js": {
    "string readWide": 1,
    "string writeWide": 1
-  },
-  "msvcrt/msvcp60-streams.js": {
-   "accessor i32": 1,
-   "accessor readWord": 1,
-   "accessor setU16": 1,
-   "accessor u16": 1
-  },
-  "msvcrt/msvcp60.js": {
-   "accessor ptr": 1,
-   "accessor setU32": 1,
-   "accessor setU8": 1,
-   "accessor u32": 1,
-   "accessor u8": 1,
-   "string cstr": 1
-  },
-  "msvcrt/msvcp80.js": {
-   "accessor f32": 1,
-   "accessor setU32": 1,
-   "accessor setWord": 1,
-   "accessor u32": 1
-  },
-  "msvcrt/msvcr80.js": {
-   "accessor readU32": 1,
-   "accessor setPointer": 1,
-   "accessor setU32": 1
   },
   "msvcrt/paths.js": {
    "string readString": 1,
@@ -825,10 +783,6 @@
    "accessor writeInt": 1,
    "string writeString": 1,
    "string writeWide": 1
-  },
-  "msvcrt/ucrtbase.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
   },
   "msvfw32/codecs.js": {
    "copy readMemory().slice()": 9

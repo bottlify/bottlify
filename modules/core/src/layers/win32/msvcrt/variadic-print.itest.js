@@ -20,6 +20,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createMsvcrtFunctions } from './functions.js';
+import { guestThrough } from './guest-window.fixture.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
 const PROGRAM = 0x8000;
@@ -123,6 +124,7 @@ test('sprintf and _snprintf in the guest write and answer as their handlers', ()
     const put = (at, text)=>machine.writePhysical(at,
         Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff));
     const fns = /** @type {Record<string, any>} */ (createMsvcrtFunctions(/** @type {any} */ ({
+        guest: guestThrough(read, (at, bytes)=>machine.writePhysical(at, bytes)),
         readMemory: read,
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             machine.writePhysical(at, bytes),
