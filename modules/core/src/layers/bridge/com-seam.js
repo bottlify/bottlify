@@ -39,6 +39,8 @@
  * library gives as `counting`.
  */
 
+import { wholeAddress } from '../../system/address.js';
+
 /** IID_IUnknown. Every object answers to it. */
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
@@ -298,8 +300,8 @@ export function createComPublisher({ publishInterface, unpublishInterface,
 
     /** @param {any} adapter @param {number} pointer @param {string} id */
     const record = (adapter, pointer, id)=>{
-        byPointer.set(pointer >>> 0, { api: adapter.api, id });
-        adapter.pointers.add(pointer >>> 0);
+        byPointer.set(wholeAddress(pointer), { api: adapter.api, id });
+        adapter.pointers.add(wholeAddress(pointer));
         adapter.ids.add(id);
     };
 
@@ -397,9 +399,9 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             afterRelease: ()=>counts.afterRelease?.(),
             /** @param {number} pointer */
             forgotten(pointer){
-                if (pointers.delete(pointer >>> 0))
+                if (pointers.delete(wholeAddress(pointer)))
                 {
-                    byPointer.delete(pointer >>> 0);
+                    byPointer.delete(wholeAddress(pointer));
                 }
             },
         };
@@ -409,7 +411,7 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             pointers,
             remember: id=>{
                 const pointer = publishInterface(adapter, id);
-                if (pointer !== 0 && !pointers.has(pointer >>> 0))
+                if (pointer !== 0 && !pointers.has(wholeAddress(pointer)))
                 {
                     record(adapter, pointer, id);
                 }
@@ -447,10 +449,10 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             adapter.ids.clear();
             forgetAll(adapter);
         },
-        objectAt: pointer=>((pointer >>> 0) === 0
+        objectAt: pointer=>(wholeAddress(pointer) === 0
             ? null
-            : byPointer.get(pointer >>> 0)?.api ?? null),
-        interfaceAt: pointer=>byPointer.get(pointer >>> 0)?.id ?? null,
+            : byPointer.get(wholeAddress(pointer))?.api ?? null),
+        interfaceAt: pointer=>byPointer.get(wholeAddress(pointer))?.id ?? null,
         adapterFor: api=>adapters.get(api) ?? null,
         count: ()=>byPointer.size,
         refused: ()=>({ ...refusals }),

@@ -19,6 +19,7 @@ import { WaitResult, createSyncObjects } from './internal/sync.js';
 import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 import { createStackPool } from './internal/stacks.js';
+import { wholeAddress } from '../../system/address.js';
 
 /** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
 const TURN_MS = 0.25;
@@ -580,8 +581,8 @@ export function createKernelModule(){
                             // Whole: a parameter or a start routine a 64-bit
                             // program keeps past 4 GiB is not its low dword.
                             const gpr = /** @type {bigint[]} */ ([]);
-                            gpr[1] = BigInt(parameter >= 2 ** 32 ? parameter : parameter >>> 0);
-                            gpr[2] = BigInt(routine >= 2 ** 32 ? routine : routine >>> 0);
+                            gpr[1] = BigInt(wholeAddress(parameter));
+                            gpr[2] = BigInt(wholeAddress(routine));
                             cpu.setContextLong?.(thread.context, { gpr });
                         }
                     }

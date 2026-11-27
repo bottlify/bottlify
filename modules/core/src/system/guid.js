@@ -24,6 +24,8 @@
  * it here.
  */
 
+import { wholeAddress } from './address.js';
+
 /** sizeof(GUID). */
 export const GUID_SIZE = 16;
 
@@ -128,7 +130,7 @@ export function canonicalGuid(text){
  * @returns {string}
  */
 export function readGuid(memory, address){
-    return formatGuid(memory.readMemory(address >= 2 ** 32 ? address : address >>> 0, GUID_SIZE));
+    return formatGuid(memory.readMemory(wholeAddress(address), GUID_SIZE));
 }
 
 /**

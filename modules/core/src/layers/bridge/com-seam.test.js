@@ -427,3 +427,19 @@ test('a table can have a head of its own, one list per head and description', ()
     assert.notEqual(methodTable(ONE), own);
     assert.equal(methodTable(ONE)[0], IUNKNOWN_METHODS[0]);
 });
+
+test('a 64-bit pointer past 4 GiB is found whole, never by its low dword', ()=>{
+    const high = 2 ** 32 + 0x2000;
+    let gave = 0;
+    const seam = createComPublisher({ publishInterface: ()=>(gave = high) });
+    const api = { addRef: ()=>1, release: ()=>0 };
+    assert.equal(seam.publish(api, [{ id: IID_ONE, methods: [] }], IID_ONE), high);
+    assert.equal(gave, high);
+    assert.equal(seam.objectAt(high), api, 'the pointer as the program holds it');
+    assert.equal(seam.interfaceAt(high), IID_ONE);
+    assert.equal(seam.objectAt(0x2000), null, 'the address 4 GiB below is another one');
+    seam.adapterFor(api).forgotten(0x2000);
+    assert.equal(seam.count(), 1, 'forgetting the address below forgets nothing of this one');
+    seam.adapterFor(api).forgotten(high);
+    assert.equal(seam.count(), 0);
+});

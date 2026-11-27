@@ -31,6 +31,8 @@
  * which pop them off the frame and jump to the routine.
  */
 
+import { wholeAddress } from '../../../system/address.js';
+
 /**
  * What a 64-bit thread is sent to first when a routine is called with
  * arguments: RSP holds the routine's quadword, the four registers' quadwords,
@@ -49,12 +51,6 @@ export const LONG_CALL_CODE = Object.freeze([
     0x58, 0x59, 0x5a, 0x41, 0x58, 0x41, 0x59, 0xff, 0xe0,
 ]);
 
-/**
- * An address as the engine keeps it: a 32-bit one unsigned, one past 4 GiB as it is.
- *
- * @param {number} address
- */
-const whole = address=>(address >= 2 ** 32 ? address : address >>> 0);
 
 /** The quadwords a 64-bit frame always holds: four registers, the return, four homes, a spare. */
 const LONG_FRAME_SLOTS = 10;
@@ -279,7 +275,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         quad(frameBase + 32, sentinelAddress);
         // The routine, popped first (`LONG_CALL_CODE`): below the frame, so the
         // stack the routine starts on is the frame's alone.
-        quad(frameBase - 8, BigInt(whole(entry)));
+        quad(frameBase - 8, BigInt(wholeAddress(entry)));
         return { frameBase, extent: frameBase + slots * 8, start: frameBase - 8 };
     }
 
@@ -392,12 +388,12 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         const frames = callbackFrames(thread);
         calls++;
         deepest = Math.max(deepest, frames.length + 1);
-        started.push({ entry: whole(entry), by, thread: thread.name });
+        started.push({ entry: wholeAddress(entry), by, thread: thread.name });
         if (started.length > STARTED_RING)
         {
             started.shift();
         }
-        frames.push({ frameBase, extent, settle, epoch, now, entry: whole(entry), by,
+        frames.push({ frameBase, extent, settle, epoch, now, entry: wholeAddress(entry), by,
             since: Date.now() });
         // Off to run guest code, whatever it was doing before.
         awaitHost(thread, false);
@@ -553,7 +549,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             {
                 return null;
             }
-            return { rip: whole(suspended[made].hostReturn),
+            return { rip: wholeAddress(suspended[made].hostReturn),
                 rsp: suspended[made].restingStack >>> 0 };
         },
 
