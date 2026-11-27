@@ -26,6 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DLOCK, D3DMCS,
     D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
@@ -110,8 +111,7 @@ function harness(options = {}){
     const samplers = [];
     /** @type {number[]} */
     const windows = [];
-    const d3d = createDirect3D8({
-        backend,
+    const d3d = createDirect3D8({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         windowMemory: (address, length)=>{
             windows.push(length);
@@ -2393,8 +2393,7 @@ test('recorded: a textured draw without a sampler factory fails loudly, not whit
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     const ram = new Uint8Array(RAM_SIZE);
-    const d3d = createDirect3D8({
-        backend,
+    const d3d = createDirect3D8({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
     });
     /** @type {{ device?: any }} */
@@ -2411,7 +2410,7 @@ test('recorded: a textured draw without a sampler factory fails loudly, not whit
     assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
     assert.throws(()=>device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
         /sampler factory/);
-    assert.throws(()=>createDirect3D8({ backend }), /readMemory/);
+    assert.throws(()=>createDirect3D8({ ...deviceRooms(), backend }), /readMemory/);
 });
 
 test('a DXT1 base narrower than one block is refused; a decoded one lies in B, G, R, A',

@@ -20,6 +20,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -175,7 +176,7 @@ function side(){
         return value && typeof value === 'object' && typeof value.length === 'number'
             ? Array.from(value) : value;
     };
-    const d3d7 = createDirect3D7(root);
+    const d3d7 = createDirect3D7(root, deviceRooms());
     const watched = {
         ...d3d7,
         /** @param {string} id @param {any} on */

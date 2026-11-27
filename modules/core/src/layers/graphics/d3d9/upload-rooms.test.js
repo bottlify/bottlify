@@ -26,7 +26,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { createScratches } from '../../cache/scratch.js';
-import { testCache } from '../../cache/testing.fixture.js';
+import { deviceRooms, testCache } from '../../cache/testing.fixture.js';
 
 const RAM_BASE = 0x40000000;
 
@@ -75,6 +75,7 @@ function deviceWith(scratches){
     const ram = new Uint8Array(8 << 20);
     let free = RAM_BASE + (1 << 20);
     const d3d = createDirect3D9({
+        ...deviceRooms(),
         backend,
         scratches,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
@@ -131,11 +132,11 @@ function deviceWith(scratches){
  */
 async function run(seed, rooms){
     const next = random(seed);
-    // A small cache: a level past its segment is made in plain memory.
-    const cache = rooms === 'held' ? await testCache({ budget: 1 << 16, segmentBytes: 1 << 15 })
+    // A small cache, whose blocks a larger level's room outgrows and is held anew in.
+    const cache = rooms === 'held' ? await testCache({ budget: 1 << 20, segmentBytes: 1 << 18 })
         : null;
     const scratches = rooms === 'held'
-        ? createScratches(/** @type {any} */ (cache).space('scratch').hold ?? null)
+        ? createScratches(/** @type {any} */ (cache).space('scratch').hold)
         : rooms === 'dirty' ? createScratches((_key, length)=>({
             bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} }))
             : null;
@@ -243,7 +244,6 @@ function BLOCKS(format){
 test('gate: an upload made in rooms of the run\'s cache, in dirty rooms and in fresh ones gives '
     + 'the device the same calls and bytes', { timeout: 120_000 }, async()=>{
     let held = 0;
-    let plain = 0;
     for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     {
         const none = await run(seed, 'fresh');
@@ -262,17 +262,16 @@ test('gate: an upload made in rooms of the run\'s cache, in dirty rooms and in f
             if (rooms === 'held')
             {
                 held += made.figures?.held ?? 0;
-                plain += made.figures?.plainGrows ?? 0;
+                assert.equal(made.figures?.refused, 0, at);
             }
         }
     }
     assert.ok(held > 0, 'rooms held in the run\'s cache');
-    assert.ok(plain > 0, 'and rooms that had none there');
 });
 
 test('a texture written every frame grows its rooms once, held in the run\'s cache', async()=>{
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const { ram, device } = deviceWith(scratches.scratch);
     /** @type {{ texture?: any }} */
     const held = {};
@@ -308,7 +307,7 @@ test('a texture written every frame grows its rooms once, held in the run\'s cac
     assert.ok(grows[0] >= 2, 'the widened and the decoded level each grew a room');
     assert.deepEqual(grows, grows.map(()=>grows[0]), 'and none grew again after the first frame');
     const figures = scratches.figures();
-    assert.equal(figures.plain, 0);
+    assert.equal(figures.refused, 0);
     assert.equal(figures.heldBytes, 2 * 256 * 256 * 4, 'a level of four bytes a texel each');
     assert.equal(cache.keeper.under('scratch/').hotBytes, figures.heldBytes,
         'in the run\'s budget');

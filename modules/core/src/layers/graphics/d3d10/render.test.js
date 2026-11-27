@@ -24,6 +24,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_CULL_MODE,
     D3D10_DRIVER_TYPE, D3D10_FILL_MODE, D3D10_FILTER, D3D10_MAP,
@@ -124,8 +125,7 @@ function harness(options = {}){
     /** @type {{ swapChain?: any }} */
     const chainOut = {};
     assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-        D3D10_SDK_VERSION, desc, chainOut, deviceOut, {
-            backend,
+        D3D10_SDK_VERSION, desc, chainOut, deviceOut, { ...deviceRooms(), backend,
             createSampler: descriptor=>({ kind: 'sampler', descriptor }),
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
@@ -1356,7 +1356,7 @@ test('GenerateMips on the processor filters a texture made for it and leaves any
         /** @type {{ device?: any }} */
         const out = {};
         assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-            D3D10_SDK_VERSION, null, {}, out, {}), S_OK);
+            D3D10_SDK_VERSION, null, {}, out, deviceRooms()), S_OK);
         const device = out.device;
         /** @type {{ resource?: any }} */
         const texture = {};
@@ -2183,11 +2183,11 @@ test('a depth buffer bound through a read-only view is tested and read in one pa
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {any} */
     const out = { wantDevice: true, wantContext: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
-        backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-        createTexture: gpu.device.createTexture,
-        divergence: (api, detail)=>said.push(detail),
-    }), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out,
+        { ...deviceRooms(), backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+            createTexture: gpu.device.createTexture,
+            divergence: (api, detail)=>said.push(detail),
+        }), S_OK);
     const { device, context } = out;
     /** @param {any} desc @returns {any} */
     const texture = desc=>{
@@ -2994,11 +2994,11 @@ function quadPatches(){
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {any} */
     const out = { wantDevice: true, wantContext: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
-        backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-        createTexture: gpu.device.createTexture,
-        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
-    }), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out,
+        { ...deviceRooms(), backend, createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+            createTexture: gpu.device.createTexture,
+            divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        }), S_OK);
     const { device, context } = out;
     /** @type {any} */
     const made = {};

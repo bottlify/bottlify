@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { D3DRENDERSTATE, D3D_OK, DEVICE_IDS } from '../d3d7/constants.js';
@@ -121,7 +122,7 @@ async function framesThrough(make, ring = false, queued = null){
     const claims = new Map();
     /** @type {string[]} */
     const refused = [];
-    const d3d = make(root, {
+    const d3d = make(root, { ...deviceRooms(),
         backend,
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
             ram.slice(address, address + length),
@@ -350,7 +351,7 @@ async function framesThrough(make, ring = false, queued = null){
  * @param {any} ddraw @param {any} services
  */
 const loopback = (ddraw, services)=>recordedDirect3D7(ddraw, services,
-    playedAtOnce(/** @type {any} */ (playedDirect3D7(services))));
+    playedAtOnce(/** @type {any} */ (playedDirect3D7({ ...deviceRooms(), ...services }))));
 
 test('Direct3D 7 frames played from a record ask of the GPU what the device itself asked',
     async()=>{
@@ -391,7 +392,7 @@ async function lateDraws(make){
     root.setCooperativeLevel(0x00010044, DDSCL_NORMAL);
     /** @type {Map<number, () => unknown>} */
     const claims = new Map();
-    const d3d = make(root, {
+    const d3d = make(root, { ...deviceRooms(),
         backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
             now: ()=>0 }),
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>

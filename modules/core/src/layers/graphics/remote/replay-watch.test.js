@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { carriedTo } from './ring-fixtures.js';
 import { D3D_OK } from '../d3d9/constants.js';
@@ -150,9 +151,9 @@ function run(seed, watched, dynamic = true, checking = null){
     /** @type {Uint8Array[][]} */
     const seen = [];
     const played = playedDirect3D(toy(seen, dynamic),
-        { ...services, backend: {}, readMemory: true });
+        { ...deviceRooms(), ...services, backend: {}, readMemory: true });
     const { sender } = carriedTo(played);
-    const root = recordedDirect3D(toy(seen, dynamic), services, sender);
+    const root = recordedDirect3D(toy(seen, dynamic), { ...deviceRooms(), ...services }, sender);
     const buffers = [0x1800, 0x1800, 0x900, 0x5000].map(length=>{
         /** @type {{ buffer?: any }} */
         const out = {};
@@ -316,9 +317,10 @@ test('a buffer moved between storages of its own is sent whole once a storage, t
             return D3D_OK;
         },
     });
-    const played = playedDirect3D(twoStorages, { ...services, backend: {}, readMemory: true });
+    const played = playedDirect3D(twoStorages, { ...deviceRooms(), ...services, backend: {},
+        readMemory: true });
     const { sender } = carriedTo(played);
-    const root = recordedDirect3D(twoStorages, services, sender);
+    const root = recordedDirect3D(twoStorages, { ...deviceRooms(), ...services }, sender);
     /** @type {{ buffer?: any }} */
     const out = {};
     assert.equal(root.CreateBuffer(out), D3D_OK);
@@ -372,10 +374,10 @@ test('a watched buffer\'s first draw sends all of it read where it lies, not cop
             };
             /** @type {Uint8Array[][]} */
             const seen = [[]];
-            const played = playedDirect3D(toy(seen), { ...services, backend: {},
+            const played = playedDirect3D(toy(seen), { ...deviceRooms(), ...services, backend: {},
                 readMemory: true });
             const { sender } = carriedTo(played);
-            const root = recordedDirect3D(toy(seen), services, sender);
+            const root = recordedDirect3D(toy(seen), { ...deviceRooms(), ...services }, sender);
             /** @type {{ buffer?: any }} */
             const out = {};
             assert.equal(root.CreateBuffer(0x3000, out), D3D_OK);

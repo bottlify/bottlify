@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { D3DERR_INVALIDCALL, D3DFMT, D3DRS, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DFMT_INDEX, D3DPOOL, D3DTS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -14,7 +15,7 @@ import { D3DSAMP, D3DTSS9 } from './samplerstates.js';
 import { DEFAULT_RENDER_STATES } from './renderstates.js';
 
 function createDevice(){
-    const d3d = createDirect3D9({ vertexShaderVersion: { major: 2, minor: 0 } });
+    const d3d = createDirect3D9({ ...deviceRooms(), vertexShaderVersion: { major: 2, minor: 0 } });
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({

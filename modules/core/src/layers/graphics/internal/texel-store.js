@@ -14,20 +14,21 @@
  *
  * A body is handed over (`put`) and is the store's from then on: readable at
  * once, in place (`with`), or taken back as the caller's own (`take`), until
- * it is dropped. Where it lies is the store's to say: in plain memory while
- * the cache has not granted its room (room is asked for without waiting), when
- * it refused, for a body smaller than the cache's unit of room, and always
- * where there is no cache under the store (a test, a device on a thread
- * without one) - the same contract, the bytes in this heap. Each body is the
+ * it is dropped. Where it lies is the store's to say: as it was handed over
+ * while the cache has not granted its room (room is asked for without
+ * waiting), for a body smaller than the cache's unit of room, and where there
+ * is no cache under the store (OpenGL's, until its services carry its
+ * owner's names) - the same contract, the bytes in this heap. A body whose
+ * room the cache refused is a loss, as one it cannot give back. Each body is the
  * only copy of what it holds for this run (a level's texels as the program
  * made them, an upload's as they stood when it was recorded), which is why
  * the owner's names go to the disk when idle (`disk: 'run'`) and never away;
  * what a device can make again from guest memory at once (an upload that goes
  * to the GPU in the same call) is never kept here.
  *
- * A body the cache cannot give back is a loss: said once a body
- * (`divergence(detail, 'loss')`), counted, and read as zeros of its length,
- * so the level draws blank instead of the device stopping.
+ * A body the cache refused room for, or cannot give back, is a loss: said
+ * once a body (`divergence(detail, 'loss')`), counted, and read as zeros of
+ * its length, so the level draws blank instead of the device stopping.
  */
 
 /**
@@ -99,6 +100,20 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
     };
 
     /**
+     * A body the cache had no room for, its bytes let go of: read as zeros
+     * from here, the loss said once.
+     *
+     * @param {Body} body
+     */
+    const refuse = body=>{
+        body.name = null;
+        counts.refused++;
+        counts.lost++;
+        divergence?.(`texels the run's cache had no room for (${body.length} bytes)`
+            + ' read as zeros', 'loss');
+    };
+
+    /**
      * Room for a body, asked for without waiting: the body moves into it once
      * granted, unless it was dropped or taken meanwhile, when the room is let
      * go of unwritten.
@@ -122,23 +137,24 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
                 return;
             }
             // Still held under its key, a body has not moved: its bytes are here.
-            if (!granted || !into.put(name, /** @type {Uint8Array} */ (body.bytes)))
-            {
-                body.name = null;
-                counts.refused++;
-                return;
-            }
+            const moved = granted && into.put(name, /** @type {Uint8Array} */ (body.bytes));
             body.bytes = null;
             counts.plainBytes -= body.length;
+            if (!moved)
+            {
+                refuse(body);
+                return;
+            }
             counts.cachedBytes += body.length;
             counts.moved++;
             counts.movedBytes += body.length;
         }, ()=>{
             if (bodies.get(key) === body)
             {
-                body.name = null;
+                body.bytes = null;
+                counts.plainBytes -= body.length;
+                refuse(body);
             }
-            counts.refused++;
         });
     };
 
@@ -155,9 +171,13 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
         {
             return read(body.bytes);
         }
+        if (body.name === null)
+        {
+            return read(new Uint8Array(body.length));
+        }
         let found = false;
         /** @type {T | undefined} */
-        const value = cache?.space.with(/** @type {string} */ (body.name), bytes=>{
+        const value = cache?.space.with(body.name, bytes=>{
             found = true;
             return read(bytes);
         }, { wait: true });

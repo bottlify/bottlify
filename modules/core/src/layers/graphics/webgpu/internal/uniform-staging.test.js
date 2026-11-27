@@ -94,9 +94,8 @@ function run(seed, staging){
 
 test('gate: the uniform ring is written the same from a copy held in the run\'s cache, '
     + 'from a dirty one and from a fresh one', async()=>{
-    // A small cache: a ring past its segment keeps its copy in plain memory.
-    const cache = await testCache({ budget: 1 << 18, segmentBytes: 1 << 16 });
-    const held = createScratches(cache.space('scratch').hold ?? null);
+    const cache = await testCache({ budget: 1 << 24, segmentBytes: 1 << 22 });
+    const held = createScratches(cache.space('scratch').hold);
     const dirty = createScratches((_key, length)=>({
         bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} }));
     for (let seed = 1; seed <= 12; seed++)
@@ -107,6 +106,5 @@ test('gate: the uniform ring is written the same from a copy held in the run\'s 
             `dirty, seed ${seed}`);
     }
     const figures = held.figures();
-    assert.ok(figures.grows - figures.plainGrows > 12, 'copies held in the run\'s cache');
-    assert.ok(figures.plainGrows > 0, 'and copies that had no room there');
+    assert.ok(figures.grows > 12 && figures.refused === 0, 'copies held in the run\'s cache');
 });

@@ -26,8 +26,6 @@ import {
 import { textExtent } from './gdi/text.js';
 import { createScreen } from './gdi/screen.js';
 import { DEFAULT_VIDEO_MEMORY, GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
-import { plainScratches } from '../cache/scratch.js';
-import { isStub } from '../../system/stub.js';
 
 /**
  * A window as the window manager lists it: enough to know where it is on
@@ -419,21 +417,16 @@ const offered = ask=>{
 /**
  * Host memory a machine's graphics keep - a blit's rooms, a level decoded on
  * its way up, a staging mirror between calls, a Direct3D 10 resource's bytes
- * for its life - held in the run's cache (`cache/scratch.js`), or plain
- * memory under the same contract where the cache layer is switched off.
- * Chosen once, out here, so that what it is handed to (a presenter whose
- * reactions the run's GPU device holds) holds the cache and nothing else of
- * the machine.
+ * for its life - held in the run's cache (`cache/scratch.js`). Made out here,
+ * so that what it is handed to (a presenter whose reactions the run's GPU
+ * device holds) holds the cache and nothing else of the machine.
  *
  * @param {any} cache
  * @returns {{ scratch: (name: string) => import('../cache/scratch.js').Scratch,
  *     hold: (name: string, length: number) => import('../cache/scratch.js').Held }}
  */
-const keptIn = cache=>{
-    // A host without the cache layer at all (a test's) is the same as one with it off.
-    const kept = typeof cache?.scratch === 'function' && !isStub(cache) ? cache : plainScratches;
-    return { scratch: name=>kept.scratch(name), hold: (name, length)=>kept.hold(name, length) };
-};
+const roomsOf = cache=>({ scratch: name=>cache.scratch(name),
+    hold: (name, length)=>cache.hold(name, length) });
 
 /** The graphics layer's module for one graph; see `defaultModules`. */
 /**
@@ -518,7 +511,7 @@ export function createGraphicsModule(){
             // draw needs them: the run's cache, which lets idle bodies go to the
             // disk, rather than the worker's own heap.
             const cache = /** @type {any} */ (host.requireApi('cache'));
-            const { scratch: scratches, hold: holds } = keptIn(cache);
+            const { scratch: scratches, hold: holds } = roomsOf(cache);
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -709,11 +702,10 @@ export function createGraphicsModule(){
              * texels under (`internal/texel-store.js`), as a root in the
              * graphics worker is given its own there (`remote/connect.js`): one
              * owner a root, numbered by the run's keeper, let go of with this
-             * machine. None where the run serves no names, and the root keeps
-             * them in plain memory.
+             * machine.
              */
             const ownTexels = ()=>{
-                const owned = cache?.owner?.('texels') ?? null;
+                const owned = cache.owner('texels');
                 if (owned)
                 {
                     state.texelOwners.push(owned);
@@ -1448,8 +1440,7 @@ export function createGraphicsModule(){
              * cache lets go of is drawn again.
              */
             const fonts = createFontEngine({
-                space: typeof cache?.space === 'function' && !isStub(cache)
-                    ? cache.space('glyphs') : null,
+                space: cache.space('glyphs'),
                 scratch: scratches('gdi/glyph-page'),
             });
             /**
@@ -1613,6 +1604,8 @@ export function createGraphicsModule(){
                     probeTexture: device?.probeTexture,
                     driverRules: config?.driverRules,
                     presenter: state.shown,
+                    scratches,
+                    holds,
                 }),
 
                 // Enumeration is the one thing here that runs guest code: the

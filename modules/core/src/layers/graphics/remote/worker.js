@@ -106,7 +106,7 @@ import { playedDirect3D10 } from './d3d10.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
 import { channelSpace } from '../../cache/module.js';
-import { createScratches } from '../../cache/scratch.js';
+import { createScratches, plainHold } from '../../cache/scratch.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -122,15 +122,18 @@ const MAP_READ = 0x01;
 /**
  * @param {{ postMessage: (message: any, transfer?: Transferable[]) => void,
  *     onmessage: ((event: { data: any }) => void) | null }} scope
- * @param {{ gpu: any, canvas?: (width: number, height: number) => any, driven?: boolean }} deps
+ * @param {{ gpu: any, canvas?: (width: number, height: number) => any, driven?: boolean,
+ *     hold?: import('../../cache/scratch.js').Hold }} deps
  *     `canvas` makes the canvas a frame is copied into to become a picture;
  *     `driven`, the roots' batches are played when `take` is called rather than
  *     as their bells ring: for a tool that times each batch's play on its own
- *     thread (`tools/read/graphics-replay.mjs`)
+ *     thread (`tools/read/graphics-replay.mjs`); `hold`, where the roots and the
+ *     backend hold their memory when served on a thread that holds a cache of
+ *     its own rather than by the run's names (a tool's, a test's)
  */
 export function serveGraphics(scope, deps){
     const { gpu, canvas = (width, height)=>new OffscreenCanvas(width, height),
-        driven = false } = deps;
+        driven = false, hold = null } = deps;
     /** @type {Promise<{ device: any, backend: any, adapter: any }> | null} */
     let opened = null;
     /** Where frames go: back to the program's thread as pictures, or nowhere. */
@@ -192,15 +195,15 @@ export function serveGraphics(scope, deps){
     let backendCache = null;
     /**
      * What the backend keeps between calls (the uniform ring's staging copy),
-     * held under those names, plain memory until they come or where there is
-     * no room. A room is taken at its first use, at the first draw, which
-     * comes after the run handed them. The worker waits for that room on the
+     * held under those names; refused before they come or where there is no
+     * room. A room is taken at its first use, at the first draw, which comes
+     * after the run handed them. The worker waits for that room on the
      * keeper's thread as a root does for its holds; it serves roots that lend
      * as well, whose thread waits on this one only while a lend is being
      * copied out of guest memory, which grows no scratch of the backend's.
      */
-    const backendRooms = createScratches((key, length)=>backendCache?.space.hold?.(key, length)
-        ?? null);
+    const backendRooms = createScratches((key, length)=>(backendCache
+        ? backendCache.space.hold(key, length) : hold?.(key, length) ?? null));
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
      * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
@@ -617,10 +620,11 @@ export function serveGraphics(scope, deps){
         // What the root keeps between calls (its scratches) and for an
         // object's life (a Direct3D 10 resource's bytes), held under its
         // names: the worker waits for that room on the keeper's thread, so a
-        // root that lends, whose program's thread may wait on this one for a
-        // lend being read, holds plain memory instead.
-        const rooms = createScratches(texelCache && !lending
-            ? texelCache.space.hold ?? null : null);
+        // root that lends, whose program's thread may be that thread waiting
+        // on this one for a lend being read, would wait on itself: it holds
+        // plain memory until room is asked ahead for it.
+        const rooms = createScratches(!texelCache ? hold
+            : lending ? plainHold : texelCache.space.hold);
         const roomServices = {
             scratches: (/** @type {string} */ name)=>rooms.scratch(name),
             holds: (/** @type {string} */ name, /** @type {number} */ length)=>
@@ -682,6 +686,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D7({
                 ...options,
+                ...roomServices,
                 liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -1132,7 +1137,7 @@ export function serveGraphics(scope, deps){
     return {
         /** The roots open now, over every way in. */
         roots: ()=>rootsOpen,
-        /** What the backend's scratches hold, in the run's cache and plain. */
+        /** What the backend's scratches hold in the run's cache. */
         scratch: ()=>backendRooms.figures(),
         /**
          * Where the roots are `driven`: plays every batch their rings hold

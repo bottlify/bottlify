@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, E_FAIL, E_INVALIDARG, S_OK,
 } from './constants.js';
@@ -36,7 +37,7 @@ function createDevice(){
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
-        D3D10_SDK_VERSION, out), S_OK);
+        D3D10_SDK_VERSION, out, deviceRooms()), S_OK);
     return out.device;
 }
 

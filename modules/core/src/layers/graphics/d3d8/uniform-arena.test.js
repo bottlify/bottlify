@@ -10,10 +10,10 @@
  * some past what the arena holds so that it grows mid-frame, recorded two at a
  * time as a device keeps a frame in flight while it records the next, and
  * "replayed" only after the next has been taken from: every block must read at
- * replay what its draw wrote, whether the arena's memory is the run's cache
- * (the names a root on the run's thread holds, `ownedSpace`, and those a root
- * in the graphics worker holds, `channelSpace`) or plain memory, and the cache
- * must hold nothing of it once the arenas are let go of.
+ * replay what its draw wrote, whether the arena's memory is a roomy run's
+ * cache (the names a root on the run's thread holds, `ownedSpace`) or a
+ * cramped one whose blocks come back full of what an earlier holder left
+ * there, and the cache must hold nothing of it once the arenas are let go of.
  */
 
 import { test } from 'node:test';
@@ -38,9 +38,9 @@ function random(seed){
 /**
  * One seeded run: what every block read at its frame's replay, in order.
  *
- * @param {number} seed @param {'plain' | 'thread' | 'small'} where  the arenas' memory: plain,
- *     names of the run's cache an owner on this thread holds, or a cache too small for all of
- *     it whose blocks come back full of what an earlier holder left there
+ * @param {number} seed @param {'thread' | 'small'} where  the arenas' memory: names of the
+ *     run's cache an owner on this thread holds, or a cache too small for all of it whose
+ *     blocks come back full of what an earlier holder left there
  * @param {{ shared?: boolean }} [options]  `shared`: every arena's memory one scratch of the
  *     device - what the arena must not be - which the gate must see
  */
@@ -48,8 +48,8 @@ async function run(seed, where, { shared = false } = {}){
     const next = random(seed);
     const runCache = where === 'thread' ? await openRunCache({ budget: 64 << 20 }) : null;
     const owner = runCache ? ownedSpace(runCache.reader, runCache.own('rooms')) : null;
-    /** @type {import('../../cache/scratch.js').Hold | null} */
-    let hold = owner?.space.hold ?? null;
+    /** @type {import('../../cache/scratch.js').Hold} */
+    let hold = owner ? owner.space.hold : ()=>null;
     /** Other holders taking the room let go of meanwhile, as a run's do. */
     let others = ()=>{};
     if (where === 'small')
@@ -57,7 +57,7 @@ async function run(seed, where, { shared = false } = {}){
         const small = await testCache({ budget: 256 << 10, segmentBytes: 128 << 10 });
         const space = small.space('scratch');
         hold = (key, length)=>{
-            const got = space.hold?.(key, length) ?? null;
+            const got = space.hold(key, length);
             got?.bytes.fill(0xcd);
             return got;
         };
@@ -67,7 +67,7 @@ async function run(seed, where, { shared = false } = {}){
             const taken = [];
             for (let size = 1024; size <= 16384; size *= 2)
             {
-                const got = hold?.(`other/${++other}`, size);
+                const got = hold(`other/${++other}`, size);
                 if (got)
                 {
                     taken.push(got);
@@ -151,23 +151,20 @@ async function run(seed, where, { shared = false } = {}){
     return { read, grew: figures.holds - made.length, heldMost, figures, released };
 }
 
-test('a frame\'s uniform blocks read at replay what their draws wrote, from the run\'s cache as '
-    + 'from plain memory, across the arena growing', async()=>{
+test('a frame\'s uniform blocks read at replay what their draws wrote, from a roomy cache and '
+    + 'a cramped one, across the arena growing', async()=>{
     for (const where of /** @type {const} */ (['thread', 'small']))
     {
         let grew = 0;
         for (const seed of [1, 2, 3, 4, 5, 6])
         {
-            const plain = await run(seed, 'plain');
             const cached = await run(seed, where);
             const at = `${where}, seed ${seed}`;
-            assert.ok(plain.read.length > 0, at);
-            assert.ok(plain.read.every(ok=>ok === 1), `${at}: plain memory reads what was written`);
-            assert.deepEqual(cached.read, plain.read, at);
-            assert.ok(cached.figures.held === 0 && cached.figures.plain === 0,
+            assert.ok(cached.read.length > 0, at);
+            assert.ok(cached.read.every(ok=>ok === 1), `${at}: every block reads what was written`);
+            assert.ok(cached.figures.held === 0 && cached.figures.refused === 0,
                 `${at}: every generation let go of`);
             assert.ok(cached.heldMost > 0, `${at}: the arenas held in the cache`);
-            assert.equal(plain.figures.held, 0);
             if (where === 'thread')
             {
                 assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, at);
@@ -179,7 +176,7 @@ test('a frame\'s uniform blocks read at replay what their draws wrote, from the 
 });
 
 test('the gate sees arenas that share their memory', async()=>{
-    for (const where of /** @type {const} */ (['plain', 'thread']))
+    for (const where of /** @type {const} */ (['thread', 'small']))
     {
         let wrong = 0;
         for (const seed of [1, 2, 3])

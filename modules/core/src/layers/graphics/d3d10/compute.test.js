@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_BIND, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_MAP, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS,
     D3D11_BUFFER_UAV_FLAG, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_OK,
@@ -47,14 +48,14 @@ function harness(createTexture, features = []){
         presentTo: ()=>{}, now: ()=>0 });
     /** @type {import('./device.js').DeviceRequest11} */
     const out = { wantDevice: true, wantContext: true };
-    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out, {
-        backend,
-        createSampler: descriptor=>({ kind: 'sampler', descriptor }),
-        createTexture: createTexture
-            ? (/** @type {any} */ descriptor)=>createTexture(descriptor, gpu.device.createTexture)
-            : gpu.device.createTexture,
-        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
-    }), S_OK);
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [D3D_FEATURE_LEVEL.LEVEL_11_0], out,
+        { ...deviceRooms(), backend,
+            createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+            createTexture: createTexture
+                ? (/** @type {any} */ descriptor)=>createTexture(descriptor, gpu.device.createTexture)
+                : gpu.device.createTexture,
+            divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        }), S_OK);
     return { gpu, divergences, device: out.device, context: out.context };
 }
 

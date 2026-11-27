@@ -22,6 +22,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
@@ -258,7 +259,7 @@ function seamed(
                 {
                     return null;
                 }
-                const root = createDirect3D8(caps);
+                const root = createDirect3D8({ ...deviceRooms(), ...caps });
                 roots.push(root);
                 return root;
             },

@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DLOCK, D3DPT } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -36,8 +37,7 @@ function harness(){
     });
     const ram = new Uint8Array(RAM_SIZE);
     let next = RAM_BASE;
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{

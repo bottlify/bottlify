@@ -27,6 +27,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { roomy } from '../cache/testing.fixture.js';
 import { graphicsModule } from './module.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { createGdiFunctions } from '../win32/gdi32/functions.js';
@@ -87,6 +88,10 @@ async function assemble(){
                         ram.subarray(address, address + length),
                     readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
                 };
+            }
+            if (name === 'cache')
+            {
+                return roomy.api;
             }
             if (name === 'win32')
             {

@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D10Seam } from './d3d10.js';
@@ -128,10 +129,10 @@ function seamed(options = {}){
             const guest = { allocate, free: ()=>{}, readMemory: memory.readBytes,
                 writeMemory: memory.writeBytes };
             return options.elsewhere
-                ? recordedDirect3D10(createDirect3D10, { factoryOptions, guest },
-                    playedAtOnce(playedDirect3D10(createDirect3D10, { ...drawing,
+                ? recordedDirect3D10(createDirect3D10, { ...deviceRooms(), factoryOptions, guest },
+                    playedAtOnce(playedDirect3D10(createDirect3D10, { ...deviceRooms(), ...drawing,
                         writeMemory: memory.writeBytes })))
-                : createDirect3D10({ ...drawing, guest });
+                : createDirect3D10({ ...deviceRooms(), ...drawing, guest });
         },
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         sharedHandles: options.sharedHandles,

@@ -862,9 +862,9 @@ test('a process\'s windows over its GPU frame that has the screen are laid over 
 
 test('gate: a surface converted in a room of the run\'s cache, in a dirty one and in bytes of '
     + 'its own reaches the queue as the same bytes, frame after frame', async()=>{
-    // A small cache: a picture past its segment is converted in plain memory.
-    const cache = await testCache({ budget: 1 << 14, segmentBytes: 1 << 13 });
-    const held = createScratches(cache.space('scratch').hold ?? null);
+    // A small cache, whose blocks a larger picture's room outgrows and is held anew in.
+    const cache = await testCache({ budget: 1 << 16, segmentBytes: 1 << 15 });
+    const held = createScratches(cache.space('scratch').hold);
     const dirty = createScratches((_key, length)=>({
         bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} }));
     let seed = 0xfeed;
@@ -918,7 +918,6 @@ test('gate: a surface converted in a room of the run\'s cache, in a dirty one an
         }
     }
     const figures = held.figures();
-    assert.ok(figures.grows - figures.plainGrows > 0, 'rooms held in the run\'s cache');
-    assert.ok(figures.plainGrows > 0, 'and rooms that had none there');
+    assert.ok(figures.grows > 0 && figures.refused === 0, 'rooms held in the run\'s cache');
     assert.ok(figures.grows < 20, `grown a few times, not a frame (${figures.grows})`);
 });

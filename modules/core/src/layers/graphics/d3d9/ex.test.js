@@ -11,6 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRS,
     D3DSWAPEFFECT, D3DUSAGE, D3D_OK, S_PRESENT_OCCLUDED,
@@ -20,7 +21,7 @@ import { createDirect3D9 } from './device.js';
 
 /** @param {boolean} extended @param {object} [parameters] */
 function make(extended, parameters = {}){
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({
@@ -238,7 +239,7 @@ test('an Ex device takes FLIPEX and up to thirty back buffers', ()=>{
     {
         /** @type {{ device?: any }} */
         const out = {};
-        assert.equal(createDirect3D9().CreateDevice({
+        assert.equal(createDirect3D9(deviceRooms()).CreateDevice({
             swapEffect: Number(swapEffect), backBufferCount: Number(backBufferCount),
             backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8,
         }, out, 0, {}, Boolean(extended)), hr, `${swapEffect} x${backBufferCount} ${extended}`);

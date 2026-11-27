@@ -9,9 +9,11 @@
  * (`d3d8/render.js` `uploadTexels`, `internal/texel-store.js`): seeded
  * programs of textures made in several formats, written whole and in part
  * while a frame that already samples them is being recorded, and drawn, run
- * with the run's cache under the store and without one: the names a root in
- * the graphics worker holds (`channelSpace`) and those a root drawn on the
- * run's own thread holds (`ownedSpace`). The device must be given the same
+ * with the run's cache under the store - the names a root in the graphics
+ * worker holds (`channelSpace`) and those a root drawn on the run's own thread
+ * holds (`ownedSpace`) - and with none, every body kept as it was handed over
+ * (the store's own state before its room is granted), the reference. The device must be given the
+ * same
  * calls with the same bytes, and the cache must hold nothing once the frames
  * are let go of. On the run's thread the frames' uniform arenas are held in
  * the cache too (`createUniformArena`), their blocks among the bytes compared.
@@ -28,6 +30,7 @@ import { FVF } from '../webgpu/internal/vertexformat.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { createScratches } from '../../cache/scratch.js';
 import { channelSpace, ownedSpace } from '../../cache/module.js';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 
 const RAM_BASE = 0x40000000;
 const ok = (/** @type {number} */ value)=>assert.equal(value, D3D_OK);
@@ -61,8 +64,9 @@ const callText = call=>JSON.stringify({ op: call.op, size: call.size, layout: ca
  * One run of a seeded program: the calls the device was given, the store's
  * figures, and what the cache held under the root's names at the end.
  *
- * @param {number} seed @param {'plain' | 'worker' | 'thread'} where  the texels' store:
- *     plain memory, or the run's cache from the graphics worker or from the run's thread
+ * @param {number} seed @param {'handed' | 'worker' | 'thread'} where  the texels' store:
+ *     the bodies as handed over, or the run's cache from the graphics worker or from the
+ *     run's thread
  * @param {{ mutate?: boolean }} [options]  `mutate`: the cache's read of a body is wrong
  *     in its first byte, which the gate must see
  */
@@ -71,7 +75,7 @@ async function run(seed, where, { mutate = false } = {}){
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
-    const runCache = where === 'plain' ? null : await openRunCache({ budget: 64 << 20 });
+    const runCache = where === 'handed' ? null : await openRunCache({ budget: 64 << 20 });
     /** @type {ReturnType<typeof channelSpace> | ReturnType<typeof ownedSpace> | null} */
     let texels = null;
     if (runCache && where === 'worker')
@@ -97,18 +101,19 @@ async function run(seed, where, { mutate = false } = {}){
         }, options);
     }
     const rooms = runCache && where === 'thread'
-        ? createScratches(ownedSpace(runCache.reader, runCache.own('rooms')).space.hold ?? null)
+        ? createScratches(ownedSpace(runCache.reader, runCache.own('rooms')).space.hold)
         : null;
     const ram = new Uint8Array(8 << 20);
     let free = RAM_BASE + (1 << 20);
     /** @type {string[]} */
     const losses = [];
     const d3d = createDirect3D9({
+        ...deviceRooms(),
         backend,
         texelCache: texels,
-        // On the run's thread, the frames' uniform arenas held in the cache as well: a
+        // On the run's thread, the frames' uniform arenas held in its cache as well: a
         // hold across a channel waits on the keeper, which is this thread.
-        holds: rooms ? (name, length)=>rooms.hold(name, length) : undefined,
+        ...rooms ? { holds: (name, length)=>rooms.hold(name, length) } : {},
         divergence: (api, detail, severity)=>{
             if (severity === 'loss')
             {
@@ -270,14 +275,14 @@ async function run(seed, where, { mutate = false } = {}){
 }
 
 test('an upload that waits for its frame gives the device the same bytes from the run\'s cache '
-    + 'as from plain memory, and leaves nothing there', { timeout: 120_000 }, async()=>{
+    + 'as kept as handed, and leaves nothing there', { timeout: 120_000 }, async()=>{
     for (const where of /** @type {const} */ (['worker', 'thread']))
     {
         let moved = 0;
         let puts = 0;
         for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
         {
-            const plain = await run(seed, 'plain');
+            const plain = await run(seed, 'handed');
             const cached = await run(seed, where);
             const at = `${where}, seed ${seed}`;
             assert.deepEqual(plain.failures, [], at);
@@ -313,7 +318,7 @@ test('the gate sees a wrong read of the run\'s cache', { timeout: 120_000 }, asy
         let differed = 0;
         for (const seed of [1, 2, 3, 4])
         {
-            const plain = await run(seed, 'plain');
+            const plain = await run(seed, 'handed');
             const wrong = await run(seed, where, { mutate: true });
             differed += wrong.calls.some((call, at)=>call !== plain.calls[at]) ? 1 : 0;
         }

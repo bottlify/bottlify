@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK,
 } from './constants.js';
@@ -21,7 +22,7 @@ const EXTENT = 16;
  * @param {object} [caps]
  */
 function createDevice(caps = {}){
-    const d3d = createDirect3D9(caps);
+    const d3d = createDirect3D9({ ...deviceRooms(), ...caps });
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD }, out), D3D_OK);
@@ -240,7 +241,7 @@ const SWAP_CHAIN_CASES = [
 ];
 
 test('the swap effect and the back-buffer count are checked together', ()=>{
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
 
     for (const parameters of SWAP_CHAIN_CASES)
     {
@@ -262,7 +263,7 @@ test('the swap effect and the back-buffer count are checked together', ()=>{
 test('a present interval is DEFAULT or one the caps offer, and reads back as given', ()=>{
     // Wine's test_swapchain_parameters: intervals 0 to 9, IMMEDIATE and ONE
     // offered.
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     for (const [interval, expected] of /** @type {[number, number][]} */ ([
         [0, D3D_OK], [1, D3D_OK], [0x80000000, D3D_OK], [2, D3DERR_INVALIDCALL],
         [3, D3DERR_INVALIDCALL], [9, D3DERR_INVALIDCALL], [0x80000001, D3DERR_INVALIDCALL],
@@ -312,7 +313,7 @@ test('a lockable back buffer is never multisampled, and an unlockable one has no
 
 test('a full-screen device makes no additional swap chain, a windowed one does', ()=>{
     // Wine's test_swapchain.
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     for (const windowed of [false, true])
     {
         /** @type {{ device?: any }} */

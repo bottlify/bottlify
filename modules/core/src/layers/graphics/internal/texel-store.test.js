@@ -168,19 +168,24 @@ test('a body the cache cannot give back is a loss, said and counted, and reads a
         assert.ok(said.every(([severity])=>severity === 'loss'));
     });
 
-test('a body refused room stays in plain memory and reads as it was', async()=>{
-    const refusing = {
-        space: { look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
-            hold: ()=>null },
-        ask: async()=>false,
-        put: ()=>false,
-        forgo: ()=>{},
-    };
-    const store = createTexelStore({ cache: refusing });
-    const bytes = bytesOf(KEPT_FROM, 9);
-    store.put('a', bytes);
-    await until(()=>store.figures().refused === 1);
-    assert.equal(store.figures().refused, 1);
-    assert.equal(store.with('a', read=>read), bytes);
-    assert.equal(store.figures().plainBytes, KEPT_FROM);
-});
+test('a body refused room is a loss, said and counted, and reads as zeros: no copy kept',
+    async()=>{
+        const refusing = {
+            space: { look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
+                hold: ()=>null },
+            ask: async()=>false,
+            put: ()=>false,
+            forgo: ()=>{},
+        };
+        /** @type {string[]} */
+        const said = [];
+        const store = createTexelStore({ cache: refusing,
+            divergence: (_detail, severity)=>said.push(severity) });
+        store.put('a', bytesOf(KEPT_FROM, 9));
+        await until(()=>store.figures().refused === 1);
+        assert.deepEqual(store.with('a', read=>[read.length, read.some(byte=>byte !== 0)]),
+            [KEPT_FROM, false]);
+        assert.deepEqual(store.figures().lost, 1);
+        assert.equal(store.figures().plainBytes, 0, 'nothing kept in this heap');
+        assert.deepEqual(said, ['loss']);
+    });

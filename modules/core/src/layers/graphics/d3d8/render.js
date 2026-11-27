@@ -74,7 +74,6 @@ import {
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 import { bitsFloat, fromHalf, toHalf } from '../../../system/floats.js';
 import { toBase64 } from '../../../system/base64.js';
-import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
@@ -1515,10 +1514,6 @@ function stageConstantsOf(model){
     return floats;
 }
 
-/** Memory for an object's life where no cache is given: plain, under the same contract. */
-const plainHold = (/** @type {string} */ name, /** @type {number} */ length)=>
-    plainScratches.hold(name, length);
-
 /** The last arena serial handed out (`createUniformArena`). */
 let arenaSerials = 0;
 
@@ -1533,17 +1528,15 @@ let arenaSerials = 0;
  * old until its next `reset`, because the draws recorded so far keep their
  * views of it until their frame replays - a scratch, which lets go of its old
  * room as it grows, would hand the next blocks the bytes those views read.
- * Plain memory under the same contract without a hold.
  *
- * @param {number} [floats]
- * @param {(name: string, length: number) => import('../../cache/scratch.js').Held} [hold]
+ * @param {number} floats
+ * @param {(name: string, length: number) => import('../../cache/scratch.js').Held} hold
  */
-export function createUniformArena(floats = 1 << 16, hold = plainHold){
+export function createUniformArena(floats, hold){
     /** @param {number} count */
     const generation = count=>{
         const held = hold('d3d/uniforms', count * 4);
-        // A hold starts on a block of the cache, or is an array of its own:
-        // aligned for floats either way.
+        // A hold starts on a block of the cache: aligned for floats.
         return { held, floats: new Float32Array(held.bytes.buffer, held.bytes.byteOffset, count) };
     };
     let current = generation(floats);
@@ -3354,15 +3347,14 @@ const CLEAR_STRIDE = 20;
  *     default) or taken again for every draw: the gate's second path.
  * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]
  *     The root's names in the run's cache (`channelSpace`), where the texels of an
- *     upload that waits for its frame's replay are kept (`uploadTexels`); none keeps
- *     them in plain memory.
+ *     upload that waits for its frame's replay are kept (`uploadTexels`); none only
+ *     where the run's cache is none.
  * @property {(name: string) => import('../../cache/scratch.js').Scratch} [scratches]
  *     Memory the renderer keeps between calls, held in the run's cache: where a level
- *     going to the queue at once is decoded, widened or taken out tight. Plain memory
- *     if absent.
+ *     going to the queue at once is decoded, widened or taken out tight. Required.
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *     Memory the renderer keeps for an object's life, held in the run's cache: its frames'
- *     uniform arenas (`createUniformArena`). Plain memory if absent.
+ *     uniform arenas (`createUniformArena`). Required.
  */
 
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
@@ -3483,7 +3475,13 @@ export function createRenderer(options){
      * program writes every frame costs no room a frame; an upload that waits
      * in its frame's order, or that a dump keeps, makes bytes of its own.
      */
-    const scratchOf = options.scratches ?? (name=>plainScratches.scratch(name));
+    const { scratches: scratchOf, holds } = options;
+    if (!scratchOf || !holds)
+    {
+        // A device's options say none where the device draws nothing; one
+        // that draws is handed the run's.
+        throw new TypeError('a renderer is handed its scratches and holds in the run\'s cache');
+    }
     const rooms = { rows: scratchOf('d3d/rows'), widened: scratchOf('d3d/widened'),
         decoded: scratchOf('d3d/decoded') };
     /** The key of the next upload kept in the store: each upload its own. */
@@ -6214,9 +6212,8 @@ export function createRenderer(options){
     const arenas = [];
     /** Every arena made, for their memory to go with the device. @type {any[]} */
     const madeArenas = [];
-    const holdOf = options.holds ?? plainHold;
     const madeArena = ()=>{
-        const arena = Object.assign(createUniformArena(undefined, holdOf),
+        const arena = Object.assign(createUniformArena(1 << 16, holds),
             { draws: /** @type {any[]} */ ([]) });
         madeArenas.push(arena);
         return arena;

@@ -12,6 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3D10_1_SDK_VERSION, D3D10_BIND, D3D10_BLEND, D3D10_BLEND_OP, D3D10_COLOR_WRITE_ENABLE,
     D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, D3D10_USAGE, D3D_FEATURE_LEVEL, DXGI_ERROR_INVALID_CALL,
@@ -29,7 +30,7 @@ function createDevice1(level = LEVEL.LEVEL_10_0){
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(D3D10CreateDevice1(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, level,
-        D3D10_1_SDK_VERSION, out), S_OK);
+        D3D10_1_SDK_VERSION, out, deviceRooms()), S_OK);
     return out.device;
 }
 
@@ -48,21 +49,21 @@ test('the 10.1 entry point makes a device at 10.0 and says so for every other le
     for (const level of [LEVEL.LEVEL_10_1, LEVEL.LEVEL_9_3, LEVEL.LEVEL_9_2, LEVEL.LEVEL_9_1])
     {
         assert.equal(D3D10CreateDevice1(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, level,
-            D3D10_1_SDK_VERSION, out), DXGI_ERROR_UNSUPPORTED, `level ${level}`);
+            D3D10_1_SDK_VERSION, out, deviceRooms()), DXGI_ERROR_UNSUPPORTED, `level ${level}`);
         assert.equal(out.device, null);
     }
     assert.equal(D3D10CreateDevice1(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, 0,
-        D3D10_1_SDK_VERSION, out), E_INVALIDARG, 'no level at all');
+        D3D10_1_SDK_VERSION, out, deviceRooms()), E_INVALIDARG, 'no level at all');
     assert.equal(D3D10CreateDevice1(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, LEVEL.LEVEL_10_0,
-        D3D10_SDK_VERSION, out), E_INVALIDARG, '10.0\'s SDK version');
+        D3D10_SDK_VERSION, out, deviceRooms()), E_INVALIDARG, '10.0\'s SDK version');
     assert.equal(D3D10CreateDevice1(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, LEVEL.LEVEL_10_0,
-        D3D10_1_SDK_VERSION, null), E_INVALIDARG, 'no device pointer');
+        D3D10_1_SDK_VERSION, null, deviceRooms()), E_INVALIDARG, 'no device pointer');
 
     // A device from the 10.0 entry point is the same device.
     /** @type {{ device?: any }} */
     const old = {};
     assert.equal(D3D10CreateDevice(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0, D3D10_SDK_VERSION,
-        old), S_OK);
+        old, deviceRooms()), S_OK);
     assert.ok(old.device.supports(IID.ID3D10Device1));
     assert.equal(old.device.GetFeatureLevel(), LEVEL.LEVEL_10_0);
     old.device.release();
@@ -74,7 +75,7 @@ test('the 10.1 device-and-swap-chain entry point needs a device pointer', ()=>{
         /** @type {number} */ level = LEVEL.LEVEL_10_0,
         swapChainDesc = /** @type {any} */ (desc))=>D3D10CreateDeviceAndSwapChain1(null,
         D3D10_DRIVER_TYPE.HARDWARE, null, 0, level, D3D10_1_SDK_VERSION, swapChainDesc, chain,
-        device);
+        device, deviceRooms());
 
     /** @type {{ swapChain?: any }} */
     const chain = {};

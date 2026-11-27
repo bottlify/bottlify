@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createHash } from 'node:crypto';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -151,7 +152,7 @@ export const random = (/** @type {number} */ seed)=>{
 export const D3D9 = {
     library: 'D3D9.dll',
     entry: 'Direct3DCreate9',
-    root: caps=>createDirect3D9(caps),
+    root: caps=>createDirect3D9({ ...deviceRooms(), ...caps }),
     rootSlots: IDIRECT3D9_SLOTS,
     // D3DPRESENT_PARAMETERS: 64 by 64, one back buffer, DISCARD, windowed, a D24S8 depth surface.
     presentParameters: [64, 64, D3DFMT_X8R8G8B8, 1, 0, 0, 1, HWND, 1, 1, D3DFMT_D24S8, 0, 0, 0],
@@ -219,7 +220,7 @@ export const D3D9 = {
 export const D3D8 = {
     library: 'D3D8.dll',
     entry: 'Direct3DCreate8',
-    root: caps=>createDirect3D8(caps),
+    root: caps=>createDirect3D8({ ...deviceRooms(), ...caps }),
     rootSlots: IDIRECT3D8_SLOTS,
     presentParameters: [64, 64, D3DFMT_X8R8G8B8, 1, 0, 1, HWND, 1, 1, D3DFMT_D24S8, 0, 0, 0],
     slots: {
@@ -428,7 +429,8 @@ export function machine(version, guestCode, options = {}){
                 // twin plays what it recorded and draws.
                 const root = options.worker
                     ? recordedDirect3D(version.root, services, playedAtOnce(playedDirect3D(
-                        version.root, { ...options.caps, ...drawing, readMemory: true,
+                        version.root, { ...deviceRooms(), ...options.caps, ...drawing,
+                            readMemory: true,
                             writeMemory: writeBytes })))
                     : version.root({ ...services, ...drawing });
                 const make = root.CreateDevice;

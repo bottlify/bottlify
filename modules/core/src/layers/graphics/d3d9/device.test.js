@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import v8 from 'node:v8';
 import vm from 'node:vm';
 import {
@@ -26,7 +27,8 @@ const MAX_POINT_SIZE = 256.0;
  * @param {{ caps?: object, parameters?: object }} [options]
  */
 function createDevice(options = {}){
-    const d3d = createDirect3D9({ maxPointSize: MAX_POINT_SIZE, ...options.caps });
+    const d3d = createDirect3D9({ ...deviceRooms(), maxPointSize: MAX_POINT_SIZE,
+        ...options.caps });
     /** @type {{ device?: any }} */
     const out = {};
     const parameters = {
@@ -570,7 +572,7 @@ test('a fresh device has a white material, not a black one', ()=>{
 });
 
 test('sRGB reads and writes are offered for the eight-bit and DXT formats alone', ()=>{
-    const d3d = createDirect3D9({});
+    const d3d = createDirect3D9(deviceRooms());
     const SRGBREAD = 0x00010000;
     const SRGBWRITE = 0x00040000;
     assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
@@ -587,7 +589,7 @@ test('sRGB reads and writes are offered for the eight-bit and DXT formats alone'
 
 test('a compressed texture is created whatever compressedTextures says -- the flag only'
     + ' chooses how its bytes travel to the GPU, never whether the format exists', ()=>{
-    const d3d = createDirect3D9({});
+    const d3d = createDirect3D9(deviceRooms());
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
         'legal on every device of the era, whatever the flag');
     const device = createDevice();
@@ -615,7 +617,7 @@ test('a compressed texture is created when the backend can sample blocks too', (
 });
 
 test('nothing may be rendered into a compressed texture, whatever compressedTextures says', ()=>{
-    const d3d = createDirect3D9({});
+    const d3d = createDirect3D9(deviceRooms());
     assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
         D3DERR_NOTAVAILABLE, 'nothing draws into blocks, whatever the flag');
     const device = createDevice();
@@ -689,8 +691,7 @@ test('a buffer released to nothing while bound lives on until it is unbound', ()
     let next = 0x10000;
     /** @type {number[]} */
     const freed = [];
-    const d3d = createDirect3D9({
-        /** @param {number} bytes */
+    const d3d = createDirect3D9({ ...deviceRooms(), /** @param {number} bytes */
         allocate: bytes=>(next += bytes + 0x100) - bytes - 0x100,
         /** @param {number} address */
         free: address=>{
@@ -785,7 +786,7 @@ test('a state block moves the binding hold with the buffers it applies', ()=>{
 test('a signed bump-map format is a texture, sampled and never drawn into', ()=>{
     // Wine's d3d9 visual.c texbem_test assumes a ps_1_1 device makes V8U8
     // textures; the bump-map tests ask CheckDeviceFormat first.
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     const device = createDevice();
     for (const format of [D3DFMT.V8U8, D3DFMT.L6V5U5, D3DFMT.Q8W8V8U8])
     {
@@ -806,7 +807,7 @@ test('a signed bump-map format is a texture, sampled and never drawn into', ()=>
 test('a floating-point format is a render target a shadow map draws its depths into', ()=>{
     // A title that keeps its shadow depths in R16F or R32F asks for a render-target
     // texture of one, and takes its lesser shader path when it is told no.
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     const device = createDevice();
     for (const format of [D3DFMT.R16F, D3DFMT.R32F])
     {
@@ -842,7 +843,7 @@ test('an HDR format is a texture of every kind and a render target, filtered and
     // A shader-model-3 program renders its lighting into A16B16G16R16F, asks
     // CheckDeviceFormat whether it may filter and blend it, and takes its
     // no-HDR path at the first D3DERR_NOTAVAILABLE.
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     const device = createDevice();
     for (const { format, bytesPerPixel } of WIDE_FORMATS)
     {
@@ -895,7 +896,7 @@ test('an HDR format is a texture of every kind and a render target, filtered and
 });
 
 test('CheckDeviceFormat answers filtering and blending as the surface\'s GPU format does', ()=>{
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     // Sampled through a filter, and never drawn into: a bump map and a
     // compressed texture.
     for (const format of [D3DFMT.V8U8, D3DFMT.DXT1])
@@ -1011,7 +1012,7 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
 
         // An extended device's memory is virtual: nothing it makes is taken
         // off (Wine's d3d9ex test_vidmem_accounting).
-        const d3d = createDirect3D9({ maxPointSize: MAX_POINT_SIZE });
+        const d3d = createDirect3D9({ ...deviceRooms(), maxPointSize: MAX_POINT_SIZE });
         /** @type {{ device?: any }} */
         const ex = {};
         assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64,

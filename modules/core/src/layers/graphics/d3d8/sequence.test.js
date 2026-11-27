@@ -19,6 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DCLEAR, D3DCULL, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DPOOL, D3DPT, D3DRS,
     D3DSWAPEFFECT, D3DTS, D3DTSS, D3D_OK,
@@ -145,8 +146,7 @@ function scene(){
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);
-    const d3d = createDirect3D8({
-        backend,
+    const d3d = createDirect3D8({ ...deviceRooms(), backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         windowMemory: (address, length)=>ram.subarray(address - RAM_BASE,
             address - RAM_BASE + length),

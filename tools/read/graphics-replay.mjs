@@ -52,6 +52,8 @@ import { pathToFileURL } from 'node:url';
 import { Session } from 'node:inspector/promises';
 import { CAPTURE, captureRecords } from '../../modules/core/src/layers/graphics/remote/capture.js';
 import { FNV_OFFSET, FNV_PRIME } from '../../modules/core/src/system/hash.js';
+import { openRunCache } from '../../modules/core/src/process/run-cache.js';
+import { cacheSpace } from '../../modules/core/src/layers/cache/module.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
@@ -228,8 +230,12 @@ const play = async profiled=>{
     /** @type {any} */
     const scope = { postMessage: ()=>{}, onmessage: null };
     // Driven: each batch is played here, when it is put in, and timed so.
+    // A run's cache of this thread's, where the roots and the backend hold
+    // their memory as a run's graphics worker holds it in the run's.
+    const run = await openRunCache();
     const served = serveGraphics(scope, {
         driven: true,
+        hold: cacheSpace(run.reader, 'rooms').hold,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: { vendor: 'fake' },
             requestDevice: async()=>gpu.device }) },
         canvas: (/** @type {number} */ width, /** @type {number} */ height)=>

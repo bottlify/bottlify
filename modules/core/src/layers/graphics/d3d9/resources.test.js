@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import {
     D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, blockAligned,
     offsetOfRect, pitchedRows, surfaceBytes, surfacePitch, tightRows,
@@ -31,7 +32,7 @@ const SENTINEL_BITS = 0xdeadbeef;
 const SENTINEL_PITCH = 1;
 
 function createDevice(){
-    const d3d = createDirect3D9();
+    const d3d = createDirect3D9(deviceRooms());
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD }, out), D3D_OK);

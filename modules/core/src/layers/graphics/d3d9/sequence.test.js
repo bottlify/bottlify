@@ -20,6 +20,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import {
     D3DBLEND, D3DCLEAR, D3DCULL, D3DFMT_INDEX, D3DLIGHTTYPE, D3DPT, D3DRS, D3DTS,
@@ -167,8 +168,7 @@ function scene(){
         now: ()=>0 });
     const ram = new Uint8Array(4 << 20);
     let next = RAM_BASE + (2 << 20);
-    const d3d = createDirect3D9({
-        backend,
+    const d3d = createDirect3D9({ ...deviceRooms(), backend,
         vertexShaderVersion: { major: 2, minor: 0 },
         pixelShaderVersion: { major: 2, minor: 0 },
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),

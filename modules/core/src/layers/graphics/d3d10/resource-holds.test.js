@@ -8,9 +8,9 @@
  * The gate of a resource's bytes held in the run's cache (`render.js`
  * `backingOf`, `cache/scratch.js` `hold`): seeded random programs of
  * creates, maps, updates, copies and releases through a Direct3D 10 and a
- * Direct3D 11 device, made twice - every resource's bytes plain memory, and
- * held in a cache too small for all of them, whose blocks come back full of
- * what an earlier holder left there - and every call the GPU was handed and
+ * Direct3D 11 device, made twice - every resource's bytes held in a roomy
+ * cache, and in a cache whose blocks come back full of what an earlier
+ * holder left there - and every call the GPU was handed and
  * every byte the program read back compared. A renderer that read a byte of
  * its resource it never wrote, or took a view's offset in the cache's
  * segment for its offset in the resource, answers differently.
@@ -29,7 +29,7 @@ import { D3D10CreateDevice, D3D11CreateDevice } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createScratches, roomFor } from '../../cache/scratch.js';
-import { testCache } from '../../cache/testing.fixture.js';
+import { deviceRooms, testCache } from '../../cache/testing.fixture.js';
 
 /** @param {number} seed */
 const random = seed=>{
@@ -101,7 +101,7 @@ function deviceOf(api, holds, guest){
         backend,
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
         createTexture: gpu.device.createTexture,
-        ...(holds ? { holds } : {}),
+        holds: holds ?? deviceRooms().holds,
         ...(guest ? { guest } : {}),
     };
     if (api === 'd3d10')
@@ -335,7 +335,7 @@ async function usedCache(made){
     const space = cache.space('scratch');
     /** @type {import('../../cache/scratch.js').Hold} */
     const hold = (key, length)=>{
-        const got = space.hold?.(key, length) ?? null;
+        const got = space.hold(key, length);
         got?.bytes.fill(0xcd);
         return got;
     };
@@ -344,34 +344,24 @@ async function usedCache(made){
 
 const SEEDS = Array.from({ length: 24 }, (_, n)=>0x5eed0 + n * 7919);
 
-test('a resource\'s bytes held in the run\'s cache answer every program as plain memory does, '
+test('a resource\'s bytes held in a used cache answer every program as in a roomy one does, '
     + 'Direct3D 10 and 11 alike', { timeout: 300_000 }, async()=>{
     let held = 0;
-    let plain = 0;
     for (const seed of SEEDS)
     {
         const api = seed % 2 === 0 ? 'd3d10' : 'd3d11';
         const alone = await play(seed, api, undefined);
-        // Small enough that some resources find no room and are plain memory.
-        const { hold } = await usedCache({ budget: 256 << 10, segmentBytes: 128 << 10 });
+        const { hold } = await usedCache({ budget: 64 << 20, segmentBytes: 16 << 20 });
         const scratches = createScratches(hold);
         const inCache = await play(seed, api, (name, length)=>{
-            const got = scratches.hold(name, length);
-            if (got.bytes.buffer instanceof SharedArrayBuffer)
-            {
-                held++;
-            }
-            else
-            {
-                plain++;
-            }
-            return got;
+            held++;
+            return scratches.hold(name, length);
         });
         assert.equal(inCache.said, alone.said, `seed ${seed} (${api}): what the program read`);
         assert.equal(inCache.calls, alone.calls, `seed ${seed} (${api}): what the GPU was handed`);
+        assert.equal(scratches.figures().refused, 0, `seed ${seed}: every resource held`);
     }
     assert.ok(held > 50, `resources held in the cache (${held})`);
-    assert.ok(plain > 0, `and resources that found no room there (${plain})`);
 });
 
 test('the gate fails a hold that hands over what the block held before, or one room for two '
@@ -383,7 +373,9 @@ test('the gate fails a hold that hands over what the block held before, or one r
         mutants['not zeroed'] = (name, length)=>{
             const got = hold(name, roomFor(length));
             return got ? { bytes: got.bytes.subarray(0, length), release: got.release }
-                : { bytes: new Uint8Array(length), release: ()=>{} };
+                : (()=>{
+                    throw new Error('no room');
+                })();
         };
     }
     {
@@ -414,7 +406,7 @@ test('a resource\'s held bytes go back to the cache once nothing can reach it, a
     setFlagsFromString('--expose-gc');
     const collect = /** @type {() => void} */ (runInNewContext('gc'));
     const cache = await testCache();
-    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const scratches = createScratches(cache.space('scratch').hold);
     const holds = (/** @type {string} */ name, /** @type {number} */ length)=>
         scratches.hold(name, length);
     await (async()=>{

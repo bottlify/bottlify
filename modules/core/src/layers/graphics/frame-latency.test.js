@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { roomy } from '../cache/testing.fixture.js';
 import { graphicsModule } from './module.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { D3DFMT, D3D_OK } from './d3d9/constants.js';
@@ -37,6 +38,7 @@ function hostWith(){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
+        cache: roomy.api,
         // A log with nowhere to publish: the layer's figures are another test's.
         log: {},
     };

@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { playedDirect3D7, recordedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10, recordedDirect3D10 } from './d3d10.js';
@@ -143,9 +144,10 @@ const direct3DRounds = version=>{
     const factory = version === 9 ? createDirect3D9 : createDirect3D8;
     const memory = freshMemory(0x40000000);
     const { backend } = gpuServices();
-    const played = answering(playedDirect3D(factory, { backend, createSampler, readMemory: true,
+    const played = answering(playedDirect3D(factory, { ...deviceRooms(), backend, createSampler,
+        readMemory: true,
         writeMemory: memory.writeMemory }));
-    const d3d = recordedDirect3D(factory, { readMemory: memory.readMemory,
+    const d3d = recordedDirect3D(factory, { ...deviceRooms(), readMemory: memory.readMemory,
         windowMemory: memory.windowMemory, writeMemory: memory.writeMemory,
         allocate: memory.allocate, free: memory.free }, playedAtOnce(played));
     /** @type {{ device?: any }} */
@@ -220,8 +222,8 @@ test('Direct3D 7: the mirror lets go of the pixels of surfaces DirectDraw gave b
     const { backend } = gpuServices();
     const services = { backend, createSampler, readMemory: memory.readMemory,
         writeMemory: memory.writeMemory, presenter: { claim: ()=>{}, release: ()=>{} } };
-    const played = answering(playedDirect3D7(services));
-    const d3d = recordedDirect3D7(ddraw, services, playedAtOnce(/** @type {any} */ (played)));
+    const played = answering(playedDirect3D7({ ...deviceRooms(), ...services }));
+    const d3d = recordedDirect3D7(ddraw, { ...deviceRooms(), ...services }, playedAtOnce(/** @type {any} */ (played)));
     /** @param {any} request */
     const surface = request=>{
         const result = ddraw.createSurface(request);
@@ -270,9 +272,10 @@ test('Direct3D 10: the mirror lets go of the storage of buffers the device let g
     const storage = { allocate: memory.allocate, free: memory.free,
         readMemory: memory.readMemory, writeMemory: memory.writeMemory };
     const { gpu, backend } = gpuServices();
-    const played = answering(playedDirect3D10(createDirect3D10, { backend, createSampler,
+    const played = answering(playedDirect3D10(createDirect3D10, { ...deviceRooms(), backend,
+        createSampler,
         createTexture: gpu.device.createTexture, writeMemory: memory.writeMemory }));
-    const root = recordedDirect3D10(createDirect3D10, { guest: storage },
+    const root = recordedDirect3D10(createDirect3D10, { ...deviceRooms(), guest: storage },
         playedAtOnce(/** @type {any} */ (played)));
     const desc = defaultSwapChainDesc();
     desc.bufferDesc.width = 8;

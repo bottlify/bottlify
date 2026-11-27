@@ -20,6 +20,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
@@ -376,7 +377,7 @@ function gate(api, table){
 
 /** Direct3D 9: a HAL device with a D24S8 depth surface, as programs make one. */
 const device9 = (caps = {})=>{
-    const d3d = createDirect3D9(caps);
+    const d3d = createDirect3D9({ ...deviceRooms(), ...caps });
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({
@@ -389,7 +390,7 @@ const device9 = (caps = {})=>{
 
 /** Direct3D 8, the same. */
 const device8 = (caps = {})=>{
-    const d3d = createDirect3D8(caps);
+    const d3d = createDirect3D8({ ...deviceRooms(), ...caps });
     /** @type {{ device?: any }} */
     const out = {};
     assert.equal(d3d.CreateDevice({
@@ -1218,7 +1219,8 @@ const device7 = ()=>{
     const target = root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
         caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, width: 64, height: 64 });
     assert.equal(target.hr, D3D_OK);
-    const made = createDirect3D7(root).createDevice(DEVICE_IDS_7.HAL, target.surface);
+    const made = createDirect3D7(root, deviceRooms()).createDevice(DEVICE_IDS_7.HAL,
+        target.surface);
     assert.equal(made.hr, D3D_OK);
     roots7.set(made.device, root);
     return made.device;
@@ -1354,7 +1356,7 @@ const QUAD_INDICES = [...new Uint32Array(Uint16Array.from([0, 1, 2, 2, 1, 3]).bu
 
 /** A scene, and a buffer of four transformed vertices. */
 const buffer7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
-    const made7 = createDirect3D7(device7Root(device)).createVertexBuffer({ caps: 0,
+    const made7 = createDirect3D7(device7Root(device), deviceRooms()).createVertexBuffer({ caps: 0,
         fvf: FVF_TL, numVertices: 4 });
     assert.equal(made7.hr, D3D_OK);
     made.vb = made7.buffer;

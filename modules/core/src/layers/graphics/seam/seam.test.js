@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { deviceRooms } from '../../cache/testing.fixture.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
@@ -134,7 +135,7 @@ function seamed(){
     const box = machine();
     const graphics = {
         /** @param {string} name */
-        create: (/** @type {string} */ name)=>(name === 'd3d8' ? createDirect3D8() : null),
+        create: (/** @type {string} */ name)=>(name === 'd3d8' ? createDirect3D8(deviceRooms()) : null),
         available: ()=>false,
     };
     const libraries = createGraphicsLibraries({
@@ -201,7 +202,7 @@ test('Direct3DCreate9Ex hands its object back through a pointer, and says when t
             const { libraries } = createGraphicsLibraries({
                 graphics: {
                     create: (/** @type {string} */ name)=>(made && name === 'd3d9'
-                        ? createDirect3D9()
+                        ? createDirect3D9(deviceRooms())
                         : null),
                     available: ()=>false,
                 },
@@ -861,7 +862,7 @@ test('a Direct3D 8 Present is paced by the device presenting, not by the device 
             return hr;
         },
     });
-    const root = seam.publishRoot(createDirect3D8());
+    const root = seam.publishRoot(createDirect3D8(deviceRooms()));
     const fields = createFields(box.services);
     const COPY_VSYNC = 4;
     const DISCARD = 1;
