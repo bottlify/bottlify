@@ -673,7 +673,8 @@ export function createPageFileStore(pageFile){
             }
             else
             {
-                pieceFor(entry, index, within + span).set(bytes.subarray(done, done + span), within);
+                pieceFor(entry, index, within + span)
+                    .set(bytes.subarray(done, done + span), within);
                 pageFile.trim();
             }
             done += span;

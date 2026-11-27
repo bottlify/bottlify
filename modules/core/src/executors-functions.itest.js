@@ -112,7 +112,7 @@ test('a routine a thread made hot on one executor is taken from the run\'s cache
             // Each executor's runtime counts what it took; the process's counts
             // say nothing of another executor's.
             const executors = metrics.executors ?? [];
-            const hits = executors.reduce((sum, /** @type {any} */ one)=>sum
+            const hits = executors.reduce((/** @type {number} */ sum, /** @type {any} */ one)=>sum
                 + (one?.cork?.kept?.hits ?? 0), metrics.cork.kept.hits);
             assert.ok(hits > 0, `the run's cache: process ${JSON.stringify(metrics.cork.kept)}, `
                 + `executors ${JSON.stringify(executors.map((/** @type {any} */ one)=>one?.cork?.kept))}`);
