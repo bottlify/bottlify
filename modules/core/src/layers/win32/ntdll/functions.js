@@ -395,7 +395,7 @@ export function createNtdllFunctions(host){
     const lastStatusOffset = LAST_STATUS[host.pointerSize === 8 ? 8 : 4];
 
     /** @param {number} bytes */
-    const allocate = bytes=>kernel32.HeapAlloc.handler([processHeap, 0, bytes]) >>> 0;
+    const allocate = bytes=>wholeAddress(kernel32.HeapAlloc.handler([processHeap, 0, bytes]));
     /** @param {number} address */
     const free = address=>kernel32.HeapFree.handler([processHeap, 0, address]) !== 0;
 
@@ -605,8 +605,7 @@ export function createNtdllFunctions(host){
             : {}),
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
-            ? createLoaderFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate, free,
+            ? createLoaderFunctions({ guest: host.guest, kernel32, allocate, free,
                 notifications: host.dllNotifications, shutdown: host.processShutdown })
             : {}),
 

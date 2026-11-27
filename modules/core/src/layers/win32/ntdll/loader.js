@@ -39,8 +39,8 @@ const LDR_LOCK_RAISE_ON_ERRORS = 0x1;
 const LDR_LOCK_TRY_ONLY = 0x2;
 /** The disposition a lock that was taken reports. */
 const LDR_LOCK_ACQUIRED = 1;
-/** The longest path, in characters, a string read here is taken to be. */
-const MAX_PATH_CHARACTERS = 32767;
+/** The longest path, in bytes, a string read here is taken to be: 32767 characters. */
+const MAX_PATH_BYTES = 32767 * 2;
 
 /** What the loader opens a found file with, to ask a section of it. */
 const GENERIC_READ = 0x80000000;
@@ -69,8 +69,9 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
 
 /**
  * @typedef {Object} LoaderHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  The guest's memory at the
+ *     process's pointer width: a handle, an address and a counted string's
+ *     Buffer are a pointer wide.
  * @property {Record<string, { handler: Function }>} kernel32
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => boolean} free
@@ -91,39 +92,17 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
 export function createLoaderFunctions({
-    readMemory, writeMemory, kernel32, allocate, free, notifications, shutdown,
+    guest, kernel32, allocate, free, notifications, shutdown,
 })
 {
     /** How many times the loader lock was taken: each a cookie of its own. */
     let locks = 0;
-    /** @param {number} address */
-    const u32 = address=>new DataView(readMemory(address, 4).buffer.slice(0)).getUint32(0, true);
-    /** @param {number} address */
-    const u16 = address=>new DataView(readMemory(address, 2).buffer.slice(0)).getUint16(0, true);
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(address, bytes);
-    };
+    const { pointerSize } = guest;
     /**
-     * A NUL-terminated UTF-16 string, read up to the longest path there is.
-     *
-     * @param {number} address
+     * Where a UNICODE_STRING's or ANSI_STRING's Buffer is: after Length and
+     * MaximumLength, aligned to a pointer.
      */
-    const wideAt = address=>{
-        let text = '';
-        for (let at = address; text.length < MAX_PATH_CHARACTERS; at += 2)
-        {
-            const unit = u16(at);
-            if (unit === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(unit);
-        }
-        return text;
-    };
+    const BUFFER = pointerSize;
     /**
      * A string, terminated, as UTF-16 in a block of the process heap the
      * caller frees with RtlFreeHeap.
@@ -133,23 +112,26 @@ export function createLoaderFunctions({
     const heapWide = text=>{
         const bytes = utf16z(text);
         const at = allocate(bytes.length);
-        writeMemory(at, bytes);
+        guest.setBytes(at, bytes);
         return at;
     };
     /**
      * A counted string's bytes, terminated, in a block of the process heap the
-     * caller frees: what a kernel32 call taking a C string reads.
+     * caller frees: what a kernel32 call taking a C string reads. Read before
+     * the block is made, so a string that is not there faults with no block
+     * left behind.
      *
      * @param {number} counted @param {number} unit  2 for UNICODE_STRING, 1 for ANSI_STRING
      */
     const terminated = (counted, unit)=>{
-        const length = u16(counted);
+        const length = guest.u16(counted);
+        const bytes = length > 0 ? guest.bytes(guest.ptr(counted + BUFFER), length) : null;
         const at = allocate(length + unit);
-        writeMemory(at, new Uint8Array(length + unit));
-        if (length > 0)
+        if (bytes !== null)
         {
-            writeMemory(at, readMemory(u32(counted + 4), length));
+            guest.setBytes(at, bytes);
         }
+        guest.fill(at + length, 0, unit);
         return at;
     };
     /**
@@ -158,23 +140,23 @@ export function createLoaderFunctions({
      * @param {number} flags  GetModuleHandleEx's @param {number} name @param {number} out
      */
     const handleOf = (flags, name, out)=>{
-        if ((out >>> 0) === 0)
+        if (wholeAddress(out) === 0)
         {
             return STATUS.INVALID_PARAMETER;
         }
-        const scratch = allocate(4);
-        const text = (flags & GET_MODULE_HANDLE_EX_FROM_ADDRESS) !== 0 ? name
-            : terminated(name >>> 0, 2);
+        const byAddress = (flags & GET_MODULE_HANDLE_EX_FROM_ADDRESS) !== 0;
+        const text = byAddress ? name : terminated(wholeAddress(name), 2);
+        const scratch = allocate(pointerSize);
         try
         {
             const found = kernel32.GetModuleHandleExW.handler([flags, text, scratch]) !== 0;
-            setU32(wholeAddress(out), found ? u32(scratch) : 0);
+            guest.setPtr(wholeAddress(out), found ? guest.ptr(scratch) : 0);
             return found ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND;
         }
         finally
         {
             free(scratch);
-            if (text !== name)
+            if (!byAddress)
             {
                 free(text);
             }
@@ -204,13 +186,13 @@ export function createLoaderFunctions({
         {
             return null;
         }
-        const out = allocate(4);
+        const out = allocate(pointerSize);
         /** @param {number} status */
         const settle = status=>{
             const refused = (status >>> 0) !== STATUS.SUCCESS;
             if (!refused)
             {
-                close.handler([u32(out)]);
+                close.handler([guest.ptr(out)]);
             }
             free(out);
             close.handler([file]);
@@ -270,7 +252,7 @@ export function createLoaderFunctions({
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const scratch = allocate(4);
+                const scratch = allocate(pointerSize);
                 try
                 {
                     return handleOf(GET_MODULE_HANDLE_EX_FROM_ADDRESS
@@ -310,12 +292,13 @@ export function createLoaderFunctions({
                     return STATUS.INVALID_PARAMETER;
                 }
                 const counted = terminated(wholeAddress(name), 2);
-                const asked = wideAt(counted);
+                const asked = guest.wstr(counted, MAX_PATH_BYTES);
                 free(counted);
                 const fixed = /^([A-Za-z]:|[\\/]|\.\.?[\\/])/.test(asked);
                 /** Where it is looked for: as asked, or under each directory of the path. */
                 const places = (path & 1) !== 0 || wholeAddress(path) === 0 || fixed ? [asked]
-                    : wideAt(wholeAddress(path)).split(';').filter(directory=>directory !== '')
+                    : guest.wstr(wholeAddress(path), MAX_PATH_BYTES).split(';')
+                        .filter(directory=>directory !== '')
                         .map(directory=>`${directory.replace(/[\\/]+$/, '')}\\${asked}`);
                 /**
                  * @param {number} next
@@ -329,7 +312,7 @@ export function createLoaderFunctions({
                     const text = heapWide(places[next]);
                     /** @param {number} base */
                     const settle = base=>{
-                        const ended = (base >>> 0) === 0
+                        const ended = wholeAddress(base) === 0
                             ? ENDING_ERRORS.get(kernel32.GetLastError.handler([])) : undefined;
                         if (ended !== undefined)
                         {
@@ -338,7 +321,7 @@ export function createLoaderFunctions({
                             free(text);
                             return ended;
                         }
-                        if ((base >>> 0) === 0)
+                        if (wholeAddress(base) === 0)
                         {
                             const refused = refusalAt(text);
                             const then = (/** @type {number | null} */ status)=>{
@@ -348,7 +331,7 @@ export function createLoaderFunctions({
                             return refused instanceof Promise ? refused.then(then) : then(refused);
                         }
                         free(text);
-                        setU32(wholeAddress(out), base >>> 0);
+                        guest.setPtr(wholeAddress(out), wholeAddress(base));
                         return STATUS.SUCCESS;
                     };
                     const base = (path & 1) !== 0
@@ -378,9 +361,10 @@ export function createLoaderFunctions({
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const named = wholeAddress(module) === 0 ? '' : wideAt(wholeAddress(module));
-                setU32(wholeAddress(out), heapWide(search(named, flags >>> 0).join(';')));
-                setU32(wholeAddress(unknown), 0);
+                const named = wholeAddress(module) === 0 ? ''
+                    : guest.wstr(wholeAddress(module), MAX_PATH_BYTES);
+                guest.setPtr(wholeAddress(out), heapWide(search(named, flags >>> 0).join(';')));
+                guest.setPtr(wholeAddress(unknown), 0);
                 return STATUS.SUCCESS;
             },
         },
@@ -403,7 +387,7 @@ export function createLoaderFunctions({
                     {
                         return STATUS.INVALID_PARAMETER;
                     }
-                    setU32(wholeAddress(cookie), notifications.register(callback, context));
+                    guest.setPtr(wholeAddress(cookie), notifications.register(callback, context));
                     return STATUS.SUCCESS;
                 },
             },
@@ -414,7 +398,7 @@ export function createLoaderFunctions({
             LdrUnregisterDllNotification: {
                 argBytes: 4,
                 /** @param {number[]} args */
-                handler: ([cookie])=>(notifications.unregister(cookie)
+                handler: ([cookie])=>(notifications.unregister(wholeAddress(cookie))
                     ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
             },
         } : {},
@@ -454,7 +438,7 @@ export function createLoaderFunctions({
                         free(text);
                     }
                     const address = wholeAddress(found);
-                    setU32(wholeAddress(out), address);
+                    guest.setPtr(wholeAddress(out), address);
                     if (address !== 0)
                     {
                         return STATUS.SUCCESS;
@@ -490,11 +474,11 @@ export function createLoaderFunctions({
                 // refusal's included.
                 if (wholeAddress(disposition) !== 0)
                 {
-                    setU32(wholeAddress(disposition), 0);
+                    guest.set32(wholeAddress(disposition), 0);
                 }
                 if (wholeAddress(cookie) !== 0)
                 {
-                    setU32(wholeAddress(cookie), 0);
+                    guest.setPtr(wholeAddress(cookie), 0);
                 }
                 if (((flags >>> 0) & ~(LDR_LOCK_RAISE_ON_ERRORS | LDR_LOCK_TRY_ONLY)) !== 0)
                 {
@@ -510,9 +494,9 @@ export function createLoaderFunctions({
                 }
                 if (wholeAddress(disposition) !== 0)
                 {
-                    setU32(wholeAddress(disposition), LDR_LOCK_ACQUIRED);
+                    guest.set32(wholeAddress(disposition), LDR_LOCK_ACQUIRED);
                 }
-                setU32(wholeAddress(cookie), ++locks);
+                guest.setPtr(wholeAddress(cookie), ++locks);
                 return STATUS.SUCCESS;
             },
         },
@@ -526,7 +510,7 @@ export function createLoaderFunctions({
                 {
                     return STATUS_INVALID_PARAMETER_1;
                 }
-                return (cookie >>> 0) === 0 ? STATUS_INVALID_PARAMETER_2 : STATUS.SUCCESS;
+                return wholeAddress(cookie) === 0 ? STATUS_INVALID_PARAMETER_2 : STATUS.SUCCESS;
             },
         },
 
@@ -558,25 +542,22 @@ export function createLoaderFunctions({
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([directory])=>{
-                const room = u16(wholeAddress(directory) + 2) >>> 1;
+                const string = wholeAddress(directory);
+                const room = guest.u16(string + 2) >>> 1;
                 const needed = kernel32.GetDllDirectoryW.handler([0, 0]) >>> 0;
                 if (needed > room)
                 {
                     // Told the bytes it needs, its terminator counted, and
                     // left an empty string, as Windows answers.
-                    const length = needed * 2;
-                    writeMemory(wholeAddress(directory), Uint8Array.of(length & 0xff,
-                        length >>> 8 & 0xff));
+                    guest.set16(string, needed * 2);
                     if (room > 0)
                     {
-                        writeMemory(u32(wholeAddress(directory) + 4), new Uint8Array(2));
+                        guest.set16(guest.ptr(string + BUFFER), 0);
                     }
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                const length = (needed - 1) * 2;
-                writeMemory(wholeAddress(directory), Uint8Array.of(length & 0xff,
-                    length >>> 8 & 0xff));
-                kernel32.GetDllDirectoryW.handler([room, u32(wholeAddress(directory) + 4)]);
+                guest.set16(string, (needed - 1) * 2);
+                kernel32.GetDllDirectoryW.handler([room, guest.ptr(string + BUFFER)]);
                 return STATUS.SUCCESS;
             },
         },
