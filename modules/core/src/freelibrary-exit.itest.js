@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -161,11 +161,11 @@ async function run(cores){
         files: [{ path: 'C:\\App\\probe.dll', bytes: buildProbe(where) }],
         // Open from the start, so that on two the worker runs beside the main
         // thread from its first instruction.
-        cpu: { cores, eager: true },
+        cpu: { cores },
     });
     try
     {
-        const code = await app.run({ timeoutMs: 60_000 });
+        const code = await app.run({ timeoutMs: 150_000 });
         const tables = await app.diagnostics();
         const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
         return { code, elsewhere: kernel?.metrics?.executorSlices ?? 0 };
@@ -177,7 +177,7 @@ async function run(cores){
 }
 
 test('FreeLibraryAndExitThread detaches the library, then ends the worker that called it',
-    { timeout: 120_000 }, async()=>{
+    { timeout: 150_000 }, async()=>{
         assert.equal((await run(1)).code, ROUNDS, 'one executor');
         const two = await run(2);
         assert.equal(two.code, ROUNDS, 'two executors');

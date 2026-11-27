@@ -13,6 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CACHE_VERSION, moduleDigest, packRegion, unpackRegion } from './cache.js';
+import { relinkBatch } from './emit-built.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
@@ -119,3 +120,179 @@ test('a module a translator answers is stored under what its bytes hash to, pack
             await m.runtime.flush();
         }
     });
+
+/**
+ * A translator a test answers for: the batches posted to it, and the word it sends back.
+ * @returns {{ adapter: import('./translator.js').WorkerAdapter, batches: any[],
+ *     say: (data: any) => void, terminated: () => boolean }}
+ */
+function fakeTranslator(){
+    /** @type {(data: any) => void} */
+    let heard = ()=>{};
+    /** @type {any[]} */
+    const batches = [];
+    let terminated = false;
+    return {
+        batches,
+        say: data=>heard(data),
+        terminated: ()=>terminated,
+        adapter: {
+            post(message, transfer){
+                if (message.ready === true)
+                {
+                    setTimeout(()=>heard({ ready: true }), 0);
+                    return;
+                }
+                batches.push({ ...message, transfer });
+            },
+            onMessage(listener){ heard = listener; },
+            onLost(){},
+            terminate(){ terminated = true; },
+        },
+    };
+}
+
+/** @param {number} ms */
+const later = ms=>new Promise(resolve=>setTimeout(resolve, ms));
+
+test('a worker that says it goes on keeps its batch past the limit, and the answer is published',
+    async()=>{
+        // A worker short of a processor: its batch takes several limits' time, a word
+        // before each region. Given up by when the batch went, its work was thrown
+        // away and the next batch waited behind it, late in its turn - for ever.
+        const m = machine({ worker: true, translators: 0, inFlightMs: 150 });
+        const fake = fakeTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(fake.adapter);
+            m.write(0x2000, piece(1, 100, 3).code);
+            m.runtime.noteHot(0x2000, 0, 2);
+            while (fake.batches.length === 0)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const [{ id, relink, layout, features, options }] = fake.batches;
+            for (let n = 0; n < 12; n++)
+            {
+                fake.say({ id, alive: 0 });
+                await later(50);
+                await m.runtime.translatePending();
+            }
+            assert.equal(m.runtime.diagnostics().refused['worker: no answer'], undefined,
+                'six limits on, the batch is still its worker\'s');
+            assert.equal(fake.batches.length, 1, 'and nothing was sent behind it');
+            fake.say({ id, batch: relinkBatch(relink, layout, features, options), compiled: null });
+            await translateUntil(m, ()=>m.runtime.entryOf(0x2000) >= 0);
+            assert.ok(m.runtime.entryOf(0x2000) >= 0, 'published from the late answer');
+            assert.ok(!fake.terminated());
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
+
+test('a worker gone silent on a region loses its batch and goes; the region is not asked for again',
+    async()=>{
+        const m = machine({ worker: true, translators: 0, inFlightMs: 150 });
+        const fake = fakeTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(fake.adapter);
+            m.write(0x2000, piece(1, 100, 3).code);
+            m.write(0x3000, piece(2, 100, 3).code);
+            m.runtime.noteHot(0x2000, 0, 2);
+            while (fake.batches.length === 0)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const [{ id, relink }] = fake.batches;
+            fake.say({ id, alive: 0 });
+            // Nothing more from it: the limit, and the event loop round twice.
+            for (let n = 0; n < 12 && !fake.terminated(); n++)
+            {
+                await later(50);
+                await m.runtime.translatePending();
+            }
+            const d = /** @type {any} */ (m.runtime.diagnostics());
+            assert.equal(d.refused['worker: no answer'], 1);
+            assert.ok(fake.terminated(), 'the worker that answers no more is let go');
+            const why = Object.keys(d.refusedWhy).find(key=>key.startsWith('worker: no answer'));
+            assert.match(why ?? '', /a batch of 1 at 2000, silent at 2000/);
+            assert.equal(relink.jobs[0].entry, 0x2000);
+            // Its answer, should it come after all, is nobody's.
+            assert.ok(m.runtime.entryOf(0x2000) < 0);
+            // What is asked for next is emitted here: no translator is left.
+            m.runtime.noteHot(0x3000, 0, 2);
+            await translateUntil(m, ()=>m.runtime.entryOf(0x3000) >= 0);
+            assert.ok(m.runtime.entryOf(0x3000) >= 0, 'translation goes on without it');
+            m.runtime.noteHot(0x2000, 0, 64);
+            await m.runtime.translatePending();
+            await later(20);
+            await m.runtime.translatePending();
+            assert.ok(m.runtime.entryOf(0x2000) < 0, 'the region it stopped at stays out');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
+
+test('a relink hands a worker the pages where they lie when the memory is shared, and a copy'
+    + ' of each only when it is not', async()=>{
+    for (const shared of [true, false])
+    {
+        const m = machine({ worker: true, translators: 0, relinkAfter: 1, relinkQuiet: 0 },
+            { shared });
+        const fake = fakeTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(fake.adapter);
+            m.write(0x2000, piece(1, 100, 3).code);
+            m.runtime.noteHot(0x2000, 0, 2);
+            while (fake.batches.length === 0)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const [first] = fake.batches;
+            fake.say({ id: first.id, compiled: null,
+                batch: relinkBatch(first.relink, first.layout, first.features, first.options) });
+            // Its batch module, then the relink that forms it again on its own.
+            while (fake.batches.length === 1)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const asked = fake.batches[1];
+            assert.deepEqual(asked.relink.jobs.map((/** @type {any} */ job)=>job.entry), [0x2000]);
+            if (shared)
+            {
+                assert.equal(asked.relink.ram.buffer, m.memory.buffer,
+                    'the guest\'s memory itself, shared with the worker');
+                assert.equal(asked.relink.pages, undefined, 'and no page copied');
+                assert.deepEqual(asked.transfer, []);
+            }
+            else
+            {
+                assert.equal(asked.relink.ram, undefined);
+                assert.ok(asked.relink.pages.length > 0, 'a copy of each page');
+                assert.equal(asked.transfer.length, asked.relink.pages.length,
+                    'given over, not cloned');
+            }
+            const batch = relinkBatch(asked.relink, asked.layout, asked.features, asked.options);
+            assert.ok(batch.results.every(result=>result.ok), 'formed as the run formed it');
+            fake.say({ id: asked.id, batch, compiled: null });
+            await translateUntil(m, ()=>(m.runtime.diagnostics().relinked ?? 0) >= 1);
+            assert.equal(m.runtime.run(m.runtime.entryOf(0x2000), 1000).kind, 'halt',
+                `shared ${shared}: the relinked region runs`);
+            assert.equal(m.reg(1), 0, 'its loop counted down');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    }
+});

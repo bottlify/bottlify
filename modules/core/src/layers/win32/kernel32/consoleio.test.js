@@ -76,25 +76,38 @@ test('an ANSI write is read in the page the console reports, as WriteFile\'s is'
     assert.equal(fns.GetConsoleOutputCP.handler(), 1252);
 });
 
-test('reading reports end of input rather than blocking on a queue nothing fills', ()=>{
-    const { fns, bytes } = setup();
+test('console input is read as a process with no console reads it: an invalid handle', ()=>{
+    // A success with nothing read is what no console gives: Unity's crash
+    // handler reads its input in a loop until its bytes come, expecting the
+    // read to block, and spun on it for ever.
+    const { fns, bytes, errors } = setup();
     bytes.set([9, 0, 0, 0], 0x100);
+    assert.equal(fns.ReadConsoleA.handler([1, 0x200, 16, 0x100, 0]), 0);
+    assert.equal(dword(bytes, 0x100), 0, 'and nothing is said to be read');
+    assert.equal(errors.at(-1), 6);
 
-    assert.equal(fns.ReadConsoleA.handler([1, 0x200, 16, 0x100, 0]), 1);
-    assert.equal(dword(bytes, 0x100), 0);
-
-    assert.equal(fns.ReadConsoleInputA.handler([1, 0x200, 4, 0x104]), 1);
-    assert.equal(dword(bytes, 0x104), 0);
-    assert.equal(fns.PeekConsoleInputA.handler([1, 0x200, 4, 0x108]), 1);
-    assert.equal(dword(bytes, 0x108), 0);
+    for (const [name, at] of /** @type {const} */ ([['ReadConsoleW', 0x104],
+        ['ReadConsoleInputA', 0x108], ['ReadConsoleInputW', 0x10c], ['PeekConsoleInputA', 0x110]]))
+    {
+        bytes.set([9, 0, 0, 0], at);
+        errors.length = 0;
+        const handler = /** @type {any} */ (fns)[name].handler;
+        assert.equal(handler(name.startsWith('ReadConsole') && !name.includes('Input')
+            ? [1, 0x200, 4, at, 0] : [1, 0x200, 4, at]), 0, name);
+        assert.equal(dword(bytes, at), 0, `${name}: nothing read`);
+        assert.equal(errors.at(-1), 6, name);
+    }
 });
 
-test('the input queue is empty and says how empty', ()=>{
-    const { fns, bytes } = setup();
+test('the input queue is no console\'s to count or flush', ()=>{
+    const { fns: typed, bytes, errors } = setup();
+    const fns = /** @type {any} */ (typed);
     bytes.set([7, 0, 0, 0], 0x100);
-    assert.equal(fns.GetNumberOfConsoleInputEvents.handler([1, 0x100]), 1);
-    assert.equal(dword(bytes, 0x100), 0);
-    assert.equal(fns.GetNumberOfConsoleInputEvents.handler([1, 0]), 0);
+    assert.equal(fns.GetNumberOfConsoleInputEvents.handler([1, 0x100]), 0);
+    assert.equal(errors.at(-1), 6);
+    assert.equal(fns.FlushConsoleInputBuffer.argBytes, 4);
+    assert.equal(fns.FlushConsoleInputBuffer.handler([1]), 0);
+    assert.equal(errors.at(-1), 6);
 });
 
 test('a control handler is accepted, because none of what it waits for can happen', ()=>{
@@ -163,14 +176,6 @@ test('the screen buffer\'s calls and writing input are refused as for a handle t
         assert.equal(said.length, cases.length, 'each said once');
     });
 
-test('flushing the console input succeeds: the queue the reads find empty stays empty', ()=>{
-    const { fns: typed, errors } = setup();
-    const fns = /** @type {any} */ (typed);
-    assert.equal(fns.FlushConsoleInputBuffer.argBytes, 4);
-    assert.equal(fns.FlushConsoleInputBuffer.handler([3]), 1);
-    assert.deepEqual(errors, []);
-});
-
 test('a console title is a console\'s, and there is none to have one', ()=>{
     const { fns, errors } = setup();
     assert.equal(fns.SetConsoleTitleA.handler(), 0);
@@ -180,4 +185,13 @@ test('a console title is a console\'s, and there is none to have one', ()=>{
     assert.deepEqual(errors, [6, 6, 6, 6], 'ERROR_INVALID_HANDLE, as GetConsoleMode answers');
     assert.equal(fns.SetConsoleTitleA.argBytes, 4);
     assert.equal(fns.GetConsoleTitleA.argBytes, 8);
+});
+
+test('no console: no group to signal and no display mode', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.GenerateConsoleCtrlEvent.handler(), 0);
+    assert.equal(fns.GetConsoleDisplayMode.handler(), 0);
+    assert.deepEqual(errors, [6, 6]);
+    assert.equal(fns.GenerateConsoleCtrlEvent.argBytes, 8);
+    assert.equal(fns.GetConsoleDisplayMode.argBytes, 4);
 });

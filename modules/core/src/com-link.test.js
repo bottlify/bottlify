@@ -149,3 +149,61 @@ test('an RPC endpoint is claimed and found through the run\'s table, and a proce
     await server.side.gone();
     assert.equal(client.table.rpcServer('ncalrpc:again'), null);
 });
+
+test('a service a process across the link starts runs once for the run: in a worker the run'
+    + ' starts, or beside the process when the run has no room, and stopped once it ends',
+async()=>{
+    const table = createClassTable();
+    /** @type {(() => void)[]} */
+    const ends = [];
+    /** @type {string[]} */
+    const where = [];
+    const ending = (/** @type {string} */ place)=>{
+        where.push(place);
+        return { exited: new Promise(resolve=>{
+            ends.push(()=>resolve(0));
+        }) };
+    };
+    // The run starts it in a worker of its own.
+    const first = processOn(table, ()=>ending('worker'), { launch: ()=>ending('beside') });
+    const other = processOn(table, ()=>ending('worker'), { launch: ()=>ending('beside') });
+    const request = { command: 'C:\\svc.exe', service: 'Svc' };
+    assert.equal(first.table.startService(request, 'first'), 'started');
+    assert.equal(other.table.serviceRunning('svc'), true, 'every process sees it running');
+    assert.equal(other.table.startService(request, 'other'), 'running');
+    assert.deepEqual(where, ['worker']);
+    ends[0]();
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.equal(other.table.serviceRunning('Svc'), false, 'gone with its process');
+
+    // No room: beside the process that asked, the run told it stands.
+    const crowded = processOn(table, ()=>null, { launch: ()=>ending('beside') });
+    assert.equal(crowded.table.startService(request, 'crowded'), 'started');
+    assert.deepEqual(where, ['worker', 'beside']);
+    assert.equal(first.table.serviceRunning('Svc'), true);
+    assert.equal(first.table.startService(request, 'first'), 'running');
+    ends[1]();
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.equal(first.table.serviceRunning('Svc'), false);
+});
+
+test('a wait for a server the run no longer knows ends: one that ended already never registers',
+    async()=>{
+        const table = createClassTable();
+        const client = processOn(table);
+        assert.equal(await client.side.handlers.whenRegistered(CLSID, 42), false,
+            'an unknown number is a server that ended, not one to wait on for good');
+    });
+
+test('a call into a process whose link closed while it was delivered answers that the server'
+    + ' died', async()=>{
+    const table = createClassTable();
+    const side = comHandlers(table, {
+        call: ()=>Promise.reject(Object.assign(new Error('link: closed'), { closed: true })),
+    });
+    const id = side.handlers.attach();
+    const reply = await /** @type {any} */ (table.endpoint(id)).deliver({ kind: 'call' });
+    assert.equal(reply.hr, 0x80010007 | 0, 'RPC_E_SERVER_DIED');
+    assert.equal(reply.disconnected, true, 'and the proxy takes the server as gone');
+});

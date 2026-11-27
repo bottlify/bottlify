@@ -30,11 +30,16 @@
 import {
     GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
     writeGuid,
-} from './guid.js';
-import { HKEY_CLASSES_ROOT, REG_EXPAND_SZ } from '../advapi32/registry.js';
+} from '../../../system/guid.js';
+import { HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
+import { createPropertySetFunctions } from './propset.js';
+import { registerComponentCategories } from './comcat.js';
+import { createDataCaches } from './datacache.js';
+import { createDefaultHandlers } from './defhandler.js';
+import { createOleUtil } from './oleutil.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
 import { createProxyStubs } from './proxy-stubs.js';
@@ -43,10 +48,12 @@ import { createOle2Functions } from './ole2.js';
 import { createAdviseFunctions } from './advise.js';
 import { createClipboardFunctions } from './clipboard.js';
 import { parseCompoundFile } from './cfb.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import {
     OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
     SIGNATURE as OBJREF_SIGNATURE, decodeObjref, encodeCustomHeader, encodeObjref,
 } from './objref.js';
+import { utf16z } from '../common/utf16.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -57,8 +64,6 @@ const E_NOINTERFACE = 0x80004002;
 const CO_E_NOT_SUPPORTED = 0x80004021;
 /** Some of the interfaces CoCreateInstanceEx was asked for, not all. */
 const CO_S_NOTALLINTERFACES = 0x00080012;
-/** MULTI_QI: the interface asked for, the pointer found, and the answer. */
-const MULTI_QI_SIZE = 12;
 const E_POINTER = 0x80004003;
 const E_FAIL = 0x80004005;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -80,6 +85,7 @@ const RPC_S_CALLPENDING = 0x80010115 | 0;
 const CO_E_CANCEL_DISABLED = 0x80010140 | 0;
 const CO_E_CLASSSTRING = 0x800401f3;
 const CO_E_OBJNOTREG = 0x800401fb;
+const CO_E_OBJISREG = 0x800401fc;
 const CO_E_DLLNOTFOUND = 0x800401f8;
 const CO_E_ERRORINDLL = 0x800401f9;
 const DRAGDROP_E_NOTREGISTERED = 0x80040100;
@@ -148,6 +154,12 @@ const CLSID_CALL_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0002}';
 
 /** An apartment's context, and what it answers as. */
 const CLSID_OBJECT_CONTEXT = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0007}';
+/**
+ * The thread that runs the multithreaded apartment's incoming calls: an
+ * object of ours whose one method is that thread's procedure.
+ */
+const CLSID_APARTMENT_WORKER = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0036}';
+const IID_APARTMENT_WORKER = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0037}';
 const IID_ICONTEXT = '{000001C0-0000-0000-C000-000000000046}';
 const IID_IOBJCONTEXT = '{000001C6-0000-0000-C000-000000000046}';
 const IID_ICOMTHREADINGINFO = '{000001CE-0000-0000-C000-000000000046}';
@@ -203,6 +215,12 @@ const MSHLFLAGS_TABLEWEAK = 2;
 const SLOT_STREAM_READ = 3;
 const SLOT_STREAM_WRITE = 4;
 
+/**
+ * The room lent a guest method for a pointer it writes out: eight bytes, which
+ * holds one of either width.
+ */
+const OUT_SLOT = 8;
+
 /** A guest object's vtable slots this file calls: IUnknown's three, then IClassFactory's. */
 const SLOT_QUERY_INTERFACE = 0;
 const SLOT_ADD_REF = 1;
@@ -253,7 +271,10 @@ const MAX_PROGID = 255;
 
 /**
  * @typedef {Object} OleHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a vtable's slots and an
+ *     interface pointer written out are eight bytes.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} fillMemory
  *     Sets a range to one byte value in place, with no host buffer holding
@@ -261,6 +282,8 @@ const MAX_PROGID = 255;
  *     through writeMemory costs an allocation and two extra passes.
  * @property {() => any} currentThread  The record apartment state hangs on.
  * @property {OleHeap} heap             Where task memory comes from.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *     kernel32's global family, which an HGLOBAL a memory stream stands on is of.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where a class this build does not have is named. A program asking
  *           for one is asking for a component it shipped or expects installed,
@@ -288,11 +311,18 @@ const MAX_PROGID = 255;
  *           name it takes is a wide string. Absent, CoLoadLibrary answers 0.
  * @property {import('./storage.js').StorageFiles} [files]
  *           The volume, for a docfile. Absent, no storage opens.
- * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown) => Promise<number>}
+ *     [call]  An argument past 4 GiB a bigint, as the bridge takes a quadword.
+ * @property {() => number} [now]  the machine's wall clock in ms (the kernel's), which
+ *     the time stamps of the running object table read; the host's own clock where none is given
  *           A stdcall into guest code, for an object a program saves to a
  *           stream: its GetClassID and Save are the program's. The thread
  *           names whose call a second, awaited-after call answers.
  * @property {() => unknown} [callerThread]  Whose call is being handled.
+ * @property {<T>(thread: unknown, fn: () => T) => T} [answering]
+ *           Runs `fn` as the call of `thread`: one of this layer's handlers
+ *           called from another after an await reads its caller then, when the
+ *           processor may be running a different thread.
  * @property {(clsid: string, definition: import('./objects.js').ComClassDefinition)
  *           => import('./objects.js').ComObject} [makeObject]
  *           An object of our own that no CLSID produces: the class object
@@ -345,15 +375,16 @@ const MAX_PROGID = 255;
  *           The run's table of class objects served out of process, and what
  *           names this process to it. Absent, this process has a table of its
  *           own and can start no server.
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *         => number | Promise<number>,
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *         thread: unknown) => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
- *           A hidden window on the calling thread, for the calls another
+ *           A hidden window on the apartment's thread, for the calls another
  *           process or apartment makes on this apartment's objects.
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *           What a thread waiting on a call into another apartment runs
  *           meanwhile: the messages other threads sent it, and its paints.
- * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
+ * @property {(entry: number, args: (number | bigint)[], thread: unknown) => Promise<number>}
+ *     [guardedCall]
  *           A call into guest code inside a frame that takes what it raises:
  *           how a method runs for another process.
  * @property {{ allocate?: (bytes: Uint8Array) => number }} [strings]
@@ -385,7 +416,7 @@ const MAX_PROGID = 255;
  * @param {number} pointer @param {number} size
  */
 function reallocate(heap, memory, pointer, size){
-    const address = pointer >>> 0;
+    const address = wholeAddress(pointer);
     const wanted = size >>> 0;
     if (address === 0)
     {
@@ -417,6 +448,12 @@ function reallocate(heap, memory, pointer, size){
 
 /** IID_IMalloc, and the private class the task allocator is registered under. */
 const IID_IMALLOC = '{00000002-0000-0000-C000-000000000046}';
+const IID_IMALLOCSPY = '{0000001D-0000-0000-C000-000000000046}';
+const IID_IINITIALIZESPY = '{00000034-0000-0000-C000-000000000046}';
+/** Where a TEB keeps its thread's id: CLIENT_ID.UniqueThread. */
+const TEB_CLIENT_ID_THREAD = 0x24;
+/** The longest clipboard format name read back from user32, in characters. */
+const CLIPBOARD_NAME_UNITS = 256;
 const CLSID_TASK_ALLOCATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0001}';
 
 /** The one memory context CoGetMalloc accepts. */
@@ -518,8 +555,20 @@ export function createOleFunctions(host){
     };
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
+
+    const width = pointerWidth(host.pointerSize ?? 4);
+    /** An IStream::Seek's offset of zero, as the process's width passes it. */
+    const noOffset = width.quadword(0);
+    /**
+     * An interface pointer written out, whole: a 64-bit caller reads eight
+     * bytes, and a high half left as it was is no pointer.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointer = (address, value)=>host.writeMemory(wholeAddress(address),
+        width.bytes(value));
 
     /** @param {any} value @param {(answer: any) => any} then */
     const andThen = (value, then)=>(typeof value?.then === 'function'
@@ -530,7 +579,7 @@ export function createOleFunctions(host){
      * Calls a method of a guest object through its vtable: `this` first, as
      * a COM method takes it.
      *
-     * @param {number} object @param {number} slot @param {number[]} args
+     * @param {number} object @param {number} slot @param {(number | bigint)[]} args
      * @param {unknown} [thread]
      * @returns {Promise<number>}
      */
@@ -539,7 +588,7 @@ export function createOleFunctions(host){
         {
             return Promise.resolve(E_NOINTERFACE);
         }
-        const entry = readU32(readU32(object) + slot * 4);
+        const entry = readU32(readU32(object) + slot * width.size);
         return host.call(entry, [object >>> 0, ...args], thread);
     };
 
@@ -649,15 +698,16 @@ export function createOleFunctions(host){
      * @returns {Promise<number>}
      */
     const queryPointer = async(object, iid, thread)=>{
-        const block = host.heap.allocate(4 + GUID_SIZE);
+        const block = host.heap.allocate(OUT_SLOT + GUID_SIZE);
         const bytes = parseGuid(iid);
         if (block === 0 || !bytes)
         {
             return 0;
         }
         writeU32(block, 0);
-        host.writeMemory(block + 4, bytes);
-        const hr = (await callMethod(object, SLOT_QUERY_INTERFACE, [block + 4, block], thread)) | 0;
+        host.writeMemory(block + OUT_SLOT, bytes);
+        const hr = (await callMethod(object, SLOT_QUERY_INTERFACE, [block + OUT_SLOT, block],
+            thread)) | 0;
         const found = readU32(block);
         host.heap.free(block);
         return hr < 0 ? 0 : found;
@@ -679,7 +729,7 @@ export function createOleFunctions(host){
         outs.forEach((out, index)=>{
             if ((out >>> 0) !== 0)
             {
-                writeU32(out >>> 0, values[index]);
+                writeU32(wholeAddress(out), values[index]);
             }
         });
     };
@@ -721,6 +771,48 @@ export function createOleFunctions(host){
     let making = null;
     /** The classes of this layer's own objects, registered once each. @type {Set<string>} */
     const madeClasses = new Set();
+    /**
+     * A thread of this process running `body`. A thread procedure is a
+     * stdcall routine of one argument, which is what a method of an object
+     * of ours is with its object as that argument: CreateThread is given the
+     * method and the object, and the thread is the method's caller.
+     *
+     * @param {(thread: unknown) => Promise<void>} body
+     * @returns {boolean}
+     */
+    const startWorkerThread = body=>{
+        if (!host.vtables || !host.system)
+        {
+            return false;
+        }
+        const worker = makeHostObject(CLSID_APARTMENT_WORKER, {
+            owned: true,
+            interfaces: [{ id: IID_APARTMENT_WORKER, methods: [
+                { name: 'ThreadProc', argBytes: 4,
+                    invoke: ()=>body(host.callerThread?.()).then(()=>0) },
+            ] }],
+        });
+        const pointer = worker ? host.vtables.publish(worker, IID_APARTMENT_WORKER) >>> 0 : 0;
+        if (pointer === 0)
+        {
+            return false;
+        }
+        const procedure = readU32(readU32(pointer) + 3 * width.size);
+        const made = host.system('KERNEL32.dll', 'CreateThread', [0, 0, procedure, pointer, 0, 0]);
+        if (made === null)
+        {
+            return false;
+        }
+        andThen(made, (/** @type {number} */ handle)=>{
+            if ((handle >>> 0) !== 0)
+            {
+                host.system?.('KERNEL32.dll', 'CloseHandle', [handle]);
+            }
+            return handle;
+        });
+        return true;
+    };
+
     /**
      * One of this layer's own objects, its one count the caller's.
      *
@@ -764,7 +856,7 @@ export function createOleFunctions(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return S_OK;
     };
 
@@ -787,6 +879,7 @@ export function createOleFunctions(host){
         remoting = createRemoting({
             table: runTable,
             process: host.com?.process ?? null,
+            pointerSize: width.size,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             heap: host.heap,
@@ -794,6 +887,7 @@ export function createOleFunctions(host){
             guardedCall: host.guardedCall,
             callerThread,
             vtables: host.vtables,
+            worker: startWorkerThread,
             bstr: {
                 allocate: bytes=>host.strings?.allocate?.(bytes) ?? 0,
                 free: pointer=>bstr.free(pointer),
@@ -825,7 +919,7 @@ export function createOleFunctions(host){
         },
         release: (factory, thread)=>callMethod(factory, SLOT_RELEASE, [], thread),
         loadFactory: async(clsid, thread)=>{
-            const block = host.heap.allocate(GUID_SIZE * 2 + 4);
+            const block = host.heap.allocate(GUID_SIZE * 2 + OUT_SLOT);
             if (block === 0)
             {
                 return 0;
@@ -939,12 +1033,38 @@ export function createOleFunctions(host){
     };
 
     /**
-     * The command line that starts the class's local server, or null.
+     * What starts the class's local server, or null: its LocalServer32 (or
+     * LocalServer) command line, or else the service its AppID names as its
+     * LocalService, started by the manager on the service's own image path.
      *
      * @param {string} clsid
+     * @returns {string | { command: string, service: string } | null}
      */
     const localServer = clsid=>classKeyValue(clsid, 'LocalServer32')
-        ?? classKeyValue(clsid, 'LocalServer');
+        ?? classKeyValue(clsid, 'LocalServer') ?? localService(clsid);
+
+    /** A registry value as text, its terminator and what follows it left out. @param {any} value */
+    const textOfValue = value=>(value
+        ? String.fromCharCode(...value.data).replace(/\0[\s\S]*$/, '') : '');
+
+    /**
+     * The service a class's AppID names as its LocalService, and its image path.
+     *
+     * @param {string} clsid
+     * @returns {{ command: string, service: string } | null}
+     */
+    const localService = clsid=>{
+        const classes = host.hive?.root(HKEY_CLASSES_ROOT);
+        const key = classes ? host.hive?.open(classes, `CLSID\\${clsid}`) : null;
+        const appId = textOfValue(key ? host.hive?.getValue(key, 'AppID') : null);
+        const app = appId && classes ? host.hive?.open(classes, `AppID\\${appId}`) : null;
+        const service = textOfValue(app ? host.hive?.getValue(app, 'LocalService') : null);
+        const machine = host.hive?.root(HKEY_LOCAL_MACHINE);
+        const entry = service && machine ? host.hive?.open(machine,
+            `SYSTEM\\CurrentControlSet\\Services\\${service}`) : null;
+        const command = textOfValue(entry ? host.hive?.getValue(entry, 'ImagePath') : null);
+        return command ? { command, service } : null;
+    };
 
     /** The classes already said to be made in process rather than in a surrogate. */
     const toldSurrogate = new Set();
@@ -1104,18 +1224,30 @@ export function createOleFunctions(host){
      * @param {string} clsid @param {number} outer @param {string} iid @param {number} out
      */
     const createBuiltIn = (clsid, outer, iid, out)=>{
-        if ((outer >>> 0) !== 0)
+        // Aggregation: the object is made inside the controlling unknown and
+        // hands it its own IUnknown, the only interface that may be asked for
+        // (`objects.js` Aggregation). A class that cannot be made so says
+        // so, as the documentation has it.
+        const aggregation = (outer >>> 0) === 0 ? null : {
+            outer: outer >>> 0,
+            /** @param {number} slot @param {number[]} args */
+            call: (slot, args)=>callMethod(outer >>> 0, slot, args),
+        };
+        const object = aggregation
+            ? host.registry.createAggregated(clsid, aggregation) : host.registry.create(clsid);
+        if (object === false)
         {
-            // Aggregation makes the outer object's IUnknown the one this
-            // object answers with, and nothing here can do that. Saying
-            // so is the documented answer; succeeding would hand back an
-            // object whose identity is wrong.
             return CLASS_E_NOAGGREGATION;
         }
-        const object = host.registry.create(clsid);
         if (!object)
         {
             return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        if (aggregation && canonicalGuid(iid) !== IID_IUNKNOWN)
+        {
+            object.release();
+            writePointer(out, 0);
+            return E_NOINTERFACE;
         }
         const record = object.queryInterface(iid);
         if (!record)
@@ -1134,7 +1266,7 @@ export function createOleFunctions(host){
         // The creation reference goes; what the guest holds is the one
         // QueryInterface took, so the object comes back with exactly one.
         object.release();
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return S_OK;
     };
 
@@ -1165,14 +1297,7 @@ export function createOleFunctions(host){
 
     /** @param {number} address @param {string} text  Written with its terminator. */
     const writeOleString = (address, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            const unit = text.charCodeAt(index);
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = (unit >>> 8) & 0xff;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(text));
     };
 
     /**
@@ -1226,8 +1351,7 @@ export function createOleFunctions(host){
      * @param {number} mode
      * @returns {number} an HRESULT
      */
-    const enterApartment = mode=>{
-        const thread = host.currentThread();
+    const enterApartment = (mode, thread = host.currentThread())=>{
         const model = (mode & COINIT_APARTMENTTHREADED) !== 0 ? COINIT_APARTMENTTHREADED : 0;
         const apartment = thread.ole32;
         if (!apartment)
@@ -1258,8 +1382,7 @@ export function createOleFunctions(host){
         return S_FALSE;
     };
 
-    const leaveApartment = ()=>{
-        const thread = host.currentThread();
+    const leaveApartment = (thread = host.currentThread())=>{
         const apartment = thread.ole32;
         // Unbalanced on the other side: documented as something a
         // program must not do, and there is nothing to report it with.
@@ -1297,12 +1420,101 @@ export function createOleFunctions(host){
         return next(0);
     };
 
+    /** IInitializeSpy's methods after IUnknown's. */
+    const SPY_PRE_INITIALIZE = 3;
+    const SPY_POST_INITIALIZE = 4;
+    const SPY_PRE_UNINITIALIZE = 5;
+    const SPY_POST_UNINITIALIZE = 6;
+
+    /**
+     * The thread's initialize spies, by the low half of their cookies: a
+     * revoked one leaves its slot empty, and the next registration takes the
+     * lowest empty slot (compobj.c test_IInitializeSpy).
+     *
+     * @param {any} thread @returns {number[]}
+     */
+    const spiesOf = thread=>(thread.ole32Spies ??= []);
+
+    /** @param {any} thread */
+    const depthOf = thread=>thread.ole32?.depth ?? 0;
+
+    /**
+     * Each spy's method, one after another; a spy revoked by an earlier
+     * one's call is not called.
+     *
+     * @param {any} thread @param {number} slot @param {(spy: number) => number[]} args
+     * @param {(answer: number) => void} [answered]
+     */
+    const callSpies = async(thread, slot, args, answered)=>{
+        const caller = host.callerThread?.();
+        const spies = spiesOf(thread);
+        for (let index = 0; index < spies.length; index++)
+        {
+            const spy = spies[index];
+            if (spy)
+            {
+                const answer = (await callMethod(spy, slot, args(spy), caller)) | 0;
+                answered?.(answer);
+            }
+        }
+    };
+
+    /**
+     * CoInitializeEx as every entry into an apartment makes it: the thread's
+     * spies told before and after, and what PostInitialize answers is the
+     * answer. Without spies, the answer is at once.
+     *
+     * @param {number} mode
+     * @returns {number | Promise<number>}
+     */
+    const spiedEnter = mode=>{
+        const thread = host.currentThread();
+        if (!spiesOf(thread).some(Boolean))
+        {
+            return enterApartment(mode, thread);
+        }
+        return callSpies(thread, SPY_PRE_INITIALIZE, ()=>[mode, depthOf(thread)]).then(async()=>{
+            let hr = enterApartment(mode, thread);
+            await callSpies(thread, SPY_POST_INITIALIZE, ()=>[hr, mode, depthOf(thread)],
+                answer=>{
+                    hr = answer;
+                });
+            return hr;
+        });
+    };
+
+    /**
+     * CoUninitialize, the thread's spies told before and after.
+     *
+     * @param {any} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const spiedLeave = (thread = host.currentThread())=>{
+        if (!spiesOf(thread).some(Boolean))
+        {
+            return leaveApartment(thread);
+        }
+        return callSpies(thread, SPY_PRE_UNINITIALIZE, ()=>[depthOf(thread)])
+            .then(()=>leaveApartment(thread))
+            .then(()=>callSpies(thread, SPY_POST_UNINITIALIZE, ()=>[depthOf(thread)]))
+            .then(()=>0);
+    };
+
+    /** The thread's id, where its TEB keeps it: an initialize spy's cookie names it. @param {any} thread */
+    const threadIdOf = thread=>{
+        const teb = thread?.tebAddress >>> 0;
+        return teb ? readU32(teb + TEB_CLIENT_ID_THREAD) : 0;
+    };
+
+    /** The process's malloc spy, or 0. */
+    let mallocSpy = 0;
+
     /**
      * @param {number} guidPointer  Where a REFCLSID or REFIID argument points.
      * @returns {string | null}
      */
     const guidAt = guidPointer=>{
-        const address = guidPointer >>> 0;
+        const address = wholeAddress(guidPointer);
         return address === 0 ? null : readGuid(host, address);
     };
 
@@ -1372,7 +1584,7 @@ export function createOleFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out >>> 0, value);
+            writeU32(wholeAddress(out), value);
             return S_OK;
         };
         /** @param {string} name */
@@ -1540,7 +1752,7 @@ export function createOleFunctions(host){
             context.release();
             return E_OUTOFMEMORY;
         }
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return S_OK;
     };
 
@@ -1548,7 +1760,7 @@ export function createOleFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([rguid, ppsz])=>{
-            const out = ppsz >>> 0;
+            const out = wholeAddress(ppsz);
             const guid = guidAt(rguid);
             if (guid === null || out === 0)
             {
@@ -1575,12 +1787,12 @@ export function createOleFunctions(host){
      * @returns {number | Promise<number>}
      */
     const coCreateInstance = ([classId, outer, context, interfaceId, ppv])=>{
-        const out = ppv >>> 0;
+        const out = wholeAddress(ppv);
         if (out === 0)
         {
             return E_POINTER;
         }
-        writeU32(out, 0);
+        writePointer(out, 0);
 
         if (!inApartment(host.currentThread()))
         {
@@ -1631,14 +1843,14 @@ export function createOleFunctions(host){
 
         // A server the registry names: its class object, asked for
         // the instance and let go.
-        const factorySlot = host.heap.allocate(4 + GUID_SIZE);
+        const factorySlot = host.heap.allocate(OUT_SLOT + GUID_SIZE);
         if (factorySlot === 0)
         {
             return E_OUTOFMEMORY;
         }
         writeU32(factorySlot, 0);
-        writeGuid(host, factorySlot + 4, IID_ICLASSFACTORY);
-        const served = fromServer(clsid, classId, factorySlot + 4, factorySlot, thread);
+        writeGuid(host, factorySlot + OUT_SLOT, IID_ICLASSFACTORY);
+        const served = fromServer(clsid, classId, factorySlot + OUT_SLOT, factorySlot, thread);
         if (served === null)
         {
             host.heap.free(factorySlot);
@@ -1677,13 +1889,7 @@ export function createOleFunctions(host){
         {
             return 0;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        host.writeMemory(block, bytes);
+        host.writeMemory(block, utf16z(text));
         return block;
     };
 
@@ -1691,21 +1897,31 @@ export function createOleFunctions(host){
     const hexOf = bytes=>Array.from(bytes, byte=>byte.toString(16).padStart(2, '0')).join('');
 
     /**
+     * `fn` run as `thread`'s call, where one is known and the host can say so.
+     *
+     * @template T
+     * @param {unknown} thread @param {() => T} fn
+     * @returns {T}
+     */
+    const asCallOf = (thread, fn)=>(thread && host.answering ? host.answering(thread, fn) : fn());
+
+    /**
      * A call of one of this layer's own exports, with a slot of scratch
      * memory for what it writes out: the HRESULT and the word in the slot.
      *
      * @param {string} name @param {(slot: number) => number[]} args
+     * @param {unknown} [thread]  Whose call this is, when it is made after an await.
      * @returns {Promise<{ hr: number, value: number }>}
      */
-    const callExport = async(name, args)=>{
+    const callExport = async(name, args, thread)=>{
         const entry = /** @type {Record<string, any>} */ (functions)[name];
-        const slot = host.heap.allocate(4);
+        const slot = host.heap.allocate(OUT_SLOT);
         if (!entry || slot === 0)
         {
             return { hr: entry ? E_OUTOFMEMORY : E_NOTIMPL, value: 0 };
         }
         writeU32(slot, 0);
-        const hr = (await entry.handler(args(slot))) | 0;
+        const hr = (await asCallOf(thread, ()=>entry.handler(args(slot)))) | 0;
         const value = readU32(slot);
         host.heap.free(slot);
         return { hr, value };
@@ -1739,12 +1955,12 @@ export function createOleFunctions(host){
             host.heap.free(block);
             return key;
         }
-        const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+        const context = await callExport('CreateBindCtx', slot=>[0, slot], thread);
         if (context.hr < 0 || context.value === 0)
         {
             return null;
         }
-        const work = host.heap.allocate(4 + GUID_SIZE);
+        const work = host.heap.allocate(OUT_SLOT + GUID_SIZE);
         if (work === 0)
         {
             await callMethod(context.value, SLOT_RELEASE, [], thread);
@@ -1754,10 +1970,10 @@ export function createOleFunctions(host){
         const named = (await callMethod(moniker, SLOT_MONIKER_GET_DISPLAY_NAME,
             [context.value, 0, work], thread)) | 0;
         await callMethod(context.value, SLOT_RELEASE, [], thread);
-        const classed = (await callMethod(moniker, SLOT_PERSIST_GET_CLASS_ID, [work + 4],
+        const classed = (await callMethod(moniker, SLOT_PERSIST_GET_CLASS_ID, [work + OUT_SLOT],
             thread)) | 0;
         const name = readU32(work);
-        const clsid = host.readMemory(work + 4, GUID_SIZE).slice();
+        const clsid = host.readMemory(work + OUT_SLOT, GUID_SIZE).slice();
         host.heap.free(work);
         if (named < 0 || name === 0)
         {
@@ -1769,12 +1985,7 @@ export function createOleFunctions(host){
         {
             return null;
         }
-        const units = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            units[index * 2] = text.charCodeAt(index) & 0xff;
-            units[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
+        const units = utf16z(text);
         return hexOf(clsid) + hexOf(units);
     };
 
@@ -1788,7 +1999,7 @@ export function createOleFunctions(host){
      */
     const savedMoniker = async(moniker, thread)=>{
         const work = host.heap.allocate(GUID_SIZE + 8);
-        const made = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        const made = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot], thread);
         if (work === 0 || made.hr < 0 || made.value === 0)
         {
             if (work !== 0)
@@ -1806,10 +2017,10 @@ export function createOleFunctions(host){
                 return null;
             }
             const clsid = readGuid(host, work);
-            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_END, work + GUID_SIZE],
-                thread);
+            await callMethod(stream, SLOT_STREAM_SEEK,
+                [...noOffset, STREAM_SEEK_END, work + GUID_SIZE], thread);
             const size = readU32(work + GUID_SIZE);
-            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+            await callMethod(stream, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0], thread);
             const bytes = size > 0 ? await readStream(stream, size, thread) : new Uint8Array(0);
             return clsid && bytes ? { clsid, bytes } : null;
         }
@@ -1836,13 +2047,13 @@ export function createOleFunctions(host){
         host.writeMemory(ids, /** @type {Uint8Array} */ (parseGuid(saved.clsid)));
         host.writeMemory(ids + GUID_SIZE, /** @type {Uint8Array} */ (parseGuid(IID_IMONIKER)));
         const made = await callExport('CoCreateInstance',
-            slot=>[ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot]);
+            slot=>[ids, 0, CLSCTX_INPROC_SERVER, ids + GUID_SIZE, slot], thread);
         host.heap.free(ids);
         if (made.hr < 0 || made.value === 0)
         {
             return 0;
         }
-        const stream = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot]);
+        const stream = await callExport('CreateStreamOnHGlobal', slot=>[0, 1, slot], thread);
         const block = host.heap.allocate(Math.max(saved.bytes.length, 1));
         if (stream.hr < 0 || stream.value === 0 || block === 0)
         {
@@ -1852,7 +2063,7 @@ export function createOleFunctions(host){
         host.writeMemory(block, saved.bytes);
         await callMethod(stream.value, SLOT_STREAM_WRITE, [block, saved.bytes.length, 0], thread);
         host.heap.free(block);
-        await callMethod(stream.value, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+        await callMethod(stream.value, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0], thread);
         const loaded = (await callMethod(made.value, SLOT_PERSIST_LOAD, [stream.value],
             thread)) | 0;
         await callMethod(stream.value, SLOT_RELEASE, [], thread);
@@ -1866,7 +2077,7 @@ export function createOleFunctions(host){
 
     /** Now, as a FILETIME's two words: when an object was registered or noted changed. */
     const fileTimeNow = ()=>{
-        const ticks = (BigInt(Date.now()) + 11644473600000n) * 10000n;
+        const ticks = (BigInt(Math.floor((host.now ?? Date.now)())) + 11644473600000n) * 10000n;
         return [Number(ticks & 0xffffffffn), Number(ticks >> 32n)];
     };
 
@@ -1953,7 +2164,7 @@ export function createOleFunctions(host){
                             flags >>> 0, host.callerThread?.());
                         if (made.hr >= 0)
                         {
-                            writeU32(cookieOut >>> 0, made.cookie);
+                            writeU32(wholeAddress(cookieOut), made.cookie);
                         }
                         return made.hr;
                     } },
@@ -1970,7 +2181,7 @@ export function createOleFunctions(host){
                         {
                             return E_INVALIDARG;
                         }
-                        writeU32(out >>> 0, 0);
+                        writePointer(wholeAddress(out), 0);
                         const thread = host.callerThread?.();
                         const entry = await runningObjects.find(moniker >>> 0, thread);
                         const pointer = entry ? await runningObjects.take(entry, thread) : 0;
@@ -1978,7 +2189,7 @@ export function createOleFunctions(host){
                         {
                             return MK_E_UNAVAILABLE;
                         }
-                        writeU32(out >>> 0, pointer);
+                        writePointer(wholeAddress(out), pointer);
                         return S_OK;
                     } },
                 { name: 'NoteChangeTime', argBytes: 12,
@@ -1988,7 +2199,8 @@ export function createOleFunctions(host){
                             return E_INVALIDARG;
                         }
                         return runTable.rotNoteChange(cookie >>> 0,
-                            [readU32(time >>> 0), readU32((time >>> 0) + 4)]) ? S_OK : E_INVALIDARG;
+                            [readU32(wholeAddress(time)),
+                                readU32(wholeAddress(time) + 4)]) ? S_OK : E_INVALIDARG;
                     } },
                 { name: 'GetTimeOfLastChange', argBytes: 12,
                     invoke: async(_object, [moniker, time])=>{
@@ -2002,8 +2214,8 @@ export function createOleFunctions(host){
                         {
                             return MK_E_UNAVAILABLE;
                         }
-                        writeU32(time >>> 0, entry.time[0]);
-                        writeU32((time >>> 0) + 4, entry.time[1]);
+                        writeU32(wholeAddress(time), entry.time[0]);
+                        writeU32(wholeAddress(time) + 4, entry.time[1]);
                         return S_OK;
                     } },
                 { name: 'EnumRunning', argBytes: 8,
@@ -2050,11 +2262,11 @@ export function createOleFunctions(host){
                             {
                                 const moniker = monikers[next++];
                                 await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
-                                writeU32((into >>> 0) + fetched * 4, moniker);
+                                writeU32(wholeAddress(into) + fetched * 4, moniker);
                             }
                             if ((fetchedOut >>> 0) !== 0)
                             {
-                                writeU32(fetchedOut >>> 0, fetched);
+                                writeU32(wholeAddress(fetchedOut), fetched);
                             }
                             return fetched === (count >>> 0) ? S_OK : S_FALSE;
                         } },
@@ -2075,13 +2287,21 @@ export function createOleFunctions(host){
                                 await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
                             }
                             return publishHostObject(CLSID_MONIKER_ENUMERATOR,
-                                monikerEnumerator(monikers, next), IID_IENUMMONIKER, out >>> 0);
+                                monikerEnumerator([...monikers], next), IID_IENUMMONIKER,
+                                out >>> 0);
                         } },
                 ],
             }],
+            async lastRelease(){
+                const thread = host.callerThread?.();
+                for (const moniker of monikers.splice(0))
+                {
+                    await callMethod(moniker, SLOT_RELEASE, [], thread);
+                }
+            },
             destroy(){
                 const thread = host.callerThread?.();
-                for (const moniker of monikers)
+                for (const moniker of monikers.splice(0))
                 {
                     void callMethod(moniker, SLOT_RELEASE, [], thread);
                 }
@@ -2223,7 +2443,7 @@ export function createOleFunctions(host){
         if (wanted === null || wanted === GUID_NULL
             || canonicalGuid(wanted) === canonicalGuid(carried))
         {
-            writeU32(out, made.pointer);
+            writePointer(out, made.pointer);
             return S_OK;
         }
         const hr = (await callMethod(made.pointer, SLOT_QUERY_INTERFACE, [riid, out], thread)) | 0;
@@ -2241,7 +2461,7 @@ export function createOleFunctions(host){
      */
     const unmarshalerFor = async(clsid, thread)=>{
         const key = canonicalGuid(clsid);
-        const slot = host.heap.allocate(4);
+        const slot = host.heap.allocate(OUT_SLOT);
         if (slot === 0)
         {
             return 0;
@@ -2295,7 +2515,7 @@ export function createOleFunctions(host){
                     } },
                 { name: 'GetMarshalSizeMax', argBytes: 28,
                     invoke: (_object, [, , , , , out])=>{
-                        writeU32(out >>> 0, OBJREF_BYTES);
+                        writeU32(wholeAddress(out), OBJREF_BYTES);
                         return S_OK;
                     } },
                 { name: 'MarshalInterface', argBytes: 28,
@@ -2307,8 +2527,8 @@ export function createOleFunctions(host){
                 { name: 'UnmarshalInterface', argBytes: 16,
                     invoke: async(_object, [stream, riid, out])=>{
                         const thread = host.callerThread?.();
-                        writeU32(out >>> 0, 0);
-                        const packet = await readObjref(stream >>> 0, thread);
+                        writeU32(wholeAddress(out), 0);
+                        const packet = await readObjref(wholeAddress(stream), thread);
                         return packet?.kind === 'standard'
                             ? standardUnmarshal(packet, riid >>> 0, out >>> 0, thread)
                             : RPC_E_INVALID_OBJREF;
@@ -2316,7 +2536,7 @@ export function createOleFunctions(host){
                 { name: 'ReleaseMarshalData', argBytes: 8,
                     invoke: async(_object, [stream])=>{
                         const thread = host.callerThread?.();
-                        const packet = await readObjref(stream >>> 0, thread);
+                        const packet = await readObjref(wholeAddress(stream), thread);
                         const channel = remote();
                         return packet?.kind === 'standard' && channel
                             ? channel.releaseReference(packet.decoded.reference, thread)
@@ -2368,8 +2588,9 @@ export function createOleFunctions(host){
                         } },
                     { name: 'GetMarshalSizeMax', argBytes: 28,
                         invoke: (_object, [, , context, , , out])=>{
-                            writeU32(out >>> 0, inProcess(context >>> 0) ? FREE_THREADED_BYTES
-                                : OBJREF_BYTES);
+                            writeU32(wholeAddress(out),
+                                inProcess(context >>> 0) ? FREE_THREADED_BYTES
+                                    : OBJREF_BYTES);
                             return S_OK;
                         } },
                     { name: 'MarshalInterface', argBytes: 28,
@@ -2404,7 +2625,7 @@ export function createOleFunctions(host){
                     { name: 'UnmarshalInterface', argBytes: 16,
                         invoke: async(_object, [stream, riid, out])=>{
                             const thread = host.callerThread?.();
-                            writeU32(out >>> 0, 0);
+                            writeU32(wholeAddress(out), 0);
                             const packet = await readPacket(stream >>> 0, thread);
                             if (!packet)
                             {
@@ -2557,6 +2778,11 @@ export function createOleFunctions(host){
     };
 
     /**
+     * MULTI_QI in this process's layout: the interface asked for and the
+     * pointer found, each a pointer wide, then the answer.
+     */
+    const multi = width.size === 8 ? { itf: 8, hr: 16, size: 24 } : { itf: 4, hr: 8, size: 12 };
+    /**
      * What the moniker classes reach of the rest of COM: activation, the
      * running object table, docfiles and the volume, all as this layer's own
      * exports answer them.
@@ -2564,6 +2790,7 @@ export function createOleFunctions(host){
      * @type {import('./monikers.js').MonikerEnv}
      */
     const monikerEnv = {
+        pointerSize: width.size,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         heap: host.heap,
@@ -2579,6 +2806,17 @@ export function createOleFunctions(host){
             [clsid, iid], ([classId, interfaceId])=>[classId, context, 0, interfaceId, out]),
         runningObjectTable: async out=>
             (await functions.GetRunningObjectTable.handler([0, out])) | 0,
+        marshaling: {
+            sizeMax: (out, iid, unknown, context, destination, flags)=>callWithGuids(
+                'CoGetMarshalSizeMax', [iid],
+                ([at])=>[out, at, unknown, context, destination, flags]),
+            marshal: (stream, iid, unknown, context, destination, flags)=>callWithGuids(
+                'CoMarshalInterface', [iid],
+                ([at])=>[stream, at, unknown, context, destination, flags]),
+            unmarshal: (stream, iid, out)=>callWithGuids('CoUnmarshalInterface', [iid],
+                ([at])=>[stream, at, out]),
+            releaseData: async stream=>(await functions.CoReleaseMarshalData.handler([stream])) | 0,
+        },
         storageClassOf: async path=>{
             const bytes = await wholeFile(path);
             const root = bytes ? parseCompoundFile(bytes) : null;
@@ -2650,6 +2888,43 @@ export function createOleFunctions(host){
             deleteEnhMetaFile: deleter('DeleteEnhMetaFile'),
         };
     };
+    /**
+     * user32's names of the registered clipboard formats, which a CLIPFORMAT
+     * carries to another machine: both calls answer at once.
+     */
+    const systemClipboardFormats = ()=>{
+        const system = /** @type {NonNullable<OleHost['system']>} */ (host.system);
+        return {
+            /** @param {number} format @returns {string | null} */
+            name: format=>{
+                const block = host.heap.allocate(CLIPBOARD_NAME_UNITS * 2);
+                if (block === 0)
+                {
+                    return null;
+                }
+                const length = system('USER32.dll', 'GetClipboardFormatNameW',
+                    [format, block, CLIPBOARD_NAME_UNITS], host.callerThread?.());
+                const text = typeof length === 'number' && length > 0
+                    ? String.fromCharCode(...new Uint16Array(host.readMemory(block,
+                        Math.min(length, CLIPBOARD_NAME_UNITS) * 2).slice().buffer))
+                    : null;
+                host.heap.free(block);
+                return text;
+            },
+            /** @param {string} name @returns {number} */
+            register: name=>{
+                const block = lendWide(name);
+                if (block === 0)
+                {
+                    return 0;
+                }
+                const format = system('USER32.dll', 'RegisterClipboardFormatW', [block],
+                    host.callerThread?.());
+                host.heap.free(block);
+                return typeof format === 'number' ? format & 0xffff : 0;
+            },
+        };
+    };
     const systemDeleteFile = ()=>{
         const system = host.system;
         return system
@@ -2662,12 +2937,14 @@ export function createOleFunctions(host){
      * The OLE half: what the helpers, the advise holders and the clipboard
      * reach of the rest of COM, all as this layer's own exports answer.
      *
-     * @type {import('./oleutil.js').OleEnv}
+     * @type {import('./ole2.js').Ole2Env}
      */
     const oleEnv = {
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         heap: host.heap,
+        globalMemory: host.globalMemory,
+        pointerSize: width.size,
         callMethod,
         queryPointer,
         callerThread: ()=>host.callerThread?.(),
@@ -2684,6 +2961,25 @@ export function createOleFunctions(host){
         divergence: host.divergence,
     };
     const clipboard = createClipboardFunctions(oleEnv);
+    // OLE's data cache and default handler, which the creation calls, OleLoad
+    // and an InprocHandler32 of ole32.dll hand out.
+    const oleUtil = createOleUtil(oleEnv);
+    const dataCaches = createDataCaches({ ole: oleEnv, util: oleUtil,
+        callFunction: host.call
+            ? (entry, args, thread)=>/** @type {NonNullable<OleHost['call']>} */ (host.call)(
+                entry, args, thread)
+            : undefined });
+    oleEnv.dataCaches = dataCaches;
+    oleEnv.defaultHandlers = createDefaultHandlers({ ole: oleEnv, util: oleUtil,
+        caches: dataCaches,
+        callExport: (name, guids, args)=>(guids.length > 0 ? callWithGuids(name, guids, args)
+            : Promise.resolve(/** @type {Record<string, any>} */ (functions)[name]
+                .handler(args([]))).then(hr=>hr | 0)) });
+    registerComponentCategories({ ...oleEnv, registry: host.registry, hive: host.hive });
+    // Property sets, which a storage of ours answers IPropertySetStorage for.
+    const { storageMethods: propertySetMethods, ...propertySetFunctions } =
+        createPropertySetFunctions({ ...oleEnv,
+            allocateBstr: bytes=>host.strings?.allocate?.(bytes) ?? 0 });
 
     const functions = {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
@@ -2691,14 +2987,14 @@ export function createOleFunctions(host){
             argBytes: 4,
             // Documented as equivalent to CoInitializeEx with
             // COINIT_APARTMENTTHREADED, which is what makes the two nest together.
-            handler: ()=>enterApartment(COINIT_APARTMENTTHREADED),
+            handler: ()=>spiedEnter(COINIT_APARTMENTTHREADED),
         },
 
         /** HRESULT CoInitializeEx(LPVOID pvReserved, DWORD dwCoInit) */
         CoInitializeEx: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, mode])=>enterApartment(mode >>> 0),
+            handler: ([, mode])=>spiedEnter(mode >>> 0),
         },
 
         /**
@@ -2712,12 +3008,12 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([cookie])=>{
-                if ((cookie >>> 0) === 0 || !host.registry?.mtaUsage)
+                if (wholeAddress(cookie) === 0 || !host.registry?.mtaUsage)
                 {
                     return E_INVALIDARG;
                 }
                 host.registry.mtaUsage.enter();
-                writeU32(cookie >>> 0, host.registry.mtaUsage.users);
+                writeU32(wholeAddress(cookie), host.registry.mtaUsage.users);
                 return S_OK;
             },
         },
@@ -2750,13 +3046,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([type, qualifier])=>{
-                if ((type >>> 0) === 0 || (qualifier >>> 0) === 0)
+                if (wholeAddress(type) === 0 || wholeAddress(qualifier) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const { kind, detail, answer } = apartmentType();
-                writeU32(type >>> 0, kind);
-                writeU32(qualifier >>> 0, detail);
+                writeU32(wholeAddress(type), kind);
+                writeU32(wholeAddress(qualifier), detail);
                 return answer;
             },
         },
@@ -2772,11 +3068,11 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeGuid(host, out >>> 0, logicalThread(host.currentThread()));
+                writeGuid(host, wholeAddress(out), logicalThread(host.currentThread()));
                 return S_OK;
             },
         },
@@ -2793,18 +3089,18 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([iid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writePointer(wholeAddress(out), 0);
                 const context = currentContext();
                 if (!context)
                 {
                     return CO_E_NOTINITIALIZED;
                 }
                 const wanted = guidAt(iid) ?? '';
-                return whenContextReady(()=>handOutContext(context, wanted, out >>> 0));
+                return whenContextReady(()=>handOutContext(context, wanted, wholeAddress(out)));
             },
         },
 
@@ -2824,7 +3120,7 @@ export function createOleFunctions(host){
                 {
                     return CO_E_NOTINITIALIZED;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return whenContextReady(()=>E_POINTER);
                 }
@@ -2834,7 +3130,7 @@ export function createOleFunctions(host){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writeU32(out >>> 0, pointer);
+                    writePointer(wholeAddress(out), pointer);
                     return S_OK;
                 });
             },
@@ -2853,11 +3149,11 @@ export function createOleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([type, iid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writePointer(wholeAddress(out), 0);
                 const wanted = type >>> 0;
                 if (![APTTYPE_CURRENT, APTTYPE_STA, APTTYPE_MTA, APTTYPE_MAINSTA].includes(wanted))
                 {
@@ -2880,7 +3176,7 @@ export function createOleFunctions(host){
                     return CO_E_NOTINITIALIZED;
                 }
                 const asked = guidAt(iid) ?? '';
-                return whenContextReady(()=>handOutContext(context, asked, out >>> 0));
+                return whenContextReady(()=>handOutContext(context, asked, wholeAddress(out)));
             },
         },
 
@@ -2940,22 +3236,123 @@ export function createOleFunctions(host){
          * unload the library later, and nothing here ever does.
          */
         CoLoadLibrary: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name])=>host.libraries?.load(name >>> 0) ?? 0,
+            handler: ([name])=>host.libraries?.load(wholeAddress(name)) ?? 0,
         },
         CoFreeLibrary: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([module])=>{
-                host.libraries?.free(module >>> 0);
+                host.libraries?.free(wholeAddress(module));
                 return 0;
             },
         },
 
         CoUninitialize: {
             argBytes: 0,
-            handler: leaveApartment,
+            handler: ()=>spiedLeave(),
+        },
+
+        /**
+         * HRESULT CoRegisterInitializeSpy(IInitializeSpy *pSpy, ULARGE_INTEGER *puliCookie)
+         *
+         * A spy on the calling thread's CoInitializeEx and CoUninitialize,
+         * held by its IInitializeSpy; the cookie is the spy's slot and the
+         * thread's id.
+         */
+        CoRegisterInitializeSpy: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: async([spy, cookie])=>{
+                if (wholeAddress(spy) === 0 || wholeAddress(cookie) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.currentThread();
+                const held = await queryPointer(wholeAddress(spy), IID_IINITIALIZESPY,
+                    host.callerThread?.());
+                if (held === 0)
+                {
+                    return E_NOINTERFACE;
+                }
+                const spies = spiesOf(thread);
+                let slot = spies.findIndex(entry=>!entry);
+                slot = slot < 0 ? spies.length : slot;
+                spies[slot] = held;
+                writeU32(wholeAddress(cookie), slot);
+                writeU32(wholeAddress(cookie) + 4, threadIdOf(thread));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT CoRevokeInitializeSpy(ULARGE_INTEGER uliCookie)
+         *
+         * Only on the thread that registered it, and once.
+         */
+        CoRevokeInitializeSpy: {
+            argBytes: 8,
+            quadwords: [0],
+            /** @param {number[]} args */
+            handler: ([slot, owner])=>{
+                const thread = host.currentThread();
+                const spies = spiesOf(thread);
+                const spy = (owner >>> 0) === threadIdOf(thread) ? spies[slot >>> 0] : 0;
+                if (!spy)
+                {
+                    return E_INVALIDARG;
+                }
+                spies[slot >>> 0] = 0;
+                return andThen(callMethod(spy, SLOT_RELEASE, [], host.callerThread?.()), ()=>S_OK);
+            },
+        },
+
+        /**
+         * HRESULT CoRegisterMallocSpy(LPMALLOCSPY pMallocSpy)
+         * HRESULT CoRevokeMallocSpy(void)
+         *
+         * One spy for the process, held by its IMallocSpy until revoked.
+         * The task allocator's blocks do not pass through it: the allocator
+         * is ours and keeps no header a spy could grow, which is said once.
+         */
+        CoRegisterMallocSpy: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([spy])=>{
+                if (wholeAddress(spy) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (mallocSpy !== 0)
+                {
+                    return CO_E_OBJISREG;
+                }
+                const held = await queryPointer(wholeAddress(spy), IID_IMALLOCSPY,
+                    host.callerThread?.());
+                if (held === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                mallocSpy = held;
+                host.divergence?.('CoRegisterMallocSpy',
+                    'the spy is held, and the task allocator\'s calls do not go through it');
+                return S_OK;
+            },
+        },
+
+        CoRevokeMallocSpy: {
+            argBytes: 0,
+            handler: ()=>{
+                const spy = mallocSpy;
+                if (spy === 0)
+                {
+                    return CO_E_OBJNOTREG;
+                }
+                mallocSpy = 0;
+                return andThen(callMethod(spy, SLOT_RELEASE, [], host.callerThread?.()), ()=>S_OK);
+            },
         },
 
         /**
@@ -2970,16 +3367,18 @@ export function createOleFunctions(host){
         OleInitialize: {
             argBytes: 4,
             handler: ()=>{
-                const answer = enterApartment(COINIT_APARTMENTTHREADED);
-                oleStarted ||= answer === S_OK || answer === S_FALSE;
-                if (answer === S_OK || answer === S_FALSE)
-                {
-                    // Counted apart from the apartment: the clipboard and a
-                    // drag need OleInitialize, not only CoInitialize.
-                    const apartment = host.currentThread().ole32;
-                    apartment.oleDepth = (apartment.oleDepth ?? 0) + 1;
-                }
-                return answer;
+                const thread = host.currentThread();
+                return andThen(spiedEnter(COINIT_APARTMENTTHREADED), (/** @type {number} */ answer)=>{
+                    oleStarted ||= answer === S_OK || answer === S_FALSE;
+                    if (answer === S_OK || answer === S_FALSE)
+                    {
+                        // Counted apart from the apartment: the clipboard and a
+                        // drag need OleInitialize, not only CoInitialize.
+                        const apartment = thread.ole32;
+                        apartment.oleDepth = (apartment.oleDepth ?? 0) + 1;
+                    }
+                    return answer;
+                });
             },
         },
 
@@ -2996,7 +3395,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([window, target])=>{
-                if ((target >>> 0) === 0)
+                if (wholeAddress(target) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -3012,13 +3411,13 @@ export function createOleFunctions(host){
                 {
                     return DRAGDROP_E_ALREADYREGISTERED;
                 }
-                if (!dropTargetProperty(window >>> 0, target >>> 0))
+                if (!dropTargetProperty(window >>> 0, wholeAddress(target)))
                 {
                     return E_OUTOFMEMORY;
                 }
-                dropTargets.set(window >>> 0, target >>> 0);
+                dropTargets.set(window >>> 0, wholeAddress(target));
                 return host.call
-                    ? callMethod(target >>> 0, SLOT_ADD_REF, [], host.callerThread?.())
+                    ? callMethod(wholeAddress(target), SLOT_ADD_REF, [], host.callerThread?.())
                         .then(()=>S_OK)
                     : S_OK;
             },
@@ -3065,10 +3464,10 @@ export function createOleFunctions(host){
                     apartment.oleDepth--;
                     if (apartment.oleDepth === 0)
                     {
-                        return andThen(clipboard.uninitialize(thread), leaveApartment);
+                        return andThen(clipboard.uninitialize(thread), ()=>spiedLeave(thread));
                     }
                 }
-                return leaveApartment();
+                return spiedLeave();
             },
         },
 
@@ -3094,14 +3493,14 @@ export function createOleFunctions(host){
                 }
                 const thread = host.callerThread?.();
                 const held = apartment.messageFilter ?? 0;
-                apartment.messageFilter = filter >>> 0;
-                if ((previous >>> 0) !== 0)
+                apartment.messageFilter = wholeAddress(filter);
+                if (wholeAddress(previous) !== 0)
                 {
-                    writeU32(previous >>> 0, held);
+                    writePointer(wholeAddress(previous), held);
                 }
-                const taken = (filter >>> 0) !== 0
-                    ? callMethod(filter >>> 0, SLOT_ADD_REF, [], thread) : S_OK;
-                return andThen(taken, ()=>(held !== 0 && (previous >>> 0) === 0
+                const taken = wholeAddress(filter) !== 0
+                    ? callMethod(wholeAddress(filter), SLOT_ADD_REF, [], thread) : S_OK;
+                return andThen(taken, ()=>(held !== 0 && wholeAddress(previous) === 0
                     ? callMethod(held, SLOT_RELEASE, [], thread).then(()=>S_OK) : S_OK));
             },
         },
@@ -3163,36 +3562,36 @@ export function createOleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([classId, outer, context, server, count, results])=>{
-                if ((count >>> 0) === 0 || (results >>> 0) === 0)
+                if ((count >>> 0) === 0 || wholeAddress(results) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((server >>> 0) !== 0 && readU32((server >>> 0) + 4) !== 0)
+                if (wholeAddress(server) !== 0 && readU32(wholeAddress(server) + 4) !== 0)
                 {
                     host.divergence?.('CoCreateInstanceEx',
                         'the server a program names is made on this machine');
                 }
                 /** @param {number} index */
-                const entry = index=>(results >>> 0) + index * MULTI_QI_SIZE;
+                const entry = index=>wholeAddress(results) + index * multi.size;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    writeU32(entry(index) + 4, 0);
-                    writeU32(entry(index) + 8, E_NOINTERFACE);
+                    writeU32(entry(index) + multi.itf, 0);
+                    writeU32(entry(index) + multi.hr, E_NOINTERFACE);
                 }
                 const thread = host.callerThread?.();
                 const first = entry(0);
                 return andThen(coCreateInstance([classId, outer, context, readU32(first),
-                    first + 4]), (/** @type {number} */ made)=>{
+                    first + multi.itf]), (/** @type {number} */ made)=>{
                     if ((made | 0) < 0)
                     {
                         for (let index = 0; index < (count >>> 0); index++)
                         {
-                            writeU32(entry(index) + 8, made);
+                            writeU32(entry(index) + multi.hr, made);
                         }
                         return made;
                     }
-                    writeU32(first + 8, S_OK);
-                    const object = readU32(first + 4);
+                    writeU32(first + multi.hr, S_OK);
+                    const object = readU32(first + multi.itf);
                     /** @param {number} index @returns {number | Promise<number>} */
                     const ask = index=>{
                         if (index >= (count >>> 0))
@@ -3200,15 +3599,15 @@ export function createOleFunctions(host){
                             let found = 0;
                             for (let at = 0; at < (count >>> 0); at++)
                             {
-                                found += readU32(entry(at) + 8) === S_OK ? 1 : 0;
+                                found += readU32(entry(at) + multi.hr) === S_OK ? 1 : 0;
                             }
                             return found === (count >>> 0) ? S_OK
                                 : found === 0 ? E_NOINTERFACE : CO_S_NOTALLINTERFACES;
                         }
                         return callMethod(object, SLOT_QUERY_INTERFACE,
-                            [readU32(entry(index)), entry(index) + 4], thread)
+                            [readU32(entry(index)), entry(index) + multi.itf], thread)
                             .then(hr=>{
-                                writeU32(entry(index) + 8, hr);
+                                writeU32(entry(index) + multi.hr, hr);
                                 return ask(index + 1);
                             });
                     };
@@ -3229,12 +3628,12 @@ export function createOleFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([classId, context, , interfaceId, ppv])=>{
-                const out = ppv >>> 0;
+                const out = wholeAddress(ppv);
                 if (out === 0)
                 {
                     return E_POINTER;
                 }
-                writeU32(out, 0);
+                writePointer(out, 0);
                 const clsid = guidAt(classId);
                 const iid = guidAt(interfaceId);
                 if (clsid === null || iid === null)
@@ -3260,7 +3659,7 @@ export function createOleFunctions(host){
                                     {
                                         return E_POINTER;
                                     }
-                                    writeU32(into >>> 0, 0);
+                                    writeU32(wholeAddress(into), 0);
                                     return asked === null
                                         ? E_INVALIDARG
                                         : createBuiltIn(clsid, outer, asked, into >>> 0);
@@ -3312,18 +3711,19 @@ export function createOleFunctions(host){
                     return CO_E_NOTINITIALIZED;
                 }
                 const clsid = guidAt(classId);
-                if (clsid === null || (object >>> 0) === 0 || (cookieOut >>> 0) === 0)
+                if (clsid === null || wholeAddress(object) === 0 || wholeAddress(cookieOut) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const cookie = nextCookie++;
-                classObjects.set(cookie, { clsid, object: object >>> 0, thread });
-                writeU32(cookieOut >>> 0, cookie);
-                const held = callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.());
+                classObjects.set(cookie, { clsid, object: wholeAddress(object), thread });
+                writeU32(wholeAddress(cookieOut), cookie);
+                const held = callMethod(wholeAddress(object), SLOT_ADD_REF, [],
+                    host.callerThread?.());
                 // Served to other processes too, through the run's table.
                 const channel = (context & CLSCTX_LOCAL_SERVER) !== 0 ? remote() : null;
                 return andThen(held, ()=>(channel
-                    ? channel.registerClass(clsid, object >>> 0, flags >>> 0, cookie)
+                    ? channel.registerClass(clsid, wholeAddress(object), flags >>> 0, cookie)
                         .then(()=>S_OK)
                     : S_OK));
             },
@@ -3408,13 +3808,14 @@ export function createOleFunctions(host){
                 {
                     return CO_E_NOTINITIALIZED;
                 }
-                if ((object >>> 0) === 0)
+                if (wholeAddress(object) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const channel = remote();
                 return channel
-                    ? channel.lockExternal(object >>> 0, lock !== 0, lastUnlockReleases !== 0)
+                    ? channel.lockExternal(wholeAddress(object), lock !== 0,
+                        lastUnlockReleases !== 0)
                         .then(()=>S_OK)
                     : S_OK;
             },
@@ -3431,12 +3832,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([object, reserved])=>{
-                if ((object >>> 0) === 0)
+                if (wholeAddress(object) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = host.callerThread?.();
-                return queryPointer(object >>> 0, IID_IMARSHAL, thread).then(async marshal=>{
+                return queryPointer(wholeAddress(object), IID_IMARSHAL,
+                    thread).then(async marshal=>{
                     if (marshal !== 0)
                     {
                         const hr = (await callMethod(marshal, SLOT_MARSHAL_DISCONNECT,
@@ -3448,7 +3850,7 @@ export function createOleFunctions(host){
                     {
                         return CO_E_NOTINITIALIZED;
                     }
-                    await remote()?.disconnect(object >>> 0, thread);
+                    await remote()?.disconnect(wholeAddress(object), thread);
                     return S_OK;
                 });
             },
@@ -3495,11 +3897,11 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([iid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const switched = threadState(host.currentThread()).callContext;
                 if (switched !== 0)
                 {
@@ -3515,7 +3917,8 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                return publishHostObject(CLSID_CALL_CONTEXT, serverSecurity(), wanted, out >>> 0);
+                return publishHostObject(CLSID_CALL_CONTEXT, serverSecurity(), wanted,
+                    wholeAddress(out));
             },
         },
 
@@ -3568,7 +3971,7 @@ export function createOleFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([proxy, ...outs])=>{
-                if (!remote()?.isProxy(proxy >>> 0))
+                if (!remote()?.isProxy(wholeAddress(proxy)))
                 {
                     return E_NOINTERFACE;
                 }
@@ -3580,16 +3983,17 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([proxy, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if (!remote()?.isProxy(proxy >>> 0))
+                if (!remote()?.isProxy(wholeAddress(proxy)))
                 {
                     return E_NOINTERFACE;
                 }
-                return callMethod(proxy >>> 0, SLOT_ADD_REF, [], host.callerThread?.()).then(()=>{
-                    writeU32(out >>> 0, proxy >>> 0);
+                return callMethod(wholeAddress(proxy), SLOT_ADD_REF, [],
+                    host.callerThread?.()).then(()=>{
+                    writeU32(wholeAddress(out), wholeAddress(proxy));
                     return S_OK;
                 });
             },
@@ -3652,14 +4056,15 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([extension, hook])=>{
-                if (guidAt(extension) === null || (hook >>> 0) === 0)
+                if (guidAt(extension) === null || wholeAddress(hook) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 host.divergence?.('CoRegisterChannelHook',
                     'a channel hook is kept but never called');
-                return andThen(callMethod(hook >>> 0, SLOT_ADD_REF, [], host.callerThread?.()),
-                    ()=>S_OK);
+                return andThen(callMethod(wholeAddress(hook), SLOT_ADD_REF, [],
+                    host.callerThread?.()),
+                ()=>S_OK);
             },
         },
 
@@ -3680,7 +4085,7 @@ export function createOleFunctions(host){
                     return E_OUTOFMEMORY;
                 }
                 writeU32(block, hresult >>> 0);
-                return callMethod(stream >>> 0, SLOT_STREAM_WRITE, [block, 4, 0], thread)
+                return callMethod(wholeAddress(stream), SLOT_STREAM_WRITE, [block, 4, 0], thread)
                     .then(hr=>{
                         host.heap.free(block);
                         return hr;
@@ -3697,11 +4102,11 @@ export function createOleFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                return callMethod(stream >>> 0, SLOT_STREAM_READ, [block, 4, 0], thread)
+                return callMethod(wholeAddress(stream), SLOT_STREAM_READ, [block, 4, 0], thread)
                     .then(hr=>{
-                        if ((hr | 0) >= 0 && (out >>> 0) !== 0)
+                        if ((hr | 0) >= 0 && wholeAddress(out) !== 0)
                         {
-                            writeU32(out >>> 0, readU32(block));
+                            writeU32(wholeAddress(out), readU32(block));
                         }
                         host.heap.free(block);
                         return hr;
@@ -3725,12 +4130,12 @@ export function createOleFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([flags, timeout, count, handles, indexOut])=>{
-                if ((indexOut >>> 0) === 0)
+                if (wholeAddress(indexOut) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(indexOut >>> 0, 0);
-                if ((handles >>> 0) === 0)
+                writeU32(wholeAddress(indexOut), 0);
+                if (wholeAddress(handles) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -3763,12 +4168,13 @@ export function createOleFunctions(host){
                     {
                         return hresultFromWin32(waits.lastError(caller));
                     }
-                    writeU32(indexOut >>> 0, answer >>> 0);
+                    writeU32(wholeAddress(indexOut), answer >>> 0);
                     return S_OK;
                 };
                 if (thread?.ole32?.model !== COINIT_APARTMENTTHREADED)
                 {
-                    return andThen(waits.objects(caller, count >>> 0, handles >>> 0, waitAll,
+                    return andThen(waits.objects(caller, count >>> 0, wholeAddress(handles),
+                        waitAll,
                         timeout >>> 0), settle);
                 }
                 return (async()=>{
@@ -3792,7 +4198,8 @@ export function createOleFunctions(host){
                             const left = (timeout >>> 0) === INFINITE ? INFINITE
                                 : (timeout >>> 0) - elapsed;
                             const answer = (await waits.messages(caller, count >>> 0,
-                                handles >>> 0, left, QS_SENDMESSAGE | QS_ALLPOSTMESSAGE | QS_PAINT,
+                                wholeAddress(handles), left,
+                                QS_SENDMESSAGE | QS_ALLPOSTMESSAGE | QS_PAINT,
                                 waitAll)) >>> 0;
                             if (answer !== WAIT_OBJECT_0 + (count >>> 0))
                             {
@@ -3830,7 +4237,7 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pguid])=>{
-                const address = pguid >>> 0;
+                const address = wholeAddress(pguid);
                 if (address === 0)
                 {
                     return E_INVALIDARG;
@@ -3849,7 +4256,9 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemAlloc(SIZE_T cb) */
         CoTaskMemAlloc: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             // A zero-byte request still yields a pointer that is not NULL, which
             // is what the caller tests for.
@@ -3866,14 +4275,14 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([context, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const pointer = (context >>> 0) === MEMCTX_TASK
                     ? host.taskAllocator?.pointer() ?? 0
                     : 0;
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 if ((context >>> 0) !== MEMCTX_TASK)
                 {
                     return E_INVALIDARG;
@@ -3887,7 +4296,7 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 // Documented as a no-op for NULL, so wrappers can pass it on.
                 if (address !== 0)
                 {
@@ -3899,7 +4308,9 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemRealloc(LPVOID pv, SIZE_T cb) */
         CoTaskMemRealloc: {
+            returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),
         },
@@ -3909,7 +4320,7 @@ export function createOleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rguid, lpsz, cchMax])=>{
-                const out = lpsz >>> 0;
+                const out = wholeAddress(lpsz);
                 const guid = guidAt(rguid);
                 // The count includes the terminator, so a buffer of exactly 38
                 // characters is one short and nothing is written into it.
@@ -3924,15 +4335,17 @@ export function createOleFunctions(host){
 
         // Structured storage: the docfile, its objects and the entry points
         // that hand them out, over the same heap, registry and vtables.
-        ...createStorageFunctions(host),
+        ...createStorageFunctions({ ...host, propertySetMethods }),
 
         // The property value, whose copy owns what it points at in task memory.
         ...createPropVariantFunctions(host),
+        ...propertySetFunctions,
 
         // What a MIDL proxy or stub calls to carry a handle, a block of
         // memory, a storage medium or an interface pointer to another process.
         ...createUserMarshalFunctions({ ...host, marshaler: ()=>marshaler,
-            ...(host.system ? { gdi: systemGdi(), deleteFile: systemDeleteFile() } : {}),
+            ...(host.system ? { gdi: systemGdi(), deleteFile: systemDeleteFile(),
+                clipboardFormats: systemClipboardFormats() } : {}),
             raise: host.raise ?? (code=>{
                 throw Object.assign(new Error(`RpcRaiseException 0x${(code >>> 0).toString(16)}`),
                     { code });
@@ -3943,17 +4356,12 @@ export function createOleFunctions(host){
             }) }),
 
         /**
-         * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
-         *
-         * The class's ProgID key in the registry, as a string in task
-         * memory; a class with no key is not registered.
-         */
-        /**
          * HRESULT CoTreatAsClass(REFCLSID clsidOld, REFCLSID clsidNew)
          *
          * Writes the emulation into the registry, as the call does: the old
          * class's TreatAs key names the new one, and a new class of GUID_NULL
-         * or the old class itself takes the emulation away.
+         * or the old class itself takes the emulation away -- which fails as
+         * a write when there is none to take (compobj.c test_TreatAsClass).
          */
         CoTreatAsClass: {
             argBytes: 8,
@@ -3974,11 +4382,52 @@ export function createOleFunctions(host){
                     || replacement === GUID_NULL;
                 if (nothing)
                 {
-                    host.hive.remove(root, `CLSID\\${old}\\TreatAs`);
-                    return S_OK;
+                    return host.hive.remove(root, `CLSID\\${old}\\TreatAs`) === 'deleted'
+                        ? S_OK : REGDB_E_WRITEREGDB;
                 }
                 const key = host.hive.create(root, `CLSID\\${old}\\TreatAs`).key;
                 host.hive.setValue(key, '', REG_SZ, encodeAnsi(`${replacement}\0`));
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
+         *
+         * The class's ProgID key in the registry, as a string in task
+         * memory; a class with no key is not registered.
+         */
+        /**
+         * HRESULT CoGetTreatAsClass(REFCLSID clsidOld, LPCLSID pClsidNew)
+         *
+         * The class the registry says emulates this one, or the class itself
+         * and S_FALSE when none does.
+         */
+        CoGetTreatAsClass: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([oldClass, out])=>{
+                const old = (oldClass >>> 0) === 0 ? null : guidAt(oldClass);
+                if (old === null || wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeGuid(host, wholeAddress(out), old);
+                const root = host.hive?.root(HKEY_CLASSES_ROOT);
+                const key = root ? host.hive?.open(root, `CLSID\\${old}\\TreatAs`) : null;
+                const value = key ? host.hive?.getValue(key, '') : null;
+                if (!value)
+                {
+                    return S_FALSE;
+                }
+                const end = value.data.indexOf(0);
+                const named = canonicalGuid(decodeAnsi(
+                    value.data.subarray(0, end < 0 ? value.data.length : end)).trim());
+                if (named === null)
+                {
+                    return S_FALSE;
+                }
+                writeGuid(host, wholeAddress(out), named);
                 return S_OK;
             },
         },
@@ -3987,7 +4436,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([rclsid, out])=>{
-                const slot = out >>> 0;
+                const slot = wholeAddress(out);
                 const guid = guidAt(rclsid);
                 if (guid === null || slot === 0)
                 {
@@ -4028,13 +4477,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpszProgID, lpclsid])=>{
-                const out = lpclsid >>> 0;
-                if (out === 0 || (lpszProgID >>> 0) === 0)
+                const out = wholeAddress(lpclsid);
+                if (out === 0 || wholeAddress(lpszProgID) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeGuid(host, out, GUID_NULL);
-                const progId = readOleString(lpszProgID >>> 0, MAX_PROGID);
+                const progId = readOleString(wholeAddress(lpszProgID), MAX_PROGID);
                 const root = host.hive?.root(HKEY_CLASSES_ROOT);
                 const key = root && progId.length > 0
                     ? host.hive?.open(root, `${progId}\\CLSID`)
@@ -4075,12 +4524,13 @@ export function createOleFunctions(host){
             handler: ([stream, riid, unknown, context, contextData, flags])=>{
                 const thread = host.callerThread?.();
                 const iid = guidAt(riid);
-                if ((stream >>> 0) === 0 || (unknown >>> 0) === 0 || iid === null)
+                if (wholeAddress(stream) === 0 || wholeAddress(unknown) === 0 || iid === null)
                 {
                     return E_INVALIDARG;
                 }
-                return marshalInterface(stream >>> 0, riid >>> 0, iid, unknown >>> 0,
-                    [context >>> 0, contextData >>> 0, flags >>> 0], thread);
+                return marshalInterface(wholeAddress(stream), riid >>> 0, iid,
+                    wholeAddress(unknown),
+                    [context >>> 0, wholeAddress(contextData), flags >>> 0], thread);
             },
         },
 
@@ -4098,13 +4548,13 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, riid, ppv])=>{
                 const thread = host.callerThread?.();
-                const out = ppv >>> 0;
-                if (out === 0 || (stream >>> 0) === 0)
+                const out = wholeAddress(ppv);
+                if (out === 0 || wholeAddress(stream) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
-                return unmarshalInterface(stream >>> 0, riid >>> 0, out, thread);
+                writePointer(out, 0);
+                return unmarshalInterface(wholeAddress(stream), riid >>> 0, out, thread);
             },
         },
 
@@ -4126,14 +4576,14 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([riid, unknown, ppStm])=>{
                 const thread = host.callerThread?.();
-                const out = ppStm >>> 0;
+                const out = wholeAddress(ppStm);
                 const iid = guidAt(riid);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
-                if ((unknown >>> 0) === 0 || iid === null)
+                writePointer(out, 0);
+                if (wholeAddress(unknown) === 0 || iid === null)
                 {
                     return E_INVALIDARG;
                 }
@@ -4144,15 +4594,17 @@ export function createOleFunctions(host){
                     return made < 0 ? made : E_OUTOFMEMORY;
                 }
                 return (async()=>{
-                    const hr = await marshalInterface(stream, riid >>> 0, iid, unknown >>> 0,
+                    const hr = await marshalInterface(stream, riid >>> 0, iid,
+                        wholeAddress(unknown),
                         [MSHCTX_INPROC, 0, 0], thread);
                     if (hr < 0)
                     {
                         await callMethod(stream, SLOT_RELEASE, [], thread);
-                        writeU32(out, 0);
+                        writePointer(out, 0);
                         return hr;
                     }
-                    await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+                    await callMethod(stream, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0],
+                        thread);
                     return S_OK;
                 })();
             },
@@ -4169,15 +4621,16 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, riid, ppv])=>{
                 const thread = host.callerThread?.();
-                const out = ppv >>> 0;
-                if (out === 0 || (stream >>> 0) === 0)
+                const out = wholeAddress(ppv);
+                if (out === 0 || wholeAddress(stream) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return (async()=>{
-                    const hr = await unmarshalInterface(stream >>> 0, riid >>> 0, out, thread);
-                    await callMethod(stream >>> 0, SLOT_RELEASE, [], thread);
+                    const hr = await unmarshalInterface(wholeAddress(stream), riid >>> 0, out,
+                        thread);
+                    await callMethod(wholeAddress(stream), SLOT_RELEASE, [], thread);
                     return hr;
                 })();
             },
@@ -4194,26 +4647,28 @@ export function createOleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([size, riid, unknown, context, contextData, flags])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(size >>> 0, OBJREF_BYTES);
+                writeU32(wholeAddress(size), OBJREF_BYTES);
                 // Nothing to ask of an object that is none, or a proxy.
-                if ((unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0))
+                if (wholeAddress(unknown) === 0 || remote()?.isProxy(wholeAddress(unknown)))
                 {
                     return S_OK;
                 }
                 return (async()=>{
                     const thread = host.callerThread?.();
-                    const own = (unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0) ? 0
-                        : await queryPointer(unknown >>> 0, IID_IMARSHAL, thread);
-                    writeU32(size >>> 0, OBJREF_BYTES);
+                    const own =
+                        wholeAddress(unknown) === 0 || remote()?.isProxy(wholeAddress(unknown)) ? 0
+                            : await queryPointer(wholeAddress(unknown), IID_IMARSHAL, thread);
+                    writeU32(wholeAddress(size), OBJREF_BYTES);
                     if (own === 0)
                     {
                         return S_OK;
                     }
-                    const args = [riid >>> 0, unknown >>> 0, context >>> 0, contextData >>> 0,
+                    const args = [riid >>> 0, wholeAddress(unknown), context >>> 0,
+                        wholeAddress(contextData),
                         flags >>> 0];
                     const block = host.heap.allocate(GUID_SIZE + 4);
                     let hr = S_OK;
@@ -4227,7 +4682,8 @@ export function createOleFunctions(host){
                             writeU32(block + GUID_SIZE, 0);
                             hr = (await callMethod(own, SLOT_MARSHAL_GET_SIZE_MAX,
                                 [...args, block + GUID_SIZE], thread)) | 0;
-                            writeU32(size >>> 0, OBJREF_CUSTOM_BYTES + readU32(block + GUID_SIZE));
+                            writeU32(wholeAddress(size),
+                                OBJREF_CUSTOM_BYTES + readU32(block + GUID_SIZE));
                         }
                         host.heap.free(block);
                     }
@@ -4248,13 +4704,14 @@ export function createOleFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([, unknown, , , , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
-                return publishHostObject(CLSID_STD_MARSHAL_OBJECT, standardMarshaler(unknown >>> 0),
-                    IID_IMARSHAL, out >>> 0);
+                writeU32(wholeAddress(out), 0);
+                return publishHostObject(CLSID_STD_MARSHAL_OBJECT,
+                    standardMarshaler(wholeAddress(unknown)),
+                    IID_IMARSHAL, wholeAddress(out));
             },
         },
 
@@ -4268,13 +4725,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 return publishHostObject(CLSID_FREE_MARSHALER_OBJECT, freeThreadedMarshaler(),
-                    IID_IUNKNOWN, out >>> 0);
+                    IID_IUNKNOWN, wholeAddress(out));
             },
         },
 
@@ -4290,12 +4747,12 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([stream])=>{
                 const thread = host.callerThread?.();
-                if ((stream >>> 0) === 0)
+                if (wholeAddress(stream) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 return (async()=>{
-                    const packet = await readObjref(stream >>> 0, thread);
+                    const packet = await readObjref(wholeAddress(stream), thread);
                     if (packet?.kind === 'custom')
                     {
                         const unmarshaler = await unmarshalerFor(packet.clsid, thread);
@@ -4304,7 +4761,7 @@ export function createOleFunctions(host){
                             return REGDB_E_CLASSNOTREG;
                         }
                         const hr = (await callMethod(unmarshaler, SLOT_MARSHAL_RELEASE_DATA,
-                            [stream >>> 0], thread)) | 0;
+                            [wholeAddress(stream)], thread)) | 0;
                         await callMethod(unmarshaler, SLOT_RELEASE, [], thread);
                         return hr;
                     }
@@ -4357,16 +4814,16 @@ export function createOleFunctions(host){
             handler: ([riid, pclsid])=>{
                 const iid = guidAt(riid);
                 const clsid = iid === null ? null : proxyStubs.classOf(iid);
-                if ((pclsid >>> 0) === 0)
+                if (wholeAddress(pclsid) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 if (clsid === null)
                 {
-                    writeGuid(host, pclsid >>> 0, GUID_NULL);
+                    writeGuid(host, wholeAddress(pclsid), GUID_NULL);
                     return REGDB_E_IIDNOTREG;
                 }
-                writeGuid(host, pclsid >>> 0, clsid);
+                writeGuid(host, wholeAddress(pclsid), clsid);
                 return S_OK;
             },
         },
@@ -4384,11 +4841,11 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([reserved, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 if ((reserved >>> 0) !== 0)
                 {
                     return E_UNEXPECTED;
@@ -4409,7 +4866,7 @@ export function createOleFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return S_OK;
             },
         },
@@ -4435,13 +4892,13 @@ export function createOleFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                const made = await runningObjects.register(unknown >>> 0, moniker,
+                const made = await runningObjects.register(wholeAddress(unknown), moniker,
                     (flags >>> 0) === ACTIVEOBJECT_WEAK ? 0 : ROTFLAGS_REGISTRATIONKEEPSALIVE,
                     thread);
                 await callMethod(moniker, SLOT_RELEASE, [], thread);
-                if (made.hr >= 0 && (cookieOut >>> 0) !== 0)
+                if (made.hr >= 0 && wholeAddress(cookieOut) !== 0)
                 {
-                    writeU32(cookieOut >>> 0, made.cookie);
+                    writeU32(wholeAddress(cookieOut), made.cookie);
                 }
                 return made.hr;
             },
@@ -4455,11 +4912,11 @@ export function createOleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([clsid, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const thread = host.callerThread?.();
                 const moniker = await activeObjectMoniker(clsid >>> 0);
                 if (moniker === 0)
@@ -4473,7 +4930,7 @@ export function createOleFunctions(host){
                 {
                     return MK_E_UNAVAILABLE;
                 }
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return S_OK;
             },
         },
@@ -4492,14 +4949,14 @@ export function createOleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, options, iid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const thread = host.callerThread?.();
                 return (async()=>{
-                    const context = await callExport('CreateBindCtx', slot=>[0, slot]);
+                    const context = await callExport('CreateBindCtx', slot=>[0, slot], thread);
                     if (context.hr < 0)
                     {
                         return context.hr;
@@ -4511,30 +4968,30 @@ export function createOleFunctions(host){
                         {
                             return E_OUTOFMEMORY;
                         }
-                        if ((options >>> 0) !== 0)
+                        if (wholeAddress(options) !== 0)
                         {
                             const set = (await callMethod(context.value, SLOT_BIND_SET_OPTIONS,
-                                [options >>> 0], thread)) | 0;
+                                [wholeAddress(options)], thread)) | 0;
                             if (set < 0)
                             {
                                 return set;
                             }
                         }
                         writeU32(work + 4, 0);
-                        const parsed = (await functions.MkParseDisplayName.handler(
-                            [context.value, name, work, work + 4])) | 0;
+                        const parsed = (await asCallOf(thread, ()=>functions.MkParseDisplayName
+                            .handler([context.value, name, work, work + 4]))) | 0;
                         const moniker = readU32(work + 4);
                         if (parsed < 0 || moniker === 0)
                         {
-                            if ((name >>> 0) !== 0)
+                            if (wholeAddress(name) !== 0)
                             {
                                 host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
-                                    readOleString(name >>> 0, MAX_PROGID))}`);
+                                    readOleString(wholeAddress(name), MAX_PROGID))}`);
                             }
                             return parsed < 0 ? parsed : E_FAIL;
                         }
                         const bound = (await callMethod(moniker, SLOT_MONIKER_BIND_TO_OBJECT,
-                            [context.value, 0, iid >>> 0, out >>> 0], thread)) | 0;
+                            [context.value, 0, iid >>> 0, wholeAddress(out)], thread)) | 0;
                         await callMethod(moniker, SLOT_RELEASE, [], thread);
                         return bound;
                     }
@@ -4575,17 +5032,17 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpsz, pclsid])=>{
-                const out = pclsid >>> 0;
+                const out = wholeAddress(pclsid);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeGuid(host, out, GUID_NULL);
-                if ((lpsz >>> 0) === 0)
+                if (wholeAddress(lpsz) === 0)
                 {
                     return S_OK;
                 }
-                return writeGuid(host, out, readOleString(lpsz >>> 0))
+                return writeGuid(host, out, readOleString(wholeAddress(lpsz)))
                     ? S_OK
                     : CO_E_CLASSSTRING;
             },
@@ -4601,17 +5058,17 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpsz, lpiid])=>{
-                const out = lpiid >>> 0;
+                const out = wholeAddress(lpiid);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeGuid(host, out, GUID_NULL);
-                if ((lpsz >>> 0) === 0)
+                if (wholeAddress(lpsz) === 0)
                 {
                     return S_OK;
                 }
-                return writeGuid(host, out, readOleString(lpsz >>> 0))
+                return writeGuid(host, out, readOleString(wholeAddress(lpsz)))
                     ? S_OK
                     : E_INVALIDARG;
             },
@@ -4667,13 +5124,13 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const [low, high] = fileTimeNow();
-                writeU32(out >>> 0, low);
-                writeU32((out >>> 0) + 4, high);
+                writeU32(wholeAddress(out), low);
+                writeU32(wholeAddress(out) + 4, high);
                 return S_OK;
             },
         },
@@ -4689,12 +5146,12 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([unknown, reserved])=>{
-                if ((reserved >>> 0) !== 0 || (unknown >>> 0) === 0)
+                if (wholeAddress(reserved) !== 0 || wholeAddress(unknown) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = host.callerThread?.();
-                const transfer = await queryPointer(unknown >>> 0, IID_IFOREGROUNDTRANSFER,
+                const transfer = await queryPointer(wholeAddress(unknown), IID_IFOREGROUNDTRANSFER,
                     thread);
                 if (transfer === 0)
                 {
@@ -4722,11 +5179,11 @@ export function createOleFunctions(host){
                 const state = threadState(host.currentThread());
                 const thread = host.callerThread?.();
                 const previous = state.state;
-                if ((pv >>> 0) !== 0)
+                if (wholeAddress(pv) !== 0)
                 {
-                    await callMethod(pv >>> 0, SLOT_ADD_REF, [], thread);
+                    await callMethod(wholeAddress(pv), SLOT_ADD_REF, [], thread);
                 }
-                state.state = pv >>> 0;
+                state.state = wholeAddress(pv);
                 if (previous !== 0)
                 {
                     await callMethod(previous, SLOT_RELEASE, [], thread);
@@ -4738,12 +5195,12 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const held = threadState(host.currentThread()).state;
-                writeU32(out >>> 0, held);
+                writeU32(wholeAddress(out), held);
                 if (held === 0)
                 {
                     return S_FALSE;
@@ -4764,13 +5221,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([context, old])=>{
-                if ((old >>> 0) === 0)
+                if (wholeAddress(old) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const state = threadState(host.currentThread());
-                writeU32(old >>> 0, state.callContext);
-                state.callContext = context >>> 0;
+                writeU32(wholeAddress(old), state.callContext);
+                state.callContext = wholeAddress(context);
                 return S_OK;
             },
         },
@@ -4779,6 +5236,17 @@ export function createOleFunctions(host){
         ...createAdviseFunctions(oleEnv),
         ...clipboard.table,
     };
+    // Not an export: keyed by a symbol, which a library's table of names never
+    // lists.
+    Object.defineProperty(functions, COM_DIAGNOSTICS,
+        { value: ()=>remoting?.diagnostics() ?? null });
 
     return functions;
 }
+
+/**
+ * The key of the table's channel diagnostics: the calls this process sends,
+ * runs and has queued across processes (`remote.js`), null before any
+ * crossed.
+ */
+export const COM_DIAGNOSTICS = Symbol('com diagnostics');

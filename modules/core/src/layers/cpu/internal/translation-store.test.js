@@ -6,9 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { unframe } from './record-frame.js';
 import {
     clearTranslations, createDirectoryTranslationStore, createMemoryDirectory, fileNameOf,
-    resolveTranslationStore,
+    readPieces, resolveTranslationStore,
     SEED_FORMAT, STORE_VERSION, unpackSeed,
 } from './translation-store.js';
 
@@ -19,8 +20,9 @@ import {
  * worker gets from the origin's file system.
  *
  * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number,
- *     writables?: number, largest?: number }} [counter]  `largest`: the most bytes one
- *     write through the synchronous handle took
+ *     writables?: number, largest?: number, short?: number }} [counter]  `largest`: the most
+ *     bytes one write through the synchronous handle took; `short`: bytes each such write
+ *     leaves out
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -78,14 +80,16 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                         counter.writables = (counter.writables ?? 0) + 1;
                         let draft = how.keepExistingData
                             ? new Uint8Array(file.bytes) : new Uint8Array(0);
+                        let cursor = 0;
                         return {
                             /** @param {Uint8Array | { type: string, position: number, data: Uint8Array }} b */
                             async write(b){
                                 if (b instanceof Uint8Array)
                                 {
-                                    draft = new Uint8Array(b);
-                                    return;
+                                    // At the stream's cursor, which follows what it wrote.
+                                    b = { type: 'write', position: cursor, data: b };
                                 }
+                                cursor = b.position + b.data.length;
                                 const grown = new Uint8Array(
                                     Math.max(draft.length, b.position + b.data.length));
                                 grown.set(draft);
@@ -112,6 +116,8 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                                 write(from, { at }){
                                     counter.writes = (counter.writes ?? 0) + 1;
                                     counter.largest = Math.max(counter.largest ?? 0, from.length);
+                                    // A disk taking a write in part, where a test asks.
+                                    from = from.subarray(0, from.length - (counter.short ?? 0));
                                     // A disk that takes its time, where a test asks.
                                     const until = performance.now() + (counter.writeMs ?? 0);
                                     while (performance.now() < until)
@@ -160,10 +166,10 @@ test('a record is appended to the bundle\'s records file and the index names its
         assert.ok(bundle.children.has('records'), 'one records file');
         assert.match(fileNameOf('anything'), /^[0-9a-f]{16}\.cork$/);
         assert.notEqual(fileNameOf('a'), fileNameOf('b'));
-        // The index names the record's place: name, offset, length, after
-        // the mark of the session that wrote it.
+        // The index names the record's place: name, offset, length (its frame's
+        // byte and its own, `record-frame.js`), after the mark of the session that wrote it.
         assert.equal(await indexOf(root, 'my_game_1.0'),
-            `# 1\n${fileNameOf('cork/1/x/401000/abc')} 0 3\n`);
+            `# 1\n${fileNameOf('cork/1/x/401000/abc')} 0 4\n`);
         // A miss touches the file system for nothing: the index answers it.
         const probes = root.counter.probes;
         assert.equal(await store.get('cork/1/x/999/zzz'), null);
@@ -172,11 +178,11 @@ test('a record is appended to the bundle\'s records file and the index names its
         await store.put('cork/1/x/401000/abc', new Uint8Array([1]));
         assert.deepEqual([...(await store.get('cork/1/x/401000/abc') ?? [])], [1]);
         assert.equal(await indexOf(root, 'my_game_1.0'),
-            `# 1\n${fileNameOf('cork/1/x/401000/abc')} 0 3\n${fileNameOf('cork/1/x/401000/abc')} 3 1\n`,
+            `# 1\n${fileNameOf('cork/1/x/401000/abc')} 0 4\n${fileNameOf('cork/1/x/401000/abc')} 4 2\n`,
             'the index is a log: the later line for a name wins');
         const reopened = await createDirectoryTranslationStore(root, 'my game/1.0');
         assert.deepEqual([...(await reopened.get('cork/1/x/401000/abc') ?? [])], [1]);
-        assert.equal(bundle.children.get('records').bytes.length, 4, 'both records are kept');
+        assert.equal(bundle.children.get('records').bytes.length, 6, 'both records are kept');
     });
 
 test('a batch of puts is indexed whole and a reopened store hits every one', async()=>{
@@ -232,6 +238,26 @@ test('an index entry the records file does not reach is not a record', async()=>
     directory.children.get('records').bytes = new Uint8Array(0);
     const reopened = await createDirectoryTranslationStore(root, 'bundle');
     assert.equal(await reopened.get('cork/1/a'), null, 'a torn write is a miss, not garbage');
+});
+
+test('an index ending in bytes that are no text is appended to at its end in bytes', async()=>{
+    // Its end was taken from its text decoded and encoded again, which a byte
+    // that is no UTF-8 makes longer: the next lines went past the file's end.
+    const root = fakeDirectory();
+    const store = await createDirectoryTranslationStore(root, 'bundle');
+    await store.put('cork/1/a', new Uint8Array([1, 2, 3]));
+    await store.flush();
+    const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    const index = directory.children.get('index');
+    index.bytes = Uint8Array.of(...index.bytes, 0xff, 0x0a);
+    const reopened = await createDirectoryTranslationStore(root, 'bundle');
+    await reopened.put('cork/1/b', new Uint8Array([4, 5]));
+    await reopened.flush();
+    const after = directory.children.get('index').bytes;
+    assert.equal(after.indexOf(0), -1, 'no gap of zeros before the new lines');
+    const again = await createDirectoryTranslationStore(root, 'bundle');
+    assert.deepEqual([...(await again.get('cork/1/b')) ?? []], [4, 5]);
+    assert.deepEqual([...(await again.get('cork/1/a')) ?? []], [1, 2, 3]);
 });
 
 test('opening a store removes the bundle\'s directories of other layout versions', async()=>{
@@ -352,11 +378,12 @@ for (const sync of [false, true])
                 { ...limits, compactFloor: Infinity });
             const root = fakeDirectory(undefined, sync);
             const kept = await twentyRuns(root, limits);
-            // Unbounded, every run appended its re-puts and its module for good.
-            assert.equal(grown[19], 20 * 1800 + 800);
+            // Unbounded, every run appended its re-puts and its module for good; each
+            // record a byte longer for its frame, none compressed under a kilobyte.
+            assert.equal(grown[19], 20 * 1809 + 808);
             // Kept, the file is at most twice what the last sessions used
-            // (8 stable + 8 relinked + 3 modules: 4 600) and one run more.
-            assert.ok(Math.max(...kept) <= 2 * 4600 + 1800, `bounded: ${kept.join(' ')}`);
+            // (8 stable + 8 relinked + 3 modules: 4 619) and one run more.
+            assert.ok(Math.max(...kept) <= 2 * 4619 + 1809, `bounded: ${kept.join(' ')}`);
             assert.deepEqual(kept.slice(-4), kept.slice(-6, -2), 'and steady, not growing');
             const store = await createDirectoryTranslationStore(root, 'bundle', limits);
             for (let i = 0; i < 8; i++)
@@ -398,8 +425,8 @@ test('a compaction cut short before its generation is named leaves the old one w
     await fourth.put('b', new Uint8Array([5]));
     await fourth.flush();
     assert.equal(new TextDecoder().decode(directory.children.get('current').bytes), '1');
-    assert.deepEqual([...directory.children.get('records.1').bytes], [7, 5],
-        'the stray bytes replaced, not appended to');
+    assert.deepEqual([...directory.children.get('records.1').bytes], [0, 7, 0, 5],
+        'the stray bytes replaced, not appended to (each record after its frame\'s byte)');
     assert.ok(!directory.children.has('records'), 'the old generation removed');
     const fifth = await createDirectoryTranslationStore(root, 'bundle');
     assert.deepEqual([...(await fifth.get('b') ?? [])], [5]);
@@ -474,6 +501,53 @@ test('an opening that cannot read which generation is current removes nothing', 
     await second.close();
 });
 
+test('a `current` a write cut short left names no generation, and nothing is removed for it',
+    async()=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('a', new Uint8Array([1]));
+        await first.close();
+        const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+        for (const name of ['records.12', 'index.12'])
+        {
+            (await directory.getFileHandle(name, { create: true })).bytes = new Uint8Array(0);
+        }
+        // `12` replaced through a synchronous handle and the page gone between the
+        // cut and the write, or after its first digit.
+        for (const torn of ['', '1'])
+        {
+            (await directory.getFileHandle('current', { create: true })).bytes =
+                new TextEncoder().encode(torn);
+            const store = await createDirectoryTranslationStore(root, 'bundle');
+            assert.deepEqual([...(await store.get('a') ?? [])], [1], `${torn || 'empty'}: `
+                + 'read as none named');
+            assert.equal(store.stats().opened.swept, 0, `${torn || 'empty'}: nothing removed`);
+            assert.ok(directory.children.has('records.12') && directory.children.has('records'));
+            await store.close();
+        }
+    });
+
+test('a record the disk took in part is a failure of the store, and no index names it',
+    async()=>{
+        const counter = { probes: 0, syncReads: 0, writes: 0, short: 0 };
+        const root = fakeDirectory(counter, true);
+        const store = await createDirectoryTranslationStore(root, 'bundle', undefined,
+            { writer: ()=>null });
+        await store.put('first', Uint8Array.from({ length: 64 }, (_, at)=>at));
+        await store.flush();
+        counter.short = 1;
+        await store.put('torn', Uint8Array.from({ length: 64 }, (_, at)=>255 - at));
+        counter.short = 0;
+        await store.put('after', new Uint8Array([7]));
+        await store.flush();
+        assert.ok(store.stats().broken, 'the store gave up for the run');
+        await store.close();
+        assert.ok(!(await indexOf(root, 'bundle')).includes(fileNameOf('torn')));
+        const next = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal(await next.get('torn'), null);
+        assert.equal((await next.get('first'))?.length, 64, 'what was whole stays');
+    });
+
 test('an index of touches is rewritten when it outgrows its records', async()=>{
     // A warm run that only reads: every run touches the same forty records,
     // and the records stay far under the compaction floor.
@@ -519,7 +593,8 @@ test('past the cap the records least recently used go first', async()=>{
     assert.equal(await store.get('r1'), null);
     assert.equal((await store.get('r2'))?.[0], 2);
     assert.equal((await store.get('r3'))?.[0], 3);
-    assert.equal(recordsSize(root), 20);
+    // Two records of ten bytes, each after its frame's byte.
+    assert.equal(recordsSize(root), 22);
 });
 
 test('the last run\'s records stay whole however far past the cap they are', async()=>{
@@ -541,8 +616,8 @@ test('the last run\'s records stay whole however far past the cap they are', asy
     {
         assert.equal((await store.get(`r${i}`))?.[0], i, `r${i}, the last run's`);
     }
-    assert.deepEqual({ ...store.stats().opened, ms: 0 }, { records: 9, bytes: 90, kept: 8,
-        keptBytes: 80, overCap: 10, orphans: 0, compacted: false, ms: 0, swept: 0, sweptBytes: 0 },
+    assert.deepEqual({ ...store.stats().opened, ms: 0 }, { records: 9, bytes: 99, kept: 8,
+        keptBytes: 88, overCap: 11, orphans: 0, compacted: false, ms: 0, swept: 0, sweptBytes: 0 },
     'past the cap only what an older run used, and a ninth of the file is no copy\'s worth');
     assert.equal((await store.get('old'))?.length, 10, 'readable until a copy leaves it out');
 });
@@ -614,7 +689,7 @@ test('a module no region names any more is dead, however recently it was written
         assert.deepEqual([(await next.get('region/a'))?.[0], (await next.get('region/b'))?.[0]],
             [3, 4]);
         assert.equal(next.stats().opened.compacted, true, 'more than half the file was dead');
-        assert.equal(next.stats().bytes, 402, 'the relinked module and its two regions');
+        assert.equal(next.stats().bytes, 405, 'the relinked module and its two regions, framed');
     });
 
 test('a store closed straight after its puts has them on disk for the next run', async()=>{
@@ -661,6 +736,59 @@ test('a store closed straight after its puts has them on disk for the next run',
         assert.equal((await next.get(`w${i}`))?.[0], i, `w${i}, written through the writer`);
     }
 });
+
+test('a record appended to reads whole, in its pieces\' order, reopened and compacted alike',
+    async()=>{
+        for (const sync of [false, true])
+        {
+            const root = fakeDirectory(undefined, sync);
+            const limits = { keepSessions: 1, compactFloor: 0, cap: 1 << 20 };
+            const first = await createDirectoryTranslationStore(root, 'bundle');
+            await first.append('map', new Uint8Array([1, 2]));
+            await first.put('dead', new Uint8Array(64));
+            await first.append('map', new Uint8Array([3]));
+            await first.append('map', new Uint8Array([4, 5]));
+            const whole = [1, 2, 3, 4, 5];
+            assert.deepEqual([...(await first.get('map')) ?? []], whole);
+            if (sync)
+            {
+                assert.deepEqual([...first.getNow('map') ?? []], whole, 'at once');
+            }
+            const lines = (await indexOf(root, 'bundle')).split('\n');
+            assert.equal(lines.filter(line=>line.startsWith(fileNameOf('map'))
+                && line.endsWith(' +')).length, 2, 'two pieces named after the first');
+            // Not closed: a page that goes away leaves its store so.
+            const next = await createDirectoryTranslationStore(root, 'bundle');
+            assert.deepEqual([...(await next.get('map')) ?? []], whole, 'reopened');
+            await next.close();
+            // 'dead' unread for a session: the next opening copies the live records.
+            const compacted = await createDirectoryTranslationStore(root, 'bundle', limits);
+            assert.deepEqual([...(await compacted.get('map')) ?? []], whole, 'compacted');
+            assert.equal(compacted.stats().opened.compacted, true);
+            assert.equal(await compacted.get('dead'), null);
+            await compacted.close();
+        }
+    });
+
+test('the touches of a run\'s reads are in the index a while after, the store left open',
+    async t=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('read', new Uint8Array([3]));
+        await first.close();
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const second = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await second.get('read'))?.[0], 3);
+        const name = fileNameOf('read');
+        const named = async()=>(await indexOf(root, 'bundle')).split(`# 2\n`)[1] ?? '';
+        assert.equal(await named(), '', 'not at once');
+        t.mock.timers.tick(2000);
+        for (let turn = 0; turn < 20 && !(await named()).includes(name); turn++)
+        {
+            await new Promise(resolve=>setImmediate(resolve));
+        }
+        assert.match(await named(), new RegExp(`^${name} 0 2$`, 'm'));
+    });
 
 test('a run that only reads keeps what it read young', async()=>{
     // Its touches were written only past 512 lines: a warm run reading a
@@ -847,7 +975,8 @@ test('a page\'s store opens one stream for the puts that arrive while one is que
     await store.flush();
     const bundle = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
     const records = bundle.children.get('records') ?? bundle.children.get('records.1');
-    assert.equal(records.bytes.length, COUNT * 2, 'every record landed');
+    assert.equal(records.bytes.length, COUNT * 3,
+        'every record landed, each after its frame\'s byte');
     // The index takes its own streams; the records take one for the batch.
     assert.ok((root.counter.writables ?? 0) - before <= 4,
         `${(root.counter.writables ?? 0) - before} streams for ${COUNT} puts`);
@@ -963,7 +1092,7 @@ function heldWriter(){
     let closed = false;
     /** @type {any} */
     let handle = null;
-    const state = { writes: 0 };
+    const state = { writes: 0, appends: 0 };
     /** @param {() => void} run @returns {Promise<void>} */
     const later = run=>new Promise((resolve, reject)=>{
         const go = ()=>{
@@ -1018,6 +1147,14 @@ function heldWriter(){
                 });
             },
             flush: ()=>later(()=>handle.flush()),
+            // The index's lines, on a handle of the writer's own for the one write.
+            append: async(/** @type {any} */ file, at, bytes)=>{
+                const index = await file.createSyncAccessHandle();
+                index.write(bytes, { at });
+                index.flush();
+                index.close();
+                state.appends++;
+            },
             // As a worker that ends: what it held is never written.
             close: ()=>{
                 closed = true;
@@ -1050,12 +1187,44 @@ test('with a records writer the store\'s own thread writes no record, found once
         assert.ok(writer.state.writes > 0, 'the writer wrote it');
         assert.deepEqual(store.getNow('cork/41/a/module/m'), bytes);
         await store.flush();
+        assert.ok(writer.state.appends > 0, 'the index too, by the writer');
         store.close();
         const next = await createDirectoryTranslationStore(root, 'game');
         assert.deepEqual(await next.get('cork/41/a/module/m'), bytes, 'and the next run finds it');
     });
 
-test('a record is handed to the writer, one inside a larger buffer copied out', async()=>{
+test('a reader with a handle of its own on the records file reads by the places the store '
+    + 'names what the store reads, and none is named without a writer', async()=>{
+    const root = fakeDirectory({ probes: 0, syncReads: 0, writes: 0 }, true);
+    const writer = heldWriter();
+    writer.release();
+    const store = await createDirectoryTranslationStore(root, 'game', undefined,
+        { writer: writer.factory });
+    await store.get('cork/41/a/none');
+    const keys = ['cork/41/a/one', 'cork/41/a/two', 'cork/41/a/grown'];
+    await store.put(keys[0], Uint8Array.from({ length: 300 }, (_, at)=>at * 5));
+    await store.put(keys[1], Uint8Array.from({ length: 7 }, (_, at)=>at + 1));
+    await store.append(keys[2], new Uint8Array([9, 8]));
+    await store.append(keys[2], new Uint8Array([7]));
+    const file = store.recordsFile();
+    assert.ok(file !== null, 'the file, the store\'s handle standing beside others');
+    const own = await file.createSyncAccessHandle({ mode: 'readwrite-unsafe' });
+    for (const key of keys)
+    {
+        const pieces = store.placeOf(key);
+        assert.ok(Array.isArray(pieces), key);
+        const framed = readPieces(own, /** @type {[number, number][]} */ (pieces));
+        assert.deepEqual(framed === null ? null : unframe(framed), store.getNow(key), key);
+    }
+    assert.equal(store.placeOf('cork/41/a/never'), null);
+    // Without a writer the store's handle is the file's only one.
+    const alone = await createDirectoryTranslationStore(fakeDirectory(undefined, true), 'game',
+        undefined, { writer: ()=>null });
+    await alone.get('cork/41/a/none');
+    assert.equal(alone.recordsFile(), null);
+});
+
+test('a record is handed to the writer framed, the caller\'s buffer left with it', async()=>{
     const root = fakeDirectory({ probes: 0, syncReads: 0, writes: 0 }, true);
     const writer = heldWriter();
     writer.release();
@@ -1068,7 +1237,8 @@ test('a record is handed to the writer, one inside a larger buffer copied out', 
     const inside = larger.subarray(100, 200);
     await store.put('cork/41/a/whole', whole);
     await store.put('cork/41/a/inside', inside);
-    assert.equal(whole.byteLength, 0, 'the record that was all of its buffer went across');
+    // What goes across is the frame (`record-frame.js`), a buffer of the store's own.
+    assert.equal(whole.byteLength, 5000, 'the caller\'s buffer stays with it');
     assert.equal(larger.byteLength, 300, 'the larger buffer stays with its owner');
     assert.deepEqual(store.getNow('cork/41/a/whole'), expected);
     assert.deepEqual(store.getNow('cork/41/a/inside'), larger.slice(100, 200));
@@ -1285,4 +1455,64 @@ test('clearing a bundle\'s translations removes every version of them and no oth
         assert.equal(await reopened.get('cork/1/a'), null, 'the next start translates afresh');
         assert.equal(await clearTranslations('none', fakeDirectory()), 0,
             'nothing kept, nothing gone');
+    });
+
+test('a record two runs left unused is dead, and a quarter of the file dead is worth a copy',
+    async()=>{
+        // A game's store had grown to 1.4 GB: a third of it regions translated
+        // ahead whose entry never ran, which no later run asks for, kept four runs.
+        const root = fakeDirectory();
+        for (const name of ['a', 'b', 'c'])
+        {
+            const store = await createDirectoryTranslationStore(root, 'bundle');
+            await store.put(name, new Uint8Array(10));
+            await store.close();
+        }
+        const store = await createDirectoryTranslationStore(root, 'bundle');
+        await store.get('c');
+        assert.deepEqual([store.stats().opened.records, store.stats().opened.kept], [3, 2],
+            'the first run\'s record, unused by the two after it, is not kept');
+        await store.close();
+        const later = fakeDirectory();
+        const keepAll = { keepSessions: 100, compactFloor: 0, cap: 1 << 20 };
+        const old = await createDirectoryTranslationStore(later, 'bundle', keepAll);
+        for (let i = 0; i < 3; i++)
+        {
+            await old.put(`dead${i}`, new Uint8Array(10));
+        }
+        await old.close();
+        const live = await createDirectoryTranslationStore(later, 'bundle', keepAll);
+        for (let i = 0; i < 6; i++)
+        {
+            await live.put(`live${i}`, new Uint8Array(10));
+        }
+        await live.close();
+        const reopened = await createDirectoryTranslationStore(later, 'bundle', { keepSessions: 1,
+            compactFloor: 0, cap: 1 << 20 });
+        await reopened.get('live0');
+        const opened = reopened.stats().opened;
+        assert.deepEqual([opened.records, opened.kept, opened.compacted], [9, 6, true],
+            'three tenths dead: copied');
+    });
+
+test('a record its run forgets is gone at the next opening, its module with its last region',
+    async()=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('module/m', new Uint8Array(40).fill(7));
+        await first.put('region/kept', new Uint8Array([1]), { needs: 'module/m' });
+        await first.put('module/n', new Uint8Array(40).fill(8));
+        await first.put('region/never', new Uint8Array([2]), { needs: 'module/n' });
+        first.forget('region/never');
+        first.forget('region/missing');
+        await first.close();
+        const second = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await second.get('region/kept'))?.[0], 1);
+        assert.equal((await second.get('module/m'))?.[0], 7);
+        assert.equal(await second.get('region/never'), null, 'forgotten');
+        assert.equal(second.stats().opened.kept, 2, 'its module goes with it');
+        await second.put('region/never', new Uint8Array([3]));
+        await second.close();
+        const third = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await third.get('region/never'))?.[0], 3, 'written again, it is back');
     });

@@ -10,9 +10,10 @@
  * crosses to another process.
  */
 
-import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { createMidl } from './midl.js';
 import { createRuntime } from './runtime.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The RPC statuses. */
 const RPC_S_OK = 0;
@@ -28,11 +29,13 @@ const UUID_STRING_LENGTH = 36;
  * @property {(address: number, maxLength: number) => string} [readCString]
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {import('../common/guest.js').Guest} [guest]  What the proxy/stub runtime
+ *           reads and writes guest memory through.
  * @property {(bytes: number) => number} [allocate]
  *           Where a string the library hands out lives, freed by RpcStringFree.
  * @property {(address: number) => void} [free]
  * @property {Omit<import('./runtime.js').RuntimeHost,
- *     'readMemory' | 'writeMemory' | 'allocate' | 'free' | 'divergence'>} [runtime]
+ *     'guest' | 'readMemory' | 'writeMemory' | 'allocate' | 'free' | 'divergence'>} [runtime]
  *           What the proxy/stub runtime needs besides memory: calls into the
  *           guest, raising on the calling thread, the registry and ole32's
  *           marshaler. Absent, a proxy/stub DLL's entry points are not bound.
@@ -65,7 +68,7 @@ export function createRpcFunctions(host){
     const uuidFromString = (spelled, out)=>{
         if (spelled === null)
         {
-            host.writeMemory(out >>> 0, new Uint8Array(GUID_SIZE));
+            host.writeMemory(wholeAddress(out), new Uint8Array(GUID_SIZE));
             return RPC_S_OK;
         }
         const bytes = spelled.length === UUID_STRING_LENGTH ? parseGuid(`{${spelled}}`) : null;
@@ -73,7 +76,7 @@ export function createRpcFunctions(host){
         {
             return RPC_S_INVALID_STRING_UUID;
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return RPC_S_OK;
     };
 
@@ -84,7 +87,7 @@ export function createRpcFunctions(host){
     const uuidToString = (uuid, out, wide)=>{
         const bytes = (uuid >>> 0) === 0 || !host.readMemory
             ? new Uint8Array(GUID_SIZE)
-            : host.readMemory(uuid >>> 0, GUID_SIZE);
+            : host.readMemory(wholeAddress(uuid), GUID_SIZE);
         const codes = [...formatGuid(bytes).slice(1, -1).toLowerCase(), '\0']
             .map(c=>c.charCodeAt(0));
         const encoded = wide ? new Uint8Array(Uint16Array.from(codes).buffer)
@@ -95,7 +98,7 @@ export function createRpcFunctions(host){
             return RPC_S_OUT_OF_MEMORY;
         }
         host.writeMemory(at, encoded);
-        writeU32(out >>> 0, at);
+        writeU32(wholeAddress(out), at);
         return RPC_S_OK;
     };
 
@@ -105,20 +108,21 @@ export function createRpcFunctions(host){
         {
             return RPC_S_OK;
         }
-        const held = new DataView(host.readMemory(pointer >>> 0, 4).slice().buffer)
+        const held = new DataView(host.readMemory(wholeAddress(pointer), 4).slice().buffer)
             .getUint32(0, true);
         if (held !== 0)
         {
             host.free?.(held);
         }
-        writeU32(pointer >>> 0, 0);
+        writeU32(wholeAddress(pointer), 0);
         return RPC_S_OK;
     };
 
     /** @type {Partial<ReturnType<typeof createRuntime>>} */
-    const runtime = host.runtime && host.readMemory && host.allocate && host.free
+    const runtime = host.runtime && host.guest && host.readMemory && host.allocate && host.free
         ? createRuntime({
             ...host.runtime,
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             allocate: host.allocate,
@@ -142,6 +146,11 @@ export function createRpcFunctions(host){
         })
         : {};
 
+    /** The time fields of the last sequential UUID, in 100 ns ticks. */
+    let lastTicks = 0n;
+    /** The clock sequence and node every sequential UUID of the process carries. */
+    const sequenceAndNode = crypto.getRandomValues(new Uint8Array(8));
+
     return {
         ...runtime,
         ...midl,
@@ -161,7 +170,7 @@ export function createRpcFunctions(host){
                 crypto.getRandomValues(bytes);
                 bytes[7] = (bytes[7] & 0x0f) | 0x40;
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return RPC_S_OK;
             },
         },
@@ -170,24 +179,29 @@ export function createRpcFunctions(host){
          * RPC_STATUS UuidCreateSequential(UUID *Uuid)
          *
          * A version 1 UUID: 100 ns ticks since 1582-10-15 in the time fields,
-         * a random clock sequence, and a node of the adapter address the
-         * machine reports none of -- random, its multicast bit set as RFC 4122
-         * asks of a node that is not an address.
+         * one clock sequence and node for the process -- the node an adapter
+         * address the machine reports none of, random, its multicast bit set
+         * as RFC 4122 asks of a node that is not an address. The time is later
+         * at every call, as the generator RFC 4122 describes keeps it: a
+         * program makes hundreds in a millisecond and keys its objects by the
+         * time fields alone.
          */
         UuidCreateSequential: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                const ticks = BigInt(Date.now()) * 10000n + 0x01b21dd213814000n;
+                const now = BigInt(Date.now()) * 10000n + 0x01b21dd213814000n;
+                lastTicks = now > lastTicks ? now : lastTicks + 1n;
+                const ticks = lastTicks;
                 const bytes = new Uint8Array(GUID_SIZE);
-                crypto.getRandomValues(bytes.subarray(8));
+                bytes.set(sequenceAndNode, 8);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, Number(ticks & 0xffffffffn), true);
                 view.setUint16(4, Number((ticks >> 32n) & 0xffffn), true);
                 view.setUint16(6, Number((ticks >> 48n) & 0x0fffn) | 0x1000, true);
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
                 bytes[10] |= 0x01;
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return RPC_S_OK;
             },
         },

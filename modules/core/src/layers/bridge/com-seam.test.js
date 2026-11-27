@@ -46,6 +46,9 @@ function machine(){
             readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
             writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
                 view.setUint32(at, value >>> 0, true),
+            // A 32-bit process: every pointer is a dword.
+            writePointer: (/** @type {number} */ at, /** @type {number} */ value)=>
+                view.setUint32(at, value >>> 0, true),
         },
         register: (name, fn)=>{
             const trap = nextTrap++;
@@ -89,6 +92,8 @@ function machine(){
             return fn.handler([pointer, ...args]) >>> 0;
         },
         poison: ()=>view.setUint32(AT.out, 0xdeadbeef, true),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            view.setUint32(at, value >>> 0, true),
     };
 }
 
@@ -184,11 +189,11 @@ test('IUnknown is one pointer whichever interface it is asked through', ()=>{
     assert.equal(m.names.get(m.slot(first, 0)), `${IID_IUNKNOWN}::QueryInterface`);
 });
 
-test('an interface marked `unknown` is the IUnknown, a `sharedWith` one what it shares', ()=>{
+test('an interface marked `identity` is the IUnknown, a `sharedWith` one what it shares', ()=>{
     const m = machine();
     const seam = publisherOn(m);
     const api = counted();
-    const whole = { ...ONE, unknown: true };
+    const whole = { ...ONE, identity: true };
     const front = { id: IID_TWO, sharedWith: IID_ONE, methods: [] };
     const one = seam.publish(api, [front, whole], IID_ONE);
     assert.equal(seam.publish(api, [front, whole], IID_TWO), one, 'the front part is the whole');
@@ -351,4 +356,74 @@ test('the default counting forwards to the object, with the interface it came th
     const silent = countedByTheObject(/** @type {any} */ ({ api: {} }));
     assert.equal(silent.addRef(undefined), 1, 'an object that keeps no count answers one');
     assert.equal(silent.release(undefined), 0);
+});
+
+test('a description may refuse with a word of its own, and an object may answer less', ()=>{
+    const m = machine();
+    const E_REFUSED = 0x88760096;
+    const seam = publisherOn(m, {
+        answers: (/** @type {any} */ api, /** @type {string} */ id)=>id !== IID_ONE || api.self,
+        refusal: ()=>0x80000001,
+    });
+    const api = Object.assign(counted(), { self: false });
+    const refusing = { ...TWO, refuses: ()=>E_REFUSED };
+    const one = seam.publish(api, [ONE, refusing], IID_ONE);
+    m.writeGuid(IID_TWO);
+    m.poison();
+    assert.equal(m.call(one, 0, [AT.iid, AT.out]), E_REFUSED, 'the description\'s word');
+    assert.equal(m.u32(AT.out), 0);
+    assert.equal(seam.publish(api, [ONE, refusing], IID_TWO), 0, 'nor published');
+    m.writeGuid(IID_ONE);
+    assert.equal(m.call(one, 0, [AT.iid, AT.out]), 0x80000001,
+        'published as it and not answered for it: the object\'s word');
+    api.self = true;
+    assert.equal(m.call(one, 0, [AT.iid, AT.out]), 0);
+    assert.equal(m.u32(AT.out), one);
+});
+
+test('an interface counted in the host keeps IUnknown at its traps, and answers strangers', ()=>{
+    const m = machine();
+    const seam = publisherOn(m);
+    const hosted = { ...ONE, countedInHost: true, stranger: 0x88760091 };
+    const pointer = seam.publish(counted(), [hosted], IID_ONE);
+    assert.equal(m.names.get(m.slot(pointer, 1)), `${IID_ONE}::AddRef`, 'the trap, not guest code');
+    assert.equal(m.names.get(m.slot(pointer, 2)), `${IID_ONE}::Release`);
+    // A pointer that never was one of its objects, with its table word.
+    const stranger = 0x200;
+    m.setU32(stranger, m.u32(pointer));
+    assert.equal(m.call(stranger, 3, [1]), 0x88760091);
+    assert.equal(m.call(stranger, 2), 0, 'and counts nothing');
+    assert.equal(m.call(pointer, 3, [1]), 7, 'its own objects answer as ever');
+});
+
+test('the way back knows which interface a pointer is, and forwards what a release owes', ()=>{
+    const m = machine();
+    let owed = 0;
+    const seam = publisherOn(m, {
+        counting: (/** @type {import('./com-seam.js').ComSeat} */ seat)=>({
+            ...countedByTheObject(seat),
+            afterRelease: ()=>{
+                owed++;
+            },
+        }),
+    });
+    const api = counted();
+    const one = seam.publish(api, [ONE, TWO], IID_ONE);
+    const two = seam.publish(api, [ONE, TWO], IID_TWO);
+    assert.equal(seam.interfaceAt(one), IID_ONE);
+    assert.equal(seam.interfaceAt(two), IID_TWO);
+    assert.equal(seam.interfaceAt(0x7777), null);
+    m.call(two, 1);
+    m.call(two, 2);
+    assert.equal(owed, 1, 'the bridge asked after the release');
+});
+
+test('a table can have a head of its own, one list per head and description', ()=>{
+    const head = Object.freeze([{ name: 'QueryInterface', argBytes: 12 },
+        { name: 'AddRef', argBytes: 4 }, { name: 'Release', argBytes: 4 }]);
+    const own = methodTable(ONE, head);
+    assert.equal(own[0], head[0]);
+    assert.equal(methodTable(ONE, head), own);
+    assert.notEqual(methodTable(ONE), own);
+    assert.equal(methodTable(ONE)[0], IUNKNOWN_METHODS[0]);
 });

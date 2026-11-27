@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
-import { moduleKeyOf } from '../../../app.js';
+import { fusedMultiplyAdd } from './ucrt-math.js';
+import { moduleKeyOf } from '../../../process/libraries.js';
 
 const STANDARD_SNPRINTF_BEHAVIOR = 0x2;
 const LEGACY_VSPRINTF_NULL_TERMINATION = 0x1;
@@ -21,8 +23,10 @@ const IOB = 0x1000;
  * out blocks from a counter, so what is checked is the runtime's own part.
  *
  * @param {Record<number, string>} [texts]  the text each format address prints
+ * @param {{ watched?: boolean }} [options]  with msvcrt's invalid-parameter
+ *     watch, ending the process into `called`
  */
-function setup(texts = {}){
+function setup(texts = {}, { watched = false } = {}){
     const memory = new Uint8Array(0x10000);
     /** @type {any[]} */
     const called = [];
@@ -67,10 +71,37 @@ function setup(texts = {}){
         _invalid_parameter_noinfo: { handler: ()=>called.push('ended') },
         _XcptFilter: { handler: ()=>0 },
         atexit: { handler: ()=>0 },
+        fread: { handler: (/** @type {number[]} */ args)=>{
+            called.push(['fread', ...args]);
+            return args[2];
+        } },
+        exit: { handler: (/** @type {number[]} */ [code])=>called.push(['exit', code]) },
+        _Getdays: { handler: ()=>{
+            writeText(0x3000, ':Sun:Sunday\0');
+            return 0x3000;
+        } },
+        malloc: { handler: (/** @type {number[]} */ [bytes])=>{
+            const block = next;
+            next += bytes;
+            return block;
+        } },
+        ...watched ? { [INVALID_PARAMETERS]: {
+            watch: createInvalidParameterWatch(),
+            exitProcess: (/** @type {number} */ code)=>called.push(['ended', code]),
+            report: (/** @type {string} */ api, /** @type {string} */ detail,
+                /** @type {string} */ kind)=>called.push([kind, api, detail]),
+        } } : {},
     };
+    // The texts in memory too, where the printers in the guest read their formats.
+    for (const [at, text] of Object.entries(texts))
+    {
+        writeText(Number(at), `${text}\0`);
+    }
     const ucrt = createUcrtbaseFunctions(crt, {
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: address=>String.fromCharCode(...memory.slice(address,
+            memory.indexOf(0, address))),
         callGuest: (entry, args)=>{
             called.push(['guest', entry, ...args]);
             return 0;
@@ -89,8 +120,8 @@ test('the API sets of the universal runtime are ucrtbase, as the schema has them
     assert.equal(moduleKeyOf('API-MS-WIN-CRT-RUNTIME-L1-1-0.DLL'), 'ucrtbase');
     assert.equal(moduleKeyOf('C:\\Windows\\System32\\api-ms-win-crt-math-l1-1-0.dll'), 'ucrtbase');
     assert.equal(moduleKeyOf('ucrtbase.dll'), 'ucrtbase');
-    assert.equal(moduleKeyOf('api-ms-win-core-synch-l1-2-0.dll'), 'api-ms-win-core-synch-l1-2-0',
-        'only the C runtime\'s sets are mapped');
+    assert.equal(moduleKeyOf('api-ms-win-core-synch-l1-2-0.dll'), 'kernel32',
+        'a core set is kernel32\'s (apisets.itest.js)');
 });
 
 test('__acrt_iob_func indexes the runtime\'s FILE records', ()=>{
@@ -125,6 +156,37 @@ test('__stdio_common_vsprintf is C99 snprintf or the legacy _vsnprintf, as its o
     assert.equal(textAt(buffer), 'abcdef', 'what fits is the whole text');
 });
 
+test('__stdio_common_vswprintf is C99 snprintf or the legacy _vsnwprintf in units, as its'
+    + ' options say', ()=>{
+    const format = 0x200;
+    const buffer = 0x2000;
+    const { ucrt, memory } = setup();
+    const view = new DataView(memory.buffer);
+    [...'abcdef', '\0'].forEach((c, i)=>view.setUint16(format + 2 * i, c.charCodeAt(0), true));
+    const print = (/** @type {number} */ options, /** @type {number} */ to,
+        /** @type {number} */ count)=>
+        ucrt.__stdio_common_vswprintf.handler([options, 0, to, count, format, 0, 0]);
+    const units = (/** @type {number} */ n)=>Array.from({ length: n },
+        (_, i)=>view.getUint16(buffer + 2 * i, true));
+    const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, 0, 0), 6, 'no buffer: the length it needs');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 4), 6,
+        'C99: the length it would have had');
+    assert.deepEqual(units(4), [...text('abc'), 0], 'cut to fit and terminated');
+
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(0, buffer, 4), -1, 'legacy: -1 when it does not fit');
+    assert.deepEqual(units(5), [...text('abcd'), 0xffff], 'and no terminator');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(LEGACY_VSPRINTF_NULL_TERMINATION, buffer, 4), -1);
+    assert.deepEqual(units(4), [...text('abc'), 0], 'unless asked to terminate it after all');
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 16), 6);
+    assert.deepEqual(units(7), [...text('abcdef'), 0], 'what fits is the whole text');
+});
+
 test('a DLL\'s exit table grows as it is registered to, and runs last first, once', async()=>{
     const { ucrt, called, readU32 } = setup();
     const table = 0x300;
@@ -146,18 +208,39 @@ test('a DLL\'s exit table grows as it is registered to, and runs last first, onc
     assert.equal(ucrt._register_onexit_function.handler([0, 1]), -1, 'no table');
 });
 
-test('an installed invalid-parameter handler is called and the caller goes on', async()=>{
-    const { ucrt, called } = setup();
-    await ucrt._invalid_parameter_noinfo.handler([]);
-    assert.deepEqual(called, ['ended'], 'none installed: the process ends');
+test('an invalid parameter reaches the handler installed, the thread\'s first, or ends the process',
+    async()=>{
+        const { ucrt, called, readU32 } = setup({}, { watched: true });
+        // A refusal with no handler: the process ends as _invoke_watson ends
+        // it, said as an error naming the function and its arguments.
+        await ucrt._set_fmode.handler([0x1234]);
+        assert.deepEqual(called.at(-1), ['ended', 0xc0000417]);
+        assert.match(called.at(-2)[2], /^_set_fmode\(0x1234\): an invalid parameter/);
+        assert.equal(called.at(-2)[0], 'loss');
 
-    called.length = 0;
-    assert.equal(ucrt._set_invalid_parameter_handler.handler([0x5000]), 0);
-    assert.equal(ucrt._get_invalid_parameter_handler.handler([]), 0x5000);
-    assert.equal(await ucrt._invalid_parameter_noinfo.handler([]), 0);
-    assert.deepEqual(called, [['guest', 0x5000, 0, 0, 0, 0, 0]]);
-    assert.equal(ucrt._set_invalid_parameter_handler.handler([0]), 0x5000, 'the one before');
-});
+        called.length = 0;
+        assert.equal(ucrt._set_invalid_parameter_handler.handler([0x5000]), 0);
+        assert.equal(ucrt._get_invalid_parameter_handler.handler([]), 0x5000);
+        assert.equal(await ucrt._set_fmode.handler([0x1234]), 22,
+            'the function answers its failure after the handler');
+        assert.equal(readU32(ERRNO), 22);
+        assert.deepEqual(called, [['guest', 0x5000, 0, 0, 0, 0, 0]],
+            'called with nothing known, as a release runtime calls it');
+        assert.equal(ucrt._set_fmode.handler([0x8000]), 0, 'an argument it takes calls nothing');
+        assert.equal(called.length, 1);
+
+        called.length = 0;
+        assert.equal(ucrt._set_thread_local_invalid_parameter_handler.handler([0x6000]), 0);
+        assert.equal(ucrt._get_thread_local_invalid_parameter_handler.handler([]), 0x6000);
+        await ucrt._invalid_parameter_noinfo.handler([]);
+        assert.deepEqual(called, [['guest', 0x6000, 0, 0, 0, 0, 0]], 'the thread\'s own first');
+
+        called.length = 0;
+        await ucrt._invalid_parameter.handler([0x10, 0x20, 0x30, 7, 0]);
+        assert.deepEqual(called, [['guest', 0x6000, 0x10, 0x20, 0x30, 7, 0]],
+            '_invalid_parameter hands on the details it was given');
+        assert.equal(ucrt._set_invalid_parameter_handler.handler([0]), 0x5000, 'the one before');
+    });
 
 test('_set_fmode takes the modes there are, and _get_fmode reads the same variable', ()=>{
     const { ucrt, readU32 } = setup();
@@ -169,4 +252,118 @@ test('_set_fmode takes the modes there are, and _get_fmode reads the same variab
     assert.equal(ucrt._set_fmode.handler([0x1234]), 22, 'EINVAL');
     assert.equal(readU32(ERRNO), 22);
     assert.equal(ucrt._get_fmode.handler([0]), 22);
+});
+
+test('_get_stream_buffer_pointers names the record\'s base, position and count fields', ()=>{
+    const { ucrt, readU32 } = setup();
+    const stream = 0x2000;
+    assert.equal(ucrt._get_stream_buffer_pointers.handler([stream, 0x500, 0x504, 0x508]), 0);
+    assert.deepEqual([readU32(0x500), readU32(0x504), readU32(0x508)],
+        [stream + 8, stream, stream + 4], '_base, _ptr and _cnt of msvcrt\'s _iobuf');
+    assert.equal(ucrt._get_stream_buffer_pointers.handler([0, 0x500, 0x504, 0x508]), 22,
+        'no stream: EINVAL');
+});
+
+test('fread_s reads as fread does, and refuses a request larger than its buffer', ()=>{
+    const { ucrt, called, readU32, memory } = setup();
+    assert.equal(ucrt.fread_s.handler([0x2000, 16, 4, 4, 0x3000]), 4);
+    assert.deepEqual(called.at(-1), ['fread', 0x2000, 4, 4, 0x3000]);
+    memory.fill(0xff, 0x2000, 0x2010);
+    assert.equal(ucrt.fread_s.handler([0x2000, 15, 4, 4, 0x3000]), 0, 'sixteen bytes into 15');
+    assert.equal(readU32(ERRNO), 34, 'ERANGE');
+    assert.deepEqual([...memory.slice(0x2000, 0x2010)], [...new Array(15).fill(0), 0xff],
+        'the buffer cleared');
+});
+
+test('exit calls the exe\'s thread-local callback first, told the process detaches', async()=>{
+    const { ucrt, called } = setup();
+    ucrt._register_thread_local_exe_atexit_callback.handler([0x7100]);
+    await ucrt.exit.handler([3]);
+    assert.deepEqual(called, [['guest', 0x7100, 0, 0, 0], ['exit', 3]]);
+    await ucrt.exit.handler([4]);
+    assert.deepEqual(called.at(-1), ['exit', 4], 'and once only');
+});
+
+test('_W_Getdays widens the names _Getdays lists, the narrow list freed', ()=>{
+    const { ucrt, called, memory } = setup();
+    const at = ucrt._W_Getdays.handler([]);
+    const units = new Uint16Array(memory.slice(at, at + 24).buffer);
+    assert.equal(String.fromCharCode(...units.slice(0, units.indexOf(0))), ':Sun:Sunday');
+    assert.deepEqual(called.at(-1), ['free', 0x3000]);
+});
+
+test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
+    const wide = { handler: ()=>1 };
+    const wideUnsigned = { handler: ()=>2 };
+    const narrow = { handler: ()=>3 };
+    const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
+        _wcstoui64: wideUnsigned });
+    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        readMemory: ()=>new Uint8Array(0), writeMemory: ()=>{} }));
+    assert.equal(ucrt.wcstoll, wide);
+    assert.equal(ucrt.wcstoull, wideUnsigned);
+    assert.equal(ucrt.strtoll, narrow);
+});
+
+test('lround and lroundf round half away from zero; a value no long holds is 0 and EDOM', ()=>{
+    /** @type {number[]} */
+    const errnos = [];
+    const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
+    const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
+        writeMemory: (/** @type {number} */ _at, /** @type {Uint8Array} */ bytes)=>
+            errnos.push(new DataView(bytes.buffer).getInt32(0, true)) })));
+    const words = (/** @type {number} */ x)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setFloat64(0, x, true);
+        return [view.getUint32(0, true), view.getUint32(4, true)];
+    };
+    assert.equal(ucrt.lround.handler(words(2.5)), 3);
+    assert.equal(ucrt.lround.handler(words(-2.5)), -3);
+    assert.equal(ucrt.lround.handler(words(1e12)), 0);
+    assert.deepEqual(errnos, [33], 'EDOM');
+    const single = new DataView(new ArrayBuffer(4));
+    single.setFloat32(0, -0.5, true);
+    assert.equal(ucrt.lroundf.handler([single.getUint32(0, true)]), -1);
+});
+
+test('fma rounds once: the error of a product is kept, ties go to even, floats round as'
+    + ' floats', ()=>{
+    /** @param {number[]} xyz */
+    const double = (...xyz)=>fusedMultiplyAdd(xyz[0], xyz[1], xyz[2], 53, -1074);
+    assert.equal(double(0.1, 10, -1), 5.551115123125783e-17, 'what 0.1 * 10 - 1 loses');
+    assert.equal(double(2 ** -1074, 0.5, 2 ** -1074), 2 ** -1073, 'a tie below the least ulp');
+    assert.equal(double(1e308, 10, -1e308), Infinity);
+    assert.ok(Object.is(double(-1, 1, 1), 0), 'an exact zero sum is +0');
+    assert.ok(Number.isNaN(double(Infinity, 0, 1)));
+    const f = Math.fround;
+    // (1 + 2^-23)^2 - 1 is 2^-22 + 2^-46: half a float ulp past 2^-22, rounded to even.
+    assert.equal(fusedMultiplyAdd(f(1 + 2 ** -23), f(1 + 2 ** -23), -1, 24, -149), 2 ** -22);
+    assert.equal(fusedMultiplyAdd(f(0.1), 10, -1, 24, -149), 1.4901161193847656e-8);
+});
+
+test('ilogb is the exponent as an int; zero and NaN have their own answers', ()=>{
+    const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
+    const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
+        writeMemory: ()=>{} })));
+    const words = (/** @type {number} */ x)=>{
+        const view = new DataView(new ArrayBuffer(8));
+        view.setFloat64(0, x, true);
+        return [view.getUint32(0, true), view.getUint32(4, true)];
+    };
+    assert.equal(ucrt.ilogb.handler(words(1)), 0);
+    assert.equal(ucrt.ilogb.handler(words(0.75)) | 0, -1);
+    assert.equal(ucrt.ilogb.handler(words(2 ** -1074)) | 0, -1074, 'a subnormal, as if normal');
+    assert.equal(ucrt.ilogb.handler(words(0)) | 0, -2147483648);
+    assert.equal(ucrt.ilogb.handler(words(NaN)), 2147483647);
+    const single = new DataView(new ArrayBuffer(4));
+    single.setFloat32(0, 1024, true);
+    assert.equal(ucrt.ilogbf.handler([single.getUint32(0, true)]), 10);
+});
+
+test('an _o_ name is the same entry as the plain one', ()=>{
+    const { ucrt } = setup();
+    assert.equal(ucrt._o_malloc, ucrt.malloc);
+    assert.equal(ucrt._o__execute_onexit_table, ucrt._execute_onexit_table);
 });

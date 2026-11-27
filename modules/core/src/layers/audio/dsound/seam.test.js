@@ -9,10 +9,11 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { writeGuid } from '../../win32/ole32/guid.js';
+import { parseGuid, readGuid, writeGuid } from '../../../system/guid.js';
 import {
     createDirectSound, createPublisher, describe,
-    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
+    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBCAPS, DSCAPS, DSCAPS_FLAGS,
+    DSBPOSITIONNOTIFY, DSBPOSITIONNOTIFY_64,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer, IID_IKsPropertySet,
     IID_IDirectSound3DListener,
@@ -20,11 +21,21 @@ import {
     IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
 import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSERR_NODRIVER = 0x88780078 | 0;
+const DSERR_OBJECTNOTFOUND = 0x88781161 | 0;
+const REGDB_E_CLASSNOTREG = 0x80040154 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_NOTIMPL = 0x80004001 | 0;
+const DSFXR_PRESENT = 0;
+const DSFXR_LOCSOFTWARE = 2;
+const DSFXR_UNKNOWN = 5;
+/** @param {any} memory @param {number} at */
+const readGuidAt = (memory, at)=>readGuid(memory, at);
 const DS_UNCERTIFIED = 1;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
@@ -122,7 +133,9 @@ function fakeBridge(){
             const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
             assert.ok(method, `${entry.id} has no ${name}`);
             assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
-            return method.invoke(entry.object, args) | 0;
+            const answer = method.invoke(entry.object, args);
+            // A method that calls into the guest answers once it is done.
+            return typeof answer?.then === 'function' ? answer : answer | 0;
         },
         /** @param {number} pointer */
         methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
@@ -137,9 +150,15 @@ function clock(){
     } };
 }
 
-/** Everything a test needs, wired the way the module wires it. */
-function fixture(){
-    const memory = guestMemory();
+/**
+ * Everything a test needs, wired the way the module wires it.
+ *
+ * @param {{ pointerSize?: 4 | 8, memory?: ReturnType<typeof guestMemory>,
+ *     callGuest?: (entry: number, args: number[]) => Promise<number>,
+ *     createInstance?: (clsid: number, outer: number, context: number, iid: number,
+ *         out: number) => number }} [options]
+ */
+function fixture({ pointerSize = 4, memory = guestMemory(), callGuest, createInstance } = {}){
     const bridge = fakeBridge();
     const time = clock();
     /** @type {number[]} */
@@ -151,7 +170,7 @@ function fixture(){
         mta.users--;
     } };
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const address = nextAddress;
             nextAddress += (bytes + 0xfff) & ~0xfff;
@@ -161,6 +180,9 @@ function fixture(){
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
         mtaUsage: mta,
+        pointerSize,
+        callGuest,
+        createInstance,
     });
     return { memory, bridge, time, dsound, signalled, mta };
 }
@@ -386,6 +408,21 @@ test('IDirectSound8 has its twelfth slot, VerifyCertification, and answers it', 
     assert.equal(f.bridge.call(root, 'VerifyCertification', [certified]), DS_OK);
     assert.equal(f.memory.u32(certified), DS_UNCERTIFIED);
     assert.equal(f.bridge.call(root, 'VerifyCertification', [0]), DSERR_INVALIDPARAM);
+});
+
+test('the speakers are stereo, wide, as Windows answers for two', ()=>{
+    // dsound.h: DSSPEAKER_MONO is 2, DSSPEAKER_STEREO 4, and the geometry sits in
+    // the high word. An answer of 2 had FMOD mix every title in mono.
+    const f = fixture();
+    const out = 0x1000;
+    assert.equal(
+        f.dsound.libraries['DSOUND.dll'].DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    const root = f.memory.u32(out);
+    const config = 0x1100;
+    assert.equal(f.bridge.call(root, 'GetSpeakerConfig', [config]), DS_OK);
+    assert.equal(f.memory.u32(config) & 0xff, 4, 'DSSPEAKER_STEREO');
+    assert.equal(f.memory.u32(config) >>> 16, 20, 'DSSPEAKER_GEOMETRY_WIDE');
+    assert.equal(f.bridge.call(root, 'GetSpeakerConfig', [0]), DSERR_INVALIDPARAM);
 });
 
 test('CreateSoundBuffer refuses a descriptor with no size or no format', ()=>{
@@ -1182,7 +1219,7 @@ test('DirectSoundCreate refuses to write through a null', ()=>{
 test('with no bridge behind it the seam refuses instead of publishing nowhere', ()=>{
     const memory = guestMemory();
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: ()=>0x50000,
         now: ()=>0,
         publishInterface: ()=>0,
@@ -1216,14 +1253,22 @@ test('the publisher keeps one adapter per object and can find it again', ()=>{
  * it. This cannot: the publisher is the real one, so where a method's arguments
  * land is decided by the code that decides it in a running program.
  */
-function guestMachine(){
+/**
+ * @param {Object} [options]
+ * @param {number[]} [options.answers]  what the program's callbacks return, in
+ *     order; a guest call past them answers TRUE
+ * @param {4 | 8} [options.pointerSize]
+ */
+function guestMachine({ answers = [], pointerSize = 4 } = {}){
     const memory = guestMemory();
+    /** @type {{ entry: number, args: number[] }[]} */
+    const guestCalls = [];
     /** @type {Map<number, any>} */
     const traps = new Map();
     let nextTrap = 1;
     let heapNext = 0x8000;
     const vtables = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} at @param {number} length */
             readBytes: (at, length)=>memory.bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
@@ -1232,7 +1277,7 @@ function guestMachine(){
             readU32: at=>memory.u32(at),
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>memory.setU32(at, value),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             const trap = nextTrap++;
@@ -1251,7 +1296,7 @@ function guestMachine(){
 
     let storage = 0x60000;
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const at = storage;
             storage += bytes + 0xfff & ~0xfff;
@@ -1259,11 +1304,17 @@ function guestMachine(){
         },
         now: ()=>1000,
         publishInterface: (object, id)=>vtables.publish(object, id),
+        callGuest: async(entry, args)=>{
+            guestCalls.push({ entry, args });
+            return answers[guestCalls.length - 1] ?? 1;
+        },
+        pointerSize,
     });
 
     return {
         memory,
         dsound,
+        guestCalls,
         /**
          * A call as the guest makes it: the interface pointer is pushed like
          * any other argument, and the publisher is what decides it is not one.
@@ -1273,7 +1324,9 @@ function guestMachine(){
         call(pointer, index, args = []){
             const entry = traps.get(memory.u32(memory.u32(pointer) + index * 4));
             assert.ok(entry, `slot ${index} has an implementation`);
-            return entry.handler([pointer, ...args]) | 0;
+            const answer = entry.handler([pointer, ...args]);
+            // A method that calls back into the guest answers once it is done.
+            return typeof answer?.then === 'function' ? answer : answer | 0;
         },
     };
 }
@@ -1316,7 +1369,7 @@ test('the primary buffer answers through its pointer after its last release', ()
 
     // Once its device is gone as well, the pointer is let go.
     assert.equal(g.call(device, RELEASE), 0);
-    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
+    assert.equal(g.call(primary, ADDREF), 0);
 });
 
 /** IID_IUnknown, as a program lays it out for QueryInterface. */
@@ -1341,8 +1394,8 @@ test('a buffer whose last reference goes is gone through every interface it was 
 
     assert.equal(g.call(buffer, RELEASE), 1);
     assert.equal(g.call(unknown, RELEASE), 0);
-    assert.equal(g.call(buffer, ADDREF) >>> 0, 0x80004003, 'E_POINTER');
-    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+    assert.equal(g.call(buffer, ADDREF), 0);
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('the primary buffer keeps every pointer it was asked for while its device lives', ()=>{
@@ -1363,8 +1416,8 @@ test('the primary buffer keeps every pointer it was asked for while its device l
     assert.equal(g.call(unknown, RELEASE), 0);
 
     assert.equal(g.call(device, RELEASE), 0);
-    assert.equal(g.call(primary, ADDREF) >>> 0, 0x80004003, 'and then neither pointer is kept');
-    assert.equal(g.call(unknown, ADDREF) >>> 0, 0x80004003);
+    assert.equal(g.call(primary, ADDREF), 0, 'and then neither pointer is kept');
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('a pointer the bridge let go of names no buffer any more, and a kept one still does', ()=>{
@@ -1435,6 +1488,18 @@ test('diagnostics report what a run actually did', ()=>{
     // bytes are read out and mixed. What is heard is the mixer's to report, and
     // it does, so a second answer here could only ever disagree with it.
     assert.equal('device' in report, false);
+});
+
+test('the contents a report reads are the playing buffers\' alone', ()=>{
+    // Every loaded sound copied out and scanned was most of a diagnostics
+    // answer's time; what is heard is what the report has to say about.
+    const f = createRoot();
+    const playing = createBuffer(f, { bytes: 4096 });
+    createBuffer(f, { bytes: 8192, descriptor: 0x2200 });
+    f.bridge.call(playing, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    const report = f.dsound.diagnostics();
+    assert.equal(report.buffers, 2);
+    assert.deepEqual(report.contents.map((/** @type {any} */ one)=>one.bytes), [4096]);
 });
 
 test('DSCAPS is the ninety-six bytes a program declares, not a hundred', ()=>{
@@ -1539,7 +1604,7 @@ function withGuest(answers){
     /** @type {{ entry: number, args: number[] }[]} */
     const calls = [];
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const address = nextAddress;
             nextAddress += (bytes + 0xfff) & ~0xfff;
@@ -1608,6 +1673,11 @@ test('GetDeviceID answers the device a default names, and a device as itself', a
         assert.equal(ask(alias(which)), DS_OK, `DSDEVID playback default ${which}`);
         assert.deepEqual(answered(), enumerated);
     }
+    // Neither half is zero, as in a real device's random GUID: a program that
+    // compared the second half with the zeroes it started from took a GUID with
+    // a zero half for no change of device and never turned its sound on.
+    assert.ok(enumerated.slice(0, 8).some(byte=>byte !== 0)
+        && enumerated.slice(8).some(byte=>byte !== 0), 'every byte of the GUID in play');
     // As Wine's dsound test expects DirectSoundCreate to answer for a capture
     // default: the default names a device that is not there.
     for (const which of [1, 3])
@@ -1814,3 +1884,538 @@ test('a new buffer holds silence, whatever the memory under it held', ()=>{
         assert.equal(f.bridge.call(buffer, 'Unlock', [f.memory.u32(p1), 4096, 0, 0]), DS_OK);
     }
 });
+
+test('a 64-bit process describes its buffers in 24 or 40 bytes and is handed whole pointers', ()=>{
+    // SDL2's DirectSound backend from a 64-bit program: sizeof(DSBUFFERDESC)
+    // is 40 there, and a check against the 32-bit sizes refused every buffer
+    // it asked for -- a device opened and no sound ever made.
+    const f = createRoot(fixture({ pointerSize: 8 }));
+    const out = 0x1800;
+    const descriptor = describeBuffer(f.memory, { bytes: 4096 });
+    for (const size of [DSBUFFERDESC.SIZE, DSBUFFERDESC.SIZE_DX8, DSBUFFERDESC_64.SIZE_DX8 + 8])
+    {
+        f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]),
+            DSERR_INVALIDPARAM, `dwSize ${size} is a 32-bit layout or none`);
+    }
+    for (const size of [DSBUFFERDESC_64.SIZE, DSBUFFERDESC_64.SIZE_DX8])
+    {
+        f.memory.setU32(out, 0xdeadbeef);
+        f.memory.setU32(out + 4, 0xdeadbeef);
+        f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, size);
+        assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK,
+            `dwSize ${size}`);
+        assert.ok(f.bridge.recordAt(f.memory.u32(out)), 'the buffer\'s pointer');
+        assert.equal(f.memory.u32(out + 4), 0, 'its high half');
+    }
+    const buffer = f.memory.u32(out);
+    // Lock's two LPVOID* are eight bytes; its LPDWORD sizes stay four.
+    const [p1, n1, p2, n2] = [0x1900, 0x1910, 0x1920, 0x1930];
+    for (const at of [p1, p2])
+    {
+        f.memory.setU32(at, 0xdeadbeef);
+        f.memory.setU32(at + 4, 0xdeadbeef);
+    }
+    assert.equal(f.bridge.call(buffer, 'Lock', [4000, 200, p1, n1, p2, n2, 0]), DS_OK);
+    const base = f.dsound.buffers().at(-1).address;
+    assert.deepEqual([f.memory.u32(p1), f.memory.u32(p1 + 4), f.memory.u32(n1)],
+        [base + 4000, 0, 96]);
+    assert.deepEqual([f.memory.u32(p2), f.memory.u32(p2 + 4), f.memory.u32(n2)], [base, 0, 104]);
+});
+
+test('a 64-bit process\'s notification positions are sixteen bytes, the handle at eight', ()=>{
+    const f = createRoot(fixture({ pointerSize: 8 }));
+    const descriptor = describeBuffer(f.memory,
+        { bytes: 88200, flags: DSBCAPS_CTRLPOSITIONNOTIFY });
+    f.memory.setU32(descriptor + DSBUFFERDESC_64.dwSize, DSBUFFERDESC_64.SIZE_DX8);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, 0x1800, 0]), DS_OK);
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.dwOffset, 44100);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.hEventNotify, 0x77);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.SIZE + DSBPOSITIONNOTIFY_64.dwOffset, 66000);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY_64.SIZE + DSBPOSITIONNOTIFY_64.hEventNotify, 0x88);
+    assert.equal(f.bridge.call(notifyOn(f, f.memory.u32(0x1800)), 'SetNotificationPositions',
+        [2, array]), DS_OK);
+    assert.deepEqual(f.dsound.buffers()[0].notifications,
+        [{ offset: 44100, event: 0x77 }, { offset: 66000, event: 0x88 }]);
+});
+
+test('a 64-bit process\'s device and class objects are written whole', ()=>{
+    const f = fixture({ pointerSize: 8 });
+    const dll = f.dsound.libraries['DSOUND.dll'];
+    const out = 0x1000;
+    f.memory.setU32(out + 4, 0xdeadbeef);
+    assert.equal(dll.DirectSoundCreate8.handler([0, out, 0]), DS_OK);
+    assert.equal(f.memory.u32(out + 4), 0);
+    f.memory.setU32(out + 4, 0xdeadbeef);
+    assert.equal(dll.DirectSoundCaptureCreate8.handler([0, out, 0]), DSERR_NODRIVER);
+    assert.deepEqual([f.memory.u32(out), f.memory.u32(out + 4)], [0, 0],
+        'a refusal clears the whole pointer');
+});
+
+test('the 3D setters name their float arguments, which a 64-bit caller passes in XMM', ()=>{
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, bytes: 0 });
+    const placed = createBuffer(f, { flags: 0x10, channels: 1 });
+    /** @param {number} pointer @param {string} id @param {string} name */
+    const floatsOf = (pointer, id, name)=>f.bridge.recordAt(pointer).object.interfaceFor(id)
+        .methods.find((/** @type {any} */ method)=>method.name === name).floats;
+    const xyz = { 1: 'f32', 2: 'f32', 3: 'f32' };
+    assert.deepEqual(floatsOf(primary, IID_IDirectSound3DListener, 'SetPosition'), xyz);
+    assert.deepEqual(floatsOf(primary, IID_IDirectSound3DListener, 'SetDistanceFactor'),
+        { 1: 'f32' });
+    assert.deepEqual(Object.keys(floatsOf(primary, IID_IDirectSound3DListener,
+        'SetOrientation')), ['1', '2', '3', '4', '5', '6']);
+    assert.deepEqual(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetVelocity'), xyz);
+    assert.deepEqual(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetMinDistance'), { 1: 'f32' });
+    assert.equal(floatsOf(placed, IID_IDirectSound3DBuffer, 'SetConeAngles'), undefined);
+});
+
+/** dsconf.h's private class, its property set and DSPROPERTY_DIRECTSOUNDDEVICE ids. */
+const CLSID_DirectSoundPrivate = '{11AB3EC0-25EC-11D1-A4D8-00C04FC28ACA}';
+const DSPROPSETID_DirectSoundDevice = '{84624F82-25EC-11D1-A4D8-00C04FC28ACA}';
+const WAVEDEVICEMAPPING_A = 1;
+const DESCRIPTION_1 = 2;
+const ENUMERATE_1 = 3;
+const WAVEDEVICEMAPPING_W = 4;
+const DESCRIPTION_A = 5;
+const DESCRIPTION_W = 6;
+const ENUMERATE_A = 7;
+const ENUMERATE_W = 8;
+const E_PROP_ID_UNSUPPORTED = 0x80070490;
+/** What DirectSoundEnumerate names the one device by. */
+const DEVICE_GUID = [.../** @type {Uint8Array} */ (parseGuid('{BD6DD71B-3DEB-4BF1-B3A6-2F5C9A8E7D41}'))];
+const DEVICE_NAME = 'Bottlify Sound Adapter';
+const PRIVATE_CLSID = 0x1e00;
+const PRIVATE_IID = 0x1e20;
+const PRIVATE_OUT = 0x1e40;
+const PROPERTY_SET = 0x1e60;
+const RETURNED = 0x1e80;
+const DATA = 0x3000;
+const NAME = 0x2800;
+
+/**
+ * The private object as a program gets it: DllGetClassObject, then the class
+ * object's CreateInstance for IKsPropertySet.
+ *
+ * @param {Parameters<typeof guestMachine>[0]} [options]
+ */
+function privatePropertySet(options){
+    const g = guestMachine(options);
+    writeGuid(g.memory, PRIVATE_CLSID, CLSID_DirectSoundPrivate);
+    writeGuid(g.memory, PRIVATE_IID, '{00000001-0000-0000-C000-000000000046}');
+    assert.equal(g.dsound.libraries['DSOUND.dll'].DllGetClassObject
+        .handler([PRIVATE_CLSID, PRIVATE_IID, PRIVATE_OUT]), DS_OK);
+    const factory = g.memory.u32(PRIVATE_OUT);
+    writeGuid(g.memory, PRIVATE_IID, IID_IKsPropertySet);
+    assert.equal(g.call(factory, 3, [0, PRIVATE_IID, PRIVATE_OUT]), DS_OK);
+    const object = g.memory.u32(PRIVATE_OUT);
+    writeGuid(g.memory, PROPERTY_SET, DSPROPSETID_DirectSoundDevice);
+    /** IKsPropertySet: Get, Set, QuerySupport after IUnknown's three. */
+    const slot = { Get: 3, Set: 4, QuerySupport: 5 };
+    return {
+        ...g,
+        object,
+        /**
+         * IKsPropertySet::Get over the device set, *pcbReturned poisoned first.
+         *
+         * @param {number} id @param {number} data @param {number} size
+         */
+        get(id, data, size){
+            g.memory.setU32(RETURNED, 0xdeadbeef);
+            return g.call(object, slot.Get, [PROPERTY_SET, id, 0, 0, data, size, RETURNED]);
+        },
+        /** @param {number} set @param {number} id @param {number} support */
+        querySupport: (set, id, support)=>g.call(object, slot.QuerySupport, [set, id, support]),
+        /** @param {number[]} args */
+        set: args=>g.call(object, slot.Set, args),
+        returned: ()=>g.memory.u32(RETURNED),
+    };
+}
+
+/** @param {any} memory @param {number} address @param {boolean} wide */
+function guestText(memory, address, wide){
+    let out = '';
+    for (let at = address; ; at += wide ? 2 : 1)
+    {
+        const code = wide ? memory.bytes[at] | memory.bytes[at + 1] << 8 : memory.bytes[at];
+        if (code === 0)
+        {
+            return out;
+        }
+        out += String.fromCharCode(code);
+    }
+}
+
+test('DllGetClassObject hands out the private property set\'s class object', ()=>{
+    // A sound library that finds no OpenAL asks dsound.dll for this class and
+    // calls through what it was handed without looking at the answer.
+    const g = guestMachine();
+    const dll = g.dsound.libraries['DSOUND.dll'];
+    writeGuid(g.memory, PRIVATE_CLSID, CLSID_DirectSoundPrivate);
+    writeGuid(g.memory, PRIVATE_IID, '{00000001-0000-0000-C000-000000000046}');
+    assert.equal(dll.DllGetClassObject.handler([PRIVATE_CLSID, PRIVATE_IID, PRIVATE_OUT]), DS_OK);
+    const factory = g.memory.u32(PRIVATE_OUT);
+    assert.notEqual(factory, 0);
+
+    // Wine's propset test: the class object makes IKsPropertySet and nothing
+    // DirectSound itself is, and a null out pointer is DSERR_INVALIDPARAM.
+    writeGuid(g.memory, PRIVATE_IID, IID_IDirectSound);
+    g.memory.setU32(PRIVATE_OUT, 0xdeadbeef);
+    assert.equal(g.call(factory, 3, [0, PRIVATE_IID, PRIVATE_OUT]) >>> 0, 0x80004002,
+        'E_NOINTERFACE');
+    assert.equal(g.memory.u32(PRIVATE_OUT), 0);
+    writeGuid(g.memory, PRIVATE_IID, IID_IKsPropertySet);
+    assert.equal(g.call(factory, 3, [0, PRIVATE_IID, 0]), DSERR_INVALIDPARAM);
+    assert.equal(g.call(factory, 3, [0, PRIVATE_IID, PRIVATE_OUT]), DS_OK);
+    assert.notEqual(g.memory.u32(PRIVATE_OUT), 0);
+
+    writeGuid(g.memory, PRIVATE_IID, IID_IDirectSound);
+    assert.equal(dll.DllGetClassObject.handler([PRIVATE_CLSID, PRIVATE_IID, PRIVATE_OUT]) >>> 0,
+        0x80004002, 'the class object is IClassFactory, not what it makes');
+});
+
+test('the private set says every device property is read and none written', ()=>{
+    const p = privatePropertySet();
+    const support = 0x1ea0;
+    for (let id = WAVEDEVICEMAPPING_A; id <= ENUMERATE_W; id++)
+    {
+        p.memory.setU32(support, 0xffffffff);
+        assert.equal(p.querySupport(PROPERTY_SET, id, support), DS_OK, `property ${id}`);
+        assert.equal(p.memory.u32(support), 1, 'KSPROPERTY_SUPPORT_GET alone');
+    }
+    p.memory.setU32(support, 0xffffffff);
+    assert.equal(p.querySupport(PROPERTY_SET, 9, support) >>> 0, E_PROP_ID_UNSUPPORTED);
+    assert.equal(p.memory.u32(support), 0);
+    const other = 0x1ec0;
+    writeGuid(p.memory, other, IID_IDirectSound);
+    assert.equal(p.querySupport(other, DESCRIPTION_A, support) >>> 0, E_PROP_ID_UNSUPPORTED);
+    assert.equal(p.set([PROPERTY_SET, DESCRIPTION_A, 0, 0, DATA, 40]) >>> 0,
+        E_PROP_ID_UNSUPPORTED, 'nothing is written');
+    assert.equal(p.get(9, DATA, 40) >>> 0, E_PROP_ID_UNSUPPORTED);
+    assert.equal(p.returned(), 0);
+});
+
+test('DESCRIPTION_1 describes the device inline, and a short structure is refused', ()=>{
+    const p = privatePropertySet();
+    // DSDEVID_DefaultPlayback, as Wine's propset test asks.
+    writeGuid(p.memory, DATA, '{DEF00000-9C6D-47ED-AAF1-4DDA8F2B5C03}');
+    assert.equal(p.get(DESCRIPTION_1, DATA, 1579), DSERR_INVALIDPARAM, 'E_INVALIDARG');
+    assert.equal(p.returned(), 1580);
+    assert.equal(p.get(DESCRIPTION_1, DATA, 1580), DS_OK);
+    assert.equal(p.returned(), 1580);
+    assert.deepEqual([...p.memory.bytes.subarray(DATA, DATA + 16)], DEVICE_GUID);
+    assert.equal(guestText(p.memory, DATA + 16, false), DEVICE_NAME, 'DescriptionA');
+    assert.equal(guestText(p.memory, DATA + 272, true), DEVICE_NAME, 'DescriptionW');
+    assert.equal(guestText(p.memory, DATA + 784, false), '', 'ModuleA');
+    assert.equal(guestText(p.memory, DATA + 1044, true), '', 'ModuleW');
+    assert.deepEqual([1564, 1568, 1572, 1576].map(at=>p.memory.u32(DATA + at)), [2, 0, 0, 0],
+        'Type WDM, DataFlow render, WaveDeviceId, Devnode');
+
+    assert.equal(p.get(DESCRIPTION_1, 0, 0), DS_OK, 'no structure asks its size');
+    assert.equal(p.returned(), 1580);
+});
+
+for (const [pointerSize, layout] of /** @type {const} */ ([
+    [4, { Description: 24, Module: 28, Interface: 32, WaveDeviceId: 36, SIZE: 40 }],
+    [8, { Description: 24, Module: 32, Interface: 40, WaveDeviceId: 48, SIZE: 56 }],
+]))
+{
+    test(`DESCRIPTION_A/W in a ${pointerSize * 8}-bit process point at the device's names`, ()=>{
+        const p = privatePropertySet({ pointerSize });
+        for (const [id, wide] of /** @type {const} */ ([[DESCRIPTION_A, false],
+            [DESCRIPTION_W, true]]))
+        {
+            p.memory.bytes.fill(0, DATA, DATA + 64);
+            assert.equal(p.get(id, DATA, layout.SIZE - 1), DSERR_INVALIDPARAM);
+            assert.equal(p.returned(), layout.SIZE);
+            // GUID_NULL and DIRECTSOUNDDEVICE_DATAFLOW_RENDER: the default playback device.
+            assert.equal(p.get(id, DATA, layout.SIZE), DS_OK);
+            assert.equal(p.returned(), layout.SIZE);
+            assert.equal(p.memory.u32(DATA), 2, 'WDM');
+            assert.equal(p.memory.u32(DATA + 4), 0, 'render');
+            assert.deepEqual([...p.memory.bytes.subarray(DATA + 8, DATA + 24)], DEVICE_GUID);
+            const text = (/** @type {number} */ at)=>{
+                if (pointerSize === 8)
+                {
+                    assert.equal(p.memory.u32(DATA + at + 4), 0, 'a whole pointer');
+                }
+                return guestText(p.memory, p.memory.u32(DATA + at), wide);
+            };
+            assert.equal(text(layout.Description), DEVICE_NAME);
+            assert.equal(text(layout.Module), '');
+            assert.equal(text(layout.Interface), '\\\\?\\bottlify#wave#out');
+            assert.equal(p.memory.u32(DATA + layout.WaveDeviceId), 0);
+
+            // There is no capture device, and a flow that is neither has no default.
+            p.memory.bytes.fill(0, DATA, DATA + 64);
+            p.memory.setU32(DATA + 4, 1);
+            assert.equal(p.get(id, DATA, layout.SIZE), DSERR_INVALIDPARAM);
+            p.memory.setU32(DATA + 4, 2);
+            assert.equal(p.get(id, DATA, layout.SIZE) >>> 0, E_PROP_ID_UNSUPPORTED);
+            // A GUID that names no device.
+            writeGuid(p.memory, DATA + 8, IID_IDirectSound);
+            p.memory.setU32(DATA + 4, 0);
+            assert.equal(p.get(id, DATA, layout.SIZE), DSERR_INVALIDPARAM);
+        }
+    });
+}
+
+test('WAVEDEVICEMAPPING finds the device by the wave device\'s name', ()=>{
+    const p = privatePropertySet();
+    for (const [id, wide] of /** @type {const} */ ([[WAVEDEVICEMAPPING_A, false],
+        [WAVEDEVICEMAPPING_W, true]]))
+    {
+        /** @param {string} name @param {number} flow */
+        const map = (name, flow)=>{
+            const units = wide ? 2 : 1;
+            p.memory.bytes.fill(0, NAME, NAME + 128);
+            [...name].forEach((character, at)=>{
+                p.memory.bytes[NAME + at * units] = character.charCodeAt(0);
+            });
+            p.memory.bytes.fill(0xcc, DATA, DATA + 24);
+            p.memory.setU32(DATA, NAME);
+            p.memory.setU32(DATA + 4, flow);
+            return p.get(id, DATA, 24);
+        };
+        assert.equal(map(DEVICE_NAME, 0), DS_OK);
+        assert.deepEqual([...p.memory.bytes.subarray(DATA + 8, DATA + 24)], DEVICE_GUID);
+        assert.equal(p.returned(), 24);
+        assert.equal(map(DEVICE_NAME, 1), DSERR_INVALIDPARAM, 'it is no capture device');
+        assert.equal(map(`${DEVICE_NAME} 2`, 0), DSERR_INVALIDPARAM, 'nor another name');
+        assert.equal(map('Bottlify', 0), DSERR_INVALIDPARAM, 'nor a part of its name');
+        assert.ok(p.memory.bytes.subarray(DATA + 8, DATA + 24).every(byte=>byte === 0xcc),
+            'and nothing is written');
+        p.memory.setU32(DATA, 0);
+        assert.equal(p.get(id, DATA, 24), DSERR_INVALIDPARAM, 'no name to look for');
+        assert.equal(p.get(id, 0, 24), DSERR_INVALIDPARAM, 'no structure');
+    }
+});
+
+test('ENUMERATE calls the program back once a device, in the form it asked for', async()=>{
+    const p = privatePropertySet();
+    const callback = 0x9000;
+    const context = 0xabcd;
+    /** @type {[number, (at: number) => void][]} */
+    const forms = [
+        [ENUMERATE_1, at=>{
+            assert.equal(guestText(p.memory, at + 16, false), DEVICE_NAME);
+            assert.equal(guestText(p.memory, at + 272, true), DEVICE_NAME);
+        }],
+        [ENUMERATE_A, at=>{
+            assert.equal(guestText(p.memory, p.memory.u32(at + 24), false), DEVICE_NAME);
+        }],
+        [ENUMERATE_W, at=>{
+            assert.equal(guestText(p.memory, p.memory.u32(at + 24), true), DEVICE_NAME);
+        }],
+    ];
+    for (const [id, check] of forms)
+    {
+        p.guestCalls.length = 0;
+        p.memory.setU32(DATA, callback);
+        p.memory.setU32(DATA + 4, context);
+        // Wine's propset test: too short is E_INVALIDARG with the size it needs.
+        assert.equal(p.get(id, DATA, 1), DSERR_INVALIDPARAM);
+        assert.equal(p.returned(), 8);
+        assert.equal(p.guestCalls.length, 0);
+
+        assert.equal(await p.get(id, DATA, 8), DS_OK);
+        assert.equal(p.returned(), 8);
+        // The devices DirectSoundEnumerate lists, without its primary driver.
+        assert.equal(p.guestCalls.length, 1, `property ${id}: one device`);
+        const [{ entry, args }] = p.guestCalls;
+        assert.equal(entry, callback);
+        assert.equal(args[1], context);
+        const guid = args[0] + (id === ENUMERATE_1 ? 0 : 8);
+        assert.deepEqual([...p.memory.bytes.subarray(guid, guid + 16)], DEVICE_GUID);
+        check(args[0]);
+    }
+    p.memory.setU32(DATA, 0);
+    assert.equal(p.get(ENUMERATE_A, DATA, 8) >>> 0, E_PROP_ID_UNSUPPORTED, 'no callback');
+});
+
+test('ENUMERATE ends when the callback answers FALSE', async()=>{
+    const p = privatePropertySet({ answers: [0, 0] });
+    p.memory.setU32(DATA, 0x9000);
+    p.memory.setU32(DATA + 4, 0);
+    assert.equal(await p.get(ENUMERATE_A, DATA, 8), DS_OK);
+    assert.equal(p.guestCalls.length, 1);
+    // DirectSoundEnumerate goes through the same loop, where FALSE after the
+    // primary driver is seen to stop it before the device.
+    p.guestCalls.length = 0;
+    assert.equal(await p.dsound.libraries['DSOUND.dll'].DirectSoundEnumerateA
+        .handler([0x9000, 0]), DS_OK);
+    assert.equal(p.guestCalls.length, 1);
+});
+
+/**
+ * A program's own effect, laid in guest memory as a DMO would be: an
+ * IMediaObject and an IMediaObjectInPlace whose slots lead to the test's
+ * functions, reached by the fake callGuest. Its Process turns every byte
+ * over, so what is heard can be told from what was written.
+ *
+ * @param {ReturnType<typeof guestMemory>} memory
+ */
+function guestEffect(memory){
+    const object = 0x9000;
+    const inPlace = 0x9010;
+    /** @type {Map<number, (args: number[]) => number>} */
+    const routines = new Map();
+    const calls = /** @type {string[]} */ ([]);
+    let references = 0;
+    /** @type {number[]} */
+    const typeSamples = [];
+    /**
+     * @param {number} pointer @param {number} vtable
+     * @param {[string, (args: number[]) => number][]} slots
+     */
+    const lay = (pointer, vtable, slots)=>{
+        memory.setU32(pointer, vtable);
+        slots.forEach(([name, routine], slot)=>{
+            const entry = vtable * 0x100 + slot * 4;
+            memory.setU32(vtable + slot * 4, entry);
+            routines.set(entry, args=>{
+                calls.push(name);
+                return routine(args);
+            });
+        });
+    };
+    const IID_INPLACE = '{651B9AD0-0FC7-4AA9-9538-D89931010741}';
+    const unknown = /** @type {[string, (args: number[]) => number][]} */ ([
+        ['QueryInterface', ([, iid, out])=>{
+            const asked = [...memory.bytes.subarray(iid, iid + 16)];
+            const wanted = [.../** @type {Uint8Array} */ (parseGuid(IID_INPLACE))];
+            if (asked.join() !== wanted.join())
+            {
+                memory.setU32(out, 0);
+                return E_NOINTERFACE;
+            }
+            memory.setU32(out, inPlace);
+            references++;
+            return 0;
+        }],
+        ['AddRef', ()=>++references],
+        ['Release', ()=>--references],
+    ]);
+    /** @type {[string, (args: number[]) => number][]} */
+    const media = [...unknown];
+    for (let slot = 3; slot < 24; slot++)
+    {
+        media.push([`slot${slot}`, ()=>E_NOTIMPL]);
+    }
+    media[8] = ['SetInputType', ([, , type])=>{
+        typeSamples.push(memory.u32(type + 40));
+        return 0;
+    }];
+    media[9] = ['SetOutputType', ([, , type])=>{
+        typeSamples.push(memory.u32(type + 40));
+        return 0;
+    }];
+    media[17] = ['Discontinuity', ()=>0];
+    lay(object, 0x9100, media);
+    lay(inPlace, 0x9200, [...unknown, ['Process', ([, size, data])=>{
+        for (let at = 0; at < size; at++)
+        {
+            memory.bytes[data + at] ^= 0xff;
+        }
+        return 1;
+    }]]);
+    return {
+        object, calls, typeSamples,
+        get references(){
+            return references;
+        },
+        /** A new reference, as a class object hands one out. */
+        made: ()=>++references,
+        /** @param {number} entry @param {number[]} args */
+        callGuest: async(entry, args)=>/** @type {any} */ (routines.get(entry))(args),
+    };
+}
+
+/** DSEFFECTDESC for each class, laid in guest memory. @param {any} memory @param {string[]} classes */
+function describeEffects(memory, classes){
+    const at = 0x1c00;
+    classes.forEach((clsid, index)=>{
+        memory.setU32(at + index * 32, 32);
+        memory.writeMemory(at + index * 32 + 8, /** @type {Uint8Array} */ (parseGuid(clsid)));
+    });
+    return at;
+}
+
+test('SetFX makes each effect through COM, gives it the buffer\'s format and runs it on Play',
+    async()=>{
+        // Wine's dsound8 test_effects, with the program's own DMO.
+        const memory = guestMemory();
+        const effect = guestEffect(memory);
+        const OWN = '{00001234-0000-0000-0000-000000000000}';
+        /** @type {string[]} */
+        const asked = [];
+        /**
+         * CoCreateInstance: the effect for its class, nothing for any other.
+         *
+         * @param {number} clsid @param {number} _outer @param {number} _context
+         * @param {number} _iid @param {number} out
+         */
+        const createInstance = (clsid, _outer, _context, _iid, out)=>{
+            const name = readGuidAt(memory, clsid);
+            asked.push(name);
+            if (name !== OWN)
+            {
+                return REGDB_E_CLASSNOTREG;
+            }
+            memory.setU32(out, effect.object);
+            effect.made();
+            return 0;
+        };
+        const f = createRoot(fixture({ memory, callGuest: effect.callGuest, createInstance }));
+        const pointer = f.bridge.query(createBuffer(f, { flags: DSBCAPS_CTRLFX, bytes: 64,
+            channels: 1, bits: 8, rate: 11025 }), IID_IDirectSoundBuffer8);
+        const results = 0x1c80;
+        assert.equal(await f.bridge.call(pointer, 'SetFX', [1, describeEffects(f.memory, [OWN]),
+            results]), DS_OK);
+        assert.equal(f.memory.u32(results), DSFXR_LOCSOFTWARE);
+        assert.deepEqual(effect.typeSamples, [1, 1],
+            'a frame of 8-bit mono going in, a byte coming out');
+
+        // The program's samples, then Play: told once, then run in place on a copy.
+        const record = [...f.dsound.awakeBuffers()].find((/** @type {any} */ b)=>!b.primary);
+        f.memory.bytes.fill(0x11, record.address, record.address + 64);
+        assert.equal(await f.bridge.call(pointer, 'Play', [0, 0, 0]), DS_OK);
+        assert.equal(effect.calls.filter(name=>name === 'Discontinuity').length, 1);
+        assert.deepEqual([...record.effectedWindow(0, 4)], [0xee, 0xee, 0xee, 0xee],
+            'what is heard is what the effect made');
+        assert.equal(f.memory.bytes[record.address], 0x11, 'the program\'s samples as written');
+        f.bridge.call(pointer, 'Stop', []);
+
+        // GetObjectInPath by any object and by class, and past the chain.
+        const out = 0x1d00;
+        const all = 0x1d10;
+        const iid = 0x1d20;
+        f.memory.writeMemory(all, /** @type {Uint8Array} */ (
+            parseGuid('{AA114DE5-C262-4169-A1C8-23D698CC73B5}')));
+        f.memory.writeMemory(iid, /** @type {Uint8Array} */ (
+            parseGuid('{651B9AD0-0FC7-4AA9-9538-D89931010741}')));
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, 0]),
+            DSERR_INVALIDPARAM);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, out]), 0);
+        assert.equal(f.memory.u32(out), 0x9010);
+        f.memory.setU32(out, 0xdeadbeef);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 1, iid, out]),
+            DSERR_OBJECTNOTFOUND);
+        assert.equal(f.memory.u32(out), 0xdeadbeef, 'nothing found, nothing written');
+
+        // A chain with a class nobody registered: the call fails with its
+        // answer, what was made is said and let go, and no effect is left.
+        const before = effect.references;
+        assert.equal(await f.bridge.call(pointer, 'SetFX', [2,
+            describeEffects(f.memory, [OWN, '{00000000-0000-0000-0000-000000000000}']), results]),
+        REGDB_E_CLASSNOTREG);
+        assert.deepEqual([f.memory.u32(results), f.memory.u32(results + 4)],
+            [DSFXR_PRESENT, DSFXR_UNKNOWN]);
+        assert.ok(effect.references < before,
+            `the chain before it and the one made let go: ${before} -> ${effect.references}`);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, out]),
+            DSERR_OBJECTNOTFOUND);
+        assert.equal(record.effectedWindow(0, 4), null, 'the program\'s samples are heard again');
+        assert.deepEqual(asked.slice(-2), [OWN, '{00000000-0000-0000-0000-000000000000}']);
+    });

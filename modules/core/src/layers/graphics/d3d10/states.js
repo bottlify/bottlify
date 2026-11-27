@@ -64,7 +64,7 @@ function bitsOf(value, bits){
  * @param {any} desc
  * @returns {any | null} the description as the object will report it
  */
-export function normaliseBlendDesc(desc){
+function normaliseBlendDesc(desc){
     if (!desc)
     {
         return null;
@@ -160,7 +160,7 @@ function normaliseTargetBlend(target){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseBlendDesc1(desc){
+function normaliseBlendDesc1(desc){
     if (!desc)
     {
         return null;
@@ -190,7 +190,7 @@ export function normaliseBlendDesc1(desc){
  *
  * @param {any} desc1
  */
-export function blendDescOf(desc1){
+function blendDescOf(desc1){
     const [first] = desc1.RenderTarget;
     return Object.freeze({
         AlphaToCoverageEnable: desc1.AlphaToCoverageEnable,
@@ -213,7 +213,7 @@ export function blendDescOf(desc1){
  *
  * @param {any} desc
  */
-export function blendDesc1Of(desc){
+function blendDesc1Of(desc){
     const targets = desc.BlendEnable.map((/** @type {boolean} */ enabled,
         /** @type {number} */ index)=>normaliseTargetBlend({
         ...desc, BlendEnable: enabled, RenderTargetWriteMask: desc.RenderTargetWriteMask[index],
@@ -266,7 +266,7 @@ function normaliseStencilFace(face){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseDepthStencilDesc(desc){
+function normaliseDepthStencilDesc(desc){
     if (!desc)
     {
         return null;
@@ -323,7 +323,7 @@ export function normaliseDepthStencilDesc(desc){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseRasterizerDesc(desc){
+function normaliseRasterizerDesc(desc){
     if (!desc)
     {
         return null;
@@ -350,7 +350,7 @@ export function normaliseRasterizerDesc(desc){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseSamplerDesc(desc){
+function normaliseSamplerDesc(desc){
     if (!desc || !isMember(D3D10_FILTER, desc.Filter))
     {
         return null;
@@ -401,6 +401,19 @@ const NORMALISERS = Object.freeze({
  * @returns {string}
  */
 function cacheKey(kind, normalised){
+    if (kind === STATE_KIND.BLEND || kind === STATE_KIND.BLEND1)
+    {
+        // One blend state, whichever description made it: Direct3D 10's and
+        // 10.1's of the same blending, as Direct3D 11 asks for it through
+        // the same device, are one object (test_create_blend_state), and
+        // independent blending is whether the targets differ.
+        const desc1 = kind === STATE_KIND.BLEND ? blendDesc1Of(normalised) : normalised;
+        const targets = desc1.RenderTarget.map((/** @type {any} */ target)=>
+            JSON.stringify(target));
+        return `blend:${JSON.stringify({ ...desc1,
+            IndependentBlendEnable: targets.some((/** @type {string} */ target)=>
+                target !== targets[0]) })}`;
+    }
     return `${kind}:${JSON.stringify(normalised)}`;
 }
 
@@ -444,6 +457,7 @@ export function createStateStore(options){
 
         let count = 1;
         options.retainDevice();
+        /** @type {any} */
         const state = {
             kind,
             ...createPrivateData(),
@@ -451,6 +465,12 @@ export function createStateStore(options){
                 return count;
             },
             addRef(){
+                // Handed out again by a getter while bound with no count of
+                // its own (Direct3D 11's context keeps it alive).
+                if (count === 0)
+                {
+                    options.retainDevice();
+                }
                 count++;
                 return count;
             },
@@ -462,10 +482,28 @@ export function createStateStore(options){
                 count--;
                 if (count === 0)
                 {
-                    live.delete(key);
                     options.releaseDevice();
+                    if (!(state.bound > 0))
+                    {
+                        live.delete(key);
+                    }
                 }
                 return count;
+            },
+            /** Its last binding let go: with no count either, it is gone. */
+            unbound(){
+                if (count === 0)
+                {
+                    live.delete(key);
+                }
+            },
+            /** @returns {boolean} gone at no count, unless a context still keeps it bound */
+            get destroyed(){
+                return count === 0 && !(state.bound > 0);
+            },
+            /** Whether a pointer to it may still be called: while it is bound. */
+            reachable(){
+                return state.bound > 0;
             },
 
             /** @param {{ desc?: any }} target */

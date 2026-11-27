@@ -19,6 +19,10 @@ import { features as probeFeatures } from '../wasm/features.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
 /** A share no region fits in: every call forms one candidate and leaves the rest. */
 const ONE_A_CALL = { holdMs: 1e-6 };
 
@@ -41,8 +45,10 @@ for (const seed of [31, 32, 33])
 {
     test(`the store's hits compiled apart and published a few at a call run as published at`
         + ` once (seed ${seed})`, async()=>{
-        const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+        const kept = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
             bundleId: 'test' };
+        // Each runtime compiles its hits' modules itself: none kept for the others.
+        const config = { ...kept, sharedModuleBytes: 0 };
         const store = memoryTranslationStore();
         const filled = await observe(seed, { ...config, store, holdMs: 0 });
         const whole = await observe(seed, { ...config, store, holdMs: 0 });
@@ -54,6 +60,12 @@ for (const seed of [31, 32, 33])
         assert.ok(parts.publishedInPart > 0, 'hits published over several calls');
         assert.deepEqual(whole.runs, filled.runs);
         assert.deepEqual(parts.runs, filled.runs);
+        // And with them kept: the modules the first compiled, published a few at a call.
+        const sharing = memoryTranslationStore();
+        await observe(seed, { ...kept, store: sharing, holdMs: 0 });
+        const shared = await observe(seed, { ...kept, store: sharing, ...ONE_A_CALL });
+        assert.ok(shared.sharedModules > 0, 'modules taken as the first compiled them');
+        assert.deepEqual(shared.runs, filled.runs);
     });
 }
 
@@ -129,7 +141,7 @@ for (const seed of [41, 42])
     test(`regions a relink moves a region a call run as moved at once (seed ${seed})`,
         async()=>{
             const config = { worker: true, translators: 1, batchRegions: 2, maxBatchRegions: 2,
-                relinkAfter: 2, relinkRegions: 4 };
+                relinkAfter: 2, relinkRegions: 4, relinkQuiet: 0 };
             const whole = await observe(seed, { ...config, holdMs: 0 });
             const parts = await observe(seed, { ...config, ...ONE_A_CALL });
             assert.ok(!whole.runs.includes('untranslated'), 'every start translated');
@@ -200,7 +212,7 @@ test('a batch left half formed is formed on with no further ask', async()=>{
         }
         await m.runtime.translatePending();
         // Only the event loop from here: the runtime calls itself back.
-        for (let i = 0; i < 200 && !starts.every(at=>m.runtime.entryOf(at) >= 0); i++)
+        while (!starts.every(at=>m.runtime.entryOf(at) >= 0))
         {
             await new Promise(resolve=>setTimeout(resolve, 5));
         }
@@ -268,7 +280,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             m.runtime.noteHot(0x4000, 0, 2);
             const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
             // Asked until the credit the first batch spent has come back.
-            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            while (diagnostics().formedInPart === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -276,7 +288,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             assert.equal(diagnostics().formedInPart, 1, 'one of the two formed');
             // The pool takes back the translator the batch was taken for, idle meanwhile.
             m.runtime.detachTranslator?.(taken.adapter);
-            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            while (diagnostics().formedWaiting === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -287,7 +299,7 @@ test('a batch formed whole after the pool took its translator back waits for ano
             const lent = heldTranslator();
             m.runtime.attachTranslator?.(lent.adapter);
             lent.ready();
-            for (let i = 0; i < 200 && lent.held.length === 0; i++)
+            while (lent.held.length === 0)
             {
                 await turn();
             }
@@ -315,7 +327,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
             // Taken back right after the call that formed one of the two, before
             // the runtime's own call back forms the other.
-            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            while (diagnostics().formedInPart === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -325,7 +337,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             m.runtime.detachTranslator?.(first.adapter);
             const next = heldTranslator();
             m.runtime.attachTranslator?.(next.adapter);
-            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            while (diagnostics().formedWaiting === 0)
             {
                 await turn();
                 await m.runtime.translatePending();
@@ -334,7 +346,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
             assert.deepEqual([m.runtime.entryOf(0x3000), m.runtime.entryOf(0x4000)], [-1, -1],
                 'not emitted on this thread');
             next.ready();
-            for (let i = 0; i < 200 && next.held.length === 0; i++)
+            while (next.held.length === 0)
             {
                 await turn();
             }
@@ -348,8 +360,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
     });
 
 test('nothing is emitted here while the translator loads: the batch waits for it', async()=>{
-    const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4,
-        loadingShare: 1 };
+    const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4 };
     const starts = [0x2000, 0x3000, 0x4000];
     /** @param {ReturnType<typeof machine>} m */
     const translated = m=>starts.filter(at=>m.runtime.entryOf(at) >= 0).length;
@@ -382,7 +393,7 @@ test('nothing is emitted here while the translator loads: the batch waits for it
         assert.ok(/** @type {any} */ (held.runtime.diagnostics()).formedWaiting > 0,
             'formed, and waiting');
         loading.ready();
-        for (let i = 0; i < 200 && loading.held.length === 0; i++)
+        while (loading.held.length === 0)
         {
             await turn();
         }
@@ -417,7 +428,7 @@ test('with no translator left, a batch emitted here is one region', async()=>{
         {
             m.runtime.noteHot(at, 0, 2);
         }
-        for (let i = 0; i < 200 && translated() < starts.length; i++)
+        while (translated() < starts.length)
         {
             await turn();
             await m.runtime.translatePending();
@@ -432,7 +443,8 @@ test('with no translator left, a batch emitted here is one region', async()=>{
 });
 
 test('a batch\'s store hits start compiling their modules a share at a call', async()=>{
-    const config = { worker: true, translators: 1, bundleId: 'test' };
+    // Compiled by the runtime itself, not taken as the filling one compiled them.
+    const config = { worker: true, translators: 1, bundleId: 'test', sharedModuleBytes: 0 };
     const store = memoryTranslationStore();
     const starts = [0x2000, 0x3000, 0x4000, 0x5000];
     /** @param {ReturnType<typeof machine>} m */
@@ -505,10 +517,11 @@ const callingLoop = at=>{
     return { code, table, slots, f, g };
 };
 
-test('regions formed again with their calls\' callees are formed a share at a call', async()=>{
+test('regions formed again with their calls\' callees are formed a share at a call', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no transfers, no calls sampled
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // A call is due at its first sample, so both are due in one reading.
     const m = machine({ worker: true, translators: 1, callTargets: true, callReturn: false,
@@ -539,7 +552,7 @@ test('regions formed again with their calls\' callees are formed a share at a ca
         await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at) >= 0));
         assert.equal(reforms(), 0);
         let most = 0;
-        for (let i = 0; i < 400 && reforms() < starts.length; i++)
+        while (reforms() < starts.length)
         {
             starts.forEach(run);
             const before = reforms();
@@ -581,7 +594,7 @@ test('regions formed again with copies of their loops are formed a share at a ca
             }
         }
         const copied = ()=>/** @type {any} */ (m.runtime.diagnostics()).copied;
-        for (let i = 0; i < 200 && copied() === 0; i++)
+        while (copied() === 0)
         {
             await turn();
             await m.runtime.translatePending();
@@ -602,3 +615,48 @@ test('regions formed again with copies of their loops are formed a share at a ca
         await m.runtime.flush();
     }
 });
+
+test('a runtime with no translator says it emitted on its own thread, timings off as shipped',
+    async()=>{
+        // What a pool that took the translator back reads to lend one again.
+        const m = machine({ worker: false, timings: false });
+        m.write(0x2000, piece(0, 100, 3).code);
+        assert.equal(m.runtime.translatedHere?.(), 0);
+        m.runtime.noteHot(0x2000, 0, 64);
+        while (m.runtime.entryOf(0x2000) < 0)
+        {
+            await m.runtime.translatePending();
+            await turn();
+        }
+        assert.ok((m.runtime.translatedHere?.() ?? 0) > 0, 'the time it emitted here');
+    });
+
+test('a block of a region formed and not yet published is not queued when it is noted again',
+    async()=>{
+        // Noted by the interpreter while the region holding it was with the
+        // translator, a block was queued, taken into a batch, found covered and
+        // dropped, and noted again: a .NET runtime's load spent a seventh of
+        // the engine thread over a window doing so.
+        const m = machine({ worker: true, translators: 0, batchRegions: 2, maxBatchRegions: 2,
+            ...ONE_A_CALL });
+        const held = heldTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(held.adapter);
+            held.ready();
+            // test eax, eax; jz +1; nop; ret - blocks at 0x2000, 0x2004 and 0x2005.
+            m.write(0x2000, [0x85, 0xc0, 0x74, 0x01, 0x90, 0xc3]);
+            m.runtime.noteHot(0x2000, 0, 64);
+            await m.runtime.translatePending();
+            assert.equal(held.held.length, 1, 'the region is with the translator');
+            const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
+            assert.equal(diagnostics().queued, 0);
+            m.runtime.noteHot(0x2005, 0, 64);
+            m.runtime.noteHot(0x2004, 0, 64);
+            assert.equal(diagnostics().queued, 0, 'its blocks wait for it, not in the queue');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });

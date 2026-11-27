@@ -41,7 +41,7 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 const mod = (a, b)=>((a % b) + b) % b;
 
 /** @param {number} t @returns {number} */
-export const day = t=>Math.floor(t / MS_PER_DAY);
+const day = t=>Math.floor(t / MS_PER_DAY);
 
 /** @param {number} y @returns {number} */
 const dayFromYear = y=>365 * (y - 1970) + Math.floor((y - 1969) / 4)
@@ -51,7 +51,7 @@ const dayFromYear = y=>365 * (y - 1970) + Math.floor((y - 1969) / 4)
 const isLeap = y=>(y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 
 /** @param {number} t @returns {number} */
-export function yearFromTime(t){
+function yearFromTime(t){
     let y = Math.floor(day(t) / 365.2425) + 1970;
     while (dayFromYear(y) * MS_PER_DAY > t)
     {
@@ -71,7 +71,7 @@ const MONTH_STARTS = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
 const monthStart = (month, leap)=>MONTH_STARTS[month] + (leap && month >= 2 ? 1 : 0);
 
 /** @param {number} t @returns {{ year: number, month: number, date: number }} */
-export function dateParts(t){
+function dateParts(t){
     const year = yearFromTime(t);
     const inYear = day(t) - dayFromYear(year);
     const leap = isLeap(year);
@@ -92,7 +92,7 @@ const weekDay = t=>mod(day(t) + 4, 7);
  * @param {number} hour @param {number} min @param {number} sec @param {number} ms
  * @returns {number}
  */
-export function makeTime(hour, min, sec, ms){
+function makeTime(hour, min, sec, ms){
     if (![hour, min, sec, ms].every(Number.isFinite))
     {
         return NaN;
@@ -106,7 +106,7 @@ export function makeTime(hour, min, sec, ms){
  *
  * @param {number} year @param {number} month @param {number} date @returns {number}
  */
-export function makeDay(year, month, date){
+function makeDay(year, month, date){
     if (![year, month, date].every(Number.isFinite))
     {
         return NaN;
@@ -118,11 +118,11 @@ export function makeDay(year, month, date){
 }
 
 /** @param {number} days @param {number} time @returns {number} */
-export const makeDate = (days, time)=>(Number.isFinite(days) && Number.isFinite(time)
+const makeDate = (days, time)=>(Number.isFinite(days) && Number.isFinite(time)
     ? days * MS_PER_DAY + time : NaN);
 
 /** @param {number} t @returns {number} TimeClip (15.9.1.14) */
-export const timeClip = t=>(!Number.isFinite(t) || Math.abs(t) > 8.64e15 ? NaN : toInteger(t) + 0);
+const timeClip = t=>(!Number.isFinite(t) || Math.abs(t) > 8.64e15 ? NaN : toInteger(t) + 0);
 
 /** @param {number} n @param {number} [width] */
 const pad = (n, width = 2)=>String(n).padStart(width, '0');
@@ -184,7 +184,7 @@ const US_ZONES = new Map([
  *
  * @param {string} text @param {(local: number) => number} utc @returns {number}
  */
-export function parseDate(text, utc){
+function parseDate(text, utc){
     const tokens = text.toLowerCase().replace(/\([^)]*\)/g, ' ')
         .match(/[a-z]+\.?|\d+|[/:+\-,]/g) ?? [];
     /** @type {number | undefined} */

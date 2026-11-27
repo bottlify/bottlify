@@ -4,15 +4,24 @@
  * See LICENSE for details
  */
 
-import { enterCode, leaveCode, tryEnterCode } from './critical.js';
-import { INTERLOCKED } from './interlocked.js';
+import { COUNTERS, criticalLayout, enterCode, enterLongCode, leaveCode, leaveLongCode, tryEnterCode,
+    tryEnterLongCode } from './critical.js';
+import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
-import { isStandardHandle, untagged } from './handle-tags.js';
+import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
-import { childWaitMark } from './threading.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
+import { createThreadInfoFunctions } from './thread-info.js';
+import { createProcessPolicyFunctions } from './process-policy.js';
+import { askChild, threadArg, threadEnd } from './cross-process.js';
+import { mergeContextGroups } from './debug-events.js';
+import { SYNCHRONIZE, allows } from './access.js';
+import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
+import { CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup }
+    from './debug-registers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -43,20 +52,16 @@ import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
  * moment at which both the new owner and the structure are known.
  */
 
-/**
- * Offsets into RTL_CRITICAL_SECTION, 32-bit.
- *
- * DebugInfo at 0x00 is a pointer into a structure only a debugger walks, and
- * Windows 8 and later make none: they write -1 there, which DeleteCriticalSection
- * clears. LockSemaphore at 0x10 is left at zero: Windows creates it lazily
- * itself, so a guest that finds it null is looking at something Windows also
- * produces.
+/*
+ * RTL_CRITICAL_SECTION (`criticalLayout`): DebugInfo, its first field, is a
+ * pointer into a structure only a debugger walks, and Windows 8 and later make
+ * none: they write -1 there, which DeleteCriticalSection clears. LockSemaphore
+ * is left at zero: Windows creates it lazily itself, so a guest that finds it
+ * null is looking at something Windows also produces.
  */
-const CS_DEBUG_INFO = 0x00;
-const CS_NO_DEBUG_INFO = -1;
-const CS_LOCK_COUNT = 0x04;
-const CS_SPIN_COUNT = 0x14;
-const CS_SIZE = 0x18;
+/** The flags InitializeCriticalSectionEx takes, all in the high byte. */
+const CS_FLAG_BITS = 0xff000000;
+const CS_FORCE_DEBUG_INFO = 0x10000000;
 
 /** LockCount while nobody holds the section. Held, it is zero or above. */
 const CS_UNLOCKED = -1;
@@ -87,32 +92,59 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SIGNAL_REFUSED = 156;
 /** A thread that has ended cannot be suspended. */
 const ERROR_ACCESS_DENIED = 5;
+/** NTSTATUS of a native call on a child that cannot be asked. */
+const STATUS_ACCESS_DENIED = 0xc0000022;
 /** What GetThreadContext answers for a thread that has ended. */
 const ERROR_GEN_FAILURE = 31;
 /** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
 const ERROR_NOACCESS = 998;
 const ERROR_INVALID_THREAD_ID = 1444;
-const ERROR_SEM_TIMEOUT = 121;
-/** The pseudo-handle for the running process. */
-const OWN_PROCESS = 0xffffffff;
 
-/** The debug events a child reports here, and the size of the record they fill. */
-const CREATE_PROCESS_DEBUG_EVENT = 3;
-const EXIT_PROCESS_DEBUG_EVENT = 5;
-const DEBUG_EVENT_SIZE = 96;
 /** The CONTEXT groups GetThreadContext fills, and the size of the record. */
 const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
-const CONTEXT_DEBUG_REGISTERS = 0x10010;
 const CONTEXT_BYTES = 0x2cc;
+/** The 32-bit CONTEXT's integer and control registers, by winnt.h's offsets. */
+const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
+    ['edx', 0xa8], ['ecx', 0xac], ['eax', 0xb0]]);
+const CONTEXT_CONTROLS = /** @type {const} */ ([['ebp', 0xb4], ['eip', 0xb8], ['eflags', 0xc0],
+    ['esp', 0xc4]]);
+/**
+ * The 64-bit CONTEXT (winnt.h's CONTEXT_AMD64 groups): its flags, MXCSR, the
+ * flags word, the sixteen general registers from RAX in the encoding's order,
+ * RIP, and XMM0 onward. Control is RSP, RIP and the flags; integer the other
+ * fifteen; floating point the XMM registers and MXCSR.
+ */
+const CONTEXT64 = Object.freeze({ FLAGS: 0x30, MXCSR: 0x34, EFLAGS: 0x44, RAX: 0x78, RIP: 0xf8,
+    XMM0: 0x1a0, SIZE: 0x4d0 });
+const CONTEXT64_CONTROL = 0x100001;
+const CONTEXT64_INTEGER = 0x100002;
+const CONTEXT64_FLOATING_POINT = 0x100008;
+/** RSP's index among the sixteen general registers. */
+const RSP_INDEX = 4;
+/** The bits of ContextFlags that name a part of the context, the machine's bit aside. */
+const CONTEXT_PARTS = 0x3f;
+/** The 32-bit CONTEXT's head: its flags, then Dr0-Dr3, Dr6 and Dr7. */
+const CONTEXT_DEBUG_BYTES = 0x1c;
 
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
 /**
  * @typedef {Object} SyncHost
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
+ * @property {{ major: number, build: number }} [windows]  The Windows the run is.
+ * @property {(process: any, code: number) => any} [terminateProcess]  A job's process ended
+ *           as TerminateProcess ends it, null for this one (`process-policy.js`).
+ * @property {() => boolean} [debugged]  Whether this process's parent debugs it.
+ * @property {import('./process-policy.js').ProcessPolicyHost['postCompletion']} [postCompletion]
+ * @property {import('./process-policy.js').ProcessPolicyHost['cancelSynchronous']}
+ *     [cancelSynchronous]
+ * @property {import('./process-policy.js').ProcessPolicyHost['listen']} [listenJobs]  Where
+ *     the jobs are told of a process that exited and of a job's handle closed.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
@@ -133,7 +165,11 @@ const FILETIME_EPOCH_MS = 11644473600000;
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
  * @property {(code: number) => void} [setLastError]
+ * @property {import('./fpu-context.js').FloatState | null} [float]  the processor's
+ *           images of a thread's x87 and SSE state
  * @property {() => Record<string, number>} [registers]  the running thread's
+ * @property {(values: Record<string, number>) => void} [setRegisters]  the running
+ *           thread's, where it goes on from (NtContinue)
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {import('./changes.js').WatchedVolume} [volume]
  *           The volume, for the directories a change notification watches;
@@ -141,11 +177,19 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, the kernel's alone.
+ * @property {number} [processId]  This process's id, which a job's list names.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose critical
+ *           sections are 40 bytes and taken by traps; absent, 4.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child where it runs: what a child's thread handle
+ *           is suspended, resumed and read through. Absent, no child is reached.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  */
 
 /**
  * Builds the function table: name -> { argBytes, handler } for a trap, or
- * { argBytes, guest } for guest code.
+ * { argBytes, guest } for guest code, with a `handler` beside it where a
+ * 64-bit process takes the call as a trap.
  *
  * `argBytes` is the size of the argument list the guest compiled against; all of
  * these are stdcall, the bridge's default, so none of them says so.
@@ -155,12 +199,116 @@ const FILETIME_EPOCH_MS = 11644473600000;
 export function createSyncFunctions(host){
     const { kernel } = host;
     const processors = host.processors ?? createProcessors(kernel);
+    const cs = criticalLayout(host.pointerSize);
+    // A HANDLE is a pointer: an array of them holds quadwords in a 64-bit
+    // process, each a handle's dword in its low half.
+    const handleSize = host.pointerSize ?? 4;
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
         host.writeMemory(address, bytes);
+    };
+
+    /** @param {number} address */
+    const readI32 = address=>new DataView(host.readMemory(address, 4).buffer)
+        .getInt32(0, true);
+
+    /**
+     * Adds to a section's LockCount as the fast paths' `lock inc` and `lock
+     * dec` do, so a thread entering on another executor is not lost between
+     * the read and the write; answers the count after.
+     *
+     * @param {number} section @param {number} delta
+     */
+    const addLockCount = (section, delta)=>{
+        const at = section + cs.LOCK_COUNT;
+        for (;;)
+        {
+            const was = readI32(at);
+            const now = (was + delta) | 0;
+            if (host.compareExchangeU32 === undefined)
+            {
+                writeI32(at, now);
+                return now;
+            }
+            if ((host.compareExchangeU32(at, was >>> 0, now >>> 0) | 0) === was)
+            {
+                return now;
+            }
+        }
+    };
+
+    /** One more in the fast paths' counter at `offset`, for a section the host took or left. @param {number} offset */
+    const tally = offset=>{
+        const at = host.critical.counters() + offset;
+        writeI32(at, readI32(at) + 1);
+    };
+
+    /**
+     * Entering, leaving and trying a section as traps over the same fields
+     * and queues the guest code below uses, for a 64-bit process, whose
+     * processor runs none of that 32-bit code.
+     */
+    const sectionTraps = {
+        /** @param {number[]} args */
+        enter: ([pointer])=>{
+            const section = wholeAddress(pointer);
+            const me = host.currentThread().id;
+            tally(COUNTERS.ENTERED);
+            if (addLockCount(section, 1) === 0)
+            {
+                writeI32(section + cs.OWNING_THREAD, me);
+                writeI32(section + cs.RECURSION_COUNT, 1);
+                return 0;
+            }
+            if (readI32(section + cs.OWNING_THREAD) === me)
+            {
+                writeI32(section + cs.RECURSION_COUNT, readI32(section + cs.RECURSION_COUNT) + 1);
+                return 0;
+            }
+            return host.critical.wait(section);
+        },
+        /** @param {number[]} args */
+        leave: ([pointer])=>{
+            const section = wholeAddress(pointer);
+            tally(COUNTERS.LEFT);
+            const recursion = readI32(section + cs.RECURSION_COUNT) - 1;
+            writeI32(section + cs.RECURSION_COUNT, recursion);
+            if (recursion !== 0)
+            {
+                addLockCount(section, -1);
+                return 0;
+            }
+            writeI32(section + cs.OWNING_THREAD, 0);
+            return addLockCount(section, -1) >= 0 ? host.critical.wake(section) : 0;
+        },
+        /** @param {number[]} args */
+        tryEnter: ([pointer])=>{
+            const section = wholeAddress(pointer);
+            const me = host.currentThread().id;
+            const at = section + cs.LOCK_COUNT;
+            const free = host.compareExchangeU32 === undefined
+                ? readI32(at) === CS_UNLOCKED && (writeI32(at, 0), true)
+                : (host.compareExchangeU32(at, CS_UNLOCKED >>> 0, 0) | 0) === CS_UNLOCKED;
+            if (free)
+            {
+                writeI32(section + cs.OWNING_THREAD, me);
+                writeI32(section + cs.RECURSION_COUNT, 1);
+            }
+            else if (readI32(section + cs.OWNING_THREAD) === me)
+            {
+                addLockCount(section, 1);
+                writeI32(section + cs.RECURSION_COUNT, readI32(section + cs.RECURSION_COUNT) + 1);
+            }
+            else
+            {
+                return 0;
+            }
+            tally(COUNTERS.ENTERED);
+            return 1;
+        },
     };
 
     /**
@@ -205,6 +353,25 @@ export function createSyncFunctions(host){
         };
         return fastPaths;
     };
+    /**
+     * The same routines in x86-64 for a 64-bit process, each placed with its
+     * module by the loader: a contended entry or an owed wake jumps to a trap
+     * into the same host half.
+     *
+     * @param {(counters: number) => { code: Uint8Array, jump: number }} make
+     * @param {'wait' | 'wake'} trap
+     */
+    const longSection = (make, trap)=>(
+        /** @type {{ register: (trap: any) => number, jump: (at: number, target: number) => void }} */
+        builder)=>{
+        const { code, jump } = make(host.critical.counters());
+        builder.jump(jump, builder.register({
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>host.critical[trap](pointer >>> 0),
+        }));
+        return code;
+    };
 
     /**
      * Where each interlocked export's code was placed, once, on the first
@@ -213,30 +380,34 @@ export function createSyncFunctions(host){
      * @type {Map<string, number> | null}
      */
     let interlocked = null;
-    /** @param {keyof typeof INTERLOCKED} name */
+    /** @param {keyof typeof INTERLOCKED | keyof typeof INTERLOCKED_64} name */
     const interlockedAt = name=>{
         if (!interlocked)
         {
             const allocate = host.allocateCode ?? host.allocate;
-            interlocked = new Map(Object.entries(INTERLOCKED).map(([exported, { code }])=>{
-                const at = allocate(code.length);
-                host.writeMemory(at, code);
-                return [exported, at];
-            }));
+            interlocked = new Map(Object.entries({ ...INTERLOCKED, ...INTERLOCKED_64 })
+                .map(([exported, { code }])=>{
+                    const at = allocate(code.length);
+                    host.writeMemory(at, code);
+                    return [exported, at];
+                }));
         }
         return /** @type {number} */ (interlocked.get(name));
     };
 
     /**
      * An interlocked export: guest code, one locked instruction on the
-     * program's dword (`interlocked.js`), with nothing to trap into.
+     * program's dword (`interlocked.js`), with nothing to trap into; in a
+     * 64-bit process its x86-64 (`long`).
      *
-     * @param {keyof typeof INTERLOCKED} name
+     * @param {keyof typeof INTERLOCKED | keyof typeof INTERLOCKED_64} name
      */
-    const interlockedExport = name=>({
-        argBytes: INTERLOCKED[name].argBytes,
-        guest: ()=>interlockedAt(name),
-    });
+    const interlockedExport = name=>{
+        const { argBytes, long } = name in INTERLOCKED
+            ? INTERLOCKED[/** @type {keyof typeof INTERLOCKED} */ (name)]
+            : INTERLOCKED_64[/** @type {keyof typeof INTERLOCKED_64} */ (name)];
+        return { argBytes, guest: ()=>interlockedAt(name), long: ()=>long };
+    };
 
     /**
      * Resolves a handle to a kernel object, or null. A bad handle is a return
@@ -294,20 +465,189 @@ export function createSyncFunctions(host){
     };
 
     /**
-     * Writes the groups of a CONTEXT its ContextFlags name, and nothing else.
+     * What a stopped thread will run with, as GetThreadContext reads it: its
+     * saved registers, under what a SetThreadContext not yet run put in their
+     * place - a caller that sets a context and reads it back sees its own.
+     *
+     * @param {any} thread
+     */
+    const stoppedRegisters = thread=>{
+        const saved = savedRegisters(thread.context);
+        const pending = thread.resumeRegisters;
+        if (!pending)
+        {
+            return saved;
+        }
+        // A 64-bit thread's registers whole are read by `writeLongContext`.
+        const registers = { ...pending };
+        delete registers.long;
+        return { ...saved, ...registers,
+            ...thread.parkedReturn !== null && thread.parkedReturn !== undefined
+                ? { eip: thread.parkedReturn >>> 0 } : {},
+            ...thread.resumeStack !== null && thread.resumeStack !== undefined
+                ? { esp: thread.resumeStack >>> 0 } : {} };
+    };
+
+    /**
+     * A long-mode thread's sixteen general registers whole, its XMM registers
+     * and MXCSR, from the state block its context saved. The first eight's low
+     * dwords are the context's dword view, as a restore writes them over the
+     * block: a thread made and not yet run has its stack pointer there alone,
+     * and read from the block it had none (a context set from it sent the
+     * thread off with RSP 0).
+     *
+     * @param {any} context
+     */
+    const savedLong = context=>{
+        const { block, layout } = context;
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        /** @param {number} index */
+        const whole = index=>{
+            const value = view.getBigUint64(layout.regs + index * 8, true);
+            return index < 8
+                ? (value & 0xffffffff00000000n) | BigInt(context.reg32[index] >>> 0)
+                : value;
+        };
+        return {
+            gpr: Array.from({ length: 16 }, (_, index)=>whole(index)),
+            xmm: block.slice(layout.xmm, layout.xmm + 256),
+            mxcsr: view.getUint32(layout.mxcsr, true),
+        };
+    };
+
+    /**
+     * GetThreadContext's answer for another thread of a 64-bit process: the
+     * groups its flags ask for, in the 64-bit CONTEXT's layout.
+     *
+     * @param {number} at @param {any} thread
+     */
+    const writeLongContext = (at, thread)=>{
+        const bytes = host.readMemory(at, CONTEXT64.SIZE);
+        const view = new DataView(bytes.buffer);
+        const flags = view.getUint32(CONTEXT64.FLAGS, true);
+        const long = thread.resumeRegisters?.long ?? savedLong(thread.context);
+        const { eip, eflags } = stoppedRegisters(thread);
+        const gpr = [...long.gpr];
+        if (!thread.resumeRegisters?.long && thread.resumeStack !== null
+            && thread.resumeStack !== undefined)
+        {
+            gpr[RSP_INDEX] = BigInt(thread.resumeStack >>> 0);
+        }
+        /** @param {number} index */
+        const put = index=>view.setBigUint64(CONTEXT64.RAX + index * 8,
+            BigInt.asUintN(64, gpr[index]), true);
+        if ((flags & CONTEXT64_INTEGER) === CONTEXT64_INTEGER)
+        {
+            gpr.forEach((_, index)=>index !== RSP_INDEX && put(index));
+        }
+        if ((flags & CONTEXT64_CONTROL) === CONTEXT64_CONTROL)
+        {
+            put(RSP_INDEX);
+            view.setBigUint64(CONTEXT64.RIP, BigInt(thread.parkedReturn ?? eip ?? 0), true);
+            view.setUint32(CONTEXT64.EFLAGS, eflags ?? 0x202, true);
+        }
+        if ((flags & CONTEXT64_FLOATING_POINT) === CONTEXT64_FLOATING_POINT)
+        {
+            bytes.set(long.xmm.subarray(0, 256), CONTEXT64.XMM0);
+            view.setUint32(CONTEXT64.MXCSR, long.mxcsr >>> 0, true);
+        }
+        host.writeMemory(at, bytes);
+    };
+
+    /**
+     * SetThreadContext's work on a stopped thread: the groups the record's
+     * flags name, applied where it next runs. A thread parked in a wait keeps
+     * its wait's continuation when the record moves no control register.
+     *
+     * @param {any} thread @param {number} at
+     */
+    const replaceContext = (thread, at)=>{
+        const parked = thread.parkedReturn !== null && thread.parkedReturn !== undefined;
+        /** @type {Record<string, any>} */
+        const values = {};
+        if (handleSize === 4)
+        {
+            const bytes = host.readMemory(at, CONTEXT_BYTES);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const flags = view.getUint32(0, true);
+            for (const [group, fields] of /** @type {const} */ ([
+                [CONTEXT_INTEGER, CONTEXT_INTEGERS], [CONTEXT_CONTROL, CONTEXT_CONTROLS]]))
+            {
+                for (const [name, offset] of (flags & group) === group ? fields : [])
+                {
+                    values[name] = view.getUint32(offset, true);
+                }
+            }
+            const groups = floatGroupsOf(bytes, flags);
+            if (groups !== null && host.float?.restore(thread.context, groups) !== true)
+            {
+                host.divergence?.('SetThreadContext',
+                    'the floating-point registers of a context are not put back');
+            }
+        }
+        else
+        {
+            const bytes = host.readMemory(at, CONTEXT64.SIZE);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const flags = view.getUint32(CONTEXT64.FLAGS, true);
+            const long = { ...thread.resumeRegisters?.long ?? savedLong(thread.context) };
+            const gpr = [...long.gpr];
+            /** @param {number} index */
+            const take = index=>{
+                gpr[index] = view.getBigUint64(CONTEXT64.RAX + index * 8, true);
+            };
+            if ((flags & CONTEXT64_INTEGER) === CONTEXT64_INTEGER)
+            {
+                gpr.forEach((_, index)=>index !== RSP_INDEX && take(index));
+            }
+            if ((flags & CONTEXT64_CONTROL) === CONTEXT64_CONTROL)
+            {
+                take(RSP_INDEX);
+                values.esp = Number(BigInt.asUintN(32, gpr[RSP_INDEX]));
+                values.eip = Number(view.getBigUint64(CONTEXT64.RIP, true));
+                values.eflags = view.getUint32(CONTEXT64.EFLAGS, true);
+            }
+            if ((flags & CONTEXT64_FLOATING_POINT) === CONTEXT64_FLOATING_POINT)
+            {
+                long.xmm = bytes.slice(CONTEXT64.XMM0, CONTEXT64.XMM0 + 256);
+                long.mxcsr = view.getUint32(CONTEXT64.MXCSR, true);
+            }
+            values.long = { ...long, gpr };
+            // RAX whole goes with the rest; its low dword is what the resume answers.
+            values.eax = Number(BigInt.asUintN(32, gpr[0]));
+        }
+        const { eip, esp, ...registers } = values;
+        const merged = { ...thread.resumeRegisters ?? {}, ...registers };
+        if (eip === undefined && parked)
+        {
+            thread.resumeRegisters = merged;
+            return;
+        }
+        kernel.scheduleResume(thread, {
+            eip: eip ?? (parked ? thread.parkedReturn : thread.context.eip),
+            // A 64-bit stack pointer moves whole with the other registers.
+            esp: esp ?? (parked ? thread.resumeStack ?? undefined : undefined),
+            returnValue: parked ? thread.waitResult ?? 0 : thread.context.reg32[0] >>> 0,
+            registers: merged,
+        });
+    };
+
+    /**
+     * Writes the groups of a CONTEXT its ContextFlags name, and nothing else;
+     * the floating-point ones from a stopped thread's state block, the debug
+     * registers from what the thread was given (`debug-registers.js`).
      *
      * @param {number} at @param {Record<string, number>} registers
+     * @param {any} thread
+     * @param {any} [context]  The stopped thread's.
      */
-    const writeThreadContext = (at, registers)=>{
-        const bytes = host.readMemory(at, CONTEXT_BYTES).slice();
+    const writeThreadContext = (at, registers, thread, context)=>{
+        const bytes = host.readMemory(at, CONTEXT_BYTES);
         const view = new DataView(bytes.buffer);
         const flags = view.getUint32(0, true);
         /** @param {number} offset @param {number | undefined} value */
         const put = (offset, value)=>view.setUint32(offset, (value ?? 0) >>> 0, true);
-        if ((flags & CONTEXT_DEBUG_REGISTERS) === CONTEXT_DEBUG_REGISTERS)
-        {
-            bytes.fill(0, 4, 0x1c);
-        }
+        writeDebugGroup(thread, bytes, flags);
         if ((flags & CONTEXT_SEGMENTS) === CONTEXT_SEGMENTS)
         {
             put(0x8c, SELECTORS.GS);
@@ -330,6 +670,8 @@ export function createSyncFunctions(host){
             put(0xc4, registers.esp);
             put(0xc8, SELECTORS.DATA);
         }
+        // The calling thread's own as they stand, another's from where it stopped.
+        writeFloatGroups(host.float?.images(context) ?? null, bytes, flags);
         host.writeMemory(at, bytes);
     };
 
@@ -353,7 +695,7 @@ export function createSyncFunctions(host){
             {
                 const bytes = new Uint8Array(8);
                 new DataView(bytes.buffer).setBigInt64(0, value, true);
-                host.writeMemory(address >>> 0, bytes);
+                host.writeMemory(wholeAddress(address), bytes);
             }
         };
         write(creation, now);
@@ -361,6 +703,61 @@ export function createSyncFunctions(host){
         write(kernelTime, 0n);
         write(userTime, BigInt(Math.round(userMs * 10000)));
         return 1;
+    };
+
+    /**
+     * The same call made on a child's first thread, where the child runs, when
+     * the handle is the one CreateProcess handed out for it; null otherwise.
+     *
+     * @param {number} handle @param {string} name
+     * @param {import('./cross-process.js').CrossArg[]} rest  after the thread
+     * @param {(number | null)[]} [into]  after the thread
+     * @returns {number | Promise<number> | null}
+     */
+    const onChildThread = (handle, name, rest, into = [])=>{
+        /** @type {import('./cross-process.js').ChildThread | null} */
+        const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
+        if (!child)
+        {
+            return null;
+        }
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, child.process,
+        { call: name, args: [threadArg(child), ...rest] }, [null, ...into]) : null;
+        if (asked === null)
+        {
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return name === 'SuspendThread' || name === 'ResumeThread' ? WAIT_FAILED : 0;
+        }
+        return asked;
+    };
+
+    /**
+     * A native call on a thread of a child, made where the child runs: its
+     * NTSTATUS, STATUS_ACCESS_DENIED for a child the run cannot ask; null
+     * for a handle that names no child's thread.
+     *
+     * @param {number} handle @param {string} name
+     * @param {import('./cross-process.js').CrossArg[]} rest @param {(number | null)[]} into
+     * @returns {number | Promise<number> | null}
+     */
+    const onChildNative = (handle, name, rest, into)=>{
+        /** @type {import('./cross-process.js').ChildThread | null} */
+        const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
+        if (!child)
+        {
+            return null;
+        }
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, child.process,
+        { call: name, args: [threadArg(child), ...rest] }, [null, ...into],
+        // A child gone, or one that refused the call, answers no buffers:
+        // refused, never a success of 0.
+        (answer, result)=>(answer.outs.every(bytes=>!bytes) ? STATUS_ACCESS_DENIED : result))
+            : null;
+        return asked ?? STATUS_ACCESS_DENIED;
     };
 
     /** @param {number} handle */
@@ -405,178 +802,55 @@ export function createSyncFunctions(host){
         host.critical.forget(address);
         // Written whole rather than field by field: the guest allocated this and
         // its contents are whatever was there before.
-        host.writeMemory(address, new Uint8Array(CS_SIZE));
-        writeI32(address + CS_DEBUG_INFO, CS_NO_DEBUG_INFO);
-        writeI32(address + CS_LOCK_COUNT, CS_UNLOCKED);
-        writeI32(address + CS_SPIN_COUNT, spinCount);
-    };
-
-    /**
-     * A DEBUG_EVENT of the two kinds a debugged child gives here: its
-     * creation, and its exit with the code it left.
-     *
-     * @param {number} address @param {any} child @param {boolean} exited
-     */
-    const writeDebugEvent = (address, child, exited)=>{
-        const bytes = new Uint8Array(DEBUG_EVENT_SIZE);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(0, exited ? EXIT_PROCESS_DEBUG_EVENT : CREATE_PROCESS_DEBUG_EVENT, true);
-        view.setUint32(4, child.id >>> 0, true);
-        view.setUint32(8, child.threadId >>> 0, true);
-        if (exited)
-        {
-            view.setUint32(12, child.exitCode >>> 0, true);
-        }
-        else
-        {
-            // hFile, hProcess, hThread: no file is handed over, and the
-            // process and thread are the handles CreateProcess gave.
-            view.setUint32(16, child.handle >>> 0, true);
-            view.setUint32(20, child.threadHandle >>> 0, true);
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, new Uint8Array(cs.SIZE));
+        host.writeMemory(address, new Uint8Array(host.pointerSize ?? 4).fill(0xff));
+        writeI32(address + cs.LOCK_COUNT, CS_UNLOCKED);
+        writeI32(address + cs.SPIN_COUNT, spinCount);
     };
 
     return {
-        /**
-         * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
-         *
-         * A child started with DEBUG_PROCESS reports its creation and then
-         * its exit -- no thread, library or exception of its own is reported,
-         * since nothing stops it to report one -- the second waited for as a
-         * wait on the child is. With no debugged child to hear from, or no
-         * time to wait, the wait times out.
-         */
-        WaitForDebugEvent: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([event, timeout])=>{
-                const child = (kernel.processes?.all() ?? []).find(
-                    (/** @type {any} */ made)=>made.debugEvents?.length > 0);
-                if (!child || (event >>> 0) === 0)
-                {
-                    host.setLastError?.(ERROR_SEM_TIMEOUT);
-                    return 0;
-                }
-                if (child.debugEvents[0] === 'create')
-                {
-                    child.debugEvents.shift();
-                    writeDebugEvent(event >>> 0, child, false);
-                    return 1;
-                }
-                const report = ()=>{
-                    child.debugEvents = [];
-                    writeDebugEvent(event >>> 0, child, true);
-                    return 1;
-                };
-                if (child.completed || child.exitCode !== kernel.processes.STILL_ACTIVE)
-                {
-                    return report();
-                }
-                if ((timeout >>> 0) === 0)
-                {
-                    host.setLastError?.(ERROR_SEM_TIMEOUT);
-                    return 0;
-                }
-                const thread = host.currentThread();
-                (child.waiters ??= []).push({ thread, result: 1, settle: report });
-                kernel.block(thread, `debug event of ${child.imagePath}`);
-                return host.park(thread);
+        // Jobs, policies, power requests, the cycle counters and the stack:
+        // what a sandboxing browser asks before anything else.
+        ...createProcessPolicyFunctions({
+            kernel,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            setLastError: host.setLastError,
+            currentThread: host.currentThread,
+            registers: host.registers,
+            setRegisters: host.setRegisters,
+            float: host.float,
+            divergence: host.divergence,
+            pointerSize: host.pointerSize,
+            processId: host.processId,
+            namedObjects: host.namedObjects,
+            threadOf,
+            objectOf: object,
+            processors,
+            terminateProcess: host.terminateProcess,
+            debugged: host.debugged,
+            postCompletion: host.postCompletion,
+            listen: host.listenJobs,
+            cancelSynchronous: host.cancelSynchronous,
+        }),
+        ...createThreadInfoFunctions({
+            kernel,
+            processors,
+            pointerSize: host.pointerSize,
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            currentThread: host.currentThread,
+            park: host.park,
+            setLastError: host.setLastError,
+            allocate: host.allocate,
+            divergence: host.divergence,
+            onChildThread: onChildNative,
+            threadTimes: (handle, at)=>{
+                const thread = threadOf(handle);
+                writeTimes([at, at + 8, at + 16, at + 24],
+                    (thread?.exitCode ?? null) !== null, thread?.cpuMs ?? 0);
             },
-        },
-
-        /** BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus) */
-        ContinueDebugEvent: { argBytes: 12, handler: ()=>1 },
-
-        /**
-         * BOOL DebugActiveProcessStop(DWORD dwProcessId)
-         *
-         * A child this process debugs stops reporting to it and goes on. A
-         * process it does not debug is refused as one with no debug object
-         * between them, and an id naming no process as a bad parameter.
-         */
-        DebugActiveProcessStop: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([id])=>{
-                const child = (kernel.processes?.all() ?? []).find(
-                    (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0));
-                if (!child)
-                {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                if (!child.debugEvents)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                child.debugEvents = null;
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL DebugSetProcessKillOnExit(BOOL KillOnExit)
-         *
-         * Whether the children this thread debugs end when it does. A caller
-         * that debugs none has no debug object to set it on, and is refused
-         * as such. The choice is kept on each child; no child of a debugger
-         * outlives its parent here, since a child runs only when the parent
-         * hands over to it.
-         */
-        DebugSetProcessKillOnExit: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([kill])=>{
-                const debugged = (kernel.processes?.all() ?? []).filter(
-                    (/** @type {any} */ made)=>made.debugEvents);
-                if (debugged.length === 0)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                for (const child of debugged)
-                {
-                    child.killOnExit = (kill >>> 0) !== 0;
-                }
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL DebugBreakProcess(HANDLE Process)
-         *
-         * On Windows the target gets a thread that breaks only if a debugger
-         * is attached and otherwise just ends, and the call succeeds either
-         * way. Neither this process nor a child it does not debug has one,
-         * so nothing happens and the call succeeds; a child it debugs would
-         * report a breakpoint, which the debug events here do not carry, and
-         * that is said. A handle that is no process is refused.
-         */
-        DebugBreakProcess: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                if ((handle >>> 0) === OWN_PROCESS)
-                {
-                    return 1;
-                }
-                const plain = untagged(handle);
-                const child = kernel.handles.typeOf?.(plain) === 'process' ? object(plain) : null;
-                if (!child)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                if (child.debugEvents)
-                {
-                    host.divergence?.('DebugBreakProcess',
-                        'a debugged child\'s breakpoint is not reported as a debug event');
-                }
-                return 1;
-            },
-        },
+        }),
 
         /**
          * VOID ReinitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection):
@@ -587,7 +861,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                initialise(pointer >>> 0, 0);
+                initialise(wholeAddress(pointer), 0);
                 return 0;
             },
         },
@@ -601,7 +875,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                initialise(pointer >>> 0, 0);
+                initialise(wholeAddress(pointer), 0);
                 return 0;
             },
         },
@@ -618,7 +892,46 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, spinCount])=>{
-                initialise(pointer >>> 0, spinCount | 0);
+                initialise(wholeAddress(pointer), spinCount | 0);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL InitializeCriticalSectionEx(LPCRITICAL_SECTION, DWORD dwSpinCount,
+         *     DWORD Flags)
+         *
+         * As InitializeCriticalSectionAndSpinCount, with no debug information
+         * unless RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO asks for it, as
+         * Windows 8 on; a flag outside the high byte the flags occupy is
+         * refused.
+         */
+        InitializeCriticalSectionEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount, flags])=>{
+                if (((flags >>> 0) & ~CS_FLAG_BITS) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                initialise(wholeAddress(pointer), spinCount & 0x00ffffff);
+                if (((flags >>> 0) & CS_FORCE_DEBUG_INFO) !== 0)
+                {
+                    // RTL_CRITICAL_SECTION_DEBUG: 0x20 bytes, 0x30 with 64-bit pointers.
+                    const debugSize = handleSize === 8 ? 0x30 : 0x20;
+                    const debug = host.allocate(debugSize);
+                    if (debug !== 0)
+                    {
+                        host.writeMemory(debug, new Uint8Array(debugSize));
+                        // CriticalSection, the pointer after Type and CreatorBackTraceIndex.
+                        writeI32(debug + handleSize, pointer | 0);
+                        // DebugInfo, the section's first field, which initialise set to -1.
+                        const field = new Uint8Array(handleSize);
+                        new DataView(field.buffer).setUint32(0, debug >>> 0, true);
+                        host.writeMemory(wholeAddress(pointer), field);
+                    }
+                }
                 return 1;
             },
         },
@@ -634,7 +947,7 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, spinCount])=>{
-                const at = (pointer >>> 0) + CS_SPIN_COUNT;
+                const at = wholeAddress(pointer) + cs.SPIN_COUNT;
                 const bytes = host.readMemory(at, 4);
                 const previous = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
                 writeI32(at, spinCount | 0);
@@ -651,16 +964,27 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).tryEnter,
+            long: ()=>tryEnterLongCode(host.critical.counters()),
+            handler: sectionTraps.tryEnter,
         },
 
-        /** VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        /**
+         * VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
+         *
+         * The section is left free, as Wine's RtlDeleteCriticalSection leaves
+         * it (LockCount -1, no owner, no debug record): a program that enters
+         * a section after deleting it, as Crysis's renderer does on its way
+         * out, takes it on Windows. Zeroed whole, its count read as held by
+         * nobody, and that entry waited for good.
+         */
         DeleteCriticalSection: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 host.critical.forget(address);
-                host.writeMemory(address, new Uint8Array(CS_SIZE));
+                host.writeMemory(address, new Uint8Array(cs.SIZE));
+                writeI32(address + cs.LOCK_COUNT, CS_UNLOCKED);
                 return 0;
             },
         },
@@ -676,6 +1000,8 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).enter,
+            long: longSection(enterLongCode, 'wait'),
+            handler: sectionTraps.enter,
         },
 
         /**
@@ -688,6 +1014,8 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {GuestBuilder} builder */
             guest: builder=>placed(builder).leave,
+            long: longSection(leaveLongCode, 'wake'),
+            handler: sectionTraps.leave,
         },
 
         // The value after for an increment or a decrement, the value before
@@ -699,6 +1027,7 @@ export function createSyncFunctions(host){
         InterlockedExchange: interlockedExport('InterlockedExchange'),
         InterlockedExchangeAdd: interlockedExport('InterlockedExchangeAdd'),
         InterlockedCompareExchange: interlockedExport('InterlockedCompareExchange'),
+        InterlockedCompareExchange64: interlockedExport('InterlockedCompareExchange64'),
 
         /** DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) */
         WaitForMultipleObjects: {
@@ -711,21 +1040,16 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return WAIT_FAILED;
                 }
-                const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
+                const view = new DataView(
+                    host.readMemory(wholeAddress(handles), total * handleSize).buffer);
                 /** @type {any[]} */
                 const objects = [];
                 /** Where each of `objects` sits in the caller's handle array. */
                 /** @type {number[]} */
                 const indices = [];
-                /** @type {any} */
-                let child = null;
-                /** Where a finished process sits in the caller's handle array. */
-                let finishedAt = -1;
-                /** And where the child still to run does. */
-                let childAt = -1;
                 for (let at = 0; at < total; at++)
                 {
-                    const handle = view.getUint32(at * 4, true);
+                    const handle = view.getUint32(at * handleSize, true);
                     // No pseudo-handle is a member of a set, not even the two
                     // WaitForSingleObject takes: none is in the table.
                     const target = isStandardHandle(handle) ? alwaysReady() : object(handle);
@@ -734,98 +1058,42 @@ export function createSyncFunctions(host){
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return WAIT_FAILED;
                     }
-                    if (kernel.handles.typeOf?.(untagged(handle)) === 'process')
+                    // One opened without SYNCHRONIZE fails the whole wait.
+                    if (!isStandardHandle(handle)
+                        && !allows(kernel.handles.access?.(untagged(handle)) ?? null, SYNCHRONIZE))
                     {
-                        if (kernel.processes?.finished?.(target))
-                        {
-                            finishedAt = at;
-                        }
-                        child = target;
-                        childAt = at;
-                        continue;
+                        host.setLastError?.(ERROR_ACCESS_DENIED);
+                        return WAIT_FAILED;
                     }
-                    objects.push(target);
+                    // A child process is in a set as the event its exit sets,
+                    // one already set for one the engine answered for; a
+                    // child's thread as the one this process sets once the
+                    // child says it has ended.
+                    const kind = kernel.handles.typeOf?.(untagged(handle));
+                    objects.push(kind === 'process' ? target.exited
+                        : kind === 'process-thread'
+                            ? threadEnd({ kernel, askChild: host.askChild }, target)
+                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady()
+                                : target.waitable ?? target);
                     indices.push(at);
+                }
+
+                // A wait for all of a set may not name one object twice, under
+                // one handle or two (NtWaitForMultipleObjects answers
+                // STATUS_INVALID_PARAMETER_MIX): taking it once for each made
+                // the second take of a semaphore with one count block for good.
+                if (waitAll && new Set(objects).size < objects.length)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return WAIT_FAILED;
                 }
 
                 const thread = host.currentThread();
 
-                // A process the engine already answered for -- a redistributable
-                // installer it stands in for -- is finished, so the wait is
-                // satisfied at once. The answer names its position in the
-                // caller's own array, which is what the index means.
-                if (finishedAt >= 0 && (waitAll === 0 || objects.length === 0))
-                {
-                    return WAIT_OBJECT_0 + finishedAt;
-                }
-
-                // A child process is in the set. It has not run while its
-                // parent can look -- it runs once the parent has nothing else
-                // to do -- so a real wait on a set containing one is the parent
-                // handing over to it. A wait for any of the set is noted on
-                // the child and answered when it exits, the engine having run
-                // it beside this process. Nothing of the parent's runs
-                // meanwhile, but the child can signal the rest of the set: a
-                // named event the parent made and the child opened by name.
-                // One it signalled came before its exit, and is the answer --
-                // taken as a wait takes it -- where Windows would have woken
-                // the parent with it while the child ran on; otherwise the
-                // child's own index. A wait for all of a set with more in it
-                // than the child cannot be satisfied by the child alone, and
-                // stays the old handover: the parent is replaced.
-                if (child !== null && (timeout >>> 0) === 0 && !child.started
-                    && !kernel.processes?.finished?.(child))
-                {
-                    child.polled = true;
-                }
-                if (child !== null && (timeout >>> 0) !== 0)
-                {
-                    if (waitAll === 0 || objects.length === 0)
-                    {
-                        const settle = ()=>{
-                            if (!objects.some(target=>ready(target, thread)))
-                            {
-                                return WAIT_OBJECT_0 + childAt;
-                            }
-                            const any = /** @type {{ index: number, result: number }} */ (
-                                kernel.waitAny(objects, thread));
-                            const base = any.result === KERNEL_ABANDONED
-                                ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
-                            return base + indices[any.index];
-                        };
-                        const reason = `child process ${child.imagePath}`;
-                        (child.waiters ??= []).push({ thread, result: WAIT_OBJECT_0 + childAt,
-                            settle, live: childWaitMark(thread, reason) });
-                    }
-                    else
-                    {
-                        child.handsOver = true;
-                    }
-                    // Timed only for a child running beside this process: one
-                    // run in its place has the parent's time stand still. One
-                    // to run beside is timed before it has started too -- it
-                    // starts at the parent's next turn, and a wait made before
-                    // then waited for ever on a child that never ends.
-                    kernel.block(thread, `child process ${child.imagePath}`,
-                        (child.started || child.beside) && (timeout >>> 0) !== INFINITE
-                            ? { deadline: kernel.clock.virtualTime() + (timeout >>> 0),
-                                result: WAIT_TIMEOUT }
-                            : undefined);
-                    return host.park(thread);
-                }
-                // A poll is a question, not a wait, and the honest answer about
-                // a child is that it is still running. So a poll for all of a
-                // set containing one can never be satisfied, and neither can a
-                // poll for any of a set that holds nothing else.
-                if (child !== null && (waitAll !== 0 || objects.length === 0))
-                {
-                    return WAIT_TIMEOUT;
-                }
-
                 // Zero is a poll: it asks whether the set is ready now and
                 // never blocks, so a program checking is not stopped by the
                 // question.
-                const wait = timeout >>> 0;
+                const wait = wholeAddress(timeout);
                 // An object another process of the run holds is answered there:
                 // its stand-in here says nothing of whether it is signalled.
                 if (wait === 0 && !waitAll && objects.some(target=>target.remote))
@@ -942,6 +1210,38 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * BOOL GetSystemTimes(LPFILETIME lpIdleTime, LPFILETIME lpKernelTime,
+         *     LPFILETIME lpUserTime)
+         *
+         * The machine's processor time since it started, summed over its
+         * processors: user time is what this process's threads ran, idle
+         * the rest, and kernel time includes the idle time, as Windows
+         * counts it. Each pointer may be null.
+         */
+        GetSystemTimes: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([idle, kernelTime, userTime])=>{
+                const total = kernel.clock.virtualTime() * processors.count();
+                const busy = Math.min(kernel.processCpuMs?.() ?? 0, total);
+                /** @param {number} address @param {number} ms */
+                const write = (address, ms)=>{
+                    if ((address >>> 0) !== 0)
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigUint64(0,
+                            BigInt(Math.round(ms * 10000)), true);
+                        host.writeMemory(wholeAddress(address), bytes);
+                    }
+                };
+                write(idle, total - busy);
+                write(kernelTime, total - busy);
+                write(userTime, busy);
+                return 1;
+            },
+        },
+
+        /**
          * DWORD_PTR SetThreadAffinityMask(HANDLE hThread, DWORD_PTR dwThreadAffinityMask)
          *
          * The processors a thread may run on, which the scheduler keeps it to,
@@ -953,6 +1253,7 @@ export function createSyncFunctions(host){
          * pins itself to each processor in turn reads each one's APIC id next.
          */
         SetThreadAffinityMask: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, mask])=>{
@@ -986,6 +1287,37 @@ export function createSyncFunctions(host){
         },
 
         /**
+         * BOOL GetThreadGroupAffinity(HANDLE hThread, PGROUP_AFFINITY GroupAffinity)
+         *
+         * The thread's mask in the one processor group a machine of fewer than
+         * 64 processors has: GROUP_AFFINITY's KAFFINITY Mask, a pointer wide,
+         * then the group, zero, and three reserved words, zero. No structure
+         * to fill is ERROR_INVALID_PARAMETER (Wine's kernel32
+         * test_thread_processor), never a fault.
+         */
+        GetThreadGroupAffinity: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const bytes = new Uint8Array(handleSize + 8);
+                new DataView(bytes.buffer).setUint32(0, processors.threadMask(thread) >>> 0, true);
+                host.writeMemory(wholeAddress(out), bytes);
+                return 1;
+            },
+        },
+
+        /**
          * DWORD SetThreadIdealProcessor(HANDLE hThread, DWORD dwIdealProcessor)
          *
          * The processor a thread would prefer to run on: recorded, and the
@@ -1004,7 +1336,7 @@ export function createSyncFunctions(host){
                     return 0xffffffff;
                 }
                 const previous = thread.idealProcessor ?? 0;
-                const asked = ideal >>> 0;
+                const asked = wholeAddress(ideal);
                 if (asked === MAXIMUM_PROCESSORS)
                 {
                     return previous;
@@ -1032,6 +1364,14 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
+                // The flags it asks for travel in the structure, and the rest comes back.
+                const child = onChildThread(handle, 'GetThreadContext',
+                    [{ inout: host.readMemory(wholeAddress(out),
+                        CONTEXT_BYTES) }], [wholeAddress(out)]);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
@@ -1044,37 +1384,126 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 const own = thread === host.currentThread();
-                if (!own)
+                // A thread stopped at a debug event for an exception goes on
+                // from the context its exception carries: that is its context.
+                if (!own && handleSize === 4 && thread.debugStop)
                 {
-                    kernel.settleThread?.(thread);
+                    const wanted = host.readMemory(wholeAddress(out), CONTEXT_BYTES);
+                    const record = host.readMemory(wholeAddress(thread.debugStop),
+                        CONTEXT_BYTES);
+                    record.set(wanted.subarray(0, 4), 0);
+                    mergeContextGroups(wanted, record);
+                    host.writeMemory(wholeAddress(out), wanted);
+                    return 1;
                 }
-                const registers = own ? host.registers?.() ?? {} : savedRegisters(thread.context);
-                writeThreadContext(out >>> 0, registers);
-                return 1;
+                const answer = ()=>{
+                    if (handleSize === 8 && !own)
+                    {
+                        writeLongContext(wholeAddress(out), thread);
+                        return 1;
+                    }
+                    writeThreadContext(wholeAddress(out),
+                        own ? host.registers?.() ?? {} : stoppedRegisters(thread), thread,
+                        own ? undefined : thread.context);
+                    return 1;
+                };
+                // Windows answers for a suspended thread once it has stopped:
+                // SuspendThread only asks, and GetThreadContext is how a caller
+                // waits for the stop. A thread still running on another executor
+                // that could not be brought back at once is waited for, the caller
+                // parked: answered from where it was last placed, the registers
+                // name a stack the thread is still writing, which a collector
+                // that walks a suspended thread's stack reads as its frames.
+                if (!own && kernel.settleThread?.(thread) === false && kernel.settledThread)
+                {
+                    return kernel.settledThread(thread).then(answer);
+                }
+                return answer();
             },
         },
 
         /**
          * BOOL SetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
          *
-         * Refused: a thread stopped here is usually stopped inside a call
-         * into the system, whose return would overwrite whatever registers
-         * were put in its place, and a context that took effect only
-         * sometimes would be worse than one refused.
+         * The groups ContextFlags names replace the thread's registers where
+         * it next runs, as Windows replaces the context a thread returns to
+         * user mode with: one stopped between instructions goes on from the
+         * new context; one waiting in a call into the system finishes the
+         * wait and then returns into it, not into its caller. What a .NET
+         * runtime's collector does to a thread it suspended in managed code:
+         * it sends it to a stub that waits for the collection to end. Put
+         * through the resume the switch applies (`scheduleResume`), the one
+         * place a stopped thread's continuation is decided. A thread running
+         * on another executor is brought back first, as GetThreadContext
+         * does. The calling thread's own context is refused, as before.
+         * A 32-bit context's x87 and SSE state goes back with the rest (`fpu-context.js`).
          */
         SetThreadContext: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, context])=>{
+                const child = onChildThread(handle, 'SetThreadContext',
+                    [{ in: host.readMemory(wholeAddress(context), CONTEXT_BYTES) }]);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                host.divergence?.('SetThreadContext', 'the registers of a thread are not replaced');
-                host.setLastError?.(ERROR_ACCESS_DENIED);
-                return 0;
+                // Stopped at a debug event for an exception, it goes on from the
+                // exception's context once continued: that is what is replaced.
+                if (thread !== host.currentThread() && handleSize === 4 && thread.debugStop)
+                {
+                    const record = host.readMemory(wholeAddress(thread.debugStop),
+                        CONTEXT_BYTES);
+                    mergeContextGroups(record,
+                        host.readMemory(wholeAddress(context), CONTEXT_BYTES));
+                    host.writeMemory(wholeAddress(thread.debugStop), record);
+                    return 1;
+                }
+                // The debug registers are the thread's to keep, its own
+                // included (`debug-registers.js`); a record that names nothing
+                // else is done once they are kept.
+                const head = handleSize === 4
+                    ? host.readMemory(wholeAddress(context), CONTEXT_DEBUG_BYTES) : null;
+                const headFlags = head === null ? 0 : new DataView(head.buffer, head.byteOffset,
+                    CONTEXT_DEBUG_BYTES).getUint32(0, true);
+                const debug = head === null ? null : debugGroupOf(head, headFlags);
+                if (debug !== null && (headFlags & CONTEXT_PARTS & ~CONTEXT_DEBUG_REGISTERS) === 0)
+                {
+                    setDebugRegisters(thread, debug, host.divergence, 'SetThreadContext');
+                    return 1;
+                }
+                if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
+                {
+                    host.setLastError?.(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                if (thread === host.currentThread() || !kernel.scheduleResume)
+                {
+                    host.divergence?.('SetThreadContext',
+                        'the calling thread\'s own registers are not replaced');
+                    host.setLastError?.(ERROR_ACCESS_DENIED);
+                    return 0;
+                }
+                const at = wholeAddress(context);
+                const apply = ()=>{
+                    replaceContext(thread, at);
+                    if (debug !== null)
+                    {
+                        setDebugRegisters(thread, debug, host.divergence, 'SetThreadContext');
+                    }
+                    return 1;
+                };
+                if (kernel.settleThread?.(thread) === false && kernel.settledThread)
+                {
+                    return kernel.settledThread(thread).then(apply);
+                }
+                return apply();
             },
         },
 
@@ -1124,7 +1553,7 @@ export function createSyncFunctions(host){
                     bytes[6] = (limit >>> 16 & 0xf) | 0x40 | (pages ? 0x80 : 0);
                     bytes[7] = base >>> 24;
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -1134,6 +1563,11 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
+                const child = onChildThread(handle, 'SuspendThread', []);
+                if (child !== null)
+                {
+                    return child;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {
@@ -1161,17 +1595,12 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                // A child created with CREATE_SUSPENDED has a thread handle but
-                // no thread: the launcher writes into the child and resumes it,
-                // and this is the point at which the child is ready to take
-                // this process's place. It answers a suspend count of one, the
-                // count a freshly suspended child really has.
-                const child = object(handle >>> 0, 'process-thread');
-                if (child)
+                // A child's first thread is resumed where the child runs: one
+                // made CREATE_SUSPENDED runs its first instruction now.
+                const child = onChildThread(handle, 'ResumeThread', []);
+                if (child !== null)
                 {
-                    const wasSuspended = child.suspended;
-                    child.suspended = false;
-                    return wasSuspended ? 1 : 0;
+                    return child;
                 }
                 const thread = threadOf(handle);
                 if (!thread)
@@ -1184,7 +1613,7 @@ export function createSyncFunctions(host){
                     // A section released while it was suspended may be its now.
                     host.critical.resumed(thread);
                 }
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -1207,7 +1636,7 @@ export function createSyncFunctions(host){
 
         // SRW locks and condition variables; a sleep on one takes a critical
         // section back through the same guest code EnterCriticalSection is.
-        ...createSlimSync(host, builder=>placed(builder).enter),
+        ...createSlimSync(host, builder=>placed(builder).enter, sectionTraps.enter),
 
         // Interlocked singly linked lists over the header the program owns.
         ...createSListFunctions(host),

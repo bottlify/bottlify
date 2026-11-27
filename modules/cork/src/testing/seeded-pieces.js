@@ -12,14 +12,19 @@
  * observe, against the same program translated inline.
  */
 
-import assert from 'node:assert/strict';
 import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 
-/** @param {Record<string, unknown>} config */
-export function machine(config = {}){
+/**
+ * @param {Record<string, unknown>} config
+ * @param {{ shared?: boolean }} [options]  `shared`: the memory a run of several
+ *     threads has, which a worker can be given without a copy
+ */
+export function machine(config = {}, { shared = false } = {}){
     const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
+    const pages = pagesFor(layout, tablesSize(layout));
+    const memory = new WebAssembly.Memory(shared
+        ? { initial: pages, maximum: pages, shared: true } : { initial: pages });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     view().setUint8(layout.x87Empty, 0xff);
@@ -27,11 +32,14 @@ export function machine(config = {}){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
+        // A page's rewrites timed on a clock of the test's, standing still: how
+        // many make a page volatile, not how fast the machine made them.
+        now: ()=>0,
     });
     return {
         runtime,
+        memory,
         /** @param {number} at @param {number[]} code */
         write(at, code){
             bytes().set(code, layout.ramBase + at);
@@ -47,23 +55,27 @@ export function machine(config = {}){
     };
 }
 
-/** @param {ReturnType<typeof machine>} m @param {number} count */
+/**
+ * Waits until `count` translators have loaded, however long a busy machine
+ * takes to start their workers: the test's own timeout is the bound.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} count
+ */
 export async function untilTranslatorsLoaded(m, count){
-    for (let i = 0; i < 500; i++)
+    while (/** @type {any} */ (m.runtime.diagnostics()).translatorsReady !== count)
     {
-        const d = m.runtime.diagnostics();
-        if (/** @type {any} */ (d).translatorsReady === count)
-        {
-            return;
-        }
         await new Promise(resolve=>setTimeout(resolve, 10));
     }
-    assert.fail('the translators loaded');
 }
 
-/** @param {ReturnType<typeof machine>} m @param {() => boolean} done */
+/**
+ * Asks the translator again until `done`, however long its workers take to
+ * answer: the test's own timeout is the bound.
+ *
+ * @param {ReturnType<typeof machine>} m @param {() => boolean} done
+ */
 export async function translateUntil(m, done){
-    for (let i = 0; i < 400 && !done(); i++)
+    while (!done())
     {
         await m.runtime.translatePending();
         await new Promise(resolve=>setTimeout(resolve, 5));
@@ -106,12 +118,14 @@ export function random(seed){
  *     outside (a host's pool), and how many: awaited before anything is noted
  * @returns {Promise<{ runs: string[], workerMs: number, formedInPart: number,
  *     publishedInPart: number, cacheHits: number, compiledApart: number,
- *     lookedUpInPart: number, relinked: number, answeredFirst: number }>} each start's exit
+ *     lookedUpInPart: number, relinked: number, answeredFirst: number,
+ *     sharedModules: number }>} each start's exit
  *     kind, retired count and registers, or 'untranslated'; the milliseconds translators
  *     emitted for it; the calls that formed or published part of a batch (`holdMs`); the
  *     store's hits, their modules compiled off the thread and the calls that left a batch's
  *     answers half read; the regions relinks moved; and the calls forming or looking up cut
- *     short for another executor's ask (`awaited`)
+ *     short for another executor's ask (`awaited`); the hits whose modules a runtime sharing
+ *     the store had compiled already (`shared-modules.js`)
  */
 export async function observe(seed, config, attach = undefined){
     const next = random(seed);
@@ -164,7 +178,8 @@ export async function observe(seed, config, attach = undefined){
         return { runs, workerMs: d.workerMs ?? 0, formedInPart: d.formedInPart,
             publishedInPart: d.publishedInPart, cacheHits: d.cacheHits,
             compiledApart: d.compiledApart, lookedUpInPart: d.lookedUpInPart,
-            relinked: d.relinked, answeredFirst: d.answeredFirst };
+            relinked: d.relinked, answeredFirst: d.answeredFirst,
+            sharedModules: d.sharedModules };
     }
     finally
     {

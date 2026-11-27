@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * powrprof and pdh — the power-scheme library and the performance-counter
  * library, as a machine answers them that has one power scheme and publishes
@@ -41,7 +43,24 @@ const PDH_NO_DATA = 0x800007d5;
  * @property {(code: number) => void} setLastError
  * @property {number} processors  How many processors the process is told of.
  * @property {number} mhz  Their speed, as the registry's `~MHz` says it.
+ * @property {(bytes: number) => number} [localAlloc]  LPTR memory the caller LocalFrees
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
  */
+
+/** The Balanced scheme's GUID, {381b4222-f694-41f0-9685-ff5bb260df2e}, as its bytes. */
+const BALANCED = Uint8Array.of(0x22, 0x42, 0x1b, 0x38, 0x94, 0xf6, 0xf0, 0x41,
+    0x96, 0x85, 0xff, 0x5b, 0xb2, 0x60, 0xdf, 0x2e);
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_MORE_DATA = 234;
+const ERROR_NO_MORE_ITEMS = 259;
+/** POWER_DATA_ACCESSOR's enumerations: schemes, subgroups, settings. */
+const ACCESS_SCHEME = 16;
+const ACCESS_SUBGROUP = 17;
+const ACCESS_INDIVIDUAL_SETTING = 18;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** POWER_PLATFORM_ROLE's PlatformRoleDesktop. */
+const PLATFORM_ROLE_DESKTOP = 1;
 
 /** @param {number} value */
 const dword = value=>{
@@ -62,15 +81,134 @@ export function createPowrprofFunctions(host){
         },
     });
 
+    /**
+     * Bytes into a caller's buffer of the size it says: no buffer asks the
+     * size, one too small is ERROR_MORE_DATA, and the size taken is written.
+     *
+     * @param {Uint8Array} bytes @param {number} buffer @param {number} size
+     */
+    const answerBytes = (bytes, buffer, size)=>{
+        const room = host.readMemory
+            ? new DataView(host.readMemory(wholeAddress(size), 4).slice().buffer).getUint32(0,
+                true) : 0;
+        host.writeMemory(wholeAddress(size), dword(bytes.length));
+        if ((buffer >>> 0) === 0)
+        {
+            return ERROR_SUCCESS;
+        }
+        if (room < bytes.length)
+        {
+            return ERROR_MORE_DATA;
+        }
+        host.writeMemory(wholeAddress(buffer), bytes);
+        return ERROR_SUCCESS;
+    };
+
     return {
+        /** POWER_PLATFORM_ROLE PowerDeterminePlatformRoleEx(ULONG Version): a desktop. */
+        PowerDeterminePlatformRoleEx: { argBytes: 4, handler: ()=>PLATFORM_ROLE_DESKTOP },
+        PowerDeterminePlatformRole: { argBytes: 0, handler: ()=>PLATFORM_ROLE_DESKTOP },
+
+        /**
+         * DWORD PowerGetActiveScheme(HKEY UserRootPowerKey, GUID **ActivePolicyGuid)
+         *
+         * Balanced, the one scheme, in a block the caller LocalFrees.
+         */
+        PowerGetActiveScheme: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const block = host.localAlloc?.(16) ?? 0;
+                if (block === 0)
+                {
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+                host.writeMemory(block, BALANCED);
+                host.writeMemory(wholeAddress(out), dword(block));
+                return ERROR_SUCCESS;
+            },
+        },
+
+        /**
+         * DWORD PowerReadACValue(HKEY, const GUID *Scheme, const GUID *SubGroup,
+         *     const GUID *Setting, PULONG Type, LPBYTE Buffer, LPDWORD BufferSize),
+         *     PowerReadDCValue alike
+         *
+         * The scheme keeps no settings to read: ERROR_FILE_NOT_FOUND, as for a
+         * setting the scheme does not have.
+         */
+        PowerReadACValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
+        PowerReadDCValue: { argBytes: 28, handler: ()=>ERROR_FILE_NOT_FOUND },
+
+        /**
+         * DWORD PowerEnumerate(HKEY RootPowerKey, const GUID *SchemeGuid,
+         *     const GUID *SubGroupOfPowerSettingsGuid, POWER_DATA_ACCESSOR AccessFlags,
+         *     ULONG Index, UCHAR *Buffer, DWORD *BufferSize)
+         *
+         * The schemes are Balanced alone; it has no subgroups or settings,
+         * as PowerReadACValue finds none. No buffer asks the size; a buffer
+         * too small is ERROR_MORE_DATA with the size written.
+         */
+        PowerEnumerate: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([, , , access, index, buffer, size])=>{
+                if (wholeAddress(size) === 0 || ![ACCESS_SCHEME, ACCESS_SUBGROUP,
+                    ACCESS_INDIVIDUAL_SETTING].includes(wholeAddress(access)))
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                if (wholeAddress(access) !== ACCESS_SCHEME || (index >>> 0) !== 0)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                return answerBytes(BALANCED, buffer, size);
+            },
+        },
+
+        /**
+         * DWORD PowerReadFriendlyName(HKEY RootPowerKey, const GUID *SchemeGuid,
+         *     const GUID *SubGroupOfPowerSettingsGuid, const GUID *PowerSettingGuid,
+         *     PUCHAR Buffer, LPDWORD BufferSize)
+         *
+         * "Balanced" for the scheme, as a wide string with its terminator;
+         * any other scheme, and every subgroup and setting, is not there.
+         */
+        PowerReadFriendlyName: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, scheme, subgroup, setting, buffer, size])=>{
+                if (wholeAddress(size) === 0 || wholeAddress(scheme) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const named = host.readMemory?.(wholeAddress(scheme), 16);
+                if (wholeAddress(subgroup) !== 0 || wholeAddress(setting) !== 0 || !named
+                    || !named.every((byte, at)=>byte === BALANCED[at]))
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                const text = 'Balanced\0';
+                const bytes = new Uint8Array(text.length * 2);
+                [...text].forEach((char, at)=>{
+                    bytes[at * 2] = char.charCodeAt(0);
+                });
+                return answerBytes(bytes, buffer, size);
+            },
+        },
+
         /** BOOLEAN GetActivePwrScheme(PUINT puiID): scheme 0, the only one. */
         GetActivePwrScheme: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([id])=>{
-                if ((id >>> 0) !== 0)
+                if (wholeAddress(id) !== 0)
                 {
-                    host.writeMemory(id >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(id), dword(0));
                 }
                 return 1;
             },
@@ -98,6 +236,35 @@ export function createPowrprofFunctions(host){
         ReadProcessorPwrScheme: noPolicy(8),
         /** BOOLEAN WriteProcessorPwrScheme(UINT, PMACHINE_PROCESSOR_POWER_POLICY) */
         WriteProcessorPwrScheme: noPolicy(8),
+        /** BOOLEAN ReadPwrScheme(UINT uiID, PPOWER_POLICY) */
+        ReadPwrScheme: noPolicy(8),
+        /** BOOLEAN WritePwrScheme(PUINT puiID, LPWSTR lpszName, LPWSTR lpszDescription, PPOWER_POLICY) */
+        WritePwrScheme: noPolicy(16),
+        /** BOOLEAN DeletePwrScheme(UINT uiID) */
+        DeletePwrScheme: noPolicy(4),
+        /** BOOLEAN EnumPwrSchemes(PWRSCHEMESENUMPROC, LPARAM): no XP-era policy to hand the callback. */
+        EnumPwrSchemes: noPolicy(8),
+        /** BOOLEAN CanUserWritePwrScheme(void): no scheme here takes a write. */
+        CanUserWritePwrScheme: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * DWORD PowerSetActiveScheme(HKEY UserRootPowerKey, const GUID *SchemeGuid)
+         *
+         * Balanced is active already; any other is not a scheme this machine has.
+         */
+        PowerSetActiveScheme: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, scheme])=>{
+                if (wholeAddress(scheme) === 0 || !host.readMemory)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const asked = host.readMemory(wholeAddress(scheme), 16);
+                return asked.every((byte, at)=>byte === BALANCED[at]) ? ERROR_SUCCESS
+                    : ERROR_FILE_NOT_FOUND;
+            },
+        },
 
         /**
          * NTSTATUS CallNtPowerInformation(POWER_INFORMATION_LEVEL InformationLevel,
@@ -111,12 +278,12 @@ export function createPowrprofFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([level, , , output, outputLength])=>{
-                if ((level >>> 0) !== PROCESSOR_INFORMATION)
+                if (wholeAddress(level) !== PROCESSOR_INFORMATION)
                 {
                     return STATUS_NOT_IMPLEMENTED;
                 }
                 const size = host.processors * PROCESSOR_POWER_INFORMATION_SIZE;
-                if ((output >>> 0) === 0 || (outputLength >>> 0) < size)
+                if (wholeAddress(output) === 0 || (outputLength >>> 0) < size)
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
@@ -130,7 +297,7 @@ export function createPowrprofFunctions(host){
                     view.setUint32(at + 8, host.mhz, true);
                     view.setUint32(at + 12, host.mhz, true);
                 }
-                host.writeMemory(output >>> 0, bytes);
+                host.writeMemory(wholeAddress(output), bytes);
                 return STATUS_SUCCESS;
             },
         },
@@ -157,7 +324,7 @@ export function createPdhFunctions(host){
             const query = nextQuery;
             nextQuery += 4;
             queries.add(query);
-            host.writeMemory(out >>> 0, dword(query));
+            host.writeMemory(wholeAddress(out), dword(query));
             return ERROR_SUCCESS;
         },
     };
@@ -187,7 +354,8 @@ export function createPdhFunctions(host){
         PdhCollectQueryData: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([query])=>(queries.has(query >>> 0) ? PDH_NO_DATA : PDH_INVALID_HANDLE),
+            handler: ([query])=>(queries.has(wholeAddress(query)) ? PDH_NO_DATA
+                : PDH_INVALID_HANDLE),
         },
 
         /**
@@ -202,7 +370,8 @@ export function createPdhFunctions(host){
         PdhCloseQuery: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([query])=>(queries.delete(query >>> 0) ? ERROR_SUCCESS : PDH_INVALID_HANDLE),
+            handler: ([query])=>(queries.delete(wholeAddress(query)) ? ERROR_SUCCESS
+                : PDH_INVALID_HANDLE),
         },
     };
 }

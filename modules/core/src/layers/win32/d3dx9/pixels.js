@@ -10,17 +10,22 @@
  * D3DFMT_A8R8G8B8 is in memory). A loader decodes a file into it, scales and
  * filters it, and encodes it into the format the texture was made in.
  *
- * The block-compressed formats are decoded as their specification describes
- * them (the DXTn layouts in the Direct3D 9 documentation) and encoded with a
- * range fit -- each block's colours between its two most distant ones -- which
- * is what a loader without a quality setting owes.
+ * The block-compressed formats go through the S3TC codec every drawing API
+ * shares (media/internal/s3tc.js): decoded as the specification states them,
+ * encoded with a range fit, which is what a loader without a quality setting
+ * owes.
  */
+
+import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
+
+/** @typedef {import('../../media/internal/s3tc.js').S3tcKind} S3tcKind */
 
 /** D3DFORMAT values. */
 export const FMT = Object.freeze({
     UNKNOWN: 0, R8G8B8: 20, A8R8G8B8: 21, X8R8G8B8: 22, R5G6B5: 23, X1R5G5B5: 24,
     A1R5G5B5: 25, A4R4G4B4: 26, A8: 28, X4R4G4B4: 30, A8B8G8R8: 32, X8B8G8R8: 33,
-    P8: 41, L8: 50, A8L8: 51,
+    G16R16: 34, A16B16G16R16: 36, P8: 41, L8: 50, A8L8: 51, V8U8: 60, Q8W8V8U8: 63,
+    V16U16: 64, L16: 81,
     DXT1: 0x31545844, DXT2: 0x32545844, DXT3: 0x33545844, DXT4: 0x34545844,
     DXT5: 0x35545844,
 });
@@ -29,15 +34,53 @@ export const FMT = Object.freeze({
 export const isCompressed = format=>format === FMT.DXT1 || format === FMT.DXT2
     || format === FMT.DXT3 || format === FMT.DXT4 || format === FMT.DXT5;
 
+/**
+ * Whether a file's level is held in its own format rather than the working
+ * form: a compressed one, and one with more than eight bits a channel, which
+ * the working form would cut, or signed ones, which it holds offset by half
+ * the range. A texture of that same format takes it as it is.
+ *
+ * @param {number} format
+ */
+export const keptAsIs = format=>isCompressed(format) || DEEP_OR_SIGNED.has(format);
+
 /** Bytes a texel takes, for the formats this module reads and writes uncompressed. */
 /** @type {Map<number, number>} */
 const TEXEL_BYTES = new Map([[FMT.R8G8B8, 3], [FMT.A8R8G8B8, 4], [FMT.X8R8G8B8, 4],
     [FMT.R5G6B5, 2], [FMT.X1R5G5B5, 2], [FMT.A1R5G5B5, 2], [FMT.A4R4G4B4, 2],
     [FMT.X4R4G4B4, 2], [FMT.A8, 1], [FMT.L8, 1], [FMT.A8L8, 2], [FMT.A8B8G8R8, 4],
-    [FMT.X8B8G8R8, 4]]);
+    [FMT.X8B8G8R8, 4], [FMT.L16, 2], [FMT.G16R16, 4], [FMT.A16B16G16R16, 8], [FMT.V8U8, 2],
+    [FMT.Q8W8V8U8, 4], [FMT.V16U16, 4]]);
+
+/**
+ * The formats a file's level is held in as it is (`keptAsIs`), beside the compressed ones.
+ *
+ * @type {Set<number>}
+ */
+const DEEP_OR_SIGNED = new Set([FMT.L16, FMT.G16R16, FMT.A16B16G16R16, FMT.V8U8, FMT.Q8W8V8U8,
+    FMT.V16U16]);
 
 /** @param {number} format */
 export const isSupported = format=>TEXEL_BYTES.has(format) || isCompressed(format);
+
+/**
+ * Formats this module has no codec for, by the bytes a texel takes: a level
+ * of one is copied row by row into a surface of the same format and size, as
+ * D3DX copies it, and goes no other way. A2B10G10R10, A2R10G10B10, R16F,
+ * G16R16F, A16B16G16R16F, R32F, G32R32F, A32B32G32R32F.
+ *
+ * @type {Map<number, number>}
+ */
+const COPIED_BYTES = new Map([[31, 4], [35, 4], [111, 2], [112, 4], [113, 8], [114, 4], [115, 8],
+    [116, 16]]);
+
+/**
+ * Whether a level of this format can be copied into a surface of the same
+ * format and size.
+ *
+ * @param {number} format
+ */
+export const isCopyable = format=>isSupported(format) || COPIED_BYTES.has(format);
 
 /** @param {number} format */
 const blockBytes = format=>(format === FMT.DXT1 ? 8 : 16);
@@ -54,11 +97,14 @@ export function layoutOf(format, width, height){
         return { rowBytes: Math.max(1, Math.ceil(width / 4)) * blockBytes(format),
             rows: Math.max(1, Math.ceil(height / 4)) };
     }
-    return { rowBytes: width * /** @type {number} */ (TEXEL_BYTES.get(format)), rows: height };
+    return { rowBytes: width * /** @type {number} */ (TEXEL_BYTES.get(format)
+        ?? COPIED_BYTES.get(format)), rows: height };
 }
 
 /** @param {number} value @param {number} bits */
 const expand = (value, bits)=>Math.round(value * 255 / ((1 << bits) - 1));
+/** A sixteen-bit channel in eight. @param {number} value */
+const narrow = value=>Math.round(value * 255 / 65535);
 /** @param {number} value @param {number} bits */
 const reduce = (value, bits)=>Math.round(value * ((1 << bits) - 1) / 255);
 
@@ -131,6 +177,35 @@ export function decodeTexels(format, data, width, height, palette){
             case FMT.A8L8:
                 r = g = b = data[at];
                 a = data[at + 1];
+                break;
+            case FMT.L16:
+                r = g = b = narrow(view.getUint16(at, true));
+                break;
+            // Red in the low word, then green (and blue and alpha), each sixteen bits.
+            case FMT.G16R16:
+                r = narrow(view.getUint16(at, true));
+                g = narrow(view.getUint16(at + 2, true));
+                break;
+            case FMT.A16B16G16R16:
+                r = narrow(view.getUint16(at, true));
+                g = narrow(view.getUint16(at + 2, true));
+                b = narrow(view.getUint16(at + 4, true));
+                a = narrow(view.getUint16(at + 6, true));
+                break;
+            // Signed: U in the low byte (red), then V, W, Q; zero held as 128.
+            case FMT.V8U8:
+                r = view.getInt8(at) + 128;
+                g = view.getInt8(at + 1) + 128;
+                break;
+            case FMT.Q8W8V8U8:
+                r = view.getInt8(at) + 128;
+                g = view.getInt8(at + 1) + 128;
+                b = view.getInt8(at + 2) + 128;
+                a = view.getInt8(at + 3) + 128;
+                break;
+            case FMT.V16U16:
+                r = (view.getInt16(at, true) >> 8) + 128;
+                g = (view.getInt16(at + 2, true) >> 8) + 128;
                 break;
             case FMT.P8: {
                 const entry = /** @type {Uint8Array} */ (palette).subarray(data[at] * 4);
@@ -209,6 +284,33 @@ export function encodeTexels(format, bgra, width, height){
                 out[at] = luminance(r, g, b);
                 out[at + 1] = a;
                 break;
+            case FMT.L16:
+                view.setUint16(at, luminance(r, g, b) * 257, true);
+                break;
+            case FMT.G16R16:
+                view.setUint16(at, r * 257, true);
+                view.setUint16(at + 2, g * 257, true);
+                break;
+            case FMT.A16B16G16R16:
+                view.setUint16(at, r * 257, true);
+                view.setUint16(at + 2, g * 257, true);
+                view.setUint16(at + 4, b * 257, true);
+                view.setUint16(at + 6, a * 257, true);
+                break;
+            case FMT.V8U8:
+                view.setInt8(at, r - 128);
+                view.setInt8(at + 1, g - 128);
+                break;
+            case FMT.Q8W8V8U8:
+                view.setInt8(at, r - 128);
+                view.setInt8(at + 1, g - 128);
+                view.setInt8(at + 2, b - 128);
+                view.setInt8(at + 3, a - 128);
+                break;
+            case FMT.V16U16:
+                view.setInt16(at, (r - 128) * 256, true);
+                view.setInt16(at + 2, (g - 128) * 256, true);
+                break;
             default:
                 throw new Error(`no encoder for format ${format}`);
         }
@@ -220,82 +322,36 @@ export function encodeTexels(format, bgra, width, height){
 const luminance = (/** @type {number} */ r, /** @type {number} */ g, /** @type {number} */ b)=>
     Math.min(255, Math.round(r * 0.2125 + g * 0.7154 + b * 0.0721));
 
-/** @param {number} c  A 565 colour. @returns {number[]} r, g, b */
-const rgb565 = c=>[expand(c >> 11, 5), expand(c >> 5 & 63, 6), expand(c & 31, 5)];
+/** The S3TC kind each DXTn format's blocks are: DXT2 and DXT4 are DXT3's and DXT5's bits. */
+const KIND = new Map(/** @type {[number, S3tcKind][]} */ ([
+    [FMT.DXT1, 'dxt1'], [FMT.DXT2, 'dxt3'], [FMT.DXT3, 'dxt3'], [FMT.DXT4, 'dxt5'],
+    [FMT.DXT5, 'dxt5']]));
+
+/**
+ * Swaps the first and third byte of every texel: the working form's BGRA and
+ * the codec's RGBA, either way.
+ *
+ * @param {Uint8Array} texels
+ */
+function swapRedBlue(texels){
+    for (let at = 0; at < texels.length; at += 4)
+    {
+        const red = texels[at];
+        texels[at] = texels[at + 2];
+        texels[at + 2] = red;
+    }
+}
 
 /**
  * @param {number} format @param {Uint8Array} data @param {number} width @param {number} height
  * @param {Uint8Array} out
  */
 function decodeBlocks(format, data, width, height, out){
-    const size = blockBytes(format);
-    const across = Math.max(1, Math.ceil(width / 4));
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    for (let by = 0; by < Math.ceil(height / 4); by++)
+    if (decodeS3tc(data, /** @type {S3tcKind} */ (KIND.get(format)), width, height, out) === null)
     {
-        for (let bx = 0; bx < across; bx++)
-        {
-            const at = (by * across + bx) * size;
-            const colourAt = format === FMT.DXT1 ? at : at + 8;
-            const c0 = view.getUint16(colourAt, true);
-            const c1 = view.getUint16(colourAt + 2, true);
-            const p0 = rgb565(c0);
-            const p1 = rgb565(c1);
-            const four = format !== FMT.DXT1 || c0 > c1;
-            const palette = [[...p0, 255], [...p1, 255],
-                four ? [0, 1, 2].map(k=>Math.round((2 * p0[k] + p1[k]) / 3)).concat(255)
-                    : [0, 1, 2].map(k=>Math.round((p0[k] + p1[k]) / 2)).concat(255),
-                four ? [0, 1, 2].map(k=>Math.round((p0[k] + 2 * p1[k]) / 3)).concat(255)
-                    : [0, 0, 0, 0]];
-            const indices = view.getUint32(colourAt + 4, true);
-            /** @type {number[]} */
-            let alphas = [];
-            if (format === FMT.DXT3 || format === FMT.DXT2)
-            {
-                for (let k = 0; k < 16; k++)
-                {
-                    alphas.push(expand(data[at + (k >> 1)] >> ((k & 1) * 4) & 15, 4));
-                }
-            }
-            else if (format === FMT.DXT5 || format === FMT.DXT4)
-            {
-                const a0 = data[at];
-                const a1 = data[at + 1];
-                const levels = [a0, a1];
-                for (let k = 1; k < (a0 > a1 ? 7 : 5); k++)
-                {
-                    levels.push(Math.round(a0 > a1 ? ((7 - k) * a0 + k * a1) / 7
-                        : ((5 - k) * a0 + k * a1) / 5));
-                }
-                if (a0 <= a1)
-                {
-                    levels.push(0, 255);
-                }
-                let bits = 0n;
-                for (let k = 5; k >= 0; k--)
-                {
-                    bits = bits << 8n | BigInt(data[at + 2 + k]);
-                }
-                alphas = Array.from({ length: 16 },
-                    (_, k)=>levels[Number(bits >> BigInt(k * 3) & 7n)]);
-            }
-            for (let k = 0; k < 16; k++)
-            {
-                const x = bx * 4 + (k & 3);
-                const y = by * 4 + (k >> 2);
-                if (x >= width || y >= height)
-                {
-                    continue;
-                }
-                const texel = palette[indices >>> (k * 2) & 3];
-                const o = (y * width + x) * 4;
-                out[o] = texel[2];
-                out[o + 1] = texel[1];
-                out[o + 2] = texel[0];
-                out[o + 3] = alphas.length > 0 ? alphas[k] : texel[3];
-            }
-        }
+        throw new Error(`a ${width}x${height} level of format ${format} in ${data.length} bytes`);
     }
+    swapRedBlue(out);
 }
 
 /**
@@ -303,125 +359,11 @@ function decodeBlocks(format, data, width, height, out){
  * @returns {Uint8Array}
  */
 function encodeBlocks(format, bgra, width, height){
-    const size = blockBytes(format);
-    const across = Math.max(1, Math.ceil(width / 4));
-    const down = Math.max(1, Math.ceil(height / 4));
-    const out = new Uint8Array(across * down * size);
-    const view = new DataView(out.buffer);
-    /** @param {number[]} p */
-    const to565 = p=>reduce(p[0], 5) << 11 | reduce(p[1], 6) << 5 | reduce(p[2], 5);
-    for (let by = 0; by < down; by++)
-    {
-        for (let bx = 0; bx < across; bx++)
-        {
-            /** @type {number[][]} r, g, b, a of the block's texels, edges repeated */
-            const texels = [];
-            for (let k = 0; k < 16; k++)
-            {
-                const x = Math.min(width - 1, bx * 4 + (k & 3));
-                const y = Math.min(height - 1, by * 4 + (k >> 2));
-                const o = (y * width + x) * 4;
-                texels.push([bgra[o + 2], bgra[o + 1], bgra[o], bgra[o + 3]]);
-            }
-            const at = (by * across + bx) * size;
-            const punch = format === FMT.DXT1 && texels.some(t=>t[3] < 128);
-            const lit = texels.filter(t=>!punch || t[3] >= 128);
-            // The two farthest apart: a bounding box's corners miss colours whose
-            // channels run against each other.
-            let ends = [lit[0] ?? [0, 0, 0], lit[0] ?? [0, 0, 0]];
-            let spread = -1;
-            for (const p of lit)
-            {
-                for (const q of lit)
-                {
-                    const d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2;
-                    if (d > spread)
-                    {
-                        spread = d;
-                        ends = [p, q];
-                    }
-                }
-            }
-            let c0 = to565(ends[0]);
-            let c1 = to565(ends[1]);
-            // Four colours want c0 > c1, three and transparent c0 <= c1.
-            if (punch ? c0 > c1 : c0 < c1)
-            {
-                [c0, c1] = [c1, c0];
-            }
-            if (!punch && c0 === c1 && c1 > 0)
-            {
-                c1--;
-            }
-            const p0 = rgb565(c0);
-            const p1 = rgb565(c1);
-            const palette = punch
-                ? [p0, p1, [0, 1, 2].map(k=>(p0[k] + p1[k]) / 2)]
-                : [p0, p1, [0, 1, 2].map(k=>(2 * p0[k] + p1[k]) / 3),
-                    [0, 1, 2].map(k=>(p0[k] + 2 * p1[k]) / 3)];
-            let indices = 0;
-            texels.forEach((t, k)=>{
-                let best = 0;
-                if (punch && t[3] < 128)
-                {
-                    best = 3;
-                }
-                else
-                {
-                    let bestError = Infinity;
-                    palette.forEach((p, i)=>{
-                        const error = (p[0] - t[0]) ** 2 + (p[1] - t[1]) ** 2 + (p[2] - t[2]) ** 2;
-                        if (error < bestError)
-                        {
-                            bestError = error;
-                            best = i;
-                        }
-                    });
-                }
-                indices |= best << (k * 2);
-            });
-            const colourAt = format === FMT.DXT1 ? at : at + 8;
-            view.setUint16(colourAt, c0, true);
-            view.setUint16(colourAt + 2, c1, true);
-            view.setUint32(colourAt + 4, indices >>> 0, true);
-            if (format === FMT.DXT3 || format === FMT.DXT2)
-            {
-                texels.forEach((t, k)=>{
-                    out[at + (k >> 1)] |= reduce(t[3], 4) << ((k & 1) * 4);
-                });
-            }
-            else if (format === FMT.DXT5 || format === FMT.DXT4)
-            {
-                const a0 = Math.max(...texels.map(t=>t[3]));
-                const a1 = Math.min(...texels.map(t=>t[3]));
-                out[at] = a0;
-                out[at + 1] = a1;
-                const levels = [a0, a1];
-                for (let k = 1; k < 7; k++)
-                {
-                    levels.push(((7 - k) * a0 + k * a1) / 7);
-                }
-                let bits = 0n;
-                texels.forEach((t, k)=>{
-                    let best = 0;
-                    if (a0 !== a1)
-                    {
-                        levels.forEach((l, i)=>{
-                            if (Math.abs(l - t[3]) < Math.abs(levels[best] - t[3]))
-                            {
-                                best = i;
-                            }
-                        });
-                    }
-                    bits |= BigInt(best) << BigInt(k * 3);
-                });
-                for (let k = 0; k < 6; k++)
-                {
-                    out[at + 2 + k] = Number(bits >> BigInt(k * 8) & 0xffn);
-                }
-            }
-        }
-    }
+    const kind = /** @type {S3tcKind} */ (KIND.get(format));
+    const rgba = bgra.slice();
+    swapRedBlue(rgba);
+    const out = new Uint8Array(compressedBytes(kind, width, height));
+    encodeS3tc(rgba, kind, width, height, out);
     return out;
 }
 

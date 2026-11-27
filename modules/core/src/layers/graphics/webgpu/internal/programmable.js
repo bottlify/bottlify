@@ -93,8 +93,9 @@ export const DECLTYPE_ATTRIBUTE = Object.freeze({
  * Each element is read from its own stream, a vertex buffer per stream at the
  * stride that stream is bound with. An input the declaration has no element
  * for is left out, and the shader reads it as the default vertex; an element
- * of a type WebGPU cannot deliver, or past its stream's stride, refuses the
- * whole layout.
+ * past its stream's stride is read from the vertex's last bytes
+ * (decisions.md); an element of a type WebGPU cannot deliver, or wider than
+ * its stream's stride, refuses the whole layout.
  *
  * @param {readonly VertexElement[]} elements
  * @param {readonly DeclaredInput[]} wanted
@@ -126,12 +127,17 @@ export function vertexLayoutOf(elements, wanted, stride, strideOf = ()=>0){
         {
             streams.set(element.Stream, own);
         }
-        if (own !== 0 && element.Offset + attribute.bytes > own)
+        if (own !== 0 && attribute.bytes > own)
         {
             return { layout: null, error: `element past the stride of ${own}` };
         }
+        // One declaration bound over vertices of several strides -- a mesh
+        // with fewer coordinate sets than the declaration names -- reads what
+        // lies past its vertex from the vertex's last bytes: its last set.
+        const offset = own !== 0 && element.Offset + attribute.bytes > own
+            ? own - attribute.bytes : element.Offset;
         layout.attributes.push({
-            shaderLocation: input.location, offset: element.Offset, format: attribute.format,
+            shaderLocation: input.location, offset, format: attribute.format,
             ...(element.Stream === 0 ? {} : { stream: element.Stream }),
         });
         layout.shapes.set(input.register, {
@@ -324,6 +330,27 @@ export function samplerDimension(type){
     return type === 'texture_3d<f32>' || type === '3d' ? '3d' : '2d';
 }
 
+/**
+ * What a translated shader's sampler binds: its dimension (`samplerDimension`),
+ * or 'shadow' for a shadow map's, a depth texture and a comparison sampler
+ * (`compared`, or the fixed stage's own 'shadow').
+ *
+ * @param {{ type: string, compared?: boolean }} entry
+ * @returns {string}
+ */
+const samplerBindingOf = entry=>(entry.compared === true || entry.type === 'shadow'
+    ? 'shadow' : samplerDimension(entry.type));
+
+/**
+ * A sampler group's texture and sampler entries for one binding kind
+ * (`samplerBindingOf`).
+ *
+ * @param {string} kind
+ */
+const samplerLayoutOf = kind=>(kind === 'shadow'
+    ? { texture: { sampleType: 'depth' }, sampler: { type: 'comparison' } }
+    : { texture: kind === '2d' ? {} : { viewDimension: kind }, sampler: {} });
+
 /** GPUShaderStage bits. */
 const VERTEX_STAGE = 1;
 const FRAGMENT_STAGE = 2;
@@ -352,7 +379,8 @@ export function createProgramCache({ backend }){
     let reused = 0;
 
     /**
-     * @param {readonly string[]} dimensions  Each pixel sampler's: '2d', 'cube' or '3d'.
+     * @param {readonly string[]} dimensions  Each pixel sampler's: '2d', 'cube', '3d' or
+     *     'shadow' (`samplerBindingOf`).
      * @param {readonly string[]} [vertexDimensions]  Each vertex sampler's, bound
      *     from VERTEX_SAMPLER_BINDING on.
      */
@@ -376,19 +404,20 @@ export function createProgramCache({ backend }){
         const samplerEntries = [];
         for (let index = 0; index < samplerCount; index++)
         {
+            const kind = samplerLayoutOf(dimensions[index]);
             samplerEntries.push({ binding: index * 2, visibility: FRAGMENT_STAGE,
-                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
+                texture: kind.texture });
             samplerEntries.push(
-                { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: {} });
+                { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: kind.sampler });
         }
         vertexDimensions.forEach((dimension, index)=>{
             // A vertex texture is read at a level, never filtered between texels'
             // derivatives, so it binds as a plain sampled texture like the rest.
+            const kind = samplerLayoutOf(dimension);
             samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2,
-                visibility: VERTEX_STAGE,
-                texture: dimension === '2d' ? {} : { viewDimension: dimension } });
+                visibility: VERTEX_STAGE, texture: kind.texture });
             samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2 + 1,
-                visibility: VERTEX_STAGE, sampler: {} });
+                visibility: VERTEX_STAGE, sampler: kind.sampler });
         });
         const groups = [
             constants(VERTEX_STAGE),
@@ -429,10 +458,8 @@ export function createProgramCache({ backend }){
                         { code: program.pixel.wgsl, label: `ps:${program.key}` }),
                 ]);
                 const descriptor = pipelineDescriptor(state, null);
-                const bound = layoutsFor(program.pixel.samplers.map(
-                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)),
-                (program.vertex.samplers ?? []).map(
-                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)));
+                const bound = layoutsFor(program.pixel.samplers.map(samplerBindingOf),
+                    (program.vertex.samplers ?? []).map(samplerBindingOf));
                 return {
                     bindGroupLayouts: bound.groups,
                     gpu: await backend.createRenderPipelineAsync({
@@ -448,7 +475,7 @@ export function createProgramCache({ backend }){
                         fragment: {
                             module: pixelModule,
                             entryPoint: program.pixel.entry,
-                            targets: [descriptor.target],
+                            targets: descriptor.targets,
                         },
                         primitive: descriptor.primitive,
                         depthStencil: descriptor.depthStencil,

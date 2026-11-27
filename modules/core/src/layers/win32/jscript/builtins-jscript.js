@@ -31,7 +31,7 @@ import { toInteger } from './realm.js';
  */
 
 /** An Enumerator: the collection's own enumerator and the item it is on. */
-export class EnumeratorObject extends JSObject
+class EnumeratorObject extends JSObject
 {
     /** @param {JSObject} proto */
     constructor(proto){

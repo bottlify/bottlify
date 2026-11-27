@@ -22,6 +22,8 @@ function machine(){
     };
     /** @type {Map<number, number>} */
     const words = new Map();
+    /** @type {Map<number, any>} */
+    const reserves = new Map();
     /** @type {any[]} */
     const guest = [];
     /** @type {any[]} */
@@ -65,10 +67,22 @@ function machine(){
                 {
                     return worker;
                 }
+                if (type === 'reserve' && reserves.has(handle))
+                {
+                    return reserves.get(handle);
+                }
                 throw new Error('not a thread');
             },
             /** @param {number} handle */
-            typeOf: handle=>({ 0x50: 'event', 0x54: 'mutex', 0x58: 'semaphore' })[handle] ?? null,
+            typeOf: handle=>(reserves.has(handle) ? 'reserve'
+                : ({ 0x44: 'thread', 0x50: 'event', 0x54: 'mutex', 0x58: 'semaphore' })[handle]
+                    ?? null),
+            /** @param {string} type @param {any} object */
+            open: (type, object)=>{
+                const handle = 0x100 + reserves.size * 4;
+                reserves.set(handle, object);
+                return handle;
+            },
         },
     };
 
@@ -173,6 +187,23 @@ test('QueueUserAPC refuses a handle that is not a thread, and a null routine', (
     assert.deepEqual(m.errors, [6, 6]);
 });
 
+test('QueueUserAPC2 with no flags is QueueUserAPC; a special user APC is a 64-bit facility', ()=>{
+    // Wine's kernel32 sync test_QueueUserAPC, for a 32-bit process.
+    const m = machine();
+    m.worker.alertable = false;
+    assert.equal(m.apcs.table.QueueUserAPC2.argBytes, 16);
+
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 0]), 1);
+    assert.equal(m.apcs.pending(m.worker), 1);
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 1]), 0);
+    assert.equal(m.errors.at(-1), 50, 'ERROR_NOT_SUPPORTED');
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x44, 7, 2]), 0);
+    assert.equal(m.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(m.apcs.table.QueueUserAPC2.handler([0x00405000, 0x99, 7, 0]), 0);
+    assert.equal(m.errors.at(-1), 6);
+    assert.equal(m.apcs.pending(m.worker), 1, 'nothing more queued');
+});
+
 test('SignalObjectAndWait signals by the object\'s kind, then waits', ()=>{
     const m = machine();
 
@@ -253,4 +284,32 @@ test('NtQueueApcThread hands its routine three arguments, and NtTestAlert runs i
     assert.equal(await natives.NtTestAlert.handler(), 0);
     assert.deepEqual(m.guest, [{ entry: 0x00406000, args: [1, 2, 3], thread: 'main' }]);
     assert.deepEqual([natives.NtQueueApcThread.argBytes, natives.NtTestAlert.argBytes], [20, 0]);
+});
+
+test('NtQueueApcThreadEx queues in a user APC reserve object, one APC at a time', async()=>{
+    // Wine's ntdll thread.c test_NtQueueApcThreadEx, as Windows answers it.
+    const m = machine();
+    const natives = m.apcs.table.QueueUserAPC.natives;
+    const ex = (/** @type {number} */ reserve)=>natives.NtQueueApcThreadEx.handler(
+        [0xfffffffe, reserve, 0x00406000, 4, 5, 6]) >>> 0;
+    assert.equal(ex(0x10000), 0xc0000008, 'a value that names nothing: STATUS_INVALID_HANDLE');
+    assert.equal(ex(1), 0xc0000008, 'the special-APC flag, read as a handle');
+    assert.equal(ex(0xfffffffe), 0xc0000024, 'a thread: STATUS_OBJECT_TYPE_MISMATCH');
+    assert.equal(ex(0x44), 0xc0000024);
+    assert.equal(m.apcs.pending(m.main), 0);
+
+    assert.equal(natives.NtAllocateReserveObject.handler([0x700, 0, 0]), 0);
+    const reserve = m.words.get(0x700) ?? 0;
+    assert.equal(ex(reserve), 0);
+    assert.equal(ex(reserve), 0xc00000f0, 'in use: STATUS_INVALID_PARAMETER_2');
+    assert.equal(await natives.NtTestAlert.handler(), 0);
+    assert.deepEqual(m.guest, [{ entry: 0x00406000, args: [4, 5, 6], thread: 'main' }]);
+    assert.equal(ex(reserve), 0, 'free again once delivered');
+
+    assert.equal(natives.NtAllocateReserveObject.handler([0x704, 0, 1]), 0);
+    assert.equal(ex(m.words.get(0x704) ?? 0), 0xc0000024, 'an I/O completion reserve');
+    assert.equal(natives.NtAllocateReserveObject.handler([0x708, 0, 7]), 0xc000000d);
+    assert.equal(ex(0), 0, 'none: NtQueueApcThread');
+    assert.deepEqual([natives.NtQueueApcThreadEx.argBytes,
+        natives.NtAllocateReserveObject.argBytes], [24, 12]);
 });

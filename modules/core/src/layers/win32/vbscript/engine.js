@@ -35,7 +35,7 @@ import { installCore } from './builtins.js';
 import { installDates } from './builtins-date.js';
 import { installStrings } from './builtins-string.js';
 import {
-    MESSAGES, SOURCE_COMPILATION, SOURCE_RUNTIME, SyntaxFailure, VBRuntimeError, hresultOf,
+    MESSAGES, SOURCE_COMPILATION, SOURCE_RUNTIME, SyntaxFailure, hresultOf,
 } from './errors.js';
 import { Interpreter, Var } from './interpreter.js';
 import { positionOf } from './lexer.js';
@@ -56,7 +56,7 @@ import { FunctionRef, fromHost, toHost } from './values.js';
  *
  * @type {Readonly<EngineVersion>}
  */
-export const VBSCRIPT_5_7 = Object.freeze({ major: 5, minor: 7, build: 18066 });
+const VBSCRIPT_5_7 = Object.freeze({ major: 5, minor: 7, build: 18066 });
 
 /**
  * The shared options (`script/engine.js`), and VBScript's own. `random` is
@@ -347,5 +347,3 @@ export class VBScriptEngine
 export function createVBScriptEngine(options){
     return new VBScriptEngine(options);
 }
-
-export { ScriptAbort, VBRuntimeError };

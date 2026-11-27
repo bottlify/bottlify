@@ -151,18 +151,41 @@ function vecOf(v){
 }
 
 /**
+ * What a target with a register model other than Direct3D 9's gives the lowering: its own
+ * builder (`b.typed`, whose values know whether they are floats, integers or truths), and
+ * the parts of a program whose shape is the target's - where a uniform lives, what a texture
+ * is, how an input and an output are named. Shader Model 4's (`graphics/d3dcompiler`).
+ *
+ * @typedef {Object} LowerTarget
+ * @property {any} builder
+ * @property {(sym: Symbol) => Value} uniform   A uniform, a texture or a sampler, read.
+ * @property {(e: any, operands: { texture: Value, sampler: Value | null, args: Value[] },
+ *     st: State, ctx: LowerContext) => Value} texop   A method of a texture.
+ * @property {(type: Type, semantic: string, name: string, pos: any) => any} input   The
+ *     target's value of an input (its builder's operand, as all values here).
+ * @property {(value: any, type: Type, semantic: string, name: string, pos: any) => void} output
+ * @property {(array: any, index: any, ctx: LowerContext) => Value} relative
+ *     An element of a uniform array at an index not known.
+ * @property {(ctx: LowerContext, name: string, args: any[], result: Type, e: any,
+ *     st: State) => Value | null} intrinsic   Null for the common library's.
+ */
+
+/**
  * Lowers the entry point of a checked module.
  *
  * @param {Module} module
  * @param {FunctionSymbol} entry
  * @param {Profile} profile
- * @param {{ loops?: ReadonlySet<any> }} [options]   `loops`: the loops to run as loops rather
- *     than unroll, which a model 3 shader can.
+ * @param {{ loops?: ReadonlySet<any>, target?: LowerTarget }} [options]   `loops`: the loops
+ *     to run as loops rather than unroll, which a model 3 shader can. `target`: a target that
+ *     is not Direct3D 9.
  * @returns {{ ir: import('./hlsl-ir.js').IrProgram }}
  * @throws {LowerError}
  */
 export function lower(module, entry, profile, options = {}){
-    const b = createBuilder(profile);
+    const hooks = options.target ?? null;
+    /** @type {ReturnType<typeof createBuilder>} */
+    const b = hooks ? hooks.builder : createBuilder(profile);
     const runAsLoops = options.loops ?? new Set();
 
     /**
@@ -259,7 +282,9 @@ export function lower(module, entry, profile, options = {}){
     };
 
     /** @param {Type} type @returns {Value} */
-    const zero = type=>build(type, new Array(scalarCount(type)).fill(b.num(0)));
+    const zero = type=>build(type, hooks
+        ? flatBases(type).map(base=>/** @type {any} */ (b).num(0, 1, base))
+        : new Array(scalarCount(type)).fill(b.num(0)));
 
     /**
      * What a variable holds before anything is assigned to it: zeros, marked,
@@ -297,7 +322,9 @@ export function lower(module, entry, profile, options = {}){
             }
         };
         walk(type, constant);
-        return build(type, numbers.map(n=>b.num(n)));
+        const bases = flatBases(type);
+        return build(type, numbers.map((n, i)=>(hooks
+            ? /** @type {any} */ (b).num(n, 1, bases[i] ?? 'float') : b.num(n))));
     };
 
     /**
@@ -363,6 +390,10 @@ export function lower(module, entry, profile, options = {}){
         if (from === to)
         {
             return v;
+        }
+        if (hooks)
+        {
+            return /** @type {any} */ (b).convert(v, from, to);
         }
         if (to === 'bool')
         {
@@ -641,6 +672,12 @@ export function lower(module, entry, profile, options = {}){
         {
             return known;
         }
+        if (hooks)
+        {
+            const made = hooks.uniform(sym);
+            uniforms.set(sym, made);
+            return made;
+        }
         const rowMajor = sym.rowMajor ?? module.rowMajor;
         // fxc names a uniform parameter of the entry point with a $ before it.
         const name = sym.kind === 'param' ? `$${sym.name}` : sym.name;
@@ -811,6 +848,10 @@ export function lower(module, entry, profile, options = {}){
         {
             return element(Math.trunc(at[0]));
         }
+        if (object.k === 'arr' && object.uniform && hooks)
+        {
+            return hooks.relative(object.uniform, b.lane(index, 0), ctx);
+        }
         if (object.k === 'arr' && object.uniform)
         {
             if (profile.kind !== 'vs')
@@ -976,6 +1017,18 @@ export function lower(module, entry, profile, options = {}){
         const base = baseOf(opType);
         /** @type {(x: Vec, y: Vec) => Vec} */
         let f;
+        const typed = /** @type {any} */ (b);
+        const integer = base === 'int' || base === 'uint';
+        const kind = base === 'uint' ? 'u' : 'i';
+        if (hooks && integer && (op === '/' || op === '%'))
+        {
+            return zip([left, right], (x, y)=>typed.integerDivide(x, y,
+                op === '/' ? 'quotient' : 'remainder', kind));
+        }
+        if (hooks && ['&', '|', '^', '<<', '>>'].includes(op))
+        {
+            return zip([left, right], (x, y)=>typed.bitwise(op, x, y, kind));
+        }
         switch (op)
         {
             case '+': f = b.add; break;
@@ -1018,9 +1071,17 @@ export function lower(module, entry, profile, options = {}){
         {
             // An integer literal is 32 bits, as fxc reads it: 3000000000 is -1294967296 and
             // 3000000000u itself; what is done with it after is done in floats.
-            case 'num': return vec(b.num(e.ntype === 'int' ? e.value | 0
-                : e.ntype === 'uint' ? e.value >>> 0 : e.value));
-            case 'bool': return vec(b.num(e.value ? 1 : 0));
+            case 'num':
+                if (hooks)
+                {
+                    const base = baseOf(e.type) ?? 'float';
+                    return vec(/** @type {any} */ (b).num(base === 'int' ? e.value | 0
+                        : base === 'uint' ? e.value >>> 0 : e.value, 1, base));
+                }
+                return vec(b.num(e.ntype === 'int' ? e.value | 0
+                    : e.ntype === 'uint' ? e.value >>> 0 : e.value));
+            case 'bool': return vec(hooks ? /** @type {any} */ (b).num(e.value ? 1 : 0, 1, 'bool')
+                : b.num(e.value ? 1 : 0));
             case 'string': return VOID;
             case 'ident': return read(e.sym, st);
             case 'cast': return convert(ev(e.operand, st), e.operand.type, e.type);
@@ -1041,12 +1102,18 @@ export function lower(module, entry, profile, options = {}){
                 {
                     return zip([x], b.not);
                 }
+                if (e.op === '~' && hooks)
+                {
+                    const kind = baseOf(e.opType) === 'uint' ? 'u' : 'i';
+                    return zip([x], y=>/** @type {any} */ (b).bitnot(y, kind));
+                }
                 return fail('X3535', `the '${e.op}' operator is not available in ${profile.name}`,
                     e.pos);
             }
             case 'incdec': {
                 const old = ev(e.operand, st);
-                const one = vec(b.num(1));
+                const one = vec(hooks ? /** @type {any} */ (b).num(1, 1,
+                    baseOf(e.operand.type) ?? 'float') : b.num(1));
                 const next = zip([old, splatTo(one, e.operand.type)],
                     e.op === '++' ? b.add : b.sub);
                 store(e.operand, next, st);
@@ -1095,6 +1162,15 @@ export function lower(module, entry, profile, options = {}){
                 return last;
             }
             case 'call': return call(e, st);
+            case 'texop': {
+                if (!hooks)
+                {
+                    return fail('X3087', 'methods are not supported', e.pos);
+                }
+                return hooks.texop(e, { texture: ev(e.texture, st),
+                    sampler: e.sampler ? ev(e.sampler, st) : null,
+                    args: e.args.map((/** @type {any} */ a)=>ev(a, st)) }, st, ctx);
+            }
             case 'combine': {
                 // fxc's sampler for a texture read through a sampler state: one for the pair,
                 // named `sampler+texture`, an element for each element of an array of textures.
@@ -1733,7 +1809,8 @@ export function lower(module, entry, profile, options = {}){
      * @returns {Value}
      */
     function intrinsic(name, args, result, e, st){
-        return lowerIntrinsic(ctx, name, args, result, e, st);
+        const own = hooks ? hooks.intrinsic(ctx, name, args, result, e, st) : null;
+        return own ?? lowerIntrinsic(ctx, name, args, result, e, st);
     }
 
     // ---- the entry point ---------------------------------------------------------------------
@@ -1772,6 +1849,10 @@ export function lower(module, entry, profile, options = {}){
         {
             return fail('X3502', `'${name}': input parameter '${name}' is missing a semantic`,
                 pos);
+        }
+        if (hooks)
+        {
+            return vec(hooks.input(type, semantic, name, pos));
         }
         const parsed = parseSemantic(semantic);
         if (!parsed)
@@ -1822,7 +1903,7 @@ export function lower(module, entry, profile, options = {}){
             fail('X3503', `'${name}': output parameter '${name}' is missing a semantic`, pos);
             return;
         }
-        const parsed = parseSemantic(semantic);
+        const parsed = hooks ? { usage: 0, index: 0 } : parseSemantic(semantic);
         if (!parsed || 'special' in parsed)
         {
             fail('X4503', `unknown output semantic '${semantic}'`, pos);
@@ -1853,6 +1934,11 @@ export function lower(module, entry, profile, options = {}){
             return;
         }
         const x = vecOf(value);
+        if (hooks)
+        {
+            hooks.output(x, type, semantic, name, pos);
+            return;
+        }
         b.write(b.output(parsed.usage, parsed.index, x.w), x);
     };
 

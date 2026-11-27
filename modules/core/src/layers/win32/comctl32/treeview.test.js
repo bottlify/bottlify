@@ -22,6 +22,9 @@ import {
     TVIS_STATEIMAGEMASK, LPSTR_TEXTCALLBACK, TVITEM, TVINSERTSTRUCT,
     WM_NOTIFY, NM_CLICK, NM_DBLCLK, TVN_SELCHANGINGA, TVN_SELCHANGEDA, TVN_DELETEITEMA,
     TVN_GETDISPINFOA, TVN_ITEMEXPANDINGA, TVN_ITEMEXPANDEDA,
+    TVM_SETTEXTCOLOR, TVM_GETTEXTCOLOR, TVM_SETBKCOLOR, TVM_GETBKCOLOR, TVM_GETLINECOLOR,
+    TVM_SETSCROLLTIME, TVM_GETSCROLLTIME, TVM_GETITEMSTATE, TVN_ITEMCHANGINGW, TVN_ITEMCHANGEDW,
+    TVM_SORTCHILDREN,
 } from './treeview.js';
 
 /**
@@ -152,6 +155,17 @@ function setup(){
      * @type {{ mask: number, hItem: number, lParam: number }[]}
      */
     const deleted = [];
+    /** The items whose TVN_ITEMCHANGINGW the parent answers TRUE to. @type {Set<number>} */
+    const blocked = new Set();
+    /** @type {Map<number, any>} */
+    const records = new Map();
+    /**
+     * Each expand notification's new item (NMTREEVIEW.itemNew, at 56), as
+     * the parent reads it.
+     *
+     * @type {{ code: number, mask: number, state: number }[]}
+     */
+    const expanding = [];
     /** What a TVN_GETDISPINFO answers for each item handle. @type {Map<number,string>} */
     const callbackText = new Map();
     let heapNext = HEAP;
@@ -196,6 +210,12 @@ function setup(){
             {
                 const code = memory.i32(message.lParam + 8);
                 notifyCodes.push(code);
+                if (code === TVN_ITEMEXPANDINGA || code === TVN_ITEMEXPANDEDA)
+                {
+                    const item = message.lParam + 56;
+                    expanding.push({ code, mask: memory.u32(item + TVITEM.mask),
+                        state: memory.u32(item + TVITEM.state) });
+                }
                 if (code === TVN_DELETEITEMA)
                 {
                     const old = message.lParam + 16;
@@ -212,6 +232,10 @@ function setup(){
                     {
                         memory.putString(buffer, text);
                     }
+                }
+                if (code === TVN_ITEMCHANGINGW)
+                {
+                    return blocked.has(memory.u32(message.lParam + 16)) ? 1 : 0;
                 }
                 return 0;
             }
@@ -238,7 +262,13 @@ function setup(){
         registerControls: (controlHost, toolkit, register)=>{
             for (const definition of createCommonControls(controlHost, toolkit))
             {
-                register(definition);
+                // Each window's record as its procedure is handed it.
+                /** @param {any} record @param {any} message @param {unknown} thread */
+                const procedure = (record, message, thread)=>{
+                    records.set(record.hwnd, record);
+                    return definition.procedure(record, message, thread);
+                };
+                register({ ...definition, procedure });
             }
         },
     });
@@ -310,6 +340,8 @@ function setup(){
 
     /** The notification codes the parent was handed, in order. */
     const notifications = ()=>[...notifyCodes];
+    /** The expand notifications' new items, in order. */
+    const expansions = ()=>[...expanding];
 
     /** The client area of the tree on the screen (a borderless child: itself).
      * @param {number} hwnd */
@@ -335,7 +367,8 @@ function setup(){
     };
 
     return {
-        memory, desktop, gdi, fns: table, pump, tree, insert, notifications,
+        memory, desktop, gdi, fns: table, pump, tree, insert, notifications, expansions, blocked,
+        recordOf: (/** @type {number} */ hwnd)=>records.get(hwnd),
         dispatched, callbackText, host_window, treeRect, treeRow, deleted,
         makeHost: async()=>{
             const name = TEXT + 64;
@@ -435,6 +468,14 @@ test('expanding tells the parent before and after, and shows the children', asyn
         TVGN_FIRSTVISIBLE, 0]), root);
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_EXPAND, TVE_EXPAND, root]), 1);
     assert.deepEqual(context.notifications(), [TVN_ITEMEXPANDINGA, TVN_ITEMEXPANDEDA]);
+    // The item names its handle among what is valid, and after the change
+    // it is expanded and expanded once (Wine's treeview test_expandnotify).
+    const [before, after] = context.expansions();
+    assert.equal(before.mask & ~0x0040, 0x0010 | 0x0020 | 0x0002 | 0x0004 | 0x0008,
+        'TVIF_HANDLE | SELECTEDIMAGE | IMAGE | PARAM | STATE, children aside');
+    assert.equal(before.state & TVIS_EXPANDED, 0, 'not expanded yet');
+    assert.equal(after.state & (TVIS_EXPANDED | 0x0040), TVIS_EXPANDED | 0x0040,
+        'TVIS_EXPANDED | TVIS_EXPANDEDONCE');
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETNEXTITEM,
         TVGN_NEXTVISIBLE, root]), child, 'the child is on show once expanded');
     context.fns.SendMessageA.handler([tree, TVM_EXPAND, TVE_COLLAPSE, root]);
@@ -449,8 +490,10 @@ test('selecting sends SELCHANGING then SELCHANGED and moves the caret', async()=
     const first = context.insert(tree, TVI_ROOT, { text: 'One' });
     const second = context.insert(tree, TVI_ROOT, { text: 'Two' });
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_SELECTITEM, TVGN_CARET, second]),
-        0);
+        1, 'TRUE: the item is the caret');
     assert.deepEqual(context.notifications(), [TVN_SELCHANGINGA, TVN_SELCHANGEDA]);
+    assert.equal(context.fns.SendMessageA.handler([tree, TVM_SELECTITEM, TVGN_CARET, second]),
+        1, 'and TRUE again when it already was');
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETNEXTITEM, TVGN_CARET, 0]),
         second);
     context.memory.put32(OUT + TVITEM.hItem, second);
@@ -531,6 +574,33 @@ test('DELETEITEM removes a subtree and TVI_ROOT clears the whole tree', async()=
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_DELETEITEM, 0, TVI_ROOT]), 1);
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETCOUNT, 0, 0]), 0);
 });
+
+test('DELETEITEM of no item clears the tree, and SORTCHILDREN orders an item\'s children only',
+    async()=>{
+        const context = setup();
+        await context.makeHost();
+        const tree = await context.tree(0);
+        const send = (/** @type {number} */ message, /** @type {number} */ wParam,
+            /** @type {number} */ lParam)=>context.fns.SendMessageA.handler([tree, message, wParam,
+            lParam]);
+        assert.equal(await send(TVM_SORTCHILDREN, 0, 0), 0, 'an empty tree');
+        context.insert(tree, TVI_ROOT, { text: 'stale' });
+        await send(TVM_DELETEITEM, 0, 0);
+        assert.equal(send(TVM_GETCOUNT, 0, 0), 0, 'no item is every item');
+        const root = context.insert(tree, TVI_ROOT, { text: 'root' });
+        assert.equal(await send(TVM_SORTCHILDREN, 0, root), 0, 'no children');
+        const wasp = context.insert(tree, root, { text: 'Wasp' });
+        const caribou = context.insert(tree, root, { text: 'caribou' });
+        const vacuum = context.insert(tree, wasp, { text: 'Vacuum' });
+        context.insert(tree, wasp, { text: 'Ocelot' });
+        assert.equal(await send(TVM_SORTCHILDREN, 0, TVI_ROOT), 1, 'answered, nothing sorted');
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, root), wasp);
+        assert.equal(await send(TVM_SORTCHILDREN, 1, root), 1);
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, root), caribou, 'without case');
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_NEXT, caribou), wasp);
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, wasp), vacuum,
+            'the grandchildren keep their order whatever wParam');
+    });
 
 test('every item deleted is told to the parent, children first, and on destroy too', async()=>{
     // The notification is where a program frees what an item's lParam holds;
@@ -670,3 +740,51 @@ test('a tree paints its rows, its selection and its check boxes', async()=>{
     assert.equal(context.desktop.read(rect.left + 60, rect.bottom - 4), COLOR_WINDOW);
     void NM_DBLCLK;
 });
+
+test('a tree keeps the colours set on it, -1 being the system\'s, and a new item image 0',
+    async()=>{
+        const context = setup();
+        await context.makeHost();
+        const tree = await context.tree(0);
+        const send = (/** @type {number} */ msg, /** @type {number} */ w,
+            /** @type {number} */ l)=>context.fns.SendMessageA.handler([tree, msg, w, l]) >>> 0;
+        assert.equal(send(TVM_GETTEXTCOLOR, 0, 0), 0xffffffff);
+        assert.equal(send(TVM_GETBKCOLOR, 0, 0), 0xffffffff);
+        assert.equal(send(TVM_GETLINECOLOR, 0, 0), 0xff000000, 'CLR_DEFAULT');
+        assert.equal(send(TVM_SETTEXTCOLOR, 0, 0x00ffffff), 0xffffffff, 'the colour before');
+        assert.equal(send(TVM_GETTEXTCOLOR, 0, 0), 0x00ffffff);
+        assert.equal(send(TVM_SETBKCOLOR, 0, 0), 0xffffffff);
+        assert.equal(send(TVM_GETBKCOLOR, 0, 0), 0);
+        send(TVM_SETSCROLLTIME, 20, 0);
+        assert.equal(send(TVM_GETSCROLLTIME, 0, 0), 20);
+        const item = context.insert(tree, TVI_ROOT, { text: 'One' });
+        context.memory.put32(OUT + TVITEM.hItem, item);
+        context.memory.put32(OUT + TVITEM.mask, 0x0002 | 0x0020);
+        context.memory.put32(OUT + TVITEM.iImage, 7);
+        context.fns.SendMessageA.handler([tree, TVM_GETITEMA, 0, OUT]);
+        assert.deepEqual([context.memory.i32(OUT + TVITEM.iImage),
+            context.memory.i32(OUT + TVITEM.iSelectedImage)], [0, 0], 'not I_IMAGECALLBACK');
+        send(TVM_SELECTITEM, TVGN_CARET, item);
+        assert.equal(send(TVM_GETITEMSTATE, item, TVIS_SELECTED), TVIS_SELECTED);
+        assert.equal(send(TVM_GETITEMSTATE, item, TVIS_EXPANDED), 0, 'only the bits asked for');
+    });
+
+test('version 6 asks before an item\'s selection changes, and the parent can keep it',
+    async()=>{
+        const context = setup();
+        await context.makeHost();
+        const tree = await context.tree(0);
+        context.recordOf(tree).controlsVersion = 6;
+        const one = context.insert(tree, TVI_ROOT, { text: 'One' });
+        const two = context.insert(tree, TVI_ROOT, { text: 'Two' });
+        const send = (/** @type {number} */ msg, /** @type {number} */ w,
+            /** @type {number} */ l)=>context.fns.SendMessageA.handler([tree, msg, w, l]);
+        assert.equal(send(TVM_SELECTITEM, TVGN_CARET, one), 1);
+        assert.deepEqual(context.notifications().slice(-4), [TVN_SELCHANGINGA, TVN_ITEMCHANGINGW,
+            TVN_ITEMCHANGEDW, TVN_SELCHANGEDA]);
+        context.blocked.add(two);
+        assert.equal(send(TVM_SELECTITEM, TVGN_CARET, two), 1, 'the caret still moves');
+        assert.equal(send(TVM_GETITEMSTATE, two, TVIS_SELECTED), 0, 'kept unselected');
+        assert.equal(send(TVM_GETITEMSTATE, one, TVIS_SELECTED), 0, 'the old one let go');
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CARET, 0), two);
+    });

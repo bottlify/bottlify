@@ -31,6 +31,8 @@
  */
 
 import { readU32, writeU32s } from './structs.js';
+import { frameOf } from './frame.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_CREATE = 0x0001;
 const WM_DESTROY = 0x0002;
@@ -38,23 +40,24 @@ const WM_SIZE = 0x0005;
 const WM_SETFOCUS = 0x0007;
 const WM_CLOSE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
+const WM_GETMINMAXINFO = 0x0024;
 const WM_NCACTIVATE = 0x0086;
 const WM_KEYDOWN = 0x0100;
 const WM_SYSKEYDOWN = 0x0104;
 const WM_COMMAND = 0x0111;
 const WM_SYSCOMMAND = 0x0112;
-export const WM_MDICREATE = 0x0220;
-export const WM_MDIDESTROY = 0x0221;
-export const WM_MDIACTIVATE = 0x0222;
-export const WM_MDIRESTORE = 0x0223;
-export const WM_MDINEXT = 0x0224;
-export const WM_MDIMAXIMIZE = 0x0225;
-export const WM_MDITILE = 0x0226;
-export const WM_MDICASCADE = 0x0227;
-export const WM_MDIICONARRANGE = 0x0228;
-export const WM_MDIGETACTIVE = 0x0229;
-export const WM_MDISETMENU = 0x0230;
-export const WM_MDIREFRESHMENU = 0x0234;
+const WM_MDICREATE = 0x0220;
+const WM_MDIDESTROY = 0x0221;
+const WM_MDIACTIVATE = 0x0222;
+const WM_MDIRESTORE = 0x0223;
+const WM_MDINEXT = 0x0224;
+const WM_MDIMAXIMIZE = 0x0225;
+const WM_MDITILE = 0x0226;
+const WM_MDICASCADE = 0x0227;
+const WM_MDIICONARRANGE = 0x0228;
+const WM_MDIGETACTIVE = 0x0229;
+const WM_MDISETMENU = 0x0230;
+const WM_MDIREFRESHMENU = 0x0234;
 
 const SC_MAXIMIZE = 0xf030;
 const SC_NEXTWINDOW = 0xf040;
@@ -79,6 +82,7 @@ const WS_EX_MDICHILD = 0x00000040;
 /** The client's style that hands a child the style it asked for and no more. */
 const MDIS_ALLCHILDSTYLES = 0x0001;
 const GWL_STYLE = -16;
+const GWL_EXSTYLE = -20;
 const CW_USEDEFAULT = 0x80000000;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
@@ -198,7 +202,7 @@ export function createMdi(options){
     const childOf = args=>{
         const [exStyle, className, title, style, x, y, width, height, parent, menu, instance,
             params] = args;
-        const client = parent >>> 0;
+        const client = wholeAddress(parent);
         const state = clients.get(client);
         if (!state || (exStyle & WS_EX_MDICHILD) === 0)
         {
@@ -216,7 +220,7 @@ export function createMdi(options){
         const room = sizeOf(client);
         const placed = (x >>> 0) !== CW_USEDEFAULT;
         const sized = (width >>> 0) !== CW_USEDEFAULT;
-        let id = menu >>> 0;
+        let id = wholeAddress(menu);
         if (id === 0)
         {
             id = state.firstChild;
@@ -420,7 +424,7 @@ export function createMdi(options){
      * @returns {any}
      */
     const defFrame = ([, clientArg, message, wParam, lParam], thread)=>{
-        const client = clientArg >>> 0;
+        const client = wholeAddress(clientArg);
         const state = clients.get(client);
         if (!state)
         {
@@ -451,8 +455,8 @@ export function createMdi(options){
      * @param {unknown} thread
      * @returns {any}
      */
-    const defChild = ([hwnd, message, wParam], thread)=>{
-        const child = hwnd >>> 0;
+    const defChild = ([hwnd, message, wParam, lParam], thread)=>{
+        const child = wholeAddress(hwnd);
         const client = parentOf(child);
         const state = clients.get(client);
         if (!state)
@@ -467,6 +471,22 @@ export function createMdi(options){
             case WM_SETFOCUS:
                 return state.active === child ? null
                     : then(activate(client, child, thread), ()=>null);
+            // Maximised, a child fills the client: its client area is the
+            // client's, its frame outside it (AdjustWindowRectEx's, no menu),
+            // whatever the procedure proposed before.
+            case WM_GETMINMAXINFO: {
+                if ((lParam >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const room = sizeOf(client);
+                const frame = frameOf(call('GetWindowLongA', [child, GWL_STYLE]) >>> 0,
+                    call('GetWindowLongA', [child, GWL_EXSTYLE]) >>> 0);
+                writeU32s(host, (lParam >>> 0) + 8, [room.width + 2 * frame.edge,
+                    room.height + 2 * frame.edge + frame.caption, -frame.edge,
+                    -(frame.edge + frame.caption)]);
+                return 0;
+            }
             case WM_CLOSE:
                 return then(send(client, WM_MDIDESTROY, child, 0, thread), ()=>0);
             case WM_SYSCOMMAND:

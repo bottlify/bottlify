@@ -6,9 +6,11 @@
 
 import { createMp3AcmCodec } from './asi/mp3acm.js';
 import { createDirectSound } from './dsound/seam.js';
+import { registerStandardEffects } from './dsound/effects.js';
 import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
+import { TABLE_BYTES } from './output/mix.js';
 import { createMp3Provider } from './asi/provider.js';
 import { createMinimp3Decoder } from './asi/minimp3.js';
 import { splitFrames } from './asi/mp3.js';
@@ -37,6 +39,11 @@ const DSSCL_WRITEPRIMARY = 4;
  *   publishing into nowhere, which is what a build with no bridge behind it --
  *   a test, an inspection of the configuration -- should get.
  *
+ * The output's memory - the table the mixer writes and the device reads - is
+ * held in the run's cache (`cache`), where every byte the run holds is counted
+ * and budgeted: one segment of it, for as long as the output stands. A machine
+ * with no cache around it makes a buffer of its own, and says so.
+ *
  * The mixer is where sound leaves. It is host-independent on purpose: it adds
  * every open source together, converts to one format, and writes ahead into a
  * ring in shared memory. What turns that into something audible is a WebAudio
@@ -49,6 +56,9 @@ const DSSCL_WRITEPRIMARY = 4;
  * device that is not consuming looks like from inside a program, and is
  * therefore the honest thing for it to look like from inside this one.
  */
+
+/** Outputs this thread's machines held in the run's cache, each under a name of its own. */
+let outputsHeld = 0;
 
 /** The audio layer's module for one graph; see `defaultModules`. */
 export function createAudioModule(){
@@ -67,7 +77,7 @@ export function createAudioModule(){
     return {
         name: 'audio',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory']),
+        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'cache']),
 
         /**
          * @param {any} config
@@ -143,6 +153,34 @@ export function createAudioModule(){
             // DirectSound buffers are read out. Whoever drives the machine reaches
             // the mixer directly, so hooking this anywhere else in this module
             // would leave it never called.
+            // A new output's memory, held in the run's cache; the output a
+            // machine inherits is held already.
+            /** @type {import('./output/mixer.js').SoundMemory | undefined} */
+            let made;
+            if (!config?.memory?.table)
+            {
+                /** @type {{ bytes: Uint8Array, release: () => void } | null} */
+                let held = null;
+                try
+                {
+                    held = host.requireApi('cache').space('sound')
+                        .hold?.(`output/${++outputsHeld}`, TABLE_BYTES) ?? null;
+                }
+                catch {
+                    // A build with the cache switched off: its stub refuses the
+                    // call, and the output is a buffer of its own, said below.
+                }
+                if (held)
+                {
+                    made = { table: held.bytes, release: held.release };
+                }
+                else
+                {
+                    config?.divergence?.('audio', 'the sound output has no room in the run\'s cache'
+                        + ' (or there is none): its table is a buffer of its own, outside the'
+                        + ' run\'s budget');
+                }
+            }
             const mixer = createMixer({
                 sampleRate: config?.sampleRate,
                 fill: ()=>feedBuffers(),
@@ -150,15 +188,12 @@ export function createAudioModule(){
                 // already handed whoever reads its far end. Absent on the first
                 // process, which makes its own.
                 memory: config?.memory,
-                // Told from outside because only the assembling caller knows
-                // whether shared memory reaches a worklet on the other end: a
-                // reader without it -- the test-page harness, any page that is
-                // not cross-origin isolated -- can only read on this thread, and
-                // the engine mixer is the only backend that thread can drive.
-                shared: config?.shared ?? false,
+                made,
                 // A process beside another on the same output, not in its place.
                 beside: config?.beside,
             });
+            // What this process held on an output another stands on too goes
+            // with it.
             closeOnDispose = config?.beside ? ()=>mixer.close?.() : ()=>{};
             /** The sound device, when there is one: the shared backend opens voices. @type {any} */
             const output = mixer;
@@ -169,6 +204,11 @@ export function createAudioModule(){
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     /** @param {number} address @param {Uint8Array} bytes */
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                    writePointer: (address, value, bytes)=>memory.writePointer(address, value,
+                        bytes),
+                    /** @param {number} address @param {4 | 8} bytes */
+                    readPointer: (address, bytes)=>memory.readPointer(address, bytes),
                 },
                 allocate,
                 now: config?.now ?? (()=>Date.now()),
@@ -176,6 +216,7 @@ export function createAudioModule(){
                 signal: config?.signal,
                 divergence: config?.divergence,
                 mtaUsage: com?.mtaUsage,
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 /**
                  * Runs a guest routine and answers with what it returned. The
                  * bridge parks the caller while it does, which is what makes a
@@ -188,7 +229,24 @@ export function createAudioModule(){
                     ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
                         /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
                 callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
+                // A buffer's effects are made through COM, as a program would
+                // make them, so its own registered effect is found too.
+                createInstance: config?.createInstance ?? win32?.createInstance,
+                played: (/** @type {any} */ buffer)=>attachVoice(buffer),
             });
+            // The standard effects SetFX names, for COM to find.
+            if (com)
+            {
+                registerStandardEffects(com, {
+                    /** @param {number} address @param {number} length */
+                    readMemory: (address, length)=>memory.readBytes(address, length),
+                    /** @param {number} address @param {Uint8Array} bytes */
+                    writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {4 | 8} bytes */
+                    readPointer: (address, bytes)=>memory.readPointer(address, bytes),
+                    divergence: config?.divergence,
+                }, config?.pointerSize === 8 ? 8 : 4);
+            }
 
             // What decodes behind the provider. The library asks for its samples
             // in a call and holds a lock while it asks, so a decoder that answers
@@ -343,6 +401,45 @@ export function createAudioModule(){
              * program hands over a buffer, and this one reads out of a buffer the
              * program wrote into long ago, at the rate the cursor moves.
              */
+            /**
+             * Gives a playing buffer the sound device's voice, as a sound card
+             * plays one: a mirror of the whole buffer read on the device's own
+             * clock. At Play itself, so the voice starts where the cursor was
+             * put; a voice first opened at the next pump was put where the
+             * cursor had run on to by the clock meanwhile, and the sound's first
+             * milliseconds were never heard. The pump gives one to a buffer
+             * still without (a device that came later).
+             *
+             * @param {any} buffer
+             */
+            const attachVoice = buffer=>{
+                if (buffer.device || !drained || !output.openVoice || buffer.references <= 0
+                    || (buffer.primary && dsound.cooperativeLevel() !== DSSCL_WRITEPRIMARY))
+                {
+                    return;
+                }
+                const voice = output.openVoice({
+                    sampleRate: buffer.frequency,
+                    channels: buffer.format.channels,
+                    bitsPerSample: buffer.format.bitsPerSample,
+                    float: buffer.format.float,
+                    bytes: buffer.bytes,
+                });
+                if (voice)
+                {
+                    /** @param {number} from @param {number} count */
+                    const copy = (from, count)=>{
+                        if (count > 0)
+                        {
+                            voice.write(from, buffer.effectedWindow(from, count)
+                                ?? memory.window(buffer.address + from, count));
+                        }
+                    };
+                    buffer.attachDevice(voice, copy);
+                    voices++;
+                }
+            };
+
             const feedBuffers = ()=>{
                 fills++;
                 // DirectMusic first: a segment's waves are due at a moment on
@@ -434,26 +531,9 @@ export function createAudioModule(){
                     {
                         buffer.detachDevice()?.close();
                     }
-                    if (!buffer.device && sounding && output.openVoice)
+                    if (sounding)
                     {
-                        const voice = output.openVoice({
-                            sampleRate: buffer.frequency,
-                            channels: buffer.format.channels,
-                            bitsPerSample: buffer.format.bitsPerSample,
-                            bytes: buffer.bytes,
-                        });
-                        if (voice)
-                        {
-                            /** @param {number} from @param {number} count */
-                            const copy = (from, count)=>{
-                                if (count > 0)
-                                {
-                                    voice.write(from, memory.window(buffer.address + from, count));
-                                }
-                            };
-                            buffer.attachDevice(voice, copy);
-                            voices++;
-                        }
+                        attachVoice(buffer);
                     }
                     const voice = buffer.device;
                     if (voice)
@@ -484,6 +564,7 @@ export function createAudioModule(){
                             sampleRate: buffer.frequency,
                             channels: buffer.format.channels,
                             bitsPerSample: buffer.format.bitsPerSample,
+                            float: buffer.format.float,
                         });
                         tracks.set(buffer, track);
                         openTracks++;
@@ -524,7 +605,8 @@ export function createAudioModule(){
                         // synchronously within this call, so a second copy here
                         // first -- what `readBytes` used to hand over -- bought
                         // nothing.
-                        track.write(memory.window(buffer.address + range.from, range.bytes));
+                        track.write(buffer.effectedWindow(range.from, range.bytes)
+                            ?? memory.window(buffer.address + range.from, range.bytes));
                     }
                 }
                 // Drops whatever was just released above from the seam's own
@@ -596,13 +678,11 @@ export function createAudioModule(){
                 }),
 
                 /**
-                 * Mixes ahead into the ring. Called once a scheduler turn by
-                 * whoever is driving the machine, which is the only place that
-                 * knows a turn has happened.
-                 *
-                 * @param {number} [frames]
+                 * Reads the program's buffers out into the table. Called once a
+                 * scheduler turn by whoever is driving the machine, which is the
+                 * only place that knows a turn has happened.
                  */
-                pump: frames=>mixer.pump(frames),
+                pump: ()=>mixer.pump(),
 
                 /** Whether anything is draining the ring. */
                 available: ()=>drained,

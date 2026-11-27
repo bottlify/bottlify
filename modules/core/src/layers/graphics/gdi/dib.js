@@ -38,8 +38,8 @@ export const BI_RGB = 0;
 export { BI_BITFIELDS };
 
 /** Run-length encoded eight- and four-bit DIBs. */
-export const BI_RLE8 = 1;
-export const BI_RLE4 = 2;
+const BI_RLE8 = 1;
+const BI_RLE4 = 2;
 
 /** The depths this layer converts. */
 const SUPPORTED_DEPTHS = new Set([1, 4, 8, 16, 24, 32]);
@@ -82,7 +82,7 @@ export function isConvertibleDib(image){
  *
  * @param {import("../../win32/gdi32/structs.js").BitmapInfoHeaderFields} header
  */
-export function isRle(header){
+function isRle(header){
     return ((header.compression === BI_RLE8 && header.bitCount === 8)
         || (header.compression === BI_RLE4 && header.bitCount === 4))
         && header.width > 0 && header.height > 0;
@@ -299,6 +299,18 @@ export function decodeDib(image, area){
             for (let x = left, at = row + (left * 3); x < right; x++, at += 3)
             {
                 words[line + x] = ((bits[at + 2] << 16) | (bits[at + 1] << 8) | bits[at]) >>> 0;
+            }
+        }
+        else if (bitCount === 32 && header.compression !== BI_BITFIELDS)
+        {
+            // A BI_RGB pixel's fourth byte is no channel, yet it is the
+            // pixel's: a raster operation works on the whole word and a copy
+            // into a thirty-two-bit bitmap keeps it, as an alpha a later
+            // AlphaBlend reads.
+            for (let x = left, at = row + (left * 4); x < right; x++, at += 4)
+            {
+                words[line + x] = (bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
+                    | (bits[at + 3] << 24)) >>> 0;
             }
         }
         else if (bitCount === 32)

@@ -14,9 +14,13 @@
  * scheduled; the thread stays the thread, its handle and id unchanged.
  *
  * What the thread block says follows the fiber, as on Windows: the head of
- * the exception handler chain, the stack's bounds, and FiberData, which is the
- * fiber itself -- GetCurrentFiber reads it, and GetFiberData the first word of
- * what it points at, the parameter the fiber was made with. The kernel's own
+ * the exception handler chain, the stack's bounds, its fibre-local values
+ * (fls.js), its own stack of activation contexts - a made fiber starts with
+ * none active - and FiberData, which is the fiber itself -- GetCurrentFiber
+ * reads it, and GetFiberData the first word of what it points at, the
+ * parameter the fiber was made with. A thread that runs no fiber has 0x1e00
+ * there and HasFiberData clear in SameTebFlags; converting it sets the flag,
+ * and converting it back clears both. The kernel's own
  * idea of the thread's stack follows too: a callback the host makes on the
  * thread is laid on the stack it is running on, and the bridge refuses one
  * outside the bounds it knows.
@@ -27,7 +31,8 @@
  * the thread, as Windows' does.
  */
 
-import { TEB } from './teb.js';
+import { HAS_FIBER_DATA, TEB } from './teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Where each word of a fiber's record is. The first is the program's: GetFiberData reads it. */
 const FIBER = Object.freeze({
@@ -41,7 +46,9 @@ const FIBER = Object.freeze({
     EBP: 0x1c,
     ESP: 0x20,
     EIP: 0x24,
-    SIZE: 0x28,
+    FLS: 0x28,
+    ACTIVATION_STACK: 0x2c,
+    SIZE: 0x30,
 });
 
 /** A handler chain with nothing on it. */
@@ -68,6 +75,8 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
  * @property {() => number} threadReturn  Where a start routine returns to: it ends the thread.
  * @property {(code: number) => any} exitThread
  * @property {(code: number) => void} setLastError
+ * @property {{ release: (block: number) => Promise<void> }} [storage]
+ *     Fibre-local storage (fls.js): a deleted fiber's block is let go through it.
  */
 
 /**
@@ -100,10 +109,23 @@ export function createFiberFunctions(host){
         return fiber;
     };
 
+    /** SameTebFlags is a WORD at an odd word: read and written in its dword. */
+    const FLAGS_DWORD = TEB.SAME_TEB_FLAGS & ~3;
+    const FLAGS_SHIFT = (TEB.SAME_TEB_FLAGS & 3) * 8;
+    /** @param {number} teb */
+    const runsFibers = teb=>
+        ((host.readU32(teb + FLAGS_DWORD) >>> FLAGS_SHIFT) & HAS_FIBER_DATA) !== 0;
+    /** @param {number} teb @param {boolean} on */
+    const setRunsFibers = (teb, on)=>{
+        const flags = host.readU32(teb + FLAGS_DWORD) >>> 0;
+        const bit = HAS_FIBER_DATA << FLAGS_SHIFT;
+        host.writeU32(teb + FLAGS_DWORD, (on ? flags | bit : flags & ~bit) >>> 0);
+    };
+
     /** The thread's current fiber, or 0 when it is not running one. */
     const current = ()=>{
         const teb = host.teb() >>> 0;
-        return teb === 0 ? 0 : host.readU32(teb + TEB.FIBER_DATA) >>> 0;
+        return teb === 0 || !runsFibers(teb) ? 0 : host.readU32(teb + TEB.FIBER_DATA) >>> 0;
     };
 
     /**
@@ -127,7 +149,9 @@ export function createFiberFunctions(host){
         {
             bounds.set(fiber, { stackTop: thread.stackTop, stackLimit: thread.stackLimit });
         }
-        host.writeU32(host.teb() + TEB.FIBER_DATA, fiber);
+        const teb = host.teb() >>> 0;
+        host.writeU32(teb + TEB.FIBER_DATA, fiber);
+        setRunsFibers(teb, true);
         return fiber;
     };
 
@@ -171,6 +195,7 @@ export function createFiberFunctions(host){
     return {
         /** LPVOID ConvertThreadToFiber(LPVOID lpParameter) */
         ConvertThreadToFiber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -178,6 +203,7 @@ export function createFiberFunctions(host){
 
         /** LPVOID ConvertThreadToFiberEx(LPVOID lpParameter, DWORD dwFlags) */
         ConvertThreadToFiberEx: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -196,7 +222,9 @@ export function createFiberFunctions(host){
                 }
                 converted.delete(thread);
                 bounds.delete(fiber);
-                host.writeU32(host.teb() + TEB.FIBER_DATA, 0);
+                const teb = host.teb() >>> 0;
+                host.writeU32(teb + TEB.FIBER_DATA, 0);
+                setRunsFibers(teb, false);
                 host.free(fiber);
                 return 1;
             },
@@ -204,9 +232,12 @@ export function createFiberFunctions(host){
 
         /** LPVOID CreateFiber(SIZE_T dwStackSize, LPFIBER_START_ROUTINE lpStartAddress, LPVOID lpParameter) */
         CreateFiber: {
+            returns: 'pointer',
             argBytes: 12,
+            sizes: [0],
             /** @param {number[]} args */
-            handler: ([size, start, parameter])=>create(size >>> 0, 0, start >>> 0, parameter),
+            handler: ([size, start, parameter])=>create(size >>> 0, 0, wholeAddress(start),
+                parameter),
         },
 
         /**
@@ -218,34 +249,45 @@ export function createFiberFunctions(host){
          * thread's, switch them in SwitchToFiber when a program is seen to rely on it).
          */
         CreateFiberEx: {
+            returns: 'pointer',
             argBytes: 20,
+            sizes: [0, 1],
             /** @param {number[]} args */
             handler: ([commit, reserve, , start, parameter])=>
-                create(commit >>> 0, reserve >>> 0, start >>> 0, parameter),
+                create(commit >>> 0, reserve >>> 0, wholeAddress(start), parameter),
         },
 
-        /** VOID DeleteFiber(LPVOID lpFiber) -- the running fiber's own deletion ends the thread */
+        /**
+         * VOID DeleteFiber(LPVOID lpFiber) -- the running fiber's own deletion
+         * ends the thread. Its fibre-local values are called back first, on
+         * the calling thread.
+         */
         DeleteFiber: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fiber])=>{
-                const at = fiber >>> 0;
+                const at = wholeAddress(fiber);
                 if (at !== 0 && at === current())
                 {
                     return host.exitThread(1);
                 }
-                const stack = stacks.get(at);
-                if (stack)
-                {
-                    stacks.delete(at);
-                    host.releaseStack(stack);
-                }
-                bounds.delete(at);
-                if (at !== 0)
-                {
-                    host.free(at);
-                }
-                return 0;
+                const gone = ()=>{
+                    const stack = stacks.get(at);
+                    if (stack)
+                    {
+                        stacks.delete(at);
+                        host.releaseStack(stack);
+                    }
+                    bounds.delete(at);
+                    if (at !== 0)
+                    {
+                        host.free(at);
+                    }
+                    return 0;
+                };
+                const block = at === 0 ? 0 : host.readU32(at + FIBER.FLS) >>> 0;
+                return block !== 0 && host.storage
+                    ? host.storage.release(block).then(gone) : gone();
             },
         },
 
@@ -263,7 +305,7 @@ export function createFiberFunctions(host){
              * @param {{ restingStack: number, hostReturn: number }} [frame]
              */
             handler: ([target], frame)=>{
-                const to = target >>> 0;
+                const to = wholeAddress(target);
                 const teb = host.teb() >>> 0;
                 const from = current();
                 if (to === 0 || teb === 0 || !frame)
@@ -286,10 +328,18 @@ export function createFiberFunctions(host){
                         host.readU32(teb + TEB.EXCEPTION_LIST));
                     host.writeU32(from + FIBER.STACK_BASE, host.readU32(teb + TEB.STACK_BASE));
                     host.writeU32(from + FIBER.STACK_LIMIT, host.readU32(teb + TEB.STACK_LIMIT));
+                    host.writeU32(from + FIBER.FLS, host.readU32(teb + TEB.FLS_SLOTS));
+                    host.writeU32(from + FIBER.ACTIVATION_STACK,
+                        host.readU32(teb + TEB.ACTIVATION_STACK));
                 }
+                host.writeU32(teb + TEB.FLS_SLOTS, host.readU32(to + FIBER.FLS));
+                host.writeU32(teb + TEB.ACTIVATION_STACK,
+                    host.readU32(to + FIBER.ACTIVATION_STACK));
                 host.writeU32(teb + TEB.EXCEPTION_LIST, host.readU32(to + FIBER.EXCEPTION_LIST));
                 host.writeU32(teb + TEB.STACK_BASE, host.readU32(to + FIBER.STACK_BASE));
                 host.writeU32(teb + TEB.STACK_LIMIT, host.readU32(to + FIBER.STACK_LIMIT));
+                // A fiber's stack is committed whole, its reservation from its limit.
+                host.writeU32(teb + TEB.DEALLOCATION_STACK, host.readU32(to + FIBER.STACK_LIMIT));
                 host.writeU32(teb + TEB.FIBER_DATA, to);
                 const kept = bounds.get(to);
                 if (thread && kept)

@@ -75,7 +75,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: 0x300000,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
 
     host.writePhysical(ENTER, enterCode(ENTER, TRAP, COUNTERS_AT));

@@ -53,6 +53,28 @@ test('a class is found under either case of its GUID', ()=>{
     assert.ok(registry.create(CLSID_TEST));
 });
 
+test('a class of one object per process hands out that object, keeping a reference of its own',
+    ()=>{
+        // MMDevAPI's enumerator: CoCreateInstance twice gives one pointer, and
+        // the count after the first is two (Wine's mmdevenum test).
+        const registry = createComRegistry();
+        let made = 0;
+        registry.registerClass(CLSID_TEST, ()=>{
+            made++;
+            return definition();
+        }, { single: true });
+        const first = /** @type {any} */ (registry.create(CLSID_TEST));
+        assert.equal(first.refCount, 2, 'its own and the caller\'s');
+        const second = registry.create(CLSID_TEST);
+        assert.equal(second, first);
+        assert.equal(first.refCount, 3);
+        assert.equal(made, 1);
+        first.release();
+        first.release();
+        assert.equal(first.destroyed, false, 'its own reference keeps it');
+        assert.equal(registry.createAggregated(CLSID_TEST, { outer: 1, call: async()=>0 }), false);
+    });
+
 test('an unregistered class produces nothing', ()=>{
     const registry = setup();
     assert.equal(registry.isRegistered(IID_ABSENT), false);
@@ -196,3 +218,81 @@ test('objects of one interface description hand the bridge one method list', ()=
     assert.deepEqual(first?.methods.map((/** @type {any} */ method)=>method.name),
         ['QueryInterface', 'AddRef', 'Release', 'Draw']);
 });
+
+test('an object counting in a word of guest memory sees the guest\'s references there', ()=>{
+    const word = new Uint32Array(1);
+    let destroyed = 0;
+    const object = createComObject('{00000000-0000-0000-0000-0000000000AA}', {
+        interfaces: [], destroy: ()=>{
+            destroyed++;
+        },
+        count: { address: 0x4000, read: ()=>word[0], write: value=>{
+            word[0] = value;
+        } },
+    });
+    assert.equal(word[0], 1, 'the caller\'s reference, in the word');
+    assert.equal(object.countCell?.(), 0x4000);
+    object.addRef();
+    assert.equal(word[0], 2);
+    // The guest's AddRef and Release change the word alone.
+    word[0] = 5;
+    assert.equal(object.refCount, 5);
+    word[0] = 1;
+    assert.equal(object.release(), 0, 'the last reference comes to the host');
+    assert.equal(destroyed, 1);
+    assert.equal(object.countCell?.(), 0, 'a destroyed object names no word');
+});
+
+test('an aggregated object counts its own IUnknown and hands its other faces to the outer one',
+    async()=>{
+        const registry = createComRegistry();
+        registry.registerClass(CLSID_TEST, ()=>({ ...definition(), aggregatable: true }));
+        /** @type {[number, number[]][]} */
+        const calls = [];
+        const aggregation = {
+            outer: 0x5000,
+            call: async(/** @type {number} */ slot, /** @type {number[]} */ args)=>{
+                calls.push([slot, args]);
+                return slot === 0 ? 0 : 7;
+            },
+        };
+
+        const object = /** @type {import('./objects.js').ComObject} */ (
+            registry.createAggregated(CLSID_TEST, aggregation));
+        assert.equal(object.aggregation, aggregation);
+        assert.equal(object.interfaceFor(IID_IUNKNOWN)?.methods[0].builtin, 'queryInterface',
+            'its own IUnknown is the non-delegating one');
+        const first = /** @type {any} */ (object.interfaceFor(IID_FIRST));
+        assert.equal(first.methods[0].builtin, undefined, 'another face delegates');
+        assert.equal(first.methods[3].name, 'Draw', 'its own methods follow');
+
+        assert.equal(object.addRef(IID_IUNKNOWN), 2, 'a reference on IUnknown is the inner one\'s');
+        assert.equal(await object.addRef(IID_FIRST), 7, 'one on another face is the outer\'s');
+        assert.deepEqual(calls, [[1, []]]);
+        await first.methods[0].invoke(object, [0x10, 0x20]);
+        assert.deepEqual(calls[1], [0, [0x10, 0x20]], 'QueryInterface through it goes outward');
+    });
+
+test('a class that may not be aggregated says so rather than making an object', ()=>{
+    /** @type {{ destroyed?: number }} */
+    const log = {};
+    const registry = setup(log);
+    assert.equal(registry.createAggregated(CLSID_TEST, { outer: 1, call: async()=>0 }), false);
+    assert.equal(log.destroyed, 1, 'what the factory made is let go');
+});
+
+test('an interface known by a second name answers it with its own methods, sharing its pointer',
+    ()=>{
+        const object = createComObject(CLSID_TEST, {
+            interfaces: [{ id: IID_FIRST, methods: [{ name: 'Draw', argBytes: 8 }],
+                also: [IID_ABSENT] }],
+        });
+        const main = object.interfaceFor(IID_FIRST);
+        const other = object.interfaceFor(IID_ABSENT.toLowerCase());
+        assert.ok(main && other);
+        assert.equal(other.id, IID_ABSENT);
+        assert.equal(/** @type {any} */ (other).sharedWith, IID_FIRST,
+            'published as the first one\'s pointer');
+        assert.equal(other.methods, main.methods);
+        assert.equal(object.interfaceFor(IID_ABSENT), other, 'the same record every time');
+    });

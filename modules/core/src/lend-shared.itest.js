@@ -5,9 +5,8 @@
  */
 
 /**
- * What a program unlocks is lent to the graphics worker where guest memory is
- * shared -- the worker reads it in place -- and copied to it where it is not,
- * or where lending is turned off.
+ * What a program unlocks is lent to the graphics worker: the worker reads it
+ * in guest memory, in place.
  *
  * The program locks a texture each frame, fills it, unlocks it, draws with
  * it and presents, then exits. The device is played in a worker thread over
@@ -19,17 +18,16 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { TEXTURE, texturedFrames } from '../../../tools/d3d9-program.mjs';
+import { TEXTURE, texturedFrames } from '../../../tools/fixtures/d3d9-program.mjs';
 
 const FRAMES = 3;
 
-/** @param {boolean} shared @param {boolean} lend @param {any} [mode] */
-async function run(shared, lend, mode){
+async function run(){
     const gpu = createFakeDevice();
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
     gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
-    const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs', import.meta.url));
+    const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs', import.meta.url));
     thread.postMessage({ type: 'open', frames: 'none' });
     /** @type {Map<Function, (data: any) => void>} */
     const listeners = new Map();
@@ -49,9 +47,6 @@ async function run(shared, lend, mode){
     {
         const app = await createApp({
             executable: texturedFrames(FRAMES),
-            cork: /** @type {any} */ ({ config: { sharedMemory: shared } }),
-            graphics: /** @type {any} */ ({ lendMemory: lend }),
-            ...mode ? { mode } : {},
             device: {
                 device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
@@ -68,7 +63,6 @@ async function run(shared, lend, mode){
         // account, and waits for it rather than saying nothing.
         const reported = (await app.report()).diagnostics;
         const result = { code, divergences, lent: metrics?.worker?.lent,
-            mode: layers.find((/** @type {any} */ layer)=>layer.name === 'app')?.metrics?.mode,
             device: reported.find((/** @type {any} */ layer)=>layer.name === 'graphics')
                 ?.metrics?.seam?.device };
         await app.dispose();
@@ -80,10 +74,9 @@ async function run(shared, lend, mode){
     }
 }
 
-test('a texture unlocked each frame is lent to the graphics worker where memory is shared',
+test('a texture unlocked each frame is lent to the graphics worker',
     { timeout: 60000 }, async()=>{
-        const result = await run(true, true);
-        assert.equal(result.mode, 'isolated', 'auto, where memory can be shared');
+        const result = await run();
         assert.equal(result.code, 0);
         assert.deepEqual(result.divergences, []);
         assert.equal(result.lent.lent, FRAMES, JSON.stringify(result.lent));
@@ -91,19 +84,3 @@ test('a texture unlocked each frame is lent to the graphics worker where memory 
         assert.ok(result.device, 'the report carries what the played device counted');
         assert.equal(result.device.frames, FRAMES + 0, JSON.stringify(result.device).slice(0, 200));
     });
-
-test('a texture unlocked each frame is copied where memory is not shared, lending is off, or'
-    + ' the run is in compatible mode', { timeout: 90000 }, async()=>{
-    for (const [shared, lend, mode] of [[false, true], [true, false], [true, true, 'compatible']])
-    {
-        const result = await run(/** @type {boolean} */ (shared), /** @type {boolean} */ (lend),
-            mode);
-        assert.equal(result.code, 0);
-        assert.deepEqual(result.divergences, []);
-        assert.deepEqual(result.lent, {}, `shared ${shared}, lend ${lend}, mode ${mode}`);
-        if (mode)
-        {
-            assert.equal(result.mode, 'compatible');
-        }
-    }
-});

@@ -36,9 +36,10 @@ const WS_POPUP = 0x80000000, WS_VISIBLE = 0x10000000;
  * is made in, and a queue a test posts keys to as a person would press them.
  *
  * @param {{ unattended?: boolean, answer?: (dialog: any) => number,
- *     loadString?: (instance: number, id: number) => string | null }} [options]
+ *     loadString?: (instance: number, id: number) => string | null,
+ *     faultReported?: () => boolean, fatal?: (notice: any) => void }} [options]
  */
-function setup({ unattended, answer, loadString } = {}){
+function setup({ unattended, answer, loadString, faultReported, fatal } = {}){
     const bytes = new Uint8Array(0x20000);
     let next = HEAP;
     /** @type {string[]} */
@@ -91,6 +92,8 @@ function setup({ unattended, answer, loadString } = {}){
             }) : undefined,
             say: (/** @type {string} */ text)=>said.push(text),
             loadString,
+            faultReported,
+            fatal,
             callerThread: ()=>'the caller',
             park: ()=>({ parked: true }),
             idle: ()=>new Promise(resolve=>setImmediate(resolve)),
@@ -247,6 +250,23 @@ test('unattended, the box is put to the answerer and no window is made', ()=>{
     assert.equal(fns.FindWindowA.handler([0, CAPTION]), 0);
 });
 
+test('a box shown as the program goes down is told before it is shown; others are not', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    let reported = false;
+    const { fns, put } = setup({ unattended: true, answer: ()=>1,
+        faultReported: ()=>reported, fatal: notice=>told.push(notice) });
+    put(TEXT, 'Application has generated an exception that could not be handled.');
+    put(CAPTION, 'Game.exe - Application Error');
+    // The .NET runtime's box: OKCANCEL, ICONEXCLAMATION, TASKMODAL, DEFAULT_DESKTOP_ONLY.
+    fns.MessageBoxA.handler([0, TEXT, CAPTION, 0x22031]);
+    assert.deepEqual(told, [], 'with no fault reported it is an ordinary box');
+    reported = true;
+    fns.MessageBoxA.handler([0, TEXT, CAPTION, 0x22031]);
+    assert.deepEqual(told, [{ text: 'Application has generated an exception that could not be '
+        + 'handled.', caption: 'Game.exe - Application Error', type: 0x22031 }]);
+});
+
 test('a box answers with buttons it shows, the default walking the set', ()=>{
     // A box answered outside its own set hands the caller a value its switch
     // has no arm for.
@@ -290,3 +310,27 @@ test('MessageBoxIndirect puts up the box its MSGBOXPARAMS describes, strings by 
         assert.equal(asked[1].title, 'Error', 'no caption is "Error", as for MessageBox');
         assert.equal(fns.MessageBoxIndirectA.argBytes, 4);
     });
+
+test('a system-modal box is topmost without the modal frame; MB_TASKMODAL overrides it', async()=>{
+    // Wine's dialog test (test_MessageBox): the extended styles a box has by
+    // its modality, as Windows makes them.
+    const WS_EX_DLGMODALFRAME = 0x1, WS_EX_TOPMOST = 0x8;
+    const MB_SYSTEMMODAL = 0x1000, MB_TASKMODAL = 0x2000, MB_TOPMOST = 0x40000;
+    const GWL_EXSTYLE = -20;
+    const { fns, put, boxNamed, press } = setup();
+    put(TEXT, 'Text');
+    const cases = [[MB_OKCANCEL, WS_EX_DLGMODALFRAME],
+        [MB_OKCANCEL | MB_SYSTEMMODAL, WS_EX_TOPMOST],
+        [MB_OKCANCEL | MB_TASKMODAL | MB_SYSTEMMODAL, WS_EX_DLGMODALFRAME],
+        [MB_OKCANCEL | MB_TOPMOST, WS_EX_DLGMODALFRAME | WS_EX_TOPMOST]];
+    for (const [index, [type, expected]] of cases.entries())
+    {
+        put(CAPTION, `Box ${index}`);
+        const answer = fns.MessageBoxA.handler([0, TEXT, CAPTION, type]);
+        const box = await boxNamed(`Box ${index}`);
+        assert.equal(fns.GetWindowLongA.handler([box, GWL_EXSTYLE]) & (WS_EX_DLGMODALFRAME
+            | WS_EX_TOPMOST), expected, `type ${type.toString(16)}`);
+        press(box, VK_ESCAPE);
+        await answer;
+    }
+});

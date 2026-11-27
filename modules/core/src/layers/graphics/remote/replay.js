@@ -56,18 +56,42 @@ const PURE_GETTERS = new Set([
     // minutes of one title, each played for nothing -- and a pause the host's
     // entry runs its calls in.
     'ringState', 'whileStill',
+    // Direct3D 10's: which interfaces an object has, asked whenever the seam
+    // hands one out, and whether a map waits for a copy into the resource --
+    // never, on a device with no renderer, whose map is the played one's.
+    'supports', 'pendingReadback',
 ]);
 
 /**
  * Whether a method may hand out one of the device's objects through a
  * structure it is given -- what makes one, gets one or asks for one -- so
- * that the structures are looked through after it. Both sides ask this.
+ * that the structures are looked through after it. Both sides ask this, of
+ * every call: the answer is kept by name, the names being few.
  *
  * @param {string} name
  */
 function handsOut(name){
+    let hands = HANDS_OUT.get(name);
+    if (hands === undefined)
+    {
+        hands = handsOutByName(name);
+        HANDS_OUT.set(name, hands);
+    }
+    return hands;
+}
+
+/** `handsOut`'s answers so far. @type {Map<string, boolean>} */
+const HANDS_OUT = new Map();
+
+/** @param {string} name */
+function handsOutByName(name){
     return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
-        || name === 'EndStateBlock';
+        || name === 'EndStateBlock'
+        // DXGI's enumerations, and Direct3D 10's getters of a stage's bindings:
+        // EnumAdapters, IAGetVertexBuffers, PSGetShader; and Direct3D 11's
+        // command lists and context states, which a context hands back.
+        || name.startsWith('Enum') || /^[A-Z]{2}Get/.test(name)
+        || name === 'FinishCommandList' || name === 'SwapDeviceContextState';
 }
 
 /** The calls that hand out one of a texture's levels as an object of its own. */
@@ -356,6 +380,9 @@ function visit(value, bind){
  *     bytes of guest memory just copied into the record, by what copied them
  * @property {(ms: number, polls: number, asks: number, beside: boolean, sentAfter: number,
  *     trip: number, events: OcclusionEvent[]) => void} [counted]
+ * @property {(ms: number, polls: number, asks: number, events: OcclusionEvent[]) => void}
+ *     [abandoned]  an occlusion query was issued again before it was told: how long it
+ *     had been waited for, its polls and asks
  *     an occlusion query was answered: this long after its END was issued, after
  *     this many polls of the program's and asks of the played side; `beside`
  *     when its count came with another query's answer; `sentAfter` how long
@@ -673,6 +700,10 @@ export function createRecording(options){
         {
             const number = next++;
             numbers.set(own, number);
+            if (/** @type {any} */ (own).counter?.owner)
+            {
+                crossers.add(own);
+            }
             const proxy = proxies.get(own);
             if (proxy)
             {
@@ -724,6 +755,13 @@ export function createRecording(options){
             {
                 value[key] = proxyOf(member);
             }
+            else if (Array.isArray(member) && member.some(one=>!raws.has(one)
+                && isDeviceObject(one)))
+            {
+                // Direct3D 10's getters hand out arrays of objects.
+                value[key] = member.map(one=>(!raws.has(one) && isDeviceObject(one)
+                    ? proxyOf(one) : one));
+            }
         }
     };
 
@@ -771,9 +809,20 @@ export function createRecording(options){
      * begin, and what each waits on: the texture, for a level's bytes as for
      * its own, or the surface. Sent with the next call that may read them, or
      * that is made on what they belong to.
+     *
+     * Kept by what they wait on, so a call finds the bytes it may read by the
+     * objects it names: a texture unlocked and never drawn again waits for
+     * good, and a search through every one at each draw and each run of the
+     * ring was half of one title's engine thread.
      */
-    const pending = { addresses: /** @type {Map<number, number | null>} */ (new Map()),
-        owners: /** @type {Map<number, object>} */ (new Map()) };
+    const pending = {
+        /** Each waiting object's ranges, by where they begin. @type {Map<object, Map<number, number | null>>} */
+        byOwner: new Map(),
+        /** The object each range waits on. @type {Map<number, object>} */
+        owners: new Map(),
+        /** The surfaces among the objects: every call that may read reads them. @type {Set<object>} */
+        surfaces: new Set(),
+    };
 
     /** What an object's unlocked bytes wait on. @param {object} object */
     const keyOf = object=>containerOf.get(object) ?? object;
@@ -790,10 +839,37 @@ export function createRecording(options){
 
     /** @param {object} key @returns {(locked: Locked) => void} */
     const pendFor = key=>({ address, length })=>{
-        const held = pending.addresses.get(address);
-        pending.addresses.set(address, held === undefined ? length
+        const was = pending.owners.get(address);
+        const held = was === undefined ? undefined : pending.byOwner.get(was)?.get(address);
+        if (was !== undefined && was !== key)
+        {
+            unpend(was, address);
+        }
+        let ranges = pending.byOwner.get(key);
+        if (!ranges)
+        {
+            ranges = new Map();
+            pending.byOwner.set(key, ranges);
+            if (!isTexture(key))
+            {
+                pending.surfaces.add(key);
+            }
+        }
+        ranges.set(address, held === undefined ? length
             : held === null || length === null ? null : Math.max(held, length));
         pending.owners.set(address, key);
+    };
+
+    /** @param {object} key @param {number} address */
+    const unpend = (key, address)=>{
+        pending.owners.delete(address);
+        const ranges = pending.byOwner.get(key);
+        ranges?.delete(address);
+        if (ranges?.size === 0)
+        {
+            pending.byOwner.delete(key);
+            pending.surfaces.delete(key);
+        }
     };
 
     /**
@@ -805,7 +881,8 @@ export function createRecording(options){
      * the run does not name.
      *
      * @param {any} target @param {string} name @param {any[]} args
-     * @returns {(key: object) => boolean}
+     * @returns {Set<object> | null}  the textures it may read beside the
+     *     surfaces, or null for every one
      */
     const readBy = (target, name, args)=>{
         /** @type {Set<object>} */
@@ -837,15 +914,18 @@ export function createRecording(options){
             && args[0] instanceof Uint8Array && target.appliesStateBlocks(args[0]) === true;
         if (!run && !name.startsWith('Draw'))
         {
-            return key=>!isTexture(key) || named.has(key);
+            return named;
         }
         const bound = target.boundTextures;
         if (!bound || (run && applies))
         {
-            return ()=>true;
+            return null;
         }
-        const sampled = new Set(bound);
-        return key=>!isTexture(key) || named.has(key) || sampled.has(key);
+        for (const texture of bound)
+        {
+            named.add(texture);
+        }
+        return named;
     };
 
     /**
@@ -875,20 +955,31 @@ export function createRecording(options){
      * it: copied into the batch now, out of the guest's memory in place,
      * before the call can write over them. The rest wait on.
      *
-     * @param {(key: object) => boolean} [which]
+     * @param {Set<object> | null} [textures]  those read beside the surfaces;
+     *     null, every one
+     * @param {object | null} [except]  one whose bytes the call does not read
      */
-    const shipPending = (which = ()=>true)=>{
+    const shipPending = (textures = null, except = null)=>{
         /** @type {{ address: number, length: number, slot: number }[]} */
         const lent = [];
         /** @type {{ address: number, bytes: Uint8Array }[]} */
         const taken = [];
-        for (const [address, length] of pending.addresses)
+        const owners = textures === null ? [...pending.byOwner.keys()]
+            : [...pending.surfaces, ...textures];
+        /** @type {[number, number | null][]} */
+        const ranges = [];
+        for (const owner of owners)
         {
-            if (!which(/** @type {object} */ (pending.owners.get(address))))
+            const held = owner === except ? undefined : pending.byOwner.get(owner);
+            if (held)
             {
-                continue;
+                ranges.push(...held);
+                pending.byOwner.delete(owner);
+                pending.surfaces.delete(owner);
             }
-            pending.addresses.delete(address);
+        }
+        for (const [address, length] of ranges)
+        {
             pending.owners.delete(address);
             const extent = extentOf(address, length);
             const slot = extent > 0 && lendable(address) ? /** @type {any} */ (lender)
@@ -1089,11 +1180,16 @@ export function createRecording(options){
         let copy = null;
         for (const key in result)
         {
-            if (isDeviceObject(result[key]))
+            const member = result[key];
+            // A list of objects too, as `ringState`'s targets are.
+            const listed = Array.isArray(member) && member.some(isDeviceObject);
+            if (listed || isDeviceObject(member))
             {
                 /** @type {Record<string, any>} */
                 const held = copy ?? { ...result };
-                held[key] = proxyOf(result[key]);
+                held[key] = listed
+                    ? member.map(each=>(isDeviceObject(each) ? proxyOf(each) : each))
+                    : proxyOf(member);
                 copy = held;
             }
         }
@@ -1318,6 +1414,16 @@ export function createRecording(options){
         {
             depth--;
         }
+        return sendCount(target, number, result);
+    };
+
+    /**
+     * The count an object is left with, sent as `REFS_TO` (`countTo`).
+     *
+     * @param {object} target @param {number} number @param {number} result
+     */
+    const sendCount = (target, number, result)=>{
+        countsSent.set(target, result >>> 0);
         if (refsToId < 0)
         {
             writer.u8(OP.CALL);
@@ -1333,6 +1439,35 @@ export function createRecording(options){
         writer.u8(0);
         transport.called(WAIT.NONE, REFS_TO);
         return result;
+    };
+
+    /**
+     * The objects whose crossings of zero the guest may make itself, with no
+     * call that comes here (`ReferenceCount.owner`: a device's own surfaces),
+     * and the count each was last sent with. A Reset is the played side's one
+     * reading of their counts -- whether the program still holds one -- so
+     * before it each is sent again where it moved.
+     *
+     * @type {Set<any>}
+     */
+    const crossers = new Set();
+    /** @type {WeakMap<object, number>} */
+    const countsSent = new WeakMap();
+    const sendCrossings = ()=>{
+        for (const object of crossers)
+        {
+            if (object.destroyed)
+            {
+                crossers.delete(object);
+                continue;
+            }
+            const count = object.refCount >>> 0;
+            const number = numbers.get(object);
+            if (number !== undefined && countsSent.get(object) !== count)
+            {
+                sendCount(object, number, count);
+            }
+        }
     };
 
     /**
@@ -1354,6 +1489,7 @@ export function createRecording(options){
         const making = handsOut(name);
         const pure = PURE_GETTERS.has(name);
         const counting = name === 'addRef' || name === 'release';
+        const resetting = name === 'Reset' || name === 'ResetEx';
         /** The method's number in the writer's table, once it has one. */
         let nameId = -1;
         /** @type {number | undefined} */
@@ -1365,6 +1501,10 @@ export function createRecording(options){
         /** @type {(...args: any[]) => any} */
         const call = (...args)=>{
             const count = args.length;
+            if (resetting && depth === 0)
+            {
+                sendCrossings();
+            }
             // A read of a surface a copy back from the GPU is still filling
             // waits for it, then is made: a lock or a DC on it, and a copy out
             // of it or of its texture, which moves the bytes it holds here.
@@ -1383,7 +1523,13 @@ export function createRecording(options){
                 {
                     applied = unwrapInto(applied, args, index);
                 }
-                return method.apply(target, applied);
+                const result = method.apply(target, applied);
+                // A pure getter's answer leaves for the caller as any answer
+                // does: `ringState` names the targets, which the caller knows
+                // by their proxies. Given the device's own, the seam finds no
+                // pointer for them, and the guest's GetRenderTarget and
+                // GetDepthStencilSurface go to the host on every call.
+                return depth > 0 ? result : answerOf(result);
             }
             // A poll of an occlusion count already asked is answered here and
             // recorded nowhere: the played side has nothing to do with it, and
@@ -1431,14 +1577,13 @@ export function createRecording(options){
                 !== 'function' && args[0] !== null && typeof args[0] === 'object'
                 ? keyOf(raws.get(args[0]) ?? args[0]) : null;
             const source = raw && inSystemMemory(raw) ? raw : null;
-            if (pending.addresses.size > 0 && !quiet)
+            if (pending.byOwner.size > 0 && !quiet)
             {
-                const readable = readBy(target, name, args);
-                shipPending(source ? key=>key !== source && readable(key) : readable);
+                shipPending(readBy(target, name, args), source);
             }
-            else if (pending.addresses.size > 0 && !unlocking && !name.startsWith('AddDirty')
+            else if (pending.byOwner.size > 0 && !unlocking && !name.startsWith('AddDirty')
                 && !(locking && inSystemMemory(keyOf(target)))
-                && [...pending.owners.values()].includes(keyOf(target)))
+                && pending.byOwner.has(keyOf(target)))
             {
                 // A lock of a resource the played side reads -- a texture its
                 // draws sample, a target its renderer answers for -- has what
@@ -1704,6 +1849,15 @@ export function createRecording(options){
             if (name === 'Issue')
             {
                 // A new measurement: what was counted before is not its count.
+                // One issued again before it was told is a count the program
+                // gave up waiting for, which the counts told never show.
+                const untold = timed ? waiting.get(target) : undefined;
+                if (untold)
+                {
+                    untold.events.push(['abandoned', sharedNow(), untold.polls]);
+                    transport.abandoned?.(performance.now() - untold.at, untold.polls,
+                        untold.asks, untold.events);
+                }
                 counts.delete(target);
                 waiting.delete(target);
                 if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION
@@ -2044,8 +2198,11 @@ export function createRecording(options){
                 // something is sent of all of it: once, at its first draw,
                 // watched from before the read.
                 const watch = watchWrites?.(base, buffer.length) ?? null;
-                const bytes = readMemory(base, buffer.length);
-                // Kept only to compare against where there is no watch to say.
+                // Read where they lie where a watch says what changes after:
+                // the call's record copies them when it is finished, before
+                // the program runs again. Kept, and so copied, only to compare
+                // against where there is no watch to say.
+                const bytes = (watch ? windowMemory : readMemory)(base, buffer.length);
                 sentOf.set(key, { base, length: buffer.length, bytes: watch ? null : bytes,
                     watch, dirty: pageMarksOf(base, buffer.length) });
                 compared.take(key, 0, buffer.length);
@@ -2103,6 +2260,30 @@ export function createRecording(options){
 }
 
 /**
+ * Whether a call's arguments hold a view of a batch's bytes: as the reader
+ * makes them, typed arrays in arrays and plain objects, not a played object's
+ * members.
+ *
+ * @param {unknown} value @param {ArrayBufferLike} buffer @returns {boolean}
+ */
+const viewsInto = (value, buffer)=>{
+    if (ArrayBuffer.isView(value))
+    {
+        return value.buffer === buffer;
+    }
+    if (Array.isArray(value))
+    {
+        return value.some(member=>viewsInto(member, buffer));
+    }
+    if (value !== null && typeof value === 'object'
+        && Object.getPrototypeOf(value) === Object.prototype)
+    {
+        return Object.values(value).some(member=>viewsInto(member, buffer));
+    }
+    return false;
+};
+
+/**
  * The playing side: the calls a recording wrote, made in their order on a
  * root of the same build, with the same objects by the same numbers.
  *
@@ -2117,14 +2298,18 @@ export function createRecording(options){
  *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any, counts: () => OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
  *     one), a paced one with the promise its device holds the caller on, and
  *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
- *     was given; `read` reads a batch of calls, and answers how long the look
- *     at the objects at a count of zero took when the batch made one
+ *     was given; `read` reads a batch of calls (the `length` bytes at `start` of
+ *     the buffer, all of it by default), and answers how long the look
+ *     at the objects at a count of zero took when the batch made one;
+ *     `spent` gives a read batch's buffer back once nothing played from it needs it
  */
 export function createPlayer({ root, ship, read, borrow }){
     /**
@@ -2163,6 +2348,16 @@ export function createPlayer({ root, ship, read, borrow }){
     /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
     let presentedSinceSweep = false;
     let batchesSinceSweep = 0;
+    /** The batch being read. @type {ArrayBufferLike | null} */
+    let reading = null;
+    /**
+     * The batches an answer still to come keeps a view of, as its arguments
+     * a device fills when it settles: how many such answers, and what gives
+     * the buffer back once the last one has (`spent`).
+     *
+     * @type {Map<ArrayBufferLike, { owed: number, give: (() => void) | null }>}
+     */
+    const kept = new Map();
     /** Where the last look stopped (`SWEEP_SLICE`); a set's iterator follows its changes. */
     let sweeping = uncounted.values();
     /**
@@ -2192,8 +2387,14 @@ export function createPlayer({ root, ship, read, borrow }){
     };
     /** @type {WeakSet<object>} */
     const known = new WeakSet([root]);
-    /** @type {number[]} */
-    let allocs = [];
+    /**
+     * The guest addresses the recorded call's allocations got, and how many
+     * of them the played call has taken (`allocate`).
+     *
+     * @type {readonly unknown[]}
+     */
+    let allocs = NOTHING;
+    let allocated = 0;
     /** The call being played, for what a failure says. @type {string} */
     let playing = '';
     /**
@@ -2238,16 +2439,19 @@ export function createPlayer({ root, ship, read, borrow }){
      * @type {Map<number, number>}
      */
     const sentCounts = new Map();
-    /** @type {any[]} */
-    let replies = [];
+    /** What the caller's services answered in the recorded call, and how many were asked. */
+    let replies = NOTHING;
+    let replied = 0;
     /**
      * Every service of the caller's, played: whatever is asked of it, the
      * answer the caller's gave in the recorded call.
      */
     const standIn = new Proxy({}, {
-        get: (_, key)=>(typeof key === 'string' ? ()=>replies.shift() : undefined),
+        get: (_, key)=>(typeof key === 'string' ? ()=>replies[replied++] : undefined),
     });
     const reader = createReader({ ref: objectAt, service: ()=>standIn });
+    /** What a call carries none of: guest memory sent. */
+    const NO_MEMORY = /** @type {readonly { address: number, bytes: Uint8Array }[]} */ (NOTHING);
 
     /** @param {object} object */
     const bind = object=>{
@@ -2259,6 +2463,27 @@ export function createPlayer({ root, ship, read, borrow }){
     };
 
     /**
+     * Holds a batch's buffer until an answer that keeps a view of it is
+     * settled and sent: the receiver sends it on `settled`, after this, so the
+     * buffer goes back a microtask later still.
+     *
+     * @param {ArrayBufferLike} buffer @param {Promise<unknown>} settled
+     */
+    const keep = (buffer, settled)=>{
+        const entry = kept.get(buffer) ?? { owed: 0, give: null };
+        entry.owed++;
+        kept.set(buffer, entry);
+        const done = ()=>queueMicrotask(()=>{
+            if (--entry.owed === 0)
+            {
+                kept.delete(buffer);
+                entry.give?.();
+            }
+        });
+        settled.then(done, done);
+    };
+
+    /**
      * The copies a call described in a structure it was given, made in the
      * memory this side reads as the caller makes them in the guest's.
      *
@@ -2267,7 +2492,12 @@ export function createPlayer({ root, ship, read, borrow }){
     const move = args=>{
         for (const arg of args)
         {
-            for (const one of Array.isArray(arg?.moves) ? arg.moves : [])
+            const moves = arg?.moves;
+            if (!Array.isArray(moves))
+            {
+                continue;
+            }
+            for (const one of moves)
             {
                 for (let row = 0; row < one.rows; row++)
                 {
@@ -2283,7 +2513,16 @@ export function createPlayer({ root, ship, read, borrow }){
             const target = /** @type {any} */ (objectAt(call.t));
             if (call.op === OP.GET)
             {
-                bindAll(target[/** @type {string} */ (call.m)], [], bind);
+                // The recording sends a read only when it numbered what it
+                // read: the same is numbered here whatever it holds, or every
+                // number after it would name another object.
+                const value = target[/** @type {string} */ (call.m)];
+                if (value === null || typeof value !== 'object')
+                {
+                    throw new Error(`remote: ${String(call.m)} read on the played side`
+                        + ' is no object');
+                }
+                bind(value);
                 return undefined;
             }
             if (call.op === OP.SET)
@@ -2297,26 +2536,30 @@ export function createPlayer({ root, ship, read, borrow }){
                 {
                     throw new Error('remote: guest memory lent to a side that cannot read it');
                 }
-                for (const { address, length, slot } of call.lent ?? [])
+                // Three words a lend, in the reader's words: no object a lend.
+                const lent = /** @type {Uint32Array} */ (call.lent);
+                for (let at = 0; at < call.lentCount * 3; at += 3)
                 {
-                    borrow(slot, address, length, bytes=>ship(address, bytes));
+                    borrow(lent[at + 2], lent[at], lent[at + 1], ship);
                 }
                 return undefined;
             }
             if (call.op !== OP.CALL)
             {
-                for (const { address, bytes } of call.wrote ?? [])
+                for (const { address, bytes } of call.wrote ?? NO_MEMORY)
                 {
                     ship(address, bytes);
                 }
                 return undefined;
             }
-            for (const { address, bytes } of call.ship ?? [])
+            for (const { address, bytes } of call.ship ?? NO_MEMORY)
             {
                 ship(address, bytes);
             }
-            allocs = call.allocs ?? [];
-            replies = call.replies ?? [];
+            allocs = call.allocs ?? NOTHING;
+            allocated = 0;
+            replies = call.replies ?? NOTHING;
+            replied = 0;
             playing = /** @type {string} */ (call.m);
             if (playing === 'Present')
             {
@@ -2329,6 +2572,12 @@ export function createPlayer({ root, ship, read, borrow }){
             if (target === undefined && playing === 'reachable')
             {
                 return call.wait === WAIT.ANSWER ? { answer: false, outs: args } : false;
+            }
+            // A layer reports on the last device it made, which the program may
+            // have made only to ask what the hardware does and let go of.
+            if (target === undefined && playing === 'diagnostics')
+            {
+                return call.wait === WAIT.ANSWER ? { answer: null, outs: args } : null;
             }
             if (playing === REFS_TO)
             {
@@ -2348,10 +2597,10 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 occlusionEnds.set(call.t, (occlusionEnds.get(call.t) ?? 0) + 1);
             }
-            /** What goes beside an answer: for an occlusion count, the others held. */
-            const beside = occlusion && playing === 'GetData' && call.wait === WAIT.ANSWER
-                ? ()=>({ counts: heldCounts(call.t) }) : ()=>({});
-            if (allocs.length > 0)
+            /** Whether an answer goes with the other occlusion counts held beside it. */
+            const beside = occlusion && playing === 'GetData' && call.wait === WAIT.ANSWER;
+            const asked = call.t;
+            if (allocated < allocs.length)
             {
                 // What the played device answered says which way it went: a
                 // refusal (a Reset the device took as lost, with resources it
@@ -2359,14 +2608,15 @@ export function createPlayer({ root, ship, read, borrow }){
                 const said = typeof answer === 'number' ? `0x${(answer >>> 0).toString(16)}`
                     : answer instanceof Promise ? 'a promise' : typeof answer;
                 throw new Error(`remote: ${playing} allocated less on the played device: it`
-                    + ` answered ${said}, ${allocs.length} of the recording's objects not made`);
+                    + ` answered ${said}, ${allocs.length - allocated} of the recording's objects`
+                    + ' not made');
             }
             const later = answer instanceof Promise;
             if (!later)
             {
                 move(args);
             }
-            for (const { address, bytes } of call.wrote ?? [])
+            for (const { address, bytes } of call.wrote ?? NO_MEMORY)
             {
                 ship(address, bytes);
             }
@@ -2374,8 +2624,13 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 const settled = answer.then(value=>{
                     move(args);
-                    return { answer: value, outs: args, ...beside() };
+                    return beside ? { answer: value, outs: args, counts: heldCounts(asked) }
+                        : { answer: value, outs: args };
                 });
+                if (reading && viewsInto(args, reading))
+                {
+                    keep(reading, settled);
+                }
                 if (call.wait === WAIT.ANSWER)
                 {
                     return settled;
@@ -2384,7 +2639,12 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             // An unwaited call's answer is what a carrier that is asked for
             // it after the call -- what a device says of itself -- passes on.
-            return call.wait === WAIT.ANSWER ? { answer, outs: args, ...beside() } : answer;
+            if (call.wait !== WAIT.ANSWER)
+            {
+                return answer;
+            }
+            return beside ? { answer, outs: args, counts: heldCounts(asked) }
+                : { answer, outs: args };
         },
         object: objectAt,
         /**
@@ -2402,16 +2662,41 @@ export function createPlayer({ root, ship, read, borrow }){
             return fresh;
         },
         allocate(){
-            const address = allocs.shift();
-            if (address === undefined)
+            if (allocated >= allocs.length)
             {
                 throw new Error('remote: the played device allocated more than the recorded one'
                     + ` in ${playing}`);
             }
-            return address;
+            return /** @type {number} */ (allocs[allocated++]);
         },
-        read: (buffer, each)=>{
-            reader.read(buffer, each);
+        /**
+         * Gives a batch's buffer back once nothing played from it needs it:
+         * at once, or when the last answer still to come that keeps a view of
+         * it has settled and been sent.
+         *
+         * @param {ArrayBufferLike} buffer @param {() => void} give
+         */
+        spent(buffer, give){
+            const entry = kept.get(buffer);
+            if (entry)
+            {
+                entry.give = give;
+            }
+            else
+            {
+                give();
+            }
+        },
+        read: (buffer, each, length = undefined, start = 0)=>{
+            reading = buffer;
+            try
+            {
+                reader.read(buffer, each, length, start);
+            }
+            finally
+            {
+                reading = null;
+            }
             // Looked at once a frame, or every so many batches for a program
             // that is not presenting: what it decides is only when a
             // destroyed object is let go, and a look after every batch went
@@ -2446,21 +2731,144 @@ export function createPlayer({ root, ship, read, borrow }){
 }
 
 /**
+ * A played root's answer, with what its mirror holds of the program's memory
+ * where the call asked for its diagnostics: only this side can say it.
+ *
+ * @param {{ m?: string }} call @param {any} answer
+ * @param {{ figures: () => object }} mirror
+ */
+export const withMirrored = (call, answer, mirror)=>(call.m === 'diagnostics' && answer
+    ? { ...answer, mirrored: mirror.figures() } : answer);
+
+/**
+ * The guest memory a played device is given: the mirror's, through which it
+ * reads, watches, writes, and holds what it allocates (`createMirror`).
+ *
+ * @typedef {Object} PlayedMemory
+ * @property {(address: number, length: number) => Uint8Array} read
+ * @property {(address: number, length: number) => Uint8Array} window
+ * @property {(address: number, length: number) => { take: (from: number, bytes: number)
+ *     => number[] }} watch
+ * @property {(address: number, bytes: Uint8Array) => void} write  what the device
+ *     writes: outside a call, the caller's too (pixels read back)
+ * @property {(bytes: number) => number} allocate  the address the recorded device got,
+ *     held until it is given back
+ * @property {(address: number) => void} free
+ * @property {(address: number, length: number) => void} hold  memory the device reads
+ *     later that it did not allocate: a surface it was described
+ * @property {(address: number, length: number) => void} release
+ */
+
+/**
+ * A played root over a mirror of the program's memory: the device `make`
+ * builds on that memory, the player of its calls, and the mirror let go of
+ * what nothing holds between batches. Every played root is made so, and so
+ * is bounded by the same rule.
+ *
+ * @template {Record<string, any>} R
+ * @param {(memory: PlayedMemory) => R} make
+ * @param {{ write?: (address: number, bytes: Uint8Array) => void,
+ *     borrow?: ReturnType<typeof import('./lending.js').createBorrower> }} [options]
+ *     `write`, where what the device writes outside a call goes; `borrow`, where
+ *     guest memory is shared, reads what the recording lent
+ * @returns {{ root: R, play: (call: import('./wire.js').ReadCall) => any,
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number) => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void,
+ *     counts: () => OcclusionCount[] }}
+ */
+export function playedOverMirror(make, { write, borrow } = {}){
+    const mirror = createMirror();
+    /** The bytes of each allocation the device holds, by its address. @type {Map<number, number>} */
+    const allocations = new Map();
+    /** @type {ReturnType<typeof createPlayer> | null} */
+    let player = null;
+    /** Whether a call is being played: what it writes, the recorded one wrote too. */
+    let playing = false;
+    const root = make({
+        read: mirror.read,
+        window: (address, length)=>mirror.window(address, length),
+        // Only what is sent writes the mirror, so it says what was written:
+        // the renderer uploads that, and compares nothing.
+        watch: mirror.watch,
+        write: (address, bytes)=>{
+            mirror.write(address, bytes);
+            if (!playing)
+            {
+                write?.(address, bytes);
+            }
+        },
+        allocate: bytes=>{
+            const address = /** @type {ReturnType<typeof createPlayer>} */ (player).allocate();
+            if (address !== 0)
+            {
+                allocations.set(address, Math.max(bytes, 1));
+                mirror.hold(address, Math.max(bytes, 1));
+            }
+            return address;
+        },
+        free: address=>{
+            const bytes = allocations.get(address);
+            if (bytes !== undefined)
+            {
+                allocations.delete(address);
+                mirror.release(address, bytes);
+            }
+        },
+        hold: mirror.hold,
+        release: mirror.release,
+    });
+    const live = createPlayer({ root, ship: mirror.write, read: mirror.read, borrow });
+    player = live;
+    return {
+        root,
+        play: call=>{
+            playing = true;
+            try
+            {
+                return withMirrored(call, live.play(call), mirror);
+            }
+            finally
+            {
+                playing = false;
+            }
+        },
+        read: (buffer, each, length, start)=>{
+            try
+            {
+                return live.read(buffer, each, length, start);
+            }
+            finally
+            {
+                mirror.settle();
+            }
+        },
+        spent: live.spent,
+        counts: live.counts,
+    };
+}
+
+/**
  * A guest memory of only the bytes sent to it, in 64 KiB pages made as they
  * are written: what a renderer behind a played device reads. It is written
  * only by what is sent, so it says which 4 KiB pages were written since a
  * reader last looked (`watch`), as the engine's write watch does for guest
  * memory: a dynamic buffer's upload is those pages, not a comparison.
  *
- * With `forget`, for a reader sent every byte it reads with the call that
- * reads it (OpenGL's), a page not written since the batch before the last
- * is let go at `settle`: kept, every page a program ever handed its pixels or
- * vertices from stays, as the Doom 3 demo's temporary buffers did. A page let
- * go is made again, zeroed, from the few kept for it.
- *
- * @param {{ forget?: boolean }} [options]
+ * What it keeps is what its device may still read, by one rule: a page some
+ * memory the device holds lies on (`hold`: a resource's storage, a surface it
+ * was described), or one a write reached since the settle before the last.
+ * Every other page is let go at `settle`, between batches. A device reads
+ * what it holds at a later batch than the one that sent it - a buffer
+ * unlocked at load and drawn from a level later, a target's pixels the
+ * program wrote, uploaded at its next draw - and everything else with the
+ * call it was sent with: a draw's vertices out of the program's memory, an
+ * OpenGL call's pixels. Were every page kept, every page a program handed
+ * its bytes from would stay, and every resource it let go of at an address it
+ * never uses again. A page let go is made again, zeroed, from the few kept
+ * for it.
  */
-export function createMirror({ forget = false } = {}){
+export function createMirror(){
     const SHIFT = 16;
     const SIZE = 1 << SHIFT;
     /** Pages let go, kept to be made again rather than allocated: at most this many. */
@@ -2469,6 +2877,24 @@ export function createMirror({ forget = false } = {}){
     const pages = new Map();
     /** @type {Uint8Array[]} */
     const spare = [];
+    /** How many holds lie on each 64 KiB page that has any. @type {Map<number, number>} */
+    const holds = new Map();
+    /** @param {number} address @param {number} length @param {number} by */
+    const holdOver = (address, length, by)=>{
+        const last = (address + Math.max(length, 1) - 1) >>> SHIFT;
+        for (let page = address >>> SHIFT; page <= last; page++)
+        {
+            const count = (holds.get(page) ?? 0) + by;
+            if (count > 0)
+            {
+                holds.set(page, count);
+            }
+            else
+            {
+                holds.delete(page);
+            }
+        }
+    };
     /** The write count at the last two settles, the older first. */
     const settled = [0, 0];
     /**
@@ -2525,7 +2951,9 @@ export function createMirror({ forget = false } = {}){
                 const at = (address + done) >>> 0;
                 const offset = at & (SIZE - 1);
                 const take = Math.min(SIZE - offset, bytes.length - done);
-                pageOf(at >>> SHIFT).set(bytes.subarray(done, done + take), offset);
+                // Most writes lie in one page: set whole, no view of a part.
+                pageOf(at >>> SHIFT).set(take === bytes.length ? bytes
+                    : bytes.subarray(done, done + take), offset);
                 done += take;
             }
         },
@@ -2589,20 +3017,29 @@ export function createMirror({ forget = false } = {}){
             };
         },
         /**
-         * Lets go of the pages no write reached since the settle before the
-         * last, where the mirror forgets: called between batches, so the bytes
-         * a call was sent are never let go before it is played, however a
-         * batch was cut.
+         * Keeps the pages of a range the device holds, however long ago they
+         * were written, until it is let go of as often (`release`).
+         *
+         * @param {number} address @param {number} length
+         */
+        hold(address, length){
+            holdOver(address, length, 1);
+        },
+        /** @param {number} address @param {number} length  a range held */
+        release(address, length){
+            holdOver(address, length, -1);
+        },
+        /**
+         * Lets go of the pages no hold lies on and no write reached since the
+         * settle before the last: called between batches, so the bytes a call
+         * was sent are never let go before it is played, however a batch was
+         * cut.
          */
         settle(){
-            if (!forget)
-            {
-                return;
-            }
             const before = settled[0];
             for (const [page, bytes] of pages)
             {
-                if (largeStamps[page] <= before)
+                if (largeStamps[page] <= before && !holds.has(page))
                 {
                     pages.delete(page);
                     if (spare.length < SPARE)
@@ -2616,7 +3053,17 @@ export function createMirror({ forget = false } = {}){
         },
         /** The bytes of the 64 KiB pages held. */
         bytes: ()=>pages.size * SIZE,
-        /** The bytes of every 64 KiB page ever written: what it holds if it forgets none. */
+        /**
+         * What the mirror holds of the heap, for the memory report: its pages,
+         * the pages kept to be made again, and the stamps; `held` is all of it.
+         */
+        figures: ()=>{
+            const stampBytes = stamps.byteLength + largeStamps.byteLength;
+            return { held: (pages.size + spare.length) * SIZE + stampBytes,
+                pages: pages.size, spare: spare.length, stampBytes,
+                reached: largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0) };
+        },
+        /** The bytes of every 64 KiB page ever written: what it would hold if it let go of none. */
         reached: ()=>largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0),
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         read(address, length){

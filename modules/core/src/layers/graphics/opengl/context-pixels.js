@@ -18,6 +18,9 @@ import { GL } from './constants.js';
 import { transform } from './matrix.js';
 import { readPixel, writeFragment } from './raster.js';
 import { fogFactor } from './pipeline.js';
+import { imageBytes } from './texture.js';
+import { packFromStorage } from './texture-transfer.js';
+import { SIZED_FORMATS } from './formats.js';
 
 /** @type {Set<number>} */
 const COLOUR_FORMATS = new Set([
@@ -60,19 +63,18 @@ const COMPONENTS = Object.freeze({
  * @param {number} format
  * @param {number} type
  * @param {PackState} pack
- * @returns {Uint8Array | null} null for a layout this does not write
+ * @returns {Uint8Array | null} null for a layout no reader writes
  */
 export function packImage(texels, width, height, format, type, pack){
     const components = /** @type {any} */ (COMPONENTS)[format];
-    if (!components)
-    {
-        return null;
-    }
     const componentBytes = type === GL.UNSIGNED_BYTE ? 1 : type === GL.UNSIGNED_SHORT ? 2
         : type === GL.UNSIGNED_INT || type === GL.FLOAT ? 4 : 0;
-    if (componentBytes === 0)
+    if (!components || componentBytes === 0)
     {
-        return null;
+        // A packed type, a signed one, a format of 3.0: the general writer's.
+        return packFromStorage(texels, width, height, 1, format, type,
+            { ...pack, swapBytes: false },
+            /** @type {import('./formats.js').SizedFormat} */ (SIZED_FORMATS.get(GL.RGBA8)));
     }
     const pixelBytes = components.length * componentBytes;
     const groups = pack.rowLength > 0 ? pack.rowLength : width;
@@ -129,6 +131,24 @@ export function installPixelCalls(context, kernel){
         skipRows: record(GL.PACK_SKIP_ROWS).values[0],
         skipPixels: record(GL.PACK_SKIP_PIXELS).values[0],
     });
+
+    /**
+     * An unpacked image through the pixel transfer, a copy when it changes
+     * anything (`context-legacy.js`).
+     *
+     * @param {Uint8Array} texels
+     * @returns {Uint8Array}
+     */
+    const transferred = texels=>{
+        const transfer = kernel.side.pixelTransfer?.();
+        if (!transfer)
+        {
+            return texels;
+        }
+        const copy = texels.slice();
+        transfer(copy);
+        return copy;
+    };
 
     /**
      * Draws a block of RGBA texels at the raster position, through the
@@ -260,14 +280,37 @@ export function installPixelCalls(context, kernel){
         },
 
         /**
+         * glReadnPixels (4.5, KHR_robustness): glReadPixels into a buffer of
+         * `size` bytes, refused when the pixels would not fit it.
+         *
+         * @param {number} x @param {number} y @param {number} width @param {number} height
+         * @param {number} format @param {number} type @param {number} size
+         * @returns {Uint8Array | Promise<Uint8Array | null> | null}
+         */
+        glReadnPixels(x, y, width, height, format, type, size){
+            if (!enter('glReadnPixels', [x, y, width, height, format, type, size]))
+            {
+                return null;
+            }
+            if (width > 0 && height > 0 && imageBytes(width, height, format, type,
+                { ...packState(), swapBytes: false }) > size)
+            {
+                setError(GL.INVALID_OPERATION);
+                return null;
+            }
+            return context.glReadPixels(x, y, width, height, format, type);
+        },
+
+        /**
          * @param {number} x
          * @param {number} y
          * @param {number} width
          * @param {number} height
          * @param {number} format
          * @param {number} type
-         * @returns {Uint8Array | null} the packed pixels, for the caller to
-         *          write where the program asked
+         * @returns {Uint8Array | Promise<Uint8Array | null> | null} the packed
+         *          pixels, for the caller to write where the program asked: a
+         *          promise of them for a framebuffer on the device
          */
         glReadPixels(x, y, width, height, format, type){
             if (!enter('glReadPixels', [x, y, width, height, format, type]))
@@ -280,13 +323,14 @@ export function installPixelCalls(context, kernel){
                 return null;
             }
             const frame = kernel.framebuffer();
-            if (kernel.gpuBacked())
-            {
-                kernel.diverge('glReadPixels was accepted and read black: the framebuffer'
-                    + ' lives on the device and is not read back');
-            }
+            const onDevice = kernel.gpuBacked();
             if (format === GL.DEPTH_COMPONENT)
             {
+                if (onDevice)
+                {
+                    kernel.diverge('glReadPixels of depth was accepted and read zero: the'
+                        + ' depth buffer lives on the device and is not read back');
+                }
                 if (!frame.depth)
                 {
                     setError(GL.INVALID_OPERATION);
@@ -331,6 +375,22 @@ export function installPixelCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return null;
             }
+            if (onDevice)
+            {
+                const pack = packState();
+                const reading = kernel.readBack?.({ x, y, width, height }) ?? null;
+                if (reading)
+                {
+                    const transfer = kernel.side.pixelTransfer?.() ?? null;
+                    return reading.then(texels=>{
+                        const read = texels ?? new Uint8Array(width * height * 4);
+                        transfer?.(read);
+                        return packImage(read, width, height, format, type, pack);
+                    });
+                }
+                kernel.diverge('glReadPixels was accepted and read black: the read buffer'
+                    + ' lives on the device and is not one it reads back');
+            }
             const texels = new Uint8Array(width * height * 4);
             for (let row = 0; row < height; row++)
             {
@@ -345,6 +405,7 @@ export function installPixelCalls(context, kernel){
                     texels.set(readPixel(frame, fx, fy), (row * width + column) * 4);
                 }
             }
+            kernel.side.pixelTransfer?.()?.(texels);
             return packImage(texels, width, height, format, type, packState());
         },
 
@@ -373,7 +434,8 @@ export function installPixelCalls(context, kernel){
             }
             if (texels)
             {
-                drawTexels(texels, width, height);
+                // A list keeps the unpacked image; the transfer is the state at the draw.
+                drawTexels(transferred(texels), width, height);
             }
         },
 
@@ -424,6 +486,8 @@ export function installPixelCalls(context, kernel){
                     }
                 }
             }
+            // The copy passes through the transfer as a read and a draw would.
+            kernel.side.pixelTransfer?.()?.(texels);
             drawTexels(texels, width, height);
         },
 

@@ -23,7 +23,10 @@
 
 import { S_OK, IID } from '../d3d10/constants.js';
 import { parseEffect } from '../d3d10/effect.js';
-import { INVALID, PASS_STATE, VARIABLE_KIND, createEffect } from '../d3d10/effect-object.js';
+import { stateIndexNotTaken } from '../d3d10/effect-states.js';
+import {
+    EffectRefused, INVALID, PASS_STATE, VARIABLE_KIND, createEffect,
+} from '../d3d10/effect-object.js';
 import { STATE_BLOCK_MASK_SIZE } from '../d3d10/stateblock.js';
 import { describe as describeSlots } from './vtables.js';
 
@@ -33,6 +36,8 @@ const E_INVALIDARG = 0x80070057 | 0;
 const E_FAIL = 0x80004005 | 0;
 const E_NOTIMPL = 0x80004001 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
+/** D3D10_EFFECT_COMPILE_CHILD_EFFECT: the effect takes what it shares from a pool. */
+const D3D10_EFFECT_COMPILE_CHILD_EFFECT = 1;
 
 export const ID3D10EFFECT_SLOTS = /** @type {[string, number][]} */ ([
     ['IsValid', 0], ['IsPool', 0], ['GetDevice', 1], ['GetDesc', 1],
@@ -130,6 +135,8 @@ const AS = Object.freeze({
 
 /**
  * @typedef {Object} EffectSeamContext
+ * @property {() => void} [sync]  Makes what the program's device calls left in
+ *     the guest's ring, before a pass sets the device's state.
  * @property {any} publisher
  * @property {ReturnType<typeof import('./structs.js').createFields>} fields
  * @property {any} memory                 readMemory/writeMemory.
@@ -780,7 +787,16 @@ export function createEffectSeam(context){
         GetAnnotationByName: (pass, [name])=>
             publishVariable(pass.GetAnnotationByName(nameArgument(name))),
         /** @param {any} pass @param {number[]} args */
-        Apply: (pass, [flags])=>(pass.invalid ? E_FAIL : pass.Apply(flags >>> 0)),
+        // What the program's device calls left in the ring is made first: a
+        // pass sets the device's state over what the program set before it.
+        Apply: (pass, [flags])=>{
+            if (pass.invalid)
+            {
+                return E_FAIL;
+            }
+            context.sync?.();
+            return pass.Apply(flags >>> 0);
+        },
         /** @param {any} pass @param {number[]} args */
         ComputeStateBlockMask: (pass, args)=>(pass.invalid ? E_FAIL : computeMask(pass, args)),
     })];
@@ -855,14 +871,47 @@ export function createEffectSeam(context){
         IsOptimized: effect=>bool(effect.IsOptimized()),
     }, false)];
 
+    // A pool is its effect: one object, one count, AsEffect the same object
+    // as ID3D10Effect, no reference taken. An effect that is no pool answers
+    // a query for ID3D10EffectPool with its own pointer, as Windows does.
+    const poolDescriptor = describe(IID.ID3D10EffectPool, [['AsEffect', 0]], {
+        /** @param {any} effect */
+        AsEffect: effect=>publisher.publish(effect, poolInterfaces, IID.ID3D10Effect),
+    }, false);
+    const poolInterfaces = [...effectInterfaces, poolDescriptor];
+    effectInterfaces.push({ ...poolDescriptor, sharedWith: IID.ID3D10Effect });
+
     /**
      * HRESULT D3D10CreateEffectFromMemory(void *data, SIZE_T size, UINT flags,
      *     ID3D10Device *device, ID3D10EffectPool *pool, ID3D10Effect **effect)
      *
      * @param {number[]} args
      */
-    const fromMemory = ([data, size, flags, devicePointer, pool, out])=>{
+    const fromMemory = ([data, size, flags, devicePointer, pool, out])=>
+        made(data, size, devicePointer, out, (flags & D3D10_EFFECT_COMPILE_CHILD_EFFECT) !== 0,
+            pool >>> 0);
+
+    /**
+     * HRESULT D3D10CreateEffectPoolFromMemory(void *data, SIZE_T size, UINT flags,
+     *     ID3D10Device *device, ID3D10EffectPool **pool)
+     *
+     * @param {number[]} args
+     */
+    const poolFromMemory = ([data, size, flags, devicePointer, out])=>{
         void flags;
+        return made(data, size, devicePointer, out, false, 0, true);
+    };
+
+    /**
+     * An effect, a pool or a pool's child, made from the bytes a program
+     * handed over. A child names its pool and is made with
+     * D3D10_EFFECT_COMPILE_CHILD_EFFECT, and neither goes without the other.
+     *
+     * @param {number} data @param {number} size @param {number} devicePointer
+     * @param {number} out @param {boolean} child @param {number} poolPointer
+     * @param {boolean} [isPool]
+     */
+    const made = (data, size, devicePointer, out, child, poolPointer, isPool = false)=>{
         const clear = ()=>{
             if ((out >>> 0) !== 0)
             {
@@ -880,37 +929,52 @@ export function createEffectSeam(context){
             clear();
             return E_INVALIDARG;
         }
-        if ((pool >>> 0) !== 0)
+        const pool = poolPointer ? publisher.objectAt(poolPointer) : null;
+        if (child !== (poolPointer !== 0) || (child && !pool?.IsPool?.()))
         {
-            report('an effect made as the child of a pool is refused: effect pools are not'
-                + ' implemented');
             clear();
-            return E_NOTIMPL;
+            return E_INVALIDARG;
         }
         const parsed = parseEffect(memory.readMemory(data >>> 0, size >>> 0));
-        if ('error' in parsed)
+        const error = 'error' in parsed ? parsed.error : stateIndexNotTaken(parsed.effect);
+        if (error || !('effect' in parsed))
         {
-            report(`an effect was refused: ${parsed.error}`);
+            report(`an effect was refused: ${error}`);
             clear();
             return E_FAIL;
         }
         let copy = 0;
         /** @type {any} */
         let effect = null;
-        effect = createEffect(parsed.effect, {
-            device,
-            report,
-            onLastRef: ()=>{
-                for (const child of effect.children())
-                {
-                    publisher.unpublish(child);
-                }
-                if (copy)
-                {
-                    free?.(copy);
-                }
-            },
-        });
+        try
+        {
+            effect = createEffect(parsed.effect, {
+                device,
+                report,
+                isPool,
+                pool,
+                onLastRef,
+            });
+        }
+        catch (e){
+            if (!(e instanceof EffectRefused))
+            {
+                throw e;
+            }
+            report(`a child effect was refused: ${e.message}`);
+            clear();
+            return E_INVALIDARG;
+        }
+        function onLastRef(){
+            for (const object of effect.children())
+            {
+                publisher.unpublish(object);
+            }
+            if (copy)
+            {
+                free?.(copy);
+            }
+        }
         const image = effect.image();
         copy = allocate ? allocate(Math.max(image.length, 4)) : 0;
         if (!copy)
@@ -921,11 +985,13 @@ export function createEffectSeam(context){
         }
         memory.writeMemory(copy, image);
         blocks.set(effect, copy);
-        return handBack(effect, effectInterfaces, IID.ID3D10Effect, out);
+        return isPool ? handBack(effect, poolInterfaces, IID.ID3D10EffectPool, out)
+            : handBack(effect, effectInterfaces, IID.ID3D10Effect, out);
     };
 
     return {
         fromMemory,
+        poolFromMemory,
         effectInterfaces,
         /** The invalid objects' pointers are the same in every effect; for tests. */
         invalid: INVALID,

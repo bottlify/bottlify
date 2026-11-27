@@ -290,6 +290,8 @@ async function run(request){
         await new Promise(resolve=>setTimeout(resolve, 20));
     }
 
+    // A program that dumps its answers as text is read by whoever drives.
+    result.text = String.fromCharCode(...bytes.slice(0, 4096));
     result.report = [];
     for (let index = 0; index < request.words && index * 4 + 3 < bytes.length; index++)
     {
@@ -300,6 +302,19 @@ async function run(request){
 
     if (presented)
     {
+        // OpenGL presents the texture a frame is shown through before its
+        // recording is replayed into it, once the replay's pipelines are
+        // built: the picture is there when the device's frames stop coming.
+        let frames = -1;
+        for (let quiet = 0, tries = 0; quiet < 2 && tries < 50; tries++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 150));
+            const now = app.diagnostics().find((/** @type {any} */ entry)=>entry.name
+                === 'graphics')?.metrics?.backend?.counters?.frames ?? 0;
+            quiet = now === frames ? quiet + 1 : 0;
+            frames = now;
+        }
+        await handle.device.queue.onSubmittedWorkDone();
         const image = await readBack(handle.device, presented.surface);
         show(image);
         result.frame = {

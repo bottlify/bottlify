@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Interlocked singly linked lists: a LIFO of entries the program owns, each
  * an SLIST_ENTRY whose first word is the next one's address, under an
@@ -55,12 +57,12 @@ const FAST_PUSH_LENGTH = 9;
  */
 export function createSListFunctions(host){
     /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
+    const read32 = address=>new DataView(host.readMemory(address, 4).buffer)
         .getUint32(0, true);
 
     /** @param {number} header */
     const readHeader = header=>{
-        const view = new DataView(host.readMemory(header, HEADER.SIZE).slice().buffer);
+        const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
         return {
             next: view.getUint32(HEADER.NEXT, true),
             depth: view.getUint16(HEADER.DEPTH, true),
@@ -101,7 +103,7 @@ export function createSListFunctions(host){
     const change = (header, step)=>{
         for (;;)
         {
-            const view = new DataView(host.readMemory(header, HEADER.SIZE).slice().buffer);
+            const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
             const was = view.getBigUint64(0, true);
             const { header: next, answer } = step({
                 next: view.getUint32(HEADER.NEXT, true),
@@ -185,7 +187,7 @@ export function createSListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>{
-                host.writeMemory(header >>> 0, new Uint8Array(HEADER.SIZE));
+                host.writeMemory(wholeAddress(header), new Uint8Array(HEADER.SIZE));
                 return 0;
             },
         },
@@ -194,14 +196,16 @@ export function createSListFunctions(host){
         QueryDepthSList: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>readHeader(header >>> 0).depth,
+            handler: ([header])=>readHeader(wholeAddress(header)).depth,
         },
 
         /** PSLIST_ENTRY InterlockedPushEntrySList(PSLIST_HEADER, PSLIST_ENTRY) */
         InterlockedPushEntrySList: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([header, entry])=>pushList(header >>> 0, entry >>> 0, entry >>> 0, 1),
+            handler: ([header, entry])=>pushList(wholeAddress(header), wholeAddress(entry),
+                wholeAddress(entry), 1),
             natives: {
                 RtlInterlockedPushListSList: pushListFast,
                 /**
@@ -211,20 +215,25 @@ export function createSListFunctions(host){
                  * The same push, as an ordinary stdcall.
                  */
                 RtlInterlockedPushListSListEx: {
+                    returns: 'pointer',
                     argBytes: 16,
                     /** @param {number[]} args */
                     handler: ([header, first, last, count])=>
-                        pushList(header >>> 0, first >>> 0, last >>> 0, count >>> 0),
+                        pushList(wholeAddress(header), wholeAddress(first), wholeAddress(last),
+                            count >>> 0),
                 },
             },
         },
 
         /** PSLIST_ENTRY InterlockedPopEntrySList(PSLIST_HEADER) */
         InterlockedPopEntrySList: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
-                header: [read32(now.next), now.depth - 1, now.sequence + 1], answer: now.next })),
+            handler: ([header])=>change(wholeAddress(header), now=>(now.next === 0
+                ? { answer: 0 }
+                : { header: [read32(now.next), now.depth - 1, now.sequence + 1],
+                    answer: now.next })),
         },
 
         /**
@@ -235,10 +244,12 @@ export function createSListFunctions(host){
          * answer kernel32's sync tests accept from Windows before 8.
          */
         InterlockedFlushSList: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
-                header: [0, 0, now.sequence + 1], answer: now.next })),
+            handler: ([header])=>change(wholeAddress(header),
+                now=>(now.next === 0 ? { answer: 0 } : {
+                    header: [0, 0, now.sequence + 1], answer: now.next })),
         },
     };
 }

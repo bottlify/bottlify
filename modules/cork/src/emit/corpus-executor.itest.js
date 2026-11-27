@@ -7,11 +7,14 @@
 /**
  * A part of the corpus on translated code on the third executor of a memory:
  * every field of its state and its tables lie past the first's, at addresses
- * its translations carry as constants (`executorLayout`). The executors' gate
+ * its translations carry as constants (`executorLayout`). The regions are in
+ * the atomic variant, as every executor of a process with more than one runs
+ * them: its locked instructions (`xchg` with memory, `lock cmpxchg8b`, ...) are
+ * wasm atomics here, judged by the processor's answers. The executors' gate
  * beside the sequences' (`runtime/executors.test.js`); see
  * `testing/translated-corpus.js`.
  */
 
 import { testTranslatedCorpus } from '../testing/translated-corpus.js';
 
-testTranslatedCorpus(2, 6, { executor: 2 });
+testTranslatedCorpus(2, 6, { executor: 2, atomic: true });

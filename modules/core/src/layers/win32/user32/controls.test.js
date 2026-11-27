@@ -40,6 +40,8 @@ const TEMPLATE = 0x12000;
 const MSG_BUFFER = 0x13000;
 const TEXT = 0x13100;
 const OUT = 0x13200;
+/** The class the fixture registers to keep a frame of its own. */
+const INSET_CLASS = 'InsetProbe';
 const HEAP = 0x18000;
 const HINSTANCE = 0x400000;
 const DIALOGPROC = 0x401000;
@@ -49,6 +51,7 @@ const THREAD = { name: 'main' };
 const SCREEN = { width: 240, height: 320, bitsPerPixel: 32 };
 
 const WM_CREATE = 0x0001;
+const WM_NCCALCSIZE = 0x0083;
 const WM_PAINT = 0x000f;
 const WM_CLOSE = 0x0010;
 const WM_KEYDOWN = 0x0100;
@@ -280,6 +283,8 @@ const textWidth = (text, average)=>[...text]
 function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
+    /** The client area each InsetProbe window found at WM_CREATE. @type {any[]} */
+    const insetCreated = [];
     /** The queue's clock, which a test moves on to have what is due later happen. */
     const clock = { now: 0 };
     const queue = createMessageQueue({ now: ()=>clock.now });
@@ -317,6 +322,16 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     const keysDown = new Set();
     let presents = 0;
     let heapNext = HEAP;
+    /** The process heap's blocks as the fake gives them, by address: their sizes. */
+    /** @type {Map<number, number>} */
+    const blockSizes = new Map();
+    /** @param {number} bytes */
+    const allocate = bytes=>{
+        const at = heapNext;
+        heapNext += (bytes + 15) & ~15;
+        blockSizes.set(at, bytes);
+        return at;
+    };
     /** @type {string[]} */
     const faces = [];
     /** @param {{ height: number, faceName: string }} font */
@@ -390,18 +405,39 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
             presents++;
         },
         keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
-        allocate: bytes=>{
-            const at = heapNext;
-            heapNext += (bytes + 15) & ~15;
-            return at;
+        allocate,
+        release: (/** @type {number} */ at)=>{
+            blockSizes.delete(at);
         },
-        release: ()=>{},
+        block: (/** @type {number} */ at)=>{
+            const size = blockSizes.get(at);
+            return size === undefined ? null : { size, capacity: (size + 15) & ~15 };
+        },
         registerControls: (controlHost, toolkit, register)=>{
             for (const definition of [...createCommonControls(controlHost, toolkit),
                 ...createRichEditControls(controlHost, toolkit)])
             {
                 register(definition);
             }
+            // A class of the library kind keeping a frame of its own, three
+            // pixels all round, and noting the client area WM_CREATE finds.
+            /** @param {any} record @param {any} message @param {unknown} thread */
+            const inset = (record, message, thread)=>{
+                if (message.message === WM_NCCALCSIZE)
+                {
+                    const rect = new Int32Array(memory.readMemory(message.lParam, 16).slice()
+                        .buffer);
+                    memory.writeMemory(message.lParam, new Uint8Array(Int32Array.from(rect,
+                        (value, index)=>value + (index < 2 ? 3 : -3)).buffer));
+                    return 0;
+                }
+                if (message.message === WM_CREATE)
+                {
+                    insetCreated.push(controlHost.clientSize(record));
+                }
+                return toolkit.common(record, message, thread);
+            };
+            register({ name: INSET_CLASS, procedure: inset });
         },
     });
     const table = /** @type {Record<string, { argBytes: number,
@@ -459,9 +495,27 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
 
     return {
         memory, queue, desktop, gdi, fns: table, dispatched, keysDown, pump, mouse, key, click,
-        commands, centre, faces, presents: ()=>presents, clock,
+        commands, centre, faces, presents: ()=>presents, clock, allocate, insetCreated,
     };
 }
+
+test('a built-in class is asked WM_NCCALCSIZE before WM_CREATE, and keeps the frame it answers',
+    async()=>{
+        // MSDN, WM_NCCALCSIZE: sent when the size and position of a window's
+        // client area must be calculated; CreateWindowEx sends it between
+        // WM_NCCREATE and WM_CREATE (msg.c WmCreateOverlappedSeq). A class
+        // the window manager runs itself answers it as a program's does: a
+        // rebar with WS_BORDER has a frame two pixels wide from the start.
+        const context = setup();
+        context.memory.putString(TEXT, INSET_CLASS);
+        const hwnd = await context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_POPUP, 10, 20,
+            100, 50, 0, 0, HINSTANCE, 0]);
+        assert.notEqual(hwnd, 0);
+        assert.deepEqual(context.insetCreated, [{ width: 94, height: 44 }],
+            'WM_CREATE finds the client area inside the frame it answered');
+        context.fns.GetClientRect.handler([hwnd, OUT]);
+        assert.deepEqual([0, 4, 8, 12].map(at=>context.memory.u32(OUT + at)), [0, 0, 94, 44]);
+    });
 
 /** The dialog every test starts from: a push button, a static, a check box. */
 const WIZARD_PAGE = Object.freeze({
@@ -1006,6 +1060,30 @@ test('an owner-drawn button is drawn by its parent, told what changed', async()=
     ]);
 });
 
+test('an owner-drawn button in a hidden window is not drawn as it is focused or pushed', async()=>{
+    // Wine's button.c paints a button's change at once only if IsWindowVisible:
+    // a window under a parent not shown yet draws nothing, and its parent is
+    // asked for no colour. 3DMark06's registration dialog sets the focus on an
+    // owner-drawn button while the dialog is still hidden; its MFC object
+    // handles the reflected WM_CTLCOLORBTN only once it is set up, and asked
+    // before, it read through a null pointer.
+    const BS_OWNERDRAW = 0x000b;
+    const BS_NOTIFY = 0x4000;
+    const BM_SETSTATE = 0x00f3;
+    const BN_SETFOCUS = 6;
+    const SW_HIDE = 0;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    await context.fns.ShowWindow.handler([dialog, SW_HIDE]);
+    context.memory.putString(TEXT, 'Button');
+    const button = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY, 150, 110, 50, 14, dialog, 0xe,
+        HINSTANCE, 0]);
+    seen.length = 0;
+    await context.fns.SetFocus.handler([button]);
+    await context.fns.SendMessageA.handler([button, BM_SETSTATE, 1, 0]);
+    assert.deepEqual(seen.map(one=>[one.message, one.code]), [['command', BN_SETFOCUS]]);
+});
+
 test('an owner-drawn static is drawn by its parent', async()=>{
     // As documented for SS_OWNERDRAW: the parent draws it on WM_DRAWITEM,
     // having been asked WM_CTLCOLORSTATIC first.
@@ -1479,6 +1557,76 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('a list box\'s selection: one item or a set, its caret and anchor, fixed when made', async()=>{
+    // Wine's listbox test: the four styles' tables and
+    // test_changing_selection_styles.
+    const context = setup();
+    const dialog = await openDialog(context);
+    const send = (/** @type {number} */ list, /** @type {number} */ message, wParam = 0,
+        lParam = 0)=>context.fns.SendMessageA.handler([list, message, wParam, lParam]);
+    const LB_SELITEMRANGE = 0x019b;
+    const LB_GETANCHORINDEX = 0x019d;
+    const LB_GETCARETINDEX = 0x019f;
+    const LB_GETSELCOUNT = 0x0190;
+    const LB_SETSEL = 0x0185;
+    const GWL_STYLE = -16;
+    /** @param {number} style */
+    const make = style=>{
+        context.memory.putString(TEXT, 'ListBox');
+        const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | style, 8, 60, 100, 60, dialog, 400, HINSTANCE, 0]);
+        for (const item of ['a', 'b', 'c', 'd'])
+        {
+            context.memory.putString(TEXT, item);
+            send(list, LB_ADDSTRING, 0, TEXT);
+        }
+        return list;
+    };
+    /** @param {number} list */
+    const query = list=>[LB_GETCURSEL, LB_GETANCHORINDEX, LB_GETCARETINDEX, LB_GETSELCOUNT]
+        .map(message=>send(list, message));
+
+    const single = make(0);
+    assert.deepEqual(query(single), [-1, -1, 0, -1], 'none selected, no anchor, caret on 0');
+    assert.equal(send(single, LB_SELITEMRANGE, 1, 1 | 2 << 16), -1, 'no range in a single list');
+    assert.equal(send(single, LB_SETSEL, 1, 1), -1);
+    assert.equal(send(single, LB_SETCURSEL, 2), 2);
+    assert.deepEqual(query(single), [2, 2, 2, -1]);
+
+    const multiple = make(0x0008);
+    assert.deepEqual(query(multiple), [0, -1, 0, 0], 'LB_GETCURSEL is the caret');
+    assert.equal(send(multiple, LB_SETCURSEL, 2), -1, 'LB_SETCURSEL is a single list\'s');
+    assert.equal(send(multiple, LB_SELITEMRANGE, 1, 1 | 2 << 16), 0);
+    assert.deepEqual(query(multiple), [0, -1, 0, 2], 'a range moves neither caret nor anchor');
+    assert.equal(send(multiple, LB_SETSEL, 0, 1), 0);
+    assert.deepEqual(query(multiple), [1, 1, 1, 1], 'LB_SETSEL moves both, either way');
+
+    // LBS_NOSEL makes a multiple-selection list answer as a single one.
+    assert.deepEqual(query(make(0x0008 | 0x4000)), [-1, -1, 0, -1]);
+
+    // A style changed after the list is made changes nothing.
+    context.fns.SetWindowLongA.handler([multiple, GWL_STYLE,
+        context.fns.GetWindowLongA.handler([multiple, GWL_STYLE]) & ~0x0008]);
+    assert.equal(send(multiple, LB_GETSELCOUNT), 1);
+    context.fns.SetWindowLongA.handler([single, GWL_STYLE,
+        context.fns.GetWindowLongA.handler([single, GWL_STYLE]) | 0x0008]);
+    assert.equal(send(single, LB_GETSELCOUNT), -1);
+});
+
+test('GetListBoxInfo is how many items a column of the list box holds', async()=>{
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ListBox');
+    const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE, 8, 60, 100, 60, dialog, 400, HINSTANCE, 0]);
+    const row = context.fns.SendMessageA.handler([list, 0x01a1, 0, 0]);
+    context.fns.GetClientRect.handler([list, OUT]);
+    const rows = Math.floor(context.memory.u32(OUT + 12) / row);
+    assert.ok(rows >= 1);
+    assert.equal(await context.fns.GetListBoxInfo.handler([list]), rows);
+    assert.equal(context.fns.SendMessageA.handler([list, 0x01b2, 0, 0]), rows, 'LB_GETLISTBOXINFO');
+});
+
 test('an item and a line of upper-half bytes read back as those bytes', async()=>{
     // The text is read as Windows-1252, where 0x80 is the euro sign, 0x99 the
     // trade mark and 0x97 an em dash; LB_GETTEXT and EM_GETLINE write it back
@@ -1627,7 +1775,8 @@ test('a dropdown list drops a list of its own under the field, and a click there
         assert.equal(context.fns.GetWindowTextA.handler([combo, OUT, 16]), 3);
         assert.equal(context.memory.readCString(OUT, 16), 'Two');
         assert.equal(dropped(), 0);
-        assert.equal(context.fns.IsWindow.handler([list]), 0, 'the list goes when it closes');
+        assert.equal(context.fns.IsWindow.handler([list]), 1, 'it lives as long as the combo box');
+        assert.equal(context.fns.IsWindowVisible.handler([list]), 0, 'hidden as it closes');
         assert.deepEqual(codes(), [CBN_DROPDOWN, CBN_SELCHANGE, CBN_SELENDOK, CBN_CLOSEUP]);
 
         // Dropped again, a key moves through it and Escape closes it with
@@ -1649,6 +1798,229 @@ test('a dropdown list drops a list of its own under the field, and a click there
         assert.deepEqual(codes(), [CBN_DROPDOWN, CBN_SELENDCANCEL, CBN_CLOSEUP,
             CBN_DROPDOWN, CBN_SELENDCANCEL, CBN_CLOSEUP]);
     });
+
+test('a combo box\'s list is a window of its own for the combo box\'s whole life', async()=>{
+    // A program measures or subclasses the list GetComboBoxInfo names
+    // (user32's combo test divides by its LB_GETITEMHEIGHT); the combo
+    // box's items are that list box's, whichever window is asked.
+    const CB_GETDROPPEDCONTROLRECT = 0x0152;
+    const CB_SETITEMHEIGHT = 0x0153;
+    const CB_GETITEMHEIGHT = 0x0154;
+    const CB_GETDROPPEDWIDTH = 0x015f;
+    const CB_SETDROPPEDWIDTH = 0x0160;
+    const CB_GETCOMBOBOXINFO = 0x0164;
+    const LB_GETITEMHEIGHT = 0x01a1;
+    const GWL_STYLE = -16;
+    const GWL_ID = -12;
+    const LBS_COMBOBOX = 0x8000;
+    const context = setup();
+    const dialog = await openDialog(context);
+    /** @param {number} style */
+    const make = style=>{
+        context.memory.putString(TEXT, 'ComboBox');
+        return context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | style,
+            8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+    };
+    /** @param {number} at @param {number} value */
+    const put32 = (at, value)=>context.memory.writeMemory(at, new Uint8Array([
+        value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255]));
+    /** The combo box, edit and list GetComboBoxInfo names. @param {number} combo */
+    const windows = combo=>{
+        put32(OUT, 52);
+        assert.equal(context.fns.GetComboBoxInfo.handler([combo, OUT]), 1);
+        return [40, 44, 48].map(at=>context.memory.u32(OUT + at));
+    };
+    /** @param {number} hwnd */
+    const className = hwnd=>{
+        context.fns.GetClassNameA.handler([hwnd, TEXT, 32]);
+        return context.memory.readCString(TEXT, 32);
+    };
+    const send = (/** @type {number[]} */ ...args)=>context.fns.SendMessageA.handler(args);
+
+    const dropdown = make(0x0003);
+    const [self, , list] = windows(dropdown);
+    assert.equal(self, dropdown);
+    assert.equal(className(list), 'ComboLBox');
+    assert.equal(context.fns.IsWindowVisible.handler([list]), 0, 'hidden until it drops');
+    assert.ok((context.fns.GetWindowLongA.handler([list, GWL_STYLE]) & LBS_COMBOBOX) !== 0);
+    put32(OUT, 52);
+    assert.equal(send(dropdown, CB_GETCOMBOBOXINFO, 0, OUT), 1, 'the message answers the same');
+    assert.equal(context.memory.u32(OUT + 48), list);
+
+    context.memory.putString(TEXT, 'One');
+    send(dropdown, CB_ADDSTRING, 0, TEXT);
+    context.memory.putString(TEXT, 'Two');
+    send(list, LB_ADDSTRING, 0, TEXT);
+    assert.equal(send(dropdown, CB_GETCOUNT, 0, 0), 2, 'one set of items');
+    assert.equal(send(list, LB_GETCOUNT, 0, 0), 2);
+    const row = send(list, LB_GETITEMHEIGHT, 0, 0);
+    assert.ok(row > 0, 'a list row is as tall as its text');
+    assert.equal(send(dropdown, CB_GETITEMHEIGHT, 0, 0), row);
+
+    // The field's item height: the field is six rows taller.
+    for (const height of [5, 20])
+    {
+        assert.equal(send(dropdown, CB_SETITEMHEIGHT, -1, height), 0);
+        context.fns.GetClientRect.handler([dropdown, OUT]);
+        assert.equal(context.memory.u32(OUT + 12), height + 6);
+        assert.equal(send(dropdown, CB_GETITEMHEIGHT, -1, 0), height);
+    }
+
+    // The dropped width is never narrower than the combo box.
+    assert.equal(send(dropdown, CB_GETDROPPEDWIDTH, 0, 0), 100);
+    assert.equal(send(dropdown, CB_SETDROPPEDWIDTH, 50, 0), 100);
+    assert.equal(send(dropdown, CB_SETDROPPEDWIDTH, 150, 0), 150);
+    assert.equal(send(dropdown, CB_SETDROPPEDWIDTH, 0, 0), 150, 'zero leaves it');
+    assert.equal(send(dropdown, CB_GETDROPPEDWIDTH, 0, 0), 150);
+    assert.equal(send(dropdown, CB_GETDROPPEDCONTROLRECT, 0, OUT), 1);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+    context.fns.GetWindowRect.handler([dropdown, TEXT]);
+    assert.deepEqual([left, top], [0, 4].map(at=>context.memory.u32(TEXT + at) | 0),
+        'on the screen, from the field');
+    assert.deepEqual([right - left, bottom - top], [150, 120], 'as wide and tall as it drops');
+    // Moved to another height, it stays as tall as its field and drops that
+    // far; a height no taller than the field leaves how far it drops.
+    /** @param {number} height */
+    const moveTo = height=>{
+        context.fns.MoveWindow.handler([dropdown, 8, 60, 100, height, 1]);
+        context.fns.GetClientRect.handler([dropdown, OUT]);
+        const client = context.memory.u32(OUT + 12);
+        send(dropdown, CB_GETDROPPEDCONTROLRECT, 0, OUT);
+        return [client, context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)];
+    };
+    assert.deepEqual(moveTo(200), [26, 200]);
+    assert.deepEqual(moveTo(10), [26, 200]);
+
+    // A simple combo box's list is its child, shown under the field.
+    const simple = make(0x0001);
+    const [, , child] = windows(simple);
+    assert.equal(className(child), 'ComboLBox');
+    assert.equal(context.fns.GetParent.handler([child]), simple);
+    assert.equal(context.fns.GetWindowLongA.handler([child, GWL_ID]), 1000);
+    assert.equal(context.fns.IsWindowVisible.handler([child]), 1);
+
+    context.fns.DestroyWindow.handler([dropdown]);
+    assert.equal(context.fns.IsWindow.handler([list]), 0, 'the list goes with the combo box');
+});
+
+test('an editable combo box\'s field is an Edit child that has the focus and hands it keys',
+    async()=>{
+        // A program subclasses the edit GetComboBoxInfo names; its colours
+        // are asked of the combo box, which asks the dialog.
+        const GWL_ID = -12;
+        const CBN_SETFOCUS = 3;
+        const WM_CTLCOLOREDIT = 0x0133;
+        /** @type {{ message: number, lParam: number }[]} */
+        const colours = [];
+        const context = setup({ reply: message=>{
+            if (message.message === WM_CTLCOLOREDIT)
+            {
+                colours.push({ message: message.message, lParam: message.lParam >>> 0 });
+            }
+            return message.message === WM_INITDIALOG ? 1 : 0;
+        } });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | 0x0002, 8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+        context.memory.writeMemory(OUT, new Uint8Array([52, 0, 0, 0]));
+        assert.equal(context.fns.GetComboBoxInfo.handler([combo, OUT]), 1);
+        const edit = context.memory.u32(OUT + 44);
+        const item = [4, 8, 12, 16].map(at=>context.memory.u32(OUT + at) | 0);
+        context.fns.GetClassNameA.handler([edit, TEXT, 32]);
+        assert.equal(context.memory.readCString(TEXT, 32), 'Edit');
+        assert.equal(context.fns.GetParent.handler([edit]), combo);
+        assert.equal(context.fns.GetWindowLongA.handler([edit, GWL_ID]), 1001);
+        context.fns.GetWindowRect.handler([edit, OUT]);
+        const placed = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+        context.fns.GetWindowRect.handler([combo, OUT]);
+        const [left, top] = [0, 4].map(at=>context.memory.u32(OUT + at) | 0);
+        assert.deepEqual(placed, [item[0] + left, item[1] + top, item[2] + left, item[3] + top],
+            'in the item GetComboBoxInfo names');
+
+        for (const text of ['One', 'Two'])
+        {
+            context.memory.putString(TEXT, text);
+            context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+        }
+        await context.fns.SetFocus.handler([combo]);
+        await context.pump(dialog);
+        assert.equal(context.fns.GetFocus.handler([]), edit, 'the focus is the edit\'s');
+        const codes = ()=>context.commands().filter(([id])=>id === 500).map(([, code])=>code);
+        assert.ok(codes().includes(CBN_SETFOCUS));
+        assert.ok(colours.some(asked=>asked.lParam === edit), 'the edit\'s colours, asked');
+
+        // Down in the edit walks the list: the item shows in the edit, and
+        // nobody typed, so no CBN_EDITCHANGE.
+        context.dispatched.length = 0;
+        context.key(WM_KEYDOWN, VK_DOWN);
+        await context.pump(dialog);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 0);
+        assert.equal(context.fns.GetWindowTextA.handler([edit, OUT, 16]), 3);
+        assert.equal(context.memory.readCString(OUT, 16), 'One');
+        assert.deepEqual(codes(), [CBN_SELCHANGE]);
+        context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+        assert.equal(context.memory.readCString(OUT, 16), 'One',
+            'the combo box\'s text is the edit\'s');
+    });
+
+test('an owner-drawn combo box is as tall as its parent measures, whatever its font',
+    async()=>{
+        const WM_MEASUREITEM = 0x002c;
+        const CB_GETITEMHEIGHT = 0x0154;
+        const CBS_OWNERDRAWFIXED = 0x0010;
+        const WM_SETFONT = 0x0030;
+        /** @type {number[]} */
+        const asked = [];
+        /** @type {any} */
+        let context = null;
+        context = setup({ reply: message=>{
+            if (message.message === WM_MEASUREITEM)
+            {
+                // The field (item -1) 18 rows tall, a list row 20.
+                const item = context.memory.u32(message.lParam + 8) | 0;
+                asked.push(item);
+                context.memory.writeMemory(message.lParam + 16,
+                    new Uint8Array([item === -1 ? 18 : 20, 0, 0, 0]));
+                return 1;
+            }
+            return message.message === WM_INITDIALOG ? 1 : 0;
+        } });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | 0x0003 | CBS_OWNERDRAWFIXED, 8, 60, 100, 120, dialog, 500,
+            HINSTANCE, 0]);
+        assert.deepEqual(asked, [-1, 0], 'the field, then a list row');
+        /** @returns {number} */
+        const height = ()=>{
+            context.fns.GetClientRect.handler([combo, OUT]);
+            return context.memory.u32(OUT + 12);
+        };
+        assert.equal(height(), 24);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETITEMHEIGHT, 0, 0]), 20);
+        context.fns.SendMessageA.handler([combo, WM_SETFONT, 0, 0]);
+        assert.equal(height(), 24, 'a new font leaves what the parent measured');
+    });
+
+test('an editable combo box\'s field empties with no selection and with no items', async()=>{
+    const CB_RESETCONTENT = 0x014b;
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ComboBox');
+    const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | 0x0002, 8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+    context.memory.putString(TEXT, 'One');
+    context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+    const field = ()=>context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+    context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+    assert.equal(field(), 3);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETCURSEL, -1, 0]), -1);
+    assert.equal(field(), 0, 'no selection, no text');
+    context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+    context.fns.SendMessageA.handler([combo, CB_RESETCONTENT, 0, 0]);
+    assert.equal(field(), 0, 'no items, no text');
+});
 
 test('an editable combo box in focus shows its text with a caret, not a field of blue', async()=>{
     // A self-extractor's destination box, typed into, was one block of the
@@ -1691,7 +2063,8 @@ test('an editable combo box field takes typing and answers the edit selection', 
 
     // The field is what a program reads back: select it whole and type the
     // replacement, as a person driving the dialog would.
-    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, -1]), 1);
+    // The low word is where the selection starts, the high word, -1, its end.
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, 0xffff0000]), 1);
     for (const character of 'C:\\App')
     {
         context.key(WM_CHAR, character.charCodeAt(0));
@@ -1709,7 +2082,8 @@ test('an editable combo box field takes typing and answers the edit selection', 
     await context.pump(dialog);
     context.fns.GetWindowTextA.handler([combo, OUT, 16]);
     assert.equal(context.memory.readCString(OUT, 16), 'C:\\Ap');
-    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETEDITSEL, OUT, OUT + 4]), 1);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETEDITSEL, OUT, OUT + 4]),
+        5 << 16 | 5, 'both ends in one answer too');
     assert.deepEqual([context.memory.u32(OUT), context.memory.u32(OUT + 4)], [5, 5]);
 
     // A limit the program sets holds, as an edit's does, and a character the
@@ -2418,3 +2792,246 @@ test('a rich edit shows a scroll bar only while it has something to scroll', asy
     assert.equal(bars(await make(ES_DISABLENOSCROLL, 'Welcome.')), WS_VSCROLL | WS_HSCROLL,
         'kept, disabled, when the style asks');
 });
+
+test('LB_SELECTSTRING selects by prefix in a sorted list, CB_SELECTSTRING shows it in the field',
+    async()=>{
+        // A setup's "setup type" page adds "Express" then "Custom" to a sorted
+        // list and selects its default by name: the index is where sorting put
+        // the item, not where it was added.
+        const LBS_SORT = 0x0002;
+        const LB_SELECTSTRING = 0x018c;
+        const CB_SELECTSTRING = 0x014d;
+        const CBS_SORT = 0x0100;
+        const context = setup();
+        const dialog = await openDialog(context);
+        /** @param {string} className @param {number} style @param {number} id */
+        const make = (className, style, id)=>{
+            context.memory.putString(TEXT, className);
+            return context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | style,
+                8, 60, 100, 60, dialog, id, HINSTANCE, 0]);
+        };
+        /** @param {number} hwnd @param {number} message @param {number} wParam @param {string} text */
+        const send = (hwnd, message, wParam, text)=>{
+            context.memory.putString(TEXT, text);
+            return context.fns.SendMessageA.handler([hwnd, message, wParam, TEXT]);
+        };
+        const list = make('ListBox', LBS_SORT, 400);
+        assert.equal(send(list, LB_ADDSTRING, 0, 'Express'), 0);
+        assert.equal(send(list, LB_ADDSTRING, 0, 'Custom'), 0);
+        assert.equal(send(list, LB_SELECTSTRING, -1 >>> 0, 'express'), 1, 'by prefix, any case');
+        assert.equal(context.fns.SendMessageA.handler([list, LB_GETCURSEL, 0, 0]), 1);
+        assert.equal(send(list, LB_SELECTSTRING, -1 >>> 0, 'Typical'), -1, 'LB_ERR: none');
+        assert.equal(context.fns.SendMessageA.handler([list, LB_GETCURSEL, 0, 0]), 1,
+            'and the selection kept');
+
+        const combo = make('ComboBox', 0x0003 | CBS_SORT, 500);
+        send(combo, CB_ADDSTRING, 0, 'Express');
+        send(combo, CB_ADDSTRING, 0, 'Custom');
+        assert.equal(send(combo, CB_SELECTSTRING, -1 >>> 0, 'Ex'), 1);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 1);
+        context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+        assert.equal(String.fromCharCode(...context.memory.bytes.subarray(OUT, OUT + 8)),
+            'Express' + String.fromCharCode(0), 'the field shows the item');
+    });
+
+test('an edit answers the characters as Windows\' does: return and tab are a multi-line edit\'s '
+    + 'text, Ctrl+X/C/V/Z its commands, every character 1', async()=>{
+    // Wine's user32:edit test_enter, test_tab, test_undo and the WM_GETDLGCODE
+    // loop of test_edit_control_1, as Windows answers them.
+    const ES_WANTRETURN = 0x1000;
+    const WM_GETDLGCODE = 0x0087;
+    const context = setup();
+    const dialog = await openDialog(context);
+    const { fns, memory } = context;
+    /** @param {number} style */
+    const make = style=>{
+        memory.putString(TEXT, 'Edit');
+        return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | style,
+            8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
+    };
+    /** @param {number} hwnd */
+    const text = hwnd=>{
+        fns.GetWindowTextA.handler([hwnd, OUT, 64]);
+        return memory.readCString(OUT, 64);
+    };
+    /** @param {number} hwnd @param {number} message @param {number} [wParam] */
+    const send = (hwnd, message, wParam = 0)=>fns.SendMessageA.handler([hwnd, message, wParam, 0]);
+
+    const multi = make(ES_MULTILINE);
+    const single = make(0);
+    const singleWantReturn = make(ES_WANTRETURN);
+    assert.equal(send(multi, WM_GETDLGCODE), 0x8d, 'a multi-line edit wants all keys');
+    assert.equal(send(single, WM_GETDLGCODE), 0x89);
+    assert.equal(send(singleWantReturn, WM_GETDLGCODE), 0x89, 'ES_WANTRETURN alone asks nothing');
+
+    assert.equal(send(multi, WM_CHAR, 0x0d), 1);
+    assert.equal(send(multi, WM_CHAR, 0x09), 1);
+    assert.equal(text(multi), '\r\n\t', 'a return without ES_WANTRETURN, and a tab, are typed');
+    assert.equal(send(single, WM_CHAR, 0x0d), 1, 'a character a single-line edit drops is 1');
+    assert.equal(send(single, WM_CHAR, 0x09), 1);
+    assert.equal(text(single), '');
+
+    memory.putString(TEXT, 'undo this');
+    fns.SetWindowTextA.handler([single, TEXT]);
+    fns.SendMessageA.handler([single, EM_SETSEL, 0, -1 >>> 0]);
+    assert.equal(send(single, WM_CHAR, 0x18), 1, 'Ctrl+X cuts');
+    assert.equal(text(single), '');
+    assert.equal(send(single, WM_CHAR, 0x1a), 1, 'Ctrl+Z undoes');
+    assert.equal(text(single), 'undo this');
+
+});
+
+test('an edit lays its text out in a formatting rectangle inside its border and margins',
+    async()=>{
+        const EM_GETRECT = 0x00b2;
+        const EM_SETRECT = 0x00b3;
+        const EM_SETMARGINS = 0x00d3;
+        const EM_GETMARGINS = 0x00d4;
+        const WS_BORDER = 0x00800000;
+        /** @param {any} context @param {number} edit */
+        const rectOf = (context, edit)=>{
+            context.fns.SendMessageA.handler([edit, EM_GETRECT, 0, OUT]);
+            return [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+        };
+        /** @param {any} context @param {number[]} rect */
+        const putRect = (context, rect)=>{
+            context.memory.writeMemory(OUT + 16, new Uint8Array(new Int32Array(rect).buffer));
+        };
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        // A single-line edit with a border, roomy enough for the border's inset
+        // above and below its line: two pixels in on every side, a line high.
+        const single = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_BORDER, 8, 8, 200, 60, dialog, 401, HINSTANCE, 0]);
+        context.fns.GetClientRect.handler([single, OUT + 32]);
+        const width = context.memory.u32(OUT + 40);
+        const height = context.memory.u32(OUT + 44);
+        const [left, top, right, bottom] = rectOf(context, single);
+        assert.deepEqual([left, top, right], [2, 2, width - 2]);
+        const line = bottom - top;
+        assert.ok(line > 0 && line < height - 4, 'one line high, not the client area');
+
+        // Margins move the sides in; the line stays where it is.
+        context.fns.SendMessageA.handler([single, EM_SETMARGINS, 3, 5 | 7 << 16]);
+        assert.equal(context.fns.SendMessageA.handler([single, EM_GETMARGINS, 0, 0]),
+            5 | 7 << 16);
+        assert.deepEqual(rectOf(context, single), [left + 5, top, right - 7, bottom]);
+
+        // A multi-line edit with no border fills its client area.
+        const multi = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE, 8, 80, 120, 50, dialog, 402, HINSTANCE, 0]);
+        context.fns.GetClientRect.handler([multi, OUT + 32]);
+        const client = [0, 0, context.memory.u32(OUT + 40), context.memory.u32(OUT + 44)];
+        assert.deepEqual(rectOf(context, multi), client);
+        // EM_SETRECT takes a rectangle larger than the client area either way,
+        // and keeps the one it has for a smaller one.
+        putRect(context, [1, 1, 10, 10]);
+        context.fns.SendMessageA.handler([multi, EM_SETRECT, 0, OUT + 16]);
+        assert.deepEqual(rectOf(context, multi), client);
+        putRect(context, [1, 1, 500, 400]);
+        context.fns.SendMessageA.handler([multi, EM_SETRECT, 0, OUT + 16]);
+        assert.deepEqual(rectOf(context, multi), [1, 1, 500, 400]);
+    });
+
+test('a top-level edit tells the window it was created with what changed, as a child does',
+    async()=>{
+        const WM_SETTEXT = 0x000c;
+        /** @type {number[]} */
+        const heard = [];
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_COMMAND)
+                {
+                    heard.push(message.wParam >>> 16);
+                }
+                return message.message === WM_INITDIALOG ? 1 : 0;
+            },
+        });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const edit = context.fns.CreateWindowExA.handler([0, TEXT, 0, 0, 10, 10, 50, 50,
+            dialog, 0, HINSTANCE, 0]);
+        heard.length = 0;
+        context.memory.putString(TEXT + 0x40, 'typed');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        await context.pump(dialog);
+        assert.ok(heard.includes(EN_CHANGE), 'the owner hears EN_CHANGE');
+    });
+
+test('a multi-line edit hands out its text as a buffer the program may write, and takes one',
+    async()=>{
+        const EM_GETHANDLE = 0x00bd;
+        const EM_SETHANDLE = 0x00bc;
+        const WM_SETTEXT = 0x000c;
+        const WM_GETTEXT = 0x000d;
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const single = context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE,
+            8, 8, 100, 20, dialog, 501, HINSTANCE, 0]);
+        assert.equal(context.fns.SendMessageA.handler([single, EM_GETHANDLE, 0, 0]), 0,
+            'a single-line edit has none');
+        const edit = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE, 8, 40, 100, 40, dialog, 502, HINSTANCE, 0]);
+        context.memory.putString(TEXT + 0x40, 'abc');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        const handle = context.fns.SendMessageA.handler([edit, EM_GETHANDLE, 0, 0]);
+        assert.notEqual(handle, 0);
+        assert.equal(context.memory.readCString(handle, 16), 'abc',
+            'an ANSI window\'s buffer is ANSI');
+        assert.equal(context.fns.SendMessageA.handler([edit, EM_GETHANDLE, 0, 0]), handle,
+            'asked again, the same buffer');
+        // The program writes the buffer; the edit reads it.
+        context.memory.putString(handle, 'xyz');
+        context.fns.SendMessageA.handler([edit, WM_GETTEXT, 16, OUT]);
+        assert.equal(context.memory.readCString(OUT, 16), 'xyz');
+        // A new text is written into the buffer.
+        context.memory.putString(TEXT + 0x40, 'new');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        assert.equal(context.memory.readCString(handle, 16), 'new');
+        // EM_SETHANDLE: the program's own buffer becomes the text.
+        const given = context.allocate(32);
+        context.memory.putString(given, 'given');
+        context.fns.SendMessageA.handler([edit, EM_SETHANDLE, given, 0]);
+        context.fns.SendMessageA.handler([edit, WM_GETTEXT, 16, OUT]);
+        assert.equal(context.memory.readCString(OUT, 16), 'given');
+    });
+
+test('a static takes only the image its style shows, and an etched line is its edge alone',
+    async()=>{
+        const STM_SETIMAGE = 0x172;
+        const STM_GETIMAGE = 0x173;
+        const SS_ICON = 0x03;
+        const SS_BITMAP = 0x0e;
+        const SS_ETCHEDHORZ = 0x10;
+        const WS_EX_STATICEDGE = 0x00020000;
+        const GWL_EXSTYLE = -20;
+        const IMAGE_BITMAP = 0;
+        const IMAGE_ICON = 1;
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Static');
+        const make = (/** @type {number} */ style)=>context.fns.CreateWindowExA.handler([0, TEXT,
+            0, WS_CHILD | WS_VISIBLE | style, 5, 5, 100, 100, dialog, 0, HINSTANCE, 0]);
+        const bitmapStatic = make(SS_BITMAP);
+        const bitmap = context.gdi.table.CreateBitmap.handler([1, 1, 1, 32, 0]);
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_SETIMAGE, IMAGE_ICON,
+            0x1234]), 0, 'an icon on a bitmap static is refused');
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_SETIMAGE, IMAGE_BITMAP,
+            bitmap]), 0, 'the first image replaces none');
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_GETIMAGE, IMAGE_BITMAP,
+            0]), bitmap);
+        const iconStatic = make(SS_ICON);
+        assert.equal(context.fns.SendMessageA.handler([iconStatic, STM_SETIMAGE, IMAGE_BITMAP,
+            bitmap]), 0);
+        assert.equal(context.fns.SendMessageA.handler([iconStatic, STM_GETIMAGE, IMAGE_BITMAP,
+            0]), 0, 'and not kept');
+
+        const line = make(SS_ETCHEDHORZ);
+        assert.equal(context.fns.GetWindowLongA.handler([line, GWL_EXSTYLE]) & WS_EX_STATICEDGE,
+            WS_EX_STATICEDGE);
+        context.fns.GetClientRect.handler([line, OUT]);
+        assert.equal(context.memory.u32(OUT + 12), 0, 'no client height');
+        assert.ok(context.memory.u32(OUT + 8) > 0, 'its width kept');
+    });

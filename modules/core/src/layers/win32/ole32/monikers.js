@@ -27,10 +27,12 @@
  * the same whether the tree it was built from leaned left or right.
  */
 
-import { GUID_NULL, GUID_SIZE, canonicalGuid, formatGuid, parseGuid } from './guid.js';
+import { canonicalGuid, formatGuid, GUID_NULL, GUID_SIZE, guidBytes } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -63,7 +65,7 @@ const MK_S_US = 0x000401e6;
 /** MKSYS_*, what IsSystemMoniker answers. */
 export const MKSYS = Object.freeze({
     NONE: 0, GENERICCOMPOSITE: 1, FILEMONIKER: 2, ANTIMONIKER: 3, ITEMMONIKER: 4,
-    POINTERMONIKER: 5, CLASSMONIKER: 7,
+    POINTERMONIKER: 5, CLASSMONIKER: 7, OBJREFMONIKER: 8,
 });
 
 const BINDSPEED_INDEFINITE = 1;
@@ -81,7 +83,7 @@ const LOCALE_US = 0x409;
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
 export const IID_IBINDCTX = '{0000000E-0000-0000-C000-000000000046}';
-export const IID_IENUMMONIKER = '{00000102-0000-0000-C000-000000000046}';
+const IID_IENUMMONIKER = '{00000102-0000-0000-C000-000000000046}';
 export const IID_IROTDATA = '{F29F6BC0-5021-11CE-AA15-00006901293F}';
 const IID_IPERSIST = '{0000010C-0000-0000-C000-000000000046}';
 const IID_IPERSISTSTREAM = '{00000109-0000-0000-C000-000000000046}';
@@ -101,6 +103,10 @@ export const CLSID_ANTI_MONIKER = '{00000305-0000-0000-C000-000000000046}';
 export const CLSID_POINTER_MONIKER = '{00000306-0000-0000-C000-000000000046}';
 export const CLSID_COMPOSITE_MONIKER = '{00000309-0000-0000-C000-000000000046}';
 export const CLSID_CLASS_MONIKER = '{0000031A-0000-0000-C000-000000000046}';
+export const CLSID_OBJREF_MONIKER = '{00000327-0000-0000-C000-000000000046}';
+const IID_IMARSHAL = '{00000003-0000-0000-C000-000000000046}';
+/** An OBJREF_CUSTOM's bytes before its data: signature, flags, IID, CLSID, two counts. */
+const OBJREF_CUSTOM_HEADER = 48;
 
 /** Private classes of the objects that are no moniker. */
 const CLSID_BIND_CONTEXT = '{7B5B0B8E-1F8C-4B36-9D1C-2A6D4E4B0020}';
@@ -137,8 +143,6 @@ const BIND_OPTS = Object.freeze({
     LOCALE: 24, SERVER_INFO: 28, HWND: 32, SIZE_OF: 36, SIZE_OF_V1: 16, SIZE_OF_V2: 32,
 });
 
-/** MULTI_QI: the IID asked for, the interface answered, and its HRESULT. */
-const MULTI_QI = Object.freeze({ IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 });
 
 /** The largest count an anti moniker loads; one more is refused. */
 const MAX_ANTI_COUNT = 0xfffff;
@@ -160,6 +164,7 @@ const FILE_MONIKER_WIDE_TAG = 3;
  * What the moniker functions need of the rest of ole32.
  *
  * @typedef {Object} MonikerEnv
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose MULTI_QI is wider
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
@@ -189,6 +194,15 @@ const FILE_MONIKER_WIDE_TAG = 3;
  *             thread: unknown) => Promise<number>} getClassObject
  *           CoGetClassObject.
  * @property {(out: number, thread: unknown) => Promise<number>} runningObjectTable
+ * @property {{ sizeMax: (out: number, iid: string, unknown: number, context: number,
+ *         destination: number, flags: number) => Promise<number>,
+ *     marshal: (stream: number, iid: string, unknown: number, context: number,
+ *         destination: number, flags: number) => Promise<number>,
+ *     unmarshal: (stream: number, iid: string, out: number) => Promise<number>,
+ *     releaseData: (stream: number) => Promise<number> }} [marshaling]
+ *     CoGetMarshalSizeMax, CoMarshalInterface, CoUnmarshalInterface and
+ *     CoReleaseMarshalData, the interface named by its IID. Absent, an
+ *     objref moniker cannot be marshaled.
  *           GetRunningObjectTable: writes an IRunningObjectTable* the caller
  *           releases to `out`.
  * @property {(path: string) => Promise<string | null>} storageClassOf
@@ -224,6 +238,9 @@ const FILE_MONIKER_WIDE_TAG = 3;
  *           What follows a class moniker's CLSID in its display name, as it
  *           persists it: UTF-16 with its terminator, or nothing.
  * @property {number} target  A pointer moniker's object, held counted.
+ * @property {boolean} objref
+ *           A pointer moniker that crosses to another apartment as a
+ *           reference to its object (CreateObjrefMoniker), not by its pointer.
  * @property {number} count   How many components an anti moniker cancels.
  * @property {number[]} parts A composite's components, each held counted.
  */
@@ -247,8 +264,15 @@ const MKSYS_OF = Object.freeze({
  */
 const newState = (kind, fields = {})=>({
     kind, self: 0, delimiter: null, name: '', path: '', clsid: GUID_NULL,
-    extra: new Uint8Array(0), target: 0, count: 0, parts: [], ...fields,
+    extra: new Uint8Array(0), target: 0, count: 0, parts: [], objref: false, ...fields,
 });
+
+/**
+ * A moniker's class, as GetClassID and its class factory know it.
+ *
+ * @param {MonikerState} state
+ */
+const classOf = state=>(state.objref ? CLSID_OBJREF_MONIKER : CLASS_OF[state.kind]);
 
 /**
  * The moniker CoCreateInstance makes of each class: what Windows' class
@@ -275,22 +299,6 @@ const upperText = text=>String.fromCharCode(...Array.from(text, c=>upperUnit(c.c
 
 /** @param {string} a @param {string} b */
 const sameIgnoringCase = (a, b)=>a.length === b.length && upperText(a) === upperText(b);
-
-/**
- * @param {string} text
- * @param {boolean} [terminate]
- * @returns {Uint8Array} UTF-16LE
- */
-const encodeWide = (text, terminate = true)=>{
-    const bytes = new Uint8Array((text.length + (terminate ? 1 : 0)) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const unit = text.charCodeAt(index);
-        bytes[index * 2] = unit & 0xff;
-        bytes[index * 2 + 1] = unit >>> 8;
-    }
-    return bytes;
-};
 
 /**
  * @param {Uint8Array} bytes  UTF-16LE; reading stops at a terminator.
@@ -335,9 +343,6 @@ const u16 = value=>new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32Of = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
     | (bytes[at + 3] << 24)) >>> 0;
-
-/** @param {string} guid */
-const guidBytes = guid=>/** @type {Uint8Array} */ (parseGuid(guid));
 
 /**
  * A path in the pieces file monikers compose and compare by: each
@@ -416,9 +421,9 @@ const comparisonDataOf = state=>{
     switch (state.kind)
     {
         case 'item':
-            return concat(clsid, encodeWide(upperText(`${state.delimiter ?? ''}${state.name}`)));
+            return concat(clsid, utf16z(upperText(`${state.delimiter ?? ''}${state.name}`)));
         case 'file':
-            return concat(clsid, encodeWide(upperText(state.path)));
+            return concat(clsid, utf16z(upperText(state.path)));
         case 'class':
             return concat(clsid, guidBytes(state.clsid));
         case 'anti':
@@ -435,18 +440,22 @@ const comparisonDataOf = state=>{
  * @param {MonikerEnv} env
  */
 export function createMonikerFunctions(env){
+    /** MULTI_QI: the IID asked for, the interface answered, each a pointer wide, and its HRESULT. */
+    const MULTI_QI = env.pointerSize === 8 ? { IID: 0, ITF: 8, HR: 16, SIZE_OF: 24 }
+        : { IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 };
     /** @param {number} address */
-    const readU32 = address=>readU32Of(env.readMemory(address >>> 0, 4), 0);
+    const readU32 = address=>readU32Of(env.readMemory(wholeAddress(address), 4), 0);
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>env.writeMemory(address >>> 0, u32(value));
+    const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @param {bigint} value */
     const writeU64 = (address, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address */
-    const readGuidAt = address=>formatGuid(env.readMemory(address >>> 0, GUID_SIZE).slice());
+    const readGuidAt = address=>formatGuid(env.readMemory(wholeAddress(address),
+        GUID_SIZE).slice());
 
     /**
      * An OLESTR a program hands in, read a window at a time so a short one at
@@ -547,7 +556,7 @@ export function createMonikerFunctions(env){
      * @param {string} text @param {number} out
      */
     const answerString = (text, out)=>{
-        const bytes = encodeWide(text);
+        const bytes = utf16z(text);
         const block = env.taskAlloc(bytes.length) >>> 0;
         if (block === 0)
         {
@@ -825,8 +834,16 @@ export function createMonikerFunctions(env){
             { id: IID_IPERSISTSTREAM, methods: MONIKER_METHODS.slice(0, 5) },
             // Windows answers a QueryInterface for the moniker's own class,
             // which is how it tells its monikers from a program's.
-            { id: CLASS_OF[state.kind], methods: MONIKER_METHODS },
+            { id: classOf(state), methods: MONIKER_METHODS },
         ];
+        if (state.objref)
+        {
+            // Asked for the pointer moniker's class, it answers as one.
+            interfaces.push({ id: CLSID_POINTER_MONIKER, methods: MONIKER_METHODS });
+        }
+        interfaces.push({ id: IID_IMARSHAL, methods: state.kind === 'pointer'
+            ? OBJREF_MARSHAL_METHODS
+            : state.kind === 'composite' ? COMPOSITE_MARSHAL_METHODS : BY_VALUE_MARSHAL_METHODS });
         if (state.kind === 'class')
         {
             interfaces.push({ id: IID_IPERSIST, methods: MONIKER_METHODS.slice(0, 1) });
@@ -835,9 +852,20 @@ export function createMonikerFunctions(env){
         {
             interfaces.push({ id: IID_IROTDATA, methods: ROT_DATA_METHODS });
         }
+        /** What the moniker holds of the program's, let go of once. */
+        const takeHeld = ()=>{
+            const held = [...state.parts, state.target].filter(pointer=>pointer !== 0);
+            state.parts = [];
+            state.target = 0;
+            return held;
+        };
         return {
             state,
             interfaces,
+            // Inside the program's last Release, and waited for: a Release
+            // made after it, with nobody waiting, would run on a thread that
+            // has gone on to something else.
+            lastRelease: ()=>releaseAll(takeHeld(), env.callerThread()),
             destroy(){
                 if (state.self !== 0)
                 {
@@ -847,9 +875,7 @@ export function createMonikerFunctions(env){
                 {
                     unseen = Math.max(0, unseen - 1);
                 }
-                const held = [...state.parts, state.target].filter(pointer=>pointer !== 0);
-                state.parts = [];
-                state.target = 0;
+                const held = takeHeld();
                 if (held.length > 0)
                 {
                     void releaseAll(held, env.callerThread());
@@ -869,6 +895,15 @@ export function createMonikerFunctions(env){
             return definitionOf(defaultState(/** @type {MonikerState['kind']} */ (kind)));
         });
     }
+    // What CoUnmarshalInterface makes to read an objref moniker back.
+    env.registry.registerClass(CLSID_OBJREF_MONIKER, ()=>{
+        if (pending)
+        {
+            return pending;
+        }
+        unseen++;
+        return definitionOf(newState('pointer', { objref: true }));
+    });
 
     /**
      * Makes one of our monikers, taking over the references the state holds.
@@ -879,7 +914,7 @@ export function createMonikerFunctions(env){
      */
     const makeMoniker = async(state, thread)=>{
         pending = definitionOf(state);
-        const object = env.registry.create(CLASS_OF[state.kind]);
+        const object = env.registry.create(classOf(state));
         pending = null;
         if (!object)
         {
@@ -1100,18 +1135,20 @@ export function createMonikerFunctions(env){
     };
     env.registry.registerClass(CLSID_CONTAINER_LOCK, ()=>{
         const state = { container: 0 };
+        /** @param {unknown} thread */
+        const unlock = thread=>{
+            const container = state.container;
+            state.container = 0;
+            return container === 0 ? Promise.resolve()
+                : call(container, SLOT.LOCK_CONTAINER, [0], thread)
+                    .then(()=>release(container, thread)).then(()=>undefined);
+        };
         return {
             state,
             interfaces: [],
+            lastRelease: ()=>unlock(env.callerThread()),
             destroy(){
-                const container = state.container;
-                if (container === 0)
-                {
-                    return;
-                }
-                const thread = env.callerThread();
-                void call(container, SLOT.LOCK_CONTAINER, [0], thread)
-                    .then(()=>release(container, thread));
+                void unlock(env.callerThread());
             },
         };
     });
@@ -1174,7 +1211,7 @@ export function createMonikerFunctions(env){
      *
      * @param {number} file @param {string} path @param {number} mode @param {unknown} thread
      */
-    const loadFile = (file, path, mode, thread)=>lend(encodeWide(path),
+    const loadFile = (file, path, mode, thread)=>lend(utf16z(path),
         name=>call(file, SLOT.PERSIST_FILE_LOAD, [name, mode], thread), E_OUTOFMEMORY);
 
     /**
@@ -1706,7 +1743,7 @@ export function createMonikerFunctions(env){
         {
             return concat(head, u32(0));
         }
-        const units = encodeWide(path, false);
+        const units = utf16(path);
         return concat(head, u32(units.length + 6), u32(units.length), u16(FILE_MONIKER_WIDE_TAG),
             units);
     };
@@ -1991,7 +2028,7 @@ export function createMonikerFunctions(env){
                     return container.hr;
                 }
                 const speed = await bindSpeed(context, thread);
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.GET_OBJECT, [name, speed, context, iidAt, out], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2073,7 +2110,7 @@ export function createMonikerFunctions(env){
                 {
                     return container.hr;
                 }
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.GET_OBJECT_STORAGE, [name, context, iidAt, out], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2423,7 +2460,7 @@ export function createMonikerFunctions(env){
                 {
                     return container.hr;
                 }
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.CONTAINER_IS_RUNNING, [name], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2940,7 +2977,7 @@ export function createMonikerFunctions(env){
                 }
                 const speed = await bindSpeed(context, thread);
                 const iidAt = (state.name.length + 1) * 2;
-                const parser = await lend(concat(encodeWide(state.name),
+                const parser = await lend(concat(utf16z(state.name),
                     guidBytes(IID_IPARSEDISPLAYNAME)), block=>outCall(
                     slot=>call(container.value, SLOT.GET_OBJECT,
                         [block, speed, context, block + iidAt, slot], thread)),
@@ -3063,7 +3100,7 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out, guidBytes(CLASS_OF[state.kind]));
+            env.writeMemory(out, guidBytes(classOf(state)));
             return S_OK;
         }),
         // Windows' monikers never change once made, so none is ever dirty.
@@ -3090,12 +3127,227 @@ export function createMonikerFunctions(env){
             {
                 return E_POINTER;
             }
-            writeU32(out, MKSYS_OF[state.kind]);
+            writeU32(out, state.objref ? MKSYS.OBJREFMONIKER : MKSYS_OF[state.kind]);
             return S_OK;
         }),
     ];
 
     const ROT_DATA_METHODS = [monikerMethod('GetComparisonData', 16, getComparisonData)];
+
+    /**
+     * A composite's halves as it marshals them: its first component, and the
+     * rest -- one moniker, or a composite of them made for the purpose. The
+     * second is the caller's to release when it was made.
+     *
+     * @param {MonikerState} state @param {unknown} thread
+     */
+    const halves = async(state, thread)=>{
+        const [left, ...rest] = state.parts;
+        if (rest.length === 1)
+        {
+            return { left, right: rest[0], made: false };
+        }
+        for (const part of rest)
+        {
+            await addRef(part, thread);
+        }
+        return { left, right: await fromParts(rest, thread), made: true };
+    };
+
+    /**
+     * A generic composite's IMarshal: its two halves, each marshaled as its
+     * own OBJREF one after the other. The size it answers is each half's
+     * CoGetMarshalSizeMax and one more OBJREF header for each, which is what
+     * Windows answers for two item monikers (moniker.c: 300 for two of 102).
+     */
+    const COMPOSITE_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            env.writeMemory(out, guidBytes(classOf(state)));
+            return S_OK;
+        }),
+        monikerMethod('GetMarshalSizeMax', 28, async(state, args, thread)=>{
+            const [, , context, destination, flags, out] = args;
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            if (state.parts.length < 2 || !env.marshaling)
+            {
+                return E_UNEXPECTED;
+            }
+            const marshaling = env.marshaling;
+            const { left, right, made } = await halves(state, thread);
+            let total = 0;
+            let hr = S_OK;
+            for (const half of [left, right])
+            {
+                hr = await lend(new Uint8Array(4), async slot=>{
+                    const answer = (await marshaling.sizeMax(slot, IID_IMONIKER, half, context,
+                        destination, flags)) | 0;
+                    total += readU32(slot) + OBJREF_CUSTOM_HEADER;
+                    return answer;
+                }, E_OUTOFMEMORY);
+                if (hr < 0)
+                {
+                    break;
+                }
+            }
+            if (made)
+            {
+                await release(right, thread);
+            }
+            if (hr >= 0)
+            {
+                writeU32(out, total);
+            }
+            return hr;
+        }),
+        monikerMethod('MarshalInterface', 28, async(state, args, thread)=>{
+            const [stream, , , context, destination, flags] = args;
+            if (state.parts.length < 2 || !env.marshaling)
+            {
+                return E_UNEXPECTED;
+            }
+            const { left, right, made } = await halves(state, thread);
+            let hr = (await env.marshaling.marshal(stream, IID_IMONIKER, left, context,
+                destination, flags)) | 0;
+            if (hr >= 0)
+            {
+                hr = (await env.marshaling.marshal(stream, IID_IMONIKER, right, context,
+                    destination, flags)) | 0;
+            }
+            if (made)
+            {
+                await release(right, thread);
+            }
+            return hr;
+        }),
+        monikerMethod('UnmarshalInterface', 16, (state, [stream, iid, out], thread)=>lend(
+            new Uint8Array(8), async slot=>{
+                const marshaling = env.marshaling;
+                if (!marshaling)
+                {
+                    return E_UNEXPECTED;
+                }
+                let hr = (await marshaling.unmarshal(stream, IID_IMONIKER, slot)) | 0;
+                if (hr >= 0)
+                {
+                    hr = (await marshaling.unmarshal(stream, IID_IMONIKER, slot + 4)) | 0;
+                    if (hr < 0)
+                    {
+                        await release(readU32(slot), thread);
+                    }
+                }
+                if (hr < 0)
+                {
+                    return hr;
+                }
+                const left = readU32(slot);
+                const right = readU32(slot + 4);
+                const parts = [...await componentsOf(left, thread),
+                    ...await componentsOf(right, thread)];
+                for (const part of parts)
+                {
+                    await addRef(part, thread);
+                }
+                await releaseAll([...state.parts, left, right], thread);
+                state.parts = parts;
+                return env.callMethod(state.self, SLOT.QUERY_INTERFACE, [iid, out], thread);
+            }, E_OUTOFMEMORY)),
+        monikerMethod('ReleaseMarshalData', 8, async(_state, [stream])=>{
+            const first = (await env.marshaling?.releaseData(stream)) ?? E_UNEXPECTED;
+            return first < 0 ? first : (await env.marshaling?.releaseData(stream)) ?? E_UNEXPECTED;
+        }),
+        monikerMethod('DisconnectObject', 8, ()=>S_OK),
+    ];
+
+    /**
+     * The IMarshal of a moniker that crosses by value: its class unmarshals
+     * it, and what crosses is what IPersistStream::Save writes, sized as
+     * GetSizeMax says (moniker.c test_moniker's marshal data).
+     */
+    const BY_VALUE_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            env.writeMemory(out, guidBytes(classOf(state)));
+            return S_OK;
+        }),
+        monikerMethod('GetMarshalSizeMax', 28, (state, [, , , , , out], thread)=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            return lend(new Uint8Array(8), async slot=>{
+                const hr = (await sizeMax(state, slot, thread)) | 0;
+                if (hr >= 0)
+                {
+                    writeU32(out, readU32(slot));
+                }
+                return hr;
+            }, E_OUTOFMEMORY);
+        }),
+        monikerMethod('MarshalInterface', 28, (state, [stream], thread)=>
+            save(state, stream, thread)),
+        monikerMethod('UnmarshalInterface', 16, async(state, [stream, iid, out], thread)=>{
+            const hr = (await load(state, stream, thread)) | 0;
+            return hr < 0 ? hr
+                : env.callMethod(state.self, SLOT.QUERY_INTERFACE, [iid, out], thread);
+        }),
+        monikerMethod('ReleaseMarshalData', 8, ()=>S_OK),
+        monikerMethod('DisconnectObject', 8, ()=>S_OK),
+    ];
+
+    /**
+     * A pointer or objref moniker's IMarshal: what crosses is its object, marshaled as
+     * any interface pointer is, and the side that unmarshals it makes an
+     * objref moniker of its own over what it got.
+     */
+    const OBJREF_MARSHAL_METHODS = [
+        monikerMethod('GetUnmarshalClass', 28, (state, [, , , , , out])=>{
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            env.writeMemory(out, guidBytes(classOf(state)));
+            return S_OK;
+        }),
+        monikerMethod('GetMarshalSizeMax', 28, (state, [, , context, destination, flags, out])=>
+            (state.target === 0 || !env.marshaling ? E_UNEXPECTED
+                : env.marshaling.sizeMax(out, IID_IUNKNOWN, state.target, context, destination,
+                    flags))),
+        monikerMethod('MarshalInterface', 28, (state, [stream, , , context, destination, flags])=>
+            (state.target === 0 || !env.marshaling ? E_UNEXPECTED
+                : env.marshaling.marshal(stream, IID_IUNKNOWN, state.target, context, destination,
+                    flags))),
+        monikerMethod('UnmarshalInterface', 16, (state, [stream, iid, out])=>lend(new Uint8Array(4),
+            async slot=>{
+                const hr = env.marshaling
+                    ? (await env.marshaling.unmarshal(stream, IID_IUNKNOWN, slot)) | 0
+                    : E_UNEXPECTED;
+                if (hr < 0)
+                {
+                    return hr;
+                }
+                const previous = state.target;
+                state.target = readU32(slot);
+                if (previous !== 0)
+                {
+                    await release(previous, env.callerThread());
+                }
+                return env.callMethod(state.self, SLOT.QUERY_INTERFACE, [iid, out],
+                    env.callerThread());
+            }, E_OUTOFMEMORY)),
+        monikerMethod('ReleaseMarshalData', 8, (_state, [stream])=>
+            env.marshaling?.releaseData(stream) ?? E_UNEXPECTED),
+        monikerMethod('DisconnectObject', 8, ()=>S_OK),
+    ];
 
     /** @type {{ items: number[], position: number } | null} */
     let pendingEnum = null;
@@ -3116,7 +3368,7 @@ export function createMonikerFunctions(env){
                     {
                         const item = state.items[state.position++];
                         await addRef(item, thread);
-                        writeU32((array >>> 0) + given * 4, item);
+                        writeU32(wholeAddress(array) + given * 4, item);
                         given++;
                     }
                     if ((fetched >>> 0) !== 0)
@@ -3151,6 +3403,11 @@ export function createMonikerFunctions(env){
                     return E_NOTIMPL;
                 } },
             ] }],
+            lastRelease(){
+                const items = state.items;
+                state.items = [];
+                return releaseAll(items, env.callerThread());
+            },
             destroy(){
                 const items = state.items;
                 state.items = [];
@@ -3229,7 +3486,7 @@ export function createMonikerFunctions(env){
             }
             if (size > BIND_OPTS.FLAGS)
             {
-                object.state.options.set(env.readMemory((options >>> 0) + BIND_OPTS.FLAGS,
+                object.state.options.set(env.readMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
                     size - BIND_OPTS.FLAGS), BIND_OPTS.FLAGS);
             }
             return S_OK;
@@ -3242,7 +3499,7 @@ export function createMonikerFunctions(env){
             const size = Math.min(readU32(options), BIND_OPTS.SIZE_OF);
             if (size > BIND_OPTS.FLAGS)
             {
-                env.writeMemory((options >>> 0) + BIND_OPTS.FLAGS,
+                env.writeMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
                     object.state.options.subarray(BIND_OPTS.FLAGS, size));
             }
             writeU32(options, size);
@@ -3329,6 +3586,7 @@ export function createMonikerFunctions(env){
         return {
             state,
             interfaces: [{ id: IID_IBINDCTX, methods: BIND_CONTEXT_METHODS }],
+            lastRelease: ()=>releaseHeld(state, true, env.callerThread()),
             destroy(){
                 void releaseHeld(state, true, env.callerThread());
             },
@@ -3390,7 +3648,7 @@ export function createMonikerFunctions(env){
         const extra = text.slice(at, end);
         return {
             hr: S_OK,
-            state: newState('class', { clsid, extra: extra.length > 0 ? encodeWide(extra)
+            state: newState('class', { clsid, extra: extra.length > 0 ? utf16z(extra)
                 : new Uint8Array(0) }),
             eaten: colon < 0 ? end : end + 1,
         };
@@ -3710,6 +3968,25 @@ export function createMonikerFunctions(env){
                 await addRef(unknown, thread);
             }
             return answerMoniker(newState('pointer', { target: unknown }), out, thread);
+        }),
+
+        /**
+         * HRESULT CreateObjrefMoniker(LPUNKNOWN punk, LPMONIKER *ppmk)
+         *
+         * A pointer moniker that marshals its object rather than itself.
+         */
+        CreateObjrefMoniker: entry(8, async([unknown, out], thread)=>{
+            if (out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            writeU32(out, 0);
+            if (unknown !== 0)
+            {
+                await addRef(unknown, thread);
+            }
+            return answerMoniker(newState('pointer', { target: unknown, objref: true }), out,
+                thread);
         }),
 
         /** HRESULT CreateAntiMoniker(LPMONIKER *ppmk) */

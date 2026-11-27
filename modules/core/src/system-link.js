@@ -27,14 +27,20 @@ import { takeId } from './layers/kernel/internal/processes.js';
 import { WINDOW_CELLS } from './layers/win32/user32/manager.js';
 
 /** What a process asks of the registry; the rest -- saving, loading -- is the system's. */
-const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'values', 'getValue', 'setValue',
-    'rename', 'deleteValue', 'placeOf', 'throughClasses', 'detached', 'forget', 'revision'];
+export const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'classOf',
+    'maxSubkeyClassLength', 'values', 'getValue', 'setValue', 'rename', 'deleteValue', 'placeOf',
+    'throughClasses', 'detached', 'forget', 'revision', 'machineWrite'];
 
 /** What a process asks of the window directory. */
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
-    'hold', 'send', 'answer', 'withdraw', 'post', 'detach', 'publish', 'raise', 'lower',
+    'holdClass', 'releaseClass', 'hold', 'send', 'answer', 'withdraw', 'post', 'detach',
+    'publish', 'raise', 'lower',
     'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
     'foregroundElsewhere', 'noteCapture', 'noteFocus', 'focus'];
+
+/** What a process asks of the run's pipes (`pipes.js`'s `PipesAcross`). */
+const PIPES = ['create', 'open', 'query', 'wait', 'read', 'write', 'peek', 'connect',
+    'disconnect', 'flush', 'transact', 'state', 'setState', 'cancel', 'close'];
 
 /** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
 const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
@@ -48,13 +54,56 @@ const answering = (service, names)=>Object.fromEntries(names.map(name=>
     [name, (/** @type {any[]} */ ...args)=>service[name](...args)]));
 
 /**
+ * The run's registry as a process across a link asks it. `asMachine` cannot
+ * send its function across: while it runs, each `create` and `setValue` goes
+ * as one `machineWrite`, which the run's registry makes as the machine laying
+ * its own keys - the mark travels with the write, so another process's write
+ * arriving between them is not taken for the machine's.
+ *
+ * @param {Record<string, (...args: any[]) => any>} asked
+ */
+const remoteRegistry = asked=>{
+    let machine = 0;
+    /** @param {'create' | 'setValue'} method */
+    const writing = method=>(/** @type {any[]} */ ...args)=>(machine > 0
+        ? asked.machineWrite(method, args) : asked[method](...args));
+    return {
+        ...asked,
+        create: writing('create'),
+        setValue: writing('setValue'),
+        /**
+         * @template T
+         * @param {() => T} write
+         * @returns {T}
+         */
+        asMachine(write){
+            machine++;
+            try
+            {
+                return write();
+            }
+            finally
+            {
+                machine--;
+            }
+        },
+        // A change is the system's to save; nothing here listens for one.
+        onChanged: ()=>()=>{},
+    };
+};
+
+/**
  * The link's handlers that answer for the run's system.
  *
  * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any }} system
  * @param {(target: string, method: string, args: any[]) => any} [askBack]
  *     a blocking call to the process across the link, for its windows
+ * @param {Set<number>} [attached]  where the ids of the processes whose
+ *     windows are answered across this link are kept: a link that ends
+ *     without each saying so is detached by the run, or this thread would
+ *     ask a gone process about its windows and block on it for good
  */
-export function systemHandlers(system, askBack){
+export function systemHandlers(system, askBack, attached){
     return {
         registry: answering(system.registry, REGISTRY),
         ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
@@ -68,9 +117,19 @@ export function systemHandlers(system, askBack){
         windows: {
             ...answering(system.windows, WINDOWS),
             /** @param {number} processId */
-            attach: processId=>system.windows.attach(processId, Object.fromEntries(
-                ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
-                    (askBack ? askBack('endpoint', name, args) : null)]))),
+            // Asked back with the process it is for: a child started beside
+            // its parent in one worker answers for its windows on the same link.
+            attach: processId=>{
+                attached?.add(processId >>> 0);
+                return system.windows.attach(processId, Object.fromEntries(
+                    ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
+                        (askBack ? askBack('endpoint', name, [processId, ...args]) : null)])));
+            },
+            /** @param {number} processId */
+            detach: processId=>{
+                attached?.delete(processId >>> 0);
+                return system.windows.detach(processId);
+            },
         },
     };
 }
@@ -97,15 +156,21 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
+    /**
+     * What each process on this link answers for its windows, by its id:
+     * a child started beside its parent in one worker shares the link.
+     *
+     * @type {Map<number, any>}
+     */
+    const endpoints = new Map();
     return {
+        // Joined across a link: the run's session is saved by the thread that
+        // holds its volume (`openSession`).
+        remote: true,
         // The run's named objects are asked there (`objects`); this table is
         // not consulted.
         namedObjects: new Map(),
-        registry: {
-            ...asking('registry', REGISTRY),
-            // A change is the system's to save; nothing here listens for one.
-            onChanged: ()=>()=>{},
-        },
+        registry: remoteRegistry(asking('registry', REGISTRY)),
         ids: { take: (/** @type {string} */ name, /** @type {number} */ step)=>
             ask('ids', 'take', [name, step]) },
         volume: remoteVolume((method, args)=>ask('volume', method, args), volume,
@@ -121,12 +186,33 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             } : {},
             /** @param {number} processId @param {any} endpoint */
             attach(processId, endpoint){
-                handlers.endpoint = Object.fromEntries(ENDPOINT.map(name=>
-                    [name, (/** @type {any[]} */ ...args)=>endpoint[name](...args)]));
+                endpoints.set(processId >>> 0, endpoint);
+                // Once per link: what finds each machine's endpoint by its id.
+                handlers.endpoint ??= Object.fromEntries(ENDPOINT.map(name=>
+                    [name, (/** @type {number} */ id, /** @type {any[]} */ ...args)=>
+                        endpoints.get(id >>> 0)?.[name](...args) ?? null]));
                 ask('windows', 'attach', [processId]);
+            },
+            /** @param {number} processId */
+            detach(processId){
+                endpoints.delete(processId >>> 0);
+                return ask('windows', 'detach', [processId]);
             },
         },
         objects: remoteObjects(ask),
+        // The run's pipes (`system-pipes.js`): what the run answers at once
+        // comes back at once; what waits there is a token whose answer is
+        // waited on as the network is, its thread parked and the link looked at.
+        pipes: /** @type {import('./layers/win32/kernel32/pipes.js').PipesAcross} */ (
+            Object.fromEntries(PIPES.map(name=>[name, (/** @type {any[]} */ ...args)=>{
+                const got = ask('pipes', name, args);
+                if (got?.waiting === undefined)
+                {
+                    return got;
+                }
+                return call ? call('pipes', 'waited', [got.waiting])
+                    : ask('pipes', 'waited', [got.waiting]);
+            }]))),
         // The run's class table (`com-link.js`): what the process exports
         // is delivered to it in its handlers, and what it calls in another
         // process is waited on as the network is.
@@ -135,6 +221,14 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             call: (/** @type {string} */ method, /** @type {any[]} */ args)=>
                 call('com', method, args),
             handlers,
+        } : undefined,
+        // A child it starts beside itself, in its worker, lent translators by
+        // the run's pool through the worker, by its id; and given back.
+        translators: call ? {
+            /** @param {number} id */
+            add: id=>void call('translators', 'add', [id]).catch(()=>{}),
+            /** @param {number} id */
+            remove: id=>void call('translators', 'remove', [id]).catch(()=>{}),
         } : undefined,
         // Its children, which the run starts in workers of their own while it
         // has room, asking back here for what only their parent has.
@@ -148,8 +242,19 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
              * @returns {boolean} whether the run has it
              */
             terminate: (id, code)=>ask('processes', 'terminate', [id, code]),
+            /**
+             * A call made in one of them, where it runs (`cross-process.js`):
+             * asked without blocking this thread, which goes on with its
+             * other threads meanwhile.
+             *
+             * @param {number} id @param {any} request
+             * @returns {Promise<any>}
+             */
+            ask: (id, request)=>(call ? call('processes', 'ask', [id, request])
+                : Promise.resolve(ask('processes', 'ask', [id, request]))),
             /** @param {Record<string, (...args: any[]) => any>} parent */
             answer(parent){
+                // Once per link: the worker's one app answers for its children.
                 handlers.parent = parent;
             },
         },
@@ -170,7 +275,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
 
 /** What a process asks of the run's named objects (`system-objects.js`). */
 const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll', 'set', 'reset',
-    'release', 'releaseMutex'];
+    'release', 'releaseMutex', 'process'];
 
 /**
  * The run's named objects, asked across a link; and where the word that one
@@ -179,19 +284,37 @@ const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll
  *
  * @param {(target: string, method: string, args: any[]) => any} ask
  */
-function remoteObjects(ask){
-    /** @type {((token: number, result: number) => void) | null} */
-    let listener = null;
+export function remoteObjects(ask){
+    /**
+     * Every machine on this link: a child started beside its parent in one
+     * worker shares its parent's link, and the run keeps the link's waits by
+     * token alone, so the tokens are counted here, once for all of them,
+     * and each word goes to every machine, which takes the tokens it holds.
+     *
+     * @type {Set<(token: number, result: number) => void>}
+     */
+    const listeners = new Set();
+    let nextToken = 1;
     return {
         ...Object.fromEntries(OBJECTS.map(name=>
             [name, (/** @type {any[]} */ ...args)=>ask('objects', name, args)])),
-        /** @param {(token: number, result: number) => void} handler */
+        token: ()=>nextToken++,
+        /**
+         * @param {(token: number, result: number) => void} handler
+         * @returns {() => void} what stops it hearing them
+         */
         onWake(handler){
-            listener = handler;
+            listeners.add(handler);
+            return ()=>{
+                listeners.delete(handler);
+            };
         },
         /** @param {number} token @param {number} result */
         deliver(token, result){
-            listener?.(token, result);
+            for (const listener of [...listeners])
+            {
+                listener(token, result);
+            }
         },
     };
 }

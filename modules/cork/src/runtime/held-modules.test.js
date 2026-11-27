@@ -5,10 +5,8 @@
  */
 
 /**
- * The modules translated code is held in, by heat. Without tail calls into
- * another instance (`crossTailCalls`) the hottest regions of two full modules
- * crossing into each other are gathered into one (`gatherAfter`), and a relink
- * puts the regions run lately apart from the rest (`relinkCold`). Past a
+ * The modules translated code is held in, by heat. A relink puts the regions
+ * run lately apart from the rest (`relinkCold`). Past a
  * ceiling (`cacheBytes`) the modules gone longest without running are let go
  * and brought back from the store when asked for. Each runs as the program
  * runs without it: the same registers and memory.
@@ -22,8 +20,13 @@ import { memoryTranslationStore } from './cache.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { random } from '../testing/seeded-pieces.js';
 
-/** A machine of 4 MiB with cork's own layout and a runtime over it. @param {Record<string, unknown>} config */
-function machine(config){
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
+/** A machine of 4 MiB with cork's own layout and a runtime over it.
+ * @param {Record<string, unknown>} config @param {() => number} [now]  the runtime's clock */
+function machine(config, now = undefined){
     const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
@@ -33,8 +36,8 @@ function machine(config){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
+        ...now ? { now } : {},
     });
     return {
         runtime,
@@ -74,7 +77,7 @@ const diagnostics = m=>/** @type {any} */ (m.runtime.diagnostics());
  * @param {ReturnType<typeof machine>} m @param {() => boolean} done
  */
 async function until(m, done){
-    for (let i = 0; i < 400 && !done(); i++)
+    while (!done())
     {
         await m.runtime.translatePending();
         await turn();
@@ -84,7 +87,7 @@ async function until(m, done){
 
 /** @param {ReturnType<typeof machine>} m */
 async function untilWorkerLoaded(m){
-    for (let i = 0; i < 300 && diagnostics(m).worker !== 'ready'; i++)
+    while (diagnostics(m).worker !== 'ready')
     {
         await turn();
     }
@@ -125,85 +128,11 @@ async function runToHalt(m, at, { budget = 1_000_000, held } = {}){
     assert.fail('the program halted');
 }
 
-test('two full modules crossing into each other have their hottest regions gathered into one,'
-    + ' and the crossings stop', async()=>{
-    if (!probeFeatures().tailCalls)
-    {
-        return;
-    }
-    // A loop at LOOP calling F, each in a module of four with three stubs:
-    // neither may take the other whole (`relinkRegions` 4), nor the region it
-    // crosses into alone (both full), so no merge.
-    const LOOP = 0x2000;
-    const F = 0x3000;
-    const DATA = 0x9000;
-    const ROUND = 300_000;
-    /** @param {Record<string, unknown>} config */
-    const program = async config=>{
-        const m = machine({ leafCalls: false, dispatch: true, worker: true, callReturn: false,
-            crossTailCalls: false, batchRegions: 4, maxBatchRegions: 4, relinkRegions: 4,
-            relinkAfter: 0, ...config });
-        try
-        {
-            m.write(LOOP, [0xb9, ...le32(ROUND), ...call(LOOP + 5, F), 0x49, 0x75, 0xf8, 0xf4]);
-            m.write(F, [0x42, 0x01, 0x15, ...le32(DATA), 0xc3]);
-            const stubs = (/** @type {number} */ from)=>[0, 1, 2].map(i=>from + i * 0x10);
-            for (const stub of [...stubs(LOOP + 0x100), ...stubs(F + 0x100)])
-            {
-                m.write(stub, [0xc3]);
-            }
-            await untilWorkerLoaded(m);
-            for (const batch of [[F, ...stubs(F + 0x100)], [LOOP, ...stubs(LOOP + 0x100)]])
-            {
-                batch.forEach(at=>m.runtime.noteHot(at, 0, 64));
-                await until(m, ()=>batch.every(at=>m.runtime.entryOf(at) >= 0));
-            }
-            assert.equal(diagnostics(m).relinked ?? 0, 0);
-            /** @type {number[]} */
-            const crossings = [];
-            for (let round = 0; round < 3; round++)
-            {
-                const before = diagnostics(m).crossingsAll;
-                m.setReg(4, 0x80000);
-                await runToHalt(m, LOOP);
-                crossings.push(diagnostics(m).crossingsAll - before);
-                // The translator reads the crossings and, where it gathers,
-                // the worker builds the module.
-                for (let i = 0; i < 20; i++)
-                {
-                    await m.runtime.translatePending();
-                    await turn();
-                }
-                if (round === 0 && config.gatherAfter !== 0)
-                {
-                    await until(m, ()=>(diagnostics(m).relinked ?? 0) >= 2);
-                }
-            }
-            const d = diagnostics(m);
-            return { crossings, gathers: d.gathers, gathered: d.gathered, merges: d.merges,
-                state: [m.reg(0), m.reg(1), m.reg(2), m.reg(3), m.reg(4), ...m.read(DATA, 16)] };
-        }
-        finally
-        {
-            await m.runtime.flush();
-        }
-    };
-    const gathered = await program({ gatherAfter: 1000 });
-    const kept = await program({ gatherAfter: 0 });
-    assert.deepEqual(gathered.state, kept.state, 'the same registers and memory');
-    assert.equal(gathered.state[2], 3 * ROUND);
-    assert.equal(kept.merges, 0, 'no merge joins two full modules');
-    assert.deepEqual(kept.crossings, [2 * ROUND, 2 * ROUND, 2 * ROUND], 'each call and return');
-    assert.equal(gathered.crossings[0], 2 * ROUND);
-    assert.equal(gathered.gathers, 1);
-    assert.equal(gathered.gathered, 2, 'the loop and its callee, not the stubs');
-    assert.deepEqual(gathered.crossings.slice(1), [0, 0], 'the two in one module');
-});
-
 test('a relink puts the regions entered lately in one module and the rest in small ones',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // The loop and its callee each in a batch of its own with stubs never
@@ -213,7 +142,7 @@ test('a relink puts the regions entered lately in one module and the rest in sma
         const F = 0x3000;
         const m = machine({ leafCalls: false, dispatch: true, worker: true, callReturn: false,
             crossTailCalls: false, batchRegions: 2, maxBatchRegions: 2, relinkRegions: 8,
-            relinkCold: 2, relinkAfter: 4, gatherAfter: 0, mergeAfter: 0 });
+            relinkCold: 2, relinkAfter: 4, mergeAfter: 0, relinkQuiet: 0 });
         try
         {
             m.write(LOOP, [0xb9, ...le32(1000), ...call(LOOP + 5, F), 0x49, 0x75, 0xf8, 0xf4]);
@@ -315,15 +244,18 @@ for (const [seed, mode] of CEILING_RUNS)
 {
     test(`a program run under a ceiling a few modules high, its modules let go and brought back`
         + ` all the time, runs as it does without one (seed ${seed}, ${JSON.stringify(mode)})`,
-    async()=>{
+    async t=>{
         if (mode.dispatch && !probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         const free = await ceilingRun(seed, { ...mode, cacheBytes: 0 });
         assert.equal(free.evictions, 0);
-        // Room for three modules of the size they are on average.
-        const cacheBytes = Math.ceil(3 * free.heldBytes / free.heldModules);
+        // Room for five modules of the size they are on average: the driver's loop of calls,
+        // each return address copied for a return come back from outside, is two to four of
+        // them, and one module larger than the ceiling is held alone (`makeRoom`).
+        const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
         const held = await ceilingRun(seed, { ...mode, cacheBytes });
         assert.deepEqual(held.state, free.state, 'the same registers and memory');
         assert.ok(held.most <= cacheBytes, `held ${held.most} of ${cacheBytes}`);
@@ -332,3 +264,156 @@ for (const [seed, mode] of CEILING_RUNS)
         assert.ok(held.cacheHits >= held.broughtBack, 'from the store, not translated again');
     });
 }
+
+test('a program run under a host\'s bound (`charge`) a few modules high runs as it does without'
+    + ' one, never holds past it, and gives back all it took', async()=>{
+    const free = await ceilingRun(61, { cacheBytes: 0 });
+    const bound = Math.ceil(5 * free.heldBytes / free.heldModules);
+    let taken = 0;
+    let most = 0;
+    let refused = 0;
+    const charge = {
+        /** @param {number} bytes */
+        take(bytes){
+            if (taken + bytes > bound)
+            {
+                refused++;
+                return false;
+            }
+            taken += bytes;
+            most = Math.max(most, taken);
+            return true;
+        },
+        /** @param {number} bytes */
+        give(bytes){
+            taken -= bytes;
+        },
+    };
+    const bounded = await ceilingRun(61, { cacheBytes: 0, charge });
+    assert.deepEqual(bounded.state, free.state, 'the same registers and memory');
+    assert.ok(most <= bound, `took ${most} of ${bound}`);
+    assert.ok(refused > 10 && bounded.evictions > 10,
+        `${refused} refused, ${bounded.evictions} let go`);
+    assert.equal(taken, bounded.heldBytes, 'what is held is what was taken, nothing given twice');
+});
+
+test('every module let go is told to the host by its bytes (`letGo`), none twice', async()=>{
+    const free = await ceilingRun(62, { cacheBytes: 0 });
+    const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
+    /** @type {number[]} */
+    const told = [];
+    let taken = 0;
+    const charge = {
+        take: (/** @type {number} */ bytes)=>{
+            taken += bytes;
+            return true;
+        },
+        give: ()=>{},
+    };
+    const run = await ceilingRun(62, { cacheBytes, charge,
+        letGo: (/** @type {number} */ bytes)=>told.push(bytes) });
+    assert.ok(run.evictions > 10, `${run.evictions} modules let go`);
+    assert.ok(told.every(bytes=>bytes > 0));
+    assert.equal(taken - told.reduce((sum, bytes)=>sum + bytes, 0), run.heldBytes,
+        'every module held is still held or was told let go, once');
+});
+
+/**
+ * A program that calls a few functions once, as a load does, then runs a loop
+ * over another, the loop run again and again for `wallMs` of the clock as a
+ * level's frames are: under `coldMs` the modules the loop never touches are
+ * parked and then let go, those it touches stay or come back, and the program
+ * leaves what it leaves without.
+ *
+ * @param {Record<string, unknown>} config @param {number} frames  each 10 ms of the runtime's clock
+ * @param {number} [budget]  a slice's: one past the loop's whole run leaves no slice ending in
+ *     the callee, so the runtime's loop never marks it
+ */
+async function loadThenLoop(config, frames, budget = 200){
+    let clock = 0;
+    const DRIVER = 0x2000;
+    const LOOP = 0x2800;
+    const FUNCTIONS = 0x3000;
+    const DATA = 0x9000;
+    const m = machine({ leafCalls: false, batchRegions: 1, maxBatchRegions: 1, relinkAfter: 0,
+        store: memoryTranslationStore(), bundleId: 'test', ...config }, ()=>clock);
+    try
+    {
+        // f_i: add eax, k; add [DATA + 4 i], eax; ret
+        const functions = [0, 1, 2, 3, 4].map(i=>{
+            const at = FUNCTIONS + i * 0x40;
+            m.write(at, [0x05, ...le32(0x01010101 * (i + 1)), 0x01, 0x05, ...le32(DATA + i * 4),
+                0xc3]);
+            return at;
+        });
+        const [loopee, ...loaded] = functions;
+        /** @type {number[]} */
+        const load = [];
+        for (const target of loaded)
+        {
+            load.push(...call(DRIVER + load.length, target));
+        }
+        load.push(0xf4);
+        m.write(DRIVER, load);
+        // mov ecx, 200; L: call loopee; dec ecx; jnz L; hlt
+        const code = [0xb9, ...le32(200)];
+        const head = code.length;
+        code.push(...call(LOOP + head, loopee));
+        code.push(0x49, 0x0f, 0x85, ...le32(head - (code.length + 7)), 0xf4);
+        m.write(LOOP, code);
+        for (const at of [...functions, DRIVER, LOOP])
+        {
+            m.runtime.noteHot(at, 0, 64);
+            await until(m, ()=>m.runtime.entryOf(at) >= 0);
+        }
+        m.setReg(4, 0x80000);
+        await runToHalt(m, DRIVER, { held: [], budget: 200 });
+        for (let frame = 0; frame < frames; frame++)
+        {
+            m.setReg(4, 0x80000);
+            await runToHalt(m, LOOP, { held: [], budget });
+            clock += 10;
+            // The translator's turn a frame's end gives it.
+            await m.runtime.translatePending();
+        }
+        const d = diagnostics(m);
+        return { state: [m.reg(0), m.reg(4), ...m.read(DATA, 20)], d,
+            loaded: loaded.filter(at=>m.runtime.entryOf(at) >= 0).length };
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+}
+
+test('the modules of code the engine has not touched for `coldMs` are let go, those it'
+    + ' touches stay, and the program runs as it does without', async()=>{
+    // 60 frames of 10 ms past an age of 100 ms: what the loop never runs is
+    // parked at 50 ms untouched and let go 100 ms after.
+    const swept = await loadThenLoop({ coldMs: 100 }, 60);
+    const kept = await loadThenLoop({ coldMs: 0 }, 60);
+    assert.deepEqual(swept.state, kept.state);
+    assert.equal(kept.d.evictedCold, 0);
+    assert.equal(kept.d.parkedNow, null, 'not measured without an age');
+    assert.equal(kept.loaded, 4);
+    assert.equal(swept.d.evictedCold, 5, 'the four called once and the code that called them');
+    assert.equal(swept.loaded, 0, 'the functions called once no longer have an entry');
+    assert.equal(swept.d.heldModules, 2, 'the loop and its callee held');
+    assert.ok(swept.d.sharedHeld, 'the store keeps compiled modules for other runtimes');
+    assert.ok(swept.d.sharedHeld.held <= 2,
+        `kept for other runtimes: ${swept.d.sharedHeld.held}, without the age`
+        + ` ${kept.d.sharedHeld.held}`);
+    // Parked is not gone: 10 frames in, nothing has been untouched a whole age.
+    const early = await loadThenLoop({ coldMs: 100 }, 10);
+    assert.ok(early.d.parkedModules >= 5, `${early.d.parkedModules} parked`);
+    assert.equal(early.d.evictedCold, 0);
+});
+
+test('a module entered only from another module, which the runtime\'s loop never marks, is'
+    + ' parked, taken back at its first touch, and runs on', async()=>{
+    const swept = await loadThenLoop({ coldMs: 100 }, 60, 1_000_000);
+    const kept = await loadThenLoop({ coldMs: 0 }, 60, 1_000_000);
+    assert.deepEqual(swept.state, kept.state);
+    assert.ok(swept.d.unparked >= 1, `${swept.d.unparked} taken back`);
+    assert.equal(swept.d.heldModules, 2, 'the loop and its callee held');
+});

@@ -66,10 +66,10 @@ function eightBit({ refuse = false } = {}){
     return { machine, offscreen };
 }
 
-test('GetDC on a surface whose rows are not a DIB\'s apart draws into its own rows', ()=>{
+test('GetDC on a surface draws into its own rows', ()=>{
     const { machine, offscreen } = eightBit();
     const panel = offscreen(622, 50);
-    assert.equal(panel.pitch, 622);
+    assert.equal(panel.pitch, 624, 'a row on an eight-byte boundary');
     const got = panel.getDC();
     assert.equal(got.hr, DD_OK);
     assert.ok(got.dc, 'a DC to draw with');
@@ -79,7 +79,7 @@ test('GetDC on a surface whose rows are not a DIB\'s apart draws into its own ro
     assert.equal(panel.releaseDC(got.dc), DD_OK);
 
     // Grey 0x80 is index 0x80 of the palette; the fill is where the rows say.
-    const row = (/** @type {number} */ y)=>panel.buffer + y * 622;
+    const row = (/** @type {number} */ y)=>panel.buffer + y * panel.pitch;
     assert.equal(machine.bytes[row(10) + 600], 0x80);
     assert.equal(machine.bytes[row(11) + 619], 0x80);
     assert.equal(machine.bytes[row(12) + 600], 0, 'nothing below the fill');

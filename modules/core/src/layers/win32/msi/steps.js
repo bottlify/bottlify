@@ -19,6 +19,7 @@ import {
     REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ,
 } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { inView } from '../advapi32/wow64-registry.js';
 
 /** @typedef {import('./engine.js').Engine} Engine */
 
@@ -134,7 +135,7 @@ export const actionData = (engine, action, fields)=>{
  * @param {Engine} engine @param {string} name @param {() => Promise<number | void>} run
  */
 export async function schedule(engine, name, run){
-    if (engine.session.mode.scheduled)
+    if (engine.session.scripting)
     {
         engine.session.script.push({ name, run: async()=>(await run()) ?? ERROR_SUCCESS });
         return ERROR_SUCCESS;
@@ -232,12 +233,40 @@ export const installing = (engine, key)=>{
  * @param {Engine} engine @param {number} root
  */
 export function registryRoot(engine, root){
-    const roots = [HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS];
-    const id = root === -1
-        ? (engine.session.getProperty('ALLUSERS') !== '' ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER)
-        : roots[root];
+    const id = registryRootId(engine, root);
     return id === undefined ? null : engine.host.hive.root(id);
 }
+
+/** @param {Engine} engine @param {number} root */
+const registryRootId = (engine, root)=>(root === -1
+    ? (engine.session.getProperty('ALLUSERS') !== '' ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER)
+    : [HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS][root]);
+
+/**
+ * A Registry row's key where its width's view keeps it: on a 64-bit Windows
+ * a 32-bit component's HKLM\SOFTWARE key is under Wow6432Node, as the
+ * installer service, a 64-bit process, writes it (`wow64-registry.js`);
+ * a 64-bit one's, and every key on a 32-bit Windows, is where it is named.
+ *
+ * @param {Engine} engine @param {number} root  the row's root column
+ * @param {string} path @param {boolean} wide  the component is 64-bit
+ */
+export function registryPath(engine, root, path, wide){
+    const id = registryRootId(engine, root);
+    return engine.session.machine?.amd64 !== true || id === undefined ? path
+        : inView(id, path.split('\\').filter(Boolean), wide ? 64 : 32).join('\\');
+}
+
+/**
+ * Whether a component is 64-bit (msidbComponentAttributes64bit).
+ *
+ * @param {Engine} engine @param {string} component
+ */
+export const componentWide = (engine, component)=>
+    ((engine.session.components.get(component)?.attributes ?? 0) & COMPONENT_64BIT) !== 0;
+
+/** msidbComponentAttributes64bit. */
+const COMPONENT_64BIT = 0x100;
 
 /**
  * A Registry row's value, formatted and typed as its prefix says: #x binary

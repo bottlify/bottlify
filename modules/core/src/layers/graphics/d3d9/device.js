@@ -51,21 +51,24 @@
 
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_DEVICEREMOVED, D3DERR_INVALIDCALL,
+    S_PRESENT_OCCLUDED,
     D3DERR_NOTAVAILABLE,
     D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DOK_NOAUTOGEN, D3DPOOL, D3DRS, D3DRTYPE, D3DUSAGE,
-    D3D_OK, FORMAT_INFO, blockAligned, isCompressed, surfaceBytes, surfacePitch, videoPoolAllowed,
+    D3D_OK, FORMAT_INFO, SIMULTANEOUS_TARGETS, blockAligned, isCompressed, storageBytes,
+    surfaceBytes, surfacePitch, videoPoolAllowed,
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
-    IDENTITY, STAGE_COUNT, createRenderer, gpuFormatOf, multiplyMatrices, sameLight,
+    IDENTITY, STAGE_COUNT, createRenderer, expandTexels, gpuFormatOf, multiplyMatrices, sameLight,
+    srgbViewFormats,
     vertexCountOf,
 } from '../d3d8/render.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
     HeldBindings, chainBytes, countedBuffer, createPriority, createReferenceCount, createSurface,
-    createTexture, createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel,
-    volumeUpdate, writeFrontBuffer, writePixels,
+    createTexture, createVideoMemory, createVolumeTexture, packBits, packColour, rectMoveOf,
+    regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -86,7 +89,8 @@ import {
     fvfOfElements, validateElements,
 } from './declaration.js';
 import {
-    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
+    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, parseShader, validateShader,
+    versionOf,
 } from './shader.js';
 import {
     D3DSBT, applyRecord, captureRecord, createStateBlock, emptyRecord, fillRecord,
@@ -162,9 +166,11 @@ export const D3DISSUE = Object.freeze({ END: 1, BEGIN: 2 });
 /** D3DGETDATA_FLUSH: send what was issued to the GPU. */
 const D3DGETDATA_FLUSH = 1;
 
-/** The last D3DTEXTUREFILTERTYPE StretchRect accepts. */
-const D3DTEXF_ANISOTROPIC = 3;
-/** D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the nearest. */
+/**
+ * D3DTEXF_LINEAR: a stretch filtered between texels; POINT and NONE take the
+ * nearest. It is the last filter StretchRect accepts: ANISOTROPIC and the
+ * rest are refused (Wine's d3d9 stretchrect_test).
+ */
 const D3DTEXF_LINEAR = 2;
 
 /** D3DSTREAMSOURCE_INDEXEDDATA and D3DSTREAMSOURCE_INSTANCEDATA. */
@@ -279,7 +285,11 @@ export function createPalettes(){
 /** @type {DeviceCaps} */
 export const DEFAULT_CAPS = Object.freeze({
     maxPointSize: 64.0,
-    depthTexture2d: false,
+    // A shadow map: a depth texture drawn into as the depth buffer and
+    // sampled as the comparison of a reference with what it holds (Wine's
+    // d3d9 visual.c shadow_test), in the depth formats the table knows: D16,
+    // D24X8 and D24S8, the era's hardware ones. Not a cube map.
+    depthTexture2d: true,
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,
@@ -421,6 +431,9 @@ function normalisePresentParameters(parameters){
         enableAutoDepthStencil: parameters.enableAutoDepthStencil ?? false,
         autoDepthStencilFormat: parameters.autoDepthStencilFormat ?? D3DFMT.D24S8,
         lockableBackBuffer: parameters.lockableBackBuffer === true,
+        hDeviceWindow: parameters.hDeviceWindow ?? 0,
+        flags: parameters.flags ?? 0,
+        presentationInterval: parameters.presentationInterval ?? 0,
     };
 }
 
@@ -435,6 +448,23 @@ const ALPHA_TWINS = new Map([
 ]);
 /** @param {number} format @returns {number | undefined} */
 const alphaTwin = format=>ALPHA_TWINS.get(format);
+
+/** The formats a display can be in. @type {ReadonlySet<number>} */
+const DISPLAY_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.X8R8G8B8, D3DFMT.A2R10G10B10]));
+/**
+ * The display formats the adapter lists modes in: 32-bit and 16-bit.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const DISPLAY_MODE_FORMATS = new Set(/** @type {number[]} */ ([D3DFMT.X8R8G8B8,
+    D3DFMT.R5G6B5]));
+/**
+ * The colour formats StretchRect converts between in guest bytes, each
+ * pixel through its D3DCOLOR (`expandTexels`, `packBits`).
+ */
+const CONVERTED = new Set(/** @type {number[]} */ ([D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5, D3DFMT.A1R5G5B5,
+    D3DFMT.X1R5G5B5, D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4]));
 /** @param {number} format */
 const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth;
 
@@ -462,7 +492,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     reads back exactly what it wrote there. Cleared unless `cleared` is
  *     false, for bytes nobody reads before they are written (`storageFor`).
  * @property {(address: number)=>void} [free]
- * @property {(api: string, detail: string)=>void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss')=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [dumpDraws]
  * @property {number} [dumpEvery]
@@ -476,8 +506,6 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepConstantBlocks]  The renderer's (`createRenderer`).
- * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
- * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
  * @property {boolean} [verifyDynamic]  The renderer's (`createRenderer`).
  * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
  *     setting `draw: false`): an occlusion query without a renderer counts every
@@ -490,6 +518,11 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {boolean} [countsInGuest]  Whether the side that draws writes occlusion counts
+ *     into the guest's query blocks itself (`storeCount` there).
+ * @property {(block: number, measurement: number, count: number) => void} [storeCount]
+ *     Writes a count into a query's block in guest memory, for the measurement it
+ *     was made for only (`QUERY`, `COUNT_STATE`).
  * @property {() => void} [occlusionCounted]
  *     Told whenever an occlusion count has come back from the GPU: where the
  *     program is told counts across a thread, so they can go to it unasked.
@@ -520,6 +553,11 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {number} BehaviorFlags
  */
 
+/** The RGB formats a device converts between (`CheckDeviceFormatConversion`). */
+/** @type {Set<number>} */
+const CONVERTED_RGB = new Set([D3DFMT.A8R8G8B8, D3DFMT.X8R8G8B8, D3DFMT.R5G6B5, D3DFMT.X1R5G5B5,
+    D3DFMT.A1R5G5B5, D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4, D3DFMT.A2R10G10B10]);
+
 /**
  * The object a program gets from Direct3DCreate9. It exists here for one
  * reason: device creation can fail on its parameters, and the caller has to be
@@ -532,8 +570,8 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        occlusionCounted, countsInGuest, storeCount,
+        drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
         ...caps
     } = options;
@@ -542,14 +580,11 @@ export function createDirect3D9(options = {}){
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
-        // `keepMemory`: what a released resource held is never given back to
-        // the guest's heap -- a debugging aid, for telling memory handed out
-        // twice apart from a defect elsewhere.
-        free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
+        free: giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        occlusionCounted,
-        rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        occlusionCounted, countsInGuest, storeCount,
+        drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
         watchWrites, keepConstantBlocks, verifyDynamic,
     };
     if (backend && !readMemory)
@@ -557,7 +592,11 @@ export function createDirect3D9(options = {}){
         throw new Error('graphics/d3d9: a device that draws needs readMemory as well as a backend');
     }
     const count = createReferenceCount();
+    /** The device made last, whose figures a live view reads (`figures.js`). @type {any} */
+    let made = null;
     const root = {
+        /** @returns {import('../figures.js').FrameFigures | null} */
+        figures: ()=>made?.figures() ?? null,
         caps: resolved,
         get refCount(){
             return count.value;
@@ -576,18 +615,44 @@ export function createDirect3D9(options = {}){
          * @param {number} usage
          * @param {number} resourceType  D3DRTYPE
          * @param {number} format
-         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         * @param {number} [adapterFormat]  The display format asked about.
+         * @returns {number} D3D_OK, D3DERR_NOTAVAILABLE, or D3DERR_INVALIDCALL for
+         *     no adapter format at all
          */
-        CheckDeviceFormat(usage, resourceType, format){
+        CheckDeviceFormat(usage, resourceType, format, adapterFormat = D3DFMT.X8R8G8B8){
+            // Asked against no display format at all, the question is not
+            // one (Wine's test_check_device_format: D3DFMT_UNKNOWN).
+            if (adapterFormat === D3DFMT.UNKNOWN)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (!DISPLAY_FORMATS.has(adapterFormat))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A buffer has no format to ask about: the question is not one.
+            if (resourceType === D3DRTYPE.VERTEXBUFFER || resourceType === D3DRTYPE.INDEXBUFFER)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const info = FORMAT_INFO[format];
             if (!info || info.video)
             {
                 return D3DERR_NOTAVAILABLE;
             }
-            // D3DUSAGE_QUERY_SRGBREAD and _SRGBWRITE: nothing here reads or
-            // writes a texture as sRGB, so a program told yes would draw in
-            // the wrong space -- told no, it does its own correction or none.
-            if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0)
+            // D3DUSAGE_QUERY_SRGBREAD and _SRGBWRITE: the eight-bit and DXT
+            // formats, whose GPU surface has an sRGB twin a stage reads
+            // through (D3DSAMP_SRGBTEXTURE) and whose target a shader writes
+            // encoded (D3DRS_SRGBWRITEENABLE); a floating-point one is neither.
+            if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0
+                && (info.depth || srgbViewFormats(gpuFormatOf(format, 4, 4, true)).length === 0))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // A plain surface is written encoded only as a target (Wine's
+            // test_check_device_format).
+            if ((usage & USAGE_QUERY_SRGBWRITE) !== 0 && resourceType === D3DRTYPE.SURFACE
+                && (usage & D3DUSAGE.RENDERTARGET) === 0)
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -655,6 +720,13 @@ export function createDirect3D9(options = {}){
                     {
                         return info.depth ? D3D_OK : D3DERR_NOTAVAILABLE;
                     }
+                    // ATI1 and ATI2 are texture formats: no plain surface in
+                    // them but a scratch one (test_resource_access,
+                    // test_surface_blocks).
+                    if (format === D3DFMT.ATI1 || format === D3DFMT.ATI2)
+                    {
+                        return D3DERR_NOTAVAILABLE;
+                    }
                     return !info.depth || resolved.depthPlain ? D3D_OK : D3DERR_NOTAVAILABLE;
                 default:
                     // Buffers have no format to ask about.
@@ -668,12 +740,30 @@ export function createDirect3D9(options = {}){
          * @param {boolean} [windowed]
          */
         CheckDeviceType(adapterFormat, backBufferFormat, windowed = true){
-            // D3DFMT_UNKNOWN as the back buffer means "the adapter's", and is
-            // legal only windowed.
-            const back = backBufferFormat === D3DFMT.UNKNOWN
-                ? (windowed ? adapterFormat : -1)
-                : backBufferFormat;
-            return isColourFormat(adapterFormat) && isColourFormat(back)
+            // The four display formats; A2R10G10B10 only full screen
+            // (Wine's test_display_formats).
+            if (!DISPLAY_FORMATS.has(adapterFormat)
+                || (windowed && adapterFormat === D3DFMT.A2R10G10B10))
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            if (windowed)
+            {
+                // D3DFMT_UNKNOWN as the back buffer means "the adapter's".
+                // Any target colour format a present converts from will do.
+                const back = backBufferFormat === D3DFMT.UNKNOWN ? adapterFormat
+                    : backBufferFormat;
+                return this.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.SURFACE, back)
+                    === D3D_OK
+                    && this.CheckDeviceFormatConversion(back, adapterFormat) === D3D_OK
+                    ? D3D_OK
+                    : D3DERR_NOTAVAILABLE;
+            }
+            // Full screen the display has to have modes in the format, and the
+            // back buffer is that format or the same with alpha.
+            return DISPLAY_MODE_FORMATS.has(adapterFormat)
+                && (backBufferFormat === adapterFormat
+                    || backBufferFormat === alphaTwin(adapterFormat))
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -706,15 +796,22 @@ export function createDirect3D9(options = {}){
         },
 
         /**
-         * Whether a present can convert between two formats. Any two colour
-         * formats: the back buffer is always drawn into the same surface and
-         * the presentation makes no distinction.
+         * Whether StretchRect or a present converts one format into another:
+         * any format into itself, whatever it is; an RGB format of eight bits
+         * a channel or fewer, or a video one, into such an RGB format; and
+         * nothing else -- no float, luminance, alpha-only or bump format into
+         * another (Wine's d3d9 test_format_conversion).
          *
          * @param {number} sourceFormat
          * @param {number} targetFormat
          */
         CheckDeviceFormatConversion(sourceFormat, targetFormat){
-            return isColourFormat(sourceFormat) && isColourFormat(targetFormat)
+            if ((sourceFormat >>> 0) === (targetFormat >>> 0))
+            {
+                return D3D_OK;
+            }
+            return (CONVERTED_RGB.has(sourceFormat) || sourceFormat === D3DFMT.YUY2
+                || sourceFormat === D3DFMT.UYVY) && CONVERTED_RGB.has(targetFormat)
                 ? D3D_OK
                 : D3DERR_NOTAVAILABLE;
         },
@@ -738,7 +835,7 @@ export function createDirect3D9(options = {}){
             // once and still reach it through GetDirect3D (Wine's d3d8 and
             // d3d9 test_refcount).
             root.addRef();
-            out.device = createDeviceObject(
+            out.device = made = createDeviceObject(
                 normalisePresentParameters(parameters), resolved, services, {
                     direct3D: root,
                     AdapterOrdinal: creation.AdapterOrdinal ?? 0,
@@ -769,7 +866,7 @@ const MAX_RESIDENCY_QUERY = 65535;
 const MAX_FRAME_LATENCY = 30;
 const DEFAULT_FRAME_LATENCY = 3;
 /** What an Ex create's usage may carry beside the surface's own. */
-const EX_SURFACE_USAGE = D3DUSAGE.RESTRICTED_CONTENT | D3DUSAGE.RESTRICT_SHARED_RESOURCE
+export const EX_SURFACE_USAGE = D3DUSAGE.RESTRICTED_CONTENT | D3DUSAGE.RESTRICT_SHARED_RESOURCE
     | D3DUSAGE.RESTRICT_SHARED_RESOURCE_DRIVER;
 
 /**
@@ -800,8 +897,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {number} pool
      */
     const unmanaged = pool=>extended && pool === D3DPOOL.MANAGED;
+    /**
+     * Whether a buffer can be made with this usage in this pool: none is a
+     * render target or a depth-stencil, and none lives in the scratch pool
+     * (Wine's test_resource_access).
+     *
+     * @param {number} usage @param {number} pool
+     */
+    const bufferTakes = (usage, pool)=>pool !== D3DPOOL.SCRATCH
+        && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) === 0;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
+    /** Whether the application lost the activation while the device was full screen. */
+    let occluded = false;
     let inScene = false;
     let nextAddress = 0x40000000;
     /** Addresses this layer invented rather than took from the guest's heap. */
@@ -854,6 +962,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     let material = defaultMaterial();
     /** @type {Map<number, Float32Array>} */
     let clipPlanes = new Map();
+    /** @param {number} index @returns {number} the plane an index names */
+    const clipPlaneAt = index=>Math.min(index >>> 0, caps.maxUserClipPlanes - 1);
     let nPatchMode = 0;
     let clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
     let gammaRamp = identityRamp();
@@ -928,6 +1038,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const textures = new HeldBindings();
     /** @type {Map<number, any>} */
     const renderTargets = new Map();
+    /**
+     * The targets bound past the first, by index less one, as the renderer
+     * reads them (`extraTargets`): empty while only the first is bound, the
+     * same array while they stay as they are.
+     *
+     * @type {readonly any[]}
+     */
+    let extraTargets = [];
+    const noteExtraTargets = ()=>{
+        let last = SIMULTANEOUS_TARGETS - 1;
+        while (last > 0 && !renderTargets.get(last))
+        {
+            last--;
+        }
+        extraTargets = Array.from({ length: last },
+            (_, index)=>renderTargets.get(index + 1) ?? null);
+    };
+    /** Lets go of the targets past the first, as a reset and the last release do. */
+    const unbindExtraTargets = ()=>{
+        for (let index = 1; index < SIMULTANEOUS_TARGETS; index++)
+        {
+            rebound(renderTargets.get(index), null);
+            renderTargets.delete(index);
+        }
+        extraTargets = [];
+    };
     /** @type {any} */
     let indices = null;
     let baseVertexIndex = 0;
@@ -935,7 +1071,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {import('./stateblock.js').StateBlockRecord | null} */
     let recording = null;
 
-    const count = createReferenceCount();
+    // Whoever lets the last reference go -- the program, or a resource or
+    // state block that held the device -- the device's teardown runs
+    // (Wine's test_refcount: the last state block destroys it).
+    const count = createReferenceCount({ onLastRef: ()=>teardown() });
 
     /**
      * The vertices each range of a static index buffer named, while none of its
@@ -963,7 +1102,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
             occlusionCounted: services.occlusionCounted,
-            rereadBuffers: services.rereadBuffers,
+            storeCount: services.storeCount,
             verifyDynamic: services.verifyDynamic === true,
             compressedTextures: caps.compressedTextures,
             keepConstantBlocks: services.keepConstantBlocks,
@@ -985,8 +1124,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         return {
             readBack: surface=>renderer.readSurface(surface).then(
-                (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                    writePixels(surface, pixels.data, write);
+                (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                    if (pixels)
+                    {
+                        writePixels(surface, pixels.data, write);
+                    }
                 }),
             written: surface=>renderer.markDirty?.(surface),
         };
@@ -1112,11 +1254,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /** A resource the device owns: its first reference is one on the device. */
-    const implicitCount = ()=>createReferenceCount({
-        implicit: true,
-        onFirstRef: ()=>count.addRef(),
-        onLastRef: ()=>count.release(),
-    });
+    const implicitCount = ()=>createReferenceCount({ implicit: true, owner: count });
 
     /**
      * A surface made on its own, not a level of anything: its storage goes
@@ -1305,7 +1443,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return D3D_OK;
         },
 
-        Present: ()=>device.Present(),
+        Present: (/** @type {boolean | undefined} */ shown)=>device.Present(shown),
 
         get presentCount(){
             return presents;
@@ -1556,6 +1694,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         get renderTarget(){
             return renderTargets.get(0);
         },
+        /** The targets bound at indices 1 to 3, null where none is; empty for none. */
+        get extraTargets(){
+            return extraTargets;
+        },
         get depthStencil(){
             return depthStencil;
         },
@@ -1734,8 +1876,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * buffer only at a multiple of four bytes, so a remainder that is not one
      * is the one offset refused.
      *
-     * @returns {number | null} null when the binding is unusable
+     * @returns {number | null} null when the binding is unusable, DRAWS_NOTHING for
+     *     a stream zero the declaration reads with no buffer there
      */
+    /** What `streamBias` answers for a draw that reads a stream zero holding no buffer. */
+    const DRAWS_NOTHING = -1;
     /** The whole vertices the last draw folded into its first (`streamBias`), for the renderer. */
     let foldedBias = 0;
     /**
@@ -1773,12 +1918,18 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         }
         if (!source?.buffer || !(source.stride > 0))
         {
+            // Direct3D does not check that a stream the declaration reads holds
+            // a buffer: a draw with one unbound answers D3D_OK (Wine's d3d9
+            // test_null_stream). Its vertices come from no buffer -- positions of
+            // nothing, which the hardware of the time drew as nothing -- and
+            // here it is not drawn.
             const read = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))].join(',');
             report(`draw-stream-${source?.buffer ? 'stride' : 'buffer'}-${read}`,
                 `a draw with ${source?.buffer ? `stride ${source.stride}` : 'no vertex buffer'}`
-                + ` on stream 0 was refused; its declaration reads streams ${read || 'none'}`
+                + ` on stream 0 drew nothing, as vertices read from no buffer do; its`
+                + ` declaration reads streams ${read || 'none'}`
                 + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
-            return null;
+            return source?.buffer ? null : DRAWS_NOTHING;
         }
         // The first vertex moves every stream that steps with it, so no more
         // vertices are folded than each further stream the declaration reads
@@ -1873,7 +2024,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * (`unbindIndices`); DrawPrimitiveUP drew none and keeps them.
      */
     const unbindStreamZero = ()=>{
-        stream(0).buffer = rebound(stream(0).buffer, null);
+        const zero = stream(0);
+        zero.buffer = rebound(zero.buffer, null);
+        // Its offset and stride go too (Wine's d3d9 test_draw_indexed).
+        zero.offset = 0;
+        zero.stride = 0;
     };
     const unbindIndices = ()=>{
         indices = rebound(indices, null);
@@ -1952,12 +2107,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
-     * Two surfaces the GPU holds in one texture, which it cannot draw from one
-     * into the other.
+     * One surface on both sides, which the GPU cannot draw from into itself.
+     * Two levels or faces of one texture are two subresources, which a pass
+     * reads one of and draws into the other: XNA resolves a target with a
+     * chain by stretching each level into the next.
      *
      * @param {any} a @param {any} b
      */
-    const oneTexture = (a, b)=>a === b || (Boolean(a.container) && a.container === b.container);
+    const oneTexture = (a, b)=>a === b;
 
     /**
      * A surface that lives on the GPU: what was drawn into it is not in the
@@ -1980,6 +2137,62 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
     /** @param {import('./resources.js').SurfaceDesc} desc @returns {Rect} */
     const wholeOf = desc=>({ left: 0, top: 0, right: desc.Width, bottom: desc.Height });
+
+    /**
+     * Copies a rectangle between two colour formats in guest bytes, each
+     * pixel through its colour: what StretchRect does between the formats
+     * CheckDeviceFormatConversion names when neither surface is on the GPU.
+     * False, and nothing written, where a format is not one of them or guest
+     * memory is out of reach.
+     *
+     * @param {any} source @param {Rect} rect @param {any} destination
+     * @param {{ x: number, y: number }} point
+     */
+    const convertBytes = (source, rect, destination, point)=>{
+        const read = services.windowMemory ?? services.readMemory;
+        const from = describe(source);
+        const to = describe(destination);
+        if (!services.writeMemory || !read || !CONVERTED.has(from.Format)
+            || !CONVERTED.has(to.Format))
+        {
+            return false;
+        }
+        const fromBytes = FORMAT_INFO[from.Format].bytesPerPixel;
+        const toBytes = FORMAT_INFO[to.Format].bytesPerPixel;
+        const width = rect.right - rect.left;
+        const row = new Uint8Array(width * toBytes);
+        for (let y = 0; y < rect.bottom - rect.top; y++)
+        {
+            const at = source.base + (rect.top + y) * pitchOf(from) + rect.left * fromBytes;
+            const bgra = expandTexels(from.Format, read(at, width * fromBytes), width);
+            for (let x = 0; x < width; x++)
+            {
+                const bits = packBits(to.Format, ((bgra[x * 4 + 3] << 24) | (bgra[x * 4 + 2] << 16)
+                    | (bgra[x * 4 + 1] << 8) | bgra[x * 4]) >>> 0);
+                for (let byte = 0; byte < toBytes; byte++)
+                {
+                    row[x * toBytes + byte] = (bits >>> (byte * 8)) & 0xff;
+                }
+            }
+            services.writeMemory(destination.base + (point.y + y) * pitchOf(to)
+                + point.x * toBytes, row);
+        }
+        return true;
+    };
+
+    /**
+     * What a surface is to StretchRect: a render target (a target surface or
+     * a target texture's level), a depth surface, a texture's level that is
+     * not a target, or an offscreen plain surface.
+     *
+     * @param {any} surface @returns {'target' | 'depth' | 'texture' | 'plain'}
+     */
+    const stretchKindOf = surface=>{
+        const desc = describe(surface);
+        return FORMAT_INFO[desc.Format].depth ? 'depth'
+            : (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 ? 'target'
+                : surface.container ? 'texture' : 'plain';
+    };
 
     /**
      * Fills a rectangle of a surface's guest bytes with one colour, packed the
@@ -2008,10 +2221,67 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
+     * One block of a DXT format holding a single colour, D3DCOLOR in: its two
+     * end colours that colour as R5G6B5 and every index the first; the alpha
+     * four bits a texel (DXT2, DXT3) or two equal end alphas (DXT4, DXT5).
+     *
+     * @param {number} format @param {number} colour
+     * @returns {Uint8Array | null}  null for a compressed format with no such block here
+     */
+    const solidBlock = (format, colour)=>{
+        const r = (colour >>> 16) & 0xff;
+        const g = (colour >>> 8) & 0xff;
+        const b = colour & 0xff;
+        const a = colour >>> 24;
+        const packed = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        const colourBlock = [packed & 0xff, packed >> 8, packed & 0xff, packed >> 8, 0, 0, 0, 0];
+        switch (format)
+        {
+            case D3DFMT.DXT1:
+                return Uint8Array.from(colourBlock);
+            case D3DFMT.DXT2:
+            case D3DFMT.DXT3:
+                return Uint8Array.from([...new Array(8).fill(((a >> 4) << 4) | (a >> 4)),
+                    ...colourBlock]);
+            case D3DFMT.DXT4:
+            case D3DFMT.DXT5:
+                return Uint8Array.from([a, a, 0, 0, 0, 0, 0, 0, ...colourBlock]);
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * Fills a rectangle of a compressed surface's guest bytes with blocks of
+     * one colour: a rectangle on whole blocks, or reaching the surface's edge.
+     *
+     * @param {any} surface @param {Rect} rect @param {Uint8Array} block
+     */
+    const fillBlocks = (surface, rect, block)=>{
+        if (!services.writeMemory)
+        {
+            return;
+        }
+        const desc = describe(surface);
+        const across = Math.ceil(rect.right / 4) - rect.left / 4;
+        const row = new Uint8Array(across * block.length);
+        for (let x = 0; x < across; x++)
+        {
+            row.set(block, x * block.length);
+        }
+        const pitch = pitchOf(desc);
+        for (let y = rect.top / 4; y < Math.ceil(rect.bottom / 4); y++)
+        {
+            services.writeMemory(surface.base + y * pitch + (rect.left / 4) * block.length, row);
+        }
+    };
+
+    /**
      * A texture's storage, for whoever needs to know what a lock hands out.
      *
      * @param {{ width: number, height: number, levels: number, format: number, pool: number,
-     *           usage: number, cube?: boolean, allocate?: (bytes: number) => number,
+     *           usage: number, cube?: boolean, faceForgivesUnlock?: boolean,
+     *           allocate?: (bytes: number) => number,
      *           free?: (address: number) => void }} spec
      *        `allocate` and `free`: where the levels are kept, when not in
      *        memory of the device's own.
@@ -2069,6 +2339,24 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /** @type {(() => void) | undefined} */
     let stopWatchingLoss;
 
+    /** What the device's last reference takes with it. */
+    const teardown = ()=>{
+        stopWatchingLoss?.();
+        showGamma(true);
+        // What it kept bound goes with it.
+        streams.clear();
+        indices = rebound(indices, null);
+        rebound(renderTargets.get(0), null);
+        unbindExtraTargets();
+        renderTargets.clear();
+        depthStencil = rebound(depthStencil, null);
+        retireImplicitSurfaces();
+        // The reference CreateDevice took on the object that made it.
+        identity?.direct3D?.release?.();
+        // What its renderer still holds on the GPU: no present comes to give it back.
+        renderer?.dispose?.();
+    };
+
     /**
      * A present's answer, once its frame is queued: at once, or once the
      * device has finished enough of the frames before it.
@@ -2078,13 +2366,30 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const presented = submitted=>{
         const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
-        return held ? held.then(()=>D3D_OK) : D3D_OK;
+        // An extended device whose application is not the active one is told
+        // its window is covered, the frame made all the same.
+        const answer = extended && occluded ? S_PRESENT_OCCLUDED : D3D_OK;
+        return held ? held.then(()=>answer) : answer;
     };
 
     /**
-     * A swap chain's back buffer presented: onto the display when it goes
-     * into the window the display shows, and otherwise drawn and kept, which
-     * is reported once.
+     * The back buffers' contents move one place down after a present: the
+     * first takes the second's, and the last the one just presented (Wine's
+     * test_flip). Each surface stays the object it was; what is behind it on
+     * the GPU is what turns.
+     */
+    const flip = ()=>{
+        if (backBuffers.length > 1)
+        {
+            renderer?.rotateSurfaces?.(backBuffers);
+        }
+    };
+
+    /**
+     * A swap chain's back buffer presented: onto the display when the window
+     * it goes into shows it, and otherwise drawn and kept, as a present into
+     * a hidden window is. Which it is is the caller's to say, since only the
+     * caller knows the windows.
      *
      * @param {any} backBuffer @param {boolean} shown
      * @returns {number | Promise<number>}
@@ -2094,14 +2399,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         {
             return lostAnswer();
         }
-        if (shown)
+        const own = backBuffer === backBuffers[0];
+        const submitted = !shown ? renderer?.submit()
+            : renderer?.present(own ? model
+                : Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        if (own)
         {
-            return presented(renderer?.present(
-                Object.create(model, { backBuffer: { get: ()=>backBuffer } })));
+            flip();
         }
-        report('chain-window', 'a swap chain presented into a window the display does not'
-            + ' show: its frame is drawn and its picture is not shown');
-        return presented(renderer?.submit());
+        return presented(submitted);
     };
 
     /** The state a plain device's reset puts back to what a new device has. */
@@ -2178,29 +2484,24 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return count.destroyed;
         },
         addRef: ()=>count.addRef(),
-        release: ()=>{
-            const before = count.value;
-            const left = count.release();
-            if (left === 0 && before > 0)
-            {
-                stopWatchingLoss?.();
-                showGamma(true);
-                // What it kept bound goes with it.
-                streams.clear();
-                indices = rebound(indices, null);
-                rebound(renderTargets.get(0), null);
-                renderTargets.clear();
-                depthStencil = rebound(depthStencil, null);
-                retireImplicitSurfaces();
-                // The reference CreateDevice took on the object that made it.
-                identity?.direct3D?.release?.();
-            }
-            return left;
-        },
+        release: ()=>count.release(),
+        // Where the guest's AddRef and Release find the device's count, and
+        // its implicit resources' crossings of zero move it (`owner`).
+        counter: count,
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){
             deviceState = restorable ? DEVICE_STATE.NOT_RESET : DEVICE_STATE.LOST;
+        },
+
+        /**
+         * Whether the application has lost the activation, which a full-screen
+         * extended device answers as its window being covered.
+         *
+         * @param {boolean} covered
+         */
+        occlude(covered){
+            occluded = covered;
         },
 
         get deviceState(){
@@ -2245,17 +2546,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return D3D_OK;
         },
 
-        /** @returns {number} bytes, rounded the way this call always reports them */
+        /**
+         * Bytes, rounded the way this call always reports them. An extended
+         * device's video memory is virtual: what its resources take is not
+         * subtracted (Wine's d3d9ex test_vidmem_accounting).
+         *
+         * @returns {number}
+         */
         GetAvailableTextureMem(){
-            return videoMemory.available();
+            return extended
+                ? (caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY) & ~0xfffff
+                : videoMemory.available();
         },
 
         /**
-         * Nothing here is managed on the device's behalf: a texture's storage
-         * is the guest's own memory and is uploaded when it changes, so there
-         * is nothing to evict and the call has already done all it can.
+         * A managed texture's storage is the guest's own memory: evicting it
+         * takes every level up again from there on its next use, which is
+         * what the program's locks without a dirty update wrote.
          */
         EvictManagedResources(){
+            renderer?.evictManaged?.();
             return D3D_OK;
         },
 
@@ -2268,15 +2578,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * differ, and a program that resets on the strength of Present alone
          * never learns that the device came back.
          */
-        /** @returns {number | Promise<number>} */
-        Present(){
+        /**
+         * @param {boolean} [shown]  Whether the window it presents into shows the picture.
+         * @returns {number | Promise<number>}
+         */
+        Present(shown = true){
             if (deviceState !== DEVICE_STATE.OK)
             {
                 return lostAnswer();
             }
-            const submitted = renderer?.present(model);
             presents++;
-            return presented(submitted);
+            return presentChain(backBuffers[0], shown);
         },
 
         /** Made through IDirect3D9Ex. */
@@ -2288,11 +2600,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /**
          * D3D_OK while the device can be used, D3DERR_DEVICEREMOVED once its
-         * GPU is gone. Whether the window is covered is not known here, so
-         * S_PRESENT_OCCLUDED is never answered.
+         * GPU is gone, S_PRESENT_OCCLUDED for a window while a full-screen
+         * device's application is not the active one (`occlude`); asked of no
+         * window, the device itself can be used. Whether a window is covered
+         * by another is not known here.
+         *
+         * @param {number} [window]
          */
-        CheckDeviceState(){
-            return deviceState === DEVICE_STATE.OK ? D3D_OK : D3DERR_DEVICEREMOVED;
+        CheckDeviceState(window = 0){
+            if (deviceState !== DEVICE_STATE.OK)
+            {
+                return D3DERR_DEVICEREMOVED;
+            }
+            return occluded && window !== 0 ? S_PRESENT_OCCLUDED : D3D_OK;
         },
 
         /** @param {{ priority?: number }} out */
@@ -2379,11 +2699,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         /**
          * @param {number} width @param {number} height @param {number} format
          * @param {number} pool @param {number} usage @param {{ surface?: any }} out
+         * @param {number} [userMemory]  The program's own memory to keep it in, 0 for none.
          */
-        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out){
+        CreateOffscreenPlainSurfaceEx(width, height, format, pool, usage, out, userMemory = 0){
             return (usage & ~EX_SURFACE_USAGE) !== 0
                 ? D3DERR_INVALIDCALL
-                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage);
+                : device.CreateOffscreenPlainSurface(width, height, format, pool, out, usage,
+                    userMemory);
         },
 
         /**
@@ -2398,6 +2720,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /** What the renderer has done and declined to do. Null without a backend. */
+        /** What a live view reads once a frame (`figures.js`). Null without a backend. */
+        figures: ()=>renderer?.figures() ?? null,
+
         diagnostics(){
             return renderer ? renderer.diagnostics() : null;
         },
@@ -2479,7 +2804,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const target = renderTargets.get(0);
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0)
+                    | ((streamBias() ?? DRAWS_NOTHING) >= 0 ? 4 : 0) | (indices ? 8 : 0)
                     | (depthStencil ? 16 : 0)
                     | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target ? describe(target).Width : 0,
@@ -2491,6 +2816,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     ? 1 : 0,
                 targets: [target ?? null, depthStencil ?? null],
             };
+        },
+
+        /**
+         * A Reset refused before it reached the device, for a full-screen
+         * size no mode has: the device is left to be reset as a refused
+         * Reset leaves it (Wine's test_reset: TestCooperativeLevel then
+         * answers D3DERR_DEVICENOTRESET).
+         *
+         * @returns {number} D3DERR_INVALIDCALL
+         */
+        RefuseReset(){
+            if (!extended && deviceState !== DEVICE_STATE.LOST)
+            {
+                deviceState = DEVICE_STATE.NOT_RESET;
+            }
+            return D3DERR_INVALIDCALL;
         },
 
         /**
@@ -2543,7 +2884,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 presentParameters = normalisePresentParameters(next);
             }
-            inScene = false;
+            // An extended device's scene outlives a reset (Wine's d3d9ex
+            // test_scene); a plain one's ends with it.
+            if (!extended)
+            {
+                inScene = false;
+            }
             recording = null;
             deviceState = DEVICE_STATE.OK;
             if (!extended)
@@ -2553,6 +2899,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             makeImplicitSurfaces();
             adoptBackBuffers();
             renderTargets.set(0, rebound(renderTargets.get(0), backBuffers[0]));
+            // A reset leaves the back buffer the only target (Wine's d3d9
+            // test_reset_resources).
+            unbindExtraTargets();
             depthStencil = rebound(depthStencil, autoDepthStencil);
             const target = describe(backBuffers[0]);
             // An extended device keeps the depth range it had.
@@ -2889,9 +3238,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const product = multiplyMatrices(matrix, transforms.get(type) ?? IDENTITY);
-            return setState(
-                record=>record.transforms.set(type, product),
-                ()=>transforms.set(type, product));
+            // It goes into the device's own state even while a block
+            // records, and the block does not hold it (Wine's
+            // test_multiply_transform).
+            transforms.set(type, product);
+            return stateChanged(false);
         },
 
         /** @param {Material} value */
@@ -2916,17 +3267,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * A plane past the device's last is the last: any index is taken,
+         * and every one from MaxUserClipPlanes - 1 up is the same plane
+         * (test_clip_planes_limits).
+         *
          * @param {number} index
          * @param {ArrayLike<number>} plane  Four floats.
          */
         SetClipPlane(index, plane){
-            if (index < 0 || index >= caps.maxUserClipPlanes || !plane || plane.length !== 4)
+            if (!plane || plane.length !== 4 || caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
+            const at = clipPlaneAt(index);
             return setState(
-                record=>record.clipPlanes.set(index, Float32Array.from(plane)),
-                ()=>clipPlanes.set(index, Float32Array.from(plane)));
+                record=>record.clipPlanes.set(at, Float32Array.from(plane)),
+                ()=>clipPlanes.set(at, Float32Array.from(plane)));
         },
 
         /**
@@ -2934,11 +3290,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ plane?: Float32Array }} out
          */
         GetClipPlane(index, out){
-            if (index < 0 || index >= caps.maxUserClipPlanes)
+            if (caps.maxUserClipPlanes === 0)
             {
                 return D3DERR_INVALIDCALL;
             }
-            out.plane = Float32Array.from(clipPlanes.get(index) ?? [0, 0, 0, 0]);
+            out.plane = Float32Array.from(clipPlanes.get(clipPlaneAt(index)) ?? [0, 0, 0, 0]);
             return D3D_OK;
         },
 
@@ -3086,7 +3442,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const desc = describe(surface);
+            // Both sides a power of two (Wine's test_cursor).
+            const powerOfTwo = (/** @type {number} */ side)=>side > 0 && (side & (side - 1)) === 0;
             if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || !powerOfTwo(desc.Width) || !powerOfTwo(desc.Height)
                 || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
             {
                 return D3DERR_INVALIDCALL;
@@ -3096,12 +3455,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
+         * Shown only once there is a cursor to show: asked before any is set,
+         * it stays hidden (Wine's test_cursor).
+         *
          * @param {boolean} show
          * @returns {boolean} whether it was shown before
          */
         ShowCursor(show){
             const was = cursor.shown;
-            cursor.shown = show;
+            cursor.shown = show && Boolean(cursor.surface);
             return was;
         },
 
@@ -3126,15 +3488,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             let declaration = fvfDeclarations.get(fvf);
             if (!declaration)
             {
-                const elements = elementsOfFvf(fvf);
+                const elements = elementsOfFvf(fvf, { asDirect3D9: true });
                 if (!elements)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                // Owned by the device: the count keeps it alive for as long as
-                // the device is, so the same object comes back every time.
+                // Owned by the device, which holds no reference a program
+                // counts: the same object comes back every time, and its count
+                // is the program's alone, as an implicit surface's is (Wine's
+                // test_fvf_decl_management: three Gets, a count of three).
                 declaration = createVertexDeclaration({
-                    elements, fvf, count: createReferenceCount(),
+                    elements, fvf, count: implicitCount(),
                 });
                 fvfDeclarations.set(fvf, declaration);
             }
@@ -3159,7 +3523,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ fvf?: number }} out
          */
         GetFVF(out){
-            out.fvf = vertexDeclaration.fvf;
+            out.fvf = vertexDeclaration.fvf || (vertexDeclaration.declaration?.reportedFvf ?? 0);
             return D3D_OK;
         },
 
@@ -3429,6 +3793,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (bias === DRAWS_NOTHING)
+            {
+                return D3D_OK;
+            }
             noteUndrawable();
             if (services.drawsFrom)
             {
@@ -3454,9 +3822,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          */
         DrawIndexedPrimitive(type, base, minIndex, numVertices, startIndex, primitiveCount){
             const bias = streamBias();
-            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null || !indices)
+            if (drawPreconditions(type, primitiveCount) !== D3D_OK || bias === null)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // No index buffer is not checked either: the draw answers D3D_OK
+            // and, reading indices from nothing, draws nothing (Wine's d3d9
+            // test_draw_indexed).
+            if (!indices)
+            {
+                report('draw-indices', 'an indexed draw with no index buffer drew nothing');
+                return D3D_OK;
+            }
+            if (bias === DRAWS_NOTHING)
+            {
+                return D3D_OK;
             }
             noteUndrawable();
             baseVertexIndex = base + bias;
@@ -3485,6 +3865,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !(stride > 0)
                 || vertexData.byteLength < vertexCountOf(type, primitiveCount) * stride)
             {
+                // Refused, it has let stream zero's buffer go all the same,
+                // keeping its offset and stride (Wine's d3d9 test_draw_indexed).
+                stream(0).buffer = rebound(stream(0).buffer, null);
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
@@ -3514,6 +3897,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (drawPreconditions(type, primitiveCount) !== D3D_OK || !vertexData || !indexData
                 || !(stride > 0) || vertexData.byteLength < reach * stride)
             {
+                // Refused, it has let the index buffer go all the same.
+                unbindIndices();
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
@@ -3678,7 +4063,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const both = (STREAMSOURCE_INDEXEDDATA | STREAMSOURCE_INSTANCEDATA) >>> 0;
             const flags = (frequency & both) >>> 0;
             const divider = (frequency & ~both) >>> 0;
-            if (index < 0 || index >= MAX_STREAMS || divider === 0
+            // A divider of zero is refused alone and taken with a flag
+            // (Wine's d3d9 stream_test: INDEXEDDATA | 0, INSTANCEDATA | 0).
+            if (index < 0 || index >= MAX_STREAMS || (divider === 0 && flags === 0)
                 || flags === both
                 || (index === 0 && flags === STREAMSOURCE_INSTANCEDATA))
             {
@@ -3703,16 +4090,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * One target: the renderer draws into index zero, and the capability
-         * block says so, which is what makes refusing a higher index right.
+         * A target at one of the indices a pixel shader's oC0 to oC3 write.
+         * The first is never none; a later one may be let go of, and only the
+         * first resets the viewport and the scissor (Wine's d3d9
+         * multiple_rendertargets_test, test_set_rt_vp_scissor).
          *
          * @param {number} index
          * @param {any} surface
          */
         SetRenderTarget(index, surface){
-            if (index !== 0 || !surface)
+            if (index >= SIMULTANEOUS_TARGETS || (index === 0 && !surface))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (!surface)
+            {
+                renderTargets.set(index, rebound(renderTargets.get(index), null));
+                renderTargets.delete(index);
+                noteExtraTargets();
+                drawStateVersion++;
+                return D3D_OK;
             }
             const target = describe(surface);
             if ((target.Usage & D3DUSAGE.RENDERTARGET) === 0)
@@ -3720,6 +4117,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             renderTargets.set(index, rebound(renderTargets.get(index), surface));
+            if (index > 0)
+            {
+                noteExtraTargets();
+                drawStateVersion++;
+                return D3D_OK;
+            }
             // A new target resets the viewport and the scissor to all of it,
             // so that one left over from a smaller target cannot stay latched.
             viewport = fullTarget({ width: target.Width, height: target.Height });
@@ -3814,7 +4217,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ surface?: any }} out
          */
         GetRenderTarget(index, out){
-            if (index !== 0)
+            if (index >= SIMULTANEOUS_TARGETS)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -3921,7 +4324,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             out.texture = makeTexture({
                 width, height, format, pool, usage,
                 ...chainOf(usage, format, levels, fullMipCount(width, height)),
-                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{} },
+                ...userMemory === 0 ? {} : { allocate: ()=>userMemory, free: ()=>{}, tight: true },
             });
             return D3D_OK;
         },
@@ -3956,6 +4359,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool,
                 usage,
                 cube: true,
+                faceForgivesUnlock: true,
                 ...chainOf(usage, format, levels, fullMipCount(edgeLength, edgeLength)),
             });
             return D3D_OK;
@@ -4078,7 +4482,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         CreateOffscreenPlainSurface(width, height, format, pool, out, usage = 0, userMemory = 0){
             const info = FORMAT_INFO[format];
             if (!info || pool === D3DPOOL.MANAGED || (info.depth && !caps.depthPlain)
-                || (info.video && !videoPoolAllowed(pool, true))
+                // A packed video surface needs the driver's support in system
+                // memory as in video memory; only scratch holds one without it
+                // (test_surface_blocks).
+                || (info.video && !videoPoolAllowed(pool, false))
+                // ATI1 and ATI2 are texture formats: a plain surface in them
+                // is only a scratch one (test_resource_access).
+                || ((format === D3DFMT.ATI1 || format === D3DFMT.ATI2) && pool !== D3DPOOL.SCRATCH)
                 || !(width > 0) || !(height > 0) || !blockAligned(format, width, height)
                 || (userMemory !== 0 && pool !== D3DPOOL.SYSTEMMEM))
             {
@@ -4091,10 +4501,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 format,
                 pool,
                 usage,
-                base: userMemory || allocate(surfaceBytes(format, width, height)),
+                base: userMemory || allocate(storageBytes(format, width, height)),
+                tight: userMemory !== 0,
                 // The program's own memory stays the program's.
                 count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
-                    : renderer?.retire(surface)), surfaceBytes(format, width, height)),
+                    : renderer?.retire(surface)), storageBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;
@@ -4113,7 +4524,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateVertexBuffer(length, usage, vertexFormat, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4135,7 +4546,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ buffer?: any }} out
          */
         CreateIndexBuffer(length, usage, format, pool, out){
-            if (!(length > 0) || unmanaged(pool))
+            if (!(length > 0) || unmanaged(pool) || !bufferTakes(usage, pool))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4158,7 +4569,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         UpdateSurface(source, sourceRect, destination, point, out = {}){
-            if (!source || !destination || source === destination)
+            // A source the program holds locked is refused (Wine's
+            // test_mipmap_lock); its container is not looked at.
+            if (!source || !destination || source === destination || source.locked === true)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4176,6 +4589,23 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 || at.y + (rect.bottom - rect.top) > to.Height)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            const block = FORMAT_INFO[from.Format]?.blockSize;
+            if (block !== undefined)
+            {
+                // Whole blocks, or a part of one that ends where both surfaces
+                // end (Wine's d3d9 update_surface_test: a 2x2 level into a
+                // 4x4 one is refused, into a 2x2 one taken).
+                const fits = (/** @type {number} */ start, /** @type {number} */ end,
+                    /** @type {number} */ size, /** @type {number} */ into,
+                    /** @type {number} */ intoSize)=>start % block === 0 && into % block === 0
+                    && ((end - start) % block === 0
+                        || (end === size && into + end - start === intoSize));
+                if (!fits(rect.left, rect.right, from.Width, at.x, to.Width)
+                    || !fits(rect.top, rect.bottom, from.Height, at.y, to.Height))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
             }
             deliverMoves([rectMove(source, rect, destination, at)], out);
             renderer?.markDirty?.(destination);
@@ -4200,13 +4630,26 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (source.volume || destination.volume)
             {
+                // Volumes of other sizes or formats are taken, as Windows takes
+                // them (Wine's test_update_volumetexture, cases 6 and 7): what
+                // overlaps is carried, bytes only between formats of one texel size.
                 const update = source.volume && destination.volume
                     && source.pool === D3DPOOL.SYSTEMMEM && destination.pool === D3DPOOL.DEFAULT
-                    ? volumeUpdate(source, destination)
+                    ? volumeUpdate(source, destination, { bySize: true })
                     : null;
                 if (!update)
                 {
                     return D3DERR_INVALIDCALL;
+                }
+                if (update.overlapped)
+                {
+                    report('update-size', 'UpdateTexture between volumes with no level of one'
+                        + ' size: they were carried where they overlap');
+                }
+                if (update.converted)
+                {
+                    report('update-format', 'UpdateTexture between volume formats of two texel'
+                        + ' sizes carried nothing: the texels are not converted');
                 }
                 deliverMoves(update.moves, out);
                 for (const volume of update.written)
@@ -4223,18 +4666,58 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             const from = describe(top);
             const to = describe(target);
+            // Two formats are taken, as Windows takes them (Wine's d3d9
+            // test_updatetexture, cases 12 to 15): of one texel size the
+            // bytes are carried, of two nothing is, and both are said.
+            const fromInfo = FORMAT_INFO[from.Format];
+            const toInfo = FORMAT_INFO[to.Format];
+            const sameBytes = from.Format === to.Format || (fromInfo !== undefined
+                && toInfo !== undefined && fromInfo.blockSize === undefined
+                && toInfo.blockSize === undefined
+                && fromInfo.bytesPerPixel === toInfo.bytesPerPixel);
             if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool !== D3DPOOL.DEFAULT
-                || from.Format !== to.Format
+                || (from.Format !== to.Format
+                    && (isCompressed(from.Format) || isCompressed(to.Format)))
                 || (source.cube ?? false) !== (destination.cube ?? false))
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (from.Format !== to.Format)
+            {
+                report('update-format', sameBytes
+                    ? 'UpdateTexture between two formats of one texel size: the bytes were'
+                        + ' carried, not converted'
+                    : 'UpdateTexture between formats of two texel sizes carried nothing: the'
+                        + ' texels are not converted');
+            }
             // A destination that makes its own levels takes the source's top
-            // one and makes the rest from it.
-            const skipped = destination.autoGen
-                ? 0
-                : Math.max(0, source.levels - destination.levels);
+            // one and makes the rest from it. Otherwise the source's levels
+            // larger than the destination's top one are skipped, by size and
+            // not by count (Wine's test_updatetexture, cases 6, 7 and 10), and
+            // levels of one larger side and two shapes carry where they
+            // overlap (case 11).
+            const largest = (/** @type {any} */ surface)=>{
+                const desc = describe(surface);
+                return Math.max(desc.Width, desc.Height);
+            };
+            let skipped = 0;
+            if (!destination.autoGen)
+            {
+                while (skipped < source.levels - 1
+                    && largest(levelSurface(source, skipped)) > largest(target))
+                {
+                    skipped++;
+                }
+                // A source with no level as large as the destination's top
+                // one in its larger side is no match: Windows writes past the
+                // destination there (the case the test leaves out).
+                if (largest(levelSurface(source, skipped)) !== largest(target))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+            }
             const faces = source.cube ? 6 : 1;
+            let overlapped = false;
             /** @type {{ one: any, other: any, level: number, face: number }[]} */
             const pairs = [];
             for (let face = 0; face < faces; face++)
@@ -4249,12 +4732,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     }
                     const desc = describe(one);
                     const into = describe(other);
-                    if (desc.Width !== into.Width || desc.Height !== into.Height)
-                    {
-                        return D3DERR_INVALIDCALL;
-                    }
+                    overlapped ||= desc.Width !== into.Width || desc.Height !== into.Height;
                     pairs.push({ one, other, level: level + skipped, face });
                 }
+            }
+            if (overlapped)
+            {
+                report('update-size', 'UpdateTexture between levels of two sizes: they were'
+                    + ' carried where they overlap');
             }
             // What the source was written in since it was last carried, and
             // nothing more: an update of a source nobody touched moves nothing
@@ -4264,11 +4749,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 (_, face)=>source.takeDirtyRegion?.(face) ?? null);
             /** @type {SurfaceMove[]} */
             const moves = [];
-            const carried = pairs.filter(pair=>regions[pair.face] !== null);
+            const carried = sameBytes ? pairs.filter(pair=>regions[pair.face] !== null) : [];
             for (const { one, other, level, face } of carried)
             {
                 const desc = describe(one);
-                const rect = regionAtLevel(regions[face], level, desc.Width, desc.Height);
+                const into = describe(other);
+                const rect = regionAtLevel(regions[face], level, Math.min(desc.Width, into.Width),
+                    Math.min(desc.Height, into.Height));
                 moves.push(rectMove(one, rect, other, { x: rect.left, y: rect.top }));
             }
             deliverMoves(moves, out);
@@ -4308,8 +4795,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 const write = services.writeMemory;
                 return renderer.readSurface(target).then(
-                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
-                        writePixels(destination, pixels.data, write);
+                    (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                        if (pixels)
+                        {
+                            writePixels(destination, pixels.data, write);
+                        }
                         return D3D_OK;
                     });
             }
@@ -4348,7 +4838,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ swapChain?: any }} out
          */
         CreateAdditionalSwapChain(asked, out){
-            if (!asked || asked.windowed === false
+            // A full-screen device has its one swap chain, windowed or not
+            // the one asked for (Wine's test_swapchain).
+            if (!asked || asked.windowed === false || presentParameters.windowed === false
                 || validatePresentParameters(asked, extended) !== D3D_OK)
             {
                 return D3DERR_INVALIDCALL;
@@ -4420,7 +4912,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         StretchRect(source, sourceRect, destination, destinationRect, filter, out = {}){
-            if (!source || !destination || filter > D3DTEXF_ANISOTROPIC)
+            if (!source || !destination || filter > D3DTEXF_LINEAR)
             {
                 report('stretch-arguments', `StretchRect refused: ${!source ? 'no source surface'
                     : !destination ? 'no destination surface' : `filter ${filter}`}`);
@@ -4439,6 +4931,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return refuse('pool', 'a surface outside the default pool');
             }
+            // A texture's level that is not a target takes no copy, and an
+            // offscreen plain surface only another's; a texture's level goes
+            // only into a target (Wine's d3d9 test_stretch_rect).
+            const fromKind = stretchKindOf(source);
+            const toKind = stretchKindOf(destination);
+            if (toKind === 'texture' || (toKind === 'plain' && fromKind !== 'plain'))
+            {
+                return refuse('kind', `a ${fromKind} surface into a ${toKind} one`);
+            }
             const depth = FORMAT_INFO[from.Format].depth;
             if (depth !== FORMAT_INFO[to.Format].depth || (depth && from.Format !== to.Format))
             {
@@ -4452,6 +4953,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             const stretched = rect.right - rect.left !== target.right - target.left
                 || rect.bottom - rect.top !== target.bottom - target.top;
+            if (depth)
+            {
+                // Depth goes whole surface to whole surface of its size, or
+                // not at all (Wine's d3d9 depth_blit_test).
+                const whole = (/** @type {Rect} */ r, /** @type {any} */ d)=>r.left === 0
+                    && r.top === 0 && r.right === d.Width && r.bottom === d.Height;
+                if (stretched || !whole(rect, from) || !whole(target, to))
+                {
+                    return refuse('depth',
+                        'a depth surface copies only whole, into one of its size');
+                }
+                if (renderer?.copyDepth?.(source, destination)
+                    || services.renderedElsewhere === true || services.drawsNothing === true)
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                services.divergence?.('Direct3D 9', 'StretchRect between depth surfaces: the'
+                    + ' depths are not copied without a renderer', 'loss');
+                return D3D_OK;
+            }
             // A stretch, or two formats the GPU stores apart, is drawn on the GPU: a program
             // that renders its interface small and stretches it over the screen is shown it
             // there, filtered as it asked.
@@ -4470,8 +4992,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // whenever both sides are its GPU's and not one texture, and
                 // the program is answered as it will be. Drawing nothing on
                 // purpose, it is answered as a GPU would answer it.
+                // An offscreen plain surface is taken up from its bytes for
+                // the stretch there.
                 if ((services.renderedElsewhere === true || services.drawsNothing === true)
-                    && drawnOnGpu(source)
+                    && (drawnOnGpu(source) || stretchKindOf(source) === 'plain')
                     && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];
@@ -4496,6 +5020,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             if (from.Format !== to.Format && alphaTwin(from.Format) !== to.Format)
             {
+                if (!isGpuResident(source) && convertBytes(source, rect, destination,
+                    { x: target.left, y: target.top }))
+                {
+                    out.moves = [];
+                    renderer?.markDirty?.(destination);
+                    return D3D_OK;
+                }
                 return refuse('convert', 'a conversion between these formats is not made here');
             }
             if (isGpuResident(source))
@@ -4538,7 +5069,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const desc = describe(surface);
             const info = FORMAT_INFO[desc.Format];
             const plain = surface.kind === SURFACE_TYPE.PLAIN;
-            if (desc.Pool !== D3DPOOL.DEFAULT || !info || info.depth || isCompressed(desc.Format)
+            if (desc.Pool !== D3DPOOL.DEFAULT || !info || info.depth
                 || (!plain && (desc.Usage & D3DUSAGE.RENDERTARGET) === 0))
             {
                 return D3DERR_INVALIDCALL;
@@ -4547,6 +5078,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (!rectWithin(area, desc))
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (isCompressed(desc.Format))
+            {
+                // Whole blocks, or to the surface's edge (Wine's d3d9
+                // color_fill_test fills DXT1 at 4,4-8,8 and is refused 5,5-7,7).
+                const block = plain ? solidBlock(desc.Format, colour >>> 0) : null;
+                const edge = (/** @type {number} */ at, /** @type {number} */ size)=>at % 4 === 0
+                    || at === size;
+                if (!block || area.left % 4 !== 0 || area.top % 4 !== 0
+                    || !edge(area.right, desc.Width) || !edge(area.bottom, desc.Height))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                fillBlocks(surface, area, block);
+                renderer?.markDirty?.(surface);
+                return D3D_OK;
             }
             if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && !renderer
                 && (services.renderedElsewhere === true || services.drawsNothing === true))
@@ -4625,10 +5172,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /**
          * Two kinds are offered. An event query asks whether the GPU has
-         * caught up, and it has, as far as the program can tell, the moment it
-         * asks. An occlusion query asks how many pixels a set of draws
-         * produced: the GPU's count where there is one. A device that draws
-         * nothing counts none, unless it draws nothing on purpose
+         * caught up, and it has the moment it asks (`roadmap/decisions.md`, A78):
+         * a present already holds the program to its frame latency. An
+         * occlusion query asks how many pixels a set of draws produced: the
+         * GPU's count where there is one. A device that draws nothing counts
+         * none, unless it draws nothing on purpose
          * (`drawsNothing`, the graphics setting `draw: false`): then every
          * pixel of the target, the one number that culls nothing the program
          * would draw on a GPU. Every other kind is the timing family, and is
@@ -4687,19 +5235,39 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {{ shader?: any }} out
      */
     const createShaderObject = (kind, supported, tokens, out)=>{
-        if (!tokens || !out)
+        if (!out)
         {
+            return D3DERR_INVALIDCALL;
+        }
+        if (!tokens)
+        {
+            report(`create:${kind}:unread`, `a ${kind} shader was refused: no function that`
+                + ' ends in an end token could be read where the program pointed');
             return D3DERR_INVALIDCALL;
         }
         const hr = validateShader(tokens, kind, supported);
         if (hr !== D3D_OK)
         {
             const version = versionOf(tokens[0]);
+            // Read whole and of a version this device runs, it was refused for
+            // a constant register past its version's last.
+            const past = version !== null && version.kind === kind && !parseShader(tokens).error
+                && (version.major < supported.major || (version.major === supported.major
+                    && version.minor <= supported.minor) || (version.major === 2
+                    && version.minor === 1 && supported.major >= 2));
             report(`create:${kind}:${version ? `${version.major}.${version.minor}` : 'bad'}`,
-                version && version.kind === kind
+                past
                     ? `a ${kind} shader of version ${version.major}.${version.minor} was refused:`
-                        + ` this device advertises ${supported.major}.${supported.minor}`
-                    : `a ${kind} shader was refused: its bytecode could not be read`);
+                        + ' it names a constant register past the version\'s last'
+                        + (kind === SHADER_KIND.VERTEX && (softwareVertexProcessing
+                            || mixedVertexProcessing)
+                            ? ', which a software-processing device has on Windows (decision A86)'
+                            : '')
+                    : version && version.kind === kind
+                        ? `a ${kind} shader of version ${version.major}.${version.minor} was`
+                            + ` refused: this device advertises ${supported.major}.`
+                            + `${supported.minor}`
+                        : `a ${kind} shader was refused: its bytecode could not be read`);
             return hr;
         }
         out.shader = createShader({ kind, tokens, count: explicitCount() });
@@ -4719,6 +5287,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const limit = file[which].length / width;
         if (!values || start < 0 || n < 0 || start + n > limit)
         {
+            if (file === vertexConstants && (softwareVertexProcessing || mixedVertexProcessing)
+                && values && start >= 0 && n >= 0)
+            {
+                report('swvp-constants', 'vertex shader constants past the hardware\'s were set'
+                    + ' on a software-processing device, which has 8192 on Windows: refused'
+                    + ' (decision A86)');
+            }
             return D3DERR_INVALIDCALL;
         }
         if (!recording)
@@ -4759,7 +5334,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            captureRecord(record, view);
+            captureRecord(record, view, { keepOffsets: true });
             return D3D_OK;
         },
         apply: ()=>{
@@ -4800,6 +5375,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             },
             addRef: ()=>queryCount.addRef(),
             release: ()=>queryCount.release(),
+            /** Whether the side that draws writes this query's counts into the guest. */
+            countsInGuest: occlusion && services.countsInGuest === true,
+            /**
+             * Where in the guest the counts of the measurement the next END
+             * closes go (`QUERY`), and that measurement's number: written by
+             * the side that draws once the GPU has them.
+             *
+             * @param {number} block @param {number} measurement
+             */
+            countInto(block, measurement){
+                if (counted)
+                {
+                    counted.guest = { block: block >>> 0, measurement: measurement >>> 0 };
+                }
+            },
             GetType: ()=>type,
             /** Four bytes: a BOOL, or a pixel count. */
             GetDataSize: ()=>4,
@@ -4840,8 +5430,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
              * the caller wait for the count (Wine's d3d9 test_occlusion_query,
              * whose loop polls with it). An event's buffer too small for its
              * BOOL is refused; an occlusion count is written in as many of
-             * its bytes as there is room for, and a query never ended writes
-             * nothing.
+             * its bytes as there is room for, and a query never issued writes
+             * the runtime's fill, 0xdddddddd.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
@@ -4868,6 +5458,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 if (!occlusion)
                 {
                     return answer(1);
+                }
+                // Never issued, the count is the runtime's fill (Wine's
+                // test_occlusion_query: 0xdddddddd, S_OK).
+                if (!ended)
+                {
+                    return answer(0xdddddddd);
                 }
                 if (!counted)
                 {

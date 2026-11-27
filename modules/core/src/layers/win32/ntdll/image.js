@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Walking a PE image's headers in guest memory, as the Rtl image helpers do.
  *
@@ -14,6 +16,13 @@
  */
 
 /** Where the headers keep what the walk needs. */
+/** IMAGE_REL_BASED_*: the base relocation types a block holds. */
+const REL_ABSOLUTE = 0;
+const REL_HIGH = 1;
+const REL_LOW = 2;
+const REL_HIGHLOW = 3;
+const REL_DIR64 = 10;
+
 const DOS_MAGIC = 0x5a4d;
 const NT_SIGNATURE = 0x00004550;
 const LFANEW = 0x3c;
@@ -105,7 +114,71 @@ export function createImageFunctions(host){
         return 0;
     };
 
+    /**
+     * One base relocation of a block applied at `at`, `delta` the distance the
+     * image moved: a dword, a word's high or low half, a qword, or nothing.
+     * Answers whether the type was one the block may hold.
+     *
+     * @param {number} type @param {number} at @param {number} delta
+     */
+    const relocate = (type, at, delta)=>{
+        const word = new DataView(host.readMemory(at, type === REL_DIR64 ? 8 : 4).buffer);
+        const out = new DataView(new ArrayBuffer(8));
+        switch (type)
+        {
+            case REL_ABSOLUTE:
+                return true;
+            case REL_HIGH:
+                out.setUint16(0, word.getUint16(0, true) + (delta >>> 16) & 0xffff, true);
+                host.writeMemory(at, new Uint8Array(out.buffer, 0, 2));
+                return true;
+            case REL_LOW:
+                out.setUint16(0, word.getUint16(0, true) + delta & 0xffff, true);
+                host.writeMemory(at, new Uint8Array(out.buffer, 0, 2));
+                return true;
+            case REL_HIGHLOW:
+                out.setUint32(0, word.getUint32(0, true) + delta >>> 0, true);
+                host.writeMemory(at, new Uint8Array(out.buffer, 0, 4));
+                return true;
+            case REL_DIR64:
+                out.setBigUint64(0, BigInt.asUintN(64, word.getBigUint64(0, true)
+                    + BigInt(delta | 0)), true);
+                host.writeMemory(at, new Uint8Array(out.buffer, 0, 8));
+                return true;
+            default:
+                return false;
+        }
+    };
+
     return {
+        /**
+         * PIMAGE_BASE_RELOCATION LdrProcessRelocationBlock(ULONG_PTR Page,
+         *   UINT Count, PUSHORT TypeOffset, LONG_PTR Delta)
+         *
+         * A base relocation block's entries applied to the page they name,
+         * each a type in its top four bits and an offset in the rest; the
+         * answer is where the next block starts, or NULL at a type no image
+         * holds, where the walk stops.
+         */
+        LdrProcessRelocationBlock: {
+            returns: 'pointer',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([page, count, entries, delta])=>{
+                const list = new DataView(host.readMemory(wholeAddress(entries),
+                    (count >>> 0) * 2).buffer);
+                for (let i = 0; i < (count >>> 0); i++)
+                {
+                    const entry = list.getUint16(i * 2, true);
+                    if (!relocate(entry >>> 12, (page + (entry & 0xfff)) >>> 0, delta | 0))
+                    {
+                        return 0;
+                    }
+                }
+                return wholeAddress(entries + (count >>> 0) * 2);
+            },
+        },
+
         /**
          * PVOID RtlImageDirectoryEntryToData(PVOID BaseOfImage, BOOLEAN MappedAsImage,
          *                                    USHORT DirectoryEntry, PULONG Size)
@@ -117,15 +190,17 @@ export function createImageFunctions(host){
          * as the real walk is guarded.
          */
         RtlImageDirectoryEntryToData: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, mappedAsImage, entry, size])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const asData = (address & 1) !== 0;
                 try
                 {
                     return directoryData((address & ~1) >>> 0,
-                        !asData && (mappedAsImage & 0xff) !== 0, entry & 0xffff, size >>> 0);
+                        !asData && (mappedAsImage & 0xff) !== 0, entry & 0xffff,
+                        wholeAddress(size));
                 }
                 catch {
                     return 0;

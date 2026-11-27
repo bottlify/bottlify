@@ -10,6 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { noCache } from '../cache/module.js';
 import { cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
@@ -28,11 +29,11 @@ const u32 = value=>[
  * @param {Uint8Array} code @param {number} at @param {any} [config]
  */
 async function booted(code, at, config = {}){
-    const metrics = createMetrics({ shared: false });
+    const metrics = createMetrics();
     /** @type {string[]} */
     const words = [];
     const moduleHost = /** @type {any} */ ({
-        requireApi: ()=>({
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {
             metrics,
             /** @param {string} text */
             intern: text=>{
@@ -42,7 +43,7 @@ async function booted(code, at, config = {}){
         }),
         provide: ()=>{},
     });
-    const api = await cpuModule.create({ engine: 'cork', engineUrl: CORK, ...config }, moduleHost);
+    const api = await cpuModule.create({ engineUrl: CORK, ...config }, moduleHost);
     await api.boot();
     api.writePhysical(at, code);
     api.writePhysical(0x7000, new Uint8Array(u32(at)));
@@ -50,16 +51,12 @@ async function booted(code, at, config = {}){
     return { api, metrics, counters };
 }
 
-test('under cork the jit counters say -1, not a dead compiler', async()=>{
-    // Cork has no emulator compiler: the `jit.*` columns stay in the table
-    // (a caller reads the same schema on every engine) but report -1, so a
-    // zero is never mistaken for a compiler that compiled nothing.
-    const metrics = createMetrics({ shared: false });
+test('the frame counters carry what the host wrote into guest memory', async()=>{
+    const metrics = createMetrics();
     const api = await cpuModule.create({
-        engine: 'cork',
         engineUrl: CORK,
     }, /** @type {any} */ ({
-        requireApi: ()=>({ metrics, intern: ()=>-1 }), provide: ()=>{},
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }), provide: ()=>{},
     }));
     await api.boot();
     api.writePhysical(GUEST_CODE, new Uint8Array([0xf4]));
@@ -67,9 +64,8 @@ test('under cork the jit counters say -1, not a dead compiler', async()=>{
     api.runSlice(100);
     metrics.sample();
     const row = readTable(metrics.describe().cpu.counters).row(0);
-    assert.equal(row['jit.compiledSteps'], -1);
-    assert.equal(row['jit.cache'], -1);
-    assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).jit, -1);
+    assert.ok(row.hostWrittenBytes >= 5, `${row.hostWrittenBytes} bytes`);
+    assert.ok(row.instructions > 0);
     await cpuModule.dispose();
 });
 
@@ -91,6 +87,30 @@ test('a slice that ends before its budget credits no sample to where it stopped'
     // The boot's own first slice, which ran its budget, may sit in the bucket.
     assert.ok((halt?.instructions ?? 0) < retired,
         `the hlt is not charged with the loop: ${JSON.stringify(halt)}`);
+    api.stop();
+    await cpuModule.dispose();
+});
+
+test('a program that presents no frame has its translator fed as it runs: a call through a'
+    + ' register is sampled and its callee formed into its region', async()=>{
+    // L: mov eax, [TABLE]; call eax; jmp L, the callee `inc edx; ret`. No frame is ever
+    // sampled here: fed only by frames, the translator's step ran while the interpreter
+    // still met new code and never again, so the call's samples were never read.
+    const table = GUEST_CODE + 0x100;
+    const callee = GUEST_CODE + 0x40;
+    const { api } = await booted(new Uint8Array([0xa1, ...u32(table), 0xff, 0xd0, 0xeb, 0xf7]),
+        GUEST_CODE);
+    api.writePhysical(callee, new Uint8Array([0x42, 0xc3]));
+    api.writePhysical(table, new Uint8Array(u32(callee)));
+    const prediction = ()=>/** @type {any} */ (cpuModule.diagnostics().metrics ?? {}).cork
+        ?.prediction;
+    for (let slice = 0; slice < 4000 && !(prediction()?.reforms > 0); slice++)
+    {
+        api.runSlice(1 << 20);
+        // A translator on a worker answers between slices.
+        await new Promise(resolve=>setTimeout(resolve, 0));
+    }
+    assert.ok(prediction()?.reforms > 0, `formed again: ${JSON.stringify(prediction())}`);
     api.stop();
     await cpuModule.dispose();
 });
@@ -125,28 +145,14 @@ test('slices credit the address the guest ran at', async()=>{
     await cpuModule.dispose();
 });
 
-test('sampling: false leaves every slice uncredited', async()=>{
-    const { api } = await booted(
-        new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE, { sampling: false });
-
-    api.runSlice(4096);
-    const status = cpuModule.diagnostics();
-    const metrics = /** @type {any} */ (status.metrics ?? {});
-    assert.equal(metrics.samples.slices, 0);
-    assert.deepEqual(metrics.samples.top, []);
-
-    api.stop();
-    await cpuModule.dispose();
-});
-
 test('a second instance in one realm boots on its own, never seeing the first one\'s machine',
     async()=>{
         const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 
-        const metrics = createMetrics({ shared: false });
-        const second = await cpuModule.create({ engine: 'cork', engineUrl: CORK },
+        const metrics = createMetrics();
+        const second = await cpuModule.create({ engineUrl: CORK },
             /** @type {any} */ ({
-                requireApi: ()=>({ metrics, intern: ()=>-1 }),
+                requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : { metrics, intern: ()=>-1 }),
                 provide: ()=>{},
             }));
         // The check reads this instance's own host, not the module's, which
@@ -174,34 +180,3 @@ test('a disposed cpu answers as a never-booted one does, after a real boot', asy
         /cpu: boot\(\) must be called before the guest can run/);
 });
 
-test('several executors keep plain accesses in order only when the run asks for it', async()=>{
-    // The ordered variant makes every integer access an atomic one: a price a
-    // run pays only when it asks, on whatever host it runs -- here one that
-    // reorders plain accesses, where a default taken from the host would be on.
-    const arch = Object.getOwnPropertyDescriptor(process, 'arch');
-    Object.defineProperty(process, 'arch', { value: 'arm64', configurable: true });
-    try
-    {
-        for (const [cork, expected] of /** @type {[any, boolean][]} */ ([
-            [undefined, false], [{ ordered: false }, false], [{ ordered: true }, true],
-        ]))
-        {
-            const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE,
-                { executors: 2, ...(cork ? { cork } : {}) });
-            assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).ordered, expected,
-                `cork ${JSON.stringify(cork)}`);
-            api.stop();
-            await cpuModule.dispose();
-        }
-        const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE,
-            { cork: { ordered: true } });
-        assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).ordered, null,
-            'one executor has no other to keep an order for');
-        api.stop();
-        await cpuModule.dispose();
-    }
-    finally
-    {
-        Object.defineProperty(process, 'arch', /** @type {PropertyDescriptor} */ (arch));
-    }
-});

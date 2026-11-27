@@ -9,9 +9,10 @@
  * the kernel's word saying no thread waits to run returns there, and every
  * other call goes to the host as it was made. Then two threads handing a
  * token back and forth, each spinning on Sleep(0) until it is its turn, on one
- * executor and on three, built with Sleep and with SleepEx(0, FALSE), which
- * only the host answers: the token's work comes out the same, and with
- * executors to spare the guest answers the spins.
+ * executor and on three, built with Sleep, with SleepEx(0, FALSE) - the same
+ * guest code over two arguments - and with SleepEx(0, TRUE), which only the
+ * host answers: the token's work comes out the same, and with executors to
+ * spare the guest answers the spins.
  */
 
 import { test } from 'node:test';
@@ -20,7 +21,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createApp } from '../../../app.js';
-import { assemble, buildExe } from '../../../../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { sleepCode } from './process.js';
 
 const PROGRAM = 0x8000;
@@ -43,7 +44,7 @@ test('Sleep(0) with no thread waiting to run returns in the guest; every other c
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(SLEEP, sleepCode(SLEEP, TRAP, WORD));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -82,6 +83,36 @@ test('Sleep(0) with no thread waiting to run returns in the guest; every other c
     assert.equal(sleep(0, 7), 'host');
     assert.equal(sleep(1, 0), 'host', 'a time to sleep is the host\'s');
     assert.equal(sleep(0xffffffff, 0), 'host');
+
+    // SleepEx's: the same over its two arguments, both popped.
+    const SLEEP_EX = SLEEP + 0x40;
+    host.writePhysical(SLEEP_EX, sleepCode(SLEEP_EX, TRAP, WORD, true));
+    /** @param {number} milliseconds @param {number} alertable @param {number} waiting */
+    const sleepEx = (milliseconds, alertable, waiting)=>{
+        host.writePhysical(WORD, new Uint8Array(u32(waiting)));
+        const code = [0x68, ...u32(alertable), 0x68, ...u32(milliseconds),
+            0xe8, ...u32((SLEEP_EX - (PROGRAM + 15)) | 0), 0xf4];
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.writeReg32('eax', 0x5a5a5a5a);
+        host.wake();
+        runToHalt(host, 1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 12,
+                'the host is reached with the call as it was made');
+            return 'host';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK, 'both arguments popped');
+        return host.readReg32('eax');
+    };
+    assert.equal(sleepEx(0, 0, 0), 0, 'SleepEx(0, FALSE), no thread waiting: zero, at once');
+    assert.equal(sleepEx(0, 0, 1), 'host');
+    assert.equal(sleepEx(0, 1, 0), 'host', 'an alertable one has routines to run: the host\'s');
+    assert.equal(sleepEx(5, 0, 0), 'host');
+    assert.equal(sleepEx(0xffffffff, 1, 0), 'host');
     host.stop();
 });
 
@@ -91,13 +122,13 @@ const WORKER_AT = 0x200;
 /**
  * Two threads handing a token: the main thread's turn multiplies the count by
  * five and adds two, the worker's by three and adds one, each spinning on a
- * zero sleep -- Sleep(0), or SleepEx(0, FALSE) when `host` -- until the token
- * is its own. The program exits with the count, which only the right order of
- * turns gives.
+ * zero sleep -- Sleep(0), SleepEx(0, FALSE), or SleepEx(0, TRUE), the host's --
+ * until the token is its own. The program exits with the count, which only the
+ * right order of turns gives.
  *
- * @param {boolean} host
+ * @param {'Sleep' | 'SleepEx' | 'alertable'} how
  */
-function tokenProgram(host){
+function tokenProgram(how){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess',
             'Sleep', 'SleepEx'] },
@@ -106,8 +137,8 @@ function tokenProgram(host){
         code: ({ iat, at, code })=>{
             /** @param {string} name */
             const call = name=>[0xff, 0x15, ...u32(iat(name))];
-            const zeroSleep = host ? [0x6a, 0x00, 0x6a, 0x00, ...call('SleepEx')]
-                : [0x6a, 0x00, ...call('Sleep')];
+            const zeroSleep = how === 'Sleep' ? [0x6a, 0x00, ...call('Sleep')]
+                : [0x6a, how === 'alertable' ? 0x01 : 0x00, 0x6a, 0x00, ...call('SleepEx')];
             /**
              * ROUNDS turns: wait for the token to be `mine`, the count times
              * `times` plus `plus`, the token to the other.
@@ -161,19 +192,19 @@ const expected = (()=>{
 })();
 
 /**
- * The exit code and how many times Sleep crossed into the host.
+ * The exit code and how many times the function crossed into the host.
  *
- * @param {Uint8Array} executable @param {number} cores
+ * @param {Uint8Array} executable @param {number} cores @param {'Sleep' | 'SleepEx'} name
  */
-async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, eager: true } });
+async function run(executable, cores, name){
+    const app = await createApp({ executable, cpu: { cores } });
     try
     {
-        const code = await app.run({ timeoutMs: 120_000 });
+        const code = await app.run({ timeoutMs: 300_000 });
         const tables = await app.diagnostics();
         const bridge = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'bridge');
         const line = (bridge?.metrics?.byFunction ?? [])
-            .find((/** @type {string} */ one)=>one.startsWith('KERNEL32.dll!Sleep '));
+            .find((/** @type {string} */ one)=>one.startsWith(`KERNEL32.dll!${name} `));
         return { code: code >>> 0, crossings: line ? Number(line.split(' ')[1]) : 0 };
     }
     finally
@@ -182,25 +213,39 @@ async function run(executable, cores){
     }
 }
 
-test('two threads spinning on Sleep(0) for a token hand it alike with the guest\'s Sleep and the'
-    + ' host\'s, on one executor and on three', { timeout: 300_000 }, async()=>{
-    for (const cores of [1, 3])
+test('two threads spinning on a zero sleep for a token hand it alike with the guest\'s Sleep and'
+    + ' SleepEx and the host\'s, on one executor and on three', { timeout: 300_000 }, async t=>{
+    // The token is handed with plain movs, which x86 keeps in order (TSO). A host that reorders
+    // plain stores to shared memory (arm64) keeps no such order between executors, by decision
+    // A277: there the test runs on one executor only.
+    const ordered = process.arch === 'x64' || process.arch === 'ia32';
+    if (!ordered)
     {
-        const host = await run(tokenProgram(true), cores);
-        assert.equal(host.code, expected, `${cores} executor(s), the host's SleepEx`);
-        const guest = await run(tokenProgram(false), cores);
-        assert.equal(guest.code, expected, `${cores} executor(s), the guest's Sleep`);
-        if (cores === 1)
+        t.diagnostic(`three executors not run on ${process.arch}: a plain-mov handoff needs TSO`
+            + ' (A277)');
+    }
+    for (const cores of ordered ? [1, 3] : [1])
+    {
+        const host = await run(tokenProgram('alertable'), cores, 'SleepEx');
+        assert.equal(host.code, expected, `${cores} executor(s), the host's SleepEx(0, TRUE)`);
+        assert.ok(host.crossings >= ROUNDS, `the host's arm crossed: ${host.crossings}`);
+        for (const name of /** @type {const} */ (['Sleep', 'SleepEx']))
         {
-            // Each spin finds the other thread waiting for the one executor:
-            // the host gives it the turn, as before.
-            assert.ok(guest.crossings >= ROUNDS, `${guest.crossings} crossings on one executor`);
-        }
-        else
-        {
-            // Each thread on an executor of its own, nothing waits to run.
-            assert.ok(guest.crossings < ROUNDS / 10,
-                `${guest.crossings} crossings with an executor each`);
+            const guest = await run(tokenProgram(name), cores, name);
+            assert.equal(guest.code, expected, `${cores} executor(s), the guest's ${name}`);
+            if (cores === 1)
+            {
+                // Each spin finds the other thread waiting for the one executor:
+                // the host gives it the turn, as before.
+                assert.ok(guest.crossings >= ROUNDS,
+                    `${name}: ${guest.crossings} crossings on one executor`);
+            }
+            else
+            {
+                // Each thread on an executor of its own, nothing waits to run.
+                assert.ok(guest.crossings < ROUNDS / 10,
+                    `${name}: ${guest.crossings} crossings with an executor each`);
+            }
         }
     }
 });

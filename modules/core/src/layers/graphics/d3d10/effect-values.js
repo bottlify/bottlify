@@ -19,22 +19,9 @@
  */
 
 import { D3D10_SVC, D3D10_SVT } from './effect.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** @typedef {'float' | 'int' | 'bool'} Given */
-
-const scratch = new DataView(new ArrayBuffer(4));
-
-/** @param {number} value */
-const floatBits = value=>{
-    scratch.setFloat32(0, value, true);
-    return scratch.getUint32(0, true);
-};
-
-/** @param {number} bits */
-const bitsFloat = bits=>{
-    scratch.setUint32(0, bits >>> 0, true);
-    return scratch.getFloat32(0, true);
-};
 
 /**
  * A value a program gives, as the dword a variable of this type keeps.
@@ -43,7 +30,7 @@ const bitsFloat = bits=>{
  * @param {Given} given
  * @param {number} svt  The variable's D3D10_SHADER_VARIABLE_TYPE.
  */
-export function toStored(value, given, svt){
+function toStored(value, given, svt){
     if (svt === D3D10_SVT.BOOL)
     {
         return given === 'bool' ? value >>> 0 : (value !== 0 ? 0xffffffff : 0);
@@ -70,7 +57,7 @@ export function toStored(value, given, svt){
  * @param {number} svt
  * @param {Given} wanted
  */
-export function fromStored(bits, svt, wanted){
+function fromStored(bits, svt, wanted){
     if (svt === D3D10_SVT.BOOL)
     {
         if (wanted === 'bool')

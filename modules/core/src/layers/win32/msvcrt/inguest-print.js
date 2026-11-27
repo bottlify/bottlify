@@ -27,10 +27,16 @@
  * The text is bytes as the format's and its strings' bytes are -- the
  * host's printer reads and writes them in the ANSI page, which is the same
  * bytes a byte at a time -- and its length is counted in bytes.
+ *
+ * A 64-bit process runs the same source compiled to x86-64 (`inguest-print.x64.js`):
+ * a slot of its `va_list` is eight bytes (`pointerBytes`), an integer the lower half
+ * of one, and a pointer (%p) or a size_t (%Iu, %zu, %tu), eight bytes there, goes to
+ * the host's printer with the rest of what this code does not render.
  */
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 /** @typedef {import('./guest-code.js').i32} i32 */
 
 /** The host's window of argument slots a `va_list` is read as (`functions.js`). */
@@ -49,6 +55,9 @@ const digitByte = (/** @type {number} */ d)=>(d < 10 ? (48 + d) | 0 : (87 + d) |
 /** Whether a byte is a digit. */
 const isDigit = (/** @type {number} */ c)=>(c >= 48 && c <= 57 ? 1 : 0);
 
+/** Whether a byte is an ASCII letter. */
+const isLetter = (/** @type {number} */ c)=>((c | 32) >= 97 && (c | 32) <= 122 ? 1 : 0);
+
 /** Whether a byte is one of the integer conversions, "diouxX", which alone take `I`, `z`, `t`. */
 const isInteger = (/** @type {number} */ c)=>(c === 100 || c === 105 || c === 111
     || c === 117 || c === 120 || c === 88 ? 1 : 0);
@@ -57,10 +66,10 @@ const isInteger = (/** @type {number} */ c)=>(c === 100 || c === 105 || c === 11
  * 1 when every conversion of a format is one `printInto` renders, else 0.
  *
  * @guestCode cdecl
- * @param {Pick<Guest, 'u8'>} guest @param {u32} format
+ * @param {Pick<Guest, 'u8' | 'pointerBytes'>} guest @param {u32} format
  * @returns {u32}
  */
-export function formatInGuest({ u8 }, format){
+export function formatInGuest({ u8, pointerBytes }, format){
     /** @type {u32} */
     let at = format;
     for (;;)
@@ -135,9 +144,10 @@ export function formatInGuest({ u8 }, format){
             {
                 wide64 = 1;
             }
-            else if (m === 70 || m === 78)
+            else if (m === 78 || m === 70 && isLetter(u8(at + 1)) !== 0)
             {
-                // Far and near: nothing to a flat address.
+                // Far and near: nothing to a flat address. An F before no
+                // letter is the universal runtime's %F, the host's.
             }
             else if (m === 73 && u8(at + 1) === 54 && u8(at + 2) === 52)
             {
@@ -150,7 +160,11 @@ export function formatInGuest({ u8 }, format){
             }
             else if ((m === 73 || m === 122 || m === 116) && isInteger(u8(at + 1)) !== 0)
             {
-                // size_t and ptrdiff_t: four bytes here.
+                // size_t and ptrdiff_t: a pointer's size.
+                if (pointerBytes === 8)
+                {
+                    wide64 = 1;
+                }
             }
             else
             {
@@ -162,6 +176,14 @@ export function formatInGuest({ u8 }, format){
         if (conversion === 0)
         {
             return 1;
+        }
+        // A pointer of eight bytes is sixteen digits, past what printInto renders.
+        if (pointerBytes === 8)
+        {
+            if (conversion === 112)
+            {
+                return 0;
+            }
         }
         at++;
         if (wide64 !== 0 && isInteger(conversion) !== 0)
@@ -176,8 +198,12 @@ export function formatInGuest({ u8 }, format){
         {
             return 0;
         }
+        // A double, and %a's and %F's too: the universal runtime writes them
+        // as numbers where msvcrt writes the letter, which the host's
+        // printer knows by the call's style.
         if (conversion === 90 || conversion === 101 || conversion === 69 || conversion === 102
-            || conversion === 103 || conversion === 71)
+            || conversion === 103 || conversion === 71 || conversion === 97 || conversion === 65
+            || conversion === 70)
         {
             return 0;
         }
@@ -192,11 +218,14 @@ export function formatInGuest({ u8 }, format){
  * whether the call is the host's, leaves memory as it was.
  *
  * @guestCode cdecl
- * @param {Pick<Guest, 'u8' | 'u32' | 'setU8' | 'setU32'>} guest @param {u32} buffer
- * @param {u32} limit @param {u32} format @param {u32} list @param {u32} counts
+ * @param {Pick<Guest, 'u8' | 'u32' | 'setU8' | 'setU32' | 'pointerBytes'>} guest
+ * @param {ptr} buffer @param {u32} limit @param {u32} format @param {ptr} list
+ * @param {u32} counts
  * @returns {u32}
  */
-export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, list, counts){
+export function printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, limit, format, list,
+    counts)
+{
     /** @type {u32} */
     let out = 0;
     /** @type {u32} */
@@ -260,7 +289,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
             let given = 0;
             if (taken < VA_LIST_SLOTS)
             {
-                given = u32(list + taken * 4) | 0;
+                given = u32(list + taken * pointerBytes) | 0;
             }
             taken++;
             if (given < 0)
@@ -288,7 +317,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
                 let given = 0;
                 if (taken < VA_LIST_SLOTS)
                 {
-                    given = u32(list + taken * 4) | 0;
+                    given = u32(list + taken * pointerBytes) | 0;
                 }
                 taken++;
                 precision = given < 0 ? -1 : given;
@@ -371,7 +400,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
         {
             if (taken < VA_LIST_SLOTS)
             {
-                value = (u32(list + taken * 4) & 0xff) >>> 0;
+                value = (u32(list + taken * pointerBytes) & 0xff) >>> 0;
             }
             taken++;
             count = 1;
@@ -380,7 +409,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
         {
             if (taken < VA_LIST_SLOTS)
             {
-                text = u32(list + taken * 4);
+                text = u32(list + taken * pointerBytes);
             }
             taken++;
             kind = 1;
@@ -407,7 +436,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
             let slot = 0;
             if (taken < VA_LIST_SLOTS)
             {
-                slot = u32(list + taken * 4) | 0;
+                slot = u32(list + taken * pointerBytes) | 0;
             }
             taken++;
             if (short !== 0)
@@ -486,7 +515,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
         {
             if (taken < VA_LIST_SLOTS)
             {
-                value = u32(list + taken * 4);
+                value = u32(list + taken * pointerBytes);
             }
             taken++;
             kind = 5;
@@ -505,7 +534,7 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
             let where = 0;
             if (taken < VA_LIST_SLOTS)
             {
-                where = u32(list + taken * 4);
+                where = u32(list + taken * pointerBytes);
             }
             taken++;
             if (where !== 0 && counts !== 0)
@@ -631,15 +660,16 @@ export function printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, lis
  * its terminator, however long; its length.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} format @param {u32} list
+ * @param {Guest} guest @param {ptr} buffer @param {u32} format @param {u32} list
  * @returns {i32}
  */
-export function vsprintf({ u8, u32, setU8, setU32, host }, buffer, format, list){
-    if (buffer === 0 || format === 0 || formatInGuest({ u8 }, format) === 0)
+export function vsprintf({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, format, list){
+    if (buffer === 0 || format === 0 || formatInGuest({ u8, pointerBytes }, format) === 0)
     {
         return host();
     }
-    const total = printInto({ u8, u32, setU8, setU32 }, buffer, 0xffffffff, format, list, 1);
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, 0xffffffff, format,
+        list, 1);
     setU8(buffer + total, 0);
     return total | 0;
 }
@@ -650,16 +680,19 @@ export function vsprintf({ u8, u32, setU8, setU32, host }, buffer, format, list)
  * when it did not fit. No buffer is the host's (a length asked for, or EINVAL).
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} count @param {u32} format
+ * @param {Guest} guest @param {ptr} buffer @param {u32} count @param {u32} format
  * @param {u32} list
  * @returns {i32}
  */
-export function _vsnprintf({ u8, u32, setU8, setU32, host }, buffer, count, format, list){
-    if (buffer === 0 || format === 0 || formatInGuest({ u8 }, format) === 0)
+export function _vsnprintf({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, count, format,
+    list)
+{
+    if (buffer === 0 || format === 0 || formatInGuest({ u8, pointerBytes }, format) === 0)
     {
         return host();
     }
-    const total = printInto({ u8, u32, setU8, setU32 }, buffer, count, format, list, 1);
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, count, format, list,
+        1);
     if (total < count)
     {
         setU8(buffer + total, 0);
@@ -679,12 +712,12 @@ export function _vsnprintf({ u8, u32, setU8, setU32, host }, buffer, count, form
  * @param {Guest} guest @param {u32} format @param {u32} list
  * @returns {i32}
  */
-export function _vscprintf({ u8, u32, setU8, setU32, host }, format, list){
-    if (format === 0 || formatInGuest({ u8 }, format) === 0)
+export function _vscprintf({ u8, u32, setU8, setU32, host, pointerBytes }, format, list){
+    if (format === 0 || formatInGuest({ u8, pointerBytes }, format) === 0)
     {
         return host();
     }
-    return printInto({ u8, u32, setU8, setU32 }, 0, 0, format, list, 1) | 0;
+    return printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 1) | 0;
 }
 
 /**
@@ -696,14 +729,15 @@ export function _vscprintf({ u8, u32, setU8, setU32, host }, format, list){
  * the host's, found before a byte is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} size @param {u32} count
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} count
  * @param {u32} format @param {u32} list
  * @returns {i32}
  */
-export function _vsnprintf_s({ u8, u32, setU8, setU32, host }, buffer, size, count, format,
-    list)
+export function _vsnprintf_s({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, size, count,
+    format, list)
 {
-    if (buffer === 0 || size === 0 || format === 0 || formatInGuest({ u8 }, format) === 0)
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuest({ u8, pointerBytes }, format) === 0)
     {
         return host();
     }
@@ -715,11 +749,13 @@ export function _vsnprintf_s({ u8, u32, setU8, setU32, host }, buffer, size, cou
         limit = count;
     }
     if (count !== 0xffffffff && count > room
-        && printInto({ u8, u32, setU8, setU32 }, 0, 0, format, list, 0) > room)
+        && printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0)
+            > room)
     {
         return host();
     }
-    const total = printInto({ u8, u32, setU8, setU32 }, buffer, limit, format, list, 1);
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, limit, format, list,
+        1);
     if (total <= limit)
     {
         setU8(buffer + total, 0);
@@ -727,4 +763,900 @@ export function _vsnprintf_s({ u8, u32, setU8, setU32, host }, buffer, size, cou
     }
     setU8(buffer + limit, 0);
     return -1;
+}
+
+/**
+ * int vsprintf_s(char *buffer, size_t size, const char *format, va_list args):
+ * the text and its terminator when both fit in `size`; a text that does not
+ * fit (the buffer emptied, ERANGE) and an invalid parameter (EINVAL) are the
+ * host's, found before a byte is written.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} format
+ * @param {u32} list
+ * @returns {i32}
+ */
+export function vsprintf_s({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, size, format,
+    list)
+{
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuest({ u8, pointerBytes }, format) === 0
+        || printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0) >= size)
+    {
+        return host();
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, size, format, list,
+        1);
+    setU8(buffer + total, 0);
+    return total | 0;
+}
+
+/*
+ * The UCRT's printers take an options quadword first: two slots before the
+ * buffer at 32 bits, one register at 64, so each argument after it is a slot
+ * nearer at 64 bits -- the source names the slots and picks by the width.
+ */
+
+/**
+ * int __stdio_common_vsprintf(unsigned __int64 options, char *buffer,
+ * size_t count, const char *format, _locale_t locale, va_list args): every
+ * narrow sprintf, snprintf and _vsnprintf of a program built since 2015. The
+ * options' STANDARD_SNPRINTF_BEHAVIOR (2) is C99's snprintf -- what fits of
+ * `count` and a terminator, the whole text's length; without it _vsnprintf's
+ * -- `count` bytes, a terminator only when the text is shorter, -1 when it
+ * did not fit -- the last byte made the terminator under
+ * LEGACY_VSPRINTF_NULL_TERMINATION (1). No buffer and no count asks for the
+ * length; no buffer with a count, or no format, is EINVAL, the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vsprintf({ u8, u32, setU8, setU32, host, pointerBytes }, options,
+    second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const count = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (format === 0 || formatInGuest({ u8, pointerBytes }, format) === 0
+        || buffer === 0 && count !== 0)
+    {
+        return host();
+    }
+    // The length alone is a text rendered all the same: %n stores its count.
+    if (buffer === 0 || count === 0 && (options & 2) !== 0)
+    {
+        return printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 1) | 0;
+    }
+    if ((options & 2) !== 0)
+    {
+        const room = (count - 1) >>> 0;
+        const whole = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, room, format,
+            list, 1);
+        setU8(buffer + (whole < room ? whole : room), 0);
+        return whole | 0;
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, count, format, list,
+        1);
+    if (total < count)
+    {
+        setU8(buffer + total, 0);
+    }
+    if (total <= count)
+    {
+        return total | 0;
+    }
+    if ((options & 1) !== 0 && count !== 0)
+    {
+        setU8((buffer + count - 1) >>> 0, 0);
+    }
+    return -1;
+}
+
+/**
+ * int __stdio_common_vsprintf_s(unsigned __int64 options, char *buffer,
+ * size_t size, const char *format, _locale_t locale, va_list args):
+ * vsprintf_s, the UCRT's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vsprintf_s({ u8, u32, setU8, setU32, host, pointerBytes },
+    options, second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const size = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuest({ u8, pointerBytes }, format) === 0
+        || printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0) >= size)
+    {
+        return host();
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, size, format, list,
+        1);
+    setU8(buffer + total, 0);
+    return total | 0;
+}
+
+/**
+ * 1 when every conversion of a wide format is one `printIntoWide` renders,
+ * else 0: `formatInGuest` over units, a narrow string or character -- which
+ * the ANSI page widens -- the host's.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'u16' | 'pointerBytes'>} guest @param {u32} format
+ * @returns {u32}
+ */
+export function formatInGuestWide({ u16, pointerBytes }, format){
+    /** @type {u32} */
+    let at = format;
+    for (;;)
+    {
+        const c = u16(at);
+        if (c === 0)
+        {
+            return 1;
+        }
+        at += 2;
+        if (c !== 37)
+        {
+            continue;
+        }
+        // The flags, the width and the precision, '*' among them.
+        while (u16(at) === 45 || u16(at) === 48 || u16(at) === 43 || u16(at) === 32
+            || u16(at) === 35)
+        {
+            at += 2;
+        }
+        if (u16(at) === 42)
+        {
+            at += 2;
+        }
+        while (isDigit(u16(at)) !== 0)
+        {
+            at += 2;
+        }
+        if (u16(at) === 46)
+        {
+            at += 2;
+            if (u16(at) === 42)
+            {
+                at += 2;
+            }
+            else
+            {
+                while (isDigit(u16(at)) !== 0)
+                {
+                    at += 2;
+                }
+            }
+        }
+        let sawH = 0;
+        let sawL = 0;
+        let sawW = 0;
+        let wide64 = 0;
+        for (;;)
+        {
+            const m = u16(at);
+            if (m === 104)
+            {
+                sawH = 1;
+            }
+            else if (m === 108)
+            {
+                if (u16(at + 2) === 108)
+                {
+                    wide64 = 1;
+                    at += 2;
+                }
+                else
+                {
+                    sawL = 1;
+                }
+            }
+            else if (m === 119)
+            {
+                sawW = 1;
+            }
+            else if (m === 76 || m === 106)
+            {
+                wide64 = 1;
+            }
+            else if (m === 78 || m === 70 && isLetter(u16(at + 2)) !== 0)
+            {
+                // Far and near: nothing to a flat address. An F before no
+                // letter is the universal runtime's %F, the host's.
+            }
+            else if (m === 73 && u16(at + 2) === 54 && u16(at + 4) === 52)
+            {
+                wide64 = 1;
+                at += 4;
+            }
+            else if (m === 73 && u16(at + 2) === 51 && u16(at + 4) === 50)
+            {
+                at += 4;
+            }
+            else if ((m === 73 || m === 122 || m === 116) && isInteger(u16(at + 2)) !== 0)
+            {
+                // size_t and ptrdiff_t: a pointer's size.
+                if (pointerBytes === 8)
+                {
+                    wide64 = 1;
+                }
+            }
+            else
+            {
+                break;
+            }
+            at += 2;
+        }
+        const conversion = u16(at);
+        if (conversion === 0)
+        {
+            return 1;
+        }
+        // A pointer of eight bytes is sixteen digits, past what printInto renders.
+        if (pointerBytes === 8)
+        {
+            if (conversion === 112)
+            {
+                return 0;
+            }
+        }
+        at += 2;
+        if (wide64 !== 0 && isInteger(conversion) !== 0)
+        {
+            return 0;
+        }
+        // A narrow string or character, which the ANSI page widens: `h` without `w`, or
+        // the capital form without `l` or `w` -- in a wide printer the small one is wide.
+        const narrow = sawH !== 0 && sawW === 0 ? 1 : 0;
+        const wide = sawW !== 0 || sawL !== 0 && sawH === 0 ? 1 : 0;
+        if ((conversion === 115 || conversion === 99 || conversion === 83 || conversion === 67)
+            && wide === 0 && (narrow !== 0 || conversion === 83 || conversion === 67))
+        {
+            return 0;
+        }
+        // A double, and %a's and %F's too: the universal runtime writes them
+        // as numbers where msvcrt writes the letter, which the host's
+        // printer knows by the call's style.
+        if (conversion === 90 || conversion === 101 || conversion === 69 || conversion === 102
+            || conversion === 103 || conversion === 71 || conversion === 97 || conversion === 65
+            || conversion === 70)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * `printInto` over units: a wide format rendered into a wide buffer, at most
+ * `limit` units written and no terminator, the whole text's length in units
+ * answered; %s and %c wide, %n the count of units.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'u16' | 'u32' | 'setU16' | 'setU32' | 'pointerBytes'>} guest
+ * @param {ptr} buffer @param {u32} limit @param {u32} format @param {ptr} list
+ * @param {u32} counts
+ * @returns {u32}
+ */
+export function printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, limit, format,
+    list, counts)
+{
+    /** @type {u32} */
+    let out = 0;
+    /** @type {u32} */
+    let taken = 0;
+    /** @type {u32} */
+    let at = format;
+    for (;;)
+    {
+        const c = u16(at);
+        if (c === 0)
+        {
+            return out;
+        }
+        at += 2;
+        if (c !== 37)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, c);
+            }
+            out++;
+            continue;
+        }
+        let leftAlign = 0;
+        let zeroPad = 0;
+        let plus = 0;
+        let space = 0;
+        let alt = 0;
+        for (;;)
+        {
+            const f = u16(at);
+            if (f === 45)
+            {
+                leftAlign = 1;
+            }
+            else if (f === 48)
+            {
+                zeroPad = 1;
+            }
+            else if (f === 43)
+            {
+                plus = 1;
+            }
+            else if (f === 32)
+            {
+                space = 1;
+            }
+            else if (f === 35)
+            {
+                alt = 1;
+            }
+            else
+            {
+                break;
+            }
+            at += 2;
+        }
+        let width = 0;
+        if (u16(at) === 42)
+        {
+            let given = 0;
+            if (taken < VA_LIST_SLOTS)
+            {
+                given = u32(list + taken * pointerBytes) | 0;
+            }
+            taken++;
+            if (given < 0)
+            {
+                leftAlign = 1;
+                width = (0 - given) | 0;
+            }
+            else
+            {
+                width = given;
+            }
+            at += 2;
+        }
+        while (isDigit(u16(at)) !== 0)
+        {
+            width = (Math.imul(width, 10) + u16(at) - 48) | 0;
+            at += 2;
+        }
+        let precision = -1;
+        if (u16(at) === 46)
+        {
+            at += 2;
+            if (u16(at) === 42)
+            {
+                let given = 0;
+                if (taken < VA_LIST_SLOTS)
+                {
+                    given = u32(list + taken * pointerBytes) | 0;
+                }
+                taken++;
+                precision = given < 0 ? -1 : given;
+                at += 2;
+            }
+            else
+            {
+                precision = 0;
+                while (isDigit(u16(at)) !== 0)
+                {
+                    precision = (Math.imul(precision, 10) + u16(at) - 48) | 0;
+                    at += 2;
+                }
+            }
+        }
+        let short = 0;
+        for (;;)
+        {
+            const m = u16(at);
+            if (m === 104)
+            {
+                short = 1;
+            }
+            else if (m === 108)
+            {
+                if (u16(at + 2) === 108)
+                {
+                    at += 2;
+                }
+            }
+            else if (m === 119 || m === 76 || m === 106 || m === 70 || m === 78)
+            {
+                // What `formatInGuest` let through of them says nothing here.
+            }
+            else if (m === 73 && u16(at + 2) === 54 && u16(at + 4) === 52)
+            {
+                at += 4;
+            }
+            else if (m === 73 && u16(at + 2) === 51 && u16(at + 4) === 50)
+            {
+                at += 4;
+            }
+            else if ((m === 73 || m === 122 || m === 116) && isInteger(u16(at + 2)) !== 0)
+            {
+                // size_t and ptrdiff_t: four bytes here.
+            }
+            else
+            {
+                break;
+            }
+            at += 2;
+        }
+        const conversion = u16(at);
+        if (conversion === 0)
+        {
+            // The format ended inside a specification: nothing of it is written.
+            return out;
+        }
+        at += 2;
+        // What the conversion renders: a prefix of up to two bytes, then a
+        // body of `zeros` zeros and `count` more, from a string or a value.
+        let prefix0 = 0;
+        let prefix1 = 0;
+        let prefixLength = 0;
+        let zeros = 0;
+        let count = 0;
+        let zeroable = 1;
+        // 0 a byte, 1 a string, 2 decimal, 3 octal, 4 hex, 5 HEX
+        let kind = 0;
+        /** @type {u32} */
+        let value = 0;
+        /** @type {u32} */
+        let text = 0;
+        if (conversion === 37)
+        {
+            value = 37;
+            count = 1;
+        }
+        else if (conversion === 99 || conversion === 67)
+        {
+            if (taken < VA_LIST_SLOTS)
+            {
+                value = (u32(list + taken * pointerBytes) & 0xffff) >>> 0;
+            }
+            taken++;
+            count = 1;
+        }
+        else if (conversion === 115 || conversion === 83)
+        {
+            if (taken < VA_LIST_SLOTS)
+            {
+                text = u32(list + taken * pointerBytes);
+            }
+            taken++;
+            kind = 1;
+            const most = precision < 0 ? 0x7fffffff : precision;
+            if (text === 0)
+            {
+                count = 6;
+            }
+            else
+            {
+                while (count < most && u16(text + count * 2) !== 0)
+                {
+                    count++;
+                }
+            }
+            if (precision >= 0 && count > precision)
+            {
+                count = precision;
+            }
+        }
+        else if (conversion === 100 || conversion === 105 || conversion === 117
+            || conversion === 111 || conversion === 120 || conversion === 88)
+        {
+            let slot = 0;
+            if (taken < VA_LIST_SLOTS)
+            {
+                slot = u32(list + taken * pointerBytes) | 0;
+            }
+            taken++;
+            if (short !== 0)
+            {
+                slot = conversion === 100 || conversion === 105 ? slot << 16 >> 16
+                    : slot & 0xffff;
+            }
+            kind = conversion === 111 ? 3 : conversion === 120 ? 4 : conversion === 88 ? 5 : 2;
+            value = slot >>> 0;
+            if ((conversion === 100 || conversion === 105) && slot < 0)
+            {
+                value = (0 - slot) >>> 0;
+                prefix0 = 45;
+                prefixLength = 1;
+            }
+            else if (conversion === 100 || conversion === 105)
+            {
+                if (plus !== 0)
+                {
+                    prefix0 = 43;
+                    prefixLength = 1;
+                }
+                else if (space !== 0)
+                {
+                    prefix0 = 32;
+                    prefixLength = 1;
+                }
+            }
+            let digits = 1;
+            if (kind === 2)
+            {
+                while (digits < 10 && value >= POWERS[digits])
+                {
+                    digits++;
+                }
+            }
+            else if (kind === 3)
+            {
+                while (digits < 11 && (value >>> (digits * 3)) !== 0)
+                {
+                    digits++;
+                }
+            }
+            else
+            {
+                while (digits < 8 && (value >>> (digits * 4)) !== 0)
+                {
+                    digits++;
+                }
+            }
+            if (precision === 0 && value === 0)
+            {
+                digits = 0;
+            }
+            if (precision > digits)
+            {
+                zeros = (precision - digits) | 0;
+            }
+            if (kind === 3 && alt !== 0 && zeros === 0 && (digits === 0
+                || (value >>> (((digits - 1) | 0) * 3)) !== 0))
+            {
+                // '#' on octal makes the text start with a zero, adding none
+                // to one that does.
+                zeros = 1;
+            }
+            if ((kind === 4 || kind === 5) && alt !== 0 && value !== 0)
+            {
+                prefix0 = 48;
+                prefix1 = kind === 4 ? 120 : 88;
+                prefixLength = 2;
+            }
+            count = digits;
+            zeroable = precision < 0 ? 1 : 0;
+        }
+        else if (conversion === 112)
+        {
+            if (taken < VA_LIST_SLOTS)
+            {
+                value = u32(list + taken * pointerBytes);
+            }
+            taken++;
+            kind = 5;
+            count = 8;
+            zeroable = 0;
+            if (alt !== 0)
+            {
+                prefix0 = 48;
+                prefix1 = 88;
+                prefixLength = 2;
+            }
+        }
+        else if (conversion === 110)
+        {
+            /** @type {u32} */
+            let where = 0;
+            if (taken < VA_LIST_SLOTS)
+            {
+                where = u32(list + taken * pointerBytes);
+            }
+            taken++;
+            if (where !== 0 && counts !== 0)
+            {
+                setU32(where, out);
+            }
+            zeroable = 0;
+        }
+        else
+        {
+            // A conversion msvcrt does not know is written as its own byte,
+            // the '%' and all between dropped: "%w0s" is "0s".
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, conversion);
+            }
+            out++;
+            continue;
+        }
+        const missing = (width - prefixLength - zeros - count) | 0;
+        let before = 0;
+        let padZeros = 0;
+        let after = 0;
+        if (missing > 0 && leftAlign !== 0)
+        {
+            after = missing;
+        }
+        else if (missing > 0 && zeroPad !== 0 && zeroable !== 0)
+        {
+            padZeros = missing;
+        }
+        else if (missing > 0)
+        {
+            before = missing;
+        }
+        for (let i = 0; i < before; i++)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, 32);
+            }
+            out++;
+        }
+        if (prefixLength > 0)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, prefix0);
+            }
+            out++;
+        }
+        if (prefixLength > 1)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, prefix1);
+            }
+            out++;
+        }
+        for (let i = 0; i < ((padZeros + zeros) | 0); i++)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, 48);
+            }
+            out++;
+        }
+        for (let i = 0; i < count; i++)
+        {
+            let byte = value | 0;
+            if (kind === 1)
+            {
+                byte = text === 0 ? NULL_TEXT[i] : u16(text + i * 2);
+            }
+            else if (kind === 2)
+            {
+                // The digit at this place: the power of ten subtracted as often as it goes.
+                /** @type {u32} */
+                let power = POWERS[(count - 1 - i) | 0];
+                let d = 0;
+                while (value >= power)
+                {
+                    value = (value - power) >>> 0;
+                    d++;
+                }
+                byte = (48 + d) | 0;
+            }
+            else if (kind === 3)
+            {
+                byte = (48 + ((value >>> (((count - 1 - i) | 0) * 3)) & 7)) | 0;
+            }
+            else if (kind === 4)
+            {
+                byte = digitByte((value >>> (((count - 1 - i) | 0) * 4)) & 15);
+            }
+            else if (kind === 5)
+            {
+                byte = digitByte((value >>> (((count - 1 - i) | 0) * 4)) & 15);
+                if (byte >= 97)
+                {
+                    byte = (byte - 32) | 0;
+                }
+            }
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, byte);
+            }
+            out++;
+        }
+        for (let i = 0; i < after; i++)
+        {
+            if (out < limit)
+            {
+                setU16(buffer + out * 2, 32);
+            }
+            out++;
+        }
+    }
+}
+
+/**
+ * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,
+ * va_list args): _vsnprintf in units, %s a wide string -- at most `count`
+ * units, the terminator only when the text is shorter, -1 when it did not
+ * fit; no buffer and no count the length. No format, or no buffer for a
+ * count, is EINVAL, the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} buffer @param {u32} count @param {u32} format
+ * @param {u32} list
+ * @returns {i32}
+ */
+export function _vsnwprintf({ u16, u32, setU16, setU32, host, pointerBytes }, buffer, count,
+    format, list)
+{
+    if (format === 0 || formatInGuestWide({ u16, pointerBytes }, format) === 0
+        || buffer === 0 && count !== 0)
+    {
+        return host();
+    }
+    const total = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer,
+        buffer === 0 ? 0 : count, format, list, 1);
+    if (buffer === 0)
+    {
+        return total | 0;
+    }
+    if (total < count)
+    {
+        setU16(buffer + total * 2, 0);
+    }
+    if (total > count)
+    {
+        return -1;
+    }
+    return total | 0;
+}
+
+/**
+ * int vswprintf(wchar_t *buffer, const wchar_t *format, va_list args),
+ * msvcrt's own with no count: the text and its terminator, however long.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} buffer @param {u32} format @param {u32} list
+ * @returns {i32}
+ */
+export function vswprintf({ u16, u32, setU16, setU32, host, pointerBytes }, buffer, format, list){
+    if (buffer === 0 || format === 0 || formatInGuestWide({ u16, pointerBytes }, format) === 0)
+    {
+        return host();
+    }
+    const total = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, 0xffffffff,
+        format, list, 1);
+    setU16(buffer + total * 2, 0);
+    return total | 0;
+}
+
+/**
+ * int _vscwprintf(const wchar_t *format, va_list args): how many units the
+ * text is, its terminator left out.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} format @param {u32} list
+ * @returns {i32}
+ */
+export function _vscwprintf({ u16, u32, setU16, setU32, host, pointerBytes }, format, list){
+    if (format === 0 || formatInGuestWide({ u16, pointerBytes }, format) === 0)
+    {
+        return host();
+    }
+    return printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, 0, 0, format, list, 1) | 0;
+}
+
+/**
+ * int vswprintf_s(wchar_t *buffer, size_t size, const wchar_t *format,
+ * va_list args): the text and its terminator when both fit in `size` units;
+ * one that does not (the buffer emptied, ERANGE) and an invalid parameter
+ * (EINVAL) the host's, found before a unit is written.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} format
+ * @param {u32} list
+ * @returns {i32}
+ */
+export function vswprintf_s({ u16, u32, setU16, setU32, host, pointerBytes }, buffer, size,
+    format, list)
+{
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuestWide({ u16, pointerBytes }, format) === 0
+        || printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, 0, 0, format, list, 0)
+            >= size)
+    {
+        return host();
+    }
+    const total = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, size, format,
+        list, 1);
+    setU16(buffer + total * 2, 0);
+    return total | 0;
+}
+
+/**
+ * int __stdio_common_vswprintf(unsigned __int64 options, wchar_t *buffer,
+ * size_t count, const wchar_t *format, _locale_t locale, va_list args):
+ * `__stdio_common_vsprintf` in units -- every swprintf, _snwprintf and
+ * _vsnwprintf of a program built since 2015.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vswprintf({ u16, u32, setU16, setU32, host, pointerBytes },
+    options, second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const count = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (format === 0 || formatInGuestWide({ u16, pointerBytes }, format) === 0
+        || buffer === 0 && count !== 0)
+    {
+        return host();
+    }
+    // The length alone is a text rendered all the same: %n stores its count.
+    if (buffer === 0 || count === 0 && (options & 2) !== 0)
+    {
+        return printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, 0, 0, format, list, 1)
+            | 0;
+    }
+    if ((options & 2) !== 0)
+    {
+        const room = (count - 1) >>> 0;
+        const whole = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, room,
+            format, list, 1);
+        setU16(buffer + (whole < room ? whole : room) * 2, 0);
+        return whole | 0;
+    }
+    const total = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, count, format,
+        list, 1);
+    if (total < count)
+    {
+        setU16(buffer + total * 2, 0);
+    }
+    if (total <= count)
+    {
+        return total | 0;
+    }
+    if ((options & 1) !== 0 && count !== 0)
+    {
+        setU16((buffer + count * 2 - 2) >>> 0, 0);
+    }
+    return -1;
+}
+
+/**
+ * int __stdio_common_vswprintf_s(unsigned __int64 options, wchar_t *buffer,
+ * size_t size, const wchar_t *format, _locale_t locale, va_list args):
+ * vswprintf_s, the UCRT's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vswprintf_s({ u16, u32, setU16, setU32, host, pointerBytes },
+    options, second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const size = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuestWide({ u16, pointerBytes }, format) === 0
+        || printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, 0, 0, format, list, 0)
+            >= size)
+    {
+        return host();
+    }
+    const total = printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer, size, format,
+        list, 1);
+    setU16(buffer + total * 2, 0);
+    return total | 0;
 }

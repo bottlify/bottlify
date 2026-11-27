@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fromHalf, halvesToStored, storedToHalves, toHalf } from './half.js';
+import { halvesToStored, storedToHalves } from './half.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 test('a half holds what binary16 holds: the ends, the subnormals, and rounds to nearest', ()=>{
     /** @type {[number, number][]} */

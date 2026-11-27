@@ -17,6 +17,7 @@
 
 import { publishEnumerator } from './enumerator.js';
 import { FORMATETC_SIZE, STGMEDIUM_SIZE, SLOT, createOleUtil } from './oleutil.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -79,11 +80,11 @@ export function createAdviseFunctions(env){
                     await env.callMethod(item.sink, SLOT.ADD_REF, [], caller);
                     return true;
                 },
-                release: ()=>{
+                release: async()=>{
                     const caller = env.callerThread();
                     for (const item of items)
                     {
-                        void release(item.sink, caller);
+                        await release(item.sink, caller);
                     }
                 },
             }, out);
@@ -117,11 +118,11 @@ export function createAdviseFunctions(env){
                 return S_OK;
             },
             /** Every sink let go of, as the holder goes. */
-            clear: ()=>{
+            clear: async()=>{
                 const caller = env.callerThread();
                 for (const connection of connections.splice(0))
                 {
-                    void release(connection.sink, caller);
+                    await release(connection.sink, caller);
                 }
             },
         };
@@ -179,7 +180,7 @@ export function createAdviseFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -218,7 +219,8 @@ export function createAdviseFunctions(env){
                                     {
                                         return E_INVALIDARG;
                                     }
-                                    const copy = env.readMemory(format >>> 0, FORMATETC_SIZE)
+                                    const copy = env.readMemory(wholeAddress(format),
+                                        FORMATETC_SIZE)
                                         .slice();
                                     // The target device is the caller's; the copy keeps none.
                                     copy.fill(0, 4, 8);
@@ -260,8 +262,9 @@ export function createAdviseFunctions(env){
                             },
                         ],
                     }],
-                    destroy: ()=>sinks.clear(),
-                }, out >>> 0);
+                    lastRelease: ()=>sinks.clear(),
+                    destroy: ()=>void sinks.clear(),
+                }, wholeAddress(out));
             },
         },
 
@@ -275,7 +278,7 @@ export function createAdviseFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -337,8 +340,9 @@ export function createAdviseFunctions(env){
                                 invoke: ()=>notify(SINK.ON_CLOSE, []) },
                         ],
                     }],
-                    destroy: ()=>sinks.clear(),
-                }, out >>> 0);
+                    lastRelease: ()=>sinks.clear(),
+                    destroy: ()=>void sinks.clear(),
+                }, wholeAddress(out));
             },
         },
     };

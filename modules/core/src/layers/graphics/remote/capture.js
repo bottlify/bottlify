@@ -6,7 +6,7 @@
 
 /**
  * What the graphics worker was sent, written down to be played again in node
- * (`tools/graphics-replay.mjs`): every root as it was made and every batch of
+ * (`tools/read/graphics-replay.mjs`): every root as it was made and every batch of
  * calls in the order it came. What a frame costs the played side is its calls
  * and how many bytes of guest memory they move, not what those bytes hold --
  * the renderer finds what a program wrote by the pages it was sent, and a
@@ -150,18 +150,21 @@ export function createCapture(deps = {}){
         },
 
         /**
-         * A batch as it came, before it is played: copied, since the played
-         * side keeps views of what it reads.
+         * A batch as it came, before it is played: copied, since where it lies
+         * is written again once the played side has read it.
          *
-         * @param {number} id @param {ArrayBuffer} buffer
+         * @param {number} id @param {ArrayBufferLike} buffer
+         * @param {number} [length]  how much of the buffer the batch is, all of it by default
+         * @param {number} [start]  where in the buffer it begins
          */
-        calls(id, buffer){
+        calls(id, buffer, length = undefined, start = 0){
             const reader = readers.get(id);
             if (stopped || !reader)
             {
                 return;
             }
-            const copy = buffer.slice(0);
+            const copy = new Uint8Array(buffer, start, length ?? buffer.byteLength - start)
+                .slice().buffer;
             let presents = 0;
             reader.read(copy, call=>{
                 counts.zeroed += zeroMemory(call.ship) + zeroMemory(call.wrote);
@@ -175,7 +178,7 @@ export function createCapture(deps = {}){
             put(CAPTURE.CALLS, id, [count, new Uint8Array(copy)]);
             counts.batches++;
             counts.presents += presents;
-            counts.sent += buffer.byteLength;
+            counts.sent += copy.byteLength;
             if (left >= 0)
             {
                 left -= presents;

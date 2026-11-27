@@ -32,15 +32,22 @@
  */
 
 import { GL } from '../opengl/constants.js';
-import { guestEntry, guestMemory } from '../../win32/msvcrt/guest-code.js';
+import { guestEntry, guestMemory, withLongCode } from '../../win32/msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as COMPILED_LONG } from './inguest.x64.js';
 import {
     lookAtCode, ortho2DCode, perspectiveCode, pickMatrixCode, unProject4Code, unProjectCode,
 } from './code.js';
 import { GLU, cylinder, newQuadric, partialDisk, sphere } from './quadric.js';
 import { TESS, tessellate } from './tess.js';
 import { createImages } from './images.js';
+import { utf16z } from '../../win32/common/utf16.js';
+
+// The x86-64 of the functions that answer in the guest: gluProject and
+// gluCheckExtension take it as their exports' `long`. The matrix helpers'
+// callers (`code.js`) are i386 by hand, and stay traps in a 64-bit process.
+withLongCode(COMPILED, COMPILED_LONG);
 
 /**
  * Every export, by the bytes of stack it takes: a GLdouble is eight.
@@ -64,6 +71,33 @@ export const GLU_ARGUMENT_BYTES = Object.freeze({
     gluTessBeginContour: 4, gluTessBeginPolygon: 8, gluTessCallback: 12,
     gluTessEndContour: 4, gluTessEndPolygon: 4, gluTessNormal: 28, gluTessProperty: 16,
     gluTessVertex: 12, gluUnProject: 48, gluUnProject4: 76,
+});
+
+/** @param {...number} words @returns {Record<number, 'f64'>} */
+const doubles = (...words)=>Object.fromEntries(words.map(word=>[word, /** @type {'f64'} */ ('f64')]));
+
+/**
+ * The GLdouble and GLfloat arguments of the exports that take any by value, by
+ * their first dword: an x86-64 caller passes each in one slot, and among its
+ * first four in an XMM register (the bridge's `floats`). An export bound by
+ * `guestEntry` declares its own.
+ *
+ * @type {Readonly<Record<string, Record<number, 'f32' | 'f64'>>>}
+ */
+const GLU_FLOATS = Object.freeze({
+    gluPerspective: doubles(0, 2, 4, 6),
+    gluOrtho2D: doubles(0, 2, 4, 6),
+    gluLookAt: doubles(0, 2, 4, 6, 8, 10, 12, 14, 16),
+    gluPickMatrix: doubles(0, 2, 4, 6),
+    gluUnProject: doubles(0, 2, 4),
+    gluUnProject4: doubles(0, 2, 4, 6, 11, 13),
+    gluCylinder: doubles(1, 3, 5),
+    gluSphere: doubles(1),
+    gluDisk: doubles(1, 3),
+    gluPartialDisk: doubles(1, 3, 7, 9),
+    gluTessNormal: doubles(1, 3, 5),
+    gluTessProperty: doubles(2),
+    gluNurbsProperty: { 2: /** @type {'f32'} */ ('f32') },
 });
 
 /** What gluErrorString answers, by code. */
@@ -110,7 +144,7 @@ const LOCAL = 0xffff0000;
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>
  *     } [callGuest]  How a program's callback is called.
  * @property {() => any} [currentThread]
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  */
 
 /**
@@ -445,7 +479,7 @@ export function createGlu(deps){
             return known;
         }
         const bytes = wide
-            ? new Uint8Array(Uint16Array.from([...text, '\0'].map(c=>c.charCodeAt(0))).buffer)
+            ? utf16z(text)
             : new TextEncoder().encode(`${text}\0`);
         const address = deps.allocate?.(bytes.length) ?? 0;
         if (address === 0)
@@ -944,6 +978,10 @@ export function createGlu(deps){
         if (!table[name] || table[name].argBytes !== bytes)
         {
             throw new Error(`glu: ${name} is not bound with ${bytes} bytes of arguments`);
+        }
+        if (GLU_FLOATS[name] && !table[name].floats)
+        {
+            table[name] = { ...table[name], floats: GLU_FLOATS[name] };
         }
     }
     return table;

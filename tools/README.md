@@ -1,0 +1,579 @@
+# Tools
+
+<!-- Written by tools/checks/check-catalog.mjs --write from tools/catalog.json: edit those. -->
+
+Every tool by the question it answers. The folder a tool is in is its category; the catalog,
+[`catalog.json`](catalog.json), says what each answers, how it is run, its tests and, for an
+instrument, a real output from this repository's own data and how to read it.
+check:boundaries fails a tool the catalog does not know. When a run is slow, flickers or
+stops, [`live/DIAGNOSING.md`](live/DIAGNOSING.md) is the order to look in; the flags of the
+runners are in [`run/README.md`](run/README.md), the live switches in
+[`live/README.md`](live/README.md).
+
+| folder | what is in it |
+|---|---|
+| `run/` | start a program and get a report: in a browser, in Node, from a phone |
+| `live/` | attach to a game a person is playing |
+| `read/` | read what a run left behind: a trace, a capture, shaders, a recording |
+| `translator/` | cork's work on a real program: its mix, its code, its calls, its cost |
+| `bench/` | cork's stand: the same work on every machine and browser, and its speed on this one |
+| `bundles/` | make, inspect and audit bottles, archives and installers |
+| `gates/` | two paths of the engine compared on a real GPU (npm run cdp:*) |
+| `checks/` | the rules of the code check:boundaries holds, and audits of the code run by hand |
+| `generators/` | scripts that rewrite a committed file from a specification or a processor |
+| `ci/` | the repository's own jobs in its workflows |
+| `lib/` | modules the tools share, never run alone |
+| `fixtures/` | programs and helpers the packages' tests import |
+| `docs/` | the documentation site and its link check |
+
+## Questions
+
+### Does a title run in a browser, and what did the run do?
+
+[`run/game.mjs`](run/game.mjs): `npm run cdp:game -- <bundle-id> [flags]  (flags: tools/run/README.md)`
+
+```
+The Swapper undefined -- TheSwapper.exe
+  ran for 13ms, 4 guest instructions
+stopped: exited with 3221225477
+errors -- what the engine did not do:
+  mscoree.dll!_CorExeMain: not implemented, answered with nothing
+1 imports nothing claimed:
+  mscoree.dll  (1)
+```
+
+From `tools/cdp_test/reports/game-2026-11-14T03-28-29-645Z.txt (a run of steam-231160 without its .NET runtime; it printed "undefined" for the missing version, which the title line now leaves out)`. The first lines are how the run ended (exit 0xC0000005 here); "errors" and "imports nothing claimed" are what the engine lacked, the first thing to implement. The rest of a report is the address space, the last host calls and, with flags, profiles and frames.
+
+### What does a frame cost once a title is up, and where does the time go?
+
+[`run/frames.mjs`](run/frames.mjs): `npm run cdp:frames -- <bundle-id> [--seconds 60] [--settle 20]`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `npm run cdp:frames -- <bundle-id> [--seconds 60] [--settle 20]` and put what it prints here.
+
+### Did a title get worse: does it still reach its game, and do its frames come as evenly as before?
+
+[`run/smoke.mjs`](run/smoke.mjs): `node tools/run/smoke.mjs <bundle-id> [--runs 3] [--against FILE]; on runs already made: smoke.mjs span <presents.json> | drops <frames.json>...`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/run/smoke.mjs <bundle-id> [--runs 3] [--against FILE]; on runs already made: smoke.mjs span <presents.json> | drops <frames.json>...` and put what it prints here.
+
+### What does the launcher's own page cost while a title runs?
+
+[`run/launcher.mjs`](run/launcher.mjs): `node tools/run/launcher.mjs <bundle-id> (launcher running: npm run ui)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/run/launcher.mjs <bundle-id> (launcher running: npm run ui)` and put what it prints here.
+
+### Does the launcher lay out on a phone, a tablet and a desktop?
+
+[`run/ui-layout.mjs`](run/ui-layout.mjs): `node tools/run/ui-layout.mjs [card regex] (launcher running)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/run/ui-layout.mjs [card regex] (launcher running)` and put what it prints here.
+
+### Where does an installer, or an installed program, stop in Node, and what is each process waiting on?
+
+[`run/install-watch.mjs`](run/install-watch.mjs): `node tools/run/install-watch.mjs <setup.exe | disc.iso | archive.zip> | --bundle ID [--which PATH] [--args ARGS]`
+
+```
+0.8 OUT stateblock.c:416: Running initial read state tests
+0.8 divergence {"api":"Direct3D 8","detail":"GetLightEnable(0x0, 0x81ff948) answered D3DERR_INVALIDCALL"}
+0.8 divergence {"api":"Direct3D 8","detail":"GetLight(0x0, 0x81ff8e0) answered D3DERR_INVALIDCALL"}
+1.0 OUT stateblock.c:1155: Test failed: Chain stage 0, render state 0x9b: expected 0, got 0x3f800000.
+1.6 OUT 16b0:stateblock: 9283 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.
+1.6 exit {"code":1}
+run -> 1
+```
+
+From `node tools/run/install-watch.mjs --bundle wine-d3d8 --args stateblock --every 5 --minutes 1`. Each line is seconds since the start and what happened: OUT is what the program printed, divergence a call answered otherwise than Windows would, then how each process ended. Here Wine's stateblock test ran 9283 checks and one failed (render state 0x9b read back 1.0, expected 0).
+
+### What do a Direct3D 9 program's frames cost the program's thread and the graphics worker's in Node, through this checkout's transport or another's?
+
+[`run/graphics-worker.mjs`](run/graphics-worker.mjs): `node tools/run/graphics-worker.mjs [--root DIR] [--frames N] [--draws N] [--queries N]`
+
+```
+{"root":"file:///home/user/wt-gring/","code":0,"frames":600,"draws":300,"queries":1,"divergences":[],"wallMs":9583,"mainCpuMs":9358,"workerCpuMs":4896,"sent":{"batches":1250,"bytes":32800358,"ms":30,"made":1,"grown":0,"copied":0,"spilled":0,"inPlace":1250,"copiedIn":0,"parts":0,"waited":0,"waiting":0},"received":{"answer":600,"presented":600},"waits":{"GetData":{"count":600,"ms":4911,"maxMs":59,"queuedMs":492,"heldMs":988,"backMs":384}}}
+```
+
+From `node tools/run/graphics-worker.mjs --frames 600 --draws 300 --queries 1 on branch c22-graphics-ring2 (rings), Node 22.23, a 4-core Xeon VM at 2.10 GHz under load 3.1, 2026-11-26`. mainCpuMs and workerCpuMs are each thread's processor time over the run (wallMs): in Node the program's thread is mostly the guest, so the transport shows in sent.ms (what publishing the batches cost that thread) and in the worker's time. sent says where the batches' records went (inPlace: built where they were read; spilled, copiedIn, parts, waited: the ring's other paths); waits.GetData is the waited occlusion count, queuedMs its way there, heldMs the worker holding it, backMs its way back. With --root DIR the same program runs on another checkout's engine, for an A/B alternated by hand; Node posts a transferred buffer at a cost of its size, which a browser does not, so a browser A/B (game.mjs --graphics-worker) is the one to judge by.
+
+### What does handing a batch to an idle worker cost in the browser: a post with its buffer transferred, or bytes in shared memory and Atomics.notify to an Atomics.waitAsync?
+
+[`run/wake-latency.mjs`](run/wake-latency.mjs): `node tools/run/wake-latency.mjs [--n 400] [--rounds 6]`
+
+```
+post: medians of runs: send 50.0 50.0 50.0 55.0; arrival 179.9 199.7 220.2 215.1
+post64: medians of runs: send 50.0 50.0 55.0 55.0; arrival 200.2 189.9 195.1 204.8
+ring: medians of runs: send 25.0 25.0 25.0 30.0; arrival 154.8 149.9 150.1 145.0
+```
+
+From `node tools/run/wake-latency.mjs --n 400 --rounds 4, headless Chromium 1243, a 4-core Xeon VM at 2.10 GHz under load ~2, 2026-11-26`. Microseconds, each run's median over 400 batches, the runs in the order they ran: send is the sender's cost of handing one batch over, arrival the time until the reader had it on the clock both read. A transferred buffer costs the same at 2 and 64 KiB; the ring's notify costs half the post and arrives some 50 us sooner. The clock's resolution in a cross-origin-isolated page is 5 us, so the send figures are steps of it.
+
+### Play a bottle from this checkout, with nothing else set up
+
+[`run/play.mjs`](run/play.mjs): `node tools/run/play.mjs <bundle-id> (then open the page it prints)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/run/play.mjs <bundle-id> (then open the page it prints)` and put what it prints here.
+
+### Do Wine's conformance tests pass in the engine?
+
+[`run/wine-tests.mjs`](run/wine-tests.mjs): `npm run wine-tests -- <dll>[:<test>]... [--browser] [--baseline FILE]`
+
+```
+winetest build 4e819f054dd2d9ee855ee3f1e30d8c1bb8f80fcf, 2 at a time, 120 s each
+  kernel32:sync                pass            executed 355430 failures     0   11.7 s
+```
+
+From `node tools/run/wine-tests.mjs kernel32:sync`. One row a test: how it ended, the checks it executed and those that failed, and its time; report.md beside it groups the failing lines and, with --baseline, says what got worse.
+
+### Where do the Visual C++ runtimes' own load checks let a program run, against Windows?
+
+[`run/vcredist-matrix.mjs`](run/vcredist-matrix.mjs): `node tools/run/vcredist-matrix.mjs [--fetch] [--out DIR]`
+
+```
+ok   vc80-crt: external program.manifest; the runtime and its manifest beside the program -- Windows runs, engine runs
+ok   vc80-crt: LoadLibrary, embedded manifest; the runtime and its manifest beside it -- Windows runs, engine runs
+ok   vc80-crt: the runtime installed: only in system32, the store presents it -- Windows runs (as with the redistribut
+ok   vc80-crt: no manifest at all; the runtime beside the program -- Windows R6034, engine runs
+ok   vc80-crt: LoadLibrary, no manifest at all; the runtime beside the program -- Windows R6034, engine runs
+```
+
+From `node tools/run/vcredist-matrix.mjs --fetch (21 rows, 0 DIFF)`. A row a runtime and a deployment layout: what Windows does and what the engine did; DIFF marks a row where they part, "by decision" one the engine answers itself on purpose.
+
+### What does a phone's browser keep, and which wasm tail call takes its page down?
+
+[`run/webkit-probe/tail-calls.html`](run/webkit-probe/tail-calls.html): `open tools/run/webkit-probe/tail-calls.html or storage.html from the launcher on the phone`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `open tools/run/webkit-probe/tail-calls.html or storage.html from the launcher on the phone` and put what it prints here.
+
+### What is a game a person plays doing right now: console, phases, profile, memory, picture, sound?
+
+[`live/live.mjs`](live/live.mjs): `node tools/live/live.mjs help | <command> [args]`
+
+```
+21757 ms sampled: idle   6.1%, garbage collection   2.9%
+self:
+   35.0%  sleep engine.worker.js:12892
+   13.6%  waitWhile engine.worker.js:12882
+    8.1%  showNow engine.worker.js:450658
+inclusive:
+  100.0%  (root) :0
+   67.8%  run engine.worker.js:837745
+^showNow : 2004 of 21757 ms (9.2%)
+    9.2%  show engine.worker.js:450858  <  presentTo engine.worker.js:835602  <  present engine.worker.js:82812
+```
+
+From `live.mjs profile --file dbg/leak/start-profile/w10-engine.cpuprofile, then --callers "^showNow "`. Attached commands need the shared browser; profile --file and diff read files. Self time is the function itself, inclusive with what it called; a stretch is time outside translated code (led by sleep or waitWhile it is the thread parked, not working). --callers says who reached a function, by the time under it: showNow is 9.2 % of this engine worker, all through present.
+
+### Where did a person's DevTools trace go, by thread and function?
+
+[`read/trace-summary.mjs`](read/trace-summary.mjs): `node tools/read/trace-summary.mjs <Trace-*.json.gz> (a trace the person saved)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/read/trace-summary.mjs <Trace-*.json.gz> (a trace the person saved)` and put what it prints here.
+
+### How long may the WebAssembly memories one browser thread holds be before its collector runs without stop?
+
+[`read/wasm-memory-gc.mjs`](read/wasm-memory-gc.mjs): `node tools/read/wasm-memory-gc.mjs [GIBxHOLDERS,...=3x1,3x2,4x2,8x1] [--seconds 6]  (CDP_TEST_CHROME names the browser)`
+
+```
+3 GiB x 1 (3072 MB held): 117 full collections in 6 s, 0 for external memory pressure, 104 ms paused; global limit 3239 MB
+3 GiB x 2 (6144 MB held): 90 full collections in 6 s, 1 for external memory pressure, 79 ms paused; global limit 6312 MB
+4 GiB x 2 (8192 MB held): 163 full collections in 6 s, 139 for external memory pressure, 183 ms paused; global limit 8192 MB
+8 GiB x 1 (8192 MB held): 168 full collections in 6 s, 144 for external memory pressure, 179 ms paused; global limit 8192 MB
+```
+
+From `headless Chromium 1243 (/opt/pw-browsers) on the project's 4-core VM, 2026-11-22`. Each line is one arm: memories of GIB GiB, HOLDERS of them held by one worker. The global limit follows what the thread holds, its memories counted by their length, up to about 8 GiB; once it is there, full collections are made for "external memory pressure" every few megabytes allocated (139 of 163 here). A run whose threads' guest memories sum past that collects half the time (C19 on the board).
+
+### What do a title's real frames cost the graphics worker, played again in Node?
+
+[`read/graphics-replay.mjs`](read/graphics-replay.mjs): `node tools/read/graphics-replay.mjs <capture> (from game.mjs --graphics-capture FILE)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/read/graphics-replay.mjs <capture> (from game.mjs --graphics-capture FILE)` and put what it prints here.
+
+### Does our HLSL compiler agree with Microsoft's on a title's own shaders?
+
+[`read/shader-diff.mjs`](read/shader-diff.mjs): `node tools/read/shader-diff.mjs <game-*-shaders dir> (from a game.mjs run; Windows for D3DCompiler)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/read/shader-diff.mjs <game-*-shaders dir> (from a game.mjs run; Windows for D3DCompiler)` and put what it prints here.
+
+### Where are the gaps, clicks and repeats in what the person heard?
+
+[`read/wav-scan.mjs`](read/wav-scan.mjs): `node tools/read/wav-scan.mjs <file.wav> (from live.mjs audio save)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/read/wav-scan.mjs <file.wav> (from live.mjs audio save)` and put what it prints here.
+
+### What does a run in Node cost the translator, and where did the program stop?
+
+[`translator/launch-probe.mjs`](translator/launch-probe.mjs): `node tools/translator/launch-probe.mjs <bundle-id> [--turns N] [--series S] [--translation-store DIR] [--cork-out FILE]`
+
+```
+mode: default, 1 executor(s), cork {}; node 26.13.1, V8 14.6.202.34-node.40, branch hints read
+Wine d3d8 tests -- d3d8_test.exe
+  entry image: 745472 bytes
+every import bound.
+  [guest 2] 1008:visual: 141799 tests executed (0 marked as todo, 0 as flaky, 3168 failures), 15 skipped.
+stopped: exited with 255
+```
+
+From `node tools/translator/launch-probe.mjs wine-d3d8 --turns 20000`. The head is the mode and what was bound; then what the program printed, and "stopped:" how the run ended, followed by the calls it made last and, with --series or --cork-out, the translator's figures. Here Wine's d3d8 visual test ran in Node, where nothing is drawn, so its read-backs fail by design.
+
+### Which guest instructions does a run execute most, what does each kind cost, and how do its calls go?
+
+[`translator/cork-mix.mjs`](translator/cork-mix.mjs): `node tools/translator/cork-mix.mjs <blocks.json> [--file DLL@BASE]... [--calls]`
+
+```
+114795 blocks, 5435328071 instructions in TheSwapper.exe, clr.dll@0x2dea000, 1082654156 block executions outside them
+share  ops-share  ops/insn  form
+  9.6%      14.1%        48  push r32
+  3.3%       9.7%        95  mov m32,r32
+  4.0%       7.2%        59  call rel
+  4.8%       7.0%        48  jne rel
+```
+
+From `cork-mix.mjs dbg/leak/swapper-ngen-load-blocks.json --file clr.dll@0x2dea000`. share is of the executed instructions, ops-share of the wasm operations they cost, ops/insn what one form costs: a form whose ops-share is far above its share (push stack32, 147 ops) is where the translator spends. --calls prints the calls' shape as JSON (direct, indirect, import; registers live around them).
+
+### What machine code, wasm text or wasm bytes does a region become, weighed by how often it ran?
+
+[`translator/cork-asm.mjs`](translator/cork-asm.mjs): `node tools/translator/cork-asm.mjs --image DLL@BASE | --bin FILE --at A --entry A [--blocks FILE] [--classes|--wat|--expansion]`
+
+```
+     entry  blocks  x86  wasm B  machine  bytes  per x86  ran x86  weighted
+0x00401160      43  229   11492     3297  15122    14.40       9M      2.94
+ran: 0.01 G guest instructions in these blocks, 2.940 machine instructions an executed one
+by kind, an executed guest instruction: other 0.935 (31.8%), branch 0.606 (20.6%), memory 0.444 (15.1%), compare 0.395
+```
+
+From `cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x401000 --entry 0x401160 --blocks crc-x87.blocks.json --classes`. "per x86" is machine instructions a guest instruction becomes in the code as compiled; "weighted" the same over what ran. The kinds line says where the instructions go besides the guest's own work (branch, memory, frame spills). The host here is arm64 (this VM).
+
+### What does translating cost, to the instruction: a pass, its forming and emitting, and the price of a region, a block, a call and any other instruction?
+
+[`translator/emit-count.mjs`](translator/emit-count.mjs): `node tools/translator/emit-count.mjs --qemu DIR [--root DIR]... [--regions N] [--warm W] [--reps R]`
+
+```
+<base>: 2042.4 M instructions a pass of work (forming 474.1, emitting 1568.3), passes 2018.9..2086.7; compiles 104.3 a pass; 306 regions, 2657564 wasm bytes
+  forming  price list (R^2 0.901, a region's error 25.9% at the median): region -59.8k (-4%), block -5.9k (-10%), call 116.5k (57%), ret 163.1k (14%), jmp 32.5k (7%), other 7.0k (36%)
+  emitting price list (R^2 0.978, a region's error 10.8% at the median): region 313.1k (6%), block 15.1k (8%), call 152.2k (23%), ret 222.2k (6%), jmp -0.5k (-0%), other 36.6k (57%)
+<helper lookup by looks>: 1915.8 M instructions a pass of work (forming 341.3, emitting 1574.5), passes 1891.4..1964.1; compiles 104.3 a pass; 306 regions, 2657564 wasm bytes; 0.9380 of the first
+```
+
+From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --root <its helperAt keyed by looks> --regions 10 --warm 15 --reps 3, node 22.22.0`. "work" is what a pass costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"); "passes" is the spread of the counted passes. The price lists are least squares over every region's own count: what one more region, block (with the jump that ends it), call, return, jump or other instruction costs in machine instructions, and its share of the part. Forming's fit is loose (its cost hangs on what the shared decoding already found); emitting's is close: the cost is the sum of those prices, nothing growing with a region's size. A negative price is a term the others absorb.
+
+### What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?
+
+[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--window 8|16] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
+
+```
+instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>
+  str-32                   2555529 [2.549]  2555529 [2.549] (1.0000)
+  switch-32                545575 [2.209]  545575 [2.209] (1.0000)
+  vcall-32                 2076236 [4.414]  2076236 [4.414] (1.0000)
+<657107ac>: geomean 1.0000 of the first
+dearest first (the last arm): vcall-32 4.41, str-32 2.55, switch-32 2.21
+```
+
+From `run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done). The calls512 and calls4096 workloads call each callee 64 times an iteration, and V8 leaves a callee in its baseline code for some nine thousand calls: at the default --warm 100 their count is of baseline callees (calls512 on arm64 28.5 a guest instruction at warm 400, 9.4 at warm 2000) - give them --warm 2000. An arm64 host is counted with --arm64 (an arm64 node 26.13.1 under qemu-aarch64 8.2.2, --node-flags --no-wasm-bounds-checks for V8 as on macOS, --warm 400): str-32 2.270, switch-32 2.343, vcall-32 3.735 a guest instruction on cork 14eff061 (2026-11-17)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the square bracket is that count over the guest's own instructions in the iteration - a processor running the image takes 1 - and the round bracket the arm's count against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown; the last line orders them by a guest instruction's cost, the dearest first.
+
+### What does one of a program's own instructions cost once its code has settled, with the whole app around it and the machine's time taken out, arm against arm?
+
+[`translator/pe-count.mjs`](translator/pe-count.mjs): `node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64] [--from MILLIONS] [--to MILLIONS] [--cork JSON] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] workload...`
+
+```
+machine instructions a guest instruction between 150 and 250 million of the guest's (in V8's code, then the whole process but V8's optimising compiles), arms: <657107ac>, <657107ac>
+  entities-sse     7.2629 7.3135 [115 regions, 0 formed again, 0 callees]  7.2629 7.3135 (1.0000) [115 regions, 0 formed again, 0 callees]
+```
+
+From `pe-count.mjs --variant sse --from 150 --to 250 entities under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms. An early window, taken for the sample's length: no callee is formed in yet. The settled windows of that tree: entities-sse 2800-2900 million 4.2225 4.2459 (5 formed again, 24 callees), spread-x87 1200-1300 million 4.1643 4.1926, each twice the same to the last digit`. Each arm's first figure is machine instructions in V8's code (the translated code, cork's runtime, the app) over the guest instructions of the window, the second the whole process but V8's optimising compiles, the round bracket that against the first arm; a processor running the program takes 1. The square bracket says where the translator was at the second mark: its regions, how many it formed again with callees, the most callees one call has formed in - a window with regions still being formed again is not settled. Both marks are in one run and the run is on a closed clock (tools/lib/closed-clock.mjs), so one tree gives the same figures every time; the counts taken before this tool as the difference of two runs on the machine's clock differed by a tenth on one tree.
+
+### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
+
+[`translator/module-memory.mjs`](translator/module-memory.mjs): `node --expose-gc [--no-wasm-lazy-compilation --no-wasm-tier-up | --no-wasm-lazy-compilation --no-liftoff] tools/translator/module-memory.mjs [--regions N]`
+
+```
+node v26.13.1 (defaults): 837 modules, 9.6 MiB of wasm; resident +15.5 MiB, 1.62 times their bytes
+node v26.13.1 --no-wasm-lazy-compilation --no-wasm-tier-up: 837 modules, 9.6 MiB of wasm; resident +35.9 MiB, 3.75 times their bytes
+node v26.13.1 --no-wasm-lazy-compilation --no-liftoff: 837 modules, 9.6 MiB of wasm; resident +58.3 MiB, 6.09 times their bytes
+```
+
+From `module-memory.mjs under node 26.13.1 (V8 14.6) with each set of flags, the micro benchmark's first 40 regions of each image`. The multiple is what holding a module costs over its wasm bytes: lazily compiled, nothing has run; the other two lines are every function compiled by Liftoff or TurboFan. A program pays the first for every module and between the other two for what ran. Resident memory moves by a few per cent run to run.
+
+### Which function of a system or runtime DLL is hot?
+
+[`translator/pdb-hot.mjs`](translator/pdb-hot.mjs): `node tools/translator/pdb-hot.mjs <blocks.json> <image.dll> <image.pdb> <base-hex> [top]`
+
+```
+48991 public symbols; the image 55.6% of 2436222218 block executions
+  2.11%  ?mark_object_simple1@gc_heap@WKS@@KGXPAE@Z
+  1.68%  ?relocate_address@gc_heap@WKS@@KGXPAPAE@Z
+  1.43%  ?relocate_survivors_in_plug@gc_heap@WKS@@KGXPAE0PAUrelocate_args@12@@Z
+  1.41%  ?FillEntryDataForAncestor@MethodDataObject@MethodTable@@IAEXPAV2@@Z
+```
+
+From `pdb-hot.mjs dbg/leak/swapper-ngen-load-blocks.json clr.dll dbg/sym/clr.pdb 2dea000`. The image's share of the run's block executions, then its public functions by share: here the CLR's garbage collector (mark, relocate) leads The Swapper's ngen load.
+
+### What is the code at module+offset, as a profile names it?
+
+[`translator/disasm.mjs`](translator/disasm.mjs): `node tools/translator/disasm.mjs <bundle-id | bundle.btl> <module> <offset[:count]> (Python with capstone)`
+
+```
+== clr.dll+0xb5a08
+  000b5a08  8d65f4               lea      esp, [ebp - 0xc]
+  000b5a0b  5f                   pop      edi
+  000b5a0c  5e                   pop      esi
+  000b5a0d  8b4dfc               mov      ecx, dword ptr [ebp - 4]
+  000b5a10  33cd                 xor      ecx, ebp
+```
+
+From `disasm.mjs steam-231160-net clr.dll b5a08:8`. Offset in the module, bytes, instruction: the hottest clr.dll address of the ngen load is a function's epilogue (its security cookie check, then ret 4).
+
+### What does one call into the host, or one maths operation, cost?
+
+[`translator/host-call-bench.mjs`](translator/host-call-bench.mjs): `node tools/translator/host-call-bench.mjs [N] --call SPEC... | --math [--rows RE]`
+
+```
+N 2000000, 3 rounds; ns a call is the median over the rounds; node 26.13.1, V8 14.6.202.34-node.40, branch hints read
+                                this ns/call      min..max  host calls
+KERNEL32.dll!lstrlenA(s:a)                24         2..27           1
+KERNEL32.dll!GetACP()                    204      190..214     2000001
+```
+
+From `host-call-bench.mjs 2000000 --rounds 3 --call 'KERNEL32.dll!lstrlenA(s:a)' --call 'KERNEL32.dll!GetACP()'`. ns a call over the loop without it, the spread of the rounds, and the host calls the bridge counted: lstrlenA is guest code (1 host call, the exit), GetACP crosses every time, about 200 ns. A spread wider than the median is noise: raise N.
+
+### Where do several executors beat one?
+
+[`translator/executor-sweep.mjs`](translator/executor-sweep.mjs): `node tools/translator/executor-sweep.mjs [--threads 1,2,3] [--executors 1,2,3,4] [--reps 3]`
+
+```
+T=2 K=- H=- E=1  best3 1.55s [1.26 1.83 1.56]  x1.00 vs E=1  1807 MIPS (2.80 G)  elsewhere 0% 0 calls
+T=2 K=- H=- E=2  best3 1.01s [0.96 1.32 0.77]  x1.53 vs E=1  2762 MIPS (2.80 G)  elsewhere 53% 2 calls
+best of several executors: T=2 K=- H=- E=2  x1.53
+```
+
+From `executor-sweep.mjs --threads 2 --executors 1,2 --host 0 --sync 0 --reps 3`. A row a point: the mean of its three fastest runs [each run], the ratio to one executor, MIPS, and the share run elsewhere. Here two threads ran 1.53 times as fast on two executors. Runs of one point that differ threefold (an earlier run of this sweep on the loaded machine gave 7.23 against 0.78 s) are the machine, not the engine: rerun on a quiet one.
+
+### Does the translator do here the work recorded, to the unit, and how fast is it on this machine -- or how fast is one checkout against another?
+
+[`bench/stand.mjs`](bench/stand.mjs): `node tools/bench/stand.mjs [--roots A,B] [--bits 32|64|both] [--only a,b] [--work] [--write]`
+
+```
+calls512-scatter-x87        519 MIPS  noise ±27.8 %  work as recorded
+vcall-x87                  5365 MIPS  noise ±15.4 %  work as recorded
+vm-x87                     3803 MIPS  noise ±1.6 %  work as recorded
+calls512-scatter-x64        631 MIPS  noise ±4.8 %  work as recorded
+vcall-x64                  3979 MIPS  noise ±2.7 %  work as recorded
+vm-x64                     2477 MIPS  noise ±2.1 %  work as recorded
+geometric mean, 32-bit: 2196 MIPS
+geometric mean, 64-bit: 1839 MIPS
+```
+
+From `node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c08 with the stand, Node 22.22.0, a 4-core Xeon VM at 2.10 GHz, 2026-11-14`. Each workload runs on the guest's own clock, so its work (instructions, regions, every way between regions) is the same on any machine: "as recorded" is the translator doing what expected.json says; DIFFERS is the code, never the machine. MIPS is this machine's speed, the median of 7 rounds; noise is how far those rounds part (half their interquartile range): a difference inside it is not one this machine shows, and a second run can land outside it when the engine optimises otherwise (lua-x87 1290 and 2069 MIPS in two runs here). With --roots A,B a ratio column gives B against A round by round.
+
+### How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?
+
+[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); an arm takes ,window=GIB (64-bit over a memory64 window), ,far (64-bit with far chunks, cpu.far) or ,callTargets=off (no predicted callees), each compared by what it computes; its arm boxes (or ?arms=NAME,NAME) pick the arms run; its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); an arm takes ,window=GIB (64-bit over a memory64 window), ,far (64-bit with far chunks, cpu.far) or ,callTargets=off (no predicted callees), each compared by what it computes; its arm boxes (or ?arms=NAME,NAME) pick the arms run; its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)` and put what it prints here.
+
+### What does a title import, or look up by name, that this build does not export?
+
+[`bundles/import-audit.mjs`](bundles/import-audit.mjs): `node tools/bundles/import-audit.mjs <file|dir|bundle.btl|disc.iso>... [--dynamic --specs DIR]`
+
+```
+15 images read
+PACKED? bundle.btl:Futuremark\3DMark03\fmod.dll: its imports are looked up at run time
+NAMED, NO LIBRARY mscoree.dll  <- EasyFMSI.exe, FMSI.dll, FMSIX.dll, atimgpud.dll, cpuidsdk.dll, SI3.dll, msvcr71.dll,
+NAMED, NO LIBRARY atiadlxy.dll  <- FMSI.dll
+MISSING BY NAME kernel32.dll (20)
+  __C_specific_handler  <- cpuidsdk.dll
+  OpenProcessToken  <- mfc70.dll
+```
+
+From `import-audit.mjs bundles/3dmark03/bundle.btl --dynamic --specs dbg/wine-specs`. PACKED is an image whose imports are found at run time (run it to know); NAMED, NO LIBRARY a DLL its strings name that nothing provides; MISSING BY NAME a function a program may GetProcAddress that this build does not export, with who names it.
+
+### Pack, verify, list, size, prune or extract a bottle, or unpack a zip of any size
+
+[`bundles/make-btl.mjs`](bundles/make-btl.mjs): `node tools/bundles/make-btl.mjs pack|verify|list|translations|extract|tree|prune|zip ...`
+
+```
+   463.5 MiB   284  Futuremark\3DMark03
+     2.2 MiB     7  Common Files\Futuremark Shared
+     0.0 MiB     1  .bottlify\registry.json
+   465.7 MiB   292  total
+   0.01 GiB       1 files  3dmark11-setup.exe
+   0.20 GiB       1 files  cab1.cab
+```
+
+From `make-btl.mjs tree 3dmark03 2; make-btl.mjs zip list to_install/3dmark11/3dmark11.zip --depth=1`. tree: bytes and files under each folder to a depth, largest first, so a setup's leftovers stand out; zip list the same for an archive before unpacking it.
+
+### Do our stdcall entries pop the bytes Windows' do?
+
+[`checks/arg-bytes-audit.mjs`](checks/arg-bytes-audit.mjs): `node tools/checks/arg-bytes-audit.mjs <Wine spec directory> [--all]`
+
+```
+2641 stdcall entries checked, 0 pop a different number of bytes
+```
+
+From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 layer against its Wine spec; a line per entry that pops another number of bytes, each one a caller's stack moved a call at a time. Run by hand: the specs are fetched once (import-audit --fetch-specs) and not kept in the repository.
+
+### What code does nothing reach: files no entry point runs, files only types or only tests reach, exports nobody takes?
+
+[`checks/unused-code.mjs`](checks/unused-code.mjs): `node tools/checks/unused-code.mjs [--exports] [--unresolved] [--json]`
+
+```
+1604 source files; roots: 33 package exports, 57 scripts, 17 bench, 41 commands in a README, 10 build entries, 10 pages, 3 declarations, 39 tools
+reached by nothing: 12 files, 371 lines
+  78	modules/core/src/layers/log/api.js
+  71	modules/core/src/layers/media/api.js
+  62	modules/core/src/layers/filesystem/api.js
+  ...
+reached only by types (the typecheck needs them, nothing runs them): 10 files, 1588 lines
+  541	modules/core/src/app-options.js  (declares types alone)
+  240	modules/core/src/host/messages.js  (declares types alone)
+  160	modules/core/src/layers/win32/kernel32/pool-types.js  (declares types alone)
+  ...
+reached only from tests: 60 files, 13842 lines
+  957	modules/core/src/layers/win32/d3dx9/effect-commit.x64.js  (a width built, not wired: effect-commit.x86.js is)
+  809	modules/core/scripts/guest-code/equivalence.mjs
+  704	modules/core/src/layers/win32/d3dx9/device.fixture.js  (a test helper by its name)
+  ...
+exports no other code takes: 1258 (1040 used in their own file, 218 used nowhere); taken only by tests: 1810; in 666 files
+cannot see: 88 places that name a file at run time, or a file that is not here (--unresolved lists them)
+```
+
+From `node tools/checks/unused-code.mjs on this repository, 2026-11-26, before the removals it led to (rows cut to three a section)`. "reached by nothing" is code no entry point, page, script, bench, tool or test loads: read each and delete it. "reached only by types" is needed by the typecheck alone; "declares types alone" is a typedef module, "holds code nothing runs" is code to remove from it. "reached only from tests" is a test helper (named so) or code that only its own tests run, or, "a width built, not wired", a guest-code output the product does not load. Of the exports, one used in its own file loses `export`, one used nowhere goes; "cannot see" counts the places a file is named at run time (import(name), a URL from parts): read them before deleting what they could load.
+
+### Which functions are written more than once, the same up to their names, in more than one file?
+
+[`checks/duplicate-code.mjs`](checks/duplicate-code.mjs): `node tools/checks/duplicate-code.mjs [--top N] [--tokens 25] [--tests] [--json]`
+
+```
+525 clusters of functions alike in more than one file; one of each kept, 5886 lines would go
+156 lines: 2 copies of 156 lines (864 tokens)
+  modules/core/src/layers/audio/output/mix.js:289 resampleInto
+  modules/core/src/layers/audio/output/worklet.js:281 resampleInto
+145 lines: 30 copies of 5 lines (48 tokens)
+  modules/core/src/layers/win32/advapi32/cred.js:190 writeDword
+  modules/core/src/layers/win32/advapi32/lsa.js:208 writeDword
+  modules/core/src/layers/win32/advapi32/named-security.js:233 writeDword
+  ...
+128 lines: 2 copies of 128 lines (826 tokens)
+  modules/core/src/layers/audio/output/mix.js:459 playVoice
+  modules/core/src/layers/audio/output/worklet.js:451 playVoice
+124 lines: 32 copies of 4 lines (50 tokens)
+  modules/core/src/layers/win32/advapi32/cred.js:185 readDword
+  modules/core/src/layers/win32/advapi32/lsa.js:203 readDword
+  modules/core/src/layers/win32/advapi32/perf.js:84 readDword
+  ...
+```
+
+From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-26 (copies cut to three a cluster)`. Each cluster is one body, its names renamed to the order they appear in and its literals kept, found in more than one file: the first line is the lines one shared function would save (a copy's lines times the copies past the first), then where each copy is and what it is called. A copy inside a larger listed copy is left to it. Two copies kept apart on purpose say so where they are (mix.js and worklet.js: the build checks that the worklet's copy is the mixer's); the rest are candidates for one mechanism. Alike but not equal is not seen.
+
+## Everything else
+
+### `bench/`
+
+- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--only NAME,NAME] [--agent STRING])`)
+
+### `gates/`
+
+- [`gates/probe.mjs`](gates/probe.mjs) - Does a browser, a page and a worker answer? (CI) (`npm run cdp:probe`)
+- [`gates/triangle.mjs`](gates/triangle.mjs) - Does a guest program's draw reach the screen, four pixels exact? (`node tools/gates/triangle.mjs [--glsl]`)
+- [`gates/shader-gate.mjs`](gates/shader-gate.mjs) - Do Direct3D 9 shaders translate as the reference machine computes them? (CI) (`npm run cdp:shaders`)
+- [`gates/shader-clip.mjs`](gates/shader-clip.mjs) - Do the two paths of user clip planes agree? (`npm run cdp:clip`)
+- [`gates/tess-gate.mjs`](gates/tess-gate.mjs) - Does the WGSL tessellator agree with the reference one? (CI) (`npm run cdp:tess`)
+- [`gates/gs-gate.mjs`](gates/gs-gate.mjs) - Do geometry shaders and stream output write what Direct3D writes? (CI) (`npm run cdp:gs`)
+- [`gates/vertex-pull-gate.mjs`](gates/vertex-pull-gate.mjs) - Do vertex streams a stage pulls itself match WebGPU's own fetch? (CI) (`npm run cdp:pull`)
+- [`gates/gl-lighting-gate.mjs`](gates/gl-lighting-gate.mjs) - Does the GPU light a fixed-function OpenGL vertex as the CPU does? (`npm run cdp:lighting`)
+- [`gates/spirv-gate.mjs`](gates/spirv-gate.mjs) - Does OpenGL's SPIR-V path compute what its GLSL source does? (`npm run cdp:spirv`)
+
+### `checks/`
+
+- [`checks/check-budget-writes.mjs`](checks/check-budget-writes.mjs) - The emitter writes a region's budget only as a count (`npm run check:boundaries`)
+- [`checks/check-emit-options.mjs`](checks/check-emit-options.mjs) - Every emit option reaches the cache key (`npm run check:boundaries`)
+- [`checks/check-guest-pointers.mjs`](checks/check-guest-pointers.mjs) - A handler faults on a bad guest pointer only as Windows does (`npm run check:boundaries`)
+- [`checks/check-guest-access.mjs`](checks/check-guest-access.mjs) - Does a win32 library read or write guest memory past host.guest: a local accessor or string helper of its own, a read copied again? (`node tools/checks/check-guest-access.mjs [--write] [--list]`)
+- [`checks/check-wide-addresses.mjs`](checks/check-wide-addresses.mjs) - A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on (`node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]`)
+- [`checks/check-is-main.mjs`](checks/check-is-main.mjs) - No script decides it was started by comparing paths itself (`npm run check:boundaries`)
+- [`checks/check-link-slots.mjs`](checks/check-link-slots.mjs) - One machine a slot of a process's link (`npm run check:boundaries`)
+- [`checks/check-lock-release.mjs`](checks/check-lock-release.mjs) - A locked word is not released by a plain store (`npm run check:boundaries`)
+- [`checks/check-overlapped-layout.mjs`](checks/check-overlapped-layout.mjs) - OVERLAPPED's offsets are written in one file (`npm run check:boundaries`)
+- [`checks/check-package-files.mjs`](checks/check-package-files.mjs) - Core's package ships what its files import (`npm run check:boundaries`)
+- [`checks/check-routine-leaves.mjs`](checks/check-routine-leaves.mjs) - A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder (`npm run check:boundaries`)
+- [`checks/check-scan-windows.mjs`](checks/check-scan-windows.mjs) - A scan of guest memory stays in its region (`npm run check:boundaries`)
+- [`checks/check-store-protocol.mjs`](checks/check-store-protocol.mjs) - A store's protocol is spoken only in GameHub (`npm run check:boundaries`)
+- [`checks/check-volume-spread.mjs`](checks/check-volume-spread.mjs) - No volume is copied by object spread (`npm run check:boundaries`)
+- [`checks/check-wall-bounds.mjs`](checks/check-wall-bounds.mjs) - No test bounds a wall-clock time (`npm run check:boundaries`)
+- [`checks/check-wide-limits.mjs`](checks/check-wide-limits.mjs) - A UTF-16 read's limit is in bytes (`npm run check:boundaries`)
+- [`checks/check-wide-arguments.mjs`](checks/check-wide-arguments.mjs) - A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller (`npm run check:boundaries`)
+- [`checks/check-pointer-arguments.mjs`](checks/check-pointer-arguments.mjs) - The table of each function's address arguments the win32 layer declares to the bridge is what the signature comments say (--write rewrites it) (`npm run check:boundaries`)
+- [`checks/check-pointer-writes.mjs`](checks/check-pointer-writes.mjs) - Every guest pointer is read and written whole by the memory layer's reader and writer (or win32's pointerIo), never as a dword and a zero made by hand (`npm run check:boundaries`)
+- [`checks/check-decision-numbers.mjs`](checks/check-decision-numbers.mjs) - Each decision number is one heading, and every citation of one is carried (`npm run check:boundaries`)
+- [`checks/emit-digest.mjs`](checks/emit-digest.mjs) - The 32-bit translation is unchanged (--check against emit-digest.json) (`npm run check:boundaries`)
+- [`checks/check-catalog.mjs`](checks/check-catalog.mjs) - Every file under tools/ is in this catalog, in its category, and every instrument has a real sample (`npm run check:boundaries`)
+- [`checks/check-cork-settings.mjs`](checks/check-cork-settings.mjs) - cork's settings, its docs and the core's EngineConfig are one table (`npm run check:boundaries`)
+
+### `generators/`
+
+- [`generators/x86-corpus.mjs`](generators/x86-corpus.mjs) - Rewrite the 32-bit instruction corpus a real processor answered (gcc -m32) (`node tools/generators/x86-corpus.mjs`)
+- [`generators/x64-corpus.mjs`](generators/x64-corpus.mjs) - Rewrite the 64-bit instruction corpus (clang) (`node tools/generators/x64-corpus.mjs`)
+- [`generators/x64-decode-fixture.mjs`](generators/x64-decode-fixture.mjs) - Rewrite the 64-bit decoder's reference from compiled code (`node tools/generators/x64-decode-fixture.mjs`)
+- [`generators/bc-corpus.mjs`](generators/bc-corpus.mjs) - Rewrite the BC6H/BC7 decoder corpus (`node tools/generators/bc-corpus.mjs`)
+- [`generators/tess-corpus.mjs`](generators/tess-corpus.mjs) - Rewrite the tessellator's corpus from Microsoft's reference tessellator (`node tools/generators/tess-corpus.mjs`)
+- [`generators/gl-registry.mjs`](generators/gl-registry.mjs) - Rewrite OpenGL's command sizes from Khronos' gl.xml (`node tools/generators/gl-registry.mjs`)
+- [`generators/glsl-functions.mjs`](generators/glsl-functions.mjs) - Rewrite GLSL's built-in functions from the GLSL specification (`node tools/generators/glsl-functions.mjs`)
+- [`generators/steam-interfaces.mjs`](generators/steam-interfaces.mjs) - Rewrite the Steamworks interfaces' vtables from the SDK headers (`node tools/generators/steam-interfaces.mjs`)
+- [`generators/windows-libraries.mjs`](generators/windows-libraries.mjs) - Rewrite the loader's list of the libraries Windows itself carries, from Wine's configure.ac (`node tools/generators/windows-libraries.mjs <configure.ac>`)
+- [`generators/uia-ids.mjs`](generators/uia-ids.mjs) - Rewrite UI Automation's identifiers from the SDK headers (`node tools/generators/uia-ids.mjs`)
+- [`generators/crt-dictionary.mjs`](generators/crt-dictionary.mjs) - Rewrite cork's dictionary of C runtime signatures (`node tools/generators/crt-dictionary.mjs`)
+
+### `ci/`
+
+- [`ci/ci-layers.mjs`](ci/ci-layers.mjs) - Which packages does a push make CI check? (`run by .github/workflows/ci.yml`)
+- [`ci/readme-links.mjs`](ci/readme-links.mjs) - A package's README links point at the commit published (`run by .github/workflows/publish.yml`)
+
+### `lib/`
+
+- [`lib/common.mjs`](lib/common.mjs) - isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)
+- [`lib/closed-clock.mjs`](lib/closed-clock.mjs) - the machine's time taken out of a counted run: the clock and the timers moved by what the program does
+- [`lib/thread-profile.mjs`](lib/thread-profile.mjs) - a V8 CPU profile of the Node thread a tool runs the engine on, over a window of the run (install-watch and launch-probe --cpu-profile FILE:FROM:FOR)
+- [`lib/qemu-count.mjs`](lib/qemu-count.mjs) - node under qemu-x86_64 with the counting plugin: marks, totals by kind of code, the plugin built
+- [`lib/btl.mjs`](lib/btl.mjs) - The tools' path to core's bundle reader and writer
+- [`lib/relay-option.mjs`](lib/relay-option.mjs) - --network and --roots for the runners
+- [`lib/disk-directory.mjs`](lib/disk-directory.mjs) - A folder of this disk shaped as OPFS, for the translation store in Node
+- [`lib/chromium-v8.mjs`](lib/chromium-v8.mjs) - Node's V8 set as Chromium's, for a tool that measures cork
+- [`lib/cdp.mjs`](lib/cdp.mjs) - A Chrome DevTools Protocol client
+- [`lib/browser.mjs`](lib/browser.mjs) - Find and launch a Chromium with a GPU and a CDP endpoint
+- [`lib/server.mjs`](lib/server.mjs) - A static server for the pages, the sources and a bundle
+- [`lib/connect.mjs`](lib/connect.mjs) - Attach to the shared browser and the launcher tab, for live.mjs
+- [`lib/profile.mjs`](lib/profile.mjs) - Sample the engine's workers and fold a CPU profile, for game.mjs and frames.mjs
+- [`lib/device-lag.mjs`](lib/device-lag.mjs) - How far the device is behind the engine, for game.mjs
+- [`lib/run-report.mjs`](lib/run-report.mjs) - Which process a game report is of and the run's cache as its keeper stood, for game.mjs
+- [`lib/frame-window.mjs`](lib/frame-window.mjs) - The frames a watched window holds, for frames.mjs
+- [`lib/timeout-report.mjs`](lib/timeout-report.mjs) - What a run that did not answer leaves, for game.mjs and drive
+- [`lib/thread-window.mjs`](lib/thread-window.mjs) - A --series window by thread and executor, for game.mjs
+
+### `fixtures/`
+
+- [`fixtures/allocation.mjs`](fixtures/allocation.mjs) - How many bytes a function allocates a call, for the tests that hold a hot path to making no garbage
+- [`fixtures/make-pe.mjs`](fixtures/make-pe.mjs) - Build PE programs for the packages' tests
+- [`fixtures/tone-program.mjs`](fixtures/tone-program.mjs) - Programs that play a tone of a known pitch and length through WASAPI, waveOut and DirectSound, for the sound delivery test
+- [`fixtures/sound-delivery-run.mjs`](fixtures/sound-delivery-run.mjs) - One run of the sound delivery test in a worker of its own: the engine, the real audio worklet on its own clock, and what it played measured
+- [`fixtures/managed-exe.mjs`](fixtures/managed-exe.mjs) - A managed (.NET) program image for the packages' tests
+- [`fixtures/d3d9-program.mjs`](fixtures/d3d9-program.mjs) - A Direct3D 9 test program
+- [`fixtures/d3d9-frames-program.mjs`](fixtures/d3d9-frames-program.mjs) - A Direct3D 9 program shaped like a game's frame: draws, a waited occlusion query and a present a frame, for measuring the graphics worker's transport (`node tools/fixtures/d3d9-frames-program.mjs OUT.exe [FRAMES] [DRAWS] [QUERIES] [immediate]`)
+- [`fixtures/gl-program.mjs`](fixtures/gl-program.mjs) - The pieces of an OpenGL test program
+- [`fixtures/gl-glsl-program.mjs`](fixtures/gl-glsl-program.mjs) - An OpenGL 2.0 GLSL test program (also triangle.mjs --glsl)
+- [`fixtures/spawn-program.mjs`](fixtures/spawn-program.mjs) - A parent-process test program
+- [`fixtures/fake-graphics-worker.mjs`](fixtures/fake-graphics-worker.mjs) - A graphics worker over the fake GPU, for tests
+- [`fixtures/cpu-time.mjs`](fixtures/cpu-time.mjs) - A thread's processor time, for tests that bound a cost
+
+### `docs/`
+
+- [`docs/site.mjs`](docs/site.mjs) - Build the documentation site from docs/ (npm run docs); check.mjs fails a link that leads nowhere (`npm run docs`)

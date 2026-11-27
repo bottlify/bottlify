@@ -30,10 +30,15 @@
  *   where the system's own profile files are, and where an installer that
  *   names its file bare expects to find it again.
  * - The file is text in the ANSI page, the page a program's own strings are
- *   read in, so a name it asks for is found by the bytes it was written with.
+ *   read in, so a name it asks for is found by the bytes it was written with --
+ *   unless it begins with a byte order mark: then it is UTF-16 (either order)
+ *   or UTF-8, and a write keeps it so.
  */
 
 import { decodeAnsi, encodeAnsi } from './locale.js';
+import { createIniMapping } from './ini-mapping.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -53,12 +58,33 @@ const MAX_VALUE = 0x10000;
  *           What a structure is written from. Without it a structure cannot
  *           be written, and the write says so.
  * @property {(code: number) => void} [setLastError]
+ * @property {import('./ini-mapping.js').MappingRegistry} [registry]
+ *           The run's registry, where IniFileMapping sends a section
+ *           (`ini-mapping.js`). Without it every section is in its file.
  */
 
 /** Why a structure was not read back. */
 const ERROR_INVALID_DATA = 13;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_INVALID_FUNCTION = 1;
+const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_SHARING_VIOLATION = 32;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * How the file is opened: to read, by anyone who lets it be read, and
+ * sharing it with whoever reads or writes it; to write, read and written,
+ * sharing the same. A program that holds its own profile open with
+ * FILE_SHARE_READ | FILE_SHARE_WRITE can therefore still have it read and
+ * written, and one that shares less sees the call refused with
+ * ERROR_SHARING_VIOLATION, as Windows answers it.
+ */
+const READING = Object.freeze({ read: true, shareRead: true, shareWrite: true });
+const WRITING = Object.freeze({
+    read: true, write: true, create: true, truncate: true, shareRead: true, shareWrite: true,
+});
 
 /** @param {string} left @param {string} right */
 const sameName = (left, right)=>left.toLowerCase() === right.toLowerCase();
@@ -109,15 +135,96 @@ const parseLine = text=>{
 };
 
 /**
+ * The encodings a profile can be in: the ANSI page, unless the file begins
+ * with a byte order mark, which Windows reads it by and keeps it in.
+ *
+ * @typedef {'ansi' | 'utf-16le' | 'utf-16be' | 'utf-8'} ProfileEncoding
+ */
+
+/** Each marked encoding's mark. */
+const BOMS = Object.freeze({
+    'utf-16le': Uint8Array.of(0xff, 0xfe),
+    'utf-16be': Uint8Array.of(0xfe, 0xff),
+    'utf-8': Uint8Array.of(0xef, 0xbb, 0xbf),
+});
+
+/** @param {Uint8Array} bytes @returns {ProfileEncoding} */
+const encodingOf = bytes=>/** @type {ProfileEncoding | undefined} */ (Object.keys(BOMS)
+    .find(name=>BOMS[/** @type {keyof typeof BOMS} */ (name)]
+        .every((byte, at)=>bytes[at] === byte))) ?? 'ansi';
+
+/**
+ * Text as a file in this encoding holds it, its mark first.
+ *
+ * @param {ProfileEncoding} encoding @param {string} text
+ * @returns {Uint8Array}
+ */
+const encodeIn = (encoding, text)=>{
+    if (encoding === 'ansi')
+    {
+        return encodeAnsi(text);
+    }
+    const mark = BOMS[encoding];
+    if (encoding === 'utf-8')
+    {
+        const body = new TextEncoder().encode(text);
+        const out = new Uint8Array(mark.length + body.length);
+        out.set(mark);
+        out.set(body, mark.length);
+        return out;
+    }
+    const out = new Uint8Array(mark.length + text.length * 2);
+    out.set(mark);
+    const view = new DataView(out.buffer);
+    for (let at = 0; at < text.length; at++)
+    {
+        view.setUint16(mark.length + at * 2, text.charCodeAt(at), encoding === 'utf-16le');
+    }
+    return out;
+};
+
+/**
  * @param {ProfileHost} host
  */
 export function createProfileFunctions(host){
     const { files } = host;
+    const mapping = host.registry ? createIniMapping(host.registry) : null;
+
+    /**
+     * Where a section of the file at `path` lives in the registry, or null
+     * when it is in the file.
+     *
+     * @param {string | null} path @param {string | null} section
+     */
+    const mappedSection = (path, section)=>(mapping && path !== null && section !== null
+        ? mapping.section(path, section)
+        : null);
+
+    /**
+     * A mapped section's entries, the registry's and, for names no mapping
+     * claims, the file's.
+     *
+     * @param {import('./ini-mapping.js').SectionMapping} mapped
+     * @param {ProfileLine[]} lines @param {string} section
+     * @returns {{ name: string, value: string }[]}
+     */
+    const mappedEntries = (mapped, lines, section)=>{
+        const listed = /** @type {NonNullable<typeof mapping>} */ (mapping).list(mapped);
+        if (!listed.file)
+        {
+            return listed.entries;
+        }
+        const span = sectionSpan(lines, section);
+        const fromFile = span === null ? [] : lines.slice(span.start + 1, span.end)
+            .flatMap(line=>(line.key === null || listed.claimed(line.key)
+                ? [] : [{ name: line.key, value: line.value }]));
+        return [...listed.entries, ...fromFile];
+    };
 
     /** @param {number} pointer @param {number} limit @returns {string | null} */
     const text = (pointer, limit)=>((pointer >>> 0) === 0
         ? null
-        : host.readCString(pointer >>> 0, limit));
+        : host.readCString(wholeAddress(pointer), limit));
 
     /** text for the wide entry points. @param {number} pointer @param {number} limit */
     const wideText = (pointer, limit)=>((pointer >>> 0) === 0
@@ -148,11 +255,29 @@ export function createProfileFunctions(host){
     };
 
     /**
-     * The file's lines, or none when it is not there. A file whose bytes are
-     * not resident is answered late, which the bridge turns into a wait.
+     * The encoding each file was in when it was last read, which a write that
+     * follows the read keeps it in.
+     *
+     * @type {Map<string, ProfileEncoding>}
+     */
+    const encodings = new Map();
+
+    /**
+     * The Win32 error a profile open that answered null stands for.
      *
      * @param {string} path
-     * @returns {ProfileLine[] | Promise<ProfileLine[]>}
+     */
+    const openError = path=>(files.openRefusal?.() === 'SHARING_VIOLATION'
+        ? ERROR_SHARING_VIOLATION
+        : files.stat(path)?.isDirectory ? ERROR_ACCESS_DENIED : ERROR_FILE_NOT_FOUND);
+
+    /**
+     * The file's lines, none when it is not there, or null when it is there
+     * and could not be opened, the last error saying why. A file whose bytes
+     * are not resident is answered late, which the bridge turns into a wait.
+     *
+     * @param {string} path
+     * @returns {ProfileLine[] | null | Promise<ProfileLine[]>}
      */
     const load = path=>{
         const entry = files.stat(path);
@@ -160,16 +285,29 @@ export function createProfileFunctions(host){
         {
             return [];
         }
-        const node = files.open(path, { read: true });
+        const node = files.open(path, READING);
         if (!node)
         {
-            return [];
+            host.setLastError?.(openError(path));
+            return null;
         }
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
             files.close(node);
-            const whole = decodeAnsi(bytes);
-            const lines = whole.split(/\r?\n/);
+            const encoding = encodingOf(bytes);
+            encodings.set(path.toLowerCase(), encoding);
+            const body = encoding === 'ansi' ? bytes : bytes.subarray(BOMS[encoding].length);
+            // The text ends at a NUL: a file written with its C string's
+            // terminator holds one, and a rewrite leaves it behind
+            // (Wine's shlwapi ordinal.c write_inifile).
+            const decoded = encoding === 'ansi' ? null
+                : new TextDecoder(encoding).decode(body);
+            const end = decoded === null ? body.indexOf(0) : decoded.indexOf('\0');
+            const whole = decoded === null ? decodeAnsi(end < 0 ? body : body.subarray(0, end))
+                : end < 0 ? decoded : decoded.slice(0, end);
+            // A line ends at CR, LF or the pair: a file written with bare
+            // CRs reads as one written with CRLF.
+            const lines = whole.split(/\r\n|\r|\n/);
             // A trailing newline is the end of the last line, not an empty one.
             if (lines.length > 0 && lines[lines.length - 1] === '')
             {
@@ -183,15 +321,35 @@ export function createProfileFunctions(host){
 
     /** @param {string} path @param {ProfileLine[]} lines */
     const store = (path, lines)=>{
-        const node = files.open(path, { write: true, create: true, truncate: true });
+        const node = files.open(path, WRITING);
         if (!node)
         {
+            host.setLastError?.(openError(path));
             return false;
         }
         const body = lines.map(line=>`${line.text}\r\n`).join('');
-        files.write(node, 0, encodeAnsi(body));
+        files.write(node, 0, encodeIn(encodings.get(path.toLowerCase()) ?? 'ansi', body));
         files.close(node);
         return true;
+    };
+
+    /**
+     * The answer a call gives from the file's lines: `answer` on them (none
+     * for no file or no name), `refused` when the file is there and could
+     * not be opened. A read answers as if the file were empty; a write fails.
+     *
+     * @template T
+     * @param {string | null} path @param {(lines: ProfileLine[]) => T}
+     * answer @param {() => T} [refused]
+     * @returns {T | Promise<T>}
+     */
+    const withLines = (path, answer, refused = ()=>answer([]))=>{
+        const loaded = path === null ? [] : load(path);
+        if (loaded === null)
+        {
+            return refused();
+        }
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
     };
 
     /**
@@ -215,17 +373,6 @@ export function createProfileFunctions(host){
         return { start, end };
     };
 
-    /** @param {string} value @returns {Uint8Array} UTF-16LE */
-    const encodeWide = value=>{
-        const out = new Uint8Array(value.length * 2);
-        for (let at = 0; at < value.length; at++)
-        {
-            out[at * 2] = value.charCodeAt(at) & 0xff;
-            out[at * 2 + 1] = value.charCodeAt(at) >>> 8;
-        }
-        return out;
-    };
-
     /**
      * Writes a list of names, NUL-separated and NUL-ended, into a buffer that
      * may be too small for it. Sizes and counts are in characters of the form
@@ -233,24 +380,27 @@ export function createProfileFunctions(host){
      *
      * @param {number} buffer @param {number} size @param {string[]} names
      * @param {boolean} [wide]
+     * @param {number} [spare]  Room past the list's last NUL that it needs to
+     *        count as fitting: GetPrivateProfileSectionNames wants one more,
+     *        and a list that fits it exactly is answered as cut.
      * @returns {number} what the call answers
      */
-    const writeList = (buffer, size, names, wide = false)=>{
-        const encode = wide ? encodeWide : encodeAnsi;
+    const writeList = (buffer, size, names, wide = false, spare = 0)=>{
+        const encode = wide ? utf16 : encodeAnsi;
         const room = size >>> 0;
         if (room === 0)
         {
             return 0;
         }
         const whole = names.map(name=>`${name}\0`).join('');
-        if (whole.length + 1 <= room)
+        if (whole.length + 1 + spare <= room)
         {
-            host.writeMemory(buffer >>> 0, encode(`${whole}\0`));
+            host.writeMemory(wholeAddress(buffer), encode(`${whole}\0`));
             return whole.length;
         }
         // Cut two short: one NUL to end the name it cut, one to end the list.
         const kept = room >= 2 ? whole.slice(0, room - 2) : '';
-        host.writeMemory(buffer >>> 0, encode(`${kept}\0\0`.slice(0, room)));
+        host.writeMemory(wholeAddress(buffer), encode(`${kept}\0\0`.slice(0, room)));
         return Math.max(room - 2, 0);
     };
 
@@ -266,7 +416,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(buffer >>> 0, (wide ? encodeWide : encodeAnsi)(`${kept}\0`));
+        host.writeMemory(wholeAddress(buffer), (wide ? utf16 : encodeAnsi)(`${kept}\0`));
         return kept.length;
     };
 
@@ -306,6 +456,38 @@ export function createProfileFunctions(host){
     const deliver = (buffer, size, answer, wide = false)=>('names' in answer
         ? writeList(buffer, size, answer.names, wide)
         : writeValue(buffer, size, answer.value, wide));
+
+    /**
+     * lookUp with the registry's sections over the file's: a mapped section
+     * answers from where it is mapped, and the section list names the
+     * mapped sections before the file's.
+     *
+     * @param {string | null} path @param {ProfileLine[]} lines
+     * @param {string | null} section @param {string | null} key
+     * @param {string} fallback
+     * @returns {{ names: string[] } | { value: string }}
+     */
+    const mappedLookUp = (path, lines, section, key, fallback)=>{
+        if (section === null)
+        {
+            const mappedNames = mapping && path !== null ? mapping.sectionNames(path) : [];
+            const fromFile = /** @type {{ names: string[] }} */ (lookUp(lines, null, null, ''))
+                .names.filter(name=>!mappedNames.some(mapped=>sameName(mapped, name)));
+            return { names: [...mappedNames, ...fromFile] };
+        }
+        const mapped = mappedSection(path, section);
+        if (!mapped)
+        {
+            return lookUp(lines, section, key, fallback);
+        }
+        if (key === null)
+        {
+            return { names: mappedEntries(mapped, lines, section).map(entry=>entry.name) };
+        }
+        const value = /** @type {NonNullable<typeof mapping>} */ (mapping).get(mapped, key);
+        return value === undefined ? lookUp(lines, section, key, fallback)
+            : { value: value ?? fallback };
+    };
 
     /**
      * The integer at the front of a value, the way the C runtime reads one:
@@ -374,9 +556,8 @@ export function createProfileFunctions(host){
         const wanted = { section, key, fallback: (fallback ?? '').replace(/\s+$/, '') };
         /** @param {ProfileLine[]} lines */
         const answer = lines=>deliver(buffer, size,
-            lookUp(lines, wanted.section, wanted.key, wanted.fallback), wide);
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+            mappedLookUp(path, lines, wanted.section, wanted.key, wanted.fallback), wide);
+        return withLines(path, answer);
     };
 
     /**
@@ -391,14 +572,13 @@ export function createProfileFunctions(host){
             // read a number out of, and the default is the answer.
             if (wanted.section === null || wanted.key === null)
             {
-                return fallback >>> 0;
+                return wholeAddress(fallback);
             }
-            const found = lookUp(lines, wanted.section, wanted.key, '');
+            const found = mappedLookUp(path, lines, wanted.section, wanted.key, '');
             const value = 'value' in found ? found.value : '';
             return value === '' ? fallback >>> 0 : integerOf(value);
         };
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer);
     };
 
     /**
@@ -414,18 +594,51 @@ export function createProfileFunctions(host){
      */
     const putText = (path, section, key, value)=>{
         const wanted = { section, key, value };
+        // All three NULL flushes the cache, which reads the mapping again:
+        // nothing is cached here, and the flush succeeds.
+        if (path !== null && section === null && key === null && value === null)
+        {
+            return 1;
+        }
+        // Any other NULL section writes nothing, and answers that no file
+        // was named.
         if (path === null || wanted.section === null)
         {
+            host.setLastError?.(ERROR_FILE_NOT_FOUND);
             return 0;
+        }
+        const mapped = mappedSection(path, wanted.section);
+        if (mapped)
+        {
+            const registry = /** @type {NonNullable<typeof mapping>} */ (mapping);
+            if (wanted.key !== null)
+            {
+                if (registry.put(mapped, wanted.key, wanted.value))
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                registry.clear(mapped);
+                if (!registry.list(mapped).file)
+                {
+                    return 1;
+                }
+            }
         }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
             const changed = edit(lines, /** @type {string} */ (wanted.section),
                 wanted.key, wanted.value);
-            return changed === null || store(path, changed) ? 1 : 0;
+            // Even a write that changes nothing leaves the file there.
+            if (changed === null && files.stat(path)?.exists)
+            {
+                return 1;
+            }
+            return store(path, changed ?? lines) ? 1 : 0;
         };
-        const loaded = load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     /**
@@ -460,9 +673,11 @@ export function createProfileFunctions(host){
      */
     const sectionNames = (path, buffer, size, wide = false)=>{
         /** @param {ProfileLine[]} lines */
-        const answer = lines=>deliver(buffer, size, lookUp(lines, null, null, ''), wide);
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        const answer = lines=>{
+            const found = mappedLookUp(path, lines, null, null, '');
+            return writeList(buffer, size, 'names' in found ? found.names : [], wide, 1);
+        };
+        return withLines(path, answer);
     };
 
     /**
@@ -473,18 +688,32 @@ export function createProfileFunctions(host){
      * @param {number} buffer @param {number} size @param {boolean} [wide]
      */
     const readSection = (path, name, buffer, size, wide = false)=>{
+        if (name === null || (buffer >>> 0) === 0 || (size >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (path === null)
+        {
+            host.setLastError?.(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        const mapped = mappedSection(path, name);
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
-            const span = name === null ? null : sectionSpan(lines, name);
-            const entries = span === null
-                ? []
-                : lines.slice(span.start + 1, span.end)
-                    .map(line=>line.text.trim())
-                    .filter(line=>line !== '' && !line.startsWith(';'));
-            return writeList(buffer, size, entries, wide);
+            const span = sectionSpan(lines, name);
+            const entries = mapped
+                ? mappedEntries(mapped, lines, name).map(entry=>`${entry.name}=${entry.value}`)
+                : span === null
+                    ? []
+                    : lines.slice(span.start + 1, span.end)
+                        .map(line=>line.text.trim())
+                        .filter(line=>line !== '' && !line.startsWith(';'));
+            const written = writeList(buffer, size, entries, wide);
+            host.setLastError?.(ERROR_SUCCESS);
+            return written;
         };
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     /**
@@ -501,10 +730,10 @@ export function createProfileFunctions(host){
         }
         /** @type {string[]} */
         const entries = [];
-        for (let at = list >>> 0; ;)
+        for (let at = wholeAddress(list); ;)
         {
             const entry = wide
-                ? host.readWideString?.(at, MAX_VALUE) ?? ''
+                ? host.readWideString?.(at, MAX_VALUE * 2) ?? ''
                 : host.readCString(at, MAX_VALUE);
             if (entry === '')
             {
@@ -527,6 +756,25 @@ export function createProfileFunctions(host){
         {
             return 0;
         }
+        const mapped = mappedSection(path, name);
+        if (mapped)
+        {
+            // The registry's keys are written one by one and none taken away;
+            // a NULL list removes the section, as a NULL key does.
+            if (entries === null)
+            {
+                return putText(path, name, null, null);
+            }
+            for (const entry of entries)
+            {
+                const { key, value } = parseLine(entry);
+                if (key !== null)
+                {
+                    /** @type {NonNullable<typeof mapping>} */ (mapping).put(mapped, key, value);
+                }
+            }
+            return 1;
+        }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
             const span = sectionSpan(lines, name);
@@ -542,8 +790,7 @@ export function createProfileFunctions(host){
                 : [...lines.slice(0, span.start), ...body, ...lines.slice(span.end)];
             return store(path, next) ? 1 : 0;
         };
-        const loaded = load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     const WIN_INI = `${WINDOWS_DIRECTORY}\\win.ini`;
@@ -722,11 +969,10 @@ export function createProfileFunctions(host){
                         host.setLastError?.(ERROR_INVALID_DATA);
                         return 0;
                     }
-                    host.writeMemory(buffer >>> 0, data);
+                    host.writeMemory(wholeAddress(buffer), data);
                     return 1;
                 };
-                const loaded = path === null ? [] : load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+                return withLines(path, answer);
             },
         },
 
@@ -740,7 +986,7 @@ export function createProfileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([section, key, structure, size, file])=>{
-                if ((structure >>> 0) === 0)
+                if (wholeAddress(structure) === 0)
                 {
                     return put(pathOf(file), section, key, 0);
                 }
@@ -749,7 +995,7 @@ export function createProfileFunctions(host){
                     host.setLastError?.(ERROR_INVALID_FUNCTION);
                     return 0;
                 }
-                const value = structText(host.readMemory(structure >>> 0, size >>> 0));
+                const value = structText(host.readMemory(wholeAddress(structure), size >>> 0));
                 return putText(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME), value);
             },
         },

@@ -31,6 +31,27 @@
  */
 
 /**
+ * The methods with a float among their arguments, by name, and where it is
+ * counting `this`: a 64-bit caller passes one among its first four in an XMM
+ * register (the bridge's `floats`), a 32-bit one on the stack as any other.
+ * Every other argument of these interfaces is an integer, a handle or a
+ * pointer, and a float past the fourth is read from its stack slot.
+ *
+ * @type {Record<string, Record<number, 'f32'>>}
+ */
+const FLOAT_ARGUMENTS = Object.freeze({
+    // IDirect3DDevice9::SetNPatchMode(float nSegments)
+    SetNPatchMode: Object.freeze({ 1: /** @type {'f32'} */ ('f32') }),
+    // ID3D10Device and ID3D11DeviceContext::ClearDepthStencilView(view, UINT flags,
+    // FLOAT depth, UINT8 stencil): the depth in the fourth slot.
+    ClearDepthStencilView: Object.freeze({ 3: /** @type {'f32'} */ ('f32') }),
+    // ID3D11DeviceContext::SetResourceMinLOD(ID3D11Resource *, FLOAT MinLOD)
+    SetResourceMinLOD: Object.freeze({ 2: /** @type {'f32'} */ ('f32') }),
+    // ID3D10EffectScalarVariable::SetFloat(FLOAT value)
+    SetFloat: Object.freeze({ 1: /** @type {'f32'} */ ('f32') }),
+});
+
+/**
  * Builds a descriptor from a list of `[name, argumentCount]` pairs.
  *
  * The argument count excludes `this`, because that is how a header reads and
@@ -63,6 +84,7 @@ export function describe(id, slots, implemented = {}, guests = {}, released = un
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,
+            ...Object.hasOwn(FLOAT_ARGUMENTS, name) ? { floats: FLOAT_ARGUMENTS[name] } : {},
             // A method that runs in the guest: its builder is handed the
             // method's own trap to fall back to, and answers the slot.
             guest: guests[name],

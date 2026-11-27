@@ -21,7 +21,9 @@
 
 import { blockState, interpret } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
-import { Tables, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PAGE, Tables, WRAP_SLACK, apicWord, ownLayout, pagesFor, tablesSize }
+    from './runtime/layout.js';
+import { PageFlag } from './runtime/pages.js';
 import { createCorkRuntime } from './runtime/runtime.js';
 import { eflagsOf, setEflags } from './emit/flags.js';
 import { TRAP_END_TURN } from './emit/integer.js';
@@ -35,6 +37,14 @@ const HOT_JUMPS = 50;
 const INTERPRET_CHUNK = 1 << 16;
 /** Instructions a region runs at a time, so a loop that never leaves still yields. */
 const REGION_CHUNK = 1 << 24;
+/**
+ * The program's clock: a millisecond a million instructions retired, about
+ * what translated code runs at. The translator times a page's rewrites
+ * (`volatileWindowMs`) by it, so which code runs translated follows the program
+ * alone -- by the host's clock it followed how busy the machine was, and a
+ * program run twice was translated two ways.
+ */
+const PROGRAM_MS = 1e-6;
 
 /**
  * Why a run ended: the program's `hlt`; an `int n` (eip past it, `vector` n); a
@@ -53,16 +63,27 @@ const REGION_CHUNK = 1 << 24;
 
 /**
  * @param {{ ramSize?: number, config?: import('../../core/src/layers/cpu/engine.js').EngineConfig,
- *     trapPort?: number }} [options]
+ *     trapPort?: number, features?: import('./wasm/features.js').Features,
+ *     now?: () => number, growing?: { floor: number, tablesAt: number } }} [options]
  *     `ramSize`: guest memory in bytes, a multiple of 64 KiB (default 16 MiB); `config`: the
  *     translator's (`EngineConfig`); `trapPort`: an I/O port whose `out` stops the run as a
- *     `trap` (default none: every `out` is one)
+ *     `trap` (default none: every `out` is one); `features`: the host the translator makes
+ *     code for, another than this one (an arm64 one's, `armHost`), this one's by default;
+ *     `now`: the clock in milliseconds the translator times a page's rewrites by, the
+ *     program's own by default (`PROGRAM_MS`); `growing`: a memory that starts with `floor`
+ *     bytes of RAM and grows to `ramSize` (`grow`), RAM at 0 and the tables inside it at
+ *     `tablesAt` (`ownLayout`'s `ramFloor`)
  */
-export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}){
+export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, features,
+    now = undefined, growing = undefined } = {})
+{
     const layout = ownLayout({ ramSize,
-        ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }) });
+        ...(config.hashSlots === undefined ? {} : { hashSlots: config.hashSlots }),
+        ...(growing === undefined ? {}
+            : { ramBase: 0, tablesAt: growing.tablesAt, ramFloor: growing.floor }) });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
-        tablesSize(layout) + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)) });
+        tablesSize(layout) + (config.blockProfile === true ? Tables.BLOCK_PROFILE_SIZE : 0)),
+    ...(growing === undefined ? {} : { maximum: (ramSize + WRAP_SLACK) / PAGE }) });
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     // A processor as it comes out of reset: every x87 register empty, the
@@ -70,13 +91,26 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
     view().setUint8(layout.x87Empty, 0xff);
     view().setUint16(layout.x87Control, 0x37f, true);
     view().setUint32(layout.mxcsr, 0x1f80, true);
+    if (layout.apic !== undefined)
+    {
+        view().setUint32(layout.apic, apicWord(layout.processor ?? 0), true);
+    }
     setEflags(view(), layout, 0x2);
+    // A growing memory's RAM is its floor's until it grows: the wrap's mask says so.
+    let ramNow = growing?.floor ?? ramSize;
+    if (layout.wrap !== undefined)
+    {
+        view().setUint32(layout.wrap, ramNow - 1, true);
+    }
     const started = performance.now();
-    const rdtsc = ()=>BigInt(Math.round((performance.now() - started) * 1e6));
+    const rdtsc = ()=>Math.round((performance.now() - started) * 1e6);
     /** @type {number[]} */
     const trapped = [];
+    /** Instructions retired by every run so far: the program's clock (`PROGRAM_MS`). */
+    let elapsed = 0;
     const runtime = createCorkRuntime({
-        memory, layout,
+        memory, layout, ...(features === undefined ? {} : { features }),
+        now: now ?? (()=>elapsed * PROGRAM_MS),
         // Formed after every run of the interpreter: there are no frames to pace it.
         config: { feed: 'slice', ...config, ...(trapPort === undefined ? {} : { trapPort }) },
         read: address=>bytes()[layout.ramBase + address],
@@ -87,11 +121,14 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
                 trapped.push(value);
                 return TRAP_END_TURN;
             },
-            getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: index=>view().getFloat64(layout.x87 + index * 16, true),
             rdtsc,
         },
     });
+    // Past the RAM a growing memory holds, every page is closed until it grows.
+    if (ramNow < ramSize)
+    {
+        runtime.pages.markRange(ramNow, ramSize - ramNow, PageFlag.INACCESSIBLE);
+    }
     const state = blockState({
         memory, layout, rdtsc,
         // An interpreted store into translated code drops the regions there,
@@ -103,7 +140,6 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
     });
     // Its pacing, the config's where it names one.
     const hotJumps = config.hotThreshold ?? HOT_JUMPS;
-    const interpretChunk = config.interpretChunk ?? INTERPRET_CHUNK;
     const regionChunk = config.yieldChunk ?? REGION_CHUNK;
     /** Jumps seen to each start not yet translated. @type {Map<number, number>} */
     const heat = new Map();
@@ -216,6 +252,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
             {
                 const exit = runtime.run(entry, Math.min(remaining, regionChunk));
                 retired += exit.retired;
+                elapsed += exit.retired;
                 translated += exit.retired;
                 if (exit.kind === 'halt')
                 {
@@ -244,9 +281,10 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
                 // The region ran nothing here (cut for another x87 top, or
                 // leaving at its own entry): one instruction interpreted moves on.
             }
-            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, interpretChunk),
+            const { retired: stepped, stop } = interpretFrom(Math.min(remaining, INTERPRET_CHUNK),
                 entry >= 0);
             retired += stepped;
+            elapsed += stepped;
             if (stop !== null)
             {
                 return ended(stop);
@@ -305,6 +343,22 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort } = {}
             view().setUint32(layout.regs + index * 4, value >>> 0, true);
         },
         diagnostics: ()=>runtime.diagnostics(),
+        /**
+         * A growing memory grown to hold `ram` bytes of RAM, a power of two: the
+         * memory's pages added, the wrap's mask set, the new pages opened.
+         *
+         * @param {number} ram
+         */
+        grow(ram){
+            if (layout.wrap === undefined || ram <= ramNow)
+            {
+                return;
+            }
+            memory.grow((ram + WRAP_SLACK - memory.buffer.byteLength) / PAGE);
+            runtime.pages.clearRange(ramNow, ram - ramNow, PageFlag.INACCESSIBLE);
+            ramNow = ram;
+            view().setUint32(layout.wrap, ram - 1, true);
+        },
         /** Ends the translation workers the runtime opened. */
         dispose: ()=>runtime.flush(),
     };

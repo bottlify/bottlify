@@ -1,0 +1,352 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The state calls OpenGL 1.2 to 2.1 added to the core, beyond what the
+ * extensions this layer already had brought (those are answered under
+ * their core names too, in `exports.js`): separate blending and its
+ * equations and constant colour, separate stencil faces, several draw
+ * buffers, point parameters, sample coverage, transposed matrices, window
+ * raster positions, occlusion queries, and the 3D texture calls.
+ *
+ * What is accepted and not drawn is said so through the divergence report:
+ * point sprites and sizes (WebGPU draws one-pixel points), sample coverage
+ * (one sample), 3D textures (none are sampled), and the occlusion queries,
+ * whose count is the viewport's area rather than what passed.
+ */
+
+import { GL } from './constants.js';
+import { transpose } from './matrix.js';
+
+/**
+ * The blend factors OpenGL 1.4 takes, constant colours among them, and 3.3's
+ * that blend by the fragment shader's second output.
+ *
+ * @type {Set<number>}
+ */
+export const BLEND_FACTORS = new Set([
+    GL.ZERO, GL.ONE, GL.SRC_COLOR, GL.ONE_MINUS_SRC_COLOR, GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA,
+    GL.DST_ALPHA, GL.ONE_MINUS_DST_ALPHA, GL.DST_COLOR, GL.ONE_MINUS_DST_COLOR,
+    GL.SRC_ALPHA_SATURATE, GL.CONSTANT_COLOR, GL.ONE_MINUS_CONSTANT_COLOR, GL.CONSTANT_ALPHA,
+    GL.ONE_MINUS_CONSTANT_ALPHA, GL.SRC1_COLOR, GL.SRC1_ALPHA, GL.ONE_MINUS_SRC1_COLOR,
+    GL.ONE_MINUS_SRC1_ALPHA,
+]);
+
+/** @type {Set<number>} */
+const COMPARE_FUNCTIONS = new Set([
+    GL.NEVER, GL.LESS, GL.EQUAL, GL.LEQUAL, GL.GREATER, GL.NOTEQUAL, GL.GEQUAL, GL.ALWAYS,
+]);
+
+/** The blend equations. @type {Set<number>} */
+export const EQUATIONS = new Set([GL.FUNC_ADD, GL.FUNC_SUBTRACT, GL.FUNC_REVERSE_SUBTRACT, GL.MIN,
+    GL.MAX]);
+
+/** @type {Set<number>} */
+const STENCIL_OPS = new Set([
+    GL.KEEP, GL.ZERO, GL.REPLACE, GL.INCR, GL.DECR, GL.INVERT, GL.INCR_WRAP, GL.DECR_WRAP,
+]);
+
+/**
+ * @typedef {{ func: number, ref: number, mask: number, fail: number, zfail: number,
+ *     zpass: number, write: number }} StencilQueries
+ */
+
+/** What each face's stencil queries are. @type {StencilQueries} */
+const FRONT = { func: GL.STENCIL_FUNC, ref: GL.STENCIL_REF, mask: GL.STENCIL_VALUE_MASK,
+    fail: GL.STENCIL_FAIL, zfail: GL.STENCIL_PASS_DEPTH_FAIL, zpass: GL.STENCIL_PASS_DEPTH_PASS,
+    write: GL.STENCIL_WRITEMASK };
+/** @type {StencilQueries} */
+const BACK = { func: GL.STENCIL_BACK_FUNC, ref: GL.STENCIL_BACK_REF,
+    mask: GL.STENCIL_BACK_VALUE_MASK, fail: GL.STENCIL_BACK_FAIL,
+    zfail: GL.STENCIL_BACK_PASS_DEPTH_FAIL, zpass: GL.STENCIL_BACK_PASS_DEPTH_PASS,
+    write: GL.STENCIL_BACK_WRITEMASK };
+
+/** The buffers glDrawBuffers takes for the window. @type {Set<number>} */
+const WINDOW_BUFFERS = new Set([GL.NONE, GL.FRONT_LEFT, GL.FRONT_RIGHT, GL.BACK_LEFT,
+    GL.BACK_RIGHT, GL.AUX0]);
+
+
+/**
+ * @param {any} context
+ * @param {import('./kernel.js').ContextKernel} kernel
+ */
+export function installCoreCalls(context, kernel){
+    const { enter, setError, setState, record } = kernel;
+
+    /** @param {number} face @returns {StencilQueries[] | null} */
+    const facesOf = face=>(face === GL.FRONT ? [FRONT] : face === GL.BACK ? [BACK]
+        : face === GL.FRONT_AND_BACK ? [FRONT, BACK] : null);
+
+    /** @param {number} value */
+    const clamp01 = value=>(value < 0 ? 0 : value > 1 ? 1 : value);
+
+    Object.assign(context, {
+        // --- blending ---
+
+        /** @param {number} r @param {number} g @param {number} b @param {number} a */
+        glBlendColor(r, g, b, a){
+            if (enter('glBlendColor', [r, g, b, a]))
+            {
+                setState(GL.BLEND_COLOR, [r, g, b, a].map(clamp01));
+            }
+        },
+
+        /** @param {number} mode */
+        glBlendEquation(mode){
+            context.glBlendEquationSeparate(mode, mode);
+        },
+
+        /** @param {number} rgb @param {number} alpha */
+        glBlendEquationSeparate(rgb, alpha){
+            if (!enter('glBlendEquationSeparate', [rgb, alpha]))
+            {
+                return;
+            }
+            if (!EQUATIONS.has(rgb) || !EQUATIONS.has(alpha))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.BLEND_EQUATION_RGB, [rgb]);
+            setState(GL.BLEND_EQUATION_ALPHA, [alpha]);
+            kernel.side.allBuffers?.(GL.BLEND_EQUATION_RGB, [rgb, alpha]);
+        },
+
+        /**
+         * @param {number} srcRgb @param {number} dstRgb @param {number} srcAlpha
+         * @param {number} dstAlpha
+         */
+        glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha){
+            if (!enter('glBlendFuncSeparate', [srcRgb, dstRgb, srcAlpha, dstAlpha]))
+            {
+                return;
+            }
+            if (![srcRgb, dstRgb, srcAlpha, dstAlpha].every(f=>BLEND_FACTORS.has(f))
+                || dstRgb === GL.SRC_ALPHA_SATURATE || dstAlpha === GL.SRC_ALPHA_SATURATE)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.BLEND_SRC, [srcRgb]);
+            setState(GL.BLEND_DST, [dstRgb]);
+            setState(GL.BLEND_SRC_RGB, [srcRgb]);
+            setState(GL.BLEND_DST_RGB, [dstRgb]);
+            setState(GL.BLEND_SRC_ALPHA, [srcAlpha]);
+            setState(GL.BLEND_DST_ALPHA, [dstAlpha]);
+            kernel.side.allBuffers?.(GL.BLEND_SRC_RGB, [srcRgb, dstRgb, srcAlpha, dstAlpha]);
+        },
+
+        // --- stencil, face by face ---
+
+        /** @param {number} face @param {number} func @param {number} ref @param {number} mask */
+        glStencilFuncSeparate(face, func, ref, mask){
+            if (!enter('glStencilFuncSeparate', [face, func, ref, mask]))
+            {
+                return;
+            }
+            const faces = facesOf(face);
+            if (!faces || !COMPARE_FUNCTIONS.has(func))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            for (const q of faces)
+            {
+                setState(q.func, [func]);
+                setState(q.ref, [ref | 0]);
+                setState(q.mask, [mask >>> 0]);
+            }
+        },
+
+        /**
+         * @param {number} face @param {number} fail @param {number} zfail
+         * @param {number} zpass
+         */
+        glStencilOpSeparate(face, fail, zfail, zpass){
+            if (!enter('glStencilOpSeparate', [face, fail, zfail, zpass]))
+            {
+                return;
+            }
+            const faces = facesOf(face);
+            if (!faces || ![fail, zfail, zpass].every(op=>STENCIL_OPS.has(op)))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            for (const q of faces)
+            {
+                setState(q.fail, [fail]);
+                setState(q.zfail, [zfail]);
+                setState(q.zpass, [zpass]);
+            }
+        },
+
+        /** @param {number} face @param {number} mask */
+        glStencilMaskSeparate(face, mask){
+            if (!enter('glStencilMaskSeparate', [face, mask]))
+            {
+                return;
+            }
+            const faces = facesOf(face);
+            if (!faces)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            for (const q of faces)
+            {
+                setState(q.write, [mask >>> 0]);
+            }
+        },
+
+        // --- colour clamping (3.0) ---
+
+        /**
+         * glClampColor: whether vertex colours, fragment colours and the
+         * colours glReadPixels reads are clamped to [0, 1]. What the device
+         * does is GL_FIXED_ONLY for fragments and reads -- a float buffer
+         * keeps its values, a normalised one clamps -- and clamped vertex
+         * colours; another setting is kept and said once.
+         *
+         * @param {number} target @param {number} clamp
+         */
+        glClampColor(target, clamp){
+            if (!enter('glClampColor', [target, clamp]))
+            {
+                return;
+            }
+            if (target !== GL.CLAMP_VERTEX_COLOR && target !== GL.CLAMP_FRAGMENT_COLOR
+                && target !== GL.CLAMP_READ_COLOR)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (clamp !== GL.TRUE && clamp !== GL.FALSE && clamp !== GL.FIXED_ONLY)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const done = target === GL.CLAMP_VERTEX_COLOR ? GL.TRUE : GL.FIXED_ONLY;
+            if (clamp !== done)
+            {
+                kernel.diverge(`glClampColor(0x${target.toString(16)}) was set to`
+                    + ` 0x${clamp.toString(16)}, kept and not done: colours are clamped as by`
+                    + ` default`);
+            }
+            setState(target, [clamp]);
+        },
+
+        // --- draw buffers ---
+
+        /** @param {readonly number[]} buffers */
+        glDrawBuffers(buffers){
+            if (!enter('glDrawBuffers', [buffers]))
+            {
+                return;
+            }
+            if (buffers.length < 0 || buffers.length > record(GL.MAX_DRAW_BUFFERS).values[0])
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (!kernel.side.drawTarget?.())
+            {
+                // The window's buffers, each one buffer (table 4.5 of the 2.1
+                // specification has no FRONT or BACK) and none twice.
+                if (buffers.some(b=>!WINDOW_BUFFERS.has(b)))
+                {
+                    setError(GL.INVALID_ENUM);
+                    return;
+                }
+                const double = record(GL.DOUBLEBUFFER).values[0] !== 0;
+                if (buffers.some((b, k)=>(b !== GL.NONE && buffers.indexOf(b) !== k)
+                    || b === GL.AUX0 || b === GL.FRONT_RIGHT || b === GL.BACK_RIGHT
+                    || (b === GL.BACK_LEFT && !double)))
+                {
+                    setError(GL.INVALID_OPERATION);
+                    return;
+                }
+            }
+            kernel.side.setDrawBuffers?.([...buffers]);
+        },
+
+        // --- points and samples ---
+
+        /** @param {number} pname @param {readonly number[]} values */
+        glPointParameterfv(pname, values){
+            if (!enter('glPointParameterfv', [pname, values]))
+            {
+                return;
+            }
+            switch (pname)
+            {
+                case GL.POINT_SIZE_MIN:
+                case GL.POINT_SIZE_MAX:
+                case GL.POINT_FADE_THRESHOLD_SIZE:
+                    if (!(values[0] >= 0))
+                    {
+                        setError(GL.INVALID_VALUE);
+                        return;
+                    }
+                    setState(pname, [values[0]]);
+                    return;
+                case GL.POINT_DISTANCE_ATTENUATION:
+                    setState(pname, [values[0], values[1], values[2]]);
+                    return;
+                case GL.POINT_SPRITE_COORD_ORIGIN:
+                    if (values[0] !== GL.LOWER_LEFT && values[0] !== GL.UPPER_LEFT)
+                    {
+                        setError(GL.INVALID_ENUM);
+                        return;
+                    }
+                    setState(pname, [values[0]]);
+                    return;
+                default:
+                    setError(GL.INVALID_ENUM);
+            }
+        },
+
+        /** @param {number} value @param {number} invert */
+        glSampleCoverage(value, invert){
+            if (enter('glSampleCoverage', [value, invert]))
+            {
+                setState(GL.SAMPLE_COVERAGE_VALUE, [clamp01(value)]);
+                setState(GL.SAMPLE_COVERAGE_INVERT, [invert ? 1 : 0]);
+            }
+        },
+
+        // --- transposed matrices ---
+
+        /** @param {ArrayLike<number>} m  row by row */
+        glLoadTransposeMatrixf(m){
+            context.glLoadMatrixf(transpose(m));
+        },
+
+        /** @param {ArrayLike<number>} m */
+        glMultTransposeMatrixf(m){
+            context.glMultMatrixf(transpose(m));
+        },
+
+        // --- the raster position in window coordinates ---
+
+        /** @param {number} x @param {number} y @param {number} z */
+        glWindowPos3f(x, y, z){
+            if (!enter('glWindowPos3f', [x, y, z]))
+            {
+                return;
+            }
+            const [near, far] = record(GL.DEPTH_RANGE).values;
+            const current = kernel.currentAttributes();
+            setState(GL.CURRENT_RASTER_POSITION, [x, y, near + clamp01(z) * (far - near), 1]);
+            setState(GL.CURRENT_RASTER_POSITION_VALID, [1]);
+            setState(GL.CURRENT_RASTER_COLOR, [...current.color]);
+            setState(GL.CURRENT_RASTER_TEXTURE_COORDS, [...current.texCoords[0]]);
+            setState(GL.CURRENT_RASTER_DISTANCE, [current.fogCoord]);
+        },
+
+
+    });
+}

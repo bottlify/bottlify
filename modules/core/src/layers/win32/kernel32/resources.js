@@ -21,10 +21,16 @@
  */
 
 /** Codes this surface reports. */
+import { forwarded, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 const ERROR_RESOURCE_NAME_NOT_FOUND = 1814;
 const ERROR_RESOURCE_LANG_NOT_FOUND = 1815;
+/** What memory calls an access to an address that is not there. */
+const GUEST_ACCESS = 'GUEST_ACCESS';
 
 /**
  * A pointer below this cannot be a string, so it is an integer identifier.
@@ -165,8 +171,23 @@ export function createResourceFunctions(host){
      * @param {number | null} language @param {boolean} [wide]
      */
     const find = (instance, type, name, language, wide = false)=>{
-        const wantedType = identifier(type, wide);
-        const wantedName = identifier(name, wide);
+        let wantedType;
+        let wantedName;
+        // A name that is not there is a page fault the lookup catches and
+        // answers: a program that passes what an enumeration it thought had
+        // run left in its variable gets ERROR_INVALID_PARAMETER back.
+        try
+        {
+            wantedType = identifier(type, wide);
+            wantedName = identifier(name, wide);
+        }
+        catch (e){
+            if (/** @type {{ code?: string }} */ (e)?.code !== GUEST_ACCESS)
+            {
+                throw e;
+            }
+            return fail(ERROR_INVALID_PARAMETER);
+        }
         const entry = wantedType === null || wantedName === null ? null
             : host.findResource(instance >>> 0, wantedType, wantedName, language);
         if (!entry)
@@ -185,7 +206,8 @@ export function createResourceFunctions(host){
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
      */
-    const enumLanguages = ([instance, type, name, callback, lParam], wide)=>{
+    const enumLanguages = (args, wide)=>{
+        const [instance, type, name, callback] = args;
         if (!host.call || (callback >>> 0) === 0)
         {
             return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
@@ -209,7 +231,8 @@ export function createResourceFunctions(host){
                 return 1;
             }
             const answer = call(callback >>> 0,
-                [instance >>> 0, type >>> 0, name >>> 0, languages[at], lParam >>> 0],
+                /** @type {number[]} */ ([forwarded(args, 0), forwarded(args, 1),
+                    forwarded(args, 2), languages[at], forwarded(args, 4, true)]),
                 thread);
             /** @param {number} went */
             const then = went=>((went | 0) === 0 ? 1 : next(at + 1));
@@ -228,13 +251,7 @@ export function createResourceFunctions(host){
         {
             return Uint8Array.from([...text].map(c=>c.charCodeAt(0) & 0xff).concat(0));
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i * 2] = text.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-        }
-        return bytes;
+        return utf16z(text);
     };
 
     /**
@@ -289,7 +306,8 @@ export function createResourceFunctions(host){
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
      */
-    const enumNames = ([instance, type, callback, lParam], wide)=>{
+    const enumNames = (args, wide)=>{
+        const [instance, type, callback] = args;
         if (!host.call || (callback >>> 0) === 0)
         {
             return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
@@ -309,7 +327,8 @@ export function createResourceFunctions(host){
             return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
         }
         return callEach(names, wide, callback,
-            name=>[instance >>> 0, type >>> 0, name, lParam >>> 0]);
+            name=>/** @type {number[]} */ ([forwarded(args, 0), forwarded(args, 1), name,
+                forwarded(args, 3, true)]));
     };
 
     /**
@@ -319,7 +338,8 @@ export function createResourceFunctions(host){
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
      */
-    const enumTypes = ([instance, callback, lParam], wide)=>{
+    const enumTypes = (args, wide)=>{
+        const [instance, callback] = args;
         if (!host.call || (callback >>> 0) === 0)
         {
             return fail(ERROR_RESOURCE_DATA_NOT_FOUND);
@@ -337,7 +357,8 @@ export function createResourceFunctions(host){
         {
             return fail(ERROR_RESOURCE_DATA_NOT_FOUND);
         }
-        return callEach(types, wide, callback, type=>[instance >>> 0, type, lParam >>> 0]);
+        return callEach(types, wide, callback, type=>/** @type {number[]} */ (
+            [forwarded(args, 0), type, forwarded(args, 2, true)]));
     };
 
     /**
@@ -359,6 +380,7 @@ export function createResourceFunctions(host){
          * a program with a string table per language picks its user's.
          */
         FindResourceExA: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, type, name, language])=>
@@ -370,6 +392,7 @@ export function createResourceFunctions(host){
          *                       WORD wLanguage)
          */
         FindResourceExW: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, type, name, language])=>
@@ -452,6 +475,7 @@ export function createResourceFunctions(host){
          * caller reads. Swapping them finds nothing, silently.
          */
         FindResourceA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>find(instance, type, name, null),
@@ -459,6 +483,7 @@ export function createResourceFunctions(host){
 
         /** HRSRC FindResourceW(HMODULE hModule, LPCWSTR lpName, LPCWSTR lpType) */
         FindResourceW: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>find(instance, type, name, null, true),
@@ -469,7 +494,7 @@ export function createResourceFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
-                const entry = found.get(resource >>> 0);
+                const entry = found.get(wholeAddress(resource));
                 return entry ? entry.size : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
             },
         },
@@ -482,14 +507,15 @@ export function createResourceFunctions(host){
          * and a program that reads through it without locking works there.
          */
         LoadResource: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
-                if ((resource >>> 0) === 0)
+                if (wholeAddress(resource) === 0)
                 {
                     return 0;
                 }
-                const entry = found.get(resource >>> 0);
+                const entry = found.get(wholeAddress(resource));
                 return entry ? (entry.base + entry.rva) >>> 0 : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
             },
         },
@@ -500,9 +526,10 @@ export function createResourceFunctions(host){
          * The handle already is the pointer, so it comes back as it went in.
          */
         LockResource: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>handle >>> 0,
+            handler: ([handle])=>wholeAddress(handle),
         },
 
         /**

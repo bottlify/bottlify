@@ -96,6 +96,7 @@ const BPP = 4;
  *           Absent when the depth test is off.
  * @property {number} [depthFunc]
  * @property {boolean} depthWrite
+ * @property {boolean} [depthClamp]  GL_DEPTH_CLAMP: depth clamped, not clipped (the device's)
  * @property {((source: number[], destination: number[]) => number[]) | null} blend
  *           Absent when blending is off. Both colours are 0..255.
  * @property {((source: number, destination: number) => number) | null} logicOp
@@ -134,7 +135,7 @@ export function wholeOf(target){
  * @param {Framebuffer} target
  * @returns {Box} the part of the box that is on the surface
  */
-export function clipBox(box, target){
+function clipBox(box, target){
     return {
         x0: Math.max(0, Math.min(target.width, Math.floor(box.x0))),
         y0: Math.max(0, Math.min(target.height, Math.floor(box.y0))),

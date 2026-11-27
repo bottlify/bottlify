@@ -134,7 +134,7 @@ class Parking {
      *
      * The kernel is told where the stub's `ret` leaves the stack, because
      * whether that `ret` has run by the time the thread is switched away
-     * is the emulator's business: a slice can end on the instruction
+     * is the engine's business: a slice can end on the instruction
      * after the trap. A resume that trusted the saved ESP would then pop
      * the park address the kernel wrote over the return address, and
      * return through whatever sat above it.

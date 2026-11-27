@@ -30,7 +30,7 @@ test('a record round-trips, and bytes of another version or shape are a miss', (
         'the blocks inside the loops with no entry, which the runtime answers for');
     assert.equal(back.shape, undefined, 'a module\'s record has no shape');
     /** @type {import('./cache.js').RegionShape} */
-    const shape = { hash: '0123456789abcdef', stops: [0x1020], targets: [[0x1004, [0x2000]]],
+    const shape = { hash: '0123456789abcdef', targets: [[0x1004, [0x2000]]],
         narrow: true, checked: true };
     assert.deepEqual(unpackRegion(packRegion({ ...region, shape }))?.shape, shape,
         'what forming made of the region, to form it again so');

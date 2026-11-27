@@ -69,7 +69,7 @@ export const DEFAULT_STAGE_STATES = Object.freeze([
  * @param {number} stage
  * @returns {number}
  */
-export function resolveStageStateDefault(entry, stage){
+function resolveStageStateDefault(entry, stage){
     if (entry.followsStage)
     {
         return stage;

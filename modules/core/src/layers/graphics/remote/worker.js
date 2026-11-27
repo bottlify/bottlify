@@ -9,8 +9,9 @@
  * on a GPU device of its own, off the thread the program runs on.
  *
  * The program's thread makes a root it records (`direct3d.js`) and sends
- * its twin here with a port of its own; the calls come in on that port
- * (`channel.js`) and are played on a device that renders. What the renderer
+ * its twin here with two rings of its own (`ring.js`): its calls come in on
+ * one (`channel.js`) and are played on a device that renders, and what the
+ * played side says goes back on the other. What the renderer
  * presents comes back to the program's thread as a picture, for the run's
  * presenter to show as it shows every other: the canvas, the gamma ramp and
  * the cursor stay where they are.
@@ -28,24 +29,36 @@
  *                                    one was presented; anything else keeps them.
  *                                    Answered every time it is asked. `capture`
  *                                    true writes down everything sent from then
- *                                    on (`capture.js`), for `tools/graphics-replay.mjs`
- *   { type: 'root', api, options, port, memory, lending, source, frameLatency }
- *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
- *                                    plain part of what the root was made with;
+ *                                    on (`capture.js`), for `tools/read/graphics-replay.mjs`
+ *   { type: 'root', id, api, options, rings, memory, lending, source, frameLatency, cache }
+ *                                    `id` the number the messages below name it by,
+ *                                    `api` 'd3d7', 'd3d8', 'd3d9', 'd3d10' or 'opengl',
+ *                                    `options` the plain part of what the root was
+ *                                    made with; `rings` its calls' and its replies'
+ *                                    (`RootRings`), a close of which ends it;
  *                                    `memory` the guest's RAM where it is shared, and
  *                                    `lending` the slots and stash a Direct3D 8 or 9
  *                                    root lends guest memory through (`lending.js`);
  *                                    `source` the process it draws for, which its
  *                                    frames carry back; `frameLatency` the frames its
  *                                    presents may leave the GPU drawing (`latency.js`;
- *                                    absent, Direct3D's three, 0 no bound);
- *                                    `{ type: 'close' }` on the port ends it
- *   { type: 'client', port }         a way in for a process on another thread: `root`
- *                                    on the port is taken as it is here, and `lost`
- *                                    is told there too; its frames come here, as every
- *                                    root's do, to the thread that shows them.
- *                                    `{ type: 'close' }` on the port ends it
- * Messages from it:
+ *                                    absent, Direct3D's three, 0 no bound); `cache` the
+ *                                    run's, which an OpenGL root keeps idle texels in
+ *   { type: 'memory', root, memory, number }  root `root`'s guest memory grew: the
+ *                                    longer view, the `number`th, which the batches
+ *                                    sent after its mark wait for (`KIND.MARK`)
+ *   { type: 'cache', root, message } what the run's cache says to root `root`'s join
+ *                                    to it: segments made and let go of
+ *   { type: 'client', port, client } a way in for a process on another thread: `root`,
+ *                                    `memory` and `cache` on the port are taken as they
+ *                                    are here, and `lost` is told there too; its frames
+ *                                    come here, as every root's do, to the thread that
+ *                                    shows them. `{ type: 'close' }` on the port ends it
+ *   { type: 'forget', client }       the process on the other end of client `client`
+ *                                    is gone, however it went: the port goes, and
+ *                                    every root made through it, as each one's
+ *                                    `close` would
+ * Messages from it -- what a root's played side says goes back on its ring:
  *   { type: 'opened', adapter } | { type: 'failed', message }
  *   { type: 'frame', bitmap, frameIndex, format, dropped, source, serial, sentAt, waitedMs,
  *     back }
@@ -62,22 +75,31 @@
  *   { type: 'lost', reason }
  *   { type: 'captured', bytes, counts }  the capture, ended, as `{ type: 'debug',
  *                                    captured: true }` asked; `bytes` null without one
+ *
+ * Frames stay messages: a picture is an ImageBitmap, which only a message can
+ * carry, and its bytes, where it goes as bytes, are moved with it; one is in
+ * flight at a time.
  */
 
 import { createDirect3D8 } from '../d3d8/device.js';
-import { dumpDigits } from '../d3d8/render.js';
+import { dumpDigits, srgbHonoured } from '../d3d8/render.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { trackDevice } from '../webgpu/ledger.js';
 import { createCapture } from './capture.js';
-import { createReceiver, sharedNow } from './channel.js';
+import { SAID_STRINGS, createReceiver, sharedNow } from './channel.js';
+import { KIND, openRingOut } from './ring.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
+import { storeCount as storeCountIn } from '../seam/block.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
-import { gpuFeaturesOf } from '../webgpu/features.js';
+import { playedDirect3D10 } from './d3d10.js';
+import { createDirect3D10 } from '../d3d10/root.js';
+import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
+import { channelSpace } from '../../cache/module.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -93,11 +115,15 @@ const MAP_READ = 0x01;
 /**
  * @param {{ postMessage: (message: any, transfer?: Transferable[]) => void,
  *     onmessage: ((event: { data: any }) => void) | null }} scope
- * @param {{ gpu: any, canvas?: (width: number, height: number) => any }} deps
- *     `canvas` makes the canvas a frame is copied into to become a picture
+ * @param {{ gpu: any, canvas?: (width: number, height: number) => any, driven?: boolean }} deps
+ *     `canvas` makes the canvas a frame is copied into to become a picture;
+ *     `driven`, the roots' batches are played when `take` is called rather than
+ *     as their bells ring: for a tool that times each batch's play on its own
+ *     thread (`tools/read/graphics-replay.mjs`)
  */
 export function serveGraphics(scope, deps){
-    const { gpu, canvas = (width, height)=>new OffscreenCanvas(width, height) } = deps;
+    const { gpu, canvas = (width, height)=>new OffscreenCanvas(width, height),
+        driven = false } = deps;
     /** @type {Promise<{ device: any, backend: any, adapter: any }> | null} */
     let opened = null;
     /** Where frames go: back to the program's thread as pictures, or nowhere. */
@@ -112,20 +138,47 @@ export function serveGraphics(scope, deps){
     /** The ports of processes on other threads, told when the GPU goes away. @type {Set<MessagePort>} */
     const clients = new Set();
     /**
+     * Each client's port and the ends of the roots made through it, by the
+     * number the run named it with: what `forget` lets go of.
+     *
+     * @type {Map<number, { port: MessagePort, ends: Set<() => void> }>}
+     */
+    const byClient = new Map();
+    /**
+     * What a root is told by message rather than on its ring -- memory, which
+     * a ring cannot carry -- by the way in it came through and its number.
+     *
+     * @typedef {{ memory: (memory: Uint8Array | null, number: number) => void,
+     *     cache: (message: any) => void }} RootControl
+     * @type {Map<number, RootControl>}
+     */
+    const ownRoots = new Map();
+    /** The roots open, over every way in: what a gate counts down to none. */
+    let rootsOpen = 0;
+    /**
+     * Their receivers, which `take` reads where the roots are `driven`, each
+     * with what ends its root.
+     *
+     * @type {Map<ReturnType<typeof createReceiver>, () => void>}
+     */
+    const receivers = new Map();
+    /**
      * What this worker is sent, written down when it was opened to (`capture`):
      * every root made after that and every batch played.
      *
      * @type {ReturnType<typeof createCapture> | null}
      */
     let capture = null;
-    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
+    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string, message: string, recent: string[] } | null} */
     let lostWith = null;
     /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
     let ledger = null;
+    /** What the backend's dynamic buffers hold (`dynamicHeld`). @type {(() => any) | null} */
+    let heldBy = null;
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
-     * Direct3D 8 and 9 device here writes its next frames down while this is
-     * above zero.
+     * Direct3D 8, 9, 10 and 11 device and OpenGL context here writes its next
+     * frames down while this is above zero.
      */
     /** The frozen frame's timer (`freeze`), while one runs. @type {ReturnType<typeof setInterval> | undefined} */
     let frozen;
@@ -389,33 +442,56 @@ export function serveGraphics(scope, deps){
     const readPixels = (device, { surface, frameIndex, serial })=>{
         const { width, height, format } = surface;
         const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
-        const buffer = device.createBuffer({ size: bytesPerRow * height,
-            usage: BUFFER_MAP_READ | BUFFER_COPY_DST });
+        const buffer = readBackFor(device, bytesPerRow * height);
         const encoder = device.createCommandEncoder();
         encoder.copyTextureToBuffer({ texture: surface.texture }, { buffer, bytesPerRow },
             [width, height]);
         device.queue.submit([encoder.finish()]);
         buffer.mapAsync(MAP_READ).then(()=>{
+            // The one copy: a mapped range is the buffer's until it is unmapped.
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
-            buffer.destroy();
+            buffer.unmap();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
                 format, dropped, source: surface.source, ...sentWith(surface, serial) },
             [pixels.buffer]);
         }, ()=>{
-            buffer.destroy();
+            readBack?.buffer.destroy();
+            readBack = null;
             sending = false;
         });
     };
+    /**
+     * The buffer frames are read back through, kept while frames are the
+     * same size on the same device: one frame is in flight at a time
+     * (`sending`), so a buffer a frame was made and destroyed for nothing.
+     *
+     * @type {{ device: any, size: number, buffer: any } | null}
+     */
+    let readBack = null;
+    /** @param {any} device @param {number} size */
+    const readBackFor = (device, size)=>{
+        if (readBack !== null && readBack.device === device && readBack.size === size)
+        {
+            return readBack.buffer;
+        }
+        readBack?.buffer.destroy();
+        const buffer = device.createBuffer({ size, usage: BUFFER_MAP_READ | BUFFER_COPY_DST });
+        readBack = { device, size, buffer };
+        return buffer;
+    };
 
-    const open = async()=>{
-        const adapter = await gpu.requestAdapter();
+    /** @param {boolean} software  The browser's software adapter, as the engine's (AppOptions.gpuAdapter). */
+    const open = async software=>{
+        const adapter = await gpu.requestAdapter(software
+            ? { forceFallbackAdapter: true } : undefined);
         if (!adapter)
         {
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
         }
-        const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
+        const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
+            requiredLimits: gpuLimitsOf(adapter) });
         ledger = trackDevice(device);
-        device.lost?.then((/** @type {{ reason?: string }} */ info)=>{
+        device.lost?.then((/** @type {{ reason?: string, message?: string }} */ info)=>{
             if (info?.reason === 'destroyed')
             {
                 return;
@@ -426,7 +502,8 @@ export function serveGraphics(scope, deps){
                 watcher();
             }
             losers.clear();
-            lostWith = { type: 'lost', reason: info?.reason ?? 'unknown' };
+            lostWith = { type: 'lost', reason: info?.reason ?? 'unknown',
+                message: String(info?.message ?? ''), recent: ledger?.recent() ?? [] };
             scope.postMessage(lostWith);
             for (const client of clients)
             {
@@ -459,6 +536,7 @@ export function serveGraphics(scope, deps){
         });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
+        heldBy = ()=>backend.dynamicHeld();
         return { device, backend, adapter: {
             vendor: adapter.info?.vendor ?? '',
             architecture: adapter.info?.architecture ?? '',
@@ -467,29 +545,47 @@ export function serveGraphics(scope, deps){
     };
 
     /**
-     * @param {string} api @param {any} options @param {MessagePort} port
-     * @param {Uint8Array | null} memory  the guest's RAM, where it is shared
+     * @param {string} api @param {any} options
+     * @param {import('./channel.js').RootRings} rings
+     * @param {Uint8Array | null} given  the guest's RAM, where it is shared
      * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer } | null} lending
      *     the parts of a lending, where the engine lends guest memory rather than copying it
      * @param {number | undefined} source  the process it draws for
      * @param {number | undefined} frameLatency  the frames its presents may leave the GPU
      *     drawing; absent, Direct3D's default
+     * @param {Set<() => void>} ends  where the way in it came through keeps its end
+     * @param {(control: RootControl) => void} control  where it is told what a ring
+     *     cannot carry
      */
-    const root = async(api, options, port, memory, lending, source, frameLatency)=>{
+    const root = async(api, options, rings, given, lending, source, frameLatency, ends,
+        control)=>
+    {
+        // The guest's memory, taken again when it grows (a `memory` message).
+        let memory = given;
+        /** The views of it taken so far, and the mark the reading waits at for the next. */
+        let memoryNumber = 0;
+        let waitingFor = 0;
         const { device, backend: shared } = await /** @type {Promise<any>} */ (opened);
         // A bound of its own, as a Direct3D device has. It counts a frame done
         // when this thread hears so from the browser's GPU process, which a
         // driver's fence does not wait on: the run's `maxFrameLatency` decides
         // how many, as it does for a device drawn on the run's own thread.
+        // DirectDraw's flips are held by nothing (none ever were), so a
+        // Direct3D 7 root's frames are counted and timed under no bound.
         const latency = createFrameLatency({ queue: device.queue, lost: device.lost,
-            limit: frameLatency });
+            limit: api === 'd3d7' ? 0 : frameLatency });
         const backend = source === undefined ? shared : drawingFor(shared, source);
         if (source !== undefined)
         {
             rootsOf.set(source, (rootsOf.get(source) ?? 0) + 1);
         }
-        /** @type {(message: any, transfer?: Transferable[]) => void} */
-        const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
+        /** What the played side says, on the root's ring back. @param {any} message */
+        const post = message=>receiver?.post(message);
+        // The run's cache, where the root keeps what it holds of a program's
+        // textures while no draw needs them (`opengl/gpu.js` `spill`), under
+        // names of its own it lets go of when it ends.
+        const texelCache = options.cacheLink
+            ? channelSpace(options.cacheLink, options.cacheLink) : null;
         /**
          * What the played device wrote outside a call -- a read-back the
          * program waits on -- into guest memory: in place where it is shared,
@@ -504,7 +600,37 @@ export function serveGraphics(scope, deps){
                 post({ type: 'wrote', writes: [{ address, length: bytes.length }] });
                 return;
             }
-            post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
+            post({ type: 'wrote', writes: [{ address, bytes }] });
+        };
+        /**
+         * An occlusion count straight into its query's block where guest memory is
+         * shared (`storeCount` in seam/shadow.js): nothing crosses to the engine's thread.
+         *
+         * @param {number} block @param {number} measurement @param {number} count
+         */
+        let words = memory
+            ? new Int32Array(memory.buffer, memory.byteOffset, Math.floor(memory.length / 4))
+            : null;
+        /**
+         * Whether the count the renderer settled last landed in its block:
+         * the renderer stores a count, then says it has come (`occlusionCounted`),
+         * and one the program reads in its own memory needs no message to its
+         * thread as well: the guest answers its polls from the block, and the
+         * count rides with the next one sent if the host asks after all.
+         */
+        let landed = false;
+        const storeCount = words
+            ? (/** @type {number} */ block, /** @type {number} */ measurement,
+                /** @type {number} */ count)=>(landed = storeCountIn(
+                /** @type {Int32Array} */ (words), block, measurement, count))
+            : undefined;
+        const occlusionCounted = ()=>{
+            if (landed)
+            {
+                landed = false;
+                return;
+            }
+            receiver?.counted();
         };
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
@@ -520,12 +646,35 @@ export function serveGraphics(scope, deps){
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 writeMemory: wrote,
+                frameQueued,
+            });
+        }
+        else if (api === 'd3d10')
+        {
+            played = playedDirect3D10(createDirect3D10, {
+                ...options,
+                liveDump,
+                backend,
+                createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
+                createTexture: (/** @type {any} */ descriptor)=>device.createTexture(descriptor),
+                // Blocks are kept as blocks only where this device samples them.
+                compressedTextures: options.compressedTextures === true
+                    && device.features?.has?.('texture-compression-bc') === true,
+                depthClipControl: options.depthClipControl === true
+                    && device.features?.has?.('depth-clip-control') === true,
+                writeMemory: wrote,
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail,
+                    /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: name, detail, severity }),
+                frameQueued,
             });
         }
         else if (api === 'opengl')
         {
             played = playedOpengl(createOpenglRoot, {
                 ...options,
+                cacheLink: undefined,
+                texelCache,
                 liveDump,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -535,8 +684,8 @@ export function serveGraphics(scope, deps){
                 astcTextures: options.astcTextures === true
                     && device.features?.has?.('texture-compression-astc') === true,
                 writeMemory: wrote,
-                divergence: (/** @type {string} */ detail)=>
-                    post({ type: 'divergence', api: 'OpenGL', detail }),
+                divergence: (/** @type {string} */ detail, /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: 'OpenGL', detail, severity }),
                 frameQueued,
             });
         }
@@ -549,10 +698,14 @@ export function serveGraphics(scope, deps){
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // The program has memory; what of it this side reads is what it is sent.
                 readMemory: true,
-                borrow: memory && lending ? createBorrower({ ...lending, memory }) : undefined,
+                borrow: memory && lending
+                    ? createBorrower({ ...lending, memory: ()=>/** @type {Uint8Array} */ (memory) })
+                    : undefined,
                 writeMemory: wrote,
-                divergence: (/** @type {string} */ name, /** @type {string} */ detail)=>
-                    post({ type: 'divergence', api: name, detail }),
+                storeCount,
+                divergence: (/** @type {string} */ name, /** @type {string} */ detail,
+                    /** @type {'loss' | undefined} */ severity)=>
+                    post({ type: 'divergence', api: name, detail, severity }),
                 onDeviceLost: (/** @type {() => void} */ watcher)=>{
                     if (lost)
                     {
@@ -563,60 +716,139 @@ export function serveGraphics(scope, deps){
                     return ()=>losers.delete(watcher);
                 },
                 frameQueued,
-                occlusionCounted: ()=>receiver?.counted(),
+                occlusionCounted,
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
-        receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
-            gpuMemory: ()=>ledger?.diagnostics() ?? null });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,
             memory: memory?.length ?? 0 }) ?? 0;
-        port.onmessage = event=>{
-            if (event.data?.type === 'close')
-            {
-                capture?.close(captured);
-                port.onmessage = null;
-                port.close();
-                const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
-                if (source !== undefined && left === 0)
+        receiver = createReceiver({ played, rings, serve: !driven,
+            latency: ()=>latency.diagnostics(),
+            gpuMemory: ()=>(ledger ? { ...ledger.diagnostics(),
+                dynamic: heldBy?.() ?? null } : null), times: ()=>latency.times(),
+            // A batch sent after the guest's memory grew may use what it gained:
+            // it waits for the longer view, which comes by message.
+            marked: number=>{
+                if (number <= memoryNumber)
                 {
-                    rootsOf.delete(source);
-                    // A frame of it being sent was copied out of the slot by
-                    // work already submitted, which a destroy lets finish.
-                    newest.get(source)?.texture.destroy();
-                    newest.delete(source);
+                    return true;
                 }
-                else if (source !== undefined)
+                waitingFor = number;
+                return false;
+            },
+            seen: (buffer, start, length)=>{
+                if (!capture)
                 {
-                    rootsOf.set(source, left);
+                    return;
                 }
-                return;
-            }
-            if (capture && event.data?.type === 'calls')
-            {
                 try
                 {
-                    capture.calls(captured, event.data.buffer);
+                    capture.calls(captured, buffer, length, start);
                 }
                 catch (e){
                     // What is written down never stands in the way of what is
                     // played: the capture stops, and says why.
                     capture.fail(e);
-                    post({ type: 'divergence', api: 'capture',
-                        detail: `the capture stopped: ${String(/** @type {any} */ (e)?.stack ?? e)}` });
+                    post({ type: 'divergence', api: 'capture', detail: 'the capture stopped: '
+                        + String(/** @type {any} */ (e)?.stack ?? e) });
                 }
+            } });
+        rootsOpen++;
+        let ended = false;
+        /** The root goes: by its rings' close, or with its client's process. */
+        const end = ()=>{
+            if (ended)
+            {
+                return;
             }
-            receiver.receive(event.data);
+            ended = true;
+            rootsOpen--;
+            receivers.delete(receiver);
+            ends.delete(end);
+            receiver?.close();
+            capture?.close(captured);
+            texelCache?.close();
+            const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
+            if (source !== undefined && left === 0)
+            {
+                rootsOf.delete(source);
+                // A frame of it being sent was copied out of the slot by
+                // work already submitted, which a destroy lets finish.
+                newest.get(source)?.texture.destroy();
+                newest.delete(source);
+            }
+            else if (source !== undefined)
+            {
+                rootsOf.set(source, left);
+            }
         };
+        ends.add(end);
+        receivers.set(receiver, end);
+        // Driven, a root's rings are read by `take`, its close found there.
+        receiver.served().then(()=>(driven ? undefined : end()), end);
+        control({
+            // The guest's memory grew: the longer view, which the batches after
+            // the mark the sender placed wait for.
+            memory: (grown, number)=>{
+                memory = grown ?? memory;
+                memoryNumber = Math.max(memoryNumber, number);
+                words = memory
+                    ? new Int32Array(memory.buffer, memory.byteOffset,
+                        Math.floor(memory.length / 4))
+                    : null;
+                if (waitingFor > 0 && waitingFor <= memoryNumber)
+                {
+                    waitingFor = 0;
+                    receiver?.resume();
+                }
+            },
+            cache: message=>texelCache?.adopt(message),
+        });
     };
 
-    /** @param {any} data */
-    const takeRoot = data=>root(data.api, data.options ?? {}, data.port, data.memory ?? null,
-        data.lending ?? null, typeof data.source === 'number' ? data.source : undefined,
-        typeof data.frameLatency === 'number' ? data.frameLatency : undefined).catch(e=>
-        data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+    /**
+     * A root sent through a way in -- this worker's own, or a client's port --
+     * whose roots it numbers.
+     *
+     * @param {any} data @param {Set<() => void>} ends @param {Map<number, RootControl>} roots
+     */
+    const takeRoot = (data, ends, roots)=>{
+        const id = Number(data.id);
+        root(data.api, data.cache ? { ...data.options, cacheLink: data.cache } : data.options ?? {},
+            data.rings, data.memory ?? null, data.lending ?? null,
+            typeof data.source === 'number' ? data.source : undefined,
+            typeof data.frameLatency === 'number' ? data.frameLatency : undefined, ends,
+            control=>{
+                roots.set(id, control);
+                ends.add(()=>roots.delete(id));
+            }).catch(e=>{
+            // Said on its ring back, which then closes: the root is no more.
+            const said = openRingOut(data.rings.replies, { strings: SAID_STRINGS });
+            said.writer.value({ type: 'failed', message: String(e?.message ?? e) }, ()=>undefined);
+            said.publish(KIND.VALUE, sharedNow());
+            said.close();
+        });
+    };
+    /**
+     * What a way in says of a root it made: its memory grown, its cache's word.
+     *
+     * @param {any} data @param {Map<number, RootControl>} roots
+     */
+    const toRoot = (data, roots)=>{
+        const control = roots.get(Number(data.root));
+        if (data.type === 'memory')
+        {
+            control?.memory(data.memory ?? null, Number(data.number) || 0);
+        }
+        else
+        {
+            control?.cache(data.message);
+        }
+    };
+    /** The roots made through this worker's own messages; they end with their rings. */
+    const ownEnds = new Set();
 
     scope.onmessage = ({ data })=>{
         switch (data?.type)
@@ -628,9 +860,20 @@ export function serveGraphics(scope, deps){
                     capture = createCapture();
                     capture.open(frames);
                 }
-                opened ??= open();
-                opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
-                    e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
+                opened ??= open(data.software === true);
+                opened.then(({ adapter })=>{
+                    // SwiftShader in Chrome makes no picture of a worker's
+                    // WebGPU canvas where it has no Vulkan below it: the GPU
+                    // process fails to back the canvas's texture and the page
+                    // goes with it. Its frames go as bytes instead.
+                    if (frames === 'bitmap' && /swiftshader/i.test(
+                        `${adapter.architecture} ${adapter.description}`))
+                    {
+                        frames = 'pixels';
+                    }
+                    scope.postMessage({ type: 'opened', adapter });
+                },
+                e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
                 break;
             case 'frames':
                 // The program's thread could not take a picture: from here on
@@ -659,7 +902,11 @@ export function serveGraphics(scope, deps){
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':
-                takeRoot(data);
+                takeRoot(data, ownEnds, ownRoots);
+                break;
+            case 'memory':
+            case 'cache':
+                toRoot(data, ownRoots);
                 break;
             case 'debug':
                 if ('dumpFrames' in data)
@@ -703,6 +950,10 @@ export function serveGraphics(scope, deps){
                 {
                     dumpDigits.value = Math.min(9,
                         Math.max(1, Math.floor(Number(data.dumpDigits)) || 4));
+                }
+                if ('srgb' in data)
+                {
+                    srgbHonoured.value = data.srgb !== false;
                 }
                 if ('skipShader' in data)
                 {
@@ -758,10 +1009,22 @@ export function serveGraphics(scope, deps){
                 /** @type {MessagePort} */
                 const port = data.port;
                 clients.add(port);
+                /** @type {Set<() => void>} */
+                const ends = new Set();
+                /** @type {Map<number, RootControl>} */
+                const roots = new Map();
+                if (typeof data.client === 'number')
+                {
+                    byClient.set(data.client, { port, ends });
+                }
                 port.onmessage = event=>{
                     if (event.data?.type === 'root')
                     {
-                        takeRoot(event.data);
+                        takeRoot(event.data, ends, roots);
+                    }
+                    else if (event.data?.type === 'memory' || event.data?.type === 'cache')
+                    {
+                        toRoot(event.data, roots);
                     }
                     else if (event.data?.type === 'close')
                     {
@@ -776,8 +1039,48 @@ export function serveGraphics(scope, deps){
                 }
                 break;
             }
+            // A process gone however it went - one that failed or was lost
+            // never closes its roots - takes them with it: each held its
+            // memory's view and its device's objects for the run.
+            case 'forget':
+            {
+                const client = byClient.get(data.client);
+                byClient.delete(data.client);
+                if (client)
+                {
+                    for (const end of [...client.ends])
+                    {
+                        end();
+                    }
+                    clients.delete(client.port);
+                    client.port.onmessage = null;
+                    client.port.close();
+                }
+                break;
+            }
             default:
                 break;
         }
+    };
+    return {
+        /** The roots open now, over every way in. */
+        roots: ()=>rootsOpen,
+        /**
+         * Where the roots are `driven`: plays every batch their rings hold
+         * now, and ends the roots whose rings the other side closed.
+         * Answers how many records were read.
+         */
+        take(){
+            let read = 0;
+            for (const [one, end] of [...receivers])
+            {
+                read += one.take();
+                if (one.closed())
+                {
+                    end();
+                }
+            }
+            return read;
+        },
     };
 }

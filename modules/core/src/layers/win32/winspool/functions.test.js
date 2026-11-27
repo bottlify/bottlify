@@ -23,6 +23,22 @@ test('with no printer installed, opening one fails by name and properties are re
     assert.equal(fns.DocumentPropertiesA.argBytes, 24);
 });
 
+test('there is no default printer to name or to set', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const memory = new Uint8Array(16).fill(0xff);
+    const fns = createSpoolerFunctions({ setLastError: code=>errors.push(code),
+        writeMemory: (at, bytes)=>memory.set(bytes, at) });
+
+    assert.equal(fns.GetDefaultPrinterW.handler([0, 4]), 0);
+    assert.deepEqual([...memory.slice(4, 8)], [0, 0, 0, 0], 'no characters needed');
+    assert.equal(fns.GetDefaultPrinterA.handler([0, 0]), 0);
+    assert.equal(fns.SetDefaultPrinterW.handler(), 0);
+    assert.deepEqual(errors, [2, 87, 1801],
+        'ERROR_FILE_NOT_FOUND, a missing count, no such printer');
+    assert.equal(fns.GetDefaultPrinterA.argBytes, 8);
+});
+
 test('there is no port to list', ()=>{
     const bytes = new Uint8Array(16).fill(0xcc);
     const fns = createSpoolerFunctions({ writeMemory: (at, data)=>bytes.set(data, at) });

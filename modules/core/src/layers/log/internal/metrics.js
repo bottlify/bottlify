@@ -16,8 +16,8 @@ import { createTable } from './table.js';
  * made once, after every layer has registered, and handed over with the
  * buffers.
  *
- * Some figures are not kept by anyone: the emulator's own counters live in
- * its exports, a thread's state is a field on the thread. Those are sampled
+ * Some figures are not kept by anyone: the translator's counters live in its
+ * runtime, a thread's state is a field on the thread. Those are sampled
  * into their table once a frame, by a sampler the layer registers here and
  * the profiler runs when the frame closes -- one moment on the engine thread,
  * a few dozen stores, instead of a walk on every request.
@@ -35,12 +35,9 @@ import { createTable } from './table.js';
  */
 
 /**
- * @param {Object} [options]
- * @param {boolean} [options.shared]
  * @returns {MetricsRegistry}
  */
-export function createMetrics(options = {}){
-    const shared = options.shared ?? true;
+export function createMetrics(){
     /** @type {Map<string, Map<string, import('./table.js').TableWriter>>} */
     const layers = new Map();
     /** @type {(() => void)[]} */
@@ -58,7 +55,7 @@ export function createMetrics(options = {}){
         {
             throw new Error(`log: ${layer} already publishes a table named "${name}"`);
         }
-        const made = createTable({ rows, columns, shared });
+        const made = createTable({ rows, columns });
         tables.set(name, made);
         return made;
     };
@@ -69,7 +66,7 @@ export function createMetrics(options = {}){
         /**
          * A table already registered, or null. For the few figures one
          * layer's row feeds another's -- a frame's row carries a copy of the
-         * emulator's counters -- resolved once rather than looked up as they
+         * cpu layer's counters -- resolved once rather than looked up as they
          * are read.
          *
          * @param {string} layer @param {string} name

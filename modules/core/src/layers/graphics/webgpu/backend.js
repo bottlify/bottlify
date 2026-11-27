@@ -14,6 +14,10 @@ import { fullTarget, viewportState } from './internal/viewport.js';
 import { createPipelineCache, pipelineDescriptor } from './internal/pipeline.js';
 import { generateFixedFunction } from './internal/fixedfunction.js';
 import { decodeFvf } from './internal/vertexformat.js';
+import { scopeOf } from './internal/scope.js';
+import {
+    DEPTH_WRITE_SHADER, depthHasStencil, depthReadGrid, depthReadShader, depthReadValues,
+} from './internal/depth.js';
 
 /**
  * The rendering backend every guest-facing graphics API sits on.
@@ -51,6 +55,10 @@ const OCCLUSION_CAPACITY = 4096;
 const MapMode = {
     READ: 0x0001,
 };
+
+/** `GPUShaderStage` bits, likewise. */
+const STAGE_FRAGMENT = 0x2;
+const STAGE_COMPUTE = 0x4;
 
 /** `GPUTextureUsage` bits, likewise. */
 const TextureUsage = {
@@ -108,6 +116,64 @@ export function createBackend(options){
     const gpuTimer = createGpuTimer({ device,
         enabled: import.meta.BOTTLIFY_DIAGNOSTICS !== false });
     const shaders = createShaderCache({ device });
+    /** @type {Map<string, Promise<any>>} what `depthPipelines` built, by format */
+    const depthPipelines = new Map();
+    /** @param {string} format */
+    const buildDepthPipelines = async format=>{
+        const stencil = depthHasStencil(format);
+        const label = `depth:${format}`;
+        const readLayout = device.createBindGroupLayout({ label: `${label}:read`, entries: [
+            { binding: 0, visibility: STAGE_COMPUTE,
+                texture: { sampleType: 'depth', viewDimension: '2d' } },
+            ...(stencil ? [{ binding: 1, visibility: STAGE_COMPUTE,
+                texture: { sampleType: 'uint', viewDimension: '2d' } }] : []),
+            { binding: 2, visibility: STAGE_COMPUTE, buffer: { type: 'storage' } },
+        ] });
+        const readModule = await shaders.build({ code: depthReadShader(stencil),
+            label: `${label}:read` });
+        const read = await /** @type {any} */ (device).createComputePipelineAsync({
+            label: `${label}:read`,
+            layout: device.createPipelineLayout({ label: `${label}:read`,
+                bindGroupLayouts: [readLayout] }),
+            compute: { module: readModule, entryPoint: 'computeMain' },
+        });
+        const writeLayout = device.createBindGroupLayout({ label: `${label}:write`, entries: [
+            { binding: 0, visibility: STAGE_FRAGMENT, buffer: { type: 'read-only-storage' } },
+        ] });
+        const writeModule = await shaders.build({ code: DEPTH_WRITE_SHADER,
+            label: `${label}:write` });
+        const writePipelineLayout = device.createPipelineLayout({ label: `${label}:write`,
+            bindGroupLayouts: [writeLayout] });
+        const face = { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace' };
+        /** @param {string} entryPoint @param {number} bit -1 for the depth */
+        const make = (entryPoint, bit)=>device.createRenderPipelineAsync({
+            label: `${label}:write:${bit}`,
+            layout: writePipelineLayout,
+            vertex: { module: writeModule, entryPoint: 'vertexMain' },
+            fragment: { module: writeModule, entryPoint, targets: [],
+                ...(bit >= 0 ? { constants: { bit } } : {}) },
+            primitive: { topology: 'triangle-list' },
+            depthStencil: {
+                format,
+                depthWriteEnabled: bit < 0,
+                depthCompare: 'always',
+                ...(stencil ? { stencilFront: face, stencilBack: face, stencilReadMask: 0xff,
+                    stencilWriteMask: bit < 0 ? 0 : 1 << bit } : {}),
+            },
+        });
+        return {
+            stencil,
+            read: { gpu: read, layout: readLayout },
+            write: {
+                depth: await make('depthMain', -1),
+                bits: stencil
+                    ? await Promise.all(Array.from({ length: 8 },
+                        (_, bit)=>make('stencilMain', bit)))
+                    : [],
+                layout: writeLayout,
+            },
+        };
+    };
     const uniforms = createUniformPool({
         device,
         queue,
@@ -224,8 +290,9 @@ export function createBackend(options){
     const fixedFunctionLayouts = new Map();
 
     /**
-     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube' or '3d'.
-     *     A binding of one kind does not take a view of another.
+     * @param {readonly string[]} dimensions  Each stage's texture: '2d', 'cube', '3d' or
+     *     'shadow' (a depth texture compared). A binding of one kind does not take a
+     *     view of another.
      */
     const layoutForStages = dimensions=>{
         const key = dimensions.join(',');
@@ -243,9 +310,13 @@ export function createBackend(options){
         ];
         for (let index = 0; index < stageCount; index++)
         {
+            // A shadow map is a depth texture read through a comparison sampler.
+            const shadow = dimensions[index] === 'shadow';
             entries.push({ binding: 1 + index * 2, visibility: 2,
-                texture: dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
-            entries.push({ binding: 2 + index * 2, visibility: 2, sampler: {} });
+                texture: shadow ? { sampleType: 'depth' }
+                    : dimensions[index] === '2d' ? {} : { viewDimension: dimensions[index] } });
+            entries.push({ binding: 2 + index * 2, visibility: 2,
+                sampler: shadow ? { type: 'comparison' } : {} });
         }
         const group = device.createBindGroupLayout({
             label: `fixed-function:${key}`,
@@ -293,7 +364,7 @@ export function createBackend(options){
                     fragment: {
                         module,
                         entryPoint: 'fragmentMain',
-                        targets: [descriptor.target],
+                        targets: descriptor.targets,
                     },
                     primitive: descriptor.primitive,
                     depthStencil: descriptor.depthStencil,
@@ -327,6 +398,21 @@ export function createBackend(options){
     const unsubmitted = new Set();
     /** @type {Set<any>} */
     const touchedBuffers = new Set();
+    const dynamicHeld = ()=>{
+        const held = { buffers: 0, bytes: 0, shadowBytes: 0, spares: 0, spareBytes: 0,
+            sparesFreed: 0 };
+        for (const buffer of dynamicBuffers)
+        {
+            const { capacity, shadow, spares, sparesFreed } = buffer.held;
+            held.buffers++;
+            held.bytes += capacity;
+            held.shadowBytes += shadow;
+            held.spares += spares;
+            held.spareBytes += spares * capacity;
+            held.sparesFreed += sparesFreed;
+        }
+        return held;
+    };
     const touched = (/** @type {any} */ buffer)=>{
         touchedBuffers.add(buffer);
     };
@@ -434,13 +520,20 @@ export function createBackend(options){
                 ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
                     | TextureUsage.COPY_SRC
                 : descriptor.usage,
+            ...(descriptor.viewFormats?.length ? { viewFormats: descriptor.viewFormats } : {}),
         });
         profiler.count('surfacesCreated');
+        const dimension = descriptor.dimension === undefined ? {}
+            : { dimension: descriptor.dimension };
+        // The same texels read through their sRGB twin, decoded to linear
+        // before filtering: what a sampler asked to read sRGB is given.
+        const srgb = /** @type {string[] | undefined} */ (descriptor.viewFormats)
+            ?.find(format=>format.endsWith('-srgb'));
         return {
             texture,
-            view: texture.createView(descriptor.dimension === undefined
-                ? { label }
-                : { label, dimension: descriptor.dimension }),
+            view: texture.createView({ label, ...dimension }),
+            ...(srgb ? { srgbView: texture.createView({ label: `${label}-srgb`, format: srgb,
+                ...dimension }) } : {}),
             width: descriptor.width,
             height: descriptor.height,
             format: descriptor.format,
@@ -486,6 +579,8 @@ export function createBackend(options){
                     : null;
             return {
                 view: target.view,
+                // A slice of a volume is drawn into through a view of it whole.
+                ...(target.depthSlice !== undefined ? { depthSlice: target.depthSlice } : {}),
                 loadOp: clearValue ? 'clear' : 'load',
                 storeOp: 'store',
                 clearValue: clearValue ?? descriptor.clearValue ?? OPAQUE_BLACK,
@@ -775,6 +870,24 @@ export function createBackend(options){
                 }
             },
 
+            /**
+             * A draw whose counts the GPU reads from a buffer at an offset:
+             * four words, five for an indexed one.
+             *
+             * @param {any} buffer @param {number} offset @param {boolean} indexed
+             */
+            drawIndirect(buffer, offset, indexed){
+                profiler.countDraw();
+                if (indexed)
+                {
+                    raw.drawIndexedIndirect(buffer, offset);
+                }
+                else
+                {
+                    raw.drawIndirect(buffer, offset);
+                }
+            },
+
             end(){
                 raw.end();
             },
@@ -816,6 +929,20 @@ export function createBackend(options){
          */
         hasFeature(name){
             return device.features?.has?.(name) === true;
+        },
+
+        /**
+         * A limit the device was made with (`maxTextureArrayLayers`, ...), or
+         * null where the device does not say: what a renderer checks a
+         * description against before the device refuses it, and with it the
+         * frame it was made in.
+         *
+         * @param {string} name
+         * @returns {number | null}
+         */
+        limit(name){
+            const value = device.limits?.[name];
+            return typeof value === 'number' ? value : null;
         },
 
         /**
@@ -939,9 +1066,45 @@ export function createBackend(options){
             return device.createRenderPipelineAsync(descriptor);
         },
 
+        /**
+         * A compute pipeline, resolved once valid and rejected with the
+         * validation message otherwise, on an explicit layout as a render
+         * pipeline is.
+         *
+         * @param {any} descriptor
+         */
+        createComputePipelineAsync(descriptor){
+            if (!descriptor.layout || typeof descriptor.layout !== 'object')
+            {
+                return Promise.reject(
+                    new Error('A compute pipeline needs an explicit pipeline layout'));
+            }
+            return /** @type {any} */ (device).createComputePipelineAsync(descriptor);
+        },
+
         /** @param {{ code: string, label?: string }} request */
         createShaderModule(request){
             return shaders.build(request);
+        },
+
+        /**
+         * What a depth texture of this format is read and written through
+         * (`internal/depth.js`), built once a format: the compute pipeline of
+         * the read, and the depth pipeline of the write with, for a format
+         * with a stencil, one for each of its eight bits.
+         *
+         * @param {string} format a WebGPU depth format
+         * @returns {Promise<{ stencil: boolean, read: { gpu: any, layout: any },
+         *     write: { depth: any, bits: any[], layout: any } }>}
+         */
+        depthPipelines(format){
+            let made = depthPipelines.get(format);
+            if (!made)
+            {
+                made = buildDepthPipelines(format);
+                depthPipelines.set(format, made);
+            }
+            return made;
         },
 
         /**
@@ -1029,6 +1192,16 @@ export function createBackend(options){
                 },
 
                 /**
+                 * A texture's texels into a buffer, outside any pass.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 */
+                copyTextureToBuffer(source, destination, size){
+                    closeCurrentPass();
+                    encoder.copyTextureToBuffer(source, destination, size);
+                },
+
+                /**
                  * A region of one texture into another, outside any pass.
                  * The two must share a format; the copy is what a program
                  * that reads its own render target back into a texture asks
@@ -1039,6 +1212,59 @@ export function createBackend(options){
                 copyTexture(source, destination, size){
                     closeCurrentPass();
                     encoder.copyTextureToTexture(source, destination, size);
+                },
+
+                /**
+                 * A region of one texture into another of a different format
+                 * with texels of the same size, byte for byte: WebGPU copies
+                 * texture to texture only within one format, but a buffer
+                 * between the two carries bytes of any.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 * @param {number} texelBytes
+                 */
+                copyThroughBuffer(source, destination, size, texelBytes){
+                    closeCurrentPass();
+                    const bytesPerRow = Math.ceil(size.width * texelBytes / 256) * 256;
+                    const layout = { bytesPerRow, rowsPerImage: size.height };
+                    const buffer = device.createBuffer({ label: 'reinterpreted',
+                        size: bytesPerRow * size.height * (size.depthOrArrayLayers ?? 1),
+                        usage: BufferUsage.COPY_SRC | BufferUsage.COPY_DST });
+                    encoder.copyTextureToBuffer(source, { buffer, ...layout }, size);
+                    encoder.copyBufferToTexture({ buffer, ...layout }, destination, size);
+                    stagingBuffers.push(buffer);
+                },
+
+                /**
+                 * A compute shader run over a grid of thread groups, in a
+                 * compute pass of its own between the frame's render passes,
+                 * its one group bound as the shader declared it, or its
+                 * groups (`groups`, numbered by their places).
+                 *
+                 * The grid is three numbers, or the buffer and offset the GPU
+                 * reads three words of it from.
+                 *
+                 * @param {{ pipeline: any, layout?: any, entries?: any[], label?: string,
+                 *     groups?: { layout: any, entries: any[] }[],
+                 *     grid: number[] | { buffer: any, offset: number } }} work
+                 */
+                dispatch(work){
+                    closeCurrentPass();
+                    const pass = /** @type {any} */ (encoder)
+                        .beginComputePass({ label: work.label ?? 'dispatch' });
+                    pass.setPipeline(work.pipeline);
+                    (work.groups ?? [{ layout: work.layout, entries: work.entries ?? [] }])
+                        .forEach((group, slot)=>pass.setBindGroup(slot,
+                            cache.get(group.layout, group.entries, work.label)));
+                    if (Array.isArray(work.grid))
+                    {
+                        pass.dispatchWorkgroups(work.grid[0], work.grid[1], work.grid[2]);
+                    }
+                    else
+                    {
+                        pass.dispatchWorkgroupsIndirect(work.grid.buffer, work.grid.offset);
+                    }
+                    pass.end();
                 },
 
                 /**
@@ -1212,6 +1438,102 @@ export function createBackend(options){
                     };
                 },
 
+                /**
+                 * A depth surface's depths, and its stencil where it has one,
+                 * as they are at this point of the frame, for a reader after
+                 * `end` (`internal/depth.js`). The pass is closed for it.
+                 *
+                 * @param {import('./contract.js').Surface} surface
+                 * @param {any} built  what `depthPipelines` built for its format
+                 * @returns {() => Promise<{ width: number, height: number,
+                 *     depths: Float32Array, stencils: Uint8Array | null }>}
+                 */
+                readDepth(surface, built){
+                    closeCurrentPass();
+                    const count = surface.width * surface.height;
+                    const size = Math.max(16, count * 4 * (built.stencil ? 2 : 1));
+                    const words = device.createBuffer({ label: 'depth-read', size,
+                        usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC });
+                    stagingBuffers.push(words);
+                    /** @param {string} aspect */
+                    const view = aspect=>surface.texture.createView({ label: `depth-read:${aspect}`,
+                        dimension: '2d', aspect, baseMipLevel: surface.mipLevel ?? 0,
+                        mipLevelCount: 1, baseArrayLayer: surface.layer ?? 0, arrayLayerCount: 1 });
+                    // A group of its own, not the cache's: its views are new
+                    // every read, and a cached group would be kept for nothing.
+                    const group = device.createBindGroup({ label: 'depth-read',
+                        layout: built.read.layout, entries: [
+                            { binding: 0, resource: view('depth-only') },
+                            ...(built.stencil ? [{ binding: 1, resource: view('stencil-only') }]
+                                : []),
+                            { binding: 2, resource: { buffer: words, offset: 0, size } },
+                        ] });
+                    const pass = /** @type {any} */ (encoder).beginComputePass({
+                        label: 'depth-read' });
+                    pass.setPipeline(built.read.gpu);
+                    pass.setBindGroup(0, group);
+                    const grid = depthReadGrid(count);
+                    pass.dispatchWorkgroups(grid[0], grid[1], grid[2]);
+                    pass.end();
+                    const read = frame.copyOut([{ buffer: words, offset: 0, size }]);
+                    return async()=>{
+                        const [bytes] = await read();
+                        return { width: surface.width, height: surface.height,
+                            ...depthReadValues(bytes, count, built.stencil) };
+                    };
+                },
+
+                /**
+                 * A depth surface given depths, and a stencil where it has one,
+                 * at this point of the frame: drawn into it by a pass of its
+                 * own, the stencil cleared and then written a bit at a time.
+                 *
+                 * @param {import('./contract.js').Surface} surface
+                 * @param {Uint32Array} words  as `depthWriteWords` makes them
+                 * @param {any} built  what `depthPipelines` built for its format
+                 */
+                writeDepth(surface, words, built){
+                    closeCurrentPass();
+                    const buffer = device.createBuffer({ label: 'depth-write',
+                        size: Math.max(16, words.byteLength),
+                        usage: BufferUsage.STORAGE | BufferUsage.COPY_DST });
+                    queue.writeBuffer(buffer, 0,
+                        new Uint8Array(words.buffer, words.byteOffset, words.byteLength));
+                    stagingBuffers.push(buffer);
+                    const group = device.createBindGroup({ label: 'depth-write',
+                        layout: built.write.layout, entries: [
+                            { binding: 0, resource: { buffer, offset: 0,
+                                size: Math.max(16, words.byteLength) } },
+                        ] });
+                    const pass = encoder.beginRenderPass({
+                        label: 'depth-write',
+                        colorAttachments: [],
+                        depthStencilAttachment: {
+                            view: surface.texture.createView({ label: 'depth-write',
+                                dimension: '2d', baseMipLevel: surface.mipLevel ?? 0,
+                                mipLevelCount: 1, baseArrayLayer: surface.layer ?? 0,
+                                arrayLayerCount: 1 }),
+                            depthLoadOp: 'load',
+                            depthStoreOp: 'store',
+                            ...(built.stencil ? { stencilLoadOp: 'clear', stencilStoreOp: 'store',
+                                stencilClearValue: 0 } : {}),
+                        },
+                    });
+                    pass.setPipeline(built.write.depth);
+                    pass.setBindGroup(0, group);
+                    pass.draw(3, 1, 0, 0);
+                    if (built.write.bits.length > 0)
+                    {
+                        pass.setStencilReference(0xff);
+                        for (const pipeline of built.write.bits)
+                        {
+                            pass.setPipeline(pipeline);
+                            pass.draw(3, 1, 0, 0);
+                        }
+                    }
+                    pass.end();
+                },
+
                 /** @param {import('./contract.js').Surface} surface */
                 present(surface){
                     if (frame.ended)
@@ -1375,7 +1697,34 @@ export function createBackend(options){
             return lastPresented;
         },
 
+        /**
+         * A view of this backend for an owner that ends before it does
+         * (`scope.js`): what the owner made through it goes back at its end.
+         * Of the object it is called on, which may be a view itself (the
+         * graphics worker's of each process, which says whose frames end).
+         *
+         * @this {any}
+         */
+        scope(){
+            return scopeOf(this, (/** @type {any} */ surface)=>{
+                if (lastPresented?.surface === surface)
+                {
+                    lastPresented = null;
+                }
+            });
+        },
+
         /** @returns {any} */
+        /**
+         * What the dynamic buffers hold, summed: the live backings, the copies
+         * kept on the processor, the spare backings a rename left, and the
+         * spares given back.
+         */
+        dynamicHeld,
+
+        /** What the shader modules cost: built, reused, and the compiler's time. */
+        shaderStats: ()=>shaders.stats(),
+
         diagnostics(){
             const snapshot = profiler.snapshot();
             return {
@@ -1386,6 +1735,7 @@ export function createBackend(options){
                 gpuPasses: gpuTimer.stats(),
                 uniforms: uniforms.stats(),
                 buffers: [...dynamicBuffers].map(buffer=>buffer.diagnostics()),
+                dynamic: dynamicHeld(),
                 frameOpen: !!(openFrame && !openFrame.ended),
                 // Cuts marked and not yet submitted: a number that only grows
                 // is a cut no frame will replay, and every backing retired

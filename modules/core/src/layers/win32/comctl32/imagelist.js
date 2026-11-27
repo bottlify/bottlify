@@ -30,6 +30,10 @@
  * or cGrow -- rounded up to a multiple of four -- whichever is more, plus one.
  */
 
+import { CLSID_IMAGELIST, createImageListObjects } from './imagelist-com.js';
+import { STANDARD_STRIPS } from './strips.js';
+import { wholeAddress } from '../common/pointers.js';
+
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
 
@@ -39,6 +43,9 @@ const ILC_COLORMASK = 0x00fe;
 const ILC_COLOR4 = 0x0004;
 const ILC_COLOR24 = 0x0018;
 
+/** ImageList_Copy exchanges the two images rather than copying one over the other. */
+const ILCF_SWAP = 0x0001;
+
 /**
  * How many overlay masks a list has (MSDN: fifteen since 4.71), and how many
  * of them ILHEAD records, its ovls being four words.
@@ -47,6 +54,11 @@ const MAX_OVERLAYS = 15;
 const SAVED_OVERLAYS = 4;
 
 /** No overlay image is set, as a list starts. */
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_POINTER = 0x80004003 | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+
 const NO_OVERLAYS = Object.freeze(Array(MAX_OVERLAYS).fill(-1));
 
 /** The bits of a drawing style that name an overlay, one-based. */
@@ -54,6 +66,53 @@ const ILD_OVERLAYMASK = 0x0f00;
 
 /** The depths a list's image is written at; any other -- ILC_COLORDDB -- is 32. */
 const DIB_DEPTHS = new Set([4, 8, 16, 24, 32]);
+
+/**
+ * The colour table a list of four bits a pixel starts with: the sixteen
+ * colours of the VGA, as 0xRRGGBB. Wine's imagelist test reads it back from
+ * Windows' (test_color_table), and so are the 256 below.
+ */
+const DEFAULT_COLORS_4 = Object.freeze([
+    0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0x808080,
+    0xff0000, 0x00ff00, 0xffff00, 0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+]);
+
+/**
+ * The colour table a list of eight bits a pixel starts with: the system's
+ * eight darker colours, black, a 6x6x6 cube, a ramp of greys and the
+ * system's brighter eight.
+ */
+const DEFAULT_COLORS_8 = Object.freeze([
+    0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0x000000,
+    0x000033, 0x000066, 0x000099, 0x0000cc, 0x0000ff, 0x003300, 0x003333, 0x003366, 0x003399,
+    0x0033cc, 0x0033ff, 0x006600, 0x006633, 0x006666, 0x006699, 0x0066cc, 0x0066ff, 0x009900,
+    0x009933, 0x009966, 0x009999, 0x0099cc, 0x0099ff, 0x00cc00, 0x00cc33, 0x00cc66, 0x00cc99,
+    0x00cccc, 0x00ccff, 0x00ff00, 0x00ff33, 0x00ff66, 0x00ff99, 0x00ffcc, 0x00ffff, 0x330000,
+    0x330033, 0x330066, 0x330099, 0x3300cc, 0x3300ff, 0x333300, 0x333333, 0x333366, 0x333399,
+    0x3333cc, 0x3333ff, 0x336600, 0x336633, 0x336666, 0x336699, 0x3366cc, 0x3366ff, 0x339900,
+    0x339933, 0x339966, 0x339999, 0x3399cc, 0x3399ff, 0x33cc00, 0x33cc33, 0x33cc66, 0x33cc99,
+    0x33cccc, 0x33ccff, 0x33ff00, 0x33ff33, 0x33ff66, 0x33ff99, 0x33ffcc, 0x33ffff, 0x660000,
+    0x660033, 0x660066, 0x660099, 0x6600cc, 0x6600ff, 0x663300, 0x663333, 0x663366, 0x663399,
+    0x6633cc, 0x6633ff, 0x666600, 0x666633, 0x666666, 0x666699, 0x6666cc, 0x6666ff, 0x669900,
+    0x669933, 0x669966, 0x669999, 0x6699cc, 0x6699ff, 0x66cc00, 0x66cc33, 0x66cc66, 0x66cc99,
+    0x66cccc, 0x66ccff, 0x66ff00, 0x66ff33, 0x66ff66, 0x66ff99, 0x66ffcc, 0x66ffff, 0x990000,
+    0x990033, 0x990066, 0x990099, 0x9900cc, 0x9900ff, 0x993300, 0x993333, 0x993366, 0x993399,
+    0x9933cc, 0x9933ff, 0x996600, 0x996633, 0x996666, 0x996699, 0x9966cc, 0x9966ff, 0x999900,
+    0x999933, 0x999966, 0x999999, 0x9999cc, 0x9999ff, 0x99cc00, 0x99cc33, 0x99cc66, 0x99cc99,
+    0x99cccc, 0x99ccff, 0x99ff00, 0x99ff33, 0x99ff66, 0x99ff99, 0x99ffcc, 0x99ffff, 0xcc0000,
+    0xcc0033, 0xcc0066, 0xcc0099, 0xcc00cc, 0xcc00ff, 0xcc3300, 0xcc3333, 0xcc3366, 0xcc3399,
+    0xcc33cc, 0xcc33ff, 0xcc6600, 0xcc6633, 0xcc6666, 0xcc6699, 0xcc66cc, 0xcc66ff, 0xcc9900,
+    0xcc9933, 0xcc9966, 0xcc9999, 0xcc99cc, 0xcc99ff, 0xcccc00, 0xcccc33, 0xcccc66, 0xcccc99,
+    0xcccccc, 0xccccff, 0xccff00, 0xccff33, 0xccff66, 0xccff99, 0xccffcc, 0xccffff, 0xff0000,
+    0xff0033, 0xff0066, 0xff0099, 0xff00cc, 0xff00ff, 0xff3300, 0xff3333, 0xff3366, 0xff3399,
+    0xff33cc, 0xff33ff, 0xff6600, 0xff6633, 0xff6666, 0xff6699, 0xff66cc, 0xff66ff, 0xff9900,
+    0xff9933, 0xff9966, 0xff9999, 0xff99cc, 0xff99ff, 0xffcc00, 0xffcc33, 0xffcc66, 0xffcc99,
+    0xffcccc, 0xffccff, 0xffff00, 0xffff33, 0xffff66, 0xffff99, 0xffffcc, 0xffffff, 0x0a0a0a,
+    0x141414, 0x1f1f1f, 0x292929, 0x333333, 0x3d3d3d, 0x474747, 0x525252, 0x5c5c5c, 0x666666,
+    0x707070, 0x7a7a7a, 0x858585, 0x8f8f8f, 0x999999, 0xa3a3a3, 0xadadad, 0xb8b8b8, 0xc2c2c2,
+    0xcccccc, 0xd6d6d6, 0xe0e0e0, 0xebebeb, 0xf5f5f5, 0x808080, 0xff0000, 0x00ff00, 0xffff00,
+    0x0000ff, 0xff00ff, 0x00ffff, 0xffffff,
+]);
 const BITMAPINFOHEADER_SIZE = 40;
 const BI_RGB = 0;
 const DIB_RGB_COLORS = 0;
@@ -70,6 +129,8 @@ const ILD_ROP = 0x0040;
 /** A colour that is none, and one that is the list's own. */
 const CLR_NONE = 0xffffffff;
 const CLR_DEFAULT = 0xff000000;
+/** IImageList::GetItemFlags: an image with alpha of its own. */
+const ILIF_ALPHA = 0x1;
 
 /** Raster operations. DSna clears the destination where the source is set. */
 const SRCCOPY = 0x00cc0020;
@@ -99,6 +160,10 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
 /**
  * @typedef {Object} ImageListHost
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
+ *           Where a list is published as the IImageList its handle is
+ *           (`imagelist-com.js`). Absent, a handle is a number of the list's own
+ *           and no COM call reaches it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
@@ -110,6 +175,8 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
  *           user32's exports, which a list made out of a module's bitmap
  *           resource loads it with.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => number} [ownInstance]  comctl32's own module handle, whose
+ *           standard strips ImageList_LoadImage is asked for by resource id.
  * @property {ReturnType<typeof createImageLists>} [imageLists]  The lists to
  *           export, when the host built them itself to share with the
  *           controls that draw from them.
@@ -168,6 +235,13 @@ export function createImageLists(host){
      * @property {number} mask      Its monochrome mask, or 0 without ILC_MASK.
      * @property {number} background  What ILD_NORMAL fills behind the image.
      * @property {readonly number[]} overlays  The images the fifteen overlays are, or -1.
+     * @property {number[] | null} [colors]  A list of four or eight bits a pixel's colour
+     *     table, 0xRRGGBB: its image's, kept to make the image again when it grows.
+     * @property {boolean} [colorsSet]  Whether its table was set, by ImageList_SetColorTable
+     *     or by the first image brought to it empty with a table of its own: once set, later
+     *     images, a list emptied included, leave it.
+     * @property {boolean[]} [alpha]  For each image of a list of 32 bits, whether the bitmap
+     *     it came from had alpha (ILIF_ALPHA).
      */
 
     /** @type {Map<number, ImageList>} */
@@ -184,6 +258,27 @@ export function createImageLists(host){
 
     /** @param {number} handle */
     const listOf = handle=>lists.get(handle >>> 0) ?? null;
+
+    /** The lists as COM objects, where there is a bridge to publish them on. */
+    const objects = host.vtables && host.readMemory ? createImageListObjects({
+        publish: (object, id)=>/** @type {NonNullable<ImageListHost['vtables']>} */ (host.vtables)
+            .publish(object, id),
+        flat: (name, args)=>/** @type {any} */ (functions)[name].handler(args),
+        putU32: (at, value)=>host.writeMemory(at, Uint8Array.of(value & 255, value >>> 8 & 255,
+            value >>> 16 & 255, value >>> 24 & 255)),
+        readGuid: at=>/** @type {NonNullable<ImageListHost['readMemory']>} */ (host.readMemory)(
+            at, 16).slice(),
+        divergence: host.divergence,
+        initialize: (handle, cx, cy, flags, initial, grow)=>{
+            const list = listOf(handle);
+            return list !== null && cx > 0 && cy > 0 && setUp(list, cx, cy, flags, initial, grow);
+        },
+        itemFlags: (handle, index)=>{
+            const list = listOf(handle);
+            return list === null || index < 0 || index >= list.count ? null
+                : list.alpha?.[index] ? ILIF_ALPHA : 0;
+        },
+    }) : null;
 
     /**
      * One of gdi32's exports called as a program would call it, or zero
@@ -249,7 +344,7 @@ export function createImageLists(host){
         }
         const width = list.cx * max;
         const masked = (list.flags & ILC_MASK) !== 0;
-        const image = gdi('CreateBitmap', width, list.cy, 1, 32, 0);
+        const image = imageBitmap(list, width);
         const mask = masked ? gdi('CreateBitmap', width, list.cy, 1, 1, 0) : 0;
         if (image === 0 || (masked && mask === 0))
         {
@@ -273,6 +368,121 @@ export function createImageLists(host){
         }
         Object.assign(list, { image, mask, max });
         return true;
+    };
+
+    /** The depth a list's image is at: its own, or 32 for ILC_COLORDDB. @param {ImageList} list */
+    const depthOf = list=>{
+        const depth = list.flags & ILC_COLORMASK;
+        return DIB_DEPTHS.has(depth) ? depth : 32;
+    };
+
+    /**
+     * A list's image of `width` pixels: a DIB section at the list's depth, as
+     * Windows keeps it - a list of four or eight bits a pixel with its
+     * colour table, the default one until it is given another - so what is
+     * added is reduced to that depth and GetImageInfo's bitmap reads so.
+     * Without guest memory to describe one in, a bitmap of 32 bits a pixel.
+     *
+     * @param {ImageList} list @param {number} width
+     */
+    const imageBitmap = (list, width)=>{
+        const depth = depthOf(list);
+        if (!host.allocate)
+        {
+            return gdi('CreateBitmap', width, list.cy, 1, 32, 0);
+        }
+        if (depth <= 8)
+        {
+            list.colors ??= [...(depth === 4 ? DEFAULT_COLORS_4 : DEFAULT_COLORS_8)];
+        }
+        const colors = depth <= 8 ? /** @type {number[]} */ (list.colors) : [];
+        const info = new DataView(new ArrayBuffer(BITMAPINFOHEADER_SIZE + colors.length * 4));
+        info.setUint32(0, BITMAPINFOHEADER_SIZE, true);
+        info.setInt32(4, width, true);
+        info.setInt32(8, list.cy, true);
+        info.setUint16(12, 1, true);
+        info.setUint16(14, depth, true);
+        info.setUint32(16, BI_RGB, true);
+        colors.forEach((rgb, index)=>info.setUint32(BITMAPINFOHEADER_SIZE + index * 4,
+            rgb & 0xffffff, true));
+        const at = host.allocate(info.byteLength);
+        if (at === 0)
+        {
+            return 0;
+        }
+        try
+        {
+            host.writeMemory(at, new Uint8Array(info.buffer));
+            return gdi('CreateDIBSection', 0, at, DIB_RGB_COLORS, 0, 0, 0);
+        }
+        finally
+        {
+            host.release?.(at);
+        }
+    };
+
+    /**
+     * Gives a list of four or eight bits a pixel `colors` from entry `start`
+     * on, in its image's colour table and its own; how many were set.
+     *
+     * @param {ImageList} list @param {number} start @param {number[]} colors  0xRRGGBB
+     */
+    const setColors = (list, start, colors)=>{
+        const depth = depthOf(list);
+        const size = depth <= 8 ? 1 << depth : 0;
+        const set = Math.max(0, Math.min(colors.length, size - start));
+        if (set === 0)
+        {
+            return 0;
+        }
+        // A table set before the list has an image is the one it is made with.
+        list.colors ??= [...(depth === 4 ? DEFAULT_COLORS_4 : DEFAULT_COLORS_8)];
+        colors.slice(0, set).forEach((rgb, index)=>{
+            /** @type {number[]} */ (list.colors)[start + index] = rgb & 0xffffff;
+        });
+        const at = host.allocate?.(set * 4) ?? 0;
+        if (at !== 0 && list.image !== 0)
+        {
+            const quads = new DataView(new ArrayBuffer(set * 4));
+            colors.slice(0, set).forEach((rgb, index)=>quads.setUint32(index * 4,
+                rgb & 0xffffff, true));
+            host.writeMemory(at, new Uint8Array(quads.buffer));
+            withDCs([list.image], dc=>gdi('SetDIBColorTable', dc, start, set, at));
+            host.release?.(at);
+        }
+        return set;
+    };
+
+    /**
+     * A bitmap's own colour table, 0xRRGGBB, or null for one with none - a
+     * device bitmap or a DIB of more than eight bits a pixel.
+     *
+     * @param {number} bitmap
+     * @returns {number[] | null}
+     */
+    const colorsOf = bitmap=>{
+        const at = host.allocate?.(256 * 4) ?? 0;
+        if (at === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        try
+        {
+            const read = /** @type {(address: number, length: number) => Uint8Array} */ (
+                host.readMemory);
+            const count = withDCs([bitmap], dc=>gdi('GetDIBColorTable', dc, 0, 256, at));
+            if (count <= 0)
+            {
+                return null;
+            }
+            const bytes = read(at, count * 4);
+            return Array.from({ length: count }, (_, index)=>bytes[index * 4]
+                | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16);
+        }
+        finally
+        {
+            host.release?.(at);
+        }
     };
 
     /**
@@ -299,21 +509,56 @@ export function createImageLists(host){
      * @returns {number} its handle
      */
     const makeList = (cx, cy, flags, initial, grow, max = initial + 1)=>{
-        const colour = (flags & ILC_COLORMASK) === 0 ? ILC_COLOR4 : 0;
         /** @type {ImageList} */
-        const list = {
-            cx, cy, flags: (flags | colour) >>> 0, count: 0, max: 0, initial,
-            // A WORD, as it is kept and written.
-            grow: (Math.max(grow, 1) + 3) & 0xfffc,
-            image: 0, mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS,
-        };
-        if (!resize(list, max, 0))
+        const list = { cx: 0, cy: 0, flags: 0, count: 0, max: 0, initial: 0, grow: 0, image: 0,
+            mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS };
+        if (!setUp(list, cx, cy, flags, initial, grow, max))
         {
             return 0;
         }
-        const handle = nextHandle++;
+        const handle = objects ? objects.make(forget) : nextHandle++;
+        if (handle === 0)
+        {
+            freeBitmaps(list);
+            return 0;
+        }
         lists.set(handle, list);
         return handle;
+    };
+
+    /**
+     * A list made empty at a size and depth: what ImageList_Create makes, and
+     * what IImageList2::Initialize makes of a list again.
+     *
+     * @param {ImageList} list @param {number} cx @param {number} cy @param {number} flags
+     * @param {number} initial @param {number} grow @param {number} [max]
+     */
+    const setUp = (list, cx, cy, flags, initial, grow, max = initial + 1)=>{
+        const colour = (flags & ILC_COLORMASK) === 0 ? ILC_COLOR4 : 0;
+        freeBitmaps(list);
+        Object.assign(list, { cx, cy, flags: (flags | colour) >>> 0, count: 0, max: 0, initial,
+            // A WORD, as it is kept and written.
+            grow: (Math.max(grow, 1) + 3) & 0xfffc,
+            image: 0, mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS, colors: null });
+        return resize(list, max, 0);
+    };
+
+    /** @param {ImageList} list */
+    const freeBitmaps = list=>{
+        [list.image, list.mask].filter(bitmap=>bitmap !== 0)
+            .forEach(bitmap=>gdi('DeleteObject', bitmap));
+        list.image = 0;
+        list.mask = 0;
+    };
+
+    /** A list whose last reference went: its bitmaps with it. @param {number} handle */
+    const forget = handle=>{
+        const list = listOf(handle);
+        if (list)
+        {
+            freeBitmaps(list);
+            lists.delete(handle >>> 0);
+        }
     };
 
     /**
@@ -326,6 +571,7 @@ export function createImageLists(host){
      */
     const place = (list, index, bitmap, from, mask, key = null)=>{
         const x = index * list.cx;
+        (list.alpha ??= [])[index] = depthOf(list) === 32 && hasAlpha(list, bitmap, from);
         withDCs([list.image, bitmap], (target, source)=>gdi('BitBlt', target, x, 0, list.cx,
             list.cy, source, from, 0, SRCCOPY));
         if (list.mask === 0)
@@ -356,6 +602,80 @@ export function createImageLists(host){
     };
 
     /**
+     * Whether the image a bitmap of 32 bits a pixel holds at `from` has any
+     * alpha: IImageList::GetItemFlags's ILIF_ALPHA, which a list of 32 bits
+     * keeps for each image. A bitmap of fewer bits has none.
+     *
+     * @param {ImageList} list @param {number} bitmap @param {number} from
+     */
+    const hasAlpha = (list, bitmap, from)=>{
+        const read = host.readMemory;
+        const info = host.allocate?.(24) ?? 0;
+        if (!read || info === 0)
+        {
+            return false;
+        }
+        /** @param {Uint8Array} pixels @param {number} start @param {number} end */
+        const anyAlpha = (pixels, start, end)=>{
+            for (let i = start + 3; i < end; i += 4)
+            {
+                if (pixels[i] !== 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        try
+        {
+            if (gdi('GetObjectA', bitmap, 24, info) === 0)
+            {
+                return false;
+            }
+            const header = new DataView(read(info, 24).slice().buffer);
+            if (header.getUint16(18, true) !== 32)
+            {
+                return false;
+            }
+            const stride = header.getInt32(12, true);
+            const rows = Math.min(Math.abs(header.getInt32(8, true)), list.cy);
+            const width = Math.min(list.cx, header.getInt32(4, true) - from);
+            const pointer = header.getUint32(20, true);
+            if (pointer !== 0 && width > 0)
+            {
+                // A DIB section's bits are in memory: its rows read in place.
+                for (let row = 0; row < rows; row++)
+                {
+                    const line = read(pointer + row * stride + from * 4, width * 4);
+                    if (anyAlpha(line, 0, line.length))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            const size = list.cx * 4 * list.cy;
+            const at = host.allocate?.(size) ?? 0;
+            if (at === 0)
+            {
+                return false;
+            }
+            const copy = gdi('CreateBitmap', list.cx, list.cy, 1, 32, 0);
+            withDCs([copy, bitmap], (target, source)=>gdi('BitBlt', target, 0, 0, list.cx,
+                list.cy, source, from, 0, SRCCOPY));
+            gdi('GetBitmapBits', copy, size, at);
+            gdi('DeleteObject', copy);
+            const found = anyAlpha(read(at, size), 0, size);
+            host.release?.(at);
+            return found;
+        }
+        finally
+        {
+            host.release?.(info);
+        }
+    };
+
+    /**
      * Adds every image a bitmap holds.
      *
      * @param {number} handle @param {number} bitmap @param {number} mask
@@ -375,6 +695,16 @@ export function createImageLists(host){
         }
         if (host.gdi32 && (bitmap >>> 0) !== 0)
         {
+            // The first images a list of a palette is given bring theirs,
+            // once: a bitmap with a colour table, added to an empty list
+            // whose table nothing set yet, puts its colours in the list's.
+            const own = first === 0 && !list.colorsSet && depthOf(list) <= 8
+                ? colorsOf(bitmap >>> 0) : null;
+            if (own)
+            {
+                setColors(list, 0, own);
+                list.colorsSet = true;
+            }
             for (let at = 0; at < count; at++)
             {
                 place(list, first + at, bitmap >>> 0, at * list.cx, mask >>> 0, key);
@@ -570,8 +900,29 @@ export function createImageLists(host){
     };
 
     /**
+     * One of comctl32's standard strips, named as its own resource: a blank
+     * bitmap of the strip's size, its pixels not being in this build. Null
+     * for anything else.
+     *
+     * @param {number} instance @param {number} name
+     */
+    const ownStrip = (instance, name)=>{
+        const own = host.ownInstance?.() ?? 0;
+        const strip = /** @type {Record<number, { count: number, side: number }>} */ (
+            STANDARD_STRIPS)[name >>> 0];
+        if (own === 0 || (instance >>> 0) !== own || !strip)
+        {
+            return null;
+        }
+        host.divergence?.('ImageList_LoadImage', `comctl32's standard bitmap ${name >>> 0}`
+            + ' is left blank');
+        return gdi('CreateBitmap', strip.count * strip.side, strip.side, 1, 32, 0) >>> 0;
+    };
+
+    /**
      * ImageList_LoadImageA and W: one body, user32's LoadImage in the
-     * spelling the name was given in.
+     * spelling the name was given in; comctl32's own standard strips, which
+     * are no module's resources here, made at their size.
      *
      * @param {'LoadImageA' | 'LoadImageW'} loader
      */
@@ -585,8 +936,9 @@ export function createImageLists(host){
                     `an image list of type ${type >>> 0} is not loaded: only a bitmap's`);
                 return 0;
             }
-            const bitmap = (host.user32?.(loader)
-                ?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags]) ?? 0) >>> 0;
+            const bitmap = ownStrip(instance, name)
+                ?? (host.user32?.(loader)?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags])
+                    ?? 0) >>> 0;
             const size = bitmap === 0 ? null : host.bitmapSize?.(bitmap) ?? null;
             if (!size || size.height <= 0)
             {
@@ -611,6 +963,50 @@ export function createImageLists(host){
     });
 
     const functions = {
+        /**
+         * HRESULT HIMAGELIST_QueryInterface(HIMAGELIST himl, REFIID riid, void **ppv)
+         *
+         * The list is the object: IImageList, IImageList2 and IUnknown are its
+         * handle, referenced once more.
+         */
+        HIMAGELIST_QueryInterface: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, riid, out])=>(objects ? objects.queryInterface(handle, riid, out)
+                : E_NOINTERFACE),
+        },
+
+        /**
+         * HRESULT ImageList_CoCreateInstance(REFCLSID rclsid, const IUnknown *punkOuter,
+         *     REFIID riid, void **ppv)
+         *
+         * CLSID_ImageList without COM's registry: an empty list, sized by
+         * IImageList2::Initialize. No aggregation.
+         */
+        ImageList_CoCreateInstance: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([clsid, outer, riid, out])=>{
+                if (!objects)
+                {
+                    return E_NOINTERFACE;
+                }
+                if (wholeAddress(out) === 0)
+                {
+                    return E_POINTER;
+                }
+                if (wholeAddress(outer) !== 0)
+                {
+                    return CLASS_E_NOAGGREGATION;
+                }
+                if (objects.guidAt(clsid) !== CLSID_IMAGELIST)
+                {
+                    return CLASS_E_CLASSNOTAVAILABLE;
+                }
+                return objects.handOut(makeList(1, 1, 0, 0, 1), riid, out);
+            },
+        },
+
         /**
          * HIMAGELIST ImageList_Create(int cx, int cy, UINT flags, int cInitial,
          *                             int cGrow)
@@ -648,14 +1044,21 @@ export function createImageLists(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const list = listOf(handle);
-                if (!list)
+                if (!listOf(handle))
                 {
                     return 0;
                 }
-                [list.image, list.mask].filter(bitmap=>bitmap !== 0)
-                    .forEach(bitmap=>gdi('DeleteObject', bitmap));
-                lists.delete(handle >>> 0);
+                // A list is a COM object: Destroy lets go of one reference,
+                // and the list goes with the last (Wine's test_iimagelist).
+                const object = objects?.objectOf(handle);
+                if (object)
+                {
+                    object.release();
+                }
+                else
+                {
+                    forget(handle);
+                }
                 return 1;
             },
         },
@@ -748,9 +1151,11 @@ export function createImageLists(host){
                 if ((index | 0) === -1)
                 {
                     list.count = 0;
+                    list.alpha = [];
                     resize(list, list.grow, 0);
                     return 1;
                 }
+                list.alpha?.splice(index | 0, 1);
                 const at = (index | 0) * list.cx;
                 for (const bitmap of [list.image, list.mask].filter(held=>held !== 0))
                 {
@@ -775,12 +1180,12 @@ export function createImageLists(host){
             /** @param {number[]} args */
             handler: ([handle, cx, cy])=>{
                 const list = listOf(handle);
-                if (!list || (cx >>> 0) === 0 || (cy >>> 0) === 0)
+                if (!list || wholeAddress(cx) === 0 || wholeAddress(cy) === 0)
                 {
                     return 0;
                 }
-                host.writeMemory(cx >>> 0, dwords([list.cx]));
-                host.writeMemory(cy >>> 0, dwords([list.cy]));
+                host.writeMemory(wholeAddress(cx), dwords([list.cx]));
+                host.writeMemory(wholeAddress(cy), dwords([list.cy]));
                 return 1;
             },
         },
@@ -964,13 +1369,13 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
-                if ((point >>> 0) !== 0)
+                if (wholeAddress(point) !== 0)
                 {
-                    host.writeMemory(point >>> 0, point32(drag.x, drag.y));
+                    host.writeMemory(wholeAddress(point), point32(drag.x, drag.y));
                 }
-                if ((hotspot >>> 0) !== 0)
+                if (wholeAddress(hotspot) !== 0)
                 {
-                    host.writeMemory(hotspot >>> 0, point32(drag.dx, drag.dy));
+                    host.writeMemory(wholeAddress(hotspot), point32(drag.dx, drag.dy));
                 }
                 return drag.owned || drag.list;
             },
@@ -1007,11 +1412,11 @@ export function createImageLists(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([params])=>{
-                if ((params >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(params) === 0 || !host.readMemory)
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(params >>> 0, IMAGELISTDRAWPARAMS.V3_SIZE);
+                const bytes = host.readMemory(wholeAddress(params), IMAGELISTDRAWPARAMS.V3_SIZE);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 /** @param {number} at */
                 const field = at=>view.getInt32(at, true);
@@ -1140,6 +1545,87 @@ export function createImageLists(host){
             },
         },
 
+        /** DWORD ImageList_GetFlags(HIMAGELIST himl) - the ILC_ flags it was made with. */
+        ImageList_GetFlags: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>listOf(handle)?.flags ?? 0,
+        },
+
+        /**
+         * BOOL ImageList_Copy(HIMAGELIST himlDst, int iDst, HIMAGELIST himlSrc, int iSrc,
+         *                     UINT uFlags)
+         *
+         * An image copied over another of the same list (ILCF_MOVE), or the
+         * two exchanged (ILCF_SWAP), masks with them. Between two lists, or
+         * at an index past the end, it is refused, as the documentation says
+         * the call works within one list.
+         */
+        ImageList_Copy: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([destination, to, source, from, flags])=>{
+                const list = listOf(source);
+                if (!list || destination >>> 0 !== source >>> 0
+                    || [to, from].some(index=>(index | 0) < 0 || (index | 0) >= list.count))
+                {
+                    return 0;
+                }
+                const blit = (/** @type {number} */ bitmap, /** @type {number} */ x,
+                    /** @type {number} */ y)=>withDCs([bitmap], dc=>gdi('BitBlt', dc,
+                    x * list.cx, 0, list.cx, list.cy, dc, y * list.cx, 0, SRCCOPY));
+                for (const bitmap of [list.image, list.mask].filter(b=>b !== 0))
+                {
+                    if (flags & ILCF_SWAP)
+                    {
+                        // Through a spare place one image wide, made for the swap.
+                        const spare = gdi('CreateBitmap', list.cx, list.cy, 1,
+                            bitmap === list.mask ? 1 : 32, 0);
+                        withDCs([spare, bitmap], (keep, strip)=>{
+                            gdi('BitBlt', keep, 0, 0, list.cx, list.cy, strip, (to | 0) * list.cx,
+                                0, SRCCOPY);
+                            gdi('BitBlt', strip, (to | 0) * list.cx, 0, list.cx, list.cy, strip,
+                                (from | 0) * list.cx, 0, SRCCOPY);
+                            gdi('BitBlt', strip, (from | 0) * list.cx, 0, list.cx, list.cy, keep,
+                                0, 0, SRCCOPY);
+                        });
+                        gdi('DeleteObject', spare);
+                    }
+                    else
+                    {
+                        blit(bitmap, to | 0, from | 0);
+                    }
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * UINT ImageList_SetColorTable(HIMAGELIST himl, UINT uStartIndex, UINT cEntries,
+         *                              const RGBQUAD *prgb) - #390
+         *
+         * The palette of a list of four or eight bits a pixel, its image's
+         * colour table: how many entries were set, none for a list of more.
+         */
+        '#390': {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, start, entries, quads])=>{
+                const list = listOf(handle);
+                if (!list || depthOf(list) > 8 || (quads >>> 0) === 0 || !host.readMemory)
+                {
+                    return 0;
+                }
+                const size = 1 << depthOf(list);
+                const wanted = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
+                const bytes = host.readMemory(wholeAddress(quads), wanted * 4);
+                list.colorsSet = true;
+                return setColors(list, start >>> 0, Array.from({ length: wanted },
+                    (_, index)=>bytes[index * 4] | bytes[index * 4 + 1] << 8
+                        | bytes[index * 4 + 2] << 16));
+            },
+        },
+
         /**
          * BOOL ImageList_GetImageInfo(HIMAGELIST, int i, IMAGEINFO *)
          *
@@ -1157,7 +1643,7 @@ export function createImageLists(host){
                     return 0;
                 }
                 const left = (index | 0) * list.cx;
-                host.writeMemory(info >>> 0, dwords([list.image, list.mask, 0, 0,
+                host.writeMemory(wholeAddress(info), dwords([list.image, list.mask, 0, 0,
                     left, 0, left + list.cx, list.cy]));
                 return 1;
             },
@@ -1321,6 +1807,16 @@ export function createImageLists(host){
     return {
         functions,
         drawEmbossed,
+        /**
+         * An image list's image size, or null for a handle that is no list:
+         * what a version 6 button lays its content out by.
+         *
+         * @param {number} handle
+         */
+        sizeOf: handle=>{
+            const list = listOf(handle);
+            return list ? { cx: list.cx, cy: list.cy } : null;
+        },
         /**
          * One image as an icon is made of: its colour bits as a 32-bit
          * device-dependent bitmap's, rows top first, and its mask's, each row

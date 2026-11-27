@@ -19,7 +19,11 @@
  */
 
 import { EINVAL, ERANGE } from './globals.js';
+import * as inGuest from './inguest.js';
 import { LOWER, UPPER } from './inguest.js';
+import { guestEntry } from './guest-code.js';
+import { COMPILED } from './inguest.x86.js';
+import { unitsAt } from './widetext.js';
 
 /**
  * @typedef {Object} SecureHost
@@ -37,13 +41,12 @@ export const STRUNCATE = 80;
 /** A string is read no further than this, since nothing in C bounds one. */
 const MAX_STRING = 1 << 20;
 
-/** Units read from memory at a time while looking for a terminator. */
-const CHUNK = 256;
-
 /**
  * @param {SecureHost} host
+ * @param {{ inGuest?: boolean }} [options]  `inGuest: false` answers every
+ *     copy and append on the host, the path the guest's is gated against.
  */
-export function createSecureFunctions(host){
+export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
     /** @param {number} code */
     const fail = code=>{
         host.errno?.(code);
@@ -52,34 +55,17 @@ export function createSecureFunctions(host){
 
     /**
      * A string's units up to its terminator or `limit` units, whichever comes
-     * first, read a chunk at a time so a large limit costs only the string.
+     * first, read no further than either: a count may end inside a string
+     * that is not terminated before its region does.
      *
      * @param {number} pointer @param {number} unit  Bytes a character.
      * @param {number} limit
      * @returns {{ units: number[], terminated: boolean }}
      */
     const readUnits = (pointer, unit, limit)=>{
-        /** @type {number[]} */
-        const units = [];
-        let at = pointer >>> 0;
         const most = Math.min(limit, MAX_STRING);
-        while (units.length < most)
-        {
-            const count = Math.min(CHUNK, most - units.length);
-            const bytes = host.readMemory(at, count * unit);
-            for (let index = 0; index < count; index++)
-            {
-                const value = unit === 1 ? bytes[index]
-                    : bytes[index * 2] | bytes[index * 2 + 1] << 8;
-                if (value === 0)
-                {
-                    return { units, terminated: true };
-                }
-                units.push(value);
-            }
-            at += count * unit;
-        }
-        return { units, terminated: false };
+        const units = [...unitsAt(host.readMemory, pointer, /** @type {1 | 2} */ (unit), most)];
+        return { units, terminated: units.length < most };
     };
 
     /** @param {number} pointer @param {number} unit @param {number[]} units */
@@ -122,7 +108,7 @@ export function createSecureFunctions(host){
             writeUnits(destination, unit, terminated ? [...units, 0] : units);
             return terminated;
         }
-        const window = host.readMemory(source, gap + most * unit).slice();
+        const window = host.readMemory(source, gap + most * unit);
         for (let index = 0; index < most; index++)
         {
             const from = index * unit;
@@ -326,19 +312,6 @@ export function createSecureFunctions(host){
     });
 
     /**
-     * size_t strnlen(const char *str, size_t max), and wcsnlen.
-     *
-     * @param {number} unit
-     */
-    const lengthBounded = unit=>({
-        convention: /** @type {'cdecl'} */ ('cdecl'),
-        argBytes: 8,
-        /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [string, max])=>readUnits(string, unit, max >>> 0)
-            .units.length,
-    });
-
-    /**
      * _strlwr_s, _strupr_s, _wcslwr_s and _wcsupr_s: the C locale's ASCII
      * folded in place. The string is measured before it is changed, so one
      * with no terminator within its size is only cleared, EINVAL -- and so
@@ -414,6 +387,8 @@ export function createSecureFunctions(host){
     const toText = (valueSlots, signed)=>({
         convention: /** @type {'cdecl'} */ ('cdecl'),
         argBytes: (valueSlots + 3) * 4,
+        // An __int64 value is one argument to an x86-64 caller.
+        ...valueSlots === 2 ? { quadwords: [0] } : {},
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             const buffer = args[valueSlots];
@@ -449,17 +424,30 @@ export function createSecureFunctions(host){
         },
     });
 
+    /**
+     * A secure copy in the guest (`inguest.js`): the copy that fits there,
+     * every refusal the handler's, as the call came.
+     *
+     * @param {keyof typeof COMPILED & keyof typeof inGuest} name
+     * @param {{ argBytes: number, handler: (args: number[]) => number }} fallback
+     */
+    const inGuestWith = (name, fallback)=>(guestCode
+        ? guestEntry(/** @type {Function} */ (inGuest[name]), COMPILED[name], host,
+            { argBytes: fallback.argBytes, handler: fallback.handler })
+        : { convention: 'cdecl', ...fallback });
+
     return {
-        strcpy_s: copy(1),
-        wcscpy_s: copy(2),
-        strcat_s: append(1),
-        wcscat_s: append(2),
-        strncpy_s: copyCounted(1),
-        wcsncpy_s: copyCounted(2),
-        strncat_s: appendCounted(1),
-        wcsncat_s: appendCounted(2),
-        strnlen: lengthBounded(1),
-        wcsnlen: lengthBounded(2),
+        strcpy_s: inGuestWith('strcpy_s', copy(1)),
+        wcscpy_s: inGuestWith('wcscpy_s', copy(2)),
+        strcat_s: inGuestWith('strcat_s', append(1)),
+        wcscat_s: inGuestWith('wcscat_s', append(2)),
+        strncpy_s: inGuestWith('strncpy_s', copyCounted(1)),
+        wcsncpy_s: inGuestWith('wcsncpy_s', copyCounted(2)),
+        strncat_s: inGuestWith('strncat_s', appendCounted(1)),
+        wcsncat_s: inGuestWith('wcsncat_s', appendCounted(2)),
+        /** size_t strnlen(const char *str, size_t max) and wcsnlen -- in the guest */
+        strnlen: { ...guestEntry(inGuest.strnlen, COMPILED.strnlen, host) },
+        wcsnlen: guestEntry(inGuest.wcsnlen, COMPILED.wcsnlen, host),
 
         /**
          * errno_t memcpy_s(void *dst, size_t size, const void *src, size_t count)
@@ -467,8 +455,7 @@ export function createSecureFunctions(host){
          * Nothing to copy is no error, whatever the pointers; no source, or
          * more than the destination holds, zeroes the whole destination.
          */
-        memcpy_s: {
-            convention: 'cdecl',
+        memcpy_s: inGuestWith('memcpy_s', {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, size, source, count])=>{
@@ -490,18 +477,17 @@ export function createSecureFunctions(host){
                     }
                     return fail((source >>> 0) === 0 ? EINVAL : ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length).slice());
+                host.writeMemory(destination, host.readMemory(source, length));
                 return 0;
             },
-        },
+        }),
 
         /**
          * errno_t memmove_s(void *dst, size_t size, const void *src, size_t count)
          *
          * memcpy_s's refusals, the destination left as it was.
          */
-        memmove_s: {
-            convention: 'cdecl',
+        memmove_s: inGuestWith('memmove_s', {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, size, source, count])=>{
@@ -518,10 +504,10 @@ export function createSecureFunctions(host){
                 {
                     return fail(ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length).slice());
+                host.writeMemory(destination, host.readMemory(source, length));
                 return 0;
             },
-        },
+        }),
 
         /** errno_t _strlwr_s(char *str, size_t size) */
         _strlwr_s: fold(1, LOWER),

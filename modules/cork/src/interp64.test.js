@@ -12,8 +12,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STATE_BLOCK_SIZE_64, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PAGE, STATE_BLOCK_SIZE_64, WRAP_SLACK, ownLayout, pagesFor, tablesSize }
+    from './runtime/layout.js';
+import { allowMemory64, ifRoom } from './testing/memory64.js';
 import { Fault } from './ir.js';
+import { memory64 } from './wasm/features.js';
 import { blockState64, interpret64 } from './interp64.js';
 
 const TRAP_PORT = 0xb077;
@@ -120,4 +123,115 @@ test('a jump begins a run the host is asked about', ()=>{
     });
     // The first run, then the loop's back edge taken twice before the host says stop.
     assert.deepEqual(steps, [[0, false], [15, true], [15, true]]);
+});
+
+for (const window of [2 ** 33, 2 ** 34])
+{
+    test(`a ${window / 2 ** 30} GiB window: code, stack and data past 4 GiB,`
+        + ' RAM apart', ifRoom(()=>{
+        allowMemory64();
+        // Where a 64-bit image without relocations asks to be (0x140000000), the stack past it.
+        const code = 0x140001000;
+        const stack = 0x150000000;
+        const data = code + PROGRAM.length / 2 - 8;
+        const layout = ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window });
+        const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
+        const ram = memory64(window);
+        new Uint8Array(ram.buffer).set(Buffer.from(PROGRAM, 'hex'), code);
+        const view = new DataView(memory.buffer);
+        view.setBigUint64(layout.regs + 4 * 8, BigInt(stack), true);
+        view.setBigUint64(layout.eip, BigInt(code), true);
+        view.setUint32(layout.eflags, 0x202, true);
+        view.setUint32(layout.mxcsr, 0x1f80, true);
+        // The window's last page is closed, as a host keeps it.
+        new Uint8Array(memory.buffer, layout.pageFlags)[window / 4096 - 1] = 1;
+        const state = blockState64({ memory, ram, layout, ports: { trapPort: TRAP_PORT,
+            read: ()=>0, write: ()=>{} } });
+        state.syncIn();
+        assert.equal(interpret64(state, 1000), 2 + 15 + 7);
+        state.syncOut();
+        assert.deepEqual(state.trapped, [7]);
+        const sum = 0x1122334455667788n + 5n + 4n + 3n + 2n + 1n;
+        assert.equal(view.getBigUint64(layout.regs + 9 * 8, true), sum, 'pushed and popped');
+        assert.equal(new DataView(ram.buffer).getBigUint64(data, true), sum, 'RIP-relative');
+        assert.equal(new DataView(ram.buffer).getBigUint64(stack - 8, true), sum, 'the stack');
+        for (const [at, why] of /** @type {[number, string][]} */ ([[window - 8, 'the closed last page'],
+            [window, 'past the window']]))
+        {
+            // mov rax, [rcx]
+            new Uint8Array(ram.buffer).set([0x48, 0x8b, 0x01], code);
+            view.setBigUint64(layout.regs + 8, BigInt(at), true);
+            view.setBigUint64(layout.eip, BigInt(code), true);
+            state.syncIn();
+            assert.throws(()=>interpret64(state, 10),
+                error=>error instanceof Fault && error.vector === 13, why);
+        }
+    }));
+}
+
+test('pcmpistri leaves its index in rcx, zero-extended, as a dword written in long mode', ()=>{
+    const { layout, view, state } = machine();
+    const set = 0x500000;
+    const text = 0x500100;
+    new Uint8Array(view.buffer).set(Buffer.from('b\0'), set);
+    new Uint8Array(view.buffer).set(Buffer.from('aab\0'), text);
+    // mov rcx, 0xdeadbeefffffffff; movdqu xmm0, [rdi]; pcmpistri xmm0, [rsi], 0 (equal
+    // any, bytes): the first byte of [rsi] in xmm0's set is at 2; hlt
+    new Uint8Array(view.buffer).set([0x48, 0xb9, 0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde,
+        0xf3, 0x0f, 0x6f, 0x07, 0x66, 0x0f, 0x3a, 0x63, 0x06, 0x00, 0xf4], CODE);
+    view.setBigUint64(layout.regs + 7 * 8, BigInt(set), true);
+    view.setBigUint64(layout.regs + 6 * 8, BigInt(text), true);
+    state.syncIn();
+    interpret64(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigUint64(layout.regs + 8, true), 2n);
+});
+
+test('crc32 over a quadword and a byte is CRC-32C: "123456789" checks to 0xE3069283', ()=>{
+    const { layout, view, state } = machine();
+    const data = 0x500000;
+    new Uint8Array(view.buffer).set(Buffer.from('123456789'), data);
+    // mov eax, -1; crc32 rax, qword [rsi]; crc32 eax, byte [rsi + 8]; not eax; hlt
+    new Uint8Array(view.buffer).set([0xb8, 0xff, 0xff, 0xff, 0xff,
+        0xf2, 0x48, 0x0f, 0x38, 0xf1, 0x06, 0xf2, 0x0f, 0x38, 0xf0, 0x46, 0x08,
+        0xf7, 0xd0, 0xf4], CODE);
+    view.setBigUint64(layout.regs + 6 * 8, BigInt(data), true);
+    state.syncIn();
+    interpret64(state, 10);
+    state.syncOut();
+    assert.equal(view.getBigUint64(layout.regs, true), 0xe3069283n);
+});
+
+test('a memory that grew between two runs is read where it grew', ()=>{
+    // A 64-bit process's memory grows as its program takes more: what the
+    // interpreter reads next lies past where the memory ended at its last run.
+    // Shared, as a process's is: the buffer of before stays whole and short.
+    const MIB = 1 << 20;
+    const layout = ownLayout({ ramSize: 64 * MIB, ramBase: 0, bits: 64, tablesAt: 4 * MIB,
+        ramFloor: 8 * MIB });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)),
+        maximum: (64 * MIB + WRAP_SLACK) / PAGE, shared: true });
+    const view = ()=>new DataView(memory.buffer);
+    view().setUint32(/** @type {number} */ (layout.wrap), 8 * MIB - 1, true);
+    view().setUint32(layout.eflags, 0x202, true);
+    view().setUint32(layout.mxcsr, 0x1f80, true);
+    const state = blockState64({ memory, layout, ports: { trapPort: TRAP_PORT,
+        read: ()=>0, write: ()=>{} } });
+    /** mov eax, [rbx]; hlt - run with RBX at `address`. @param {number} address */
+    const read = address=>{
+        new Uint8Array(memory.buffer).set([0x8b, 0x03, 0xf4], CODE);
+        view().setBigUint64(layout.regs + 3 * 8, BigInt(address), true);
+        view().setBigUint64(layout.eip, BigInt(CODE), true);
+        state.syncIn();
+        state.halted = false;
+        interpret64(state, 4);
+        state.syncOut();
+        return Number(view().getBigUint64(layout.regs, true));
+    };
+    view().setUint32(0x500000, 0x11111111, true);
+    assert.equal(read(0x500000), 0x11111111);
+    memory.grow((64 * MIB + WRAP_SLACK - memory.buffer.byteLength) / PAGE);
+    view().setUint32(/** @type {number} */ (layout.wrap), 64 * MIB - 1, true);
+    view().setUint32(0x2180000, 0x33333333, true);
+    assert.equal(read(0x2180000), 0x33333333);
 });

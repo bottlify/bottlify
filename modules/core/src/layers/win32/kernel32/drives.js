@@ -28,11 +28,17 @@
  * four values together must not overflow.
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { encodeAnsi } from './locale.js';
+import { msToFileTime } from './filetime.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
-/** @param {string} text @returns {Uint8Array} UTF-16, as a wide string is written. */
-const encodeWide = text=>new Uint8Array(Uint16Array.from(text,
-    character=>character.charCodeAt(0)).buffer);
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 /** What GetDriveType answers. Only three of the six are ever used here. */
 const DRIVE_NO_ROOT_DIR = 1;
@@ -40,40 +46,87 @@ const DRIVE_FIXED = 3;
 const DRIVE_CDROM = 5;
 
 /** Codes this surface reports. */
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_NO_MORE_FILES = 18;
 const ERROR_WRITE_PROTECT = 19;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BUFFER_OVERFLOW = 111;
-const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_INVALID_NAME = 123;
+const ERROR_DIR_NOT_ROOT = 144;
+const ERROR_FILENAME_EXCED_RANGE = 206;
+const ERROR_MORE_DATA = 234;
+const ERROR_NOT_A_REPARSE_POINT = 4390;
 
-/** A path argument is at most this long. */
-const MAX_PATH = 260;
+/** The statuses NtQueryVolumeInformationFile answers. */
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_BAD_LENGTH = 24;
+
+/** The FS_INFORMATION_CLASS values answered, and their records' fixed parts. */
+const FILE_FS_VOLUME_INFORMATION = 1;
+const FILE_FS_SIZE_INFORMATION = 3;
+const FILE_FS_DEVICE_INFORMATION = 4;
+const FILE_FS_ATTRIBUTE_INFORMATION = 5;
+const FILE_FS_FULL_SIZE_INFORMATION = 7;
+const VOLUME_FIXED = 18;
+/**
+ * When the volume was made, as FileFsVolumeInformation answers it: nothing
+ * here has a date of its own, so the start of the DOS calendar, which the
+ * files a program found on the drive carry too - the volume is no younger
+ * than anything on it (decisions.md A276).
+ */
+const VOLUME_CREATED_MS = Date.UTC(1980, 0, 1);
+const ATTRIBUTE_FIXED = 12;
+/** FILE_FS_DEVICE_INFORMATION's device types and characteristics. */
+const FILE_DEVICE_CD_ROM = 2;
+const FILE_DEVICE_DISK = 7;
+const FILE_DEVICE_NAMED_PIPE = 0x11;
+const FILE_REMOVABLE_MEDIA = 0x1;
+const FILE_READ_ONLY_DEVICE = 0x2;
+const FILE_DEVICE_IS_MOUNTED = 0x20;
+
+/** DefineDosDevice's flags. */
+const DDD_RAW_TARGET_PATH = 0x1;
+const DDD_REMOVE_DEFINITION = 0x2;
+const DDD_EXACT_MATCH_ON_REMOVE = 0x4;
+
+/** `\\?\Volume{GUID}\`: what a volume's own name is, in characters. */
+const VOLUME_NAME_LENGTH = 49;
+/** What FindFirstVolume hands out, as far from the kernel's handles as their numbers go. */
+const FIRST_VOLUME_FIND = 0x7f3e0000;
 
 /**
  * The geometry claimed, and the reason for these particular numbers.
  *
  * 512-byte sectors and 8 to a cluster is an ordinary volume of the era. The
- * volume itself is thirty-two gigabytes with twenty-four free: nothing here has
- * a size of its own, a program of the era installs into a fraction of that, so
- * a figure this large refuses no installation and is still a disk such a
- * program could have seen.
+ * volume itself is thirty-three and a half gigabytes with twenty-five and a
+ * half free: nothing here has a size of its own, a program of the era installs
+ * into a fraction of that, so a figure this large refuses no installation and
+ * is still a disk such a program could have seen.
  *
- * The cluster call cannot say that much. The documented way to get a byte
- * count out of it is to multiply all four values on 32-bit arithmetic, and a
- * product at or past 2^32 wraps -- to zero, which reads as a full disk. So it
- * reports the volume as the consumer line of Windows reported a large one:
- * clamped so the product stays below 2^32, two gigabytes at most. The byte
- * call has the room and says the whole of it.
+ * The cluster call answers the whole volume, as Windows NT's does (kernel32's
+ * drive.c: its product is never less than GetDiskFreeSpaceEx's total). The
+ * documented way to get a byte count out of it is to multiply all four values,
+ * and a program of the Windows 9x era does that on 32-bit arithmetic, where a
+ * product past 2^32 wraps: a size that is a whole number of 4 GiB wraps to
+ * zero, which reads as a full disk, and one past 2 GiB beyond it to a negative
+ * number. So each size is one and a half gigabytes past a multiple of four:
+ * wrapped, signed or not, it is still room to install in (decisions.md A270).
  */
 const BYTES_PER_SECTOR = 512;
 const SECTORS_PER_CLUSTER = 8;
 const CLUSTER_BYTES = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
-const VOLUME_BYTES = 32 * 1024 * 1024 * 1024;
-const FREE_BYTES = 24 * 1024 * 1024 * 1024;
-/** The most clusters the cluster call may report: a product just under 2^32. */
-const CLUSTER_CAP = 0x1_0000_0000 / CLUSTER_BYTES - 1;
-const TOTAL_CLUSTERS = Math.min(VOLUME_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
-const FREE_CLUSTERS = Math.min(FREE_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
+const GIB = 1024 * 1024 * 1024;
+const VOLUME_BYTES = 33.5 * GIB;
+const FREE_BYTES = 25.5 * GIB;
+const TOTAL_CLUSTERS = VOLUME_BYTES / CLUSTER_BYTES;
+const FREE_CLUSTERS = FREE_BYTES / CLUSTER_BYTES;
 
 /** What the volume calls itself. */
 const VOLUME_LABEL = 'Bottlify';
@@ -88,7 +141,15 @@ const MAX_COMPONENT_LENGTH = 255;
  */
 const FS_CASE_IS_PRESERVED = 0x00000002;
 const FS_UNICODE_STORED_ON_DISK = 0x00000004;
-const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK;
+// NTFS keeps ACLs, and so does this volume: a program that reads a file's
+// descriptor gets a real one and can set it (advapi32's file security).
+const FS_PERSISTENT_ACLS = 0x00000008;
+// It keeps reparse points: mount points, symbolic links, tags of a program's own.
+const FILE_SUPPORTS_REPARSE_POINTS = 0x00000080;
+// A file opens by its number, the one FileInternalInformation answers.
+const FILE_SUPPORTS_OPEN_BY_FILE_ID = 0x01000000;
+const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK | FS_PERSISTENT_ACLS
+    | FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
 
 /**
  * A disc, as the CD-ROM file system describes one: 2048-byte sectors, one to
@@ -105,6 +166,89 @@ const FILE_READ_ONLY_VOLUME = 0x00080000;
 const DISC_COMPONENT_LENGTH = 221;
 const DISC_UNICODE_COMPONENT_LENGTH = 110;
 
+/**
+ * A volume's own name, `\\?\Volume{GUID}\`: one per letter, the same every
+ * time it is asked, built from the volume's serial and its letter. The file
+ * calls open it as the drive's root.
+ *
+ * @param {string} letter
+ */
+export const volumeName = letter=>{
+    const code = letter.toUpperCase().charCodeAt(0);
+    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
+        (value >>> 0).toString(16).padStart(digits, '0');
+    return `\\\\?\\Volume{${hex(VOLUME_SERIAL ^ code, 8)}-b077-11ef-8000-`
+        + `${hex(code, 4)}${hex(VOLUME_SERIAL, 8)}}\\`;
+};
+
+/**
+ * The drive a path to a volume's own name is on, and the rest of the path,
+ * or null when it names none. The device namespace's `\\.\` names the same
+ * volume as `\\?\` does.
+ *
+ * @param {string} path
+ * @returns {{ letter: string, rest: string } | null}
+ */
+export const onVolume = path=>{
+    const found = /^\\\\[?.]\\Volume\{[^}]*\}(\\|$)/i.exec(path);
+    if (!found)
+    {
+        return null;
+    }
+    const wanted = `\\\\?\\${found[0].slice(4).replace(/\\?$/, '')}\\`.toLowerCase();
+    for (let code = 0x41; code <= 0x5a; code++)
+    {
+        const letter = String.fromCharCode(code);
+        if (volumeName(letter).toLowerCase() === wanted)
+        {
+            return { letter, rest: path.slice(found[0].length) };
+        }
+    }
+    return null;
+};
+
+/**
+ * The device a drive letter is a link to, as the object manager names it:
+ * the disc drives numbered from 0 as CdRom, the other volumes from 1 as
+ * HarddiskVolume, each in the order of the letters.
+ *
+ * @param {string[]} letters @param {(letter: string) => boolean} isDisc
+ * @param {string} letter
+ */
+const deviceName = (letters, isDisc, letter)=>{
+    const same = letters.filter(other=>isDisc(other) === isDisc(letter));
+    const index = same.indexOf(letter);
+    return isDisc(letter) ? `\\Device\\CdRom${index}` : `\\Device\\HarddiskVolume${index + 1}`;
+};
+
+/**
+ * Every mount point the mount manager knows: each drive's letter and its
+ * volume's own name, both links to the drive's device, with the volume's
+ * unique ID. The ID is an MBR disk's -- the disk's signature and the
+ * partition's offset, twelve bytes -- one disk with one partition per
+ * letter: there is no disk under the volumes to read one from, and the ID
+ * only has to be the same for the two links of a volume and differ between
+ * volumes.
+ *
+ * @param {{ drives?: () => string[], volume?: (letter: string) => any }} host
+ * @returns {{ link: string, id: Uint8Array, device: string }[]}
+ */
+export const mountPointsOf = host=>{
+    const letters = (host.drives?.() ?? ['C']).map(letter=>letter[0].toUpperCase());
+    const isDisc = (/** @type {string} */ letter)=>host.volume?.(letter)?.kind === 'cdrom';
+    return letters.flatMap((letter, index)=>{
+        const id = new Uint8Array(12);
+        const view = new DataView(id.buffer);
+        view.setUint32(0, VOLUME_SERIAL, true);
+        view.setUint32(4, (index + 1) * 0x100000, true);
+        const device = deviceName(letters, isDisc, letter);
+        return [
+            { link: `\\DosDevices\\${letter}:`, id, device },
+            { link: `\\??\\${volumeName(letter).slice(4, -1)}`, id, device },
+        ];
+    });
+};
+
 /** What GetComputerName answers. NetBIOS names are at most 15 characters. */
 export const COMPUTER_NAME = 'BOTTLIFY';
 
@@ -119,6 +263,13 @@ export const COMPUTER_NAME = 'BOTTLIFY';
  * @property {(letter: string) => { kind?: string, label?: string, serial?: number,
  *     size?: number, unicode?: boolean, readOnly?: boolean } | null} [volume]
  *     What a drive says of itself: a disc names its kind, `'cdrom'`, and what it records.
+ * @property {() => string} [currentDirectory]  The process's, as a full path.
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(path: string) => { exists?: boolean, isDirectory?: boolean } | null} [stat]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose IO_STATUS_BLOCK
+ *     holds Information eight bytes in; absent, 4.
+ * @property {{ resolve: (handle: number, type?: string) => any }} [handles]
+ *     The handle table, for the volume an open file is on.
  */
 
 /**
@@ -151,7 +302,10 @@ export function createDriveFunctions(host){
 
     /**
      * The drive letter a path names, or null when it names none. A path with no
-     * drive means the current one, which is the first mounted letter.
+     * drive means the current one, which is the first mounted letter. The
+     * Win32 file namespace's `\\?\` and the device namespace's `\\.\` name
+     * the same drive with their prefix in front, and a program that writes
+     * its paths long asks about its drive that way.
      *
      * @param {string} path
      */
@@ -160,7 +314,7 @@ export function createDriveFunctions(host){
         {
             return letters()[0] ?? null;
         }
-        const found = /^([A-Za-z]):/.exec(path);
+        const found = /^(?:\\\\[?.]\\)?([A-Za-z]):/.exec(path);
         return found ? found[1].toUpperCase() : null;
     };
 
@@ -199,19 +353,48 @@ export function createDriveFunctions(host){
      * implementations of one answer drift, and the drift shows as a drive that
      * exists when asked one way and not the other.
      *
-     * @param {string} path
+     * @param {string | null} path  null for none: the current drive.
      */
     const driveType = path=>{
-        if (!known(path))
+        const root = rootOf(path);
+        if (root === null || !known(root))
         {
             return DRIVE_NO_ROOT_DIR;
         }
-        return discAt(path) ? DRIVE_CDROM : DRIVE_FIXED;
+        return discAt(root) ? DRIVE_CDROM : DRIVE_FIXED;
     };
 
     /**
-     * GetDiskFreeSpace in either spelling: the volume in clusters, clamped so
-     * that the four figures multiplied stay under 2^32.
+     * The drive root a path to the space and type calls means: its own
+     * letter's, the current drive's for `\` or `/`, a volume's own name's;
+     * null for the empty string and for a name with no drive in it.
+     *
+     * @param {string | null} path  null when the caller passed no path: the
+     *     current directory's drive.
+     * @returns {string | null}
+     */
+    const rootOf = path=>{
+        if (path === null)
+        {
+            return currentRoot();
+        }
+        const text = path.replace(/\//g, '\\');
+        if (text === '\\')
+        {
+            return currentRoot();
+        }
+        const own = letterOfVolume(text);
+        if (own !== null)
+        {
+            return `${own}:\\`;
+        }
+        const plain = /^\\\\[?.]\\/.test(text) ? text.slice(4) : text;
+        const drive = /^([A-Za-z]):(\\|$)/.exec(plain);
+        return drive ? `${drive[1].toUpperCase()}:\\` : null;
+    };
+
+    /**
+     * GetDiskFreeSpace in either spelling: the volume in clusters.
      *
      * @param {(address: number) => string} readPath
      */
@@ -219,10 +402,10 @@ export function createDriveFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([path, sectorsPerCluster, bytesPerSector, freeClusters, totalClusters])=>{
-            const root = path === 0 ? '' : readPath(path >>> 0);
-            if (!known(root))
+            const root = rootOf(path === 0 ? null : readPath(wholeAddress(path)));
+            if (root === null || !known(root))
             {
-                host.setLastError(ERROR_INVALID_PARAMETER);
+                host.setLastError(ERROR_PATH_NOT_FOUND);
                 return 0;
             }
             const disc = discAt(root);
@@ -251,10 +434,10 @@ export function createDriveFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([path, available, total, free])=>{
-            const root = path === 0 ? '' : readPath(path >>> 0);
-            if (!known(root))
+            const root = rootOf(path === 0 ? null : readPath(wholeAddress(path)));
+            if (root === null || !known(root))
             {
-                host.setLastError(ERROR_INVALID_PARAMETER);
+                host.setLastError(ERROR_PATH_NOT_FOUND);
                 return 0;
             }
             /** @param {number} address @param {number} value */
@@ -273,35 +456,392 @@ export function createDriveFunctions(host){
         },
     });
 
+    /** The current directory's drive, as `C:\`. */
+    const currentRoot = ()=>{
+        const found = /^([A-Za-z]):/.exec(host.currentDirectory?.() ?? '');
+        return `${found ? found[1].toUpperCase() : letters()[0] ?? 'C'}:\\`;
+    };
+
+    /** The letter a volume's own name is, or null. @param {string} name */
+    const letterOfVolume = name=>{
+        const wanted = name.toLowerCase();
+        return letters().find(letter=>volumeName(letter).toLowerCase() === wanted) ?? null;
+    };
+
+    /**
+     * The root a path to GetVolumeInformation names -- `C:\`, the same behind
+     * `\\?\` or `\\.\`, a volume's own name -- or null for a path that is no
+     * root. `C:` alone is the drive's current directory, and a root only
+     * while that is the drive's root.
+     *
+     * @param {string} named
+     * @returns {string | null}
+     */
+    const rootNamed = named=>{
+        const text = named.replace(/\//g, '\\');
+        const volume = letterOfVolume(text);
+        if (volume !== null)
+        {
+            return `${volume}:\\`;
+        }
+        const plain = /^\\\\[?.]\\/.test(text) ? text.slice(4) : text;
+        const rooted = /^([A-Za-z]):\\$/.exec(plain);
+        if (rooted)
+        {
+            return `${rooted[1].toUpperCase()}:\\`;
+        }
+        const bare = /^([A-Za-z]):$/.exec(plain);
+        if (bare)
+        {
+            const letter = bare[1].toUpperCase();
+            const current = host.currentDirectory?.() ?? '';
+            const onDrive = current.toUpperCase().startsWith(`${letter}:`);
+            return !onDrive || /^[A-Za-z]:\\?$/.test(current) ? `${letter}:\\` : null;
+        }
+        return null;
+    };
+
+    /**
+     * The mount point a path is on, as GetVolumePathName names it, or the
+     * error it is refused with. A path behind `\\?\` keeps the prefix and its
+     * own spelling; a drive letter is upper-cased; a relative path, and one
+     * in the object manager's `\??\`, is on the current directory's volume.
+     * Nothing here is mounted in a folder, so the root of a drive is the
+     * answer for every path on it.
+     *
+     * @param {string} name
+     * @returns {{ path: string } | { error: number }}
+     */
+    const volumePathOf = name=>{
+        const text = name.replace(/\//g, '\\');
+        if (text.startsWith('\\\\?\\'))
+        {
+            const rest = text.slice(4);
+            const drive = /^([A-Za-z]):(\\|$)/.exec(rest);
+            if (drive && letters().includes(drive[1].toUpperCase()))
+            {
+                return { path: `\\\\?\\${drive[1]}:\\` };
+            }
+            const volume = /^Volume\{[^}]*\}\\/i.exec(rest);
+            const letter = volume ? letterOfVolume(`\\\\?\\${volume[0]}`) : null;
+            return letter !== null ? { path: volumeName(letter) } : { error: ERROR_INVALID_NAME };
+        }
+        if (text.startsWith('\\??\\'))
+        {
+            return { path: currentRoot() };
+        }
+        if (text.startsWith('\\\\'))
+        {
+            return { error: ERROR_INVALID_NAME };
+        }
+        if (text[1] === ':')
+        {
+            const letter = text[0].toUpperCase();
+            return /[A-Z]/.test(letter) && letters().includes(letter)
+                ? { path: `${letter}:\\` } : { error: ERROR_FILE_NOT_FOUND };
+        }
+        return { path: currentRoot() };
+    };
+
+    /**
+     * Devices DefineDosDevice made, by name without regard to case, each the
+     * targets it was given, the latest last: a definition removed uncovers
+     * the one before it, as the object manager's link does.
+     *
+     * @type {Map<string, { name: string, targets: string[] }>}
+     */
+    const devices = new Map();
+
+    /** Find handles FindFirstVolume gave out, each the letters still to tell. */
+    /** @type {Map<number, string[]>} */
+    const volumeFinds = new Map();
+    let nextVolumeFind = FIRST_VOLUME_FIND;
+
+    /**
+     * Writes a string and its terminator where `room` characters fit, or
+     * says the room is short.
+     *
+     * @param {number} buffer @param {number} room @param {string} text
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const fits = (buffer, room, text, encode)=>{
+        if ((buffer >>> 0) === 0 || text.length + 1 > (room >>> 0))
+        {
+            return false;
+        }
+        host.writeMemory(wholeAddress(buffer), encode(`${text}\0`));
+        return true;
+    };
+
+    /**
+     * The volume calls whose only difference is the width of their strings.
+     *
+     * @param {(address: number) => string} read
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const volumeCalls = (read, encode)=>({
+        /**
+         * BOOL DefineDosDevice(DWORD dwFlags, LPCTSTR lpDeviceName, LPCTSTR lpTargetPath)
+         *
+         * A name for a path, as QueryDosDevice then reports it -- `\??\` in
+         * front and its slashes turned unless the target is raw. What it
+         * names is not routed to: a file opened through the new name is not
+         * found, as the device's own link would not lead anywhere here.
+         */
+        DefineDosDevice: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([flags, name, target])=>{
+                if (wholeAddress(name) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const device = read(wholeAddress(name));
+                const key = device.toLowerCase();
+                const given = wholeAddress(target) === 0 ? null : read(wholeAddress(target));
+                const path = given === null || (flags & DDD_RAW_TARGET_PATH) !== 0
+                    ? given : `\\??\\${given.replace(/\//g, '\\')}`;
+                if ((flags & DDD_REMOVE_DEFINITION) !== 0)
+                {
+                    const held = devices.get(key);
+                    const at = held === undefined ? -1
+                        : path !== null && (flags & DDD_EXACT_MATCH_ON_REMOVE) !== 0
+                            ? held.targets.lastIndexOf(path) : held.targets.length - 1;
+                    if (held === undefined || at < 0)
+                    {
+                        host.setLastError(ERROR_FILE_NOT_FOUND);
+                        return 0;
+                    }
+                    held.targets.splice(at, 1);
+                    if (held.targets.length === 0)
+                    {
+                        devices.delete(key);
+                    }
+                    return 1;
+                }
+                if (path === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const held = devices.get(key) ?? { name: device, targets: [] };
+                held.targets.push(path);
+                devices.set(key, held);
+                return 1;
+            },
+        },
+
+        /**
+         * HANDLE FindFirstVolume(LPTSTR lpszVolumeName, DWORD cchBufferLength)
+         * BOOL FindNextVolume(HANDLE hFindVolume, LPTSTR lpszVolumeName, DWORD cchBufferLength)
+         *
+         * Every volume's own name, one at a time, in the letters' order.
+         */
+        FindFirstVolume: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, room])=>{
+                const [first, ...rest] = letters();
+                if (first === undefined)
+                {
+                    host.setLastError(ERROR_NO_MORE_FILES);
+                    return 0xffffffff;
+                }
+                if (!fits(buffer, room, volumeName(first), encode))
+                {
+                    host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                    return 0xffffffff;
+                }
+                const handle = nextVolumeFind;
+                nextVolumeFind += 4;
+                volumeFinds.set(handle, rest);
+                return handle;
+            },
+        },
+        FindNextVolume: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, room])=>{
+                const rest = volumeFinds.get(handle >>> 0);
+                if (rest === undefined)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (rest.length === 0)
+                {
+                    host.setLastError(ERROR_NO_MORE_FILES);
+                    return 0;
+                }
+                if (!fits(buffer, room, volumeName(rest[0]), encode))
+                {
+                    host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                    return 0;
+                }
+                rest.shift();
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetVolumeNameForVolumeMountPoint(LPCTSTR lpszVolumeMountPoint,
+         *   LPTSTR lpszVolumeName, DWORD cchBufferLength)
+         *
+         * A drive's root to the volume's own name. The point must end in a
+         * separator; a folder that is no mount point, a drive that is not
+         * there and a name DefineDosDevice made are each refused as Windows
+         * refuses them.
+         */
+        GetVolumeNameForVolumeMountPoint: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([point, buffer, room])=>{
+                if ((room >>> 0) < VOLUME_NAME_LENGTH + 1)
+                {
+                    host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                    return 0;
+                }
+                const text = wholeAddress(point) === 0 ? '' : read(wholeAddress(point)).replace(/\//g, '\\');
+                if (!text.endsWith('\\'))
+                {
+                    host.setLastError(ERROR_INVALID_NAME);
+                    return 0;
+                }
+                const own = letterOfVolume(text);
+                const plain = text.startsWith('\\\\?\\') ? text.slice(4) : text;
+                const drive = /^([A-Za-z]):\\$/.exec(plain);
+                const letter = own ?? (drive ? drive[1].toUpperCase() : null);
+                if (letter !== null && devices.has(`${letter.toLowerCase()}:`))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (letter === null || !letters().includes(letter))
+                {
+                    let folder = null;
+                    try
+                    {
+                        folder = drive ? null : host.stat?.(plain.slice(0, -1)) ?? null;
+                    }
+                    catch (e){
+                        void e;
+                    }
+                    host.setLastError(folder?.exists ? ERROR_NOT_A_REPARSE_POINT
+                        : ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                fits(buffer, room, volumeName(letter), encode);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetVolumePathName(LPCTSTR lpszFileName, LPTSTR lpszVolumePathName,
+         *   DWORD cchBufferLength)
+         *
+         * The mount point a path is on. A buffer one character short of it
+         * takes it without its trailing separator.
+         */
+        GetVolumePathName: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, buffer, room])=>{
+                const text = wholeAddress(name) === 0 ? '' : read(wholeAddress(name));
+                if (text === '' || wholeAddress(buffer) === 0 || (room >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const found = volumePathOf(text);
+                if ('error' in found)
+                {
+                    host.setLastError(found.error);
+                    return 0;
+                }
+                const path = found.path;
+                const answer = (room >>> 0) >= path.length + 1 ? path
+                    : (room >>> 0) === path.length ? path.slice(0, -1) : null;
+                if (answer === null)
+                {
+                    host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(buffer), encode(`${answer}\0`));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetVolumePathNamesForVolumeName(LPCTSTR lpszVolumeName,
+         *   LPTCH lpszVolumePathNames, DWORD cchBufferLength, PDWORD lpcchReturnLength)
+         *
+         * Where a volume is mounted, as a list ended by an empty string: its
+         * drive's root, the only place anything is mounted here.
+         */
+        GetVolumePathNamesForVolumeName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([name, buffer, room, needed])=>{
+                const text = wholeAddress(name) === 0 ? '' : read(wholeAddress(name));
+                if (!/^\\\\\?\\Volume\{[0-9a-f-]{36}\}\\$/i.test(text))
+                {
+                    host.setLastError(ERROR_INVALID_NAME);
+                    return 0;
+                }
+                const letter = letterOfVolume(text);
+                if (letter === null)
+                {
+                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                const list = `${letter}:\\\0\0`;
+                writeDwordIf(wholeAddress(needed), list.length);
+                if (wholeAddress(buffer) === 0 || (room >>> 0) < list.length)
+                {
+                    host.setLastError(ERROR_MORE_DATA);
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(buffer), encode(list));
+                return 1;
+            },
+        },
+    });
+
     /**
      * GetVolumeInformation in either width; only the text differs.
      *
-     * @param {(address: number, maxLength: number) => string} readPath
+     * @param {(address: number) => string} readPath
      * @param {(text: string) => Uint8Array} encode
      */
     const volumeInformation = (readPath, encode)=>({
         argBytes: 32,
         /** @param {number[]} args */
         handler: args=>{
-            const [path, volumeName, volumeSize, serial,
+            const [path, labelBuffer, volumeSize, serial,
                 componentLength, flags, systemName, systemSize] = args;
-            const root = path === 0 ? '' : readPath(path >>> 0, MAX_PATH);
+            const named = path === 0 ? '' : readPath(wholeAddress(path));
+            const root = path === 0 ? '' : rootNamed(named);
+            if (root === null)
+            {
+                host.setLastError(named.endsWith('\\') || named.endsWith('/')
+                    ? ERROR_DIR_NOT_ROOT : ERROR_INVALID_NAME);
+                return 0;
+            }
             if (!known(root))
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const disc = discAt(root);
-            const system = disc ? DISC_FILE_SYSTEM : FILE_SYSTEM;
-            if (volumeName !== 0)
+            const { label, system, serial: number, component, flags: kept } = factsOf(root);
+            if (labelBuffer !== 0)
             {
-                const label = labelOf(root);
                 if (label.length + 1 > (volumeSize >>> 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(volumeName >>> 0, encode(label + '\0'));
+                host.writeMemory(wholeAddress(labelBuffer), encode(label + '\0'));
             }
             if (systemName !== 0)
             {
@@ -310,23 +850,198 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(systemName >>> 0, encode(system + '\0'));
+                host.writeMemory(wholeAddress(systemName), encode(system + '\0'));
             }
-            if (disc)
-            {
-                writeDwordIf(serial >>> 0, (disc.serial ?? 0) >>> 0);
-                writeDwordIf(componentLength >>> 0, disc.unicode
-                    ? DISC_UNICODE_COMPONENT_LENGTH : DISC_COMPONENT_LENGTH);
-                writeDwordIf(flags >>> 0, FILE_CASE_SENSITIVE_SEARCH | FILE_READ_ONLY_VOLUME
-                    | (disc.unicode ? FILE_UNICODE_ON_DISK : 0));
-                return 1;
-            }
-            writeDwordIf(serial >>> 0, VOLUME_SERIAL);
-            writeDwordIf(componentLength >>> 0, MAX_COMPONENT_LENGTH);
-            writeDwordIf(flags >>> 0, FILE_SYSTEM_FLAGS);
+            writeDwordIf(serial >>> 0, number);
+            writeDwordIf(componentLength >>> 0, component);
+            writeDwordIf(flags >>> 0, kept);
             return 1;
         },
     });
+
+    /**
+     * What GetVolumeInformation says of the volume a root is on, whichever
+     * way it was asked.
+     *
+     * @param {string} root
+     */
+    const factsOf = root=>{
+        const disc = discAt(root);
+        return disc ? {
+            label: labelOf(root), system: DISC_FILE_SYSTEM, serial: (disc.serial ?? 0) >>> 0,
+            component: disc.unicode ? DISC_UNICODE_COMPONENT_LENGTH : DISC_COMPONENT_LENGTH,
+            flags: FILE_CASE_SENSITIVE_SEARCH | FILE_READ_ONLY_VOLUME
+                | (disc.unicode ? FILE_UNICODE_ON_DISK : 0),
+            disc,
+        } : {
+            label: labelOf(root), system: FILE_SYSTEM, serial: VOLUME_SERIAL,
+            component: MAX_COMPONENT_LENGTH, flags: FILE_SYSTEM_FLAGS, disc: null,
+        };
+    };
+
+    /** FILE_FS_DEVICE_INFORMATION of the pipe device: its type, no characteristics. */
+    const pipeDevice = ()=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setUint32(0, FILE_DEVICE_NAMED_PIPE, true);
+        return bytes;
+    };
+    /** Whether a handle opens a pipe end or the pipe device. @param {number} handle */
+    const isPipeHandle = handle=>{
+        try
+        {
+            return host.handles?.resolve(handle >>> 0, 'pipe') != null;
+        }
+        catch {
+            return false;
+        }
+    };
+    /**
+     * The root of the volume an open file or directory is on, or null for a
+     * handle that is neither.
+     *
+     * @param {number} handle
+     */
+    const rootOfHandle = handle=>{
+        for (const kind of ['file', 'directory'])
+        {
+            try
+            {
+                const path = host.handles?.resolve(handle >>> 0, kind)?.path;
+                if (typeof path === 'string' && /^[A-Za-z]:/.test(path))
+                {
+                    return `${path[0].toUpperCase()}:\\`;
+                }
+            }
+            catch (e){
+                void e;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * One FS_INFORMATION_CLASS record of the volume a root is on, as
+     * NtQueryVolumeInformationFile lays it out, and the part of it that
+     * must fit whole; null for a class not kept.
+     *
+     * @param {string} root @param {number} kind
+     * @returns {{ bytes: Uint8Array, fixed: number } | null}
+     */
+    const volumeRecord = (root, kind)=>{
+        const facts = factsOf(root);
+        /** @param {number} length @param {(view: DataView) => void} fill */
+        const record = (length, fill)=>{
+            const bytes = new Uint8Array(length);
+            fill(new DataView(bytes.buffer));
+            return bytes;
+        };
+        const discSectors = Math.ceil((facts.disc?.size ?? 0) / DISC_SECTOR);
+        const total = facts.disc ? discSectors : VOLUME_BYTES / CLUSTER_BYTES;
+        const free = facts.disc ? 0 : FREE_BYTES / CLUSTER_BYTES;
+        const perCluster = facts.disc ? 1 : SECTORS_PER_CLUSTER;
+        const sector = facts.disc ? DISC_SECTOR : BYTES_PER_SECTOR;
+        switch (kind)
+        {
+            case FILE_FS_VOLUME_INFORMATION: {
+                // VolumeCreationTime, VolumeSerialNumber, VolumeLabelLength,
+                // SupportsObjects, then the label.
+                const label = utf16(facts.label);
+                const bytes = record(VOLUME_FIXED + label.length, view=>{
+                    // A disc's descriptor dates are not kept: it says none.
+                    view.setBigUint64(0, facts.disc ? 0n : msToFileTime(VOLUME_CREATED_MS), true);
+                    view.setUint32(8, facts.serial, true);
+                    view.setUint32(12, label.length, true);
+                    // SupportsObjects stays 0: the volume keeps no object ids,
+                    // as its attribute flags say, though NTFS answers 1 (A276).
+                });
+                bytes.set(label, VOLUME_FIXED);
+                return { bytes, fixed: VOLUME_FIXED };
+            }
+            case FILE_FS_SIZE_INFORMATION:
+                return { bytes: record(24, view=>{
+                    view.setBigUint64(0, BigInt(total), true);
+                    view.setBigUint64(8, BigInt(free), true);
+                    view.setUint32(16, perCluster, true);
+                    view.setUint32(20, sector, true);
+                }), fixed: 24 };
+            case FILE_FS_DEVICE_INFORMATION:
+                return { bytes: record(8, view=>{
+                    view.setUint32(0, facts.disc ? FILE_DEVICE_CD_ROM : FILE_DEVICE_DISK, true);
+                    view.setUint32(4, FILE_DEVICE_IS_MOUNTED | (facts.disc
+                        ? FILE_REMOVABLE_MEDIA | FILE_READ_ONLY_DEVICE : 0), true);
+                }), fixed: 8 };
+            case FILE_FS_ATTRIBUTE_INFORMATION: {
+                // FileSystemAttributes, MaximumComponentNameLength,
+                // FileSystemNameLength, then the name.
+                const name = utf16(facts.system);
+                const bytes = record(ATTRIBUTE_FIXED + name.length, view=>{
+                    view.setUint32(0, facts.flags, true);
+                    view.setUint32(4, facts.component, true);
+                    view.setUint32(8, name.length, true);
+                });
+                bytes.set(name, ATTRIBUTE_FIXED);
+                return { bytes, fixed: ATTRIBUTE_FIXED };
+            }
+            case FILE_FS_FULL_SIZE_INFORMATION:
+                return { bytes: record(32, view=>{
+                    view.setBigUint64(0, BigInt(total), true);
+                    view.setBigUint64(8, BigInt(free), true);
+                    view.setBigUint64(16, BigInt(free), true);
+                    view.setUint32(24, perCluster, true);
+                    view.setUint32(28, sector, true);
+                }), fixed: 32 };
+            default:
+                return null;
+        }
+    };
+
+    /**
+     * NTSTATUS NtQueryVolumeInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
+     *                                       ULONG Length, FS_INFORMATION_CLASS)
+     *
+     * A buffer short of the record's fixed part takes nothing; one short of
+     * its name takes what fits, the length still saying all of it.
+     */
+    const queryVolumeInformation = {
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([handle, block, out, length, kind])=>{
+            /** @param {number} status @param {number} information */
+            const report = (status, information)=>{
+                if ((block >>> 0) !== 0)
+                {
+                    overlappedResult(writeDwordIf, overlappedLayout(host.pointerSize),
+                        block >>> 0, status, information);
+                }
+                return status;
+            };
+            const root = rootOfHandle(handle);
+            const piped = root === null && isPipeHandle(handle);
+            if (root === null && !piped)
+            {
+                return STATUS_INVALID_HANDLE;
+            }
+            // A pipe is on the pipe device, which says what kind of device it
+            // is and keeps nothing a volume does.
+            const found = root !== null ? volumeRecord(root, kind >>> 0)
+                : (kind >>> 0) === FILE_FS_DEVICE_INFORMATION ? { bytes: pipeDevice(), fixed: 8 }
+                    : null;
+            if (found === null)
+            {
+                host.divergence?.('NtQueryVolumeInformationFile',
+                    `information class ${kind >>> 0} is not kept`);
+                return STATUS_INVALID_INFO_CLASS;
+            }
+            if ((length >>> 0) < found.fixed)
+            {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            const stored = found.bytes.subarray(0, Math.min(found.bytes.length, length >>> 0));
+            host.writeMemory(wholeAddress(out), stored);
+            return report(stored.length < found.bytes.length ? STATUS_BUFFER_OVERFLOW : 0,
+                stored.length);
+        },
+    };
 
     /**
      * GetComputerName in either width: the name is ASCII, so the sizes are
@@ -343,33 +1058,55 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const room = readDword(size >>> 0);
+            const room = readDword(wholeAddress(size));
             if (buffer === 0 || COMPUTER_NAME.length + 1 > room)
             {
-                writeDword(size >>> 0, COMPUTER_NAME.length + 1);
+                writeDword(wholeAddress(size), COMPUTER_NAME.length + 1);
                 host.setLastError(ERROR_BUFFER_OVERFLOW);
                 return 0;
             }
-            host.writeMemory(buffer >>> 0, encode(COMPUTER_NAME + '\0'));
-            writeDword(size >>> 0, COMPUTER_NAME.length);
+            host.writeMemory(wholeAddress(buffer), encode(COMPUTER_NAME + '\0'));
+            writeDword(wholeAddress(size), COMPUTER_NAME.length);
             return 1;
         },
     });
 
     /**
-     * The device a drive letter is a link to, as the object manager names it:
-     * the disc drives numbered from 0 as CdRom, the other volumes from 1 as
-     * HarddiskVolume, each in the order of the letters.
+     * GetComputerNameEx in either width. The machine is in a workgroup, not a
+     * domain: its DNS domain is empty and its fully qualified name its host
+     * name, and the physical names are the same as the logical ones, there
+     * being no cluster. A name that does not fit is ERROR_MORE_DATA, with
+     * the room it needs, its terminator counted.
      *
-     * @param {string} letter
+     * @param {(text: string) => Uint8Array} encode
      */
-    const deviceOf = letter=>{
-        const all = letters();
-        const isDisc = (/** @type {string} */ other)=>host.volume?.(other)?.kind === 'cdrom';
-        const same = all.filter(other=>isDisc(other) === isDisc(letter));
-        const index = same.indexOf(letter);
-        return isDisc(letter) ? `\\Device\\CdRom${index}` : `\\Device\\HarddiskVolume${index + 1}`;
-    };
+    const computerNameEx = encode=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([type, buffer, size])=>{
+            const format = type >>> 0;
+            if (format > 7 || (size >>> 0) === 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const name = (format & 3) === 2 ? '' : COMPUTER_NAME;
+            const room = readDword(wholeAddress(size));
+            if ((buffer >>> 0) === 0 || name.length + 1 > room)
+            {
+                writeDword(wholeAddress(size), name.length + 1);
+                host.setLastError(ERROR_MORE_DATA);
+                return 0;
+            }
+            host.writeMemory(wholeAddress(buffer), encode(`${name}\0`));
+            writeDword(wholeAddress(size), name.length);
+            return 1;
+        },
+    });
+
+    /** @param {string} letter */
+    const deviceOf = letter=>deviceName(letters(), other=>host.volume?.(other)?.kind === 'cdrom',
+        letter);
 
     /**
      * QueryDosDevice in either width: the target of a drive letter named
@@ -386,13 +1123,23 @@ export function createDriveFunctions(host){
         /** @param {number[]} args */
         handler: ([name, target, max])=>{
             let list;
+            const defined = name === 0 ? undefined
+                : devices.get(readName(wholeAddress(name)).toLowerCase());
             if (name === 0)
             {
-                list = letters().map(letter=>`${letter}:\0`).join('');
+                list = [...letters().map(letter=>`${letter}:`),
+                    ...[...devices.values()].map(device=>device.name)]
+                    .filter((device, at, all)=>all.findIndex(other=>
+                        other.toLowerCase() === device.toLowerCase()) === at)
+                    .map(device=>`${device}\0`).join('');
+            }
+            else if (defined !== undefined)
+            {
+                list = `${/** @type {string} */ (defined.targets.at(-1))}\0`;
             }
             else
             {
-                const found = /^([A-Za-z]):$/.exec(readName(name >>> 0));
+                const found = /^([A-Za-z]):$/.exec(readName(wholeAddress(name)));
                 const letter = found ? found[1].toUpperCase() : null;
                 if (letter === null || !letters().includes(letter))
                 {
@@ -407,7 +1154,7 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
-            host.writeMemory(target >>> 0, encode(list));
+            host.writeMemory(wholeAddress(target), encode(list));
             return list.length;
         },
     });
@@ -432,18 +1179,77 @@ export function createDriveFunctions(host){
             {
                 return needed;
             }
-            host.writeMemory(buffer >>> 0, encode(block + '\0'));
+            host.writeMemory(wholeAddress(buffer), encode(block + '\0'));
             return block.length;
         },
     });
 
+    /** @param {string} name */
+    const mountRefused = name=>({
+        argBytes: 8,
+        handler: ()=>{
+            host.divergence?.(name, 'no mounted folders: the volume keeps no reparse points');
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        },
+    });
+    const notMountPoint = ()=>{
+        host.setLastError(ERROR_NOT_A_REPARSE_POINT);
+        return 0;
+    };
+
+    const ansiVolumes = volumeCalls(address=>host.readCString(address, WHOLE_NAME), encodeAnsi);
+    const wideVolumes = volumeCalls(address=>host.readWideString(address, WHOLE_NAME * 2),
+        utf16);
+
     return {
+        // The volume calls, each in both widths (`volumeCalls`).
+        DefineDosDeviceA: ansiVolumes.DefineDosDevice,
+        DefineDosDeviceW: wideVolumes.DefineDosDevice,
+        FindFirstVolumeA: ansiVolumes.FindFirstVolume,
+        FindFirstVolumeW: wideVolumes.FindFirstVolume,
+        FindNextVolumeA: ansiVolumes.FindNextVolume,
+        FindNextVolumeW: wideVolumes.FindNextVolume,
+        GetVolumeNameForVolumeMountPointA: ansiVolumes.GetVolumeNameForVolumeMountPoint,
+        GetVolumeNameForVolumeMountPointW: wideVolumes.GetVolumeNameForVolumeMountPoint,
+        GetVolumePathNameA: ansiVolumes.GetVolumePathName,
+        GetVolumePathNameW: wideVolumes.GetVolumePathName,
+        GetVolumePathNamesForVolumeNameA: ansiVolumes.GetVolumePathNamesForVolumeName,
+        GetVolumePathNamesForVolumeNameW: wideVolumes.GetVolumePathNamesForVolumeName,
+
+        /**
+         * BOOL SetVolumeMountPointA/W(LPCTSTR lpszVolumeMountPoint, LPCTSTR lpszVolumeName)
+         * BOOL DeleteVolumeMountPointA/W(LPCTSTR lpszVolumeMountPoint)
+         *
+         * No folder is a mount point here: the volume keeps no reparse
+         * points. Making one is refused as it is to a user without the right
+         * to, and removing one finds none.
+         */
+        SetVolumeMountPointA: mountRefused('SetVolumeMountPointA'),
+        SetVolumeMountPointW: mountRefused('SetVolumeMountPointW'),
+        DeleteVolumeMountPointA: { argBytes: 4, handler: notMountPoint },
+        DeleteVolumeMountPointW: { argBytes: 4, handler: notMountPoint },
+
+        /** BOOL FindVolumeClose(HANDLE hFindVolume) */
+        FindVolumeClose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!volumeFinds.delete(handle >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
         /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, MAX_PATH), encodeAnsi),
+        QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, WHOLE_NAME), encodeAnsi),
 
         /** DWORD QueryDosDeviceW(LPCWSTR lpDeviceName, LPWSTR lpTargetPath, DWORD ucchMax) */
-        QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, MAX_PATH * 2),
-            encodeWide),
+        QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, WHOLE_NAME * 2),
+            utf16),
 
         /**
          * DWORD GetLogicalDrives(VOID)
@@ -472,14 +1278,14 @@ export function createDriveFunctions(host){
          *
          * The same block in wide characters; the sizes are in characters too.
          */
-        GetLogicalDriveStringsW: driveStrings(encodeWide),
+        GetLogicalDriveStringsW: driveStrings(utf16),
 
         /** UINT GetDriveTypeA(LPCSTR lpRootPathName) */
         GetDriveTypeA: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH)),
+                path === 0 ? null : host.readCString(wholeAddress(path), WHOLE_NAME)),
         },
 
         /** UINT GetDriveTypeW(LPCWSTR lpRootPathName) */
@@ -487,7 +1293,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? '' : host.readWideString(path >>> 0, MAX_PATH * 2)),
+                path === 0 ? null : host.readWideString(wholeAddress(path), WHOLE_NAME * 2)),
         },
 
         /**
@@ -495,10 +1301,10 @@ export function createDriveFunctions(host){
          *                        LPDWORD lpBytesPerSector, LPDWORD lpNumberOfFreeClusters,
          *                        LPDWORD lpTotalNumberOfClusters)
          */
-        GetDiskFreeSpaceA: diskFreeSpace(address=>host.readCString(address, MAX_PATH)),
+        GetDiskFreeSpaceA: diskFreeSpace(address=>host.readCString(address, WHOLE_NAME)),
 
         /** GetDiskFreeSpaceW: the same answers, the root read in UTF-16. */
-        GetDiskFreeSpaceW: diskFreeSpace(address=>host.readWideString(address, MAX_PATH * 2)),
+        GetDiskFreeSpaceW: diskFreeSpace(address=>host.readWideString(address, WHOLE_NAME * 2)),
 
         /**
          * BOOL GetDiskFreeSpaceExA(LPCSTR lpDirectoryName,
@@ -509,10 +1315,10 @@ export function createDriveFunctions(host){
          * volume clamped. There is one user and no quota, so what is free is
          * what the caller may have.
          */
-        GetDiskFreeSpaceExA: diskFreeSpaceEx(address=>host.readCString(address, MAX_PATH)),
+        GetDiskFreeSpaceExA: diskFreeSpaceEx(address=>host.readCString(address, WHOLE_NAME)),
 
         /** GetDiskFreeSpaceExW: the same answers, the directory read in UTF-16. */
-        GetDiskFreeSpaceExW: diskFreeSpaceEx(address=>host.readWideString(address, MAX_PATH * 2)),
+        GetDiskFreeSpaceExW: diskFreeSpaceEx(address=>host.readWideString(address, WHOLE_NAME * 2)),
 
         /**
          * BOOL GetVolumeInformationA(LPCSTR lpRootPathName, LPSTR lpVolumeNameBuffer,
@@ -526,11 +1332,55 @@ export function createDriveFunctions(host){
          * where a size mismatch fails instead of reporting a size.
          */
         GetVolumeInformationA: volumeInformation(
-            (address, length)=>host.readCString(address, length), encodeAnsi),
+            address=>host.readCString(address, WHOLE_NAME), encodeAnsi),
 
         /** GetVolumeInformationW: the same answers, the names in UTF-16 and sized in characters. */
         GetVolumeInformationW: volumeInformation(
-            (address, length)=>host.readWideString(address, length * 2), encodeWide),
+            address=>host.readWideString(address, WHOLE_NAME * 2), utf16),
+
+        /**
+         * BOOL GetVolumeInformationByHandleW(HANDLE, LPWSTR lpVolumeNameBuffer,
+         *     DWORD nVolumeNameSize, LPDWORD lpVolumeSerialNumber,
+         *     LPDWORD lpMaximumComponentLength, LPDWORD lpFileSystemFlags,
+         *     LPWSTR lpFileSystemNameBuffer, DWORD nFileSystemNameSize)
+         *
+         * GetVolumeInformationW's answers for the volume an open file or
+         * directory is on; a name with no room for its terminator fails
+         * with ERROR_BAD_LENGTH. The native query it rests on is ntdll's.
+         */
+        GetVolumeInformationByHandleW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([handle, labelBuffer, labelSize, serial, componentLength, flags,
+                systemName, systemSize])=>{
+                const root = rootOfHandle(handle);
+                if (root === null)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const facts = factsOf(root);
+                for (const [buffer, size, text] of /** @type {[number, number, string][]} */ ([
+                    [labelBuffer, labelSize, facts.label], [systemName, systemSize, facts.system]]))
+                {
+                    if (buffer === 0)
+                    {
+                        continue;
+                    }
+                    if (text.length + 1 > (size >>> 0))
+                    {
+                        host.setLastError(ERROR_BAD_LENGTH);
+                        return 0;
+                    }
+                    host.writeMemory(wholeAddress(buffer), utf16(text + '\0'));
+                }
+                writeDwordIf(wholeAddress(serial), facts.serial);
+                writeDwordIf(wholeAddress(componentLength), facts.component);
+                writeDwordIf(wholeAddress(flags), facts.flags);
+                return 1;
+            },
+            natives: { NtQueryVolumeInformationFile: queryVolumeInformation },
+        },
 
         /**
          * BOOL SetVolumeLabelA(LPCSTR lpRootPathName, LPCSTR lpVolumeName)
@@ -542,7 +1392,7 @@ export function createDriveFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([path, name])=>{
-                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
+                const root = path === 0 ? '' : host.readCString(wholeAddress(path), WHOLE_NAME);
                 const letter = letterOf(root);
                 if (letter === null || !known(root))
                 {
@@ -554,7 +1404,8 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_WRITE_PROTECT);
                     return 0;
                 }
-                labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, MAX_PATH));
+                labels.set(letter, name === 0 ? '' : host.readCString(wholeAddress(name),
+                    WHOLE_NAME));
                 return 1;
             },
         },
@@ -572,6 +1423,13 @@ export function createDriveFunctions(host){
         GetComputerNameA: computerName(encodeAnsi),
 
         /** BOOL GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize): the size in characters. */
-        GetComputerNameW: computerName(encodeWide),
+        GetComputerNameW: computerName(utf16),
+
+        /**
+         * BOOL GetComputerNameExA/W(COMPUTER_NAME_FORMAT NameType, LPTSTR lpBuffer,
+         *     LPDWORD nSize)
+         */
+        GetComputerNameExA: computerNameEx(encodeAnsi),
+        GetComputerNameExW: computerNameEx(utf16),
     };
 }

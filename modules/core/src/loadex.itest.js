@@ -25,7 +25,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { parsePe, rvaToFileOffset } from './layers/loader/internal/pe.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** Where the fixture builder puts every image it makes. */
 const IMAGE_BASE = 0x400000;
@@ -270,4 +270,165 @@ test('LoadLibrary refuses a library one of whose own libraries is nowhere, as Wi
 
         const code = await app.run({ timeoutMs: 40000 });
         assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });
+
+test('a library loaded by its path is that file, though one of the same name is loaded',
+    { timeout: 60000 }, async t=>{
+        // Windows looks a path up among the loaded modules by the whole path:
+        // a second file of the same name is a module of its own, and a bare
+        // name finds the one loaded first. The .NET Framework loads a mixed
+        // assembly's native image by its path while the assembly, of the same
+        // name, is loaded; given the assembly back, its setup could not
+        // install the image. Exit code bits: the two handles differ (1), the
+        // bare name is the first (2), the first path again is the first (4),
+        // the second path again is the second (8), each DllMain ran (0x10,
+        // 0x20).
+        const EVERY = 0x3f;
+        let where = { one: 0, two: 0 };
+        const program = (/** @type {(at: (name: string) => number) => void} */ placed)=>buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetModuleHandleA', 'ExitProcess'] },
+            data: {
+                first: cString('C:\\App\\one\\same.dll'), second: cString('C:\\App\\two\\same.dll'),
+                bare: cString('same.dll'), one: [0, 0, 0, 0], two: [0, 0, 0, 0],
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                placed(at);
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const JNE = 0x75;
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...push(at('first')), ...call('LoadLibraryA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...push(at('second')), ...call('LoadLibraryA'),
+                    0x89, 0xc7, //                                   mov edi, eax
+                    0x39, 0xfe, 0x74, 6, ...flag(0x1), //            cmp esi, edi; je
+                    ...push(at('bare')), ...call('GetModuleHandleA'),
+                    0x39, 0xf0, JNE, 6, ...flag(0x2), //             cmp eax, esi
+                    ...push(at('first')), ...call('LoadLibraryA'),
+                    0x39, 0xf0, JNE, 6, ...flag(0x4), //             cmp eax, esi
+                    ...push(at('second')), ...call('LoadLibraryA'),
+                    0x39, 0xf8, JNE, 6, ...flag(0x8), //             cmp eax, edi
+                    0x83, 0x3d, ...u32(at('one')), 0x00, 0x74, 6, ...flag(0x10),
+                    0x83, 0x3d, ...u32(at('two')), 0x00, 0x74, 6, ...flag(0x20),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        program(at=>{ where = { one: at('one'), two: at('two') }; });
+        const executable = program(()=>{});
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\Same.exe',
+            files: [
+                { path: 'C:\\App\\one\\same.dll', bytes: library(image(where.one).file) },
+                { path: 'C:\\App\\two\\same.dll', bytes: library(image(where.two).file) },
+            ],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });
+
+test('a load that cannot be answers why: a path not there, an empty file, a name with spaces',
+    { timeout: 60000 }, async t=>{
+        // Wine's kernel32:module: LoadLibraryEx as data of a path that is not
+        // there is ERROR_FILE_NOT_FOUND, though a module of its name is loaded;
+        // of an empty file ERROR_FILE_INVALID; "kernel32   " is kernel32;
+        // GetProcAddress(NULL) of a name the program does not export is
+        // ERROR_PROC_NOT_FOUND. One exit code bit for each answer as expected.
+        const EVERY = 0x3f;
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'LoadLibraryExA', 'GetLastError',
+                'GetModuleHandleA', 'GetProcAddress', 'ExitProcess'] },
+            data: { absent: cString('C:\\Nowhere\\kernel32.dll'),
+                empty: cString('C:\\App\\empty.dll'), spaced: cString('kernel32   '),
+                kernel: cString('kernel32'), missing: cString('NoSuchExport') },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const JNE = 0x75;
+                /** @param {string} name @param {number} zero @param {number} error */
+                const asData = (name, zero, error)=>[
+                    ...push(LOAD_LIBRARY_AS_DATAFILE), ...push(0), ...push(at(name)),
+                    ...call('LoadLibraryExA'),
+                    0x85, 0xc0, JNE, 6, ...flag(zero), //        test eax, eax
+                    ...call('GetLastError'),
+                    0x3d, ...u32(error), JNE, 6, ...flag(zero << 1), // cmp eax, error
+                ];
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...asData('absent', 0x1, 2),
+                    ...asData('empty', 0x4, 1006),
+                    ...push(at('spaced')), ...call('LoadLibraryA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...push(at('kernel')), ...call('GetModuleHandleA'),
+                    0x39, 0xc6, JNE, 6, ...flag(0x10), //           cmp esi, eax
+                    ...push(at('missing')), ...push(0), ...call('GetProcAddress'),
+                    ...call('GetLastError'),
+                    0x3d, ...u32(127), JNE, 6, ...flag(0x20),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\answers.exe',
+            files: [{ path: 'C:\\App\\empty.dll', bytes: new Uint8Array(0) }],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });
+
+test('a library loaded as an exclusive data file keeps writers off it until it is freed',
+    { timeout: 60000 }, async t=>{
+        // Wine's kernel32:loader: after LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE an
+        // open for writing is a sharing violation; after FreeLibrary it opens.
+        const held = buildExe({ dll: true, imports: { 'KERNEL32.dll': ['GetLastError'] },
+            codeSize: 0x10, code: ()=>[0xb8, 1, 0, 0, 0, 0xc2, 0x0c, 0x00] });
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryExA', 'FreeLibrary', 'CreateFileA',
+                'CloseHandle', 'GetLastError', 'ExitProcess'] },
+            data: { path: cString('C:\\App\\held.dll') },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const JNE = 0x75;
+                // CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0)
+                const openForWriting = [...push(0), ...push(0), ...push(3), ...push(0),
+                    ...push(1), ...push(0x40000000), ...push(at('path')), ...call('CreateFileA')];
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...push(0x40), ...push(0), ...push(at('path')), ...call('LoadLibraryExA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...openForWriting,
+                    0x83, 0xf8, 0xff, JNE, 6, ...flag(0x1), //      cmp eax, -1
+                    ...call('GetLastError'),
+                    0x83, 0xf8, 32, JNE, 6, ...flag(0x2), //        ERROR_SHARING_VIOLATION
+                    0x56, ...call('FreeLibrary'), //                 push esi
+                    ...openForWriting,
+                    0x83, 0xf8, 0xff, 0x74, 13, //                   je over
+                    0x50, ...call('CloseHandle'), //                 push eax
+                    ...flag(0x4),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable, imagePath: 'C:\\App\\exclusive.exe',
+            files: [{ path: 'C:\\App\\held.dll', bytes: held }],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, 0x7, `missing bits 0x${(0x7 & ~code).toString(16)}`);
     });

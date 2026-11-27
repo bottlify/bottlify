@@ -28,10 +28,11 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f64} f64 */
 /**
  * @typedef {Pick<Guest, 'u32' | 'i32' | 'f32' | 'f64' | 'setU32' | 'setF32' | 'setF64'
- *     | 'controlWord' | 'setControlWord'>} Evaluating
+ *     | 'controlWord' | 'setControlWord' | 'pointerBytes'>} Evaluating
  */
 
 /**
@@ -84,13 +85,13 @@ const DOUBLES = 0x27f;
  * HRESULT CommitChanges()
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
 export function CommitChanges({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord,
-    setControlWord, callStd, host }, self)
+    setControlWord, callStd, host, pointerBytes }, self)
 {
-    const block = u32(self + 4);
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -135,8 +136,8 @@ export function CommitChanges({ u32, i32, f32, f64, setU32, setF32, setF64, cont
     {
         if (u32(u32(pair)) > u32(u32(pair + 4)))
         {
-            Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord, setControlWord },
-                (u32(pair + 4) - CELL_DATE) >>> 0, u32(block + BLOCK_CLOCK));
+            Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord, setControlWord,
+                pointerBytes }, (u32(pair + 4) - CELL_DATE) >>> 0, u32(block + BLOCK_CLOCK));
         }
         pair = (pair + 8) >>> 0;
     }
@@ -151,13 +152,13 @@ export function CommitChanges({ u32, i32, f32, f64, setU32, setF32, setF64, cont
  * the pass begun, 0 for none.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} index
+ * @param {Guest} guest @param {ptr} self @param {u32} index
  * @returns {u32}
  */
 export function BeginPass({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord,
-    setControlWord, callStd, host }, self, index)
+    setControlWord, callStd, host, pointerBytes }, self, index)
 {
-    const block = u32(self + 4);
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -192,8 +193,8 @@ export function BeginPass({ u32, i32, f32, f64, setU32, setF32, setF64, controlW
     {
         if (u32(u32(pair)) > u32(u32(pair + 4)))
         {
-            Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord, setControlWord },
-                (u32(pair + 4) - CELL_DATE) >>> 0, u32(block + BLOCK_CLOCK));
+            Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord, setControlWord,
+                pointerBytes }, (u32(pair + 4) - CELL_DATE) >>> 0, u32(block + BLOCK_CLOCK));
         }
         pair = (pair + 8) >>> 0;
     }
@@ -212,11 +213,11 @@ export function BeginPass({ u32, i32, f32, f64, setU32, setF32, setF64, controlW
  * HRESULT EndPass()
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
-export function EndPass({ u32, setU32, host }, self){
-    const block = u32(self + 4);
+export function EndPass({ u32, setU32, host, pointerBytes }, self){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block + BLOCK_ACTIVE) === 0)
     {
         return host();
@@ -233,11 +234,11 @@ export function EndPass({ u32, setU32, host }, self){
  * the first time, is the host's.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} passesOut @param {u32} flags
+ * @param {Guest} guest @param {ptr} self @param {ptr} passesOut @param {u32} flags
  * @returns {u32}
  */
-export function Begin({ u32, setU32, callStd, host }, self, passesOut, flags){
-    const block = u32(self + 4);
+export function Begin({ u32, setU32, callStd, host, pointerBytes }, self, passesOut, flags){
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -263,7 +264,7 @@ export function Begin({ u32, setU32, callStd, host }, self, passesOut, flags){
     setU32(block + BLOCK_PASSES, passes);
     if (saved !== 0)
     {
-        callStd(u32(u32(saved) + CAPTURE * 4), saved);
+        callStd(u32(u32(saved) + CAPTURE * pointerBytes), saved);
     }
     return 0;
 }
@@ -272,11 +273,11 @@ export function Begin({ u32, setU32, callStd, host }, self, passesOut, flags){
  * HRESULT End()
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
-export function End({ u32, setU32, callStd, host }, self){
-    const block = u32(self + 4);
+export function End({ u32, setU32, callStd, host, pointerBytes }, self){
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -297,7 +298,7 @@ export function End({ u32, setU32, callStd, host }, self){
     const saved = u32(technique + TECHNIQUE_SAVED + (flags & KEEPS) * 2);
     if (saved !== 0)
     {
-        callStd(u32(u32(saved) + APPLY * 4), saved);
+        callStd(u32(u32(saved) + APPLY * pointerBytes), saved);
     }
     return 0;
 }
@@ -309,11 +310,11 @@ export function End({ u32, setU32, callStd, host }, self){
  * not among them is the host's to refuse.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} handle
+ * @param {Guest} guest @param {ptr} self @param {u32} handle
  * @returns {u32}
  */
-export function SetTechnique({ u32, setU32, host }, self, handle){
-    const block = u32(self + 4);
+export function SetTechnique({ u32, setU32, host, pointerBytes }, self, handle){
+    const block = u32(self + pointerBytes);
     if (block === 0 || handle === 0)
     {
         return host();
@@ -349,11 +350,11 @@ export function SetTechnique({ u32, setU32, host }, self, handle){
  * D3DXHANDLE GetTechnique(UINT Index)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} index
+ * @param {Guest} guest @param {ptr} self @param {u32} index
  * @returns {u32}
  */
-export function GetTechnique({ u32, host }, self, index){
-    const block = u32(self + 4);
+export function GetTechnique({ u32, host, pointerBytes }, self, index){
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -375,7 +376,7 @@ export function GetTechnique({ u32, host }, self, index){
  * @param {Guest} guest @param {u32} block @param {u32} table @param {u32} all
  * @returns {u32}
  */
-export function Walk({ u32, setU32, f32, setF32, callStd }, block, table, all){
+export function Walk({ u32, setU32, f32, setF32, callStd, pointerBytes }, block, table, all){
     const applied = u32(u32(table + 4));
     const triggers = u32(table + 16);
     const device = u32(table);
@@ -391,7 +392,7 @@ export function Walk({ u32, setU32, f32, setF32, callStd }, block, table, all){
         if (all !== 0 || u32(u32(at + 4)) > applied)
         {
             const kind = u32(at);
-            const fn = u32(u32(device) + u32(at + 8) * 4);
+            const fn = u32(u32(device) + u32(at + 8) * pointerBytes);
             const data = u32(at + 20);
             if (kind <= 6)
             {
@@ -467,15 +468,20 @@ export function Walk({ u32, setU32, f32, setF32, callStd }, block, table, all){
  * @param {Evaluating} guest @param {u32} cell @param {u32} clock
  */
 export function Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWord,
-    setControlWord }, cell, clock)
+    setControlWord, pointerBytes }, cell, clock)
 {
     const program = u32(cell + CELL_PROGRAM);
     const inputs = u32(program);
     const count = u32(program + 4);
     const registers = u32(program + 8);
     const slots = u32(program + 12);
-    const saved = controlWord();
-    setControlWord(DOUBLES);
+    // The x87 rounds as JavaScript does under a double control word; SSE's
+    // doubles, a 64-bit process's, are JavaScript's as they are.
+    const saved = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(DOUBLES);
+    }
     // A register no input or instruction wrote reads as zero.
     for (let slot = u32(program + 16) | 0; slot < (slots | 0); slot++)
     {
@@ -633,5 +639,8 @@ export function Evaluate({ u32, i32, f32, f64, setU32, setF32, setF64, controlWo
         setU32(cell, Math.fround(x) >>> 0);
     }
     setU32(cell + CELL_DATE, (u32(clock) - 1) | 0);
-    setControlWord(saved);
+    if (pointerBytes === 4)
+    {
+        setControlWord(saved);
+    }
 }

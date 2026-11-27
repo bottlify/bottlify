@@ -25,12 +25,13 @@ import { DXGI_FORMAT } from './constants.js';
  *
  * @type {Readonly<Record<number, string>>}
  */
-export const TEXTURE_FORMAT = Object.freeze({
+const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_FLOAT]: 'rgba32float',
     [DXGI_FORMAT.R32G32B32A32_UINT]: 'rgba32uint',
     [DXGI_FORMAT.R32G32B32A32_SINT]: 'rgba32sint',
     [DXGI_FORMAT.R16G16B16A16_FLOAT]: 'rgba16float',
     [DXGI_FORMAT.R16G16B16A16_UNORM]: 'rgba16unorm',
+    [DXGI_FORMAT.R16G16B16A16_SNORM]: 'rgba16snorm',
     [DXGI_FORMAT.R16G16B16A16_UINT]: 'rgba16uint',
     [DXGI_FORMAT.R16G16B16A16_SINT]: 'rgba16sint',
     [DXGI_FORMAT.R32G32_FLOAT]: 'rg32float',
@@ -38,6 +39,8 @@ export const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32_SINT]: 'rg32sint',
     [DXGI_FORMAT.R10G10B10A2_UNORM]: 'rgb10a2unorm',
     [DXGI_FORMAT.R10G10B10A2_UINT]: 'rgb10a2uint',
+    // Its bits as they are, without the bias (decisions.md A83, temporary).
+    [DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM]: 'rgb10a2unorm',
     [DXGI_FORMAT.R11G11B10_FLOAT]: 'rg11b10ufloat',
     [DXGI_FORMAT.R8G8B8A8_UNORM]: 'rgba8unorm',
     [DXGI_FORMAT.R8G8B8A8_UNORM_SRGB]: 'rgba8unorm-srgb',
@@ -62,6 +65,7 @@ export const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R16_FLOAT]: 'r16float',
     [DXGI_FORMAT.D16_UNORM]: 'depth16unorm',
     [DXGI_FORMAT.R16_UNORM]: 'r16unorm',
+    [DXGI_FORMAT.R16_SNORM]: 'r16snorm',
     [DXGI_FORMAT.R16_UINT]: 'r16uint',
     [DXGI_FORMAT.R16_SINT]: 'r16sint',
     [DXGI_FORMAT.R8_UNORM]: 'r8unorm',
@@ -99,6 +103,16 @@ export const COMPRESSED_FORMAT = Object.freeze({
     [DXGI_FORMAT.BC4_SNORM]: { format: 'bc4-r-snorm', decoded: 'r8snorm', conversion: 'bc4s' },
     [DXGI_FORMAT.BC5_UNORM]: { format: 'bc5-rg-unorm', decoded: 'rg8unorm', conversion: 'bc5u' },
     [DXGI_FORMAT.BC5_SNORM]: { format: 'bc5-rg-snorm', decoded: 'rg8snorm', conversion: 'bc5s' },
+    [DXGI_FORMAT.BC6H_UF16]: {
+        format: 'bc6h-rgb-ufloat', decoded: 'rgba16float', conversion: 'bc6hu',
+    },
+    [DXGI_FORMAT.BC6H_SF16]: {
+        format: 'bc6h-rgb-float', decoded: 'rgba16float', conversion: 'bc6hs',
+    },
+    [DXGI_FORMAT.BC7_UNORM]: { format: 'bc7-rgba-unorm', decoded: 'rgba8unorm', conversion: 'bc7' },
+    [DXGI_FORMAT.BC7_UNORM_SRGB]: {
+        format: 'bc7-rgba-unorm-srgb', decoded: 'rgba8unorm-srgb', conversion: 'bc7',
+    },
 });
 
 /**
@@ -112,6 +126,7 @@ export const TEXEL_BYTES = Object.freeze({
     rgba32sint: 16,
     rgba16float: 8,
     rgba16unorm: 8,
+    rgba16snorm: 8,
     rgba16uint: 8,
     rgba16sint: 8,
     rg32float: 8,
@@ -144,6 +159,7 @@ export const TEXEL_BYTES = Object.freeze({
     r16float: 2,
     depth16unorm: 2,
     r16unorm: 2,
+    r16snorm: 2,
     r16uint: 2,
     r16sint: 2,
     r8unorm: 1,
@@ -155,6 +171,17 @@ export const TEXEL_BYTES = Object.freeze({
 });
 
 /**
+ * The formats of three 32-bit channels, which WebGPU has no texture of, by
+ * the four-channel format each is kept in (`blocks.js`, `ThreeWords`).
+ *
+ * @type {Readonly<Record<number, import('./blocks.js').ThreeWords>>}
+ */
+const THREE_WORD_STORAGE = Object.freeze({
+    [DXGI_FORMAT.R32G32B32_FLOAT]: 'rgba32float', [DXGI_FORMAT.R32G32B32_UINT]: 'rgba32uint',
+    [DXGI_FORMAT.R32G32B32_SINT]: 'rgba32sint',
+});
+
+/**
  * The format a family keeps its typeless resources in when nothing binds them
  * as a depth stencil: the member a view most often names, so the view that
  * has to reinterpret is the rare one.
@@ -163,6 +190,7 @@ export const TEXEL_BYTES = Object.freeze({
  */
 const TYPELESS_STORAGE = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_TYPELESS]: DXGI_FORMAT.R32G32B32A32_FLOAT,
+    [DXGI_FORMAT.R32G32B32_TYPELESS]: DXGI_FORMAT.R32G32B32_FLOAT,
     [DXGI_FORMAT.R16G16B16A16_TYPELESS]: DXGI_FORMAT.R16G16B16A16_FLOAT,
     [DXGI_FORMAT.R32G32_TYPELESS]: DXGI_FORMAT.R32G32_FLOAT,
     [DXGI_FORMAT.R10G10B10A2_TYPELESS]: DXGI_FORMAT.R10G10B10A2_UNORM,
@@ -177,6 +205,8 @@ const TYPELESS_STORAGE = Object.freeze({
     [DXGI_FORMAT.BC3_TYPELESS]: DXGI_FORMAT.BC3_UNORM,
     [DXGI_FORMAT.BC4_TYPELESS]: DXGI_FORMAT.BC4_UNORM,
     [DXGI_FORMAT.BC5_TYPELESS]: DXGI_FORMAT.BC5_UNORM,
+    [DXGI_FORMAT.BC6H_TYPELESS]: DXGI_FORMAT.BC6H_UF16,
+    [DXGI_FORMAT.BC7_TYPELESS]: DXGI_FORMAT.BC7_UNORM,
     [DXGI_FORMAT.B8G8R8A8_TYPELESS]: DXGI_FORMAT.B8G8R8A8_UNORM,
     [DXGI_FORMAT.B8G8R8X8_TYPELESS]: DXGI_FORMAT.B8G8R8X8_UNORM,
 });
@@ -234,6 +264,61 @@ function srgbTwin(format){
 }
 
 /**
+ * What a device's features let a texture be: whether it samples BC blocks,
+ * keeps a 32-bit depth with stencil, has texture-formats-tier1 (the 16-bit
+ * normalised formats exist, and the snorm ones are drawn into) and draws into
+ * R11G11B10_FLOAT. A field left out is taken as the device having it.
+ *
+ * @typedef {object} GpuFormatOptions
+ * @property {boolean} [compressed]
+ * @property {boolean} [depth32Stencil]
+ * @property {boolean} [formatsTier1]
+ * @property {boolean} [sixteenBitStandIn]  keep the 16-bit normalised formats
+ *           in 32-bit floats even with tier1: a browser's tier1 formats sample
+ *           unfiltered alone, and a 32-bit float filters where the device has
+ *           float32-filterable
+ * @property {boolean} [rg11b10Renderable]
+ */
+
+/** The formats WebGPU has only with texture-formats-tier1. */
+const SIXTEEN_BIT_NORMALISED = new Set(['r16unorm', 'rg16unorm', 'rgba16unorm',
+    'r16snorm', 'rg16snorm', 'rgba16snorm']);
+
+/**
+ * What keeps a 16-bit normalised format on a GPU without texture-formats-tier1,
+ * which feature level 10.0 requires: 32-bit floats of the same channels, which
+ * hold every code exactly (`blocks.js` converts on the way in and out).
+ */
+const SIXTEEN_BIT_STAND_IN = Object.freeze({
+    r16unorm: 'r32float', rg16unorm: 'rg32float', rgba16unorm: 'rgba32float',
+    r16snorm: 'r32float', rg16snorm: 'rg32float', rgba16snorm: 'rgba32float',
+});
+
+/** The formats WebGPU draws into only with texture-formats-tier1. */
+const TIER1_TARGETS = new Set([...SIXTEEN_BIT_NORMALISED, 'r8snorm', 'rg8snorm', 'rgba8snorm']);
+
+/**
+ * Whether the GPU draws into a texture of this WebGPU format: the snorm and
+ * 16-bit normalised ones only with texture-formats-tier1, R11G11B10_FLOAT
+ * only with rg11b10ufloat-renderable (which tier1 brings).
+ *
+ * @param {string} format
+ * @param {GpuFormatOptions} [options]
+ * @returns {boolean}
+ */
+export function gpuRenderable(format, options = {}){
+    if (TIER1_TARGETS.has(format))
+    {
+        return options.formatsTier1 !== false;
+    }
+    if (format === 'rg11b10ufloat')
+    {
+        return options.rg11b10Renderable !== false || options.formatsTier1 === true;
+    }
+    return true;
+}
+
+/**
  * What a resource of this format is kept in on the GPU.
  *
  * A typed format is kept as itself. A typeless one is kept as the member of
@@ -245,7 +330,7 @@ function srgbTwin(format){
  *
  * @param {number} dxgiFormat
  * @param {number} bindFlags
- * @param {{ compressed?: boolean }} [options]  Whether the GPU samples BC blocks.
+ * @param {GpuFormatOptions} [options]
  * @returns {TextureStorage | null} null for a format the GPU has no way to hold
  */
 export function textureStorage(dxgiFormat, bindFlags, options = {}){
@@ -278,7 +363,24 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
             ? kept(compressed.format, null)
             : kept(compressed.decoded, compressed.conversion);
     }
+    const three = THREE_WORD_STORAGE[typed];
+    if (three)
+    {
+        return kept(three, three);
+    }
     const format = TEXTURE_FORMAT[typed];
+    if (SIXTEEN_BIT_NORMALISED.has(format)
+        && (options.formatsTier1 === false || options.sixteenBitStandIn === true))
+    {
+        return kept(/** @type {Record<string, string>} */ (SIXTEEN_BIT_STAND_IN)[format],
+            /** @type {import('./blocks.js').SixteenBit} */ (format));
+    }
+    // A 32-bit depth with stencil needs a device feature; without it the
+    // depth keeps 24 bits.
+    if (format === 'depth32float-stencil8' && options.depth32Stencil === false)
+    {
+        return kept('depth24plus-stencil8', null);
+    }
     return format ? kept(format, null) : null;
 }
 
@@ -303,7 +405,7 @@ export function copyCompatible(a, b){
  *
  * @param {TextureStorage} storage
  * @param {number} viewFormat  The DXGI format the view names.
- * @param {{ compressed?: boolean }} [options]
+ * @param {GpuFormatOptions} [options]
  * @returns {{ format?: string, aspect?: string, reinterpreted: boolean }}
  */
 export function viewFormatOf(storage, viewFormat, options = {}){
@@ -324,6 +426,17 @@ export function viewFormatOf(storage, viewFormat, options = {}){
 
 /** @param {string} format @returns {boolean} whether the format is a depth one */
 export const isDepthFormat = format=>format.startsWith('depth');
+
+/**
+ * Vertex formats WebGPU has no spelling for, which the vertex stage reads out
+ * of the buffer's words itself (`wgsl.js` `vertexFetch`): Direct3D 10 requires
+ * R11G11B10_FLOAT of a vertex buffer (d3d10core.c test_required_format_support).
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const PULLED_VERTEX_FORMAT = Object.freeze({
+    [DXGI_FORMAT.R11G11B10_FLOAT]: 'rg11b10ufloat',
+});
 
 /** @type {Readonly<Record<number, string>>} */
 export const VERTEX_FORMAT = Object.freeze({
@@ -377,6 +490,7 @@ export const VERTEX_FORMAT = Object.freeze({
  * @type {Readonly<Record<string, number>>}
  */
 export const VERTEX_FORMAT_BYTES = Object.freeze({
+    rg11b10ufloat: 4,
     float32x4: 16,
     uint32x4: 16,
     sint32x4: 16,

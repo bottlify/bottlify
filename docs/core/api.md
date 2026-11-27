@@ -1,4 +1,5 @@
 # API
+<!-- covers: modules/core/src/app.js modules/core/src/core.js -->
 
 ```js
 import { createApp } from '@bottlify/core';
@@ -14,7 +15,7 @@ The package also exports `assembleModules` (the layers without a program, see
 `openSpeaker` (the page's audio output, below), and the page's screen while a run plays
 (`requestFullscreen`, `exitFullscreen`, `fullscreenElement`, `watchFullscreen`, `canFullscreen`,
 `keepScreenAwake`, below), and `programIcon(bytes)`: a program's own icon from its executable, for a
-page to show the game by -- the first icon group's largest image, `{ width, height, rgba }` for one
+page to show the game by: the first icon group's largest image, `{ width, height, rgba }` for one
 stored as a bitmap or `{ width, height, png }` for one stored as a PNG, null for none.
 
 ## The speaker
@@ -27,8 +28,8 @@ beside `core.js` by default). It answers a speaker:
 | Member | What it does |
 | --- | --- |
 | `ready(timeoutMs = 1000)` | `{ running: true }` once the worklet is loaded and the context runs, or `{ running: false, reason }`. A context still stopped is kept open and started at the person's next gesture. |
-| `audioOptions()` | The `audio` option for `createApp`: `{ drained: true, sampleRate }`, and `port` on a page without shared memory. |
-| `connect(app)` | Plays the built app: the worklet node, reading its track table and every process's beside it, or fed from the port. Once per speaker. |
+| `audioOptions()` | The `audio` option for `createApp`: `{ drained: true, sampleRate }`. |
+| `connect(app)` | Plays the built app: the worklet node, reading its track table and every process's beside it. Once per speaker. |
 | `volume(level)` | What is heard, 0 silent; the program's cursors move as they would. |
 | `suspend()`, `resume()` | Holds it with a paused run; nothing else starts it again. A stop the browser made on its own (`interrupted` on a phone, a device change) is resumed when the context says so and at the next gesture. |
 | `close()` | Stops the worklet and closes the context. |
@@ -36,30 +37,35 @@ beside `core.js` by default). It answers a speaker:
 
 ## Options
 
-The options reach the engine's worker by `postMessage`, so every value must be data.
+The options reach the engine's worker by `postMessage`, so every value must be data. Nested
+options are described in [configuration.md](configuration.md). An option the engine does not know
+is ignored; `executors`, the older name of `cpu.cores`, is refused.
 
 ### What runs
 
 | Option | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `executable` | `Uint8Array` | required | The program's PE image. Only 32-bit x86 (PE32) is accepted. |
-| `imagePath` | string | `'C:\app.exe'` | Where the program believes it was loaded from, and its start directory. |
+| `executable` | `Uint8Array` | required | The program's PE image: 32-bit x86 (PE32), or x86-64 (PE32+) as far as [limits](limits/README.md) says. |
+| `imagePath` | string | `'C:\app.exe'` | Where the program believes it was loaded from. |
 | `commandLine` | string | the quoted `imagePath` | What `GetCommandLine` answers. If you compose it, quote argv[0] yourself. |
-| `engine` | `'cork'` \| `'emulator'` | `'cork'` | What runs the x86 code: cork, which the package carries, or a v86 emulator the caller brings in `v86`; `'emulator'` without one is refused. |
-| `mode` | `'auto'` \| `'compatible'` \| `'isolated'` | `'auto'` | How much uses shared memory. `isolated`: guest memory is a `SharedArrayBuffer`; the graphics worker reads unlocked bytes from it and writes read-backs into it in place. `compatible`: guest memory belongs to the engine thread, and whatever crosses to another thread is copied. `auto`: `isolated` on a cross-origin isolated page, `compatible` elsewhere. `isolated` where memory cannot be shared is refused at `createApp`. The `app` layer's diagnostics show the run's mode. |
-| `concurrency` | `1` \| `2` \| `4` | `1` | How many processes run at once. `1`: the program runs on the engine's thread, and a child runs in its parent's place until it exits. `2` or `4`: every process, the page's program included, runs in its own worker, and a child runs beside its parent from `CreateProcess` on; a child beyond that count runs beside its parent, taking turns with it in the parent's worker. The engine's thread then runs no program and keeps the run's system (registry, volume, bundle, session, windows, ids, named events, semaphores and mutexes, journal, sound output, presenter), which each process reaches over a link; what a process in a worker shares and draws through the run, and what it cannot have yet, is in [limits.md](limits.md#processes). More than one process needs shared memory and runs `isolated`; asked for in `compatible` mode or where memory cannot be shared, the run is `compatible` with `1` and a `fallback` event says so. With more than one, the page's input and visibility go into a ring in shared memory that the engine reads between turns, and an idle engine sleeps on its doorbell instead of handing its thread back to the browser to look for input. At any concurrency the page's input goes to the process whose window should have it: the pointer to the window holding the mouse or under it, the keyboard to the window with the run's single focus. Where no window has it, it goes to no program, except in a run with no window showing, where the page is the console: the last-started process still running gets it. The `app` layer's diagnostics carry `concurrency`, `fallback` and the pacing counts (`pacing`). |
-| `windows` | `'win2000'` \| `'winxp'` \| `'win7'` \| `'win10'` | `'winxp'` | The Windows the program sees; `GetVersionEx`, `RtlGetVersion`, the registry, system file versions and profile folders agree. Windows 10 reports 6.2 to a program whose manifest does not declare it. |
-| `graphicsApi` | `'directx7'` \| `'directx8'` \| `'directx9'` \| `'directx10'` \| `'opengl'` | every API | The graphics the program gets. `directxN` keeps every DirectX up to N (DirectDraw, Direct3D 8, 9, then Direct3D 10 with DXGI); `opengl` keeps OpenGL alone. Only those system DLLs exist and only their code is built. The registry, `DirectXSetupGetVersion`, DxDiag and the DLLs' file versions report DirectX 7.0, 8.1 or 9.0c (9.0c for 9 and 10). Absent: every API, DirectX 9.0c. |
-| `memorySize` | number | 1 GiB | Guest RAM in bytes, a power of two; reserved, not committed. |
-| `heapSize` | number | the rest of RAM | How much the program's heaps may allocate. |
-| `stackSize` | number | the image's stack reserve | The main thread's stack. |
-| `quantum` | number | 100 000 | Guest instructions per scheduler turn. |
-| `preemption` | boolean | `false` | End a turn early when a thread of higher priority is due. |
+| `startDirectory` | string | the image's directory | The current directory the program starts in, for a system program whose paths are its starter's to mean (a setup's helper). |
+| `concurrency` | `1` \| `2` \| `4` | `1` | How many processes run at once. `1`: the program runs on the engine's thread, and a child runs beside its parent from `CreateProcess` on, the two taking turns on that thread. `2` or `4`: every process, the page's program included, runs in its own worker, and a child runs beside its parent from `CreateProcess` on; a child beyond that count runs beside its parent, taking turns with it in the parent's worker. The engine's thread then runs no program and keeps the run's system (registry, volume, bundle, session, windows, ids, named events, semaphores and mutexes, journal, sound output, presenter), which each process reaches over a link; what a process in a worker shares and draws through the run, and what it cannot have yet, is in [the process limits](limits/processes.md). With more than one, the page's input and visibility go into a ring in shared memory that the engine reads between turns, and an idle engine sleeps on its doorbell instead of handing its thread back to the browser to look for input. At any concurrency the page's input goes to the process whose window should have it: the pointer to the window holding the mouse or under it, the keyboard to the window with the run's single focus. Where no window has it, it goes to no program, except in a run with no window showing, where the page is the console: the last-started process still running gets it. The `app` layer's diagnostics carry `concurrency` and the pacing counts (`pacing`). |
+| `windows` | `'win2000'` \| `'winxp'` \| `'win7'` \| `'win10'` \| `'auto'` | `'winxp'` | The Windows the program sees; `GetVersionEx`, `RtlGetVersion`, the registry, system file versions and profile folders agree. Windows 10 reports 6.2 to a program whose manifest does not declare it. `'auto'`: the Windows the program was made for, chosen once from its image for the whole run - the newest its manifest names, else its PE header's version; 10 for a program importing a library only 8 and later have (the Windows Runtime, Direct3D 12); at least 7 for a 64-bit one. A `windows` event says which and why. |
+| `machine` | `'x86'` \| `'amd64'` | the first program's width; `amd64` for a `memorySize` past 2 GiB | Whether the machine is a 32- or a 64-bit Windows. On a 64-bit one a 32-bit process runs under WOW64: `IsWow64Process`, `GetNativeSystemInfo`, `GetSystemWow64Directory` and the environment's `PROCESSOR_ARCHITEW6432` say so. A 64-bit program always runs on a 64-bit machine. |
+| `layout` | `'x86'` \| `'amd64'` | `machine` | The machine the volume's Windows was laid out for. `machine: 'x86'` over `layout: 'amd64'` is a 32-bit Windows running the 32-bit side of a 64-bit one's volume: files and registry through WOW64's view (SysWOW64, Wow6432Node), while `IsWow64Process`, `GetNativeSystemInfo` and the environment say 32-bit - a launcher that picks its build by the system's width picks the 32-bit one. |
+| `graphicsApi` | `'directx7'` \| `'directx8'` \| `'directx9'` \| `'directx10'` \| `'directx11'` \| `'opengl'` | every API | The graphics the program gets. `directxN` keeps every DirectX up to N (DirectDraw, Direct3D 8, 9, then Direct3D 10 with DXGI, then Direct3D 11); `opengl` keeps OpenGL alone. Only those system DLLs exist and only their code is built. The registry, `DirectXSetupGetVersion`, DxDiag and the DLLs' file versions report DirectX 7.0, 8.1 or 9.0c (9.0c for 9, 10 and 11). Absent: every API, DirectX 9.0c. |
+| `gpuProfile` | `'sm1'` \| `'sm2'` \| `'sm3'` \| `'sm4'` \| `'host'` | `'host'` | The card the video adapter is shown as ([configuration.md](configuration.md#graphics)). |
+| `memorySize` | number | 1 GiB | The program's RAM in bytes, up to 4 GiB: a limit on what each process is given, not its address space; a process's memory grows to what its program takes ([configuration.md](configuration.md#cpu)). |
+| `machineMemory` | number | none | The tab's memory in bytes: the guest's memories, the engine's own and the translations never hold more together ([configuration.md](configuration.md#cpu)). |
+| `cache` | `{ budget }` | `{ budget: 160 MiB }` | The run's cache (Cellar): bodies every process of the run reads in place from shared memory: the bundle's blocks decoded, once a run, the ranges of files a process read twice, and the shaders D3DX compiled (`D3DXCompileShader` and its kin: a compile asked again with the same source, entry, profile, flags and macros, its includes found the same, is answered from there by any process of the run). `budget` is the bytes of shared memory it holds them in at most; past it the least recently read go, and a body unread for 30 s goes. Counted among the heaps ([configuration.md](configuration.md#memory-zones)). |
+| `machineWaitMs` | number | 600000 | How long a process asked for while the tab's memory is full waits for another to end before it fails to start with STATUS_NO_MEMORY. |
+| `cpu` | `{ cores?, grow? }` | automatic | The program's processors ([configuration.md](configuration.md#cpu)). |
+| `win32` | `{ trustedRoots?, steam? }` | none | The machine's trusted roots and a Steam account ([configuration.md](configuration.md#win32)). |
 | `unattended` | boolean | `false` | Nobody is at the screen: every modal dialog and message box gets its default button, and each answer is reported as a `divergence` event. |
-| `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and its settings ([configuration.md](configuration.md#cpu)). |
-| `v86` | `{ moduleUrl, wasmBytes }` | none | The caller's own v86 build, for `engine: 'emulator'`; the package carries none. |
-| `zstd` | `{ wasmUrl?, wasmBytes? }` | the package's | The bundle decoder's wasm build; without it a JavaScript decoder is used. |
+| `cork` | `{ moduleUrl?, config? }` | the package's | Where cork is loaded from, and where its translations are kept ([configuration.md](configuration.md#cpu)). |
 | `media` | `{ wasmBytes }` | none | The video decoder (FFmpeg in wasm). Without it the program is told no clip can be played. |
+| `sidecarHooks` | `{ spec, source }` | none | A bundle's sidecar (`hooks.json` parsed as `spec`, the text of `hooks.mjs` as `source`), next to its `manifest.json` and never inside the bundle: replaces guest functions, or a loop inside one, with the sidecar's own code, through a data pointer it rewrites (`slot`) or a patch at a point inside a function (`site`). `source` runs as an ES module in the engine's worker, with a bounds-checked view of guest memory and nothing else of the engine. |
+| `exitNotice` | boolean | `true` | A program that exits with code 0 raises a `message-box` event saying it finished. |
 
 ### Display, input and sound
 
@@ -70,23 +76,31 @@ The options reach the engine's worker by `postMessage`, so every value must be d
 | `host` | `'worker'` \| `'thread'` | `'worker'` where `Worker` exists | Where the engine runs. `thread` runs it on the calling thread over the same protocol. |
 | `workerUrl` | string \| `URL` | beside the module | Where `engine.worker.js` is loaded from, for a bundler that moves it. |
 | `transfer` | `Transferable[]` | none | Buffers in the options to hand over instead of copying (the wasm binaries). |
+| `on` | `{ [event]: handler }` | none | Events subscribed before the start, for what the engine tells while it starts (`bundle-preload`, `layer-needed`), before the app it answers with can be subscribed on. |
 | `screen` | `{ width, height, bitsPerPixel }` | 640 × 480, 32 | The display the program is told it has. |
 | `desktop` | `{ picture? }` | none | What the desktop shows where no window is: `picture` is `{ width, height, bits }`, 32 bits a pixel (B, G, R, unused), top row first, scaled to the screen. Absent: the desktop colour. |
-| `maxFps` | number | 60 | Accepted, not applied yet ([limits.md](limits.md#graphics)). |
-| `graphics` | `{ compressedTextures?, maxFrameLatency?, lendMemory?, guestCode?, driverRules?, videoMemory? }` | `false`, 3, `true`, `true`, `'legacy'`, the `graphicsApi` preset's | `compressedTextures`: upload BC-compressed textures where the GPU has `texture-compression-bc`. `maxFrameLatency`: how many frames the GPU may still be drawing when `Present` returns (0: no bound). `lendMemory`, `guestCode`, `driverRules`: see [configuration.md](configuration.md#graphics). `videoMemory`: the card's memory in megabytes, overriding the preset's. |
-| `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–9 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap`; `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
-| `audio` | `{ drained?, sampleRate?, mp3?, port? }` | `false`, none, `true`, none | `drained`: an `AudioWorkletNode` really reads the output, so play cursors follow the sound rather than a clock. `sampleRate`: the `AudioContext`'s rate. `mp3: false`: the program decodes MP3 with the library it ships instead of the engine's provider. `port`: on a page without shared memory, the engine's end of a `MessageChannel` whose other end the worklet holds; the mix is posted down it ([README.md](README.md#sound)). |
+| `maxFps` | number | 60 | The display's refresh rate the program is told, which its vertical sync keeps to; 0 for none. |
+| `graphics` | `{ compressedTextures?, maxFrameLatency?, videoMemory?, driverRules? }` | `false`, 3, the `graphicsApi` preset's, `'legacy'` | The device's settings ([configuration.md](configuration.md#graphics)). |
+| `device.graphicsWorker` | `true` \| `'pixels'` \| `false` | `true` | Draw Direct3D 7–11 and OpenGL in a graphics worker that sends each frame back as an `ImageBitmap` (as bytes on SwiftShader, which makes no picture of a worker's canvas); `'pixels'` sends the frame's bytes instead; `false` draws on the engine thread. |
+| `audio` | `{ drained?, sampleRate?, port? }` | `false`, none, none | The sound output, as `openSpeaker().audioOptions()` gives it ([configuration.md](configuration.md#audio)). |
 
 ### Storage, bundles and discs
 
 | Option | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `bundle` | `{ url \| file, id?, prefix?, store?, prefetch?, indexSha256?, retry? }` | none | A `.btl` mounted read-only on `C:`, under `prefix` (`App`: `C:\App`). It is read a block at a time, by HTTP `Range` from `url` or as slices of `file` (a `Blob`, such as a bundle kept in OPFS on this device), and fetched blocks are kept in OPFS under `id` (`store: null` keeps none, as a bundle already on the device needs). `prefetch` (on) fills the cache while nothing is being read; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. |
-| `storage` | `'opfs'` \| `'local'` \| `{ files }` \| `null` | `null` | Where the session (the files the program wrote, and its registry) lives: `opfs` in the origin's file system, `local` in `localStorage`; `{ files }` seeds it for this run only; `null` keeps nothing. |
+| `bundle` | `{ url \| file, id?, prefix?, store?, evictOthers?, prefetch?, preload?, revision?, indexSha256?, retry?, layers? }` | none | A `.btl` mounted read-only on `C:`, under `prefix` (`App`: `C:\App`). It is read a block at a time, by HTTP `Range` from `url`, a miss widened to the blocks around and ahead of it, or as slices of `file` (a `Blob`, such as a bundle kept in OPFS on this device), a read waiting for its own blocks alone and the blocks around and ahead of them read behind it; fetched blocks are kept decoded in OPFS under `blocks/<id>` (`store` a directory handle of your own shaped as OPFS's puts them there instead; `store: null` keeps none, as a bundle already on the device needs). `evictOthers` (on) lets other bottles' blocks go when the device runs out of room ([configuration](configuration.md)); `prefetch` (on) fills the cache while nothing is being read; `preload` brings every block not kept yet in before the program starts, so nothing it reads waits on the network; `revision`, raised each time the bottle is packed again, lays the bottle's registry over a session saved under an earlier one, as a reinstall would; `indexSha256` (from the manifest) is checked against the bundle's index; `retry` is `{ attempts: 6, baseDelayMs: 250, maxDelayMs: 10000 }`. `layers` are bundles the bottle stands on (a runtime built once and shared by bottles), each `{ url \| file, id, store?, evictOthers?, prefetch?, preload?, indexSha256?, retry? }`, under the bottle on `C:`, the first over the next: a path the bottle's bundle has is read from it, a folder both have shows the files of both. A layer is a bottle's system files alone - its `.bottlify\drive_c` mounted at `C:\`, `.bottlify\system32` in `C:\WINDOWS\system32`, its `.bottlify\registry.json` laid under the bottle's registry (a key the bottle's installation or the session set keeps their value) - and anything else in it is not mounted (`layer-files-unmounted`). `id` is required and is the layer's own: its blocks are kept under it, once for every bottle on it. |
+| `layers` | the same as `bundle.layers` | none | The layers a run with no bundle of its own stands on: an installer writing its whole volume whose wizard needs the runtime a layer carries while it installs (a WiX setup's managed wizard, the .NET Framework). Ignored beside a `bundle`, which names its own. |
+| `storage` | `'opfs'` \| `'local'` \| `{ files }` \| `null` | `null` | Where the session (the files the program wrote, and its registry) lives: `opfs` in the origin's file system, its files read when the program reads them, never laid on the volume whole before it starts; `local` in `localStorage`; `{ files }` seeds it for this run only; `null` keeps nothing. A run saves its session once, from the thread that holds its volume, whatever writes it: a process in a worker saves nothing of its own, and when the process saving it ends, another standing on that thread takes the saving over. A provider of your own (`{ load, save }`) may read the files' `bytes` after its save settles, and they are kept for it while it holds them; one that has read them all by then says `readsWithinSave: true`, and the volume stops keeping them apart at once. |
+| `pageFile` | `'local'` \| `false` \| `{ root }` | `'local'` | The run's own folder, where it keeps what it lets go of from memory and no later run reads: the run cache's bodies that are the only copy for the run: what the program wrote (the cache's `pages/` space) and the texels the GPU was given, idle 30 s or pushed out for room. `local`, a folder of the run's own in the origin's file system, where the engine's thread has a synchronous handle (a worker), taken away when the run ends (or by the next run, after a tab was killed); `false` keeps it all in memory (past the cache's budget, what the program writes stays in the tab's memory); `{ root }` a directory handle of your own. The `filesystem` diagnostics say what it holds (`pageFile`, `bytesHeld`). |
 | `id` | string | none | Names the session, and the bundle cache when `bundle.id` is absent. |
 | `files` | `{ path, bytes }[]` | none | Edits laid over the session at every start; they win over what the program last saved. The bundle never changes. |
 | `discs` | `{ image, letter? }[]` | none | Disc images mounted as CD-ROM drives, `D:` or the next free letter. `image` is a `Blob` (read a range at a time) or bytes. |
 | `collectOnExit` | boolean | `false` | The run's exit carries the files the program wrote, for `session.export()`. |
+
+What a browser keeps of each bottle is listed and removed from `@bottlify/core/storage`:
+`bottleStorage()` answers the origin's `usage`, `quota`, `persisted` and, per bottle (by
+`storageName(id)`), the bytes of its `blocks`, `translations` and `saves` and whether a run holds
+it (`busy`); `clearBottleStorage(id, kinds)` removes those kinds and refuses a bottle a run holds.
 
 ### Network
 
@@ -94,23 +108,46 @@ The options reach the engine's worker by `postMessage`, so every value must be d
 | --- | --- | --- | --- |
 | `network` | `{ module, url, room, token? }` | none | The relay Winsock goes through: the URL of a module exporting `connectRelay` (`@bottlify/networking`'s client), the relay's `ws(s)://` address, and the room to join. Without it Winsock has only the loopback adapter. |
 
-### Diagnostics
+### Debugging
 
-| Option | Type | Default | What it does |
-| --- | --- | --- | --- |
-| `log` | `{ categories?, capacity?, bytes? }` | none | Call areas recorded from the first instruction (`{ 'call.gpu': 'trace' }`), and the journal's size: `capacity` records, `bytes` of ring (1 MiB). |
-| `traceStrings` | boolean | `false` | Keep the text an argument points at in the journal. |
-| `profileCalls` | boolean | `false` | Time every host call as a phase of its own. |
-| `sampleJs` | boolean | `false` | Run the browser's JavaScript sampler on the engine's thread in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` ([README.md](README.md)) and the engine on a window's thread: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
-| `record` | number | 0 | How many events at the bridge to keep for a replay. |
-| `hooks` | `HookSpec[]` | none | Watches placed in front of routines inside the program's own modules as they load. |
-| `watch` | `{ libraries, strings }` | none | Watch calls from one guest module into another, by library and ordinal. |
-| `refuseReplacement` | boolean | `false` | Stop instead of replacing the process with a child it asks for. |
-| `exitNotice` | boolean | `true` | A program that exits with code 0 raises a `message-box` event saying it finished. |
-| `sampling` | boolean | `true` | The cpu layer's guest sampler. |
-| `device.*` | | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of the graphics layer. |
-| `pacing` | `'page'` \| `'event'` | `'page'` | How the run loop waits in a worker: a short look every turn, or sleep until something is due. |
-| `pendingYieldMs` | number | `1` | While other guest threads still have work, how often, in milliseconds, the run loop yields to the event loop to hear an outstanding host answer (a call parked on the device, a range in flight). A turn that ran nothing yields at once. Lower hears answers sooner, at the cost of more event-loop round trips. |
+Switches for finding where a fault or a cost is: each turns a path off, keeps the second path a
+test compares against, or records what a run did. None is a setting to ship with; the defaults are
+what every run uses.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `log` | none | `{ categories?, capacity?, bytes?, shaders? }`: call areas recorded from the first instruction, each at its level (`off`, `error`, `warn`, `info`, `debug`, `trace`): `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`, `call.hook`, `input.press`, `input.message`; and the journal's size, `capacity` records and `bytes` of ring (1 MiB). A thread's calls that repeat in a loop of up to 8 are written until the loop has gone round twice, then counted. `shaders` (off) writes a line for each shader a program compiles, with its defines; a shader that fails to compile is written with its source either way. |
+| `traceStrings` | `false` | Keep the text an argument points at in the journal. |
+| `profileCalls` | `false` | Time every host call as a phase of its own. |
+| `sampleJs` | `false` | Run the browser's JavaScript sampler on the engine's thread in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` ([README.md](README.md)) and the engine on a window's thread: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
+| `record` | 0 | How many events at the bridge to keep for a replay. |
+| `hooks` | none | `HookSpec[]`: watches placed in front of routines inside the program's own modules as they load. |
+| `watch` | none | `{ libraries, strings }`: calls from one guest module into another watched, by library and ordinal. |
+| `quantum` | see [configuration.md](configuration.md#kernel) | Every scheduler turn exactly this many guest instructions, for a profile fine enough to say something. |
+| `heapSize` | the rest of RAM | How much the program's heaps may allocate, to find out what runs out first. |
+| `driveGuestCalls` | `true` | `false` runs the host calls written as steps through promises, each guest call they make a turn of its own, rather than in the slice they came in. |
+| `cpu.eager` | `true` with `cpu.cores` named, else `false` | `true` opens every executor before the program starts, `false` as threads want them. A process the program starts opens its executors as its threads want them either way. |
+| `cpu.placement` | `'spread'` | `'concentrate'`: every thread takes turns on the process's own executor, as on one processor. |
+| `cpu.gcNudge` | on where JavaScriptCore runs (Safari, every browser on iOS) | The threads that hold the guest's memory, and the graphics worker, make and drop an untouched buffer every 20 ms (64 MB, or a quarter of the guest's memory past 256 MB), which JavaScriptCore counts as allocated and so collects their garbage sooner; the engine's thread makes one between the guest's slices too. `false` turns it off, `true` on in any browser, `{ everyMs, bytes }` sets it. |
+| `cpu.executorWorker` | the file beside the engine | The script each executor past the process's own runs in its worker, for a host that serves the engine's files elsewhere. An executor whose worker goes while the program runs is a loss of the run's (`executorsLost` in the cpu diagnostics): its threads run on the others, the one it ran from its last state. |
+| `cork.config` | | cork's own diagnostics and paths left out ([cork settings](../cork/settings.md)). |
+| `cork.poolPerProcess` | the host's cores less the program's and two, at least 1 | The most translation workers of the run's pool one process gets. |
+| `cork.poolCapacity` | the host's cores less two, at least 1 | The translation workers the run's pool holds for every process together before it lets one more join a process whose translation lags. A process (and each of its other executors) is lent its first past it: one left waiting would interpret. A process whose workers sat idle 5 s gives back its first and translates on its own thread until it is lent one again. |
+| `win32.handleWords` | `true` | `false` leaves every WaitForSingleObject, ReleaseMutex, ReleaseSemaphore, SetEvent and ResetEvent to the host, with no answers in the guest. |
+| `graphics.guestCode` | `true` | `false` traps every Direct3D 8 and 9 call to the host: a fault that goes away with it is in the guest code that keeps the program's state, its calls in order and its reference counts in guest memory. |
+| `graphics.guestTraps` | `[]` | With `guestCode` on, the parts of that guest code kept as traps anyway: methods by name, or the groups `getters`, `ring`, `locks`, `levels`, `counts`, and `moves` (a DISCARD under draws comes to the host instead of moving the buffer onto a spare storage in the guest). |
+| `graphics.draw` | `true` | `false` draws nothing: no API reaches the GPU or the graphics worker, OpenGL is not rasterised, and every API keeps the state a program sets and answers what it asks. A Direct3D 9 occlusion query then counts every pixel of the target, so a program culls nothing it would draw. For measuring a program's own work. |
+| `graphics.raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised. |
+| `graphics.verifyDynamic` | `false` | With a graphics worker: every Direct3D draw from a dynamic buffer compares the bytes its indices reach in the worker's copy of guest memory with the buffer's copy as the draw is recorded, and with the GPU buffer it binds once its frame is submitted (4 MB a frame read back); the report's `verifyDynamic` counts the ranges that differ (`copyStale`, `gpuStale`) and the vertices indices reach past a draw's declared range (`beyond`). |
+| `device.*` | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of a device on the engine's thread. |
+| `audio.mp3` | `true` | `false`: the program decodes MP3 with the library it ships rather than the engine's provider for Miles. |
+
+While a program runs, `app.debug` switches more of these from that moment on: `checkDraws(on)`
+(every Direct3D draw from a buffer compared with what the graphics worker was sent),
+`handleWords(on)`, frame dumps, draw and texture cuts, and the rest
+[`tools/README.md`](../../tools/README.md) lists.
+
+### What the diagnostics say
 
 The `log` table's phases show where the engine thread's time goes (`topPhases`; `phasesSelfMs`
 for all of them together). A host call is the phase `trap`, timed one call in about 32 and weighted
@@ -120,8 +157,8 @@ go of), `ring-take` (calls the program left in the command ring) and, inside tha
 (buffers still locked that those calls may read). The graphics worker's thread has no phase
 table: `graphics.worker.phases` holds its totals since it started, `batch-read` (each batch of
 calls read and played; its `selfMs` excludes the sweep) and `batch-sweep` (the once-a-frame look
-at objects whose count reached zero). It is `null` until the worker has answered a diagnostics
-request, and in a build that times nothing. `graphics.worker.latency` is the bound on the frames
+at objects whose count reached zero). The worker sends them with every frame it presents; they are
+`null` before its first present, and in a build that times nothing. `graphics.worker.latency` is the bound on the frames
 the worker's GPU may still be drawing (`graphics.maxFrameLatency`), summed over the devices drawn
 there: `held` and `heldMs` count the presents that waited for the GPU to finish a frame, and
 `peak` is the most frames it was behind. A wait on a present in `graphics.worker.waits` that
@@ -143,33 +180,36 @@ counts the frames that went so.
 | `canFullscreen(element)` | Whether either name exists, so a page can offer the home screen instead of a button that does nothing. |
 | `fullscreenElement()`, `exitFullscreen()` | The element in fullscreen or null, and leaving it, by either name. |
 | `watchFullscreen(handler)` | Calls `handler(element or null)` on every change, by either event name; answers the function that stops. |
-| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played -- an intro, a cutscene -- does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
+| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played (an intro, a cutscene) does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
 
 ## The controller
 
 | Member | What it does |
 | --- | --- |
-| `run({ maxTurns? })` | Runs the program; resolves with its exit code. |
+| `run({ maxTurns? })` | Runs the program; resolves with its exit code. Rejects with an error whose `reason` is `disposed` when the run is disposed under it. |
 | `pause()`, `resume()`, `stop()` | Hold, continue, or end the run. |
-| `dispose()` | Ends the run and frees the engine; the worker stays with the canvas. |
+| `dispose()` | Ends the run - the program and every process it started - and frees the engine; the worker stays with the canvas. |
 | `on(name, handler)` | Subscribes to an event (below); returns the function that unsubscribes. |
 | `answerMessageBox(id, button)` | Answers a `message-box` event with the id of the button pressed. |
 | `input.attach(canvas, { pointerLock? })`, `input.detach()` | Capture keyboard, mouse and gamepads from the canvas, or stop. |
 | `input.send(event)`, `input.poll()` | Send an input event yourself; poll the gamepads (call once a frame). An event is `{ kind, ... }`: `key` (`code` a `KeyboardEvent.code`, `down`), `text` (`text`, the character the `key` press sent just before it typed: it rides on that press and reaches no one alone), `type` (`text`, characters with no key behind them, delivered as Windows delivers `SendInput`'s Unicode input: a `VK_PACKET` press and release each, and `WM_CHAR` from `TranslateMessage`), `paste` (`text`, for the clipboard), `pointerMove` (`x`, `y` in the picture's pixels, and/or `dx`, `dy`), `pointerButton` (`button` `left`/`right`/`middle`/`x1`/`x2`, `down`), `wheel` (`delta` in multiples of 120), `focus` (`gained`), `padAxis` (`axis`, `value` -1..1), `padButton` (`index`, `down`). |
 | `input.showKeyboard()`, `input.hideKeyboard()`, `input.keyboardShown()` | A phone's on-screen keyboard, typing into the game. `showKeyboard` must be called inside a touch's own handler (`click`, `touchend`), the only moment a phone shows its keyboard; it focuses a field the engine keeps beside the attached canvas and answers whether the field took the focus. What is typed reaches the program as a keyboard with keys would send it: each character on the US layout's key that types it, with Shift held where needed (so `WM_KEYDOWN`, `GetAsyncKeyState` and DirectInput see it), a character no key there types as `type`, a line break as Enter and a deletion as Backspace; a paired keyboard's keys go through as keys. Put away by the phone's own button, the keyboard leaves the game the focus. `false` with no canvas attached. |
 | `input.route()` | Clicks and key taps driven from outside, one step at a time. `click(x, y, { button? })` and `key(code, frames?)` queue steps; `tick()` sends the next and returns how many are left (call it once a frame, or on a timer for a program that does not present). A click first pushes the pointer far up and left, on the next step moves it from the corner to the point and presses, and releases on the step after. A program that moves its own cursor by relative motion (DirectInput) thus clicks where the window's pointer is, wherever it had put its cursor. |
-| `audio.memory()`, `audio.format()` | The output's shared table and `{ sampleRate, channels }`, for the `AudioWorkletNode`. |
+| `audio.memory()`, `audio.format()` | The output's shared table and `{ sampleRate, channels }`, for the `AudioWorkletNode`. `readSoundTable(table)` from `@bottlify/core/sound-meter` reads the speaker off it without asking the engine: `{ rate, blocks, starvedBlocks, starvedFrames }`, the device's rate and, since the table was made, the output blocks asked for, those found short and the frames they lacked - the gaps heard as a crackle. A sound meter's source. |
 | `adapter` | `{ vendor, architecture, description }` of the GPU the engine opened. |
 | `canvas`, `host` | The viewport and where the engine runs. |
 | `frames()`, `presented()` | Frames shown so far; the history of presents. |
-| `files.list(path)`, `files.read(path)` | The volume as the program sees it. |
-| `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. |
+| `frameClock()` | A promise of a `SharedArrayBuffer` the engine writes each frame's time into as it reaches the canvas, every API and path alike: read it with `readFrameClock(buffer, since?)` from `@bottlify/core/frame-clock` (`{ count, times }`, the newest 1023 times, milliseconds of the engine's clock - only their gaps mean anything) on the page's own animation frames, without asking the engine again. An fps meter's source. |
+| `files.list(path)`, `files.read(path)` | The volume as the program sees it; `read` is a promise of the whole file (a lazily read bundle's blocks fetched first), null for no file. |
+| `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. A file with more than one name (a hard link) is in the list under each of its names, with the same bytes. A file of an `opfs` session the program did not write is `{ path, size, read(offset?, length?) }`, its bytes read when asked. |
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's; a request to the engine thread, not for polling. Besides the layers' tables, a `windows` table lists the run's windows as every process reports them: every process's top-level windows, topmost first, each with its process, title, class, visibility and rectangle, and the run's foreground and captured windows. |
-| `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128). Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |
-| `translationPool()` | The run's pool of translation workers (`cork.pool`) as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
+| `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128) and every loss with its count (`losses`), so an error the journal has let go of is still there. Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |
+| `translationPool()` | The run's pool of translation workers as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
+| `runCache()` | The run's cache as its keeper stands, the run's and not a process's: its records, hot and cold bodies and their bytes, segments and the bytes placed in them, what went to the run's folder and came back, the bodies let go of, its `budget` and the most it held at once (`peakSegmentBytes`, `peakPlacedBytes`), the owners given names of their own (`owners`, a graphics root each) and what those left behind them (`ownerTails`: owners, bodies and bytes; each also a `loss`), and by space, the part of a name before its first `/` (`spaces`: each one's bodies and bytes, those in memory, and the blocks they take there, whose difference is what rounding to blocks costs that space), and the same as the cache stood when it had the most placed (`peakSpaces`, with `peakRoundingBytes`): a run's bodies go cold as it goes on, so its end holds few. A process joined to a run kept elsewhere answers `not measured` with the reason. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
-| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
+| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `drops` (the frame rate, the slowest 1% and 0.1% as rates, and each frame over twice the median and longer than a 60 Hz refresh named by what grew in it), `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`, `live`. |
+| `log.live()` | What a view that follows the run reads, typically once a second: `instructions` retired, every profiler phase (`phases`, name, kind, count, `selfMs`), the guest's `threads` (id, name, instructions, state), the memory layer's `regions` (name, base, size), the cpu sampler's 64 heaviest 64-byte buckets (`samples`, address and instructions), the sidecar `hooks` (name, calls, ms) and `graphics`: canvas copies (`shown`, `shownBy` by surface), the device that draws (`device`: `draws`, `gpuFrames`, `gpuMs`; `null` where it keeps none: Direct3D 7, OpenGL, no GPU), its `lastFrame` (draws, of them offscreen and into how many targets, clears, `clearColor` or -1, the viewport and the target's size) and the graphics worker's thread (`worker`: `batches`, `readSelfMs`, `sweepMs`; `null` without one). Every figure is cumulative since the start: take two and subtract. Answered by the log keeper from the tables the layers fill as a frame closes, never by the engine's thread. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |
 
 ## Events
@@ -179,17 +219,23 @@ counts the frames that went so.
 | `frame` | `{ width, height, presented }` | A frame reached the canvas, the first or after a resize. Always sent. |
 | `exit` | `{ code }` | The program ended. |
 | `message-box` | `{ id, text, caption, type, buttons, defaultButton, icon }` | The program shows a message box; answer it with `answerMessageBox`. |
+| `program-error` | `{ text, caption, type, trace }` | The program shows a box that reports it is going down: one after it handed an exception to error reporting (`ReportFault`), or one with the stop icon modal to the whole task or system, as the system's and the C runtime's fatal boxes are. The box is still drawn on its desktop; this is for the page to put in front of the person. `trace` is the engine's last account of the run, the exception's among it. |
 | `output` | `{ handle, text }` | The program wrote to a standard handle. |
 | `cursor` | `{ width, height, hotSpot, bgra, shown }` | The program's cursor changed. |
 | `cursor-moved` | `{ x, y }` | The cursor moved, by the pointer or by the program: its position as a fraction of the viewport each way. A locked pointer has no browser cursor, so the page draws the program's here. |
 | `clipboard` | `{ text }` | The program put text on the clipboard. |
 | `open-url` | `{ url }` | The program asked the shell to open an address (a link, a `.url` shortcut); the page decides whether to open it. |
-| `divergence` | `{ api, detail }` | A call answered differently from Windows. |
+| `divergence` | `{ api, detail }` | A call answered differently from Windows: accepted, and not all of it done. Said once; journalled as a warning. |
+| `loss` | `{ api, detail, seen? }` | Something the program made did not happen at all: a draw or a frame dropped, an object the GPU refused. Said the first time and every 256th with `seen`, the count; journalled as an error. The program is not stopped. |
 | `error` | the failure | A failure inside the engine. |
-| `fallback` | `{ asked, detail, mode, concurrency }` | The run could not have what it asked for (`concurrency` without shared memory) and runs as `mode` and `concurrency` say; `detail` says why. |
+| `windows` | `{ windows, because }` | `windows: 'auto'` chose this Windows for the run; `because` says what of the program's image decided it. |
 | `present-failed` | the failure | A frame could not be shown. |
 | `bundle-fetching` | `{ fetching }` | The program waits on bundle data not yet on this device (`true`), or has all it asked for again (`false`): a page can say a stall is the download. |
-| `bundle`, `bundle-*` | details | The bundle was opened; a fetch is retried, a block is unavailable, prefetch, translations it carries. |
+| `bundle`, `bundle-*` | details | The bundle was opened; a fetch is retried, a block is unavailable, prefetch, translations it carries. A layer's carry its `layer` (its id). |
+| `layer-files-unmounted` | `{ files, layer }` | A layer holds files outside its system files, which are not on the volume. |
+| `layer-needed` | `{ layer, program? }` | The machine lacks a runtime a layer carries: a managed program (`program`, its path) is loaded on a volume with no .NET Framework that runs it, or a program started the .NET Framework 4's setup, which succeeds (A249). `layer` names it: `dotnet48-x86`, the .NET Framework 4.8 for a 32-bit program or machine, `dotnet48-amd64` for a 64-bit one. The program goes on as it would without; mount the layer (`bundle.layers`, or `layers` for an install) from the next start. |
+| `storage-full` | `{ bundle, reason }` | A block could not be kept for lack of room, with nothing left the engine may remove; said once a run. The run goes on, the block held in memory. |
 | `libraries`, `libraries-missing`, `library-*`, `import-unresolved`, `unimplemented` | names | Which DLLs were bound, which are missing, which imports nothing implements. |
-| `process-*` | details | A child process was created, started, replaced or ended. |
+| `libraries-not-found` | `{ names, program }` | A program's static import names a library found nowhere and carried by no Windows: the process ends at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on Windows, and `run` answers that code (A256). |
+| `process-*` | details | A child process was created, started or ended. `process-resumed` carries its exit code and, as `diagnostics`, each of its layers' name, status and the numbers and flags of its metrics (and of a metric's fields), not their lists or text; an `error` about a process in a worker carries the same on its error. |
 | `session` | `{ changes }` | The program changed files on the volume; the session is saved shortly after. |

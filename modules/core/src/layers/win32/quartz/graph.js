@@ -37,7 +37,8 @@
  */
 
 import {
-    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2,
+    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER, CLSID_FILTER_MAPPER2,
+    IFILTER_MAPPER_SLOTS, IID_IFILTER_MAPPER,
     IBASIC_AUDIO_SLOTS, IBASIC_VIDEO_SLOTS, IFILTER_GRAPH_SLOTS, IFILTER_MAPPER2_SLOTS,
     IGRAPH_BUILDER_SLOTS, IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH,
     IID_IFILTER_MAPPER2, IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT,
@@ -45,9 +46,40 @@ import {
     IMEDIA_CONTROL_SLOTS, IMEDIA_EVENT_EX_SLOTS, IMEDIA_EVENT_SLOTS, IMEDIA_POSITION_SLOTS,
     IMEDIA_SEEKING_SLOTS, IVIDEO_WINDOW_SLOTS, IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS,
     IID_IBASE_FILTER, VTABLE,
+    IID_IFILTER_GRAPH2, IFILTER_GRAPH2_SLOTS, IID_IBASIC_VIDEO2, IBASIC_VIDEO2_SLOTS,
+    IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, IID_IGRAPH_CONFIG, IGRAPH_CONFIG_SLOTS,
+    IID_IGRAPH_VERSION, IGRAPH_VERSION_SLOTS, IID_IMEDIA_FILTER, IMEDIA_FILTER_SLOTS,
+    IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS,
 } from './interfaces.js';
 import { describe } from './describe.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createStreaming } from './stream.js';
+import { createSystemClock } from './clock.js';
+import { createMemoryAllocator } from './allocator.js';
+import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
+import {
+    WINDOWS_REGISTRATIONS, deviceRegistrations, registerWindowsFilters,
+} from './registrations.js';
+import { SYSTEM_CODECS } from '../msvfw32/codecs.js';
+import { CLSID_SEEKING_PASS_THRU, createPassThru } from './passthru.js';
+import {
+    CLSID_SYSTEM_DEVICE_ENUM, CLSID_DEVICE_MONIKER, createDeviceEnumeration,
+} from '../devenum/devenum.js';
+import { CLSID_ASYNC_READER, CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
+import { createFilterBase } from './filter.js';
+import { createFileSource } from './filesource.js';
+import { createRenderers } from './renderers.js';
+import { createParsers } from './splitters.js';
+import { createTransforms } from './transforms.js';
+import { createColorSpaceConverter } from './colorspace.js';
+import { createAcmWrapper } from './acmwrapper.js';
+import { wholeAddress } from '../common/pointers.js';
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -101,12 +133,9 @@ const DEFAULT_VIDEO_HEIGHT = 480;
 const AM_SEEKING_POSITIONING_MASK = 0x03;
 const AM_SEEKING_ABSOLUTE = 0x01;
 
-/** A file name no longer than Windows would hand a filter graph. */
-const MAX_PATH = 260;
-
 /**
- * How many frames one tick may decode, and how many decoder steps it may take
- * to find them.
+ * How many frames one tick may decode, and how many times it may advance the
+ * sound.
  *
  * ponytail: a fixed catch-up budget rather than dropping frames to keep the
  * clock. A run that stalls for a second falls behind and the film plays slower
@@ -120,10 +149,10 @@ const STEPS_PER_TICK = 16;
  * How far the picture may be decoded past the sound that has been heard.
  *
  * A frame is shown the moment it is decoded, so this is also how far the
- * picture leads the sound. It is a lead rather than nothing because the sound
- * decoded with those frames is what keeps a device fed through a turn that took
- * a while, and a device left with nothing is heard at once where a frame a
- * fifth of a second early is not.
+ * picture leads the sound; the sound is read this far past the picture. It is a
+ * lead rather than nothing because sound handed over ahead is what keeps a
+ * device fed through a turn that took a while, and a device left with nothing
+ * is heard at once where a frame a fifth of a second early is not.
  */
 const SOUND_LEAD_MS = 200;
 
@@ -177,10 +206,15 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {Record<string, number>} window
  * @property {Record<string, number>} audio
  * @property {{ width: number, height: number }} video
+ * @property {{ source: [number, number, number, number] | null,
+ *     destination: [number, number, number, number] | null }} placement
+ *           IBasicVideo's rectangles, left, top, width, height; null for the default.
  * @property {VideoClip | null} clip   What RenderFile opened, when it opened one.
  * @property {number} film             Which clip this is, so that whoever plays
  *                                     the sound can tell one from the next.
- * @property {number} shown            Frames decoded and handed over so far.
+ * @property {number} shown            Frames handed over so far: the film's position.
+ * @property {boolean} pictureDone     Whether the picture has said `end`.
+ * @property {boolean} soundDone       Whether the sound has said `end`.
  * @property {number} soundMs
  *           Milliseconds of this film's own sound handed over so far, which is
  *           where the sound has reached in the film -- as against where it has
@@ -197,6 +231,11 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  *           a pause or a decode that could not keep up cost. Null until the
  *           first tick after Run, so that Run needs no clock of its own.
  * @property {boolean} finished        Whether EC_COMPLETE has been raised.
+ * @property {number} eventHandle  The kernel event GetEventHandle hands out, made with the
+ *           graph's first ask; zero until then.
+ * @property {number} version   IGraphVersion's: one more each time a filter joins or leaves.
+ * @property {number} syncSource  The reference clock IMediaFilter was given, one reference held.
+ * @property {number} site        The site IObjectWithSite was given, one reference held.
  * @property {number[]} filters
  *           Filters the program added itself, one reference held on each: a
  *           renderer it wrote, which the graph starts and stops with itself.
@@ -266,7 +305,7 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  */
 function openMedia(host, path){
     const name = host.video && (path >>> 0) !== 0
-        ? host.readWideString?.(path >>> 0, MAX_PATH) ?? ''
+        ? host.readWideString?.(path >>> 0, WHOLE_NAME * 2) ?? ''
         : '';
     return name === '' ? null : host.video?.open(name) ?? null;
 }
@@ -292,9 +331,12 @@ function newGraphState(){
         },
         audio: Object.fromEntries(AUDIO_PROPERTIES.map(name=>[name, 0])),
         video: { width: DEFAULT_VIDEO_WIDTH, height: DEFAULT_VIDEO_HEIGHT },
+        placement: { source: null, destination: null },
         clip: null,
         film: 0,
         shown: 0,
+        pictureDone: false,
+        soundDone: false,
         soundMs: 0,
         heardMs: 0,
         soundMovedAt: null,
@@ -302,6 +344,10 @@ function newGraphState(){
         finished: false,
         filters: [],
         source: null,
+        version: 0,
+        eventHandle: 0,
+        syncSource: 0,
+        site: 0,
     };
 }
 
@@ -321,6 +367,24 @@ function newGraphState(){
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes, once per distinct difference.
+ * @property {{ create: () => number, set: (handle: number) => void,
+ *     reset: (handle: number) => void, close: (handle: number) => void } | undefined} [events]
+ *           Kernel events by handle: the one IMediaEvent::GetEventHandle hands
+ *           out, manual-reset and signalled while the queue holds an event.
+ *           Absent, GetEventHandle refuses as before.
+ * @property {(import('../devenum/devenum.js').DevEnumHost
+ *     & { store: import('../devenum/devenum.js').FilterStore }) | undefined} [devices]
+ *           What the filter mappers and the device enumerator keep their
+ *           registrations in and hand them out through. Absent, a registration
+ *           is accepted and forgotten, and nothing is enumerated.
+ * @property {import('./clock.js').ClockHost | undefined} [clock]
+ *           The machine's clock and its timers, which CLSID_SystemClock is built
+ *           on. Absent, the class is not registered, as on a machine without it.
+ * @property {(import('./filter.js').FilterHost
+ *     & { files: import('./filesource.js').FileSourceHost }) | undefined} [filters]
+ *           What quartz's own filters are built on: the program's memory and
+ *           objects, this process's classes, and the volume's files File Source
+ *           reads. Absent, the filter classes are not registered.
  * @property {import('./stream.js').StreamHost | undefined} [stream]
  *           What joining a program's own filters to a graph needs: calling into
  *           its objects, handing out ours, and a thread to call it from. Absent,
@@ -333,7 +397,12 @@ function newGraphState(){
  *
  * @param {QuartzHost} host
  */
-export function createQuartz(host){
+function createQuartz(host){
+    // The mappers' registrations and the device enumerator over them (`mapper.js`).
+    const devices = host.devices
+        ? createDeviceEnumeration(host.devices, host.devices.store) : null;
+    const mapping = host.devices && devices
+        ? createFilterMapper(host.devices, host.devices.store, devices) : null;
     /** @param {number} address @param {number} value @returns {number} an HRESULT */
     const writeLong = (address, value)=>{
         if ((address >>> 0) === 0)
@@ -342,7 +411,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -354,7 +423,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -366,7 +435,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigInt64(0, BigInt(value), true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -413,12 +482,42 @@ export function createQuartz(host){
      * @param {number} code @param {number} param1 @param {number} param2
      */
     const raise = (graph, code, param1, param2)=>{
-        graph.events.push({ code, param1: param1 >>> 0, param2: param2 >>> 0 });
         const { hwnd, message, instance, flags } = graph.notify;
-        if (hwnd !== 0 && (flags & AM_MEDIAEVENT_NONOTIFY) === 0)
+        // With notification turned off nothing is queued, and the handle is
+        // raised only by the end of a stream: the program waits for the film to
+        // finish without reading events (SetNotifyFlags' documentation).
+        if ((flags & AM_MEDIAEVENT_NONOTIFY) !== 0)
+        {
+            if (code === EC_COMPLETE && graph.eventHandle !== 0)
+            {
+                host.events?.set(graph.eventHandle);
+            }
+            return;
+        }
+        graph.events.push({ code, param1: param1 >>> 0, param2: param2 >>> 0 });
+        if (graph.eventHandle !== 0)
+        {
+            host.events?.set(graph.eventHandle);
+        }
+        if (hwnd !== 0)
         {
             host.post({ hwnd, message, wParam: 0, lParam: instance });
         }
+    };
+
+    /**
+     * The next event, the handle lowered once the queue is empty: it is up
+     * exactly while there is something to collect.
+     *
+     * @param {FilterGraphState} graph @returns {GraphEvent | undefined}
+     */
+    const takeEvent = graph=>{
+        const event = graph.events.shift();
+        if (graph.events.length === 0 && graph.eventHandle !== 0)
+        {
+            host.events?.reset(graph.eventHandle);
+        }
+        return event;
     };
 
     const streaming = host.stream ? createStreaming(host.stream) : null;
@@ -527,15 +626,17 @@ export function createQuartz(host){
             graph.source.startedAt = null;
             playing.add(graph);
         }
-        return (result | 0) < 0 ? result : S_OK;
+        return (result | 0) < 0 || result === S_FALSE ? result : S_OK;
     };
 
     /** @param {FilterGraphState} graph @param {number} slot @param {number} state */
     const moveFilters = async(graph, slot, state)=>{
         playing.delete(graph);
-        await /** @type {NonNullable<typeof streaming>} */ (streaming).each(graph.filters, slot);
+        const result = await /** @type {NonNullable<typeof streaming>} */ (streaming)
+            .each(graph.filters, slot);
         graph.state = state;
-        return S_OK;
+        // S_FALSE is a filter still on its way, a renderer with nothing to show yet.
+        return (result | 0) < 0 || result === S_FALSE ? result : S_OK;
     };
 
     /** @param {FilterGraphState} graph @param {number} result */
@@ -564,6 +665,8 @@ export function createQuartz(host){
         graph.clip = null;
         graph.film = ++films;
         graph.shown = 0;
+        graph.pictureDone = false;
+        graph.soundDone = false;
         graph.soundMs = 0;
         graph.heardMs = 0;
         graph.soundMovedAt = null;
@@ -728,42 +831,43 @@ export function createQuartz(host){
             const audio = [];
             /** @type {Uint8Array | null} */
             let frame = null;
-            let decoded = 0;
+            // The sound first, on its own reading of the file: as far past
+            // where the picture is going as the lead, whatever the picture has
+            // reached in the file. A muxer may lay the sound seconds behind
+            // its picture, and read in the file's order it was reached only by
+            // decoding the picture that far ahead; the sound ran out, stalled,
+            // and the film went over to the host clock and back - in jerks.
+            const soundTo = want * 1000 / clip.fps + SOUND_LEAD_MS;
             let steps = 0;
-            while (graph.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
+            while (clip.hasAudio && !graph.soundDone && graph.soundMs < soundTo
+                && steps++ < STEPS_PER_TICK)
             {
-                const what = clip.decode();
-                if (what === 'frame')
+                const what = clip.decodeAudio();
+                const block = clip.readAudio();
+                if (block)
+                {
+                    audio.push(block);
+                    graph.soundMs += block.length / clip.channels * 1000 / clip.sampleRate;
+                }
+                graph.soundDone = what === 'end';
+            }
+            // Then the picture, decoded only as it is due. Last, because a frame
+            // is a view into the decoder good until the next call into it.
+            let decoded = 0;
+            while (!graph.pictureDone && graph.shown < want && decoded < FRAMES_PER_TICK)
+            {
+                if (clip.decode() === 'frame')
                 {
                     graph.shown++;
                     decoded++;
                     frame = clip.frame();
                     continue;
                 }
-                if (what === 'audio')
-                {
-                    const block = clip.readAudio?.() ?? null;
-                    if (block)
-                    {
-                        audio.push(block);
-                    }
-                    continue;
-                }
+                graph.pictureDone = true;
+            }
+            if (graph.pictureDone && (graph.soundDone || !clip.hasAudio))
+            {
                 complete(graph);
-                break;
-            }
-            // Whatever sound the decoder is still holding goes now, rather than
-            // waiting for a tick that wants another frame: it belongs with
-            // pictures already shown, and every tick it waits inside is a tick
-            // it is heard late by.
-            const residue = clip.readAudio?.();
-            if (residue)
-            {
-                audio.push(residue);
-            }
-            for (const block of audio)
-            {
-                graph.soundMs += block.length / clip.channels * 1000 / clip.sampleRate;
             }
             // Whatever the budget could not reach is time the film does not get
             // to have: the clock is moved up to what was actually shown, so a
@@ -902,8 +1006,10 @@ export function createQuartz(host){
             return E_POINTER;
         }
         const sources = streaming;
-        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, MAX_PATH);
-        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, MAX_PATH);
+        const file = (path >>> 0) === 0 ? '' : stream.readWideString(wholeAddress(path),
+            WHOLE_NAME * 2);
+        const label = (name >>> 0) === 0 ? file : stream.readWideString(wholeAddress(name),
+            WHOLE_NAME * 2);
         /** @param {VideoClip | null} clip */
         const took = clip=>{
             if (!clip || !clip.hasVideo)
@@ -934,19 +1040,28 @@ export function createQuartz(host){
     };
 
     /**
-     * Connect and ConnectDirect: only a connection out of this graph's own
-     * source pin can be made, because that pin is the one thing here that
-     * produces anything.
+     * Connect and ConnectDirect: the output pin's IPin::Connect with the input
+     * pin and the type, as the documentation has ConnectDirect do; the graph's
+     * own source pin connects through its streaming half.
      *
      * @param {FilterGraphState} graph @param {number} out @param {number} into
+     * @param {number} [type]  The AM_MEDIA_TYPE, 0 for any.
      */
-    const connectPins = (graph, out, into)=>{
+    const connectPins = async(graph, out, into, type = 0)=>{
         const source = graph.source;
-        if (!streaming || !source || host.stream?.objectAt(out) !== source.pin)
+        if (streaming && source && host.stream?.objectAt(out) === source.pin)
         {
-            return VFW_E_CANNOT_CONNECT;
+            return streaming.connect(source, into);
         }
-        return streaming.connect(source, into);
+        const stream = host.stream;
+        if (!stream || (out >>> 0) === 0 || (into >>> 0) === 0)
+        {
+            return (out >>> 0) === 0 || (into >>> 0) === 0 ? E_POINTER : VFW_E_CANNOT_CONNECT;
+        }
+        // IPin::Connect, the vtable's fourth slot.
+        const entry = stream.readU32((stream.readU32(wholeAddress(out)) + 3 * 4) >>> 0);
+        return (await stream.callGuest(entry, [out >>> 0, into >>> 0, type >>> 0],
+            stream.currentThread())) | 0;
     };
 
     /**
@@ -980,6 +1095,7 @@ export function createQuartz(host){
                     if ((result | 0) >= 0)
                     {
                         graph.filters.push(filter >>> 0);
+                        graph.version++;
                     }
                     return result;
                 });
@@ -993,11 +1109,12 @@ export function createQuartz(host){
                 return VFW_E_NOT_FOUND;
             }
             graph.filters.splice(at, 1);
+            graph.version++;
             return streaming.remove(filter);
         },
 
         /** HRESULT ConnectDirect(IPin *ppinOut, IPin *ppinIn, const AM_MEDIA_TYPE *pmt) */
-        ConnectDirect: (graph, [out, into])=>connectPins(graph, out, into),
+        ConnectDirect: (graph, [out, into, type])=>connectPins(graph, out, into, type),
 
         /** HRESULT EnumFilters(IEnumFilters **ppEnum) */
         EnumFilters: (graph, [out])=>refuse(out, E_NOTIMPL),
@@ -1010,6 +1127,27 @@ export function createQuartz(host){
 
         /** HRESULT Connect(IPin *ppinOut, IPin *ppinIn) */
         Connect: (graph, [out, into])=>connectPins(graph, out, into),
+
+        /**
+         * HRESULT Disconnect(IPin *ppin)
+         *
+         * The pin's own IPin::Disconnect, one end at a time, as the
+         * documentation has it: a program disconnects both ends.
+         */
+        Disconnect: async(graph, [pin])=>{
+            const stream = host.stream;
+            if ((pin >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!stream)
+            {
+                return E_NOTIMPL;
+            }
+            // IPin::Disconnect, the vtable's sixth slot.
+            const entry = stream.readU32((stream.readU32(wholeAddress(pin)) + 5 * 4) >>> 0);
+            return (await stream.callGuest(entry, [pin >>> 0], stream.currentThread())) | 0;
+        },
 
         /** HRESULT Render(IPin *ppinOut) */
         Render: (graph, [out])=>{
@@ -1073,8 +1211,21 @@ export function createQuartz(host){
         /** HRESULT StopWhenReady(void) */
         StopWhenReady: graph=>stopGraph(graph),
 
-        /** HRESULT GetState(LONG msTimeout, OAFilterState *pfs) */
-        GetState: (graph, [, out])=>writeLong(out, graph.state),
+        /**
+         * HRESULT GetState(LONG msTimeout, OAFilterState *pfs)
+         *
+         * The program's filters are asked too: one still on its way (a
+         * renderer paused with no sample yet) makes the answer
+         * VFW_S_STATE_INTERMEDIATE, as the graph's own filters would.
+         */
+        GetState: (graph, [timeout, out])=>{
+            const answer = writeLong(out, graph.state);
+            if ((answer | 0) < 0 || !streaming || graph.filters.length === 0)
+            {
+                return answer;
+            }
+            return streaming.states(graph.filters, timeout);
+        },
 
         /** HRESULT RenderFile(BSTR strFilename) — a BSTR is wide, like the other one. */
         RenderFile: (graph, [path])=>render(graph, path),
@@ -1095,12 +1246,31 @@ export function createQuartz(host){
         /**
          * HRESULT GetEventHandle(OAEVENT *hEvent)
          *
-         * The other way to learn an event is waiting: a handle the program
-         * waits on itself. There is no event object behind this graph, and
-         * handing out a handle that never signals would be worse than saying
-         * so -- a program told this fails uses the notify window instead.
+         * The other way to learn an event is waiting: a manual-reset event the
+         * graph owns, signalled while its queue holds an event and lowered by
+         * the GetEvent that empties it. The program waits on it and must not
+         * close it; the graph closes it when it goes. One handle for the
+         * graph's life, made with the first ask.
          */
-        GetEventHandle: (graph, [out])=>refuse(out, E_NOTIMPL),
+        GetEventHandle: (graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!host.events)
+            {
+                return refuse(out, E_NOTIMPL);
+            }
+            if (graph.eventHandle === 0)
+            {
+                graph.eventHandle = host.events.create();
+                if (graph.events.length > 0)
+                {
+                    host.events.set(graph.eventHandle);
+                }
+            }
+            return writeLong(out, graph.eventHandle);
+        },
 
         /**
          * HRESULT GetEvent(long *lEventCode, LONG_PTR *lParam1, LONG_PTR *lParam2,
@@ -1117,7 +1287,7 @@ export function createQuartz(host){
             {
                 return E_POINTER;
             }
-            const event = graph.events.shift();
+            const event = takeEvent(graph);
             if (!event)
             {
                 return E_ABORT;
@@ -1140,7 +1310,7 @@ export function createQuartz(host){
             {
                 return VFW_E_WRONG_STATE;
             }
-            const event = graph.events.shift();
+            const event = takeEvent(graph);
             if (!event)
             {
                 return E_ABORT;
@@ -1172,6 +1342,16 @@ export function createQuartz(host){
                 return E_INVALIDARG;
             }
             graph.notify.flags = flags >>> 0;
+            // Turning notification off drops what is queued, as quartz does:
+            // a program that stops reading is not handed stale events later.
+            if (graph.notify.flags !== 0)
+            {
+                graph.events = [];
+                if (graph.eventHandle !== 0)
+                {
+                    host.events?.reset(graph.eventHandle);
+                }
+            }
             return S_OK;
         },
 
@@ -1241,22 +1421,125 @@ export function createQuartz(host){
         IsCursorHidden: (graph, [out])=>writeLong(out, 0),
     };
 
+    /**
+     * The rectangles IBasicVideo places: the part of the frame shown (the
+     * source, which must lie inside the frame) and where in the window it is
+     * shown (the destination, which only needs a size). Unset, each is its
+     * default - the whole frame, and the window's client area, which a video
+     * window keeps at the frame's size.
+     *
+     * @param {FilterGraphState} graph @param {'source' | 'destination'} which
+     * @returns {[number, number, number, number]} left, top, width, height
+     */
+    const placed = (graph, which)=>graph.placement[which]
+        ?? [0, 0, graph.video.width, graph.video.height];
+
+    /**
+     * Places a rectangle, as the documentation bounds it.
+     *
+     * @param {FilterGraphState} graph @param {'source' | 'destination'} which
+     * @param {[number, number, number, number]} rect
+     */
+    const placeRect = (graph, which, [left, top, width, height])=>{
+        if (width <= 0 || height <= 0)
+        {
+            return E_INVALIDARG;
+        }
+        if (which === 'source' && (left < 0 || top < 0 || left + width > graph.video.width
+            || top + height > graph.video.height))
+        {
+            return E_INVALIDARG;
+        }
+        graph.placement[which] = [left, top, width, height];
+        return S_OK;
+    };
+
+    /**
+     * get_ and put_ for one side of a rectangle: a put keeps the other three.
+     *
+     * @param {'source' | 'destination'} which @param {string} prefix @returns {Record<string,
+     *     (graph: FilterGraphState, args: number[]) => number>}
+     */
+    const sides = (which, prefix)=>{
+        /** @param {number} index @param {FilterGraphState} graph @param {number} value */
+        const put = (index, graph, value)=>{
+            const rect = /** @type {[number, number, number, number]} */ (
+                [...placed(graph, which)]);
+            rect[index] = value | 0;
+            return placeRect(graph, which, rect);
+        };
+        return Object.fromEntries(['Left', 'Top', 'Width', 'Height'].flatMap((side, index)=>[
+            [`get_${prefix}${side}`, (/** @type {FilterGraphState} */ graph,
+                /** @type {number[]} */ [out])=>writeLong(out, placed(graph, which)[index])],
+            [`put_${prefix}${side}`, (/** @type {FilterGraphState} */ graph,
+                /** @type {number[]} */ [value])=>put(index, graph, value)],
+        ]));
+    };
+
+    /**
+     * SetSourcePosition and the like: four longs in, or four addresses out.
+     *
+     * @param {'source' | 'destination'} which
+     */
+    const position4 = which=>({
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        set: (graph, args)=>placeRect(graph, which,
+            /** @type {[number, number, number, number]} */ (args.map(value=>value | 0))),
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        get: (graph, args)=>{
+            if (args.some(out=>(out >>> 0) === 0))
+            {
+                return E_POINTER;
+            }
+            const rect = placed(graph, which);
+            args.forEach((out, index)=>writeLong(out, rect[index]));
+            return S_OK;
+        },
+    });
+
+    /** @param {FilterGraphState} graph @param {'source' | 'destination'} which */
+    const isDefault = (graph, which)=>{
+        const rect = placed(graph, which);
+        return rect[0] === 0 && rect[1] === 0 && rect[2] === graph.video.width
+            && rect[3] === graph.video.height ? S_OK : S_FALSE;
+    };
+
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const basicVideo = {
+        /** HRESULT get_AvgTimePerFrame(REFTIME *pAvgTimePerFrame) */
+        get_AvgTimePerFrame: (graph, [out])=>writeDouble(out,
+            graph.clip ? 1 / graph.clip.fps : 0),
+
         /** HRESULT get_VideoWidth(long *pVideoWidth) */
         get_VideoWidth: (graph, [out])=>writeLong(out, graph.video.width),
 
         /** HRESULT get_VideoHeight(long *pVideoHeight) */
         get_VideoHeight: (graph, [out])=>writeLong(out, graph.video.height),
 
+        ...sides('source', 'Source'),
+        ...sides('destination', 'Destination'),
+
+        SetSourcePosition: position4('source').set,
+        GetSourcePosition: position4('source').get,
+        SetDefaultSourcePosition: graph=>{
+            graph.placement.source = null;
+            return S_OK;
+        },
+        SetDestinationPosition: position4('destination').set,
+        GetDestinationPosition: position4('destination').get,
+        SetDefaultDestinationPosition: graph=>{
+            graph.placement.destination = null;
+            return S_OK;
+        },
+
         /** HRESULT GetVideoSize(long *pWidth, long *pHeight) */
         GetVideoSize: (graph, args)=>videoSize(graph, args),
 
         /** HRESULT IsUsingDefaultSource(void) */
-        IsUsingDefaultSource: ()=>S_OK,
+        IsUsingDefaultSource: graph=>isDefault(graph, 'source'),
 
         /** HRESULT IsUsingDefaultDestination(void) */
-        IsUsingDefaultDestination: ()=>S_OK,
+        IsUsingDefaultDestination: graph=>isDefault(graph, 'destination'),
     };
 
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
@@ -1334,8 +1617,72 @@ export function createQuartz(host){
         CanSeekBackward: (graph, [out])=>writeLong(out, 0),
     };
 
+    /** The one time format a graph answers in: REFERENCE_TIME, a hundred nanoseconds. */
+    const TIME_FORMAT_MEDIA_TIME = '{7B785574-8C82-11CF-BC0C-00AA00AC74F6}';
+    /**
+     * A time format a program names, GUID_NULL - the format in use - for none.
+     *
+     * @param {number} address @returns {string}
+     */
+    const formatAt = address=>{
+        const read = host.stream?.readU32;
+        if ((address >>> 0) === 0 || !read)
+        {
+            return TIME_FORMAT_MEDIA_TIME;
+        }
+        const bytes = new Uint8Array(16);
+        const view = new DataView(bytes.buffer);
+        for (let i = 0; i < 16; i += 4)
+        {
+            view.setUint32(i, read(wholeAddress(address) + i), true);
+        }
+        const format = formatGuid(bytes);
+        return format === '{00000000-0000-0000-0000-000000000000}'
+            ? TIME_FORMAT_MEDIA_TIME : format;
+    };
+    /** @param {number} out */
+    const writeFormat = out=>{
+        if ((out >>> 0) === 0)
+        {
+            return E_POINTER;
+        }
+        host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(TIME_FORMAT_MEDIA_TIME)));
+        return S_OK;
+    };
+
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaSeeking = {
+        /** HRESULT IsFormatSupported(const GUID *pFormat) */
+        IsFormatSupported: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : S_FALSE),
+        /** HRESULT QueryPreferredFormat(GUID *pFormat) */
+        QueryPreferredFormat: (graph, [out])=>writeFormat(out),
+        /** HRESULT GetTimeFormat(GUID *pFormat) */
+        GetTimeFormat: (graph, [out])=>writeFormat(out),
+        /** HRESULT IsUsingTimeFormat(const GUID *pFormat) */
+        IsUsingTimeFormat: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : S_FALSE),
+        /** HRESULT SetTimeFormat(const GUID *pFormat) */
+        SetTimeFormat: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : E_INVALIDARG),
+        /**
+         * HRESULT ConvertTimeFormat(LONGLONG *pTarget, const GUID *pTargetFormat,
+         *                           LONGLONG Source, const GUID *pSourceFormat)
+         *
+         * Between the one format and itself, a time is itself.
+         */
+        ConvertTimeFormat: (graph, [target, targetFormat, low, high, sourceFormat])=>{
+            if ((target >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (formatAt(targetFormat) !== TIME_FORMAT_MEDIA_TIME
+                || formatAt(sourceFormat) !== TIME_FORMAT_MEDIA_TIME)
+            {
+                return E_INVALIDARG;
+            }
+            return writeLongLong(target, (high | 0) * 0x1_0000_0000 + (low >>> 0));
+        },
         /**
          * HRESULT GetCapabilities(DWORD *pCapabilities)
          *
@@ -1374,7 +1721,7 @@ export function createQuartz(host){
             {
                 return S_OK;
             }
-            const low = stream.readU32(current >>> 0);
+            const low = stream.readU32(wholeAddress(current));
             const high = stream.readU32((current + 4) >>> 0) | 0;
             return seekSource(graph, (high * 2 ** 32 + low) / TICKS_PER_SECOND) ?? S_OK;
         },
@@ -1406,9 +1753,8 @@ export function createQuartz(host){
 
     /**
      * IFilterMapper2, which is where a filter DLL's DllRegisterServer announces
-     * itself. Nothing here builds graphs out of registered filters, so the
-     * registration is accepted and forgotten -- which is what a filter that
-     * registers successfully and is never chosen looks like from inside.
+     * itself. These answers stand only without the device store; with it,
+     * `mapper.js`'s mapper replaces them and a registration is kept.
      *
      * @type {Record<string, (state: null, args: number[]) => number>}
      */
@@ -1436,6 +1782,137 @@ export function createQuartz(host){
         },
     };
 
+    /**
+     * A method of an object the program gave the graph - a clock, a site -
+     * called through its own vtable, as the graph calls one.
+     *
+     * @param {number} self @param {number} slot @param {number[]} [args]
+     */
+    const callObject = async(self, slot, args = [])=>{
+        const stream = host.stream;
+        if (!stream || (self >>> 0) === 0)
+        {
+            return E_NOTIMPL;
+        }
+        const entry = stream.readU32(stream.readU32(wholeAddress(self)) + slot * 4);
+        return (await stream.callGuest(entry, [self >>> 0, ...args], stream.currentThread())) >>> 0;
+    };
+    /** IUnknown's slots, as callObject numbers them. */
+    const QUERY_INTERFACE = 0;
+    const ADD_REF = 1;
+    const RELEASE = 2;
+    /** VFW_E_FRAME_STEP_UNSUPPORTED: no renderer in the graph steps a frame at a time. */
+    const VFW_E_FRAME_STEP_UNSUPPORTED = 0x8004028e;
+    const E_FAIL = 0x80004005;
+
+    /**
+     * IMediaFilter on the graph: the graph's own state, as IMediaControl
+     * drives it, its class as IPersist says, and the reference clock it runs
+     * on, a reference held on the clock it is given.
+     *
+     * @type {Record<string, (graph: FilterGraphState, args: number[], self: any) => any>}
+     */
+    const mediaFilter = {
+        GetClassID: (graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(CLSID_FILTER_GRAPH)));
+            return S_OK;
+        },
+        Stop: (graph, args)=>mediaControl.Stop(graph, args),
+        Pause: (graph, args)=>mediaControl.Pause(graph, args),
+        Run: (graph, args)=>mediaControl.Run(graph, args),
+        GetState: (graph, [timeout, out])=>((out >>> 0) === 0 ? E_POINTER
+            : mediaControl.GetState(graph, [timeout, out])),
+        SetSyncSource: async(graph, [clock])=>{
+            if ((clock >>> 0) !== 0)
+            {
+                await callObject(clock, ADD_REF);
+            }
+            const before = graph.syncSource;
+            graph.syncSource = clock >>> 0;
+            if (before)
+            {
+                await callObject(before, RELEASE);
+            }
+            return S_OK;
+        },
+        GetSyncSource: async(graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeLong(out, graph.syncSource);
+            if (graph.syncSource)
+            {
+                await callObject(graph.syncSource, ADD_REF);
+            }
+            return graph.syncSource ? S_OK : S_FALSE;
+        },
+    };
+
+    /** IGraphVersion: how many times a filter has joined or left. */
+    const graphVersion = {
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        QueryVersion: (graph, [out])=>((out >>> 0) === 0 ? E_POINTER
+            : writeLong(out, graph.version)),
+    };
+
+    /** IObjectWithSite: the site is the program's object, asked through its own QueryInterface. */
+    const objectWithSite = {
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        SetSite: async(graph, [site])=>{
+            if ((site >>> 0) !== 0)
+            {
+                await callObject(site, ADD_REF);
+            }
+            const before = graph.site;
+            graph.site = site >>> 0;
+            if (before)
+            {
+                await callObject(before, RELEASE);
+            }
+            return S_OK;
+        },
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        GetSite: (graph, [iid, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!graph.site)
+            {
+                writeLong(out, 0);
+                return E_FAIL;
+            }
+            return callObject(graph.site, QUERY_INTERFACE, [iid >>> 0, out >>> 0]);
+        },
+    };
+
+    /** IVideoFrameStep: the graph renders through no filter that steps a frame at a time. */
+    const frameStep = {
+        Step: ()=>VFW_E_FRAME_STEP_UNSUPPORTED,
+        CanStep: ()=>S_FALSE,
+        CancelStep: ()=>S_OK,
+    };
+
+    /** IBasicVideo2's one addition: the picture's own aspect, its size. */
+    const basicVideo2 = {
+        ...basicVideo,
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        GetPreferredAspectRatio: (graph, [x, y])=>{
+            if ((x >>> 0) === 0 || (y >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeLong(x, graph.video.width);
+            writeLong(y, graph.video.height);
+            return S_OK;
+        },
+    };
+
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
     const filterGraph = ()=>{
         const state = newGraphState();
@@ -1452,6 +1929,11 @@ export function createQuartz(host){
              */
             destroy: ()=>{
                 playing.delete(state);
+                if (state.eventHandle !== 0)
+                {
+                    host.events?.close(state.eventHandle);
+                    state.eventHandle = 0;
+                }
                 state.clip?.close();
                 state.clip = null;
                 // Reached without the program's Release -- nothing here is
@@ -1497,14 +1979,81 @@ export function createQuartz(host){
                 describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, mediaPosition),
                 describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, mediaSeeking),
                 describe(IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS, eventSink),
+                // The graph is also the system's filter mapper, as quartz's is,
+                // and answers for the faces Windows' graph has.
+                describe(IID_IFILTER_GRAPH2, IFILTER_GRAPH2_SLOTS, graphBuilder),
+                describe(IID_IBASIC_VIDEO2, IBASIC_VIDEO2_SLOTS, basicVideo2),
+                describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper),
+                describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper),
+                describe(IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, filterMapper),
+                describe(IID_IGRAPH_CONFIG, IGRAPH_CONFIG_SLOTS, {}),
+                describe(IID_IGRAPH_VERSION, IGRAPH_VERSION_SLOTS, graphVersion),
+                describe(IID_IMEDIA_FILTER, IMEDIA_FILTER_SLOTS, mediaFilter),
+                describe(IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, objectWithSite),
+                describe(IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS, frameStep),
             ],
         };
     };
 
-    /** @returns {import('../ole32/objects.js').ComClassDefinition} */
+    /**
+     * The filter mapper's class: both mappers, the third's device enumerator,
+     * and IAMFilterData, as quartz's mapper answers for them.
+     *
+     * @returns {import('../ole32/objects.js').ComClassDefinition}
+     */
     const filterMapper2 = ()=>({
         state: null,
-        interfaces: [describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper)],
+        aggregatable: true,
+        interfaces: [
+            describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper),
+            describe(IID_IAM_FILTER_DATA, IAM_FILTER_DATA_SLOTS, mapping?.filterData ?? {}),
+        ],
+    });
+
+    /**
+     * IFilterMapper, the first one: what a filter DLL built on the SDK's base
+     * classes registers through when IFilterMapper2 is not there. As the
+     * second, a registration is accepted and forgotten; an instance asked for
+     * is given an id of its own, a new GUID, as quartz makes one.
+     *
+     * @type {Record<string, (state: null, args: number[]) => number>}
+     */
+    const firstMapper = {
+        RegisterFilter: ()=>S_OK,
+        /** HRESULT RegisterFilterInstance(CLSID clsid, LPCWSTR Name, CLSID *MRId) */
+        RegisterFilterInstance: (state, args)=>{
+            const out = args[5] >>> 0;
+            if (out === 0)
+            {
+                return E_POINTER;
+            }
+            const id = globalThis.crypto.getRandomValues(new Uint8Array(16));
+            // Version 4 in Data3's high nibble (its second byte, little-endian),
+            // the RFC 4122 variant in Data4's first.
+            id[7] = (id[7] & 0x0f) | 0x40;
+            id[8] = (id[8] & 0x3f) | 0x80;
+            host.writeMemory(out, id);
+            return S_OK;
+        },
+        RegisterPin: ()=>S_OK,
+        RegisterPinType: ()=>S_OK,
+        UnregisterFilter: ()=>S_OK,
+        UnregisterFilterInstance: ()=>S_OK,
+        UnregisterPin: ()=>S_OK,
+    };
+    if (mapping)
+    {
+        Object.assign(filterMapper, mapping.mapper2);
+        Object.assign(firstMapper, mapping.mapper1);
+    }
+
+    /** @returns {import('../ole32/objects.js').ComClassDefinition} */
+    const filterMapper1 = ()=>({
+        state: null,
+        aggregatable: true,
+        interfaces: [describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper)],
     });
 
     /**
@@ -1590,7 +2139,9 @@ export function createQuartz(host){
         };
     };
 
-    return { filterGraph, filterMapper2, tick, film };
+    return { filterGraph, filterMapper1, filterMapper2, systemDeviceEnum: devices?.systemDeviceEnum,
+        deviceMoniker: devices?.deviceMoniker,
+        tick, film };
 }
 
 /**
@@ -1617,5 +2168,49 @@ export function registerQuartzClasses(registry, host){
     registry.registerClass(CLSID_FILTER_GRAPH, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
+    registry.registerClass(CLSID_FILTER_MAPPER, quartz.filterMapper1);
+    if (host.clock)
+    {
+        registry.registerClass(CLSID_SYSTEM_CLOCK, createSystemClock(host.clock));
+    }
+    if (quartz.systemDeviceEnum)
+    {
+        registry.registerClass(CLSID_SYSTEM_DEVICE_ENUM, quartz.systemDeviceEnum);
+    }
+    if (quartz.deviceMoniker)
+    {
+        registry.registerClass(CLSID_DEVICE_MONIKER, quartz.deviceMoniker);
+    }
+    if (host.stream)
+    {
+        registry.registerClass(CLSID_MEMORY_ALLOCATOR, createMemoryAllocator(host.stream));
+    }
+    if (host.filters)
+    {
+        const base = createFilterBase(host.filters);
+        const passThru = createPassThru(base, host.filters);
+        registry.registerClass(CLSID_ASYNC_READER, createFileSource(base, host.filters,
+            host.filters.files));
+        registry.registerClass(CLSID_SEEKING_PASS_THRU, passThru.seekingPassThru);
+        for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
+            ...createParsers(base, host.filters),
+            ...createColorSpaceConverter(base, host.filters, passThru),
+            ...host.filters.acm
+                ? createAcmWrapper(base, host.filters, host.filters.acm, passThru) : [],
+            ...host.filters.icm
+                ? createTransforms(base, host.filters, host.filters.icm, passThru) : []])
+        {
+            registry.registerClass(clsid, define);
+        }
+    }
+    // Registered as DllRegisterServer registers them, for intelligent connect
+    // and a program walking a category to find; only what is made here.
+    if (host.devices)
+    {
+        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid), [
+            ...WINDOWS_REGISTRATIONS,
+            ...deviceRegistrations(SYSTEM_CODECS),
+        ]);
+    }
     return { tick: quartz.tick, film: quartz.film };
 }

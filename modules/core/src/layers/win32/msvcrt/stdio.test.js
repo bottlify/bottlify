@@ -1205,3 +1205,114 @@ test('tmpfile opens a new file for update in binary, each its own, removed when 
         assert.equal(files.stat(name)?.exists === true, false, `${name} is gone once closed`);
     }
 });
+
+test('_putw writes a word\'s four bytes and _getw reads them back, EOF at the end', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\words.bin'), memory.put('w+b')]);
+    assert.equal(fns._putw.handler([0x2c312c30, stream]), 0x2c312c30);
+    assert.equal(fns._putw.handler([-2, stream]), -2);
+    assert.equal(fns.fseek.handler([stream, 0, 0]), 0);
+    assert.equal(fns._getw.handler([stream]), 0x2c312c30);
+    assert.equal(fns._getw.handler([stream]), -2);
+    assert.equal(fns.feof.handler([stream]), 0);
+    assert.equal(fns._getw.handler([stream]), -1, 'nothing left');
+    assert.notEqual(fns.feof.handler([stream]), 0);
+});
+
+test('_getw reads through a text stream\'s CR LF as one LF', ()=>{
+    const { memory, fns } = build();
+    const writer = fns.fopen.handler([memory.put('C:\\text.txt'), memory.put('wb')]);
+    fns.fwrite.handler([memory.put('a\r\nbc'), 1, 5, writer]);
+    fns.fclose.handler([writer]);
+    const stream = fns.fopen.handler([memory.put('C:\\text.txt'), memory.put('rt')]);
+    assert.equal(fns._getw.handler([stream]), 0x63620a61, 'a, LF, b, c');
+});
+
+test('fopen_s writes the stream through its pointer and answers errno\'s code', ()=>{
+    const { memory, fns, errno } = build();
+    const out = memory.allocate(4);
+    assert.equal(fns.fopen_s.handler([out, memory.put('C:\\data.bin'), memory.put('rb')]), 0);
+    assert.notEqual(memory.u32(out), 0);
+    assert.equal(fns.fopen_s.handler([0, memory.put('C:\\data.bin'), memory.put('rb')]), 22);
+    assert.equal(fns.fopen_s.handler([out, memory.put('C:\\data.bin'), memory.put('q')]), 22,
+        'not a mode');
+    assert.equal(memory.u32(out), 0, 'and no stream');
+    assert.ok(errno.includes(22));
+    assert.equal(fns._wfopen_s.handler([out, memory.putWide('C:\\data.bin'),
+        memory.putWide('rb')]), 0);
+    assert.notEqual(memory.u32(out), 0);
+});
+
+test('setbuf gives a stream BUFSIZ or no buffer', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
+    fns.setbuf.handler([stream, 0]);
+    assert.equal(memory.u32(stream + 24), 2, 'its _charbuf, as Wine\'s test_flsbuf reads');
+    fns.setbuf.handler([stream, memory.allocate(512)]);
+    assert.equal(memory.u32(stream + 24), 4096);
+});
+
+test('fread of a binary stream puts the volume\'s bytes into the buffer, copied once', async()=>{
+    // A read of a stretch the window would not hold whole reads straight into
+    // guest memory (files.readInto); a small one from the stream's window,
+    // without a copy between. Each answers the bytes of the file in order,
+    // and a short read at the end raises EOF.
+    for (const late of [false, true])
+    {
+        const memory = fakeMemory();
+        const size = 20_000;
+        const data = Uint8Array.from({ length: size }, (_, at)=>(at * 7 + 3) & 255);
+        const files = fakeVolume({ 'C:\\big.bin': data }, { late });
+        const calls = { read: 0, readInto: 0 };
+        const read = files.read.bind(files);
+        const readInto = files.readInto.bind(files);
+        files.read = (/** @type {string} */ node, /** @type {number} */ at, /** @type {number} */ n)=>{
+            calls.read++;
+            return read(node, at, n);
+        };
+        /** @param {string} node @param {number} at @param {number} n @param {any} put */
+        const counted = (node, at, n, put)=>{
+            calls.readInto++;
+            return readInto(node, at, n, put);
+        };
+        files.readInto = counted;
+        /** @type {ArrayBufferLike[]} */
+        const sources = [];
+        const write = memory.writeMemory;
+        memory.writeMemory = (address, source)=>{
+            sources.push(source.buffer);
+            write(address, source);
+        };
+        const fns = /** @type {any} */ (createStdioFunctions({
+            readMemory: memory.readMemory, writeMemory: memory.writeMemory,
+            readCString: memory.readCString, allocate: memory.allocate, free: ()=>true,
+            files, write: ()=>{}, iob: ()=>IOB, errno: ()=>{},
+        }));
+        const stream = fns.fopen.handler([memory.put('C:\\big.bin'), memory.put('rb')]);
+        const buffer = memory.allocate(size + 16);
+        /** @param {number} from @param {number} n */
+        const at = (from, n)=>[...memory.bytes.subarray(buffer, buffer + n)]
+            .every((value, i)=>value === data[from + i]);
+
+        assert.equal(await fns.fread.handler([buffer, 1, 10, stream]), 10);
+        assert.ok(at(0, 10), `${late ? 'late' : 'at once'}: the first ten bytes`);
+        assert.equal(calls.read, 1, 'a small read fills the window');
+        assert.equal(await fns.fread.handler([buffer, 1, 100, stream]), 100);
+        assert.ok(at(10, 100), 'the next hundred, from the window');
+        assert.equal(calls.read, 1, 'and asks the volume nothing');
+        assert.equal(await fns.fread.handler([buffer, 4, 2000, stream]), 2000);
+        assert.ok(at(110, 8000), 'eight thousand, past the window');
+        assert.equal(calls.readInto, 1, 'read into the buffer');
+        assert.equal(sources.at(-1), data.buffer, 'from the volume\'s own bytes, no copy between');
+        assert.equal(await fns.fread.handler([buffer, 1, size, stream]), size - 8110);
+        assert.ok(at(8110, size - 8110), 'the rest');
+        assert.notEqual(fns.feof.handler([stream]), 0, 'a short read ends the file');
+
+        fns.fseek.handler([stream, 0, 0]);
+        fns.ungetc.handler([0x41, stream]);
+        assert.equal(await fns.fread.handler([buffer, 1, 5000, stream]), 5000, 'after ungetc');
+        assert.equal(memory.bytes[buffer], 0x41, 'the byte given back first');
+        assert.ok(at(0, 0) && [...memory.bytes.subarray(buffer + 1, buffer + 5000)]
+            .every((value, i)=>value === data[i]), 'then the file from where it was');
+    }
+});

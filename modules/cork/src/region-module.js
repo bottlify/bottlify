@@ -18,21 +18,22 @@
 
 import { formRegion } from './region.js';
 import { ModuleBuilder } from './wasm/encoder.js';
-import { features } from './wasm/features.js';
+import { features, memory64, wideLanes } from './wasm/features.js';
 import { emitRegion, finishModule, prepareModule } from './emit/region.js';
 import { ownLayout, PAGE } from './runtime/layout.js';
+import { MODE_64 } from './decode/decoder.js';
 
 /**
  * @param {{ code: ArrayLike<number>, at: number, entry?: number, precise?: boolean,
  *     atomic?: boolean, ramSize?: number, hash?: boolean, callReturn?: boolean,
- *     looseStacks?: boolean, structure?: boolean,
+ *     looseStacks?: boolean,
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
  *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number,
- *     ordered?: boolean, hostFeatures?: Partial<import('./wasm/features.js').Features>,
- *     form?: Parameters<typeof formRegion>[2] }} what
+ *     hostFeatures?: Partial<import('./wasm/features.js').Features>,
+ *     form?: Parameters<typeof formRegion>[2], bits?: 32 | 64, window?: number }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
- *     default); `precise`, `atomic`, `ordered`, `hash`, `callReturn`, `looseStacks`,
- *     `structure`: as the translator's configuration has them; `expansion` told each
+ *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`:
+ *     as the translator's configuration has them; `expansion` told each
  *     instruction's wasm bytes (a diagnostic build); `wide` the x87 compiled for double or
  *     extended precision, as a run whose control word says so has it; `checked` false the
  *     x87 stack's shape at the entry tested once rather than at every instruction, as the
@@ -43,12 +44,15 @@ import { ownLayout, PAGE } from './runtime/layout.js';
  *     has in place of this one's (`features`), the module emitted as that host emits it --
  *     an arm64 one's default NaN is positive, and its float arithmetic carries the fix-ups
  *     an x86 host emits no code for; `form` how the region is formed (`formRegion`'s
- *     options: `formDepth`, the leaves' limits)
+ *     options: `formDepth`, the leaves' limits); `bits` 64 the code long mode's, formed and
+ *     emitted as the long-mode runtime has it; `window` a wide window's bytes (8 or 16
+ *     GiB, long mode's), the RAM a `memory64` memory of its own
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
-    structure = true, expansion = null, wide = false, checked = true, processors = 1,
-    markBlocks = false, ramBase = PAGE, ordered = false, hostFeatures = {}, form = {} })
+    expansion = null, wide = false, checked = true, processors = 1,
+    markBlocks = false, ramBase = PAGE, hostFeatures = {}, form = {}, bits = 32,
+    window })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -56,11 +60,15 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
         const offset = address - at;
         return offset >= 0 && offset < bytes.length ? bytes[offset] : 0xf4;
     };
-    const region = formRegion(read, entry, form);
+    const region = formRegion(read, entry, bits === 64 ? { mode: MODE_64, ...form } : form);
     const m = new ModuleBuilder();
-    const context = prepareModule(m, ownLayout({ ramSize, processors, ramBase }),
-        { ...features(), ...hostFeatures }, {},
-        { precise, atomic, ordered, hash, callReturn: hash && callReturn, looseStacks, structure,
+    const layout = window !== undefined ? ownLayout({ ramSize, bits: 64, window, ramBase: 0 })
+        : ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
+    // A wide window's lane accesses as the runtime makes them on this engine (`wideLanes`).
+    const lanes = window === undefined || 'wideLanes' in hostFeatures ? {}
+        : { wideLanes: wideLanesOf(window) };
+    const context = prepareModule(m, layout, { ...features(), ...lanes, ...hostFeatures }, {},
+        { precise, atomic, hash, callReturn: hash && callReturn, looseStacks,
             expansion, wide, markBlocks });
     const translation = emitRegion(context, region, { entryTop: 0, checked });
     finishModule(context, [translation.functionIndex]);
@@ -74,4 +82,15 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
         bytes: region.bytes,
         refused: Object.fromEntries(region.refused),
     };
+}
+
+/** `wideLanes` over a window of so many bytes, asked once a size. @type {Map<number, boolean>} */
+const lanesAsked = new Map();
+/** @param {number} window */
+function wideLanesOf(window){
+    if (!lanesAsked.has(window))
+    {
+        lanesAsked.set(window, wideLanes(memory64(window)));
+    }
+    return /** @type {boolean} */ (lanesAsked.get(window));
 }

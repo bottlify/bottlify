@@ -42,7 +42,7 @@
 
 import { compoundBytesSync, nameKey, storageOf, streamOf } from '../common/compound-writer.js';
 import { createEntry, parseCompoundFile, serializeCompoundFile } from '../ole32/cfb.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { openCompound } from './compound.js';
 import {
     MSITYPE, columnWidth, decodeStreamName, encodeStreamName, encoderFor, isBinaryType, isKey,
@@ -183,7 +183,7 @@ async function loadTransform(file, storage){
  * @param {Uint8Array} bytes @param {Column[]} columns @param {(string | null)[]} strings
  * @param {boolean} longRefs @returns {TransformRecord[]}
  */
-export function readTransformRecords(bytes, columns, strings, longRefs){
+function readTransformRecords(bytes, columns, strings, longRefs){
     /** @type {TransformRecord[]} */
     const records = [];
     for (let at = 0; at < bytes.length;)
@@ -764,7 +764,7 @@ export async function applyTransform(db, name, errorConditions, openFile, log){
  * @param {(path: string) => ByteSource | null | Promise<ByteSource | null>} openFile
  * @returns {Promise<{ file: CompoundFile, storage: CompoundNode } | null>}
  */
-export async function openTransform(db, name, openFile){
+async function openTransform(db, name, openFile){
     if (name.startsWith(':'))
     {
         const file = db.compound ?? null;

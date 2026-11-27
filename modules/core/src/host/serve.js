@@ -7,7 +7,7 @@
 /**
  * The engine's end of the wire: answers a page's requests over a port.
  *
- * Everything that is the engine lives on this side -- the emulator, the HLE,
+ * Everything that is the engine lives on this side -- the CPU, the HLE,
  * the mixer's pump, the GPU device and the copy of each frame into the
  * canvas. The page keeps what only a page can do: the DOM events, the audio
  * context, the cursor style. A GPUDevice is neither transferable nor
@@ -20,15 +20,15 @@
  * worker at all; `engine.worker.js` is the two lines that bind it to a real one.
  */
 
-import { PAGE_YIELD_MS, createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { PAGE_YIELD_MS, createMacrotask, pagePacing } from '../app.js';
 import { createInboundReader } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
+import { createFrameClock } from './frame-clock.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { gcNudgeOf } from '../layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../layers/cpu/module.js';
-import { createLogReader } from '../layers/log/reader.js';
-import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
-import { gpuFeaturesOf } from '../layers/graphics/webgpu/features.js';
+import { PIECE_SIZE } from '../layers/filesystem/internal/memory-store.js';
+import { gpuFeaturesOf, gpuLimitsOf } from '../layers/graphics/webgpu/features.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
@@ -65,52 +65,10 @@ export const WORKER_YIELD_MS = 4;
  *     of its own.
  * @property {boolean} [threaded]
  *     Whether this end has a thread of its own. It does in a worker, where
- *     the loop holds the thread for the worker's interval between yields and
- *     a run may ask for the event-driven pacing; on a page's thread, behind
- *     a MessageChannel, the loop keeps the page's pacing whatever is asked.
+ *     the loop holds the thread for the worker's interval between yields; on
+ *     a page's thread, behind a MessageChannel, it yields at the page's.
  * @property {() => number} [now]
  */
-
-/**
- * The pacing of a thread that is nobody else's: turns run back to back until
- * something is pending, and an idle machine sleeps until the guest's next
- * deadline, a host answer, or a message from the page -- never on a short
- * timer looked at again and again.
- *
- * @param {Object} deps
- * @param {() => Promise<void>} deps.macrotask
- * @param {() => Promise<void>} deps.poke   Settles on the next message from the page.
- * @param {() => boolean} deps.signalled    Whether the page has posted since the last look.
- * @param {() => number} deps.now
- * @param {number} [deps.pendingMs]
- * @returns {import('../app.js').RunPacing}
- */
-export function workerPacing({ macrotask, poke, signalled, now, pendingMs }){
-    return {
-        yield: pacedYield({ macrotask, now, intervalMs: WORKER_YIELD_MS, signalled, pendingMs }),
-        wait({ sleep, deadlineMs, wakes }){
-            if (!sleep)
-            {
-                return macrotask();
-            }
-            /** @type {ReturnType<typeof setTimeout> | null} */
-            let timer = null;
-            const waits = [...wakes, poke()];
-            if (deadlineMs !== null)
-            {
-                waits.push(new Promise(resolve=>{
-                    timer = setTimeout(resolve, deadlineMs);
-                }));
-            }
-            return Promise.race(waits).then(()=>{
-                if (timer !== null)
-                {
-                    clearTimeout(timer);
-                }
-            });
-        },
-    };
-}
 
 /**
  * One byte range of a bundle, by HTTP.
@@ -183,7 +141,10 @@ export function watchFrom({ libraries, strings }){
             return { args: 6 };
         }
         const decorated = /@(\d+)$/.exec(name);
-        return decorated ? { args: Number(decorated[1]) / 4 } : null;
+        // A C++ name (`?init@System@FMOD@@QAG...`) says its arguments only in its mangling:
+        // eight dwords are shown, `this` first under __stdcall, as for an ordinal.
+        return decorated ? { args: Number(decorated[1]) / 4 }
+            : name.startsWith('?') ? { args: 8, strings } : null;
     };
 }
 
@@ -322,11 +283,26 @@ function buffersUnder(files){
  * archive file was one allocation more than the worker could make, and its
  * copy on the way another; the page reads it a block at a time.
  *
+ * A file of a session laid under the volume that the program did not touch
+ * (`session-source.js`) is read from the session here, a piece at a time.
+ *
  * @param {{ path: string, bytes: Uint8Array, contents?: { size: number,
- *     flat: Uint8Array | null, pieces: (Uint8Array | undefined)[] } }} file
- * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[] }}
+ *     flat: Uint8Array | null, pieces: (Uint8Array | undefined)[] } }
+ *     | { path: string, size: number,
+ *         read: (offset?: number, length?: number) => Promise<Uint8Array> }} file
+ * @returns {Promise<{ path: string, size: number, pieces: (Uint8Array | null)[] }>}
  */
-function inPieces(file){
+async function inPieces(file){
+    if (!('bytes' in file))
+    {
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        for (let at = 0; at < file.size; at += PIECE_SIZE)
+        {
+            pieces.push(await file.read(at, Math.min(PIECE_SIZE, file.size - at)));
+        }
+        return { path: file.path, size: file.size, pieces };
+    }
     const contents = file.contents;
     if (!contents)
     {
@@ -412,30 +388,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const adapters = gpu ?? /** @type {any} */ (globalThis.navigator)?.gpu;
     const clock = now ?? (()=>performance.now());
     const breathe = createMacrotask();
-    // Whoever is waiting for the page to say something: every message settles
-    // it, so an idle loop wakes for an input event or a request the moment it
-    // arrives rather than at its next look.
-    /** @type {(() => void) | null} */
-    let poked = null;
-    /** @type {Promise<void> | null} */
-    let poking = null;
-    const poke = ()=>{
-        if (!poking)
-        {
-            poking = new Promise(resolve=>{
-                poked = ()=>{
-                    poking = null;
-                    poked = null;
-                    resolve();
-                };
-            });
-        }
-        return poking;
-    };
     // The page counts what it posts in a shared word, so a loop between
     // turns can tell that a message is waiting without giving up the thread
-    // to find out. Absent -- no shared memory on this origin -- the loop
-    // yields on a short clock instead.
+    // to find out. Absent -- a starter that sends none, as a test's does --
+    // the loop yields on a short clock instead.
     /** @type {Int32Array | null} */
     let signal = null;
     let signalSeen = 0;
@@ -456,20 +412,54 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     /** @type {any} */
     let app = null;
     /**
-     * The ring from the page with `concurrency`, read between turns and before
-     * each posted message.
+     * The ring from the page with `concurrency`, read between turns, before
+     * each posted message and as the page rings its bell (`watchInbound`).
      *
      * @type {ReturnType<typeof createInboundReader> | null}
      */
     let inboundReader = null;
+    /** Whether the engine's port was closed: the ring's watch ends. */
+    let closed = false;
+    /**
+     * Reads the ring each time the page rings its bell, on this thread's event
+     * loop. With concurrency every program stands in a worker of its own and
+     * this thread runs none, so no turn boundary comes to read it at: read
+     * only before a posted message, the pointer's motion waited for the page's
+     * next request and reached the program in one burst, which its window's
+     * queue folded into a single WM_MOUSEMOVE. Where Atomics.waitAsync is
+     * missing the ring is looked at on the worker's yield interval instead.
+     *
+     * @param {ReturnType<typeof createInboundReader>} reader
+     */
+    const watchInbound = reader=>{
+        if (typeof (/** @type {any} */ (Atomics).waitAsync) !== 'function')
+        {
+            const timer = setInterval(()=>(closed ? clearInterval(timer) : reader.drain()),
+                WORKER_YIELD_MS);
+            return;
+        }
+        const look = ()=>{
+            if (closed)
+            {
+                return;
+            }
+            const seen = reader.bell.seen();
+            reader.drain();
+            reader.bell.waitAsync(seen).then(look);
+        };
+        look();
+    };
     /** The relay transport opened for the run, closed with it. @type {any} */
     let transport = null;
-    /** The sound posted to a worklet that cannot share memory. @type {any} */
-    let feeder = null;
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
-    let frames = 0;
+    // Every frame on this worker's canvas, read by the page's fps meter
+    // straight from the buffer; the count a program's run reports is the
+    // frames since it started.
+    const frameClock = createFrameClock();
+    let framesAtStart = 0;
+    const frames = ()=>frameClock.count() - framesAtStart;
     /** @type {import('./messages.js').StartOptions | null} */
     let started = null;
     /**
@@ -490,16 +480,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * @type {{ worker: any, frames: string } | null}
      */
     let graphics = null;
-    /**
-     * A reader on *this* thread, and only where the page could not have one:
-     * without shared memory the log's block cannot cross, so the answers a
-     * reader would have given here are computed here and posted. With shared
-     * memory this stays null and nothing a reader wants ever reaches this
-     * thread again.
-     *
-     * @type {ReturnType<typeof createLogReader> | null}
-     */
-    let reading = null;
 
     /**
      * Each distinct refusal of the device and how often it has been made. A
@@ -536,19 +516,22 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * size. Depth clip control is asked for the same way: without it a
      * Direct3D 10 rasterizer state that turns depth clipping off still clips.
      */
-    const openDevice = async()=>{
+    /** @param {{ gpuAdapter?: 'software' }} options */
+    const openDevice = async options=>{
         if (!adapters)
         {
             throw Object.assign(new Error('this worker exposes no navigator.gpu, so there '
                 + 'is no device to draw on'), { reason: 'no WebGPU' });
         }
-        const adapter = await adapters.requestAdapter();
+        const adapter = await adapters.requestAdapter(options.gpuAdapter === 'software'
+            ? { forceFallbackAdapter: true } : undefined);
         if (!adapter)
         {
             throw Object.assign(new Error('WebGPU is present but no adapter answered '
                 + 'requestAdapter'), { reason: 'no GPU adapter' });
         }
-        const opened = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
+        const opened = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
+            requiredLimits: gpuLimitsOf(adapter) });
         // A validation error the engine did not catch drops the whole frame
         // it was in, silently. It goes into the run's own journal, beside the
         // frame it dropped, where the person reading the run looks; the
@@ -616,11 +599,11 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 throw new Error('this worker is already running a program');
             }
             viewport = canvas ?? viewport;
-            frames = 0;
+            framesAtStart = frameClock.count();
             presented.length = 0;
             signal = options.signal ? new Int32Array(options.signal) : null;
             signalSeen = signal ? Atomics.load(signal, 0) : 0;
-            const opened = viewport ? await openDevice() : null;
+            const opened = viewport ? await openDevice(options) : null;
             device = opened?.device ?? null;
             const adapter = opened?.adapter ?? { vendor: '', architecture: '', description: '' };
             const screen = viewport ? contextOf(viewport) : null;
@@ -644,6 +627,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 // A worker that opens no device is no worker to draw in: the
                 // devices then draw here, and the journal says why.
                 const answer = await openGraphicsWorker({ frames: returned,
+                    software: rest.gpuAdapter === 'software',
                     gcNudge: gcNudgeOf(rest.cpu?.gcNudge, undefined,
                         rest.memorySize ?? DEFAULT_MEMORY_SIZE) });
                 if (answer.worker)
@@ -673,39 +657,47 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     transport = null;
                 }
             }
-            const { port: soundPort, ...soundOptions } = rest.audio ?? {};
+            const soundOptions = rest.audio ?? {};
             /**
              * With concurrency, ring pacing where the page wrote a ring;
-             * otherwise the page's pacing unless asked, with the signal word
-             * in both: a message the page posted is seen between two turns
-             * rather than at the next timed yield.
+             * otherwise the page's pacing, with the signal word in both: a
+             * message the page posted is seen between two turns rather than at
+             * the next timed yield.
              *
-             * @param {import('../system/ring.js').RingMemory | undefined} ring
-             * @param {string | undefined} asked
+             * @param {import('@bottlify/cellar').RingMemory | undefined} ring
              */
-            const pacingFor = (ring, asked)=>{
+            const pacingFor = ring=>{
                 if (ring)
                 {
                     inboundReader = createInboundReader(ring, receive);
+                    watchInbound(inboundReader);
                     return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
-                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted,
-                        pendingMs: options.pendingYieldMs });
-                }
-                if (threaded && asked === 'event')
-                {
-                    return workerPacing({ macrotask: breathe, poke, signalled, now: clock,
-                        pendingMs: options.pendingYieldMs });
+                        intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
                 }
                 return pagePacing({ macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
-                    yieldMs: threaded ? WORKER_YIELD_MS : undefined,
-                    pendingMs: options.pendingYieldMs });
+                    yieldMs: threaded ? WORKER_YIELD_MS : undefined });
             };
             // What the translation worker raises and rings after each batch it
             // posts, where the engine is fed through the ring: the batch is
             // taken at the next turn rather than at the next timed yield.
             const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
-            const pacing = pacingFor(inbound, options.pacing);
-            const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
+            const pacing = pacingFor(inbound);
+            const doorbell = posted && inboundReader
+                ? { posted, bell: inboundReader.bell.memory } : null;
+            /**
+             * A layer read as the bundle is, its preload told as its own: the
+             * bundle's (`bundle.layers`) and a run's with no bundle (`layers`).
+             *
+             * @param {any} layer
+             */
+            const readLayer = layer=>({
+                ...layer,
+                fetch: layer.file ? blobFetcher(layer.file)
+                    : rangeFetcher(/** @type {string} */ (layer.url)),
+                local: Boolean(layer.file),
+                progress: (/** @type {object} */ state)=>emit('bundle-preload',
+                    { ...state, layer: layer.id }),
+            });
             app = await createApp({
                 ...rest,
                 audio: rest.audio ? soundOptions : undefined,
@@ -717,10 +709,13 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     ...bundle,
                     fetch: bundle.file ? blobFetcher(bundle.file)
                         : rangeFetcher(/** @type {string} */ (bundle.url)),
+                    local: Boolean(bundle.file),
                     // A preload happens inside the start, before the page has
                     // an app to subscribe through: told as an event at once.
                     progress: (/** @type {unknown} */ state)=>emit('bundle-preload', state),
+                    layers: bundle.layers?.map(readLayer),
                 } : undefined,
+                layers: rest.layers?.map(readLayer),
                 storage: storage && typeof storage === 'object'
                     ? { load: async()=>storage.files }
                     : storage,
@@ -743,7 +738,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                         now: clock,
                         /** @param {any} payload */
                         onFrame: payload=>{
-                            frames = payload.presented;
                             emit('frame', {
                                 width: payload.width, height: payload.height,
                                 presented: payload.presented,
@@ -762,6 +756,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                             : undefined,
                         /** @param {any} payload */
                         onPresentFailed: payload=>emit('present-failed', payload),
+                        frameClock,
                     }
                     : undefined,
             });
@@ -770,18 +765,11 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             // A machine rebuilt on a child's image publishes a fresh block.
             // The page's keeper is reading the parent's, so it is handed the
             // next one the moment it exists -- the journal's sequence is
-            // continuous, so the cursors it already holds still resolve. Only a
-            // shared block is worth sending; a copy would never move again.
+            // continuous, so the cursors it already holds still resolve.
             app.on('process-started',
                 (/** @type {{ image: string, sequenceBase: number }} */ payload)=>{
-                    const memory = app.log.memory();
-                    // A page that is not cross-origin isolated has no
-                    // SharedArrayBuffer at all: naming it there throws.
-                    if (typeof SharedArrayBuffer === 'function'
-                        && memory.journal instanceof SharedArrayBuffer)
-                    {
-                        post({ type: 'log-memory', memory, sequenceBase: payload.sequenceBase });
-                    }
+                    post({ type: 'log-memory', memory: app.log.memory(),
+                        sequenceBase: payload.sequenceBase });
                 });
             if (hooks && hooks.length > 0)
             {
@@ -804,33 +792,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             catch {
                 // No mixer in this build: a run without sound is a run.
             }
-            // A port to the worklet comes only from a page without shared
-            // memory, where the mix stays in the engine's own ring and is
-            // posted to the worklet from here.
-            feeder?.close();
-            feeder = null;
-            if (soundPort && audio && 'control' in audio.memory)
-            {
-                feeder = createFeeder({
-                    memory: audio.memory, channels: audio.channels, port: soundPort,
-                    aheadFrames: Math.round(audio.sampleRate * FEED_AHEAD_MS / 1000),
-                });
-            }
-            else
-            {
-                soundPort?.close();
-            }
 
             // The log's memory crosses here, once, in the answer that starts
             // the program -- it is shared memory, so crossing is sharing, and
             // from now on the page reads records, frames, counters and tables
-            // itself. A block that is not shared would cross as a copy that
-            // never moves again, so it is kept here and read here instead.
-            const log = app.log.memory();
-            const shared = typeof SharedArrayBuffer === 'function'
-                && log.journal instanceof SharedArrayBuffer;
-            reading = shared ? null : createLogReader({ memory: log });
-            return { audio, adapter, log: shared ? log : null };
+            // itself.
+            return { audio, adapter, log: app.log.memory() };
         },
 
         /**
@@ -855,7 +822,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             return {
                 code,
                 registry,
-                files: started?.collectOnExit ? app.session.export().map(inPieces) : [],
+                files: started?.collectOnExit
+                    ? await Promise.all(app.session.export().map(inPieces)) : [],
                 // What an installer's output is sorted against: the libraries
                 // a bottle does not carry out of system32.
                 systemLibraries: started?.collectOnExit
@@ -881,10 +849,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const ending = app;
             app = null;
             started = null;
-            reading = null;
             await ending?.dispose();
-            feeder?.close();
-            feeder = null;
             transport?.dispose?.();
             transport = null;
             device?.destroy?.();
@@ -897,7 +862,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
          * @param {string} [layer]
          */
         diagnostics: layer=>{
-            const tables = app.diagnostics();
+            const tables = app.diagnostics(layer);
             return plain(layer === undefined
                 ? tables
                 : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));
@@ -907,9 +872,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // reads: the threads and the guest's time by module.
         report: async()=>plain({
             ...await app.report(),
-            presented: { count: frames, history: presented.slice() },
-            threads: reading?.threads() ?? [],
-            guestByModule: reading?.guestByModule() ?? {},
+            presented: { count: frames(), history: presented.slice() },
         }),
         'files.list': (/** @type {string} */ path)=>volume().list(path),
         'files.read': (/** @type {string} */ path)=>volume().read(path),
@@ -924,9 +887,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // Awaited: a program in a worker of its own answers across its link.
         'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
             (await app.debug.read(address, length)).slice(),
-        presented: ()=>({ count: frames, history: presented.slice() }),
+        presented: ()=>({ count: frames(), history: presented.slice() }),
+        // The buffer itself: shared, so the page reads every frame's time
+        // without asking again (`host/frame-clock.js`).
+        frameClock: ()=>frameClock.buffer,
         /*
-         * The emulator's account of where the guest ran, by address. Only the
+         * An engine's account of where the guest ran, by address. Only the
          * engine's own thread can start it, and the run worth taking an account
          * of is the one the page drives -- so without these there is no way to
          * ask for one where it matters. Requests rather than shared memory: it
@@ -940,20 +906,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             app.guestProfile.start(how),
         'guestProfile.read': ()=>app.guestProfile.read(),
         'guestProfile.stop': ()=>app.guestProfile.stop(),
-        /*
-         * The reading half of the log, for a page that has no shared memory
-         * to read it in. Every one of these is a request the page does not
-         * make when the block crossed at start: there it reads the same
-         * numbers out of the same memory, on its own thread.
-         */
-        'log.recent': (/** @type {number} */ count)=>app.log.recent(count),
-        'log.drain': (/** @type {number} */ since, /** @type {number} */ limit)=>
-            app.log.drain(since, limit),
-        'log.profile': (/** @type {number} */ worst)=>app.log.profile(worst),
-        'log.frames': (/** @type {number} */ count)=>app.log.frames(count),
-        'log.counters': (/** @type {string} */ layer)=>reading?.counters(layer) ?? {},
-        'log.threads': ()=>reading?.threads() ?? [],
-        'log.guestByModule': ()=>reading?.guestByModule() ?? {},
         // The writer's gate, which is the engine's to change: a level says
         // what is kept, and only the thread doing the keeping can be told.
         'log.setLevel': (/** @type {string} */ category, /** @type {string | number} */ level)=>
@@ -982,7 +934,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * @param {import('./messages.js').ToEngine} message
      */
     const receive = async message=>{
-        poked?.();
         switch (message.type)
         {
             case 'input':
@@ -1043,6 +994,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         close(){
             port.onmessage = null;
             breathe.close();
+            closed = true;
+            // The ring closed: its watch is woken to see it is over, and the
+            // page writes nothing more into it.
+            inboundReader?.close();
         },
     };
 }

@@ -26,6 +26,8 @@
 import { EINVAL, ERANGE } from './globals.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** A string is read no further than this. */
 const MAX_STRING = 1 << 20;
@@ -50,8 +52,9 @@ const MAX_STRING = 1 << 20;
  *     rewritten there as they change. Absent, each keeps the value it was
  *     placed with.
  * @property {(name: string, initial?: number) => number} cell
- *     An int of the runtime's own, for a `__p__` accessor when the export's
- *     own address is not to be had.
+ *     A cell of the runtime's own, for a `__p__` accessor when the export's
+ *     own address is not to be had: room for a pointer of either width.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -72,6 +75,7 @@ export function createEnvironment(host){
     let initenv = 0;
     let wenviron = 0;
     let winitenv = 0;
+    const width = pointerWidth(host.pointerSize);
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
@@ -79,6 +83,9 @@ export function createEnvironment(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address, bytes);
     };
+
+    /** @param {number} address @param {number} value */
+    const writePointer = (address, value)=>host.writeMemory(address, width.bytes(value));
 
     /** @param {Uint8Array} bytes */
     const place = bytes=>{
@@ -95,22 +102,12 @@ export function createEnvironment(host){
 
     /** @param {string} text */
     const wideString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         return place(bytes);
     };
 
     /** A null-terminated array of the strings. @param {number[]} pointers */
-    const array = pointers=>{
-        const bytes = new Uint8Array((pointers.length + 1) * 4);
-        const view = new DataView(bytes.buffer);
-        pointers.forEach((pointer, index)=>view.setUint32(index * 4, pointer >>> 0, true));
-        return place(bytes);
-    };
+    const array = pointers=>place(width.array(pointers));
 
     /**
      * Each variable as the arrays and accessors report it, wherever it is
@@ -124,9 +121,9 @@ export function createEnvironment(host){
             const at = host.addressOf?.(name) ?? 0;
             if (at !== 0)
             {
-                writeU32(at, value);
+                writePointer(at, value);
             }
-            writeU32(host.cell(name), value);
+            writePointer(host.cell(name), value);
         }
     };
 
@@ -257,7 +254,7 @@ export function createEnvironment(host){
             return 0;
         }
         const value = start()[index].value;
-        const bytes = unit === 1 ? encodeAnsi(`${value}\0`) : wideBytes(value);
+        const bytes = unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
         writeU32(length, bytes.length / unit);
         if (bytes.length / unit > (size >>> 0))
         {
@@ -268,16 +265,37 @@ export function createEnvironment(host){
         return 0;
     };
 
-    /** @param {string} text */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        return bytes;
-    };
+    /**
+     * `_dupenv_s` and `_wdupenv_s`: the value and its terminator copied to the
+     * heap, the length in characters with the terminator; a variable not set
+     * is a null copy and a length of none.
+     *
+     * @param {1 | 2} unit
+     */
+    const dupenv = unit=>({
+        convention: 'cdecl',
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [buffer, length, name])=>{
+            if ((buffer >>> 0) === 0 || (name >>> 0) === 0)
+            {
+                host.errno(EINVAL);
+                return EINVAL;
+            }
+            const index = unit === 1 ? find(readNarrow(name)) : find(readWide(name), true);
+            const value = index < 0 ? null : start()[index].value;
+            const bytes = value === null ? null
+                : unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
+            const copy = bytes ? place(bytes) : 0;
+            writePointer(buffer, copy);
+            if ((length >>> 0) !== 0)
+            {
+                writePointer(length,
+                    copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length / unit);
+            }
+            return 0;
+        },
+    });
 
     /**
      * _putenv_s's body: a name and a value, neither absent, the name with no
@@ -311,13 +329,6 @@ export function createEnvironment(host){
         },
     });
 
-    /** @param {number} value */
-    const dword = value=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        return bytes;
-    };
-
     const functions = {
         /**
          * char *getenv(const char *name)
@@ -326,11 +337,12 @@ export function createEnvironment(host){
          * without regard to case; null for none, and for no name.
          */
         getenv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -341,11 +353,12 @@ export function createEnvironment(host){
 
         /** wchar_t *_wgetenv(const wchar_t *name) */
         _wgetenv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -366,7 +379,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const pair = (text >>> 0) === 0 ? null : parse(readNarrow(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(readNarrow(text));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -384,7 +397,7 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([text])=>{
                 startWide();
-                const pair = (text >>> 0) === 0 ? null : parse(readWide(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(readWide(text));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -400,8 +413,8 @@ export function createEnvironment(host){
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name, value])=>putenvPair((name >>> 0) === 0 ? null : readNarrow(name),
-                (value >>> 0) === 0 ? null : readNarrow(value), false),
+            handler: ([name, value])=>putenvPair(wholeAddress(name) === 0 ? null : readNarrow(name),
+                wholeAddress(value) === 0 ? null : readNarrow(value), false),
         },
 
         /** errno_t _wputenv_s(const wchar_t *name, const wchar_t *value) */
@@ -411,8 +424,8 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([name, value])=>{
                 startWide();
-                return putenvPair((name >>> 0) === 0 ? null : readWide(name),
-                    (value >>> 0) === 0 ? null : readWide(value), true);
+                return putenvPair(wholeAddress(name) === 0 ? null : readWide(name),
+                    wholeAddress(value) === 0 ? null : readWide(value), true);
             },
         },
 
@@ -420,18 +433,20 @@ export function createEnvironment(host){
         getenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                (name >>> 0) === 0 ? null : readNarrow(name), 1),
+                wholeAddress(name) === 0 ? null : readNarrow(name), 1),
         },
 
         /** errno_t _wgetenv_s(size_t *length, wchar_t *buffer, size_t size, const wchar_t *name) */
         _wgetenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                (name >>> 0) === 0 ? null : readWide(name), 2),
+                wholeAddress(name) === 0 ? null : readWide(name), 2),
         },
 
         /**
@@ -440,36 +455,24 @@ export function createEnvironment(host){
          * The value on the heap, for the caller to free; null and a length of
          * none for a variable not set.
          */
-        _dupenv_s: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, length, name])=>{
-                if ((buffer >>> 0) === 0 || (name >>> 0) === 0)
-                {
-                    host.errno(EINVAL);
-                    return EINVAL;
-                }
-                const index = find(readNarrow(name));
-                const bytes = index < 0 ? null : encodeAnsi(`${start()[index].value}\0`);
-                const copy = bytes ? place(bytes) : 0;
-                writeU32(buffer, copy);
-                if ((length >>> 0) !== 0)
-                {
-                    writeU32(length, copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length);
-                }
-                return 0;
-            },
-        },
+        _dupenv_s: dupenv(1),
+
+        /**
+         * errno_t _wdupenv_s(wchar_t **buffer, size_t *length, const wchar_t *name)
+         *
+         * _dupenv_s in wide characters, the length counted in them (Wine's
+         * msvcr80 test_wdupenv_s).
+         */
+        _wdupenv_s: dupenv(2),
 
         /** char ***__p__environ(void) */
-        __p__environ: accessor('_environ'),
+        __p__environ: { ...accessor('_environ'), returns: 'pointer' },
         /** wchar_t ***__p__wenviron(void) */
-        __p__wenviron: accessor('_wenviron'),
+        __p__wenviron: { ...accessor('_wenviron'), returns: 'pointer' },
         /** char ***__p___initenv(void) */
-        __p___initenv: accessor('__initenv'),
+        __p___initenv: { ...accessor('__initenv'), returns: 'pointer' },
         /** wchar_t ***__p___winitenv(void) */
-        __p___winitenv: accessor('__winitenv'),
+        __p___winitenv: { ...accessor('__winitenv'), returns: 'pointer' },
 
         /** void _get_environ(char ***environ) */
         _get_environ: {
@@ -478,9 +481,9 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 start();
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out, environ);
+                    writePointer(out, environ);
                 }
                 return 0;
             },
@@ -492,9 +495,9 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out, wenviron);
+                    writePointer(out, wenviron);
                 }
                 return 0;
             },
@@ -506,10 +509,10 @@ export function createEnvironment(host){
          *
          * Variables: the arrays, as placed at start -- the wide ones null.
          */
-        _environ: { data: ()=>dword((start(), environ)) },
-        _wenviron: { data: ()=>dword(wenviron) },
-        __initenv: { data: ()=>dword((start(), initenv)) },
-        __winitenv: { data: ()=>dword(winitenv) },
+        _environ: { data: ()=>width.bytes((start(), environ)) },
+        _wenviron: { data: ()=>width.bytes(wenviron) },
+        __initenv: { data: ()=>width.bytes((start(), initenv)) },
+        __winitenv: { data: ()=>width.bytes(winitenv) },
     };
 
     return {

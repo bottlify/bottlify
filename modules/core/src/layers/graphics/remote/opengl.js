@@ -15,10 +15,13 @@
  * and the played one reads the same bytes at the same call.
  */
 
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 
-/** The one call whose answer only the renderer has: what it says of itself. */
-const ANSWERED = new Set(['diagnostics']);
+/** The calls whose answers only the renderer has: what it says of itself, and the pixels it drew. */
+const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable',
+    // A level's image: this side keeps no texels, the side that draws reads the device.
+    'glGetTexImage', 'glGetTextureImage', 'glGetTextureSubImage', 'getnTexImage',
+    'glGetCompressedTexImageARB']);
 
 /**
  * The root the program's contexts are made by: every call on it and on the
@@ -84,58 +87,19 @@ export function recordedOpengl(factory, services, transport){
  *     is given but for memory, which is the mirror's: `writeMemory` is where what the
  *     played contexts write outside a call goes, and nothing does today
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  */
 export function playedOpengl(factory, services){
-    // Every byte a played context reads is sent with the call that reads it.
-    const mirror = createMirror({ forget: true });
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    let playing = false;
-    const write = services.writeMemory;
-    const root = factory({
+    return playedOverMirror(memory=>factory({
         ...services,
         model: false,
-        readMemory: mirror.read,
-        windowMemory: (address, length)=>mirror.window(address, length),
-        writeMemory: (address, bytes)=>{
-            mirror.write(address, bytes);
-            if (!playing)
-            {
-                write?.(address, bytes);
-            }
-        },
-        allocate: ()=>/** @type {ReturnType<typeof createPlayer>} */ (player).allocate(),
-    });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read });
-    const live = player;
-    return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                const answer = live.play(call);
-                // What this side holds of the program's memory, which only it can say.
-                return call.m === 'diagnostics' && answer
-                    ? { ...answer, mirrored: { held: mirror.bytes(), reached: mirror.reached() } }
-                    : answer;
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: (buffer, each)=>{
-            try
-            {
-                return live.read(buffer, each);
-            }
-            finally
-            {
-                mirror.settle();
-            }
-        },
-    };
+        readMemory: memory.read,
+        windowMemory: memory.window,
+        writeMemory: memory.write,
+        allocate: memory.allocate,
+        free: memory.free,
+    }), { write: services.writeMemory });
 }

@@ -185,7 +185,7 @@
  */
 
 /** The generic attribute number each conventional binding arrives through. */
-export const VERTEX_ATTRIB_OF = Object.freeze({
+const VERTEX_ATTRIB_OF = Object.freeze({
     position: 0,
     weight: 1,
     normal: 2,

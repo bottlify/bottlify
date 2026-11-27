@@ -18,10 +18,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
     bytesOfHex, call, dumpAndExit, floatBits, importsWith, setupCode, setupData, storeEax, u32,
-} from '../../../tools/gl-program.mjs';
+} from '../../../tools/fixtures/gl-program.mjs';
 
 const GL_BLEND = 0x0be2;
 const GL_CURRENT_COLOR = 0x0b00;

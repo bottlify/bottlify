@@ -8,9 +8,10 @@
  * WMI, as far as a program asking about its machine goes: CLSID_WbemLocator,
  * the namespace it connects to, and the instances of the classes programs read
  * to size themselves or to describe the machine in a report --
- * Win32_VideoController, Win32_SoundDevice, Win32_Processor, Win32_BIOS,
- * Win32_BaseBoard, the physical memory and its array, a slot and a disk. Every figure is the one
- * the machine gives the same program another way: the processor's CPUID and
+ * Win32_ComputerSystem, Win32_VideoController, Win32_SoundDevice,
+ * Win32_Processor, Win32_BIOS, Win32_BaseBoard, the physical memory and its
+ * array, a slot and a disk. Every figure is the one the machine gives the
+ * same program another way: the processor's CPUID and
  * speed, the physical memory GlobalMemoryStatus reports, the video memory
  * Direct3D's GetAvailableTextureMem reports, the computer's name.
  *
@@ -21,9 +22,12 @@
  */
 
 import { createComObject } from './objects.js';
+import { DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE } from '../oleaut32/vartypes.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { USER_NAME } from '../advapi32/tokens.js';
 import { CPUID, PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
 import { SOUND_ADAPTER_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_WBEM_LOCATOR = '{4590F811-1D3A-11D0-891F-00AA004B2E24}';
 export const IID_IWBEM_LOCATOR = '{DC12A687-737F-11CF-884D-00AA004B2E24}';
@@ -110,6 +114,20 @@ export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
         'ServicePackMajorVersion', 'ServicePackMinorVersion', 'SizeStoredInPagingFiles',
         'SuiteMask', 'SystemDevice', 'SystemDirectory', 'SystemDrive', 'TotalSwapSpaceSize',
         'TotalVirtualMemorySize', 'TotalVisibleMemorySize', 'Version', 'WindowsDirectory'],
+    // NumberOfLogicalProcessors came with XP's third service pack.
+    Win32_ComputerSystem: [...ELEMENT, 'AdminPasswordStatus', 'AutomaticResetBootOption',
+        'AutomaticResetCapability', 'BootOptionOnLimit', 'BootOptionOnWatchDog',
+        'BootROMSupported', 'BootupState', 'ChassisBootupState', 'CreationClassName',
+        'CurrentTimeZone', 'DaylightInEffect', 'DNSHostName', 'Domain', 'DomainRole',
+        'EnableDaylightSavingsTime', 'FrontPanelResetStatus', 'InfraredSupported',
+        'InitialLoadInfo', 'KeyboardPasswordStatus', 'LastLoadInfo', 'Manufacturer', 'Model',
+        'NameFormat', 'NetworkServerModeEnabled', 'NumberOfLogicalProcessors',
+        'NumberOfProcessors', 'OEMLogoBitmap', 'OEMStringArray', 'PartOfDomain', 'PauseAfterReset',
+        'PowerManagementCapabilities', 'PowerManagementSupported', 'PowerOnPasswordStatus',
+        'PowerState', 'PowerSupplyState', 'PrimaryOwnerContact', 'PrimaryOwnerName',
+        'ResetCapability', 'ResetCount', 'ResetLimit', 'Roles', 'SupportContactDescription',
+        'SystemStartupDelay', 'SystemStartupOptions', 'SystemStartupSetting', 'SystemType',
+        'ThermalState', 'TotalPhysicalMemory', 'UserName', 'WakeUpType', 'Workgroup'],
     Win32_VideoController: [...DEVICE, 'AcceleratorCapabilities', 'AdapterCompatibility',
         'AdapterDACType', 'AdapterRAM', 'CapabilityDescriptions', 'ColorTableEntries',
         'CurrentBitsPerPixel', 'CurrentHorizontalResolution', 'CurrentNumberOfColors',
@@ -215,6 +233,34 @@ export function machineClasses(
     } : {};
     return {
         ...system,
+        // The machine itself, as the computer's name, the memory and the
+        // processors are given elsewhere: one package Win32_Processor
+        // describes, a workgroup's workstation, the one user signed in.
+        win32_computersystem: [{
+            name: [CIM_STRING, COMPUTER_NAME],
+            caption: [CIM_STRING, COMPUTER_NAME],
+            description: [CIM_STRING, 'AT/AT COMPATIBLE'],
+            dnshostname: [CIM_STRING, COMPUTER_NAME],
+            creationclassname: [CIM_STRING, 'Win32_ComputerSystem'],
+            manufacturer: [CIM_STRING, 'Bottlify'],
+            model: [CIM_STRING, 'Bottlify Virtual Machine'],
+            systemtype: [CIM_STRING, 'X86-based PC'],
+            numberofprocessors: [CIM_UINT32, 1],
+            numberoflogicalprocessors: [CIM_UINT32, processors],
+            totalphysicalmemory: [CIM_UINT64, String(memory)],
+            domain: [CIM_STRING, 'WORKGROUP'],
+            workgroup: [CIM_STRING, 'WORKGROUP'],
+            partofdomain: [CIM_BOOLEAN, false],
+            domainrole: [CIM_UINT16, 0], // a standalone workstation
+            username: [CIM_STRING, `${COMPUTER_NAME}\\${USER_NAME}`],
+            primaryownername: [CIM_STRING, USER_NAME],
+            bootupstate: [CIM_STRING, 'Normal boot'],
+            powerstate: [CIM_UINT16, 0], // unknown
+            thermalstate: [CIM_UINT16, 3], // safe
+            powersupplystate: [CIM_UINT16, 3], // safe
+            wakeuptype: [CIM_UINT16, 6], // power switch
+            status: [CIM_STRING, 'OK'],
+        }],
         win32_videocontroller: [{
             adapterram: [CIM_UINT32, ADAPTER_RAM],
             name: [CIM_STRING, ADAPTER_NAME],
@@ -410,7 +456,7 @@ export function registerWbemClasses(host){
         host.writeMemory(address, bytes);
     };
     const readString = (/** @type {number} */ address)=>
-        address === 0 ? '' : host.readWideString(address, MAX_WBEM_STRING);
+        address === 0 ? '' : host.readWideString(address, MAX_WBEM_STRING * 2);
 
     /**
      * An object of ours, published, its pointer written to `out`.
@@ -480,24 +526,31 @@ export function registerWbemClasses(host){
     /**
      * A SAFEARRAY of VT_I4 over the values, laid out and allocated as
      * SafeArrayCreate lays out its own -- so SafeArrayDestroy and VariantClear
-     * free it -- or 0.
+     * free it -- or 0. That includes the sixteen bytes in front of the
+     * descriptor, the VARTYPE last among them: SafeArrayDestroy frees the block
+     * from there, and a descriptor allocated without them has it free whatever
+     * block lies sixteen bytes before -- a live object's, as often as not.
      *
      * @param {number[]} values @returns {number}
      */
     const allocateArray = values=>{
-        const descriptor = host.heap.allocate(24);
+        const block = host.heap.allocate(DESCRIPTOR_PREFIX + 24);
         const data = host.heap.allocate(Math.max(1, values.length * 4));
-        if (descriptor === 0 || data === 0)
+        if (block === 0 || data === 0)
         {
             return 0;
         }
-        const header = new Uint8Array(24);
+        const descriptor = block + DESCRIPTOR_PREFIX;
+        const header = new Uint8Array(DESCRIPTOR_PREFIX + 24);
         const view = new DataView(header.buffer);
-        view.setUint16(0, 1, true); // one dimension
-        view.setUint32(4, 4, true); // four bytes an element
-        view.setUint32(12, data, true);
-        view.setUint32(16, values.length, true); // its count, from a lower bound of 0
-        host.writeMemory(descriptor, header);
+        view.setUint32(DESCRIPTOR_PREFIX - 4, VT_I4, true);
+        view.setUint16(DESCRIPTOR_PREFIX, 1, true); // one dimension
+        view.setUint16(DESCRIPTOR_PREFIX + 2, FADF_HAVEVARTYPE, true);
+        view.setUint32(DESCRIPTOR_PREFIX + 4, 4, true); // four bytes an element
+        view.setUint32(DESCRIPTOR_PREFIX + 12, data, true);
+        // Its count, from a lower bound of 0.
+        view.setUint32(DESCRIPTOR_PREFIX + 16, values.length, true);
+        host.writeMemory(block, header);
         const elements = new Uint8Array(values.length * 4);
         values.forEach((value, index)=>new DataView(elements.buffer)
             .setUint32(index * 4, value >>> 0, true));
@@ -520,7 +573,7 @@ export function registerWbemClasses(host){
     const publishInstance = (className, properties, out)=>publish(CLSID_WBEM_LOCATOR, {
         interfaces: [describe(IID_IWBEM_CLASS_OBJECT, 'IWbemClassObject', SLOTS.object, {
             Get: ([name, , value, type, flavor])=>{
-                const key = readString(name >>> 0);
+                const key = readString(wholeAddress(name));
                 const property = properties[key.toLowerCase()];
                 if (!property && !WBEM_SCHEMAS[className]?.has(key.toLowerCase()))
                 {
@@ -533,15 +586,15 @@ export function registerWbemClasses(host){
                     {
                         const variant = new Uint8Array(16);
                         new DataView(variant.buffer).setUint16(0, VT_NULL, true);
-                        host.writeMemory(value >>> 0, variant);
+                        host.writeMemory(wholeAddress(value), variant);
                     }
                     if ((type >>> 0) !== 0)
                     {
-                        writeU32(type >>> 0, CIM_STRING);
+                        writeU32(wholeAddress(type), CIM_STRING);
                     }
                     if ((flavor >>> 0) !== 0)
                     {
-                        writeU32(flavor >>> 0, 0);
+                        writeU32(wholeAddress(flavor), 0);
                     }
                     return S_OK;
                 }
@@ -581,15 +634,15 @@ export function registerWbemClasses(host){
                         view.setUint16(0, VT_I4, true);
                         view.setUint32(8, content >>> 0, true);
                     }
-                    host.writeMemory(value >>> 0, variant);
+                    host.writeMemory(wholeAddress(value), variant);
                 }
                 if ((type >>> 0) !== 0)
                 {
-                    writeU32(type >>> 0, cimType);
+                    writeU32(wholeAddress(type), cimType);
                 }
                 if ((flavor >>> 0) !== 0)
                 {
-                    writeU32(flavor >>> 0, 0);
+                    writeU32(wholeAddress(flavor), 0);
                 }
                 return S_OK;
             },
@@ -630,7 +683,7 @@ export function registerWbemClasses(host){
                             index++;
                             fetched++;
                         }
-                        writeU32(returned >>> 0, fetched);
+                        writeU32(wholeAddress(returned), fetched);
                         return fetched === (count >>> 0) ? S_OK : WBEM_S_FALSE;
                     },
                     Skip: ([, count])=>{
@@ -664,8 +717,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            const name = readString(filter >>> 0);
+            writeU32(wholeAddress(out), 0);
+            const name = readString(wholeAddress(filter));
             return publishEnumerator(name.toLowerCase(),
                 instancesOf(name, 'IWbemServices::CreateInstanceEnum'), out >>> 0);
         },
@@ -674,12 +727,12 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            if (readString(language >>> 0).toUpperCase() !== 'WQL')
+            writeU32(wholeAddress(out), 0);
+            if (readString(wholeAddress(language)).toUpperCase() !== 'WQL')
             {
                 return WBEM_E_INVALID_QUERY_TYPE;
             }
-            const text = readString(query >>> 0);
+            const text = readString(wholeAddress(query));
             const from = /\bfrom\s+(\w+)/i.exec(text);
             if (!from)
             {
@@ -701,8 +754,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            const namespace = readString(resource >>> 0);
+            writeU32(wholeAddress(out), 0);
+            const namespace = readString(wholeAddress(resource));
             // `\\.\root\cimv2`, `root\cimv2` or `//./root/cimv2`: the local
             // default namespace is the only one kept.
             if (!/(^|[\\/])root[\\/]cimv2$/i.test(namespace))

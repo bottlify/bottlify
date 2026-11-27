@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 test('a bottle that names its graphics has no library beyond it to import', async()=>{
     // A library the bottle lacks is missing as any absent file is: its imports

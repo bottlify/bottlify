@@ -19,10 +19,11 @@
  * and hands these back, which is what lets the content be ours to choose.
  */
 
-import { readGuid } from '../ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_ISHELLFOLDER = '{000214E6-0000-0000-C000-000000000046}';
 export const IID_IENUMIDLIST = '{000214F2-0000-0000-C000-000000000046}';
@@ -34,6 +35,14 @@ const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  */
 export const MY_COMPUTER = '::{20D04FE0-3AEA-1069-A2D8-08002B30309D}';
 const MY_COMPUTER_NAME = 'My Computer';
+
+/**
+ * The Control Panel, a folder of the desktop's with nothing of the volume
+ * in it: its applets are no files here, so it lists none.
+ */
+export const CONTROL_PANEL = '::{21EC2020-3AEA-1069-A2DD-08002B30309D}';
+const CONTROL_PANEL_NAME = 'Control Panel';
+const SFGAO_CANLINK = 0x4;
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -51,6 +60,7 @@ const SFGAO_FILESYSTEM = 0x40000000;
 const SFGAO_HASSUBFOLDER = 0x80000000;
 
 const SHGDN_FORPARSING = 0x8000;
+const SHGDN_FORADDRESSBAR = 0x4000;
 
 /** STRRET: the type word, then the text in place. */
 const STRRET_CSTR = 2;
@@ -105,7 +115,7 @@ export function listBytes(text){
  */
 export function itemsOf(memory, list){
     const texts = [];
-    let at = list >>> 0;
+    let at = wholeAddress(list);
     // A list is short, but a pointer to something else is not, and walking it
     // by its own `cb` fields would run until a zero word turned up.
     for (let n = 0; at !== 0 && n < 64; n++)
@@ -146,9 +156,9 @@ export function pathOfList(memory, list){
  * @param {number} list
  * @returns {number}
  */
-export function lastItemOf(memory, list){
-    let last = list >>> 0;
-    let at = list >>> 0;
+function lastItemOf(memory, list){
+    let last = wholeAddress(list);
+    let at = wholeAddress(list);
     for (let n = 0; at !== 0 && n < 64; n++)
     {
         const header = memory.readMemory(at, 2);
@@ -172,7 +182,7 @@ export function lastItemOf(memory, list){
  * @returns {string | null | undefined}  null is the desktop
  */
 export function parentOf(text){
-    if (text === MY_COMPUTER)
+    if (text === MY_COMPUTER || text === CONTROL_PANEL)
     {
         return null;
     }
@@ -255,6 +265,12 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         attributes: (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR | SFGAO_HASSUBFOLDER) >>> 0,
     };
 
+    /** The Control Panel, which Windows reaches by its parsing name. */
+    const controlPanelItem = {
+        text: CONTROL_PANEL, name: CONTROL_PANEL_NAME,
+        attributes: (SFGAO_CANLINK | SFGAO_FOLDER | SFGAO_HASSUBFOLDER) >>> 0,
+    };
+
     /**
      * What a list's last item names, wherever it is in the namespace: a
      * program hands back the lists it was given, and what they carry is
@@ -267,6 +283,10 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         if (text === MY_COMPUTER)
         {
             return computerItem;
+        }
+        if (text === CONTROL_PANEL)
+        {
+            return controlPanelItem;
         }
         const entry = volume.stat(text);
         if (!entry)
@@ -287,9 +307,14 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
      */
     const parsingName = text=>{
         const upper = text.toUpperCase();
-        if (upper === MY_COMPUTER)
+        if (upper === MY_COMPUTER || upper === CONTROL_PANEL)
         {
-            return MY_COMPUTER;
+            return upper;
+        }
+        // The Control Panel is in the computer, and is named through it too.
+        if (upper === `${MY_COMPUTER}\\${CONTROL_PANEL}`)
+        {
+            return CONTROL_PANEL;
         }
         if (upper === MY_DOCUMENTS)
         {
@@ -309,6 +334,10 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
         if (folder === null)
         {
             return (flags & SHCONTF_FOLDERS) !== 0 ? [computerItem] : [];
+        }
+        if (folder === CONTROL_PANEL)
+        {
+            return [];
         }
         if (folder === MY_COMPUTER)
         {
@@ -347,8 +376,19 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
     const handOut = (object, iid, out)=>{
         const pointer = publish(object, iid) >>> 0;
         memory.writeMemory(out, dword(pointer));
+        if (pointer !== 0 && iid === IID_ISHELLFOLDER)
+        {
+            folders.set(pointer, object);
+        }
         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
     };
+    /**
+     * The folders handed out, by the pointer the program holds: a program
+     * hands one back to say where an item is (SHCreateShellItem).
+     *
+     * @type {Map<number, import('../oleaut32/objects.js').ComAdapter>}
+     */
+    const folders = new Map();
 
     /**
      * @typedef {Object} FolderState
@@ -404,24 +444,35 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'ParseDisplayName', argBytes: 28,
             invoke: (object, [, , name, eaten, out, attributes])=>{
-                const item = itemFor(parsingName(readWide(name >>> 0)));
-                memory.writeMemory(out >>> 0, dword(0));
+                // No name, or nowhere to put the item, is refused before
+                // either is touched.
+                if ((name >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        memory.writeMemory(wholeAddress(out), dword(0));
+                    }
+                    return E_INVALIDARG;
+                }
+                const text = readWide(wholeAddress(name));
+                memory.writeMemory(wholeAddress(out), dword(0));
+                // A path in the `\\?\` form is no display name.
+                const item = text.startsWith('\\\\?\\') ? null : itemFor(parsingName(text));
                 if (!item)
                 {
                     return E_INVALIDARG;
                 }
                 const list = listFor(item.text);
-                memory.writeMemory(out >>> 0, dword(list));
-                if ((eaten >>> 0) !== 0)
-                {
-                    memory.writeMemory(eaten >>> 0, dword(item.text.length));
-                }
+                memory.writeMemory(wholeAddress(out), dword(list));
+                // Windows leaves the count it was given as it was
+                // (Wine's shfldr_special, against Windows).
+                void eaten;
                 if ((attributes >>> 0) !== 0)
                 {
-                    const asked = memory.readMemory(attributes >>> 0, 4);
+                    const asked = memory.readMemory(wholeAddress(attributes), 4);
                     const mask = (asked[0] | asked[1] << 8 | asked[2] << 16
                                 | asked[3] << 24) >>> 0;
-                    memory.writeMemory(attributes >>> 0,
+                    memory.writeMemory(wholeAddress(attributes),
                         dword((item.attributes & mask) >>> 0));
                 }
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
@@ -443,12 +494,12 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 const item = itemFor(itemsOf(memory, pidl >>> 0).at(-1) ?? '');
                 if (!item || (item.attributes & SFGAO_FOLDER) === 0)
                 {
-                    memory.writeMemory(out >>> 0, dword(0));
+                    memory.writeMemory(wholeAddress(out), dword(0));
                     return E_INVALIDARG;
                 }
                 if (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN)
                 {
-                    memory.writeMemory(out >>> 0, dword(0));
+                    memory.writeMemory(wholeAddress(out), dword(0));
                     return E_NOINTERFACE;
                 }
                 return handOut(folderObject(item.text), IID_ISHELLFOLDER, out >>> 0);
@@ -480,23 +531,23 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                  */
         { name: 'GetAttributesOf', argBytes: 16,
             invoke: (object, [count, lists, inOut])=>{
-                const asked = memory.readMemory(inOut >>> 0, 4);
+                const asked = memory.readMemory(wholeAddress(inOut), 4);
                 let mask = (asked[0] | asked[1] << 8 | asked[2] << 16 | asked[3] << 24) >>> 0;
                 let shared = 0xffffffff;
                 for (let n = 0; n < (count >>> 0); n++)
                 {
-                    const slot = memory.readMemory((lists >>> 0) + n * 4, 4);
+                    const slot = memory.readMemory(wholeAddress(lists) + n * 4, 4);
                     const list = (slot[0] | slot[1] << 8 | slot[2] << 16 | slot[3] << 24) >>> 0;
                     const item = itemFor(itemsOf(memory, list).at(-1) ?? '');
                     if (!item)
                     {
-                        memory.writeMemory(inOut >>> 0, dword(0));
+                        memory.writeMemory(wholeAddress(inOut), dword(0));
                         return E_INVALIDARG;
                     }
                     shared = (shared & item.attributes) >>> 0;
                 }
                 mask = (mask & shared) >>> 0;
-                memory.writeMemory(inOut >>> 0, dword(mask));
+                memory.writeMemory(wholeAddress(inOut), dword(mask));
                 return S_OK;
             } },
         { name: 'GetUIObjectOf', argBytes: 28, invoke: ()=>E_NOTIMPL },
@@ -515,9 +566,12 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                 {
                     return E_INVALIDARG;
                 }
-                const text = ((flags >>> 0) & SHGDN_FORPARSING) !== 0 ? item.text : item.name;
-                memory.writeMemory(out >>> 0, dword(STRRET_CSTR));
-                memory.writeMemory((out >>> 0) + STRRET_TEXT,
+                // For the address bar a virtual item is named as it is shown.
+                const parsing = ((flags >>> 0) & SHGDN_FORPARSING) !== 0
+                    && !(((flags >>> 0) & SHGDN_FORADDRESSBAR) !== 0 && item.text.startsWith('::'));
+                const text = parsing ? item.text : item.name;
+                memory.writeMemory(wholeAddress(out), dword(STRRET_CSTR));
+                memory.writeMemory(wholeAddress(out) + STRRET_TEXT,
                     sz(text.slice(0, STRRET_CAPACITY - 1)));
                 return S_OK;
             } },
@@ -544,13 +598,13 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
                     {
                         return E_OUTOFMEMORY;
                     }
-                    memory.writeMemory((out >>> 0) + n * 4, dword(list));
+                    memory.writeMemory(wholeAddress(out) + n * 4, dword(list));
                     object.state.at++;
                     n++;
                 }
                 if ((fetched >>> 0) !== 0)
                 {
-                    memory.writeMemory(fetched >>> 0, dword(n));
+                    memory.writeMemory(wholeAddress(fetched), dword(n));
                 }
                 return n === (count >>> 0) ? S_OK : S_FALSE;
             } },
@@ -581,6 +635,18 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
          */
         desktop: out=>handOut(folderObject(null), IID_ISHELLFOLDER, out),
         /**
+         * The desktop folder as a COM class's object, what
+         * CoCreateInstance(CLSID_ShellDesktop) makes: the same folder
+         * SHGetDesktopFolder answers.
+         *
+         * @returns {import('../ole32/objects.js').ComClassDefinition}
+         */
+        desktopClass: ()=>({
+            state: /** @type {FolderState} */ ({ folder: null }),
+            interfaces: [{ id: IID_ISHELLFOLDER, methods: /** @type {any[]} */ (
+                folderMethods.slice(IUNKNOWN_METHODS.length)) }],
+        }),
+        /**
          * The folder a list's last item is in, into guest memory, and where
          * that item starts: SHBindToParent. An empty list is the desktop,
          * bound to itself.
@@ -600,8 +666,84 @@ export function createShellNamespace({ publish, allocate, memory, volume, docume
             }
             return { hr: handOut(folderObject(folder), IID_ISHELLFOLDER, out), last };
         },
+        /**
+         * What the desktop's ParseDisplayName finds for a name: the item's
+         * text and attributes, or null for a name this namespace has not.
+         *
+         * @param {string} name
+         */
+        parse: name=>{
+            try
+            {
+                const item = itemFor(parsingName(name));
+                return item ? { text: item.text, attributes: item.attributes } : null;
+            }
+            catch (e){
+                // A name the volume refuses outright -- a wildcard, a tab -- names nothing.
+                if (e && typeof e === 'object' && 'code' in e)
+                {
+                    return null;
+                }
+                throw e;
+            }
+        },
+        /**
+         * The folder a list names, into guest memory: the desktop's
+         * BindToObject, and the desktop itself for an empty list.
+         *
+         * @param {number} list @param {number} riid @param {number} out
+         */
+        bind: (list, riid, out)=>{
+            const iid = readGuid(memory, riid >>> 0);
+            const text = itemsOf(memory, list >>> 0).at(-1);
+            const item = text === undefined ? null : itemFor(text);
+            if (text !== undefined && (!item || (item.attributes & SFGAO_FOLDER) === 0))
+            {
+                memory.writeMemory(wholeAddress(out), dword(0));
+                return E_INVALIDARG;
+            }
+            if (iid !== IID_ISHELLFOLDER && iid !== IID_IUNKNOWN)
+            {
+                memory.writeMemory(wholeAddress(out), dword(0));
+                return E_NOINTERFACE;
+            }
+            return handOut(folderObject(item ? item.text : null), IID_ISHELLFOLDER, out >>> 0);
+        },
         /** @param {string} text @returns {number} */
         listFor,
+        /**
+         * What an item's text names -- its parsing name, display name and
+         * attributes -- or null for one no longer there.
+         *
+         * @param {string} text
+         * @returns {NamespaceItem | null}
+         */
+        describe: text=>{
+            try
+            {
+                return itemFor(text);
+            }
+            catch (e){
+                if (e && typeof e === 'object' && 'code' in e)
+                {
+                    return null;
+                }
+                throw e;
+            }
+        },
+        /**
+         * The folder an IShellFolder pointer this namespace handed out is --
+         * its text, null for the desktop -- or undefined for any other
+         * pointer, and for one whose object is gone.
+         *
+         * @param {number} pointer
+         * @returns {string | null | undefined}
+         */
+        folderAt: pointer=>{
+            const object = folders.get(pointer >>> 0);
+            return object && !object.destroyed
+                ? /** @type {FolderState} */ (object.state).folder : undefined;
+        },
         /** @param {number} list */
         pathOf: list=>pathOfList(memory, list),
     };

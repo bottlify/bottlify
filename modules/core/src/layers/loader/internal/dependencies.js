@@ -21,6 +21,13 @@
  * So this walks the import graph, and every name it meets that is not a
  * KnownDLL is a file to look for; when it is not there and we have a table for
  * it, that table is the answer, and otherwise the name is recorded missing.
+ * A missing name is one of two things. A library Windows itself carries
+ * (`isWindowsLibrary`) that the engine does not recreate is the engine's gap:
+ * the program still starts, as it would have on Windows, and fails where it
+ * calls in. A library in no list, imported by a static import table, is one the
+ * program was meant to bring: Windows does not start such a process
+ * (STATUS_DLL_NOT_FOUND), and neither does the engine (`absent`). A delay-loaded
+ * one fails on its first call on Windows, not at the start, and stays missing.
  *
  * Order matters and is not merely tidiness. A library's own imports have to
  * resolve against libraries that are already mapped, so the graph is emitted
@@ -35,7 +42,7 @@
  * mutual references.
  */
 
-import { parsePe, readImports } from './pe.js';
+import { parsePe, readExports, readImports } from './pe.js';
 import { readDelayImports } from './delayload.js';
 
 /**
@@ -69,17 +76,26 @@ import { readDelayImports } from './delayload.js';
  *        Whether the name is one Windows maps out of the system directory and
  *        never looks for beside the program. These are ours whatever is on the
  *        volume: the file, if any, is ignored.
- * @returns {Promise<{ order: Dependency[], missing: string[] }>}
+ * @param {(name: string) => boolean} [options.isWindowsLibrary]
+ *        Whether Windows itself carries the library. Not given, every missing
+ *        name is taken to be one, and nothing is `absent`.
+ * @returns {Promise<{ order: Dependency[], missing: string[], absent: string[] }>}
  *        `order` is dependency-first and excludes the executable. `missing`
  *        names libraries that are neither ours nor present in the volume --
  *        recorded rather than thrown, because a program that never calls into
- *        one still runs, and one that does fails where it called.
+ *        one still runs, and one that does fails where it called. `absent` is
+ *        the part of it that ends the start: statically imported, and carried
+ *        by no Windows.
  */
-export async function planDependencies({ entry, entryName, readLibrary, isSystem, isKnownDll }){
+export async function planDependencies(options){
+    const { entry, entryName, readLibrary, isSystem, isKnownDll } = options;
+    const isWindowsLibrary = options.isWindowsLibrary ?? (()=>true);
     /** @type {Dependency[]} */
     const order = [];
     /** @type {string[]} */
     const missing = [];
+    /** @type {string[]} */
+    const absent = [];
     /** Lower-cased, because an import descriptor's spelling is not dependable. */
     const seen = new Set(entryName ? [entryName.toLowerCase()] : []);
 
@@ -90,17 +106,70 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
      * its slots are bound to nothing while the file sits beside the program.
      *
      * @param {Uint8Array} file
-     * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[] }[]}
+     * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[], delayed: boolean }[]}
      */
     const importsOf = file=>{
         // Read alone, so an x86-64 program's imports are walked as well.
         const image = parsePe(file, { wide: true });
-        return [...readImports(file, image), ...readDelayImports(file, image)];
+        return [...readImports(file, image).map(table=>({ ...table, delayed: false })),
+            ...readDelayImports(file, image).map(table=>({ ...table, delayed: true }))];
     };
 
-    /** @param {Uint8Array} file */
-    const visit = async file=>{
-        for (const { dll: name, entries } of importsOf(file))
+    /**
+     * The libraries a library's forwarders lead to, for the imports taken
+     * from it that are forwarded: what Windows' loader loads to snap such an
+     * import ("LIB.Name", "LIB.#7"), so they are planned before it.
+     *
+     * @param {Uint8Array} file
+     * @param {import('./pe.js').ImportEntry[]} wanted
+     * @param {boolean} delayed
+     * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[], delayed: boolean }[]}
+     */
+    const forwardsOf = (file, wanted, delayed)=>{
+        let exports;
+        try
+        {
+            exports = readExports(file, parsePe(file, { wide: true })).exports;
+        }
+        catch {
+            return [];
+        }
+        const forwarders = exports.filter(each=>each.forwards !== null);
+        if (forwarders.length === 0)
+        {
+            return [];
+        }
+        const byName = new Map(forwarders.filter(each=>each.name !== null)
+            .map(each=>[String(each.name), each.forwards]));
+        const byOrdinal = new Map(forwarders.map(each=>[each.ordinal, each.forwards]));
+        /** @type {Map<string, import('./pe.js').ImportEntry[]>} */
+        const targets = new Map();
+        for (const asked of wanted)
+        {
+            const forward = (asked.name !== null ? byName.get(asked.name)
+                : byOrdinal.get(asked.ordinal ?? -1)) ?? null;
+            const dot = forward === null ? -1 : forward.lastIndexOf('.');
+            if (forward === null || dot <= 0)
+            {
+                continue;
+            }
+            const exported = forward.slice(dot + 1);
+            const dll = `${forward.slice(0, dot)}.dll`;
+            const list = targets.get(dll) ?? [];
+            list.push(exported.startsWith('#')
+                ? { name: null, ordinal: Number(exported.slice(1)) >>> 0, iatRva: 0 }
+                : { name: exported, ordinal: null, iatRva: 0 });
+            targets.set(dll, list);
+        }
+        return [...targets].map(([dll, entries])=>({ dll, entries, delayed }));
+    };
+
+    /**
+     * @param {{ dll: string, entries: import('./pe.js').ImportEntry[],
+     *     delayed: boolean }[]} imports
+     */
+    const visit = async imports=>{
+        for (const { dll: name, entries, delayed } of imports)
         {
             const key = name.toLowerCase();
             if (seen.has(key) || isKnownDll(name))
@@ -120,14 +189,18 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
                 if (!isSystem(name))
                 {
                     missing.push(name);
+                    if (!delayed && !isWindowsLibrary(name))
+                    {
+                        absent.push(name);
+                    }
                 }
                 continue;
             }
-            await visit(bytes);
+            await visit([...forwardsOf(bytes, entries, delayed), ...importsOf(bytes)]);
             order.push({ name, file: bytes });
         }
     };
 
-    await visit(entry);
-    return { order, missing };
+    await visit(importsOf(entry));
+    return { order, missing, absent };
 }

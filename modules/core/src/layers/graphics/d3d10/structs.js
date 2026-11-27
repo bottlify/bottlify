@@ -27,10 +27,11 @@
 
 import {
     D3D10_1_SRV_DIMENSION, D3D10_DSV_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
+    D3D11_UAV_DIMENSION,
 } from './constants.js';
 
 /** DXGI_RATIONAL: the refresh rate, as a fraction rather than a number. */
-export const DXGI_RATIONAL = Object.freeze({
+const DXGI_RATIONAL = Object.freeze({
     Numerator: 0x00,
     Denominator: 0x04,
     SIZE: 0x08,
@@ -64,10 +65,26 @@ export const DXGI_SWAP_CHAIN_DESC = Object.freeze({
     SIZE: 0x3c,
 });
 
+/** The same in a 64-bit process: OutputWindow an HWND, eight bytes on an eight-byte boundary. */
+const DXGI_SWAP_CHAIN_DESC_64 = Object.freeze({
+    ...DXGI_SWAP_CHAIN_DESC,
+    OutputWindow: 0x30,
+    Windowed: 0x38,
+    SwapEffect: 0x3c,
+    Flags: 0x40,
+    SIZE: 0x48,
+});
+
+/** @param {number} [pointerSize] */
+const swapChainLayout = (pointerSize = 4)=>(pointerSize === 8 ? DXGI_SWAP_CHAIN_DESC_64
+    : DXGI_SWAP_CHAIN_DESC);
+
 /**
  * @typedef {Object} GuestMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, bytes: 4 | 8) => void} writePointer
+ *     a pointer whole (the memory layer's writer)
  */
 
 /**
@@ -122,6 +139,9 @@ export function writeU32(memory, address, value){
  * @property {boolean} windowed
  * @property {number} swapEffect
  * @property {number} flags
+ * @property {boolean} [stereo]     DXGI_SWAP_CHAIN_DESC1's: a stereo chain.
+ * @property {number} [scaling1]    DXGI_SWAP_CHAIN_DESC1's DXGI_SCALING.
+ * @property {number} [alphaMode]   DXGI_SWAP_CHAIN_DESC1's DXGI_ALPHA_MODE.
  */
 
 /**
@@ -183,20 +203,22 @@ export function writeModeDesc(memory, address, mode){
 /**
  * @param {GuestMemory} memory
  * @param {number} address
+ * @param {number} [pointerSize]  8 in a 64-bit process (`DXGI_SWAP_CHAIN_DESC_64`)
  * @returns {SwapChainFields}
  */
-export function readSwapChainDesc(memory, address){
+export function readSwapChainDesc(memory, address, pointerSize = 4){
+    const layout = swapChainLayout(pointerSize);
     return {
-        bufferDesc: readModeDesc(memory, address + DXGI_SWAP_CHAIN_DESC.BufferDesc),
-        sampleDesc: readSampleDesc(memory, address + DXGI_SWAP_CHAIN_DESC.SampleDesc),
-        bufferUsage: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferUsage),
-        bufferCount: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferCount),
-        outputWindow: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.OutputWindow),
+        bufferDesc: readModeDesc(memory, address + layout.BufferDesc),
+        sampleDesc: readSampleDesc(memory, address + layout.SampleDesc),
+        bufferUsage: readU32(memory, address + layout.BufferUsage),
+        bufferCount: readU32(memory, address + layout.BufferCount),
+        outputWindow: readU32(memory, address + layout.OutputWindow),
         // BOOL is a 32-bit int and any non-zero value is true; a program that
         // sets it from a comparison may well pass something other than one.
-        windowed: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed) !== 0,
-        swapEffect: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect),
-        flags: readU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags),
+        windowed: readU32(memory, address + layout.Windowed) !== 0,
+        swapEffect: readU32(memory, address + layout.SwapEffect),
+        flags: readU32(memory, address + layout.Flags),
     };
 }
 
@@ -204,16 +226,73 @@ export function readSwapChainDesc(memory, address){
  * @param {GuestMemory} memory
  * @param {number} address
  * @param {SwapChainFields} desc
+ * @param {number} [pointerSize]  8 in a 64-bit process, whose HWND is eight bytes
  */
-export function writeSwapChainDesc(memory, address, desc){
-    writeModeDesc(memory, address + DXGI_SWAP_CHAIN_DESC.BufferDesc, desc.bufferDesc);
-    writeSampleDesc(memory, address + DXGI_SWAP_CHAIN_DESC.SampleDesc, desc.sampleDesc);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferUsage, desc.bufferUsage);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.BufferCount, desc.bufferCount);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.OutputWindow, desc.outputWindow);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Windowed, desc.windowed ? 1 : 0);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.SwapEffect, desc.swapEffect);
-    writeU32(memory, address + DXGI_SWAP_CHAIN_DESC.Flags, desc.flags);
+export function writeSwapChainDesc(memory, address, desc, pointerSize = 4){
+    const layout = swapChainLayout(pointerSize);
+    writeModeDesc(memory, address + layout.BufferDesc, desc.bufferDesc);
+    writeSampleDesc(memory, address + layout.SampleDesc, desc.sampleDesc);
+    writeU32(memory, address + layout.BufferUsage, desc.bufferUsage);
+    writeU32(memory, address + layout.BufferCount, desc.bufferCount);
+    // An HWND, pointer-sized: written whole by the memory layer's writer.
+    memory.writePointer(address + layout.OutputWindow, desc.outputWindow,
+        pointerSize === 8 ? 8 : 4);
+    writeU32(memory, address + layout.Windowed, desc.windowed ? 1 : 0);
+    writeU32(memory, address + layout.SwapEffect, desc.swapEffect);
+    writeU32(memory, address + layout.Flags, desc.flags);
+}
+
+/**
+ * DXGI 1.2's two halves of a swap chain's description -- DXGI_SWAP_CHAIN_DESC1
+ * and the optional DXGI_SWAP_CHAIN_FULLSCREEN_DESC -- as the first version's
+ * fields: the window is the call's, and a chain with no fullscreen half is
+ * windowed.
+ *
+ * @param {GuestMemory} memory
+ * @param {number} address  DXGI_SWAP_CHAIN_DESC1: width, height, format, stereo,
+ *     sample count and quality, usage, count, scaling, swap effect, alpha mode, flags
+ * @param {number} fullscreenAt  DXGI_SWAP_CHAIN_FULLSCREEN_DESC, or zero: refresh
+ *     numerator and denominator, scanline order, scaling, windowed
+ * @returns {SwapChainFields}
+ */
+export function readSwapChainDesc1(memory, address, fullscreenAt){
+    const word = (/** @type {number} */ at)=>readU32(memory, address + at);
+    const full = (/** @type {number} */ at)=>(fullscreenAt ? readU32(memory, fullscreenAt + at)
+        : 0);
+    return {
+        bufferDesc: { width: word(0), height: word(4), refreshNumerator: full(0),
+            refreshDenominator: full(4), format: word(8), scanlineOrdering: full(8),
+            scaling: full(12) },
+        sampleDesc: { count: word(16), quality: word(20) },
+        bufferUsage: word(24),
+        bufferCount: word(28),
+        outputWindow: 0,
+        windowed: fullscreenAt ? full(16) !== 0 : true,
+        swapEffect: word(36),
+        flags: word(44),
+        stereo: word(12) !== 0,
+        scaling1: word(32),
+        alphaMode: word(40),
+    };
+}
+
+/**
+ * @param {GuestMemory} memory @param {number} address @param {SwapChainFields} desc
+ */
+export function writeSwapChainDesc1(memory, address, desc){
+    [desc.bufferDesc.width, desc.bufferDesc.height, desc.bufferDesc.format, desc.stereo ? 1 : 0,
+        desc.sampleDesc.count, desc.sampleDesc.quality, desc.bufferUsage, desc.bufferCount,
+        desc.scaling1 ?? 0, desc.swapEffect, desc.alphaMode ?? 0, desc.flags]
+        .forEach((value, index)=>writeU32(memory, address + index * 4, value));
+}
+
+/**
+ * @param {GuestMemory} memory @param {number} address @param {SwapChainFields} desc
+ */
+export function writeFullscreenDesc(memory, address, desc){
+    [desc.bufferDesc.refreshNumerator, desc.bufferDesc.refreshDenominator,
+        desc.bufferDesc.scanlineOrdering, desc.bufferDesc.scaling, desc.windowed ? 1 : 0]
+        .forEach((value, index)=>writeU32(memory, address + index * 4, value));
 }
 
 /**
@@ -236,6 +315,12 @@ const RANGE_MS_ARRAY = Object.freeze(['FirstArraySlice', 'ArraySize']);
 const RANGE_BUFFER = Object.freeze(['ElementOffset', 'ElementWidth']);
 const SRV_LEVELS = Object.freeze(['MostDetailedMip', 'MipLevels']);
 const SRV_ARRAY = Object.freeze(['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']);
+const SRV_CUBE_ARRAY = Object.freeze(['MostDetailedMip', 'MipLevels', 'First2DArrayFace',
+    'NumCubes']);
+/** Direct3D 11's buffer views past 10's: the elements, and how they are read. */
+const RANGE_BUFFER_EX = Object.freeze(['FirstElement', 'NumElements', 'Flags']);
+/** A Direct3D 11 depth-stencil view's flags word sits before its union. */
+const flagged = (/** @type {readonly string[]} */ members)=>Object.freeze(['Flags', ...members]);
 
 /**
  * @typedef {Object} ViewUnion
@@ -299,10 +384,52 @@ export const VIEW_UNION = Object.freeze({
             TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
             TEXTURE3D: SRV_LEVELS,
             TEXTURECUBE: SRV_LEVELS,
-            TEXTURECUBEARRAY: Object.freeze(['MostDetailedMip', 'MipLevels',
-                'First2DArrayFace', 'NumCubes']),
+            TEXTURECUBEARRAY: SRV_CUBE_ARRAY,
         }),
         size: 0x18,
+    }),
+    // Direct3D 11's: a shader-resource view adds the extended buffer, a
+    // depth-stencil view a flags word, and the unordered-access view is new.
+    SHADER_RESOURCE11: Object.freeze({
+        dimensions: Object.freeze({ ...D3D10_1_SRV_DIMENSION, BUFFEREX: 11 }),
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER,
+            TEXTURE1D: SRV_LEVELS,
+            TEXTURE1DARRAY: SRV_ARRAY,
+            TEXTURE2D: SRV_LEVELS,
+            TEXTURE2DARRAY: SRV_ARRAY,
+            TEXTURE2DMS: RANGE_MS,
+            TEXTURE2DMSARRAY: RANGE_MS_ARRAY,
+            TEXTURE3D: SRV_LEVELS,
+            TEXTURECUBE: SRV_LEVELS,
+            TEXTURECUBEARRAY: SRV_CUBE_ARRAY,
+            BUFFEREX: RANGE_BUFFER_EX,
+        }),
+        size: 0x18,
+    }),
+    DEPTH_STENCIL11: Object.freeze({
+        dimensions: D3D10_DSV_DIMENSION,
+        members: Object.freeze({
+            TEXTURE1D: flagged(RANGE_1D),
+            TEXTURE1DARRAY: flagged(RANGE_ARRAY),
+            TEXTURE2D: flagged(RANGE_1D),
+            TEXTURE2DARRAY: flagged(RANGE_ARRAY),
+            TEXTURE2DMS: flagged(RANGE_MS),
+            TEXTURE2DMSARRAY: flagged(RANGE_MS_ARRAY),
+        }),
+        size: 0x18,
+    }),
+    UNORDERED_ACCESS: Object.freeze({
+        dimensions: D3D11_UAV_DIMENSION,
+        members: Object.freeze({
+            BUFFER: RANGE_BUFFER_EX,
+            TEXTURE1D: RANGE_1D,
+            TEXTURE1DARRAY: RANGE_ARRAY,
+            TEXTURE2D: RANGE_1D,
+            TEXTURE2DARRAY: RANGE_ARRAY,
+            TEXTURE3D: Object.freeze(['MipSlice', 'FirstWSlice', 'WSize']),
+        }),
+        size: 0x14,
     }),
 });
 
@@ -312,7 +439,7 @@ export const VIEW_UNION = Object.freeze({
  * @returns {readonly string[] | null} the union's members for that dimension, or null
  *     for a dimension the kind does not have
  */
-export function viewUnionMembers(union, viewDimension){
+function viewUnionMembers(union, viewDimension){
     const entry = Object.entries(union.dimensions).find(([, value])=>value === viewDimension);
     return entry ? union.members[entry[0]] ?? null : null;
 }

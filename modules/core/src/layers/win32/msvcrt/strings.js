@@ -23,6 +23,10 @@ import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { wholeAddress } from '../common/pointers.js';
+
+/** A string's terminator, where a string ends: never itself written. */
+const NUL = new Uint8Array(1);
 
 /**
  * @typedef {Object} StringHost
@@ -38,6 +42,7 @@ import { COMPILED } from './inguest.x86.js';
  *     the largest host cost in an install that scans while it copies.
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
  * @property {(code: number) => void} [errno]  Where a refused parameter says why.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where `_pctype` is a quadword.
  */
 
 /** A string is scanned no further than this, since nothing in C bounds one. */
@@ -68,6 +73,8 @@ const CT_HEX = 0x0080;
  * matches on the overlap, the same as every other mask here.
  */
 const CT_ALPHA_MARK = 0x0100;
+/** `_LEADBYTE`: a multibyte character's first byte in the locale's code page. */
+const CT_LEADBYTE = 0x8000;
 
 
 /**
@@ -117,43 +124,31 @@ export function createStringFunctions(host){
     /** @type {Record<string, any>} */
     const table = {
         /** char *strrchr(const char *str, int ch) -- in the guest */
-        strrchr: guestEntry(inGuest.strrchr, COMPILED.strrchr, host),
+        strrchr: { ...guestEntry(inGuest.strrchr, COMPILED.strrchr, host), returns: 'pointer' },
 
         /** char *strpbrk(const char *str, const char *accept) -- in the guest */
-        strpbrk: guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host),
+        strpbrk: { ...guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host), returns: 'pointer' },
 
         /** size_t strspn(const char *str, const char *accept) -- in the guest */
-        strspn: guestEntry(inGuest.strspn, COMPILED.strspn, host),
+        strspn: { ...guestEntry(inGuest.strspn, COMPILED.strspn, host) },
 
         /** size_t strcspn(const char *str, const char *reject) -- in the guest */
-        strcspn: guestEntry(inGuest.strcspn, COMPILED.strcspn, host),
+        strcspn: { ...guestEntry(inGuest.strcspn, COMPILED.strcspn, host) },
 
-        /** char *strncat(char *dest, const char *src, size_t count) */
-        strncat: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                const existing = readString(destination);
-                // Unlike strncpy, this one always terminates: the count bounds
-                // what is appended, not what is written.
-                writeString(destination + existing.length,
-                    readString(source).slice(0, count >>> 0));
-                return destination;
-            },
-        },
+        /** char *strncat(char *dest, const char *src, size_t count) -- in the guest */
+        strncat: { ...guestEntry(inGuest.strncat, COMPILED.strncat, host), returns: 'pointer' },
 
         /** int _strnicmp(const char *l, const char *r, size_t count) -- in the guest */
         _strnicmp: guestEntry(inGuest._strnicmp, COMPILED._strnicmp, host),
 
         /** char *_strupr(char *str) -- in the guest */
-        _strupr: guestEntry(inGuest._strupr, COMPILED._strupr, host),
+        _strupr: { ...guestEntry(inGuest._strupr, COMPILED._strupr, host), returns: 'pointer' },
 
         /** char *_strlwr(char *str) -- in the guest */
-        _strlwr: guestEntry(inGuest._strlwr, COMPILED._strlwr, host),
+        _strlwr: { ...guestEntry(inGuest._strlwr, COMPILED._strlwr, host), returns: 'pointer' },
 
         /** char *_strrev(char *str) */
-        _strrev: inPlace(text=>[...text].reverse().join('')),
+        _strrev: { ...inPlace(text=>[...text].reverse().join('')), returns: 'pointer' },
 
         /**
          * char *strtok(char *str, const char *delimiters)
@@ -163,13 +158,14 @@ export function createStringFunctions(host){
          * passes null on every call after the first to mean "carry on".
          */
         strtok: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, delimiters])=>{
-                if ((string >>> 0) !== 0)
+                if (wholeAddress(string) !== 0)
                 {
-                    tokenAt = string >>> 0;
+                    tokenAt = wholeAddress(string);
                 }
                 if (tokenAt === 0)
                 {
@@ -200,7 +196,7 @@ export function createStringFunctions(host){
                 const token = tokenAt + start;
                 if (end < rest.length)
                 {
-                    host.writeMemory(tokenAt + end, new Uint8Array(1));
+                    host.writeMemory(tokenAt + end, NUL);
                     tokenAt = tokenAt + end + 1;
                 }
                 else
@@ -219,11 +215,12 @@ export function createStringFunctions(host){
          * duplicates to null, errno untouched, as msvcrt checks for it.
          */
         _strdup: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([string])=>{
-                if ((string >>> 0) === 0)
+                if (wholeAddress(string) === 0)
                 {
                     return 0;
                 }
@@ -255,7 +252,7 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(source, length).slice();
+                const bytes = host.readMemory(source, length);
                 for (let at = 0; at < length; at += 2)
                 {
                     const first = bytes[at];
@@ -279,16 +276,16 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([left, right])=>{
-                if ((left >>> 0) === 0 || (right >>> 0) === 0)
+                if (wholeAddress(left) === 0 || wholeAddress(right) === 0)
                 {
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
                 /** @param {number} at */
                 const bytesOf = at=>host.readMemory(at,
-                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1).slice();
-                const a = bytesOf(left >>> 0);
-                const b = bytesOf(right >>> 0);
+                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1);
+                const a = bytesOf(wholeAddress(left));
+                const b = bytesOf(wholeAddress(right));
                 for (let at = 0; ; at++)
                 {
                     if (a[at] !== b[at])
@@ -314,10 +311,11 @@ export function createStringFunctions(host){
         strxfrm: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;
-                if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0))
+                if (wholeAddress(source) === 0 || (wholeAddress(destination) === 0 && room !== 0))
                 {
                     host.errno?.(EINVAL);
                     return INT_MAX;
@@ -326,7 +324,7 @@ export function createStringFunctions(host){
                 if (room !== 0)
                 {
                     host.writeMemory(destination,
-                        host.readMemory(source, Math.min(room, length + 1)).slice());
+                        host.readMemory(source, Math.min(room, length + 1)));
                 }
                 return length;
             },
@@ -336,11 +334,10 @@ export function createStringFunctions(host){
          * int _memicmp(const void *left, const void *right, size_t count)
          *
          * memcmp with the ASCII letters folded to lower case, the answer the
-         * difference of the first two bytes that differ; no buffer for a
-         * count is _NLSCMPERROR and EINVAL.
+         * difference of the first two bytes that differ -- in the guest; no
+         * buffer for a count is this handler's, _NLSCMPERROR and EINVAL.
          */
-        _memicmp: {
-            convention: 'cdecl',
+        _memicmp: guestEntry(inGuest._memicmp, COMPILED._memicmp, host, {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([left, right, count])=>{
@@ -354,7 +351,7 @@ export function createStringFunctions(host){
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
-                const a = host.readMemory(left, length).slice();
+                const a = host.readMemory(left, length);
                 const b = host.readMemory(right, length);
                 for (let at = 0; at < length; at++)
                 {
@@ -366,27 +363,10 @@ export function createStringFunctions(host){
                 }
                 return 0;
             },
-        },
+        }),
 
-        /** void *memchr(const void *buffer, int value, size_t count) */
-        memchr: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, value, count])=>{
-                const length = count >>> 0;
-                const bytes = host.readMemory(buffer, length);
-                const wanted = value & 0xff;
-                for (let at = 0; at < length; at++)
-                {
-                    if (bytes[at] === wanted)
-                    {
-                        return buffer + at;
-                    }
-                }
-                return 0;
-            },
-        },
+        /** void *memchr(const void *buffer, int value, size_t count) -- in the guest */
+        memchr: { ...guestEntry(inGuest.memchr, COMPILED.memchr, host), returns: 'pointer' },
 
         // The classifiers, under the C locale, in the guest (`inguest.js`):
         // 1 for a byte of the class, 0 for anything else, EOF included.
@@ -394,6 +374,20 @@ export function createStringFunctions(host){
             'ispunct', 'isxdigit', 'isprint', 'isgraph', 'iscntrl'].map(name=>[name, guestEntry(
             /** @type {Function} */ (inGuest[/** @type {'isalpha'} */ (name)]),
             COMPILED[/** @type {'isalpha'} */ (name)], host)])),
+
+        /**
+         * int _tolower(int c) / int _toupper(int c)
+         *
+         * The case moved by the distance from 'A' to 'a' whatever `c` is:
+         * unlike tolower they do not ask whether it is a letter - the caller
+         * is meant to know - so `_tolower(0)` is 0x20.
+         */
+        _tolower: { convention: 'cdecl', argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code | 0) + 0x20) | 0 },
+        _toupper: { convention: 'cdecl', argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code | 0) - 0x20) | 0 },
     };
 
     // The table `_pctype` points at and `_isctype` reads: one mask per byte,
@@ -451,6 +445,19 @@ export function createStringFunctions(host){
     };
 
     /**
+     * int isleadbyte(int c)
+     *
+     * `_isctype(c, _LEADBYTE)`: the table is the "C" locale's, which has no
+     * lead bytes, so never.
+     */
+    table.isleadbyte = {
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>table._isctype.handler([code, CT_LEADBYTE]),
+    };
+
+    /**
      * const unsigned short *_pctype
      *
      * A variable, not a function: the runtime's classification table, indexed
@@ -472,21 +479,31 @@ export function createStringFunctions(host){
             ctypeTable.byteOffset + ctypeTable.byteLength)),
     };
 
+    /** Where the published table's second element is, 0 until it is published. */
+    let published = 0;
+    const publishedTable = ()=>{
+        if (published === 0)
+        {
+            const address = host.allocate(ctypeTable.byteLength);
+            if (address !== 0)
+            {
+                host.writeMemory(address, new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
+                    ctypeTable.byteLength));
+                published = address + 2;
+            }
+        }
+        return published;
+    };
     table._pctype = {
         data: ()=>{
-            const address = host.allocate(ctypeTable.byteLength);
-            if (address === 0)
-            {
-                return new Uint8Array(4);
-            }
-            const bytes = new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
-                ctypeTable.byteLength);
-            host.writeMemory(address, bytes);
-            const pointer = new Uint8Array(4);
-            new DataView(pointer.buffer).setUint32(0, address + 2, true);
+            const pointer = new Uint8Array(host.pointerSize ?? 4);
+            new DataView(pointer.buffer).setUint32(0, publishedTable(), true);
             return pointer;
         },
     };
+
+    /** const unsigned short *__pctype_func(void): `_pctype`'s value, through a call. */
+    table.__pctype_func = { convention: 'cdecl', argBytes: 0, handler: publishedTable };
 
     return table;
 }

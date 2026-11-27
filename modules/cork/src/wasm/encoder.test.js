@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Body, EMPTY, ModuleBuilder, ValType, leb128s32, leb128s64, leb128u } from './encoder.js';
-import { features } from './features.js';
+import { allowMemory64, ifRoom } from '../testing/memory64.js';
+import { features, memory64 } from './features.js';
 
 /**
  * Instantiates a built module, saying why when the engine refuses it: a
@@ -74,7 +75,8 @@ test('an imported memory is read through a load with an offset', ()=>{
 
 test('a store lands in the memory at the offset asked', ()=>{
     // An import that declares a maximum links only against a memory that has
-    // one -- the reason the translator declares none against the emulator's.
+    // one: the translator declares one only for a memory it knows has one
+    // (`maxPages`).
     const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
     const m = new ModuleBuilder();
     m.importMemory('env', 'memory', { min: 1, max: 1 });
@@ -245,6 +247,116 @@ test('a branch marked unlikely is named in the branch-hint section, at its offse
         assert.deepEqual([f(0), f(1)], [5, 7]);
     });
 
+test('pieces put in at their places in one pass leave what inserting each, last first, does',
+    ()=>{
+        for (let seed = 1; seed <= 50; seed++)
+        {
+            // A seeded xorshift, so a failing case is the same again.
+            let x = seed;
+            const next = (/** @type {number} */ below)=>{
+                x ^= x << 13;
+                x ^= x >>> 17;
+                x ^= x << 5;
+                return (x >>> 0) % below;
+            };
+            // A body of nops with hinted branches, and pieces of drops and hinted ifs at
+            // places in order, two sometimes at one place, past the copy by hand's 32
+            // bytes sometimes: through one source body, and inserted one at a time.
+            const main = ()=>{
+                const b = new Body(1);
+                for (let i = 0; i < 40; i++)
+                {
+                    if (next(5) === 0)
+                    {
+                        b.i32const(i).unlikely().if(EMPTY).end();
+                    }
+                    else
+                    {
+                        b.byte(0x01);
+                    }
+                }
+                return b;
+            };
+            const start = x;
+            const one = main();
+            /** @type {{ at: number, body: Body }[]} */
+            const pieces = [];
+            for (let at = next(4); at < one.length; at += 1 + next(6))
+            {
+                const body = new Body();
+                for (let k = next(40); k > 0; k--)
+                {
+                    if (next(7) === 0)
+                    {
+                        body.i32const(k).unlikely().if(EMPTY).end();
+                    }
+                    else
+                    {
+                        body.i32const(k).drop();
+                    }
+                }
+                pieces.push({ at, body });
+            }
+            x = start;
+            const many = main();
+            // The source the pieces are written into, the last place's first.
+            const source = new Body();
+            const places = [];
+            for (let k = pieces.length - 1; k >= 0; k--)
+            {
+                const from = source.length;
+                const { body } = pieces[k];
+                for (let i = 0; i < body.length; i++)
+                {
+                    if (body.hints.includes(i))
+                    {
+                        source.hints.push(source.length);
+                    }
+                    source.byte(body.buffer[i]);
+                }
+                places.unshift(pieces[k].at, from, source.length);
+            }
+            one.insertFrom(source, places);
+            for (let k = pieces.length - 1; k >= 0; k--)
+            {
+                many.insert(pieces[k].at, pieces[k].body);
+            }
+            assert.deepEqual([...one.toBytes()], [...many.toBytes()], `seed ${seed}`);
+            assert.deepEqual(one.hints, many.hints, `seed ${seed}`);
+        }
+    });
+
+test('a body done with hands its buffer to the next as big, its bytes taken first', ()=>{
+    const first = new Body(4096);
+    for (let i = 0; i < 3000; i++)
+    {
+        first.byte(i & 0x7f);
+    }
+    const kept = first.toBytes();
+    first.release();
+    assert.equal(first.length, 0);
+    const second = new Body(4096);
+    for (let i = 0; i < 3000; i++)
+    {
+        second.byte(0x7f - (i & 0x7f));
+    }
+    assert.deepEqual(kept.subarray(0, 3), Uint8Array.of(0, 1, 2), 'taken bytes are a copy');
+    assert.deepEqual(second.toBytes().subarray(0, 3), Uint8Array.of(0x7f, 0x7e, 0x7d));
+    // Written again, a released body takes a buffer of its own.
+    first.byte(5);
+    assert.deepEqual([...first.toBytes()], [5, 0x0b]);
+});
+
+test('an i64 constant is its signed LEB128 at any value', ()=>{
+    for (const value of [0n, 1n, -1n, 63n, 64n, -64n, -65n, 0x7fffffffn, -0x80000000n,
+        0x80000000n, -0x80000001n, 0xffffffffn, 1n << 62n, -(1n << 63n), (1n << 63n) - 1n])
+    {
+        const body = new Body().i64const(value);
+        assert.deepEqual([...body.buffer.subarray(0, body.length)], [0x42, ...leb128s64(value)],
+            String(value));
+    }
+});
+
 test('a body with a block left open is refused with its depth', ()=>{
     const b = new Body().block(EMPTY).i32const(1).drop();
     assert.throws(()=>b.toBytes(), { message: 'encoder: block left open (1 deep)' });
@@ -345,3 +457,115 @@ test('atomic read-modify-writes on a shared memory answer the old value at every
     assert.throws(()=>f.add_i32(2, 1), WebAssembly.RuntimeError);
     assert.throws(()=>new Body().atomic('nand_i32'), /no such atomic/);
 });
+
+test('a second memory, memory64, read and written past 4 GiB beside the first', ifRoom(()=>{
+    allowMemory64();
+    const state = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+    const ram = memory64(2 ** 33, true);
+    const high = 2 ** 32 + 0x1230;
+    new DataView(ram.buffer).setUint32(high, 0xc0ffee, true);
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'state', { min: 1, max: 1, shared: true });
+    m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, shared: true, index64: true });
+    const type = m.type({ params: [ValType.i64], results: [] });
+    // state[0] = ram[a + 4]; ram[a + 8] = state[0] + 1
+    m.function(type, [], new Body().i32const(0).localGet(0).load('i32', { offset: 4, memory: 1 })
+        .store('i32')
+        .localGet(0).i32const(0).load('i32').i32const(1).op(0x6a)
+        .store('i32', { offset: 8, memory: 1 }).toBytes(), { exportAs: 'f' });
+    /** @type {any} */ (instantiate(m, { env: { state, ram } })).f(BigInt(high - 4));
+    assert.equal(new DataView(state.buffer).getUint32(0, true), 0xc0ffee);
+    assert.equal(new DataView(ram.buffer).getUint32(high + 4, true), 0xc0ffef);
+}));
+
+test('a guest access in a wide window: the i32 address widened by the high local', ifRoom(()=>{
+    allowMemory64();
+    const ram = memory64(2 ** 33);
+    const at = 2 ** 32 + 0x5000;
+    new DataView(ram.buffer).setUint32(at, 0x1234567, true);
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'state', { min: 1 });
+    m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, index64: true });
+    const type = m.type({ params: [ValType.i32, ValType.i64], results: [ValType.i32] });
+    // ram[a + 4] = ram[a] + 1 (i32); ram[a + 16] as v128 = ram[a] as v128; answers ram[a]
+    const b = new Body();
+    b.guest = { memory: 1, whole: 1, scratch: t=>(t === ValType.i32 ? 2 : 3) };
+    b.localGet(0).localGet(0).load('i32', { guest: true }).i32const(1).op(0x6a)
+        .store('i32', { offset: 4, guest: true })
+        .localGet(0).localGet(0).loadV128({ guest: true }).storeV128({ offset: 16, guest: true })
+        .localGet(0).load('i32', { guest: true });
+    m.function(type, [ValType.i32, ValType.v128], b.toBytes(), { exportAs: 'f' });
+    const state = new WebAssembly.Memory({ initial: 1 });
+    const { f } = /** @type {any} */ (instantiate(m, { env: { state, ram } }));
+    assert.equal(f(at % 2 ** 32, 2n ** 32n), 0x1234567);
+    const view = new DataView(ram.buffer);
+    assert.equal(view.getUint32(at + 4, true), 0x1234568);
+    assert.equal(view.getUint32(at + 20, true), 0x1234568, 'the vector went past 4 GiB too');
+    assert.equal(new Body().load('i32', { guest: true }).length, 3,
+        'a 4 GiB window\'s guest access is a plain one');
+}));
+
+test('a wide window\'s lane and zero-extending accesses: as they are where the engine reads them, '
+    + 'else their scalar forms, the same bytes either way', ifRoom(()=>{
+    allowMemory64();
+    const ram = memory64(2 ** 33);
+    const at = 2 ** 32 + 0x7000;
+    const source = Uint8Array.from({ length: 16 }, (_, i)=>0xa0 + i);
+    // movss's load, movsd's, pinsrd's lane load and pextrq's lane store, past 4 GiB.
+    const forms = [[92, 2], [93, 3], [86, 2], [91, 3]];
+    /** @param {boolean} lanes */
+    const built = lanes=>{
+        const m = new ModuleBuilder();
+        m.importMemory('env', 'state', { min: 1 });
+        m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, index64: true });
+        const type = m.type({ params: [ValType.i32, ValType.i64], results: [] });
+        const b = new Body();
+        b.guest = { memory: 1, whole: 1, lanes,
+            scratch: t=>(t === ValType.v128 ? 2 : t === ValType.i32 ? 3 : 4) };
+        for (const [index, [opcode, align]] of forms.entries())
+        {
+            const lane = opcode === 92 || opcode === 93 ? undefined : 0;
+            const store = opcode === 91;
+            if (!store)
+            {
+                b.i32const(index * 16);
+            }
+            b.localGet(0);
+            if (lane !== undefined)
+            {
+                b.v128const(store ? source : new Array(16).fill(0x55));
+            }
+            b.simdMem(opcode, { align, offset: store ? 32 : 0, lane, guest: true });
+            if (!store)
+            {
+                b.storeV128();
+            }
+        }
+        m.function(type, [ValType.v128, ValType.i32, ValType.i64], b.toBytes(), { exportAs: 'f' });
+        return /** @type {any} */ (instantiate(m, { env: { state, ram } })).f;
+    };
+    const state = new WebAssembly.Memory({ initial: 1 });
+    const answers = [];
+    const view = new Uint8Array(ram.buffer);
+    for (const lanes of [true, false])
+    {
+        view.set(source, at);
+        view.fill(0, at + 32, at + 48);
+        new Uint8Array(state.buffer).fill(0);
+        built(lanes)(at % 2 ** 32, BigInt(at - at % 2 ** 32));
+        answers.push([...new Uint8Array(state.buffer, 0, 48), ...view.subarray(at + 32, at + 48)]);
+    }
+    const lane = (/** @type {number} */ size, /** @type {number} */ rest)=>[
+        ...source.subarray(0, size), ...new Array(16 - size).fill(rest)];
+    assert.deepEqual(answers[0], [...lane(4, 0), ...lane(8, 0), ...lane(4, 0x55),
+        ...lane(8, 0)], 'as they are');
+    assert.deepEqual(answers[1], answers[0], 'the scalar forms');
+    /** A movss load's wasm bytes, @param {boolean} lanes */
+    const movss = lanes=>{
+        const b = new Body();
+        b.guest = { memory: 1, whole: 1, scratch: ()=>2, lanes };
+        return b.localGet(0).simdMem(92, { align: 2, offset: 0, guest: true }).length;
+    };
+    assert.ok(movss(true) < movss(false) - 16, `the access alone: ${movss(true)} bytes`
+        + ` against ${movss(false)}`);
+}));

@@ -1,9 +1,11 @@
 # cork bench
 
-A benchmark of guest code for the translator: one 32-bit Windows program in two builds,
-[`bin/bench-x87.exe`](bin/bench-x87.exe) (x87 arithmetic, as compilers of the era emitted it) and
-[`bin/bench-sse.exe`](bin/bench-sse.exe) (scalar SSE2), built from [`src/`](src/) with clang for the
-MSVC ABI and no C runtime. Each run executes one workload and exits with its checksum.
+A benchmark of guest code for the translator: one Windows program in three builds,
+[`bin/bench-x87.exe`](bin/bench-x87.exe) (32-bit, x87 arithmetic, as compilers of the era emitted
+it), [`bin/bench-sse.exe`](bin/bench-sse.exe) (32-bit, scalar SSE2) and
+[`bin/bench-x64.exe`](bin/bench-x64.exe) (x64, its arithmetic SSE2 too), built from [`src/`](src/)
+with clang for the MSVC ABI and no C runtime. Each run executes one workload and exits with its
+checksum; the SSE builds and the x64 one compute the same checksums.
 
 | workload | what it is |
 |---|---|
@@ -17,14 +19,16 @@ MSVC ABI and no C runtime. Each run executes one workload and exits with its che
 | `api` | kernel32 and msvcrt calls in a frame's proportions between short stretches of the program's own work |
 
 A checksum does not depend on who ran the program: no time, handle, thread id or address goes into
-it. [`native/peload.c`](native/peload.c) is a small 32-bit Linux loader: it maps the same
-executable at its base, binds its imports to functions of its own and runs it on the processor. So
+it. [`native/peload.c`](native/peload.c) is a small Linux loader, built 32-bit (`bin/peload`) for
+the 32-bit builds and 64-bit (`bin/peload64`, a PE32+ and Microsoft's x64 convention) for the x64
+one: it maps the same executable at its base, binds its imports to functions of its own and runs
+it on the processor. So
 the reference checksums in [`expected.json`](expected.json) are what the hardware computed from the
 same machine code the engine translates, and a run with `--native` also reports how many times
 slower the engine was.
 
     node modules/cork/bench/build.mjs          # clang, lld-link, llvm-dlltool
-    node modules/cork/bench/run.mjs            # every workload, both builds
+    node modules/cork/bench/run.mjs            # every workload, all three builds
     node modules/cork/bench/run.mjs --native --only spread,vm --reps 3
     node modules/cork/bench/run.mjs --cork '{"callTargets":true}'
 
@@ -57,4 +61,49 @@ differed by up to two thirds.
 `'{"base":"../base","new":"."}'`, and two configurations naming them. A configuration's `cork` is
 the translator's configuration, so a flag is A/B'd on one bundle. Both builds of every workload,
 two reps of each, take about a minute and a half. The browser is `CDP_TEST_CHROME` or the first one
-[`tools/cdp_test`](../../../tools/cdp_test) finds.
+[`tools/lib/browser.mjs`](../../../tools/lib/browser.mjs) finds.
+
+## Micro workloads
+
+[`micro/`](micro/) holds what the program above does not cover, as flat images loaded at
+0x401000 and run on the cork host in Node to their `hlt`:
+
+- the x86-64 twins of the workloads (`micro/images64/`, built by `micro/build64.sh`), for the
+  long-mode translator on the same programs as the 32-bit one;
+- `calls8|512|4096-order|scatter`: calls through a table of 8, 512 or 4096 small functions, in
+  order or scattered, where only the number of distinct targets changes;
+- `patch`: a loop calling a routine that patches its own code, which crosses from translated code
+  into the interpreter and back on every call.
+
+The 32-bit images (`micro/images/`, built by `micro/build.sh`) are also the fixtures of cork's
+emitter tests and of the emit digest (`tools/checks/emit-digest.mjs`); `lua-x87` is Lua 5.1.5 running
+one frame of 27 addons (THIRD-PARTY-NOTICES.md). The images are committed, so a run needs no
+compiler.
+
+    node modules/cork/bench/micro/run.mjs calls patch            # 32-bit
+    node modules/cork/bench/micro/run.mjs --bits 64 calls vm     # the x86-64 twins
+    node modules/cork/bench/micro/run.mjs crc --blocks dbg/blocks   # block counts for cork-asm
+
+Each rep times the first iteration (`coldMs`) and the best of `--iters` steady ones
+(`usPerIter`); `eax` is the program's checksum and must not change with the engine.
+
+## The emitted functions' keepers
+
+A relink or a merge emits running regions again, and takes each one's function as it was emitted
+before from a keeper: the thread's own LRU (`createEmitCache`) or the run's cache (`kept.js`),
+shared by its executors and translation workers.
+[`emit-cache.mjs`](emit-cache.mjs) runs each micro workload keeping its functions in a run's
+cache, the relink brought forward so that a short run reaches it, prints the run's hits, and then
+gives the functions the run kept to each keeper - timing a keep, a hit and a miss (microseconds an
+op, median and range over the reps). A keeper that hands back anything other than what was kept
+stops the bench.
+
+    node modules/cork/bench/emit-cache.mjs lua calls512            # 32-bit
+    node modules/cork/bench/emit-cache.mjs --bits 64 --reps 15     # the x86-64 twins
+
+Against the arena it replaced (Node 22.23.5, 4-core x86 VM, load average 11.6-14.7 from other
+work, 60 iterations, 15 reps after 3, all 22 32-bit and 18 64-bit workloads; the run's cache over
+the arena, geometric mean of the workloads' median ratios): 32-bit hit 1.14, miss 1.42, keep 1.37;
+64-bit hit 1.17, miss 1.50, keep 1.48. In microseconds: a hit 3.7-18.5, a miss 0.7-1.8, a keep
+5-41, against an emission of milliseconds. The noise floor measured before on this machine was a
+geometric mean of 0.88-1.17.

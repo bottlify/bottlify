@@ -11,8 +11,9 @@ import { createEventLogFunctions } from './eventlog.js';
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 
-function setup(){
-    const bytes = new Uint8Array(0x400);
+/** @param {Partial<import('./eventlog.js').EventLogHost>} [more] */
+function setup(more = {}){
+    const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
     /** @type {Map<number, { type: string, object: any }>} */
@@ -41,6 +42,10 @@ function setup(){
             return text;
         },
         setLastError: code=>errors.push(code),
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        now: ()=>1000,
+        computerName: 'HOST',
         handles: {
             open(type, object){
                 table.set(next, { type, object });
@@ -59,11 +64,12 @@ function setup(){
                 return table.delete(handle);
             },
         },
+        ...more,
     }));
     return { bytes, errors, fns, table };
 }
 
-test('a source is registered, reported to and let go, and the event is forgotten', ()=>{
+test('a source is registered, reported to and let go', ()=>{
     const { bytes, errors, fns, table } = setup();
     bytes.set([...'IDriver\0'].map(character=>character.charCodeAt(0)), 0x100);
     const log = fns.RegisterEventSourceA.handler([0, 0x100]);
@@ -90,3 +96,163 @@ test('a source without a name is refused, the wide form reads UTF-16, calls are 
         assert.deepEqual([fns.RegisterEventSourceA.argBytes, fns.DeregisterEventSource.argBytes,
             fns.ReportEventA.argBytes, fns.ReportEventW.argBytes], [8, 4, 36, 36]);
     });
+
+test('an event reported is read back as an EVENTLOGRECORD, oldest first, then the end', ()=>{
+    const { bytes, errors, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    bytes.set([...'MySource\0'].map(character=>character.charCodeAt(0)), 0x100);
+    bytes.set([...'hello\0'].map(character=>character.charCodeAt(0)), 0x140);
+    view.setUint32(0x180, 0x140, true);
+    const log = fns.RegisterEventSourceA.handler([0, 0x100]);
+    assert.equal(fns.ReportEventA.handler([log, 2, 7, 42, 0, 1, 0, 0x180, 0]), 1);
+    const reader = fns.OpenEventLogA.handler([0, 0x100]);
+    view.setUint32(0x300, 0, true);
+    assert.equal(fns.GetNumberOfEventLogRecords.handler([reader, 0x300]), 1);
+    assert.equal(view.getUint32(0x300, true), 1, 'an unknown source writes to Application');
+    const READ = 0x304;
+    const NEEDED = 0x308;
+    assert.equal(fns.ReadEventLogA.handler([reader, 5, 0, 0x400, 8, READ, NEEDED]), 0);
+    assert.equal(errors.at(-1), 122);
+    const length = view.getUint32(NEEDED, true);
+    assert.equal(fns.ReadEventLogA.handler([reader, 5, 0, 0x400, 0x400, READ, NEEDED]), 1);
+    assert.equal(view.getUint32(READ, true), length);
+    assert.deepEqual([view.getUint32(0x400, true), view.getUint32(0x404, true),
+        view.getUint32(0x408, true), view.getUint32(0x414, true), view.getUint16(0x418, true),
+        view.getUint16(0x41a, true), view.getUint16(0x41c, true)],
+    [length, 0x654c664c, 1, 42, 2, 1, 7], 'length, signature, number, id, type, strings, category');
+    assert.equal(view.getUint32(0x400 + length - 4, true), length, 'the length again at its end');
+    const strings = 0x400 + view.getUint32(0x424, true);
+    assert.equal(String.fromCharCode(...bytes.subarray(strings, strings + 5)), 'hello');
+    assert.equal(fns.ReadEventLogA.handler([reader, 5, 0, 0x400, 0x400, READ, NEEDED]), 0);
+    assert.equal(errors.at(-1), 38, 'ERROR_HANDLE_EOF');
+    assert.equal(fns.ReadEventLogA.handler([reader, 3, 0, 0x400, 0x400, READ, NEEDED]), 0,
+        'sequential and seek at once');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.ClearEventLogA.handler([reader, 0]), 1);
+    fns.GetNumberOfEventLogRecords.handler([reader, 0x300]);
+    assert.equal(view.getUint32(0x300, true), 0);
+});
+
+test('an error event is told to the run with its source, id and strings; others are not', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    const { bytes, fns } = setup({ reportError: (source, id, strings)=>told.push([source, id,
+        strings]) });
+    const view = new DataView(bytes.buffer);
+    bytes.set([...'.NET Runtime\0'].map(character=>character.charCodeAt(0)), 0x100);
+    bytes.set([...'internal error\0'].map(character=>character.charCodeAt(0)), 0x140);
+    view.setUint32(0x180, 0x140, true);
+    const log = fns.RegisterEventSourceA.handler([0, 0x100]);
+    assert.equal(fns.ReportEventA.handler([log, 1, 0, 1023, 0, 1, 0, 0x180, 0]), 1);
+    assert.equal(fns.ReportEventA.handler([log, 4, 0, 1000, 0, 1, 0, 0x180, 0]), 1);
+    assert.deepEqual(told, [['.NET Runtime', 1023, ['internal error']]],
+        'EVENTLOG_ERROR_TYPE alone');
+});
+
+test('the System log opens on its service\'s start, whatever the case of its name', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    bytes.set([...'SYSTEM\0'].map(character=>character.charCodeAt(0)), 0x100);
+    const log = fns.OpenEventLogA.handler([0, 0x100]);
+    assert.equal(fns.ReadEventLogA.handler([log, 9, 0, 0x400, 0x400, 0x304, 0x308]), 1);
+    assert.equal(view.getUint32(0x414, true), 0x80001775, 'EVENT_EventlogStarted');
+    assert.equal(view.getUint32(0x430, true), 24, 'its 24 bytes of data');
+});
+
+test('a trace session starts once under its name, and the kernel logger only as itself', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    const properties = 0x400;
+    bytes.fill(0, properties, properties + 140);
+    view.setUint32(properties, 140, true);
+    view.setUint32(properties + 112, 120, true);
+    view.setUint32(properties + 108, 128, true);
+    bytes.set([...'wine\0'].map(character=>character.charCodeAt(0)), 0x100);
+    // {9e814aad-3204-11d2-9a82-006008a86939}, laid out as a GUID is.
+    bytes.set([0xad, 0x4a, 0x81, 0x9e, 0x04, 0x32, 0xd2, 0x11, 0x9a, 0x82, 0x00, 0x60, 0x08,
+        0xa8, 0x69, 0x39], properties + 24);
+    assert.equal(fns.StartTraceA.handler([0x300, 0x100, properties]), 87);
+    bytes.fill(0, properties + 24, properties + 40);
+    assert.equal(fns.StartTraceA.handler([0x300, 0x100, properties]), 0);
+    assert.equal(fns.StartTraceA.handler([0x300, 0x100, properties]), 183, 'already there');
+    assert.equal(fns.ControlTraceA.handler([view.getUint32(0x300, true), 0, 0x100, properties, 1]),
+        0);
+    assert.equal(fns.StartTraceA.handler([0x300, 0x100, properties]), 0, 'stopped, it starts');
+    const handle = view.getUint32(0x300, true);
+    assert.equal(fns.QueryTraceA.handler([handle, 0, 0, properties]), 0);
+    assert.equal(fns.FlushTraceA.handler([0, 0, 0x100, properties]), 0, 'by name');
+    assert.equal(fns.EnableTrace.handler([1, 0, 0, 0x200, handle, 0]), 0);
+    assert.equal(fns.EnableTraceEx2.handler([handle, 0, 0x200, 1, 4]), 0);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0x100, properties]), 0);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0x100, properties]), 4201,
+        'ERROR_WMI_INSTANCE_NOT_FOUND: the session is not running');
+    assert.equal(fns.EnableTrace.handler([1, 0, 0, 0x200, handle, 0]), 4201);
+    assert.equal(fns.StopTraceA.handler([0, 0, 0, properties]), 87, 'neither handle nor name');
+});
+
+test('a trace has no consumer: OpenTrace answers the invalid handle and why', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.OpenTraceW.handler([0x400]) >>> 0, 0xffffffff);
+    assert.equal(fns.ProcessTrace.handler([0x300, 1, 0, 0]), 6);
+    assert.equal(fns.CloseTrace.handler([1, 0]), 6);
+});
+
+test('a 64-bit trace provider\'s registrations are two quadwords each', ()=>{
+    // TRACE_GUID_REGISTRATION at 64 bits: LPCGUID at 0, HANDLE at 8, sixteen
+    // bytes a registration. In the 32-bit layout the handle went into the GUID
+    // pointer's upper half, and the second registration's into the first's handle.
+    const { bytes, fns } = setup({ pointerSize: 8 });
+    const view = new DataView(bytes.buffer);
+    bytes.fill(0xaa, 0x500, 0x548);
+    view.setBigUint64(0x500, 0x520n, true);
+    view.setBigUint64(0x510, 0x530n, true);
+    assert.equal(fns.RegisterTraceGuidsW.handler([0x401000, 0, 0x520, 2, 0x500, 0, 0, 0x540]), 0);
+    const handle = view.getBigUint64(0x540, true);
+    assert.notEqual(handle, 0n);
+    assert.deepEqual([0x500, 0x508, 0x510, 0x518].map(at=>view.getBigUint64(at, true)),
+        [0x520n, handle, 0x530n, handle], 'the pointers whole, each handle beside its own');
+    assert.equal(view.getUint32(0x520, true), 0xaaaaaaaa, 'nothing past the registrations');
+});
+
+test('a classic trace provider registers, is never enabled, and unregisters', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    // TRACE_GUID_REGISTRATION at 0x500: a GUID pointer, then the handle filled in.
+    view.setUint32(0x500, 0x520, true);
+    assert.equal(fns.RegisterTraceGuidsW.handler([0x401000, 0, 0x520, 1, 0x500, 0, 0, 0x540]), 0);
+    const handle = view.getUint32(0x540, true);
+    assert.notEqual(handle, 0);
+    assert.equal(view.getUint32(0x504, true), handle, 'each registration given its handle');
+    assert.equal(fns.RegisterTraceGuidsW.handler([0, 0, 0x520, 0, 0, 0, 0, 0x540]), 87,
+        'no request routine');
+    assert.equal(fns.GetTraceLoggerHandle.handler([0x600]) >>> 0, 0xffffffff);
+    assert.equal(fns.GetTraceEnableLevel.handler([1, 0]), 0);
+    assert.equal(fns.TraceEvent.handler([1, 0, 0x600]), 6, 'no session is anyone\'s logger');
+    assert.equal(fns.TraceMessage.argBytes, 0, 'cdecl');
+    assert.equal(fns.UnregisterTraceGuids.handler([handle, 0]), 0);
+    assert.equal(fns.UnregisterTraceGuids.handler([handle, 0]), 87);
+});
+
+test('an event of a registered provider goes nowhere and succeeds; activity ids per thread', ()=>{
+    const { bytes, fns } = setup();
+    const view = new DataView(bytes.buffer);
+    assert.equal(fns.EventRegister.handler([0x520, 0, 0, 0x540]), 0);
+    const handle = view.getUint32(0x540, true);
+    assert.equal(fns.EventWrite.handler([handle, 0, 0x560, 0, 0]), 0);
+    assert.equal(fns.EventWrite.handler([handle, 0, 0, 0, 0]), 87, 'no descriptor');
+    assert.equal(fns.EventWrite.handler([handle + 99, 0, 0x560, 0, 0]), 6);
+    assert.equal(fns.EventWriteTransfer.handler([handle, 0, 0x560, 0, 0, 0, 0]), 0);
+    assert.equal(fns.EventSetInformation.handler([handle, 0, 2, 0x560, 4]), 0);
+
+    bytes.fill(0xaa, 0x600, 0x610);
+    assert.equal(fns.EventActivityIdControl.handler([1, 0x600]), 0);
+    assert.ok(bytes.subarray(0x600, 0x610).every(byte=>byte === 0), 'GUID_NULL to begin with');
+    assert.equal(fns.EventActivityIdControl.handler([3, 0x600]), 0, 'CREATE');
+    const made = bytes.slice(0x600, 0x610);
+    assert.ok(made.some(byte=>byte !== 0));
+    assert.equal(fns.EventActivityIdControl.handler([2, 0x600]), 0, 'SET');
+    bytes.fill(0, 0x600, 0x610);
+    assert.equal(fns.EventActivityIdControl.handler([1, 0x600]), 0);
+    assert.deepEqual(bytes.slice(0x600, 0x610), made);
+    assert.equal(fns.EventActivityIdControl.handler([9, 0x600]), 87);
+});

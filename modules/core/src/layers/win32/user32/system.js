@@ -21,15 +21,17 @@
 import { varargsSlots } from '../msvcrt/format.js';
 import { formatWsprintf } from './wsprintf.js';
 import {
-    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, decodeAnsi, decodeOem, encodeAnsi, encodeOem, mapCaseAnsi,
+    ANSI_PAGE, LANGID_EN_US, OEM_PAGE, charToOem, decodeAnsi, decodeOem, encodeAnsi, mapCaseAnsi,
     transcodeSingleByte,
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
-import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
+import { cursorFilePicture, dibToBgra, groupImageId, iconFilePicture } from './cursors.js';
+import { readFileIcons } from '../shell32/icons.js';
+import { bitsFromPicture, pictureFromBits, scaleBits } from './icon-bits.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
-import { displayModes, refreshOf } from './display.js';
+import { displayModes, refreshOf, registryMode } from './display.js';
 import {
-    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
+    BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, TOOL_CAPTION_HEIGHT,
     WS_CAPTION, WS_CHILD, WS_THICKFRAME, WS_VISIBLE, frameOf,
 } from './frame.js';
 import {
@@ -45,22 +47,31 @@ import {
     MONITORINFO,
     WINDOWINFO,
     WINDOWPLACEMENT,
+    putFields,
     readRect,
+    userLayouts,
     writeRect,
     writeU16,
     writeU32s,
 } from './structs.js';
 import { readText, textBytes } from './unicode.js';
 import { HWND_BROADCAST, createWindowDirectory } from './directory.js';
-import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
+import { LOGFONTA, LOGFONTW_SIZE, logFontBytes, readLogFont, readLogFontW } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
-import { VIDEO_ADAPTER_NAME } from '../devices.js';
+import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
+import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+
+/** The list box message GetListBoxInfo is. */
+const LB_GETLISTBOXINFO = 0x01b2;
 
 /** The longest path a file name argument is read to. */
 const MAX_PATH = 260;
@@ -73,8 +84,11 @@ const SWP_NOACTIVATE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
 const WM_WINDOWPOSCHANGING = 0x0046;
 const WM_WINDOWPOSCHANGED = 0x0047;
-/** WINDOWPOS: hwnd, hwndInsertAfter, x, y, cx, cy, flags. */
-const WINDOWPOS_SIZE = 28;
+/** The accessibility events placing a window raises, about the window itself. */
+const EVENT_OBJECT_SHOW = 0x8002;
+const EVENT_OBJECT_HIDE = 0x8003;
+const EVENT_OBJECT_LOCATIONCHANGE = 0x800b;
+const OBJID_WINDOW = 0;
 const SWP_SHOWWINDOW = 0x0040;
 const SWP_HIDEWINDOW = 0x0080;
 const SWP_FRAMECHANGED = 0x0020;
@@ -120,10 +134,11 @@ const SM_CYMAXIMIZED = 62;
 /**
  * The metrics that do not follow the screen, as a display at 96 dots per inch
  * with the classic non-client metrics answers them: icons and cursors, the
- * caption's buttons, edges, the minimum width a caption's buttons and title
- * need, double-click and drag slop, the mouse and its wheel. Anything not
- * here and not derived below is a zero, which is also Windows' answer for a
- * feature this machine does not have.
+ * caption's buttons, edges, double-click and drag slop, the mouse and its
+ * wheel. Those SystemParametersInfo sets (the icon spacing, the double-click
+ * rectangle, the arrangement of minimised windows) start from these. Anything
+ * not here and not derived below is a zero, which is also Windows' answer for
+ * a feature this machine does not have.
  *
  * @type {ReadonlyMap<number, number>}
  */
@@ -133,17 +148,14 @@ const FIXED_METRICS = new Map([
     [13, 32], [14, 32],       // SM_CXCURSOR, SM_CYCURSOR
     [19, 1],                  // SM_MOUSEPRESENT
     [20, 16], [21, 16],       // SM_CYVSCROLL, SM_CXHSCROLL: a scroll bar's arrow
-    [28, 112], [34, 112],     // SM_CXMIN, SM_CXMINTRACK
     [30, 18], [31, 18],       // SM_CXSIZE, SM_CYSIZE: a caption button
     [36, 4], [37, 4],         // SM_CXDOUBLECLK, SM_CYDOUBLECLK
     [38, 75], [39, 75],       // SM_CXICONSPACING, SM_CYICONSPACING
     [43, 3],                  // SM_CMOUSEBUTTONS
     [45, 2], [46, 2],         // SM_CXEDGE, SM_CYEDGE
-    [47, 160], [48, 24],      // SM_CXMINSPACING, SM_CYMINSPACING
     [49, 16], [50, 16],       // SM_CXSMICON, SM_CYSMICON
     [54, 18], [55, 18],       // SM_CXMENUSIZE, SM_CYMENUSIZE
     [56, 8],                  // SM_ARRANGE: ARW_HIDE, minimised windows not shown
-    [57, 160], [58, 24],      // SM_CXMINIMIZED, SM_CYMINIMIZED
     [68, 4], [69, 4],         // SM_CXDRAG, SM_CYDRAG
     [71, 13], [72, 13],       // SM_CXMENUCHECK, SM_CYMENUCHECK
     [75, 1],                  // SM_MOUSEWHEELPRESENT
@@ -166,7 +178,7 @@ export const HOVER_SIZE = 4;
  *
  * @type {Record<number, number>}
  */
-export const SYS_COLORS = Object.freeze({
+const SYS_COLORS = Object.freeze({
     0: 0x00c0c0c0,
     1: 0x00808080,
     2: 0x00800000,
@@ -223,10 +235,10 @@ export function createSystemColors(){
     };
 }
 
-/** MonitorFromRect and friends answer with this, there being one display. */
 /** What SetClassWord answers for the atom, or a word past the extra bytes. */
 const ERROR_INVALID_INDEX = 1413;
-const PRIMARY_MONITOR = 0x00010001;
+/** MonitorFromRect and friends answer with this, there being one display. */
+export const PRIMARY_MONITOR = 0x00010001;
 const MONITOR_DEFAULTTONULL = 0;
 const MONITORINFOF_PRIMARY = 1;
 
@@ -238,13 +250,6 @@ const DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x00000001;
 const DISPLAY_DEVICE_PRIMARY_DEVICE = 0x00000004;
 const DISPLAY_DEVICE_ACTIVE = 0x20000000;
 
-/**
- * The one adapter's name, spelled the way the drawing layer's adapter
- * identifier spells it too: a program told the name here and the name there
- * has to be told the same one twice, or the two halves of its display do not
- * meet.
- */
-const DISPLAY_ADAPTER_NAME = '\\\\.\\DISPLAY1';
 
 /**
  * The identity a monitor that never reported one is listed under: the class
@@ -253,11 +258,7 @@ const DISPLAY_ADAPTER_NAME = '\\\\.\\DISPLAY1';
  */
 const DEFAULT_MONITOR_ID = 'MONITOR\\DEFAULT\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0000';
 
-/**
- * SendInput's contract: one INPUT per event, 28 bytes on 32-bit Windows --
- * a type, then the union of every event kind laid out at its widest.
- */
-const INPUT_SIZE = 28;
+/** SendInput's event kinds: the INPUT's type (its layout is `userLayouts`'). */
 const INPUT_MOUSE = 0;
 const INPUT_KEYBOARD = 1;
 const INPUT_HARDWARE = 2;
@@ -277,7 +278,35 @@ const KEYEVENTF_EXTENDEDKEY = 0x0001;
 const KEYEVENTF_KEYUP = 0x0002;
 const KEYEVENTF_UNICODE = 0x0004;
 const KEYEVENTF_SCANCODE = 0x0008;
+/** The low-level hooks an injected event is shown before it is queued. */
+const WH_KEYBOARD_LL = 13;
+const WH_MOUSE_LL = 14;
+/** MSLLHOOKSTRUCT and KBDLLHOOKSTRUCT's flags: put in by a program, a key let go, extended. */
+const LLMHF_INJECTED = 0x01;
+const LLKHF_EXTENDED = 0x01;
+const LLKHF_INJECTED = 0x10;
+const LLKHF_ALTDOWN = 0x20;
+const LLKHF_UP = 0x80;
+const VK_PACKET = 0xe7;
+const VK_MENU = 0x12;
+const VK_LMENU = 0xa4;
+const VK_RMENU = 0xa5;
+const VK_CONTROL = 0x11;
+const VK_LCONTROL = 0xa2;
+const VK_RCONTROL = 0xa3;
+const VK_F10 = 0x79;
+const VK_SHIFT = 0x10;
+const VK_LSHIFT = 0xa0;
+const VK_RSHIFT = 0xa1;
+const VK_NUMLOCK = 0x90;
+/** The keys of the numeric keypad with NumLock off: VK_NUMPAD0..9, then VK_DECIMAL. */
+const KEYPAD_NAVIGATION = [0x2d, 0x23, 0x28, 0x22, 0x25, 0x0c, 0x27, 0x24, 0x26, 0x21];
+const VK_NUMPAD0 = 0x60;
+const VK_DECIMAL = 0x6e;
+const VK_DELETE = 0x2e;
+const WM_MOUSEMOVE = 0x0200;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_SUPPORTED = 50;
 /** The ids of the system's cursors SetSystemCursor replaces (OCR_NORMAL to OCR_APPSTARTING). */
 const SYSTEM_CURSOR_IDS = Object.freeze([32512, 32513, 32514, 32515, 32516, 32640, 32641, 32642,
     32643, 32644, 32645, 32646, 32648, 32649, 32650]);
@@ -309,6 +338,7 @@ const modifiersIn = state=>({
     shift: state ? (state[0x10] & 0x80) !== 0 : false,
     capsLock: state ? (state[0x14] & 0x01) !== 0 : false,
     control: state ? (state[0x11] & 0x80) !== 0 : false,
+    alt: state ? (state[0x12] & 0x80) !== 0 : false,
 });
 
 /** A key-up, in the scan code ToUnicode and ToAscii are handed. */
@@ -470,10 +500,375 @@ const CS_HREDRAW = 0x0002;
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_MAXIMIZE = 0x01000000;
+/**
+ * The SystemParametersInfo settings that are one number, with Windows 7's
+ * default: [get action, set action, default, where the set finds the value].
+ * The older ones take it in uiParam; the 0x1000 and 0x2000 ranges, and the
+ * mouse speed, in pvParam itself. A get writes a BOOL or DWORD at pvParam.
+ *
+ * @type {ReadonlyArray<readonly [number, number, number, 'param' | 'pointer']>}
+ */
+const SPI_NUMBERS = Object.freeze([
+    [0x0001, 0x0002, 1, 'param'], // BEEP
+    [0x0005, 0x0006, BORDER, 'param'], // BORDER
+    [0x000a, 0x000b, 31, 'param'], // KEYBOARDSPEED
+    [0x000e, 0x000f, 600, 'param'], // SCREENSAVETIMEOUT
+    [0x0010, 0x0011, 0, 'param'], // SCREENSAVEACTIVE
+    [0x0016, 0x0017, 1, 'param'], // KEYBOARDDELAY
+    [0x0019, 0x001a, 1, 'param'], // ICONTITLEWRAP
+    [0x001b, 0x001c, 0, 'param'], // MENUDROPALIGNMENT
+    [0x0023, 0x0024, 1, 'param'], // FASTTASKSWITCH
+    [0x0026, 0x0025, 1, 'param'], // DRAGFULLWINDOWS
+    [0x0038, 0x0039, 0, 'param'], // SHOWSOUNDS
+    [0x0044, 0x0045, 0, 'param'], // KEYBOARDPREF
+    [0x0046, 0x0047, 0, 'param'], // SCREENREADER
+    // FONTSMOOTHING, off: text is drawn here without smoothing. A font
+    // renderer picks the quality it asks GDI for from this, and a refusal
+    // leaves it reporting an error on every font it makes.
+    [0x004a, 0x004b, 0, 'param'],
+    [0x004f, 0x0051, 0, 'param'], // LOWPOWERTIMEOUT
+    [0x0050, 0x0052, 0, 'param'], // POWEROFFTIMEOUT
+    [0x0053, 0x0055, 0, 'param'], // LOWPOWERACTIVE
+    [0x0054, 0x0056, 0, 'param'], // POWEROFFACTIVE
+    [0x005e, 0x005d, 0, 'param'], // MOUSETRAILS
+    [0x005f, 0x0060, 0, 'param'], // SNAPTODEFBUTTON
+    [0x0062, 0x0063, HOVER_SIZE, 'param'], // MOUSEHOVERWIDTH
+    [0x0064, 0x0065, HOVER_SIZE, 'param'], // MOUSEHOVERHEIGHT
+    [0x0066, 0x0067, HOVER_TIME, 'param'], // MOUSEHOVERTIME
+    [0x0068, 0x0069, 3, 'param'], // WHEELSCROLLLINES
+    [0x006a, 0x006b, 400, 'param'], // MENUSHOWDELAY
+    [0x006c, 0x006d, 3, 'param'], // WHEELSCROLLCHARS
+    [0x006e, 0x006f, 1, 'param'], // SHOWIMEUI
+    [0x0070, 0x0071, 10, 'pointer'], // MOUSESPEED
+    [0x0072, 0, 0, 'param'], // SCREENSAVERRUNNING
+    [0x0076, 0x0077, 0, 'param'], // SCREENSAVESECURE
+    [0x0078, 0x0079, 5000, 'param'], // HUNGAPPTIMEOUT
+    [0x007a, 0x007b, 20000, 'param'], // WAITTOKILLTIMEOUT
+    [0x007c, 0x007d, 12000, 'param'], // WAITTOKILLSERVICETIMEOUT
+    // The user interface effects, each a BOOL: activewindow tracking, menu,
+    // combo box and list box animation, gradient captions, keyboard cues
+    // (hidden until the keyboard is used), z-order tracking, hot tracking,
+    // menu and selection fades, tooltip animation and fade, the cursor's
+    // shadow, sonar, click lock, vanish, flat menus, drop shadows, input
+    // resets, the effects as a whole, overlapped content, client-area
+    // animation, ClearType (off: text is drawn without smoothing here).
+    ...[[0x1000, 0], [0x1002, 1], [0x1004, 1], [0x1006, 1], [0x1008, 1], [0x100a, 0],
+        [0x100c, 0], [0x100e, 1], [0x1012, 1], [0x1014, 1], [0x1016, 1], [0x1018, 1],
+        [0x101a, 1], [0x101c, 0], [0x101e, 0], [0x1020, 1], [0x1022, 1], [0x1024, 1],
+        [0x1026, 0], [0x103e, 1], [0x1040, 0], [0x1042, 1], [0x1048, 0]]
+        .map(([get, on])=>/** @type {const} */ ([get, get + 1, on, 'pointer'])),
+    // Foreground lock timeout, window-tracking timeout, flash count, caret
+    // width, click-lock time, font smoothing type, contrast (the gamma
+    // DirectWrite blends GDI-like text with, over a thousand) and
+    // orientation, focus border width and height, message duration.
+    ...[[0x2000, 200000], [0x2002, 0], [0x2004, 7], [0x2006, 1], [0x2008, 1200],
+        [0x200a, 1], [0x200c, 1400], [0x200e, 1], [0x2010, 1], [0x2012, 1], [0x2016, 5]]
+        .map(([get, value])=>/** @type {const} */ ([get, get + 1, value, 'pointer'])),
+]);
+
+/**
+ * The settings that are a structure beginning with its cbSize, by get action:
+ * the set action and the default words, the size first. FILTERKEYS,
+ * TOGGLEKEYS, MOUSEKEYS, STICKYKEYS, ACCESSTIMEOUT, SOUNDSENTRY (its effect
+ * library's name left null) and ANIMATIONINFO, with Windows 7's accessibility
+ * defaults.
+ *
+ * @type {ReadonlyMap<number, { set: number, words: readonly number[] }>}
+ */
+const SPI_STRUCTURES = new Map([
+    [0x0032, { set: 0x0033, words: [24, 126, 1000, 1000, 500, 0] }],
+    [0x0034, { set: 0x0035, words: [8, 58] }],
+    [0x0036, { set: 0x0037, words: [28, 62, 80, 3000, 0, 0, 0] }],
+    [0x003a, { set: 0x003b, words: [8, 510] }],
+    [0x003c, { set: 0x003d, words: [12, 2, 300000] }],
+    [0x0040, { set: 0x0041, words: [48, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }],
+    [0x0048, { set: 0x0049, words: [8, 1] }],
+]);
+
+/** The keys under HKEY_CURRENT_USER a user's settings are kept in. */
+const DESKTOP_KEY = 'Control Panel\\Desktop';
+const METRICS_KEY = 'Control Panel\\Desktop\\WindowMetrics';
+const MOUSE_KEY = 'Control Panel\\Mouse';
+const KEYBOARD_KEY = 'Control Panel\\Keyboard';
+const ACCESSIBILITY_KEY = 'Control Panel\\Accessibility';
+
+/**
+ * How a setting is written in the profile: 'text' a decimal REG_SZ, 'yes'
+ * "Yes" or "No", 'smoothing' "2" (on) or "0", 'twips' a size as a negative
+ * count of twips in a REG_SZ (a twip is a 1440th of an inch, fifteen a pixel
+ * at 96 dots per inch), 'dword' a REG_DWORD, 'bit' one bit of
+ * UserPreferencesMask.
+ *
+ * @typedef {'text' | 'yes' | 'smoothing' | 'twips' | 'dword' | 'bit'} ProfileFormat
+ */
+
+/**
+ * Where SystemParametersInfo keeps a one-number setting in the user's
+ * profile, by its get action (a setting that has none, by its set action): the
+ * key under HKEY_CURRENT_USER, the value's name and its format. A set with
+ * SPIF_UPDATEINIFILE writes it there, and a process starts from what is there.
+ *
+ * @type {ReadonlyMap<number, { key: string, name: string, as: ProfileFormat }>}
+ */
+const SPI_PLACES = new Map(/** @type {[number, string, string, ProfileFormat][]} */ ([
+    [0x0001, 'Control Panel\\Sound', 'Beep', 'yes'],
+    [0x0005, METRICS_KEY, 'BorderWidth', 'twips'],
+    [0x000a, KEYBOARD_KEY, 'KeyboardSpeed', 'text'],
+    [0x000e, DESKTOP_KEY, 'ScreenSaveTimeOut', 'text'],
+    [0x0010, DESKTOP_KEY, 'ScreenSaveActive', 'text'],
+    [0x0016, KEYBOARD_KEY, 'KeyboardDelay', 'text'],
+    [0x0019, METRICS_KEY, 'IconTitleWrap', 'text'],
+    [0x001b, 'Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows', 'MenuDropAlignment',
+        'text'],
+    [0x001d, MOUSE_KEY, 'DoubleClickWidth', 'text'],
+    [0x001e, MOUSE_KEY, 'DoubleClickHeight', 'text'],
+    [0x0020, MOUSE_KEY, 'DoubleClickSpeed', 'text'],
+    [0x0021, MOUSE_KEY, 'SwapMouseButtons', 'text'],
+    [0x0026, DESKTOP_KEY, 'DragFullWindows', 'text'],
+    [0x0038, `${ACCESSIBILITY_KEY}\\ShowSounds`, 'On', 'text'],
+    [0x0044, `${ACCESSIBILITY_KEY}\\Keyboard Preference`, 'On', 'text'],
+    [0x0046, `${ACCESSIBILITY_KEY}\\Blind Access`, 'On', 'text'],
+    [0x004a, DESKTOP_KEY, 'FontSmoothing', 'smoothing'],
+    [0x004f, DESKTOP_KEY, 'LowPowerTimeOut', 'text'],
+    [0x0050, DESKTOP_KEY, 'PowerOffTimeOut', 'text'],
+    [0x0053, DESKTOP_KEY, 'LowPowerActive', 'text'],
+    [0x0054, DESKTOP_KEY, 'PowerOffActive', 'text'],
+    [0x005e, MOUSE_KEY, 'MouseTrails', 'text'],
+    [0x005f, MOUSE_KEY, 'SnapToDefaultButton', 'text'],
+    [0x0062, MOUSE_KEY, 'MouseHoverWidth', 'text'],
+    [0x0064, MOUSE_KEY, 'MouseHoverHeight', 'text'],
+    [0x0066, MOUSE_KEY, 'MouseHoverTime', 'text'],
+    [0x0068, DESKTOP_KEY, 'WheelScrollLines', 'text'],
+    [0x006a, DESKTOP_KEY, 'MenuShowDelay', 'text'],
+    [0x006c, DESKTOP_KEY, 'WheelScrollChars', 'text'],
+    [0x0070, MOUSE_KEY, 'MouseSensitivity', 'text'],
+    [0x0076, DESKTOP_KEY, 'ScreenSaverIsSecure', 'text'],
+    [0x0078, DESKTOP_KEY, 'HungAppTimeout', 'text'],
+    [0x007a, DESKTOP_KEY, 'WaitToKillAppTimeout', 'text'],
+    // The user interface effects up to the effects as a whole are the bits
+    // of one mask, each at its get action's place in the range.
+    ...[0x1000, 0x1002, 0x1004, 0x1006, 0x1008, 0x100a, 0x100c, 0x100e, 0x1012, 0x1014,
+        0x1016, 0x1018, 0x101a, 0x101c, 0x101e, 0x1020, 0x1022, 0x1024, 0x1026, 0x103e]
+        .map(get=>/** @type {[number, string, string, ProfileFormat]} */ (
+            [get, DESKTOP_KEY, 'UserPreferencesMask', 'bit'])),
+    [0x2000, DESKTOP_KEY, 'ForegroundLockTimeout', 'dword'],
+    [0x2002, DESKTOP_KEY, 'ActiveWndTrkTimeout', 'dword'],
+    [0x2004, DESKTOP_KEY, 'ForegroundFlashCount', 'dword'],
+    [0x2006, DESKTOP_KEY, 'CaretWidth', 'dword'],
+    [0x2008, DESKTOP_KEY, 'ClickLockTime', 'dword'],
+    [0x200a, DESKTOP_KEY, 'FontSmoothingType', 'dword'],
+    [0x200c, DESKTOP_KEY, 'FontSmoothingGamma', 'dword'],
+    [0x200e, DESKTOP_KEY, 'FocusBorderWidth', 'dword'],
+    [0x2010, DESKTOP_KEY, 'FocusBorderHeight', 'dword'],
+    [0x2012, DESKTOP_KEY, 'FontSmoothingOrientation', 'dword'],
+]).map(([action, key, name, as])=>[action, { key, name, as }]));
+
+/**
+ * What a set does to the number it is given before keeping it, by get
+ * action: a border is at least a pixel wide, the hover time is at least the
+ * shortest a timer waits, font smoothing is on or off.
+ *
+ * @type {ReadonlyMap<number, (value: number) => number>}
+ */
+const SPI_KEPT_AS = new Map([
+    [0x0005, value=>Math.max(value | 0, 1)],
+    [0x004a, value=>(value !== 0 ? 1 : 0)],
+    [0x0066, value=>Math.max(value, 10)],
+]);
+
+/**
+ * Where a structure setting keeps its words past cbSize, by get action: the
+ * key, and each word's value name (null for one Windows does not keep).
+ *
+ * @type {ReadonlyMap<number, { key: string, names: (string | null)[] }>}
+ */
+const SPI_STRUCTURE_PLACES = new Map([
+    [0x0032, { key: `${ACCESSIBILITY_KEY}\\Keyboard Response`, names: ['Flags',
+        'DelayBeforeAcceptance', 'AutoRepeatDelay', 'AutoRepeatRate', 'BounceTime'] }],
+    [0x0034, { key: `${ACCESSIBILITY_KEY}\\ToggleKeys`, names: ['Flags'] }],
+    [0x0036, { key: `${ACCESSIBILITY_KEY}\\MouseKeys`, names: ['Flags', 'MaximumSpeed',
+        'TimeToMaximumSpeed', null, null, null] }],
+    [0x003a, { key: `${ACCESSIBILITY_KEY}\\StickyKeys`, names: ['Flags'] }],
+    [0x003c, { key: `${ACCESSIBILITY_KEY}\\TimeOut`, names: ['Flags', 'TimeToWait'] }],
+    [0x0040, { key: `${ACCESSIBILITY_KEY}\\SoundSentry`, names: ['Flags', 'FSTextEffect',
+        null, null, null, null, null, 'WindowsEffect', null, null, null] }],
+    [0x0048, { key: METRICS_KEY, names: ['MinAnimate'] }],
+]);
+
+/** The fonts' character set: DEFAULT_CHARSET, the one the user's locale picks. */
+const DEFAULT_CHARSET = 1;
+
+/**
+ * The non-client fonts' face and size, Tahoma at eight points (eleven pixels
+ * at 96 dots per inch), as LOGFONT fields: the caption's bold.
+ *
+ * @param {number} weight
+ * @returns {import('../gdi32/structs.js').LogFontFields}
+ */
+const systemFont = weight=>({ height: -11, width: 0, escapement: 0, orientation: 0, weight,
+    italic: 0, underline: 0, strikeOut: 0, charSet: DEFAULT_CHARSET, outPrecision: 0,
+    clipPrecision: 0, quality: 0, pitchAndFamily: 0, faceName: 'Tahoma' });
+
+/**
+ * The average character width of the caption's font as this build's GDI
+ * measures it (bold Tahoma at eleven pixels): SM_CXMIN, the narrowest a
+ * window may be, holds four of them beside its caption's buttons.
+ */
+const CAPTION_CHAR_WIDTH = 6;
+
+/** The narrowest icon spacing a set leaves: an icon's width at 96 dots per inch. */
+const LEAST_ICON_SPACING = 32;
+
+/** What WM_SETTINGCHANGE is, and how long its broadcast waits for each window. */
+const WM_SETTINGCHANGE = 0x001a;
+const SETTING_CHANGE_WAIT_MS = 2000;
+/** SystemParametersInfo's fWinIni: write the setting to the profile, tell every window. */
+const SPIF_UPDATEINIFILE = 0x1;
+const SPIF_SENDCHANGE = 0x2;
+/** The settings GetSystemMetrics reads too, by their get actions. */
+const SPI_GETBORDER = 0x0005;
+const SPI_GETMENUDROPALIGNMENT = 0x001b;
+const SPI_GETSHOWSOUNDS = 0x0038;
+/** The registry's root for the user's profile, and the value types written there. */
+const HKEY_CURRENT_USER = 0x80000001;
+const REG_SZ = 1;
+const REG_BINARY = 3;
+const REG_DWORD = 4;
+/** The actions whose sets are not one number of SPI_NUMBERS. */
+const SPI_SETMOUSE = 0x0004;
+const SPI_ICONHORIZONTALSPACING = 0x000d;
+const SPI_SETDESKWALLPAPER = 0x0014;
+const SPI_ICONVERTICALSPACING = 0x0018;
+const SPI_SETICONTITLEWRAP = 0x001a;
+const SPI_SETDOUBLECLICKTIME = 0x0020;
+const SPI_SETMOUSEBUTTONSWAP = 0x0021;
+const SPI_SETICONTITLELOGFONT = 0x0022;
+const SPI_SETMINIMIZEDMETRICS = 0x002c;
+const SPI_SETICONMETRICS = 0x002e;
+const SPI_SETWORKAREA = 0x002f;
+const SPI_SETHIGHCONTRAST = 0x0043;
+
+/**
+ * A value of the registry, as the hive keeps it.
+ *
+ * @typedef {{ type: number, data: Uint8Array }} RegistryValue
+ */
+
+/**
+ * One value of the user's profile a setting is kept in: where it is, what
+ * the setting writes there, and how the setting takes back what is there
+ * (absent for a value only written).
+ *
+ * @typedef {Object} ProfileValue
+ * @property {string} key  Under HKEY_CURRENT_USER.
+ * @property {string} name
+ * @property {() => RegistryValue} written
+ * @property {(found: RegistryValue) => void} [read]
+ */
+
+/** UserPreferencesMask's length, and the bit of an effect's get action in it. */
+const PREFERENCES_MASK_BYTES = 8;
+/** @param {number} get */
+const maskBit = get=>(get - 0x1000) >>> 1;
+/** How many twips a pixel is at 96 dots per inch. */
+const TWIPS_PER_PIXEL = 15;
+
+/** @param {string} text @returns {RegistryValue} */
+const textValue = text=>({ type: REG_SZ, data: encodeAnsi(text) });
+/** @param {RegistryValue} found @returns {string | null} a REG_SZ's text */
+const textOf = found=>(found.type === REG_SZ
+    ? decodeAnsi(found.data).replace(/\0+$/, '') : null);
+/** @param {RegistryValue} found @returns {number | null} a decimal REG_SZ's number */
+const numberOf = found=>{
+    const text = textOf(found);
+    return text !== null && /^\s*[-+]?\d/.test(text) ? Number.parseInt(text, 10) : null;
+};
+
+/**
+ * A setting's number as the profile writes it.
+ *
+ * @param {ProfileFormat} as @param {number} value
+ * @returns {RegistryValue}
+ */
+const placeValue = (as, value)=>{
+    switch (as){
+        case 'yes':
+            return textValue(value !== 0 ? 'Yes' : 'No');
+        case 'smoothing':
+            return textValue(value !== 0 ? '2' : '0');
+        case 'twips':
+            return textValue(String(value === 0 ? 0 : -TWIPS_PER_PIXEL * (value | 0)));
+        case 'dword':
+            return { type: REG_DWORD, data: new Uint8Array(new Uint32Array([value >>> 0]).buffer) };
+        default:
+            return textValue(String(value >>> 0));
+    }
+};
+
+/**
+ * The number a profile value holds for a setting, null for one in another
+ * form: a size in twips (negative) comes back in pixels, rounded, and a
+ * positive one is pixels already.
+ *
+ * @param {ProfileFormat} as @param {RegistryValue} found @param {number} bit  Of the mask.
+ * @returns {number | null}
+ */
+const placeNumber = (as, found, bit)=>{
+    if (as === 'dword')
+    {
+        return found.type === REG_DWORD && found.data.length >= 4
+            ? new DataView(found.data.buffer, found.data.byteOffset).getUint32(0, true) : null;
+    }
+    if (as === 'bit')
+    {
+        return found.type === REG_BINARY && found.data.length > bit >>> 3
+            ? (found.data[bit >>> 3] >>> (bit & 7)) & 1 : null;
+    }
+    if (as === 'yes')
+    {
+        const text = textOf(found);
+        return text === null ? null : /^\s*yes\s*$/i.test(text) ? 1 : 0;
+    }
+    const number = numberOf(found);
+    if (number === null)
+    {
+        return null;
+    }
+    if (as === 'smoothing')
+    {
+        return number !== 0 ? 1 : 0;
+    }
+    if (as === 'twips' && number < 0)
+    {
+        return Math.floor((-number * 96 + 720) / 1440);
+    }
+    return number >>> 0;
+};
+
+/** GetSystemMetrics' indices of the icon spacing. */
+const SM_CXICONSPACING_INDEX = 38;
+const SM_CYICONSPACING_INDEX = 39;
+
+/** HIGHCONTRAST's flags: available, its hot key active, confirmed, sounded, shown. */
+const HIGHCONTRAST_DEFAULT_FLAGS = 0x7e;
+
 /** The metrics SPI_SETMINIMIZEDMETRICS and ArrangeIconicWindows go by. */
 const SM_ARRANGE = 56;
 const SM_CXMINIMIZED = 57;
 const SM_CYMINIMIZED = 58;
+const SM_CXMINSPACING = 47;
+const SM_CYMINSPACING = 48;
+/** A minimised window's width inside its frame, as MINIMIZEDMETRICS has it. */
+const MINIMIZED_WIDTH = 154;
+/** The metrics a setting of SystemParametersInfo moves. */
+const SM_SWAPBUTTON = 23;
+const SM_CXMIN = 28;
+const SM_CYSIZE = 31;
+const SM_CXMINTRACK = 34;
+const SM_CXDOUBLECLK = 36;
+const SM_CYDOUBLECLK = 37;
+const SM_MENUDROPALIGNMENT = 40;
+const SM_SHOWSOUNDS = 70;
 const WS_POPUP = 0x80000000;
 /** What the region calls answer: no region, or one rectangle. */
 const REGION_ERROR = 0;
@@ -485,11 +880,16 @@ const WS_SYSMENU = 0x00080000;
 const WS_MINIMIZEBOX = 0x00020000;
 const WS_MAXIMIZEBOX = 0x00010000;
 const WS_EX_TOOLWINDOW = 0x00000080;
+const WS_EX_TOPMOST = 0x00000008;
+/** SetWindowPos's hWndInsertAfter: into the topmost band, out of it. */
+const HWND_TOPMOST = 0xffffffff;
+const HWND_NOTOPMOST = 0xfffffffe;
 const WS_EX_CONTEXTHELP = 0x00000400;
 /** TITLEBARINFO: cbSize, rcTitleBar, rgstate[6] (the bar, a reserved slot, four buttons). */
 const TITLEBARINFO_SIZE = 44;
 /** COMBOBOXINFO: cbSize, rcItem, rcButton, stateButton, hwndCombo, hwndItem, hwndList. */
-const COMBOBOXINFO_SIZE = 52;
+/** COMBOBOXINFO by pointer size: its three window handles end it. */
+const COMBOBOXINFO_SIZE = { 4: 52, 8: 64 };
 const TITLEBARINFO_RGSTATE = 20;
 const STATE_SYSTEM_UNAVAILABLE = 0x00000001;
 const STATE_SYSTEM_INVISIBLE = 0x00008000;
@@ -503,6 +903,19 @@ const DISP_CHANGE_SUCCESSFUL = 0;
 const DISP_CHANGE_BADMODE = -2;
 /** ChangeDisplaySettings' flag that asks whether a mode could be set, without setting it. */
 const CDS_TEST = 0x2;
+/** ChangeDisplaySettings' flags: keep the mode in the registry too; and, beside it, only there. */
+const CDS_UPDATEREGISTRY = 0x1;
+const CDS_NORESET = 0x10000000;
+/** What every top-level window hears when the display's mode moves. */
+const WM_DISPLAYCHANGE = 0x007e;
+/**
+ * How long the system's WM_DISPLAYCHANGE broadcast waits for each window
+ * before going on, as a send with SMTO_ABORTIFHUNG does.
+ */
+const DISPLAY_CHANGE_WAIT_MS = 2000;
+/** DEVMODE's display orientation field, and the orientation every display here has. */
+const DM_DISPLAYORIENTATION = 0x00000080;
+const DMDO_DEFAULT = 0;
 
 /** The refresh rate reported for the one mode this build offers. */
 
@@ -516,6 +929,36 @@ const DMLERR_SYS_ERROR = 0x400f;
 const DMLERR_NO_ERROR = 0;
 /** Why the calls on a DDE instance fail: DdeInitialize never makes one. */
 const NO_DDE = 'no DDE instance: DdeInitialize refuses, so none of its handles exist';
+
+/**
+ * The character before `current`, never before `start`: CharPrevA and
+ * CharPrevExA. In a single-byte page one byte back; in a double-byte page the
+ * last character starting before `current`, walked to from `start`.
+ *
+ * @param {{ readMemory: (address: number, length: number) => Uint8Array }} memory
+ * @param {number} codePage @param {number} start @param {number} current
+ */
+const characterBefore = (memory, codePage, start, current)=>{
+    if (current <= start)
+    {
+        return current;
+    }
+    if (!isLeadByte(codePage, 0x81))
+    {
+        return current - 1;
+    }
+    const bytes = memory.readMemory(start, current - start);
+    let at = 0;
+    for (;;)
+    {
+        const next = at + (isLeadByte(codePage, bytes[at]) ? 2 : 1);
+        if (next >= bytes.length)
+        {
+            return start + at;
+        }
+        at = next;
+    }
+};
 
 /**
  * Whether a byte begins a two-byte character in a double-byte code page:
@@ -576,16 +1019,18 @@ const SW_SHOWNA = 8;
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
- * @param {Map<string, any>} options.classes  Registered classes, by name.
  * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
- *     title: string } | null)} [options.elsewhere]
+ *     title: string, parent?: number, owner?: number, style?: number } | null)}
+ *     [options.elsewhere]
  *     A window of another process, as that process describes it.
  * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
  *     [options.names]  The run's registered messages and clipboard formats.
  */
-export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
+export function createSystemFunctions({ host, live, windows, elsewhere = ()=>null,
     names = createWindowDirectory() })
 {
+    /** The structures at the process's width (`structs.js`). */
+    const layouts = userLayouts(host.pointerSize);
     /**
      * A window as the program is told of it: the desktop, the one window
      * here that is not the program's, as none.
@@ -614,7 +1059,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return 0;
         }
-        const state = (keyState >>> 0) === 0 ? null : host.readMemory(keyState >>> 0, 256);
+        const state = (keyState >>> 0) === 0 ? null : host.readMemory(wholeAddress(keyState), 256);
         const character = characterOf(vk & 0xff, modifiersIn(state));
         if (character === null)
         {
@@ -622,15 +1067,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         // A WORD either way: ToAscii's buffer is one, and its high byte is
         // left clear rather than holding a stale half.
-        host.writeMemory(buffer >>> 0, new Uint8Array([character & 0xff,
+        host.writeMemory(wholeAddress(buffer), new Uint8Array([character & 0xff,
             unit === 2 ? character >>> 8 : 0]));
         return 1;
     };
 
     const refuse = createRefusals(host);
 
-    /** Whether GetComboBoxInfo has said it names no edit or list window. */
-    let comboWindowsSaid = false;
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
     let nextTimerId = 0x1000;
@@ -701,6 +1144,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
     host.pictures?.(cursorPicture);
     const SM_CXCURSOR = 13;
+    const SM_CXICON = 11;
+    const SM_CYICON = 12;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -764,8 +1209,25 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             hotSpot: { ...shape.hotSpot }, bgra: shape.bgra } : { shown });
     };
 
-    /** GetDoubleClickTime's answer, which SetDoubleClickTime changes. */
-    let doubleClickTime = DOUBLE_CLICK_TIME;
+    /** GetCaretBlinkTime's answer, which SetCaretBlinkTime changes. */
+    let caretBlinkTime = CARET_BLINK_TIME;
+
+    /**
+     * The double-click time as SetDoubleClickTime or SPI_SETDOUBLECLICKTIME
+     * last set it, zero for the default, which GetDoubleClickTime answers.
+     */
+    const clickTime = { value: DOUBLE_CLICK_TIME };
+
+    /**
+     * The work area SPI_SETWORKAREA set, null for the whole screen: a mode
+     * change gives the whole new screen back, as Windows lays the work area
+     * out again then.
+     *
+     * @type {{ left: number, top: number, right: number, bottom: number } | null}
+     */
+    let workArea = null;
+    const workAreaRect = ()=>workArea
+        ?? { left: 0, top: 0, right: screen.width, bottom: screen.height };
 
     /**
      * GetKeyboardLayoutName in either encoding.
@@ -779,7 +1241,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const name = `0000${LANGID_EN_US.toString(16).padStart(4, '0')}`;
-        host.writeMemory(into >>> 0, textBytes(name, wide));
+        host.writeMemory(wholeAddress(into), textBytes(name, wide));
         return 1;
     };
 
@@ -791,24 +1253,49 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {number} lParam
      * @param {boolean} [unicode]  Whether the text the message carries is wide.
      * @param {number} [timeout]  How long to wait for another thread, in milliseconds.
+     * @param {import('../common/pointers.js').WideParams} [wide]  The WPARAM and LPARAM a
+     *     64-bit caller passed, where the dwords do not say them.
      * @returns {number | Promise<number | null>} null when the timeout passed first
      */
-    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined)=>
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined,
+        wide = undefined)=>
         (host.sendAcross
             ? host.sendAcross(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
+                host.callerThread?.(), unicode,
+                { ...timeout === undefined ? {} : { timeout }, ...wide ? { wide } : {} })
             : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode));
+                host.callerThread?.(), unicode, wide));
+
+    /** @param {number} codePage @param {number} start @param {number} current */
+    const previousCharacter = (codePage, start, current)=>
+        characterBefore(host, codePage, start, current);
+
+    /**
+     * The monitor a box overlaps, there being one: the screen, or for a box
+     * off it (or none) the one the flags ask for - none under
+     * MONITOR_DEFAULTTONULL, the one monitor as both primary and nearest.
+     *
+     * @param {{ left: number, top: number, right: number, bottom: number } | null} box
+     * @param {number} flags
+     */
+    const monitorFromBox = (box, flags)=>{
+        const overlaps = box !== null && box.left < screen.width && box.right > 0
+            && box.top < screen.height && box.bottom > 0;
+        return overlaps || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
+    };
 
     /**
      * GetMonitorInfo, both spellings. cbSize is the caller saying which
      * structure it allocated; a size that is neither of the two it may be is a
      * caller bug, and answering FALSE is how it finds out rather than by
-     * having its stack written past.
+     * having its stack written past. MONITORINFOEX, as long again as the
+     * device name of the caller's spelling, has the adapter's name after it:
+     * the name EnumDisplaySettings takes for the monitor's modes.
      *
-     * @param {number} monitor @param {number} info
+     * @param {number} monitor @param {number} info @param {boolean} [wide]
      */
-    const monitorInfo = (monitor, info)=>{
+    const monitorInfo = (monitor, info, wide = false)=>{
+        const CCHDEVICENAME = 32;
         if ((monitor >>> 0) !== PRIMARY_MONITOR || (info >>> 0) === 0)
         {
             return 0;
@@ -821,8 +1308,15 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         }
         const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
         writeRect(host, info + MONITORINFO.rcMonitor, whole);
-        writeRect(host, info + MONITORINFO.rcWork, whole);
+        writeRect(host, info + MONITORINFO.rcWork, workAreaRect());
         writeU32s(host, info + MONITORINFO.dwFlags, [MONITORINFOF_PRIMARY]);
+        const unit = wide ? 2 : 1;
+        if (declared >= MONITORINFO.SIZE + CCHDEVICENAME * unit)
+        {
+            const name = new Uint8Array(CCHDEVICENAME * unit);
+            name.set(textBytes(DISPLAY_DEVICE_NAME, wide));
+            host.writeMemory(info + MONITORINFO.SIZE, name);
+        }
         return 1;
     };
 
@@ -832,20 +1326,32 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {number[]} args  lpPrevWndFunc, hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const callWindowProc = ([previous, hwnd, message, wParam, lParam], unicode)=>{
+    const callWindowProc = (args, unicode)=>{
+        const [previous, hwnd, message, wParam, lParam] = args;
         if ((previous >>> 0) === 0)
         {
             return 0;
         }
+        // What a 64-bit caller passed that the dwords do not say, and a holder
+        // for a quadword the procedure answers (`wideOf`).
+        const wide = wideOf(args, 3, 4, true);
         // A system class's procedure lives on this side, and a program
-        // that subclassed one calls it through here with its address.
-        return host.callProcedure(previous >>> 0, {
+        // that subclassed one calls it through here with its address. An
+        // address is called as a procedure of the call's own encoding; a
+        // handle names one of the other, and the message is converted on
+        // its way (class.c test_wndproc_handles). A system class's entry is
+        // run as it is, in its own encoding, whichever call names it.
+        const behind = host.procBehind?.(previous) ?? null;
+        /** @type {boolean} */
+        const reads = behind ? behind.unicode : host.entryReads?.(previous) ?? unicode;
+        return andThen(host.callProcedure(behind ? behind.address : wholeAddress(previous), {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
-            ...unicode ? { unicode } : {},
-        }, host.callerThread?.());
+            ...(behind ? unicode : reads) ? { unicode: true } : {},
+            ...wide ? { wide } : {},
+        }, host.callerThread?.(), reads), result=>wholeAnswer(result, wide));
     };
 
     /**
@@ -858,7 +1364,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
      * @param {boolean} unicode
      */
-    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
+    const sendMessageTimeout = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam, , timeout, result] = args;
+        const wide = wideOf(args, 2, 3, true);
         if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -873,17 +1381,41 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             }
             if ((result >>> 0) !== 0)
             {
-                writeU32s(host, result >>> 0, [answer >>> 0]);
+                // A DWORD_PTR: the LRESULT whole at 64 bits, a dword widened
+                // by its sign where the procedure answered no more.
+                const whole = wholeAnswer(answer, wide);
+                writeU32s(host, result >>> 0, host.pointerSize === 8
+                    ? typeof whole === 'bigint'
+                        ? [Number(whole & 0xffffffffn), Number(whole >> 32n & 0xffffffffn)]
+                        : [answer >>> 0, (answer | 0) < 0 ? 0xffffffff : 0]
+                    : [answer >>> 0]);
             }
             return 1;
         };
-        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0);
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0, wide);
         return typeof (/** @type {any} */ (answer))?.then === 'function'
             ? /** @type {Promise<number | null>} */ (answer).then(report)
             : report(/** @type {number} */ (answer));
     };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
+    /** The depth the display started at, which the registry's mode goes back to. */
+    const launchBits = screen.bitsPerPixel;
+    /**
+     * The modes user32 lists and sets: every size at the display's own depth,
+     * then each again at sixteen bits, as Windows lists a thirty-two-bit
+     * display's lower depths -- a program that asks for a sixteen-bit full
+     * screen (an OpenGL engine of 1998) is refused nothing a real display
+     * would give it. The display's own depth first: a program taking the
+     * first mode it is offered keeps the depth it had.
+     */
+    const userModes = ()=>{
+        // The list is the display's as launched, whatever depth a program
+        // has set since: a display set to 16 bits goes back to its 32.
+        const own = displayModes({ ...screen, bitsPerPixel: launchBits });
+        return launchBits !== 32 ? own
+            : [...own, ...own.map(one=>({ ...one, bitsPerPixel: 16 }))];
+    };
 
 
     /**
@@ -904,7 +1436,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const thread = caller ?? host.callerThread?.();
-        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS_SIZE) : 0;
+        const { WINDOWPOS } = layouts;
+        const pos = host.send && host.allocate ? host.allocate(WINDOWPOS.SIZE) : 0;
         if (!pos)
         {
             return place(args, thread);
@@ -914,17 +1447,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // enforces its constraints there -- and what became of it after, with
         // the client area's moving and sizing told apart, from which
         // DefWindowProc tells it WM_MOVE and WM_SIZE.
-        const struct = new Uint8Array(WINDOWPOS_SIZE);
-        const view = new DataView(struct.buffer);
-        args.slice(0, 7).forEach((value, index)=>view.setUint32(index * 4, value >>> 0, true));
-        host.writeMemory(pos, struct);
+        /** @param {number[]} values  hwnd, hwndInsertAfter, x, y, cx, cy, flags */
+        const posBytes = values=>{
+            const bytes = new Uint8Array(WINDOWPOS.SIZE);
+            const [hwnd, hwndInsertAfter, x, y, cx, cy, flags] = values;
+            putFields(new DataView(bytes.buffer), 0, layouts, WINDOWPOS,
+                { hwnd, hwndInsertAfter, x, y, cx, cy, flags });
+            return bytes;
+        };
+        host.writeMemory(pos, posBytes(args.slice(0, 7)));
         const asked = (args[6] >>> 0 & SWP_NOSENDCHANGING) !== 0 ? 0
             : host.send(record.hwnd, WM_WINDOWPOSCHANGING, 0, pos, thread);
         return andThen(asked, ()=>{
-            const given = host.readMemory(pos, WINDOWPOS_SIZE);
-            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS_SIZE);
-            const [, after, x, y, cx, cy, flags] = [0, 1, 2, 3, 4, 5, 6]
-                .map(index=>read.getInt32(index * 4, true));
+            const given = host.readMemory(pos, WINDOWPOS.SIZE);
+            const read = new DataView(given.buffer, given.byteOffset, WINDOWPOS.SIZE);
+            const [after, x, y, cx, cy, flags] = [WINDOWPOS.hwndInsertAfter, WINDOWPOS.x,
+                WINDOWPOS.y, WINDOWPOS.cx, WINDOWPOS.cy, WINDOWPOS.flags]
+                .map(offset=>read.getInt32(offset, true));
             const before = { window: host.geometry.windowRect(record),
                 client: host.geometry.clientRect(record), visible: host.shown(record) };
             // A new size or a changed frame asks the procedure where its
@@ -937,7 +1476,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 height: (flags & SWP_NOSIZE) !== 0 ? record.height : cy,
             }, thread, pos) ?? 0 : 0;
             /** WM_WINDOWPOSCHANGED, with what became of what was asked. */
-            const changed = ()=>{
+            /** @param {boolean} restacked */
+            const changed = restacked=>{
                 const window = host.geometry.windowRect(record);
                 const client = host.geometry.clientRect(record);
                 const same = (/** @type {any} */ a, /** @type {any} */ b)=>a.left === b.left
@@ -953,14 +1493,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     final &= ~(SWP_SHOWWINDOW | SWP_HIDEWINDOW);
                 }
-                if ((final & SWP_STATUS) === SWP_NO_CHANGE)
+                // Nothing changed, not even the stacking: only WM_WINDOWPOSCHANGING
+                // was sent (msg.c WmSetFocus_1's raise of the active window).
+                if (((final | (restacked ? 0 : SWP_NOZORDER)) & SWP_STATUS) === SWP_NO_CHANGE)
                 {
                     return 0;
                 }
-                const told = new DataView(new ArrayBuffer(WINDOWPOS_SIZE));
-                [record.hwnd, after, record.x, record.y, record.width, record.height, final]
-                    .forEach((value, index)=>told.setUint32(index * 4, value >>> 0, true));
-                host.writeMemory(pos, new Uint8Array(told.buffer));
+                host.writeMemory(pos, posBytes([record.hwnd, after, record.x, record.y,
+                    record.width, record.height, final]));
                 return host.send(record.hwnd, WM_WINDOWPOSCHANGED, 0, pos, thread);
             };
             return andThen(calculated, ()=>andThen(place([record.hwnd, after, x, y, cx, cy, flags],
@@ -983,7 +1523,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      * @param {unknown} [thread]
-     * @param {() => any} [changed]
+     * @param {(restacked: boolean) => any} [changed]  Told whether the window
+     *     moved in the stacking.
      */
     const place = (args, thread = host.callerThread?.(), changed = ()=>0)=>{
         const [hwnd, after, x, y, cx, cy, flags] = args;
@@ -995,6 +1536,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const wasShown = host.shown(record);
+        const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const before = wasShown ? host.geometry.shapedRect(record) : null;
         const oldWidth = record.width;
         const oldHeight = record.height;
@@ -1007,7 +1549,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // Moved while it holds the mouse, it is being dragged: held as it is,
         // its picture taken before it moves.
         const dragged = wasShown && moved && !sized && host.dragging?.(record) === true;
-        const watched = host.beforeChange?.(record, dragged) ?? null;
+        // A placement that changes nothing -- activation bringing a window
+        // already on top to the top -- marks, paints and tells nothing.
+        const nothing = !moved && !sized && (flags & SWP_FRAMECHANGED) === 0
+            && ((flags & SWP_SHOWWINDOW) === 0 || (record.style & WS_VISIBLE) !== 0)
+            && ((flags & SWP_HIDEWINDOW) === 0 || (record.style & WS_VISIBLE) === 0)
+            && ((flags & SWP_NOZORDER) !== 0 || host.inPlace?.(record, after >>> 0) === true);
+        const watched = nothing ? null : host.beforeChange?.(record, dragged) ?? null;
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -1026,13 +1574,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
-        if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
+        let restacked = false;
+        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window - one on
+        // the desktop, WS_CHILD of it or not - in the band above the others
+        // or out of it, which WS_EX_TOPMOST says.
+        const inside = (record.style & WS_CHILD) !== 0 && record.parent !== 0;
+        const band = inside || (flags & SWP_NOZORDER) !== 0 ? null
+            : (after >>> 0) === HWND_TOPMOST ? true : (after >>> 0) === HWND_NOTOPMOST ? false
+                : null;
+        if (band !== null && ((record.exStyle & WS_EX_TOPMOST) !== 0) !== band)
         {
-            host.restack(record, after >>> 0, false);
+            record.exStyle = (band ? record.exStyle | WS_EX_TOPMOST
+                : record.exStyle & ~WS_EX_TOPMOST) >>> 0;
+            restacked = true;
+        }
+        if ((flags & SWP_NOZORDER) === 0 && inside)
+        {
+            restacked = host.restack(record, after >>> 0, false) !== false;
         }
         else if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM)
         {
-            host.raise(record, false);
+            restacked = host.raise(record, false) !== false || restacked;
         }
         host.tell?.(record);
         const isShown = host.shown(record);
@@ -1068,9 +1630,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 redraw,
             });
         }
+        // EVENT_OBJECT_SHOW or _HIDE as the window's own visibility flips,
+        // before anything is painted or told (msg.c WmShowOverlappedSeq,
+        // WmHideOverlappedSeq).
+        const nowVisible = (record.style & WS_VISIBLE) !== 0;
+        const flipped = nowVisible === wasVisible ? 0
+            : host.winEvent?.(nowVisible ? EVENT_OBJECT_SHOW : EVENT_OBJECT_HIDE, record.hwnd,
+                OBJID_WINDOW, thread) ?? 0;
         // What it showed is framed and erased before it returns, as Windows
         // XP's SetWindowPos does it; SWP_NOREDRAW asks for no painting at all.
-        const erased = redrawn ? host.eraseShown?.(thread) ?? 1 : 1;
+        const erased = andThen(flipped, ()=>(redrawn && !nothing
+            ? host.eraseShown?.(thread) ?? 1 : 1));
         // A top-level window placed without SWP_NOACTIVATE is activated
         // before it hears WM_WINDOWPOSCHANGED; the active one hidden hands the
         // activation on after (msg.c WmShowOverlappedSeq,
@@ -1081,17 +1651,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             ? host.activate?.(record.hwnd, { thread }) ?? 0 : 0));
         const handsOn = topLevel && wasShown && !isShown && host.active?.() === record.hwnd;
         // A child placed without SWP_NOACTIVATE is told it is the active
-        // child, shown or not (user32's message tests, WmShowChildSeq_2 and
-        // _4): an MDI child becomes the client's active one this way when its
-        // program brings it to the top.
-        const told = andThen(andThen(activated, changed),
+        // child, shown or not, before it hears WM_WINDOWPOSCHANGED (user32's
+        // message tests, WmShowChildSeq_2 and _4; comctl32's pager test,
+        // set_child_seq): an MDI child becomes the client's active one this
+        // way when its program brings it to the top.
+        const childActivated = andThen(activated, ()=>((flags
+            & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
+            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD
+            ? host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, thread) : 0));
+        // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
+        const located = andThen(andThen(childActivated, ()=>changed(restacked)), ()=>(moved
+            || sized ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW,
+                thread) ?? 0 : 0));
+        const told = andThen(located,
             ()=>(handsOn ? host.activateOther?.(record, thread) ?? 0 : 0));
-        if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
-            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
-        {
-            return andThen(told, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
-                thread), ()=>1));
-        }
         return andThen(told, ()=>1);
     };
 
@@ -1101,6 +1674,24 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed
         && !record.unlinked);
+
+    /**
+     * A window of this process, or another's as that process describes it,
+     * with its handle: what the calls that walk the tree of windows read.
+     *
+     * @param {number} hwnd
+     * @returns {any}
+     */
+    const anyWindow = hwnd=>{
+        const own = live(hwnd);
+        if (own || (hwnd >>> 0) === 0)
+        {
+            return own;
+        }
+        const other = elsewhere(hwnd);
+        return other ? { ...other, hwnd: hwnd >>> 0, parent: other.parent ?? 0,
+            owner: other.owner ?? 0, style: other.style ?? 0 } : null;
+    };
 
     /**
      * What GetParent answers for a window: its owner when it is a popup, its
@@ -1135,7 +1726,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([text])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             if (at === 0)
             {
                 return 0;
@@ -1154,7 +1745,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([text, count])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             const length = count >>> 0;
             if (at === 0 || length === 0)
             {
@@ -1177,7 +1768,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([text])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             if (at === 0)
             {
                 return 0;
@@ -1205,7 +1796,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([text, count])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             const length = count >>> 0;
             if (at === 0 || length === 0)
             {
@@ -1240,19 +1831,40 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             : decodeAnsi(new Uint8Array([code & 0xff]))) ? 1 : 0),
     });
 
+    /**
+     * Whether a class long setter is asked for the atom, which is the
+     * class's name and is not set: ERROR_INVALID_PARAMETER, and nothing
+     * answered.
+     *
+     * @param {number} index
+     */
+    const atomRefused = index=>{
+        if ((index | 0) !== GCW_ATOM)
+        {
+            return false;
+        }
+        host.setLastError?.(ERROR_INVALID_PARAMETER);
+        return true;
+    };
+
     /** @param {number} hwnd @returns {any | null} the class a window was made from */
     const classOfWindow = hwnd=>{
         const record = live(hwnd);
-        return record ? classes.get(record.className) ?? null : null;
+        return record?.cls ?? null;
     };
 
-    /** @param {any} cls @param {number} index */
-    const readClassLong = (cls, index)=>{
+    /**
+     * @param {any} cls @param {number} index
+     * @param {boolean} [unicode]  Read through GetClassLongW: a procedure of
+     *     the other encoding is answered as its handle.
+     */
+    const readClassLong = (cls, index, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 return cls.style;
             case GCL_WNDPROC:
-                return cls.wndProc;
+                return host.procAs ? host.procAs(cls.wndProc, cls.unicode === true, unicode)
+                    : cls.wndProc;
             case GCL_CBCLSEXTRA:
                 return cls.classExtra;
             case GCL_CBWNDEXTRA:
@@ -1282,6 +1894,56 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
+     * A pointer-sized class long of a 64-bit process: eight of the class's
+     * extra bytes whole, or a field: an address whole, any other
+     * sign-extended from its dword.
+     *
+     * @param {any} cls @param {number} index
+     * @param {boolean} [unicode]  Read through the wide call, as `readClassLong`.
+     * @returns {bigint}
+     */
+    const readClassLongPtr = (cls, index, unicode = false)=>{
+        const at = index | 0;
+        if (at >= 0)
+        {
+            cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+            return at + 8 <= cls.extra.byteLength ? cls.extra.getBigUint64(at, true) : 0n;
+        }
+        const value = readClassLong(cls, index, unicode);
+        // A procedure, a module and a menu's name are addresses, whole and
+        // zero-extended; a handle or a count widens by its sign, as RAX does.
+        return at === GCL_WNDPROC || at === GCL_HMODULE || at === GCL_MENUNAME
+            ? BigInt(wholeAddress(value)) : BigInt.asUintN(64, BigInt(value | 0));
+    };
+
+    /**
+     * SetClassLongPtr: answers the long it replaced.
+     *
+     * @param {number} hwnd @param {number} index @param {number} low @param {number} high
+     * @param {boolean} unicode  Set through the wide call.
+     * @returns {bigint}
+     */
+    const setClassLongPtr = (hwnd, index, low, high, unicode)=>{
+        const cls = classOfWindow(hwnd);
+        if (!cls || atomRefused(index))
+        {
+            return 0n;
+        }
+        const previous = readClassLongPtr(cls, index, unicode);
+        const at = index | 0;
+        if (at < 0)
+        {
+            writeClassLong(cls, index, low, unicode);
+        }
+        else if (at + 8 <= cls.extra.byteLength)
+        {
+            cls.extra.setUint32(at, low >>> 0, true);
+            cls.extra.setUint32(at + 4, high >>> 0, true);
+        }
+        return previous;
+    };
+
+    /**
      * Where a word of the class's extra bytes is, or null outside them.
      *
      * @param {any} cls @param {number} index
@@ -1291,15 +1953,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return (index | 0) >= 0 && (index | 0) + 2 <= cls.extra.byteLength ? index | 0 : null;
     };
 
-    /** @param {any} cls @param {number} index @param {number} value */
-    const writeClassLong = (cls, index, value)=>{
+    /**
+     * @param {any} cls @param {number} index @param {number} value
+     * @param {boolean} [unicode]  Set through SetClassLongW: the windows made
+     *     of the class from now on read wide text; those made already keep
+     *     their own procedure (win.c test_IsWindowUnicode).
+     */
+    const writeClassLong = (cls, index, value, unicode = false)=>{
         switch (index | 0){
             case GCL_STYLE:
                 cls.style = value >>> 0;
                 return;
-            case GCL_WNDPROC:
-                cls.wndProc = value >>> 0;
+            case GCL_WNDPROC: {
+                const behind = host.procBehind?.(value) ?? null;
+                cls.wndProc = behind ? behind.address : value >>> 0;
+                cls.unicode = behind ? behind.unicode : unicode;
                 return;
+            }
             case GCL_HICON:
                 cls.icon = value >>> 0;
                 return;
@@ -1341,19 +2011,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeWideString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = new Uint8Array((clipped.length + 1) * 2);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            const code = clipped.charCodeAt(index);
-            bytes[index * 2] = code & 0xff;
-            bytes[index * 2 + 1] = code >>> 8;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(clipped));
         return clipped.length;
     };
 
     /** A wsprintf %S of a null pointer prints as a %s of one. @param {number} address */
-    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0));
+    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)'
+        : readWideString(wholeAddress(address)));
 
     /** A narrow character's byte, as the ANSI page has it. @param {number} byte */
     const byteChar = byte=>decodeAnsi(Uint8Array.of(byte));
@@ -1396,27 +2060,46 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     /**
      * LoadImage in either spelling: a cursor or an icon out of a module's
-     * resources, as LoadCursor and LoadIcon load them; a device bitmap stands
-     * in for LR_CREATEDIBSECTION's section, since selected and blitted the two
-     * draw the same.
+     * resources, as LoadCursor and LoadIcon load them; a bitmap is a device
+     * bitmap, or with LR_CREATEDIBSECTION a DIB section of the resource's own
+     * depth, whose bits a program reads through GetObject's bmBits.
      *
      * @param {number} instance @param {number} name @param {number} type
      * @param {boolean} wide @param {number} [flags]  fuLoad.
+     * @param {number} [size]  cx, the width asked for; 0 for the system's.
      */
-    const loadImage = (instance, name, type, wide, flags = 0)=>{
+    const loadImage = (instance, name, type, wide, flags = 0, size = 0)=>{
         const IMAGE_BITMAP = 0;
         const IMAGE_ICON = 1;
         const IMAGE_CURSOR = 2;
         const LR_LOADFROMFILE = 0x10;
         switch (type >>> 0){
             case IMAGE_ICON:
-                return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
-            case IMAGE_CURSOR:
-                return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
-            case IMAGE_BITMAP:
                 return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadIconFile(readText(host, name >>> 0, wide, MAX_PATH), size)
+                    : loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
+            case IMAGE_CURSOR:
+                return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadCursorFile(readText(host, name >>> 0, wide, MAX_PATH))
+                    : loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
+            case IMAGE_BITMAP:
+                return andThen((flags & LR_LOADFROMFILE) !== 0
                     ? loadBitmapFile(readText(host, name >>> 0, wide, MAX_PATH))
-                    : loadBitmap(instance, name, wide);
+                    : loadBitmap(instance, name, wide), loaded=>{
+                    const LR_CREATEDIBSECTION = 0x2000;
+                    if ((flags & LR_CREATEDIBSECTION) === 0 || (loaded >>> 0) === 0
+                        || !host.copyBitmap)
+                    {
+                        return loaded;
+                    }
+                    const section = host.copyBitmap(loaded >>> 0, 0, 0, LR_CREATEDIBSECTION) >>> 0;
+                    if (section === 0)
+                    {
+                        return loaded;
+                    }
+                    host.deleteObject?.(loaded >>> 0);
+                    return section;
+                });
             default:
                 return 0;
         }
@@ -1437,7 +2120,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const FILE_HEADER = 14;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         if (bytes.length <= FILE_HEADER + 12 || view.getUint16(0, true) !== 0x4d42
-            || !host.allocate || !host.bitmapFromDib)
+            || !host.allocate || !host.bitmapFromDib || !loadableDib(view, FILE_HEADER))
         {
             return 0;
         }
@@ -1461,6 +2144,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     });
 
     /**
+     * Whether the DIB a .bmp file holds is one LoadImage takes: its header
+     * one of the four sizes a header has -- BITMAPCOREHEADER, BITMAPINFOHEADER
+     * and its V4 and V5 forms -- inside the file, and no side longer than
+     * 65535 pixels. Any other size is a broken file rather than a header
+     * newer than this one, and the colour table it would place lies wherever
+     * that size says (Wine's cursoricon test, broken biSize).
+     *
+     * @param {DataView} view @param {number} at  Where the DIB starts in the file.
+     */
+    const loadableDib = (view, at)=>{
+        const size = view.getUint32(at, true);
+        if (![12, 40, 108, 124].includes(size) || at + size > view.byteLength)
+        {
+            return false;
+        }
+        const width = size === 12 ? view.getUint16(at + 4, true) : view.getInt32(at + 4, true);
+        const height = size === 12 ? view.getUint16(at + 6, true) : view.getInt32(at + 8, true);
+        return width > 0 && width <= 0xffff && height !== 0 && Math.abs(height) <= 0xffff;
+    };
+
+    /**
      * A file's bytes, handed to `make`; 0 for a name that is no file. The
      * answer waits when the volume's blocks are not resident yet.
      *
@@ -1479,10 +2183,101 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /** @param {Uint8Array} bytes */
         const done = bytes=>{
             files.close(node);
+            // The file opened and read leaves the last error clear, whether or
+            // not it holds an image of the kind asked for (Wine's
+            // cursoricon test_LoadImageFile).
+            host.setLastError?.(0);
             return make(bytes);
         };
         const read = files.read(node, 0, stat.size);
         return read instanceof Uint8Array ? done(read) : read.then(done);
+    };
+
+    /**
+     * An icon out of an .ico file, as LoadImage loads one with LR_LOADFROMFILE:
+     * the image of the size asked for, or of the system's icon size. 0 for a
+     * name that is no file and for one that holds no icon this can read.
+     *
+     * @param {string} path @param {number} size
+     */
+    const loadIconFile = (path, size)=>readWhole(path, bytes=>{
+        const picture = iconFilePicture(bytes, (size | 0) > 0 ? size | 0 : metric(SM_CXICON));
+        return picture
+            ? host.handles.open('icon', { hotSpot: picture.hotSpot, width: picture.width,
+                height: picture.height, picture })
+            : 0;
+    });
+
+    /**
+     * PrivateExtractIcons: the icons of an executable, a library or an .ico
+     * file from an index on, each made at the size asked for - the low word
+     * of cxIcon, and with a second size in its high word a second icon of
+     * each, the pair counting two of nIcons. Without an array it is how
+     * many icons the file holds. piconid, when given, gets each icon's
+     * resource id, zero for an icon file's. The answer is how many icons
+     * were made; a file that is none, or has none, makes none; an empty
+     * name answers ~0.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const extractIcons = ([file, index, cx, cy, icons, ids, count], wide)=>{
+        const volume = host.files;
+        const path = (readText(host, file >>> 0, wide, MAX_PATH) ?? '').trim();
+        // An empty name is ~0, not a count (Wine's resource test_PrivateExtractIcons).
+        if (path === '')
+        {
+            return 0xffffffff;
+        }
+        if (!volume)
+        {
+            return 0;
+        }
+        /**
+         * @template T, U
+         * @param {T | Promise<T>} value @param {(value: T) => U | Promise<U>} then
+         * @returns {U | Promise<U>}
+         */
+        const after = (value, then)=>(value instanceof Promise ? value.then(then) : then(value));
+        if ((icons >>> 0) === 0)
+        {
+            return after(readFileIcons(volume, path, -1), found=>found.count);
+        }
+        const sides = [[cx & 0xffff, cy & 0xffff], [cx >>> 16, cy >>> 16]]
+            .filter(([across])=>across > 0);
+        const wanted = count >>> 0;
+        /**
+         * @param {number} made @returns {number | Promise<number>}
+         */
+        const next = made=>{
+            if (made >= wanted)
+            {
+                return made;
+            }
+            const [across, down] = sides[made % sides.length]
+                ?? [metric(SM_CXICON), metric(SM_CYICON)];
+            const at = (index | 0) + Math.floor(made / sides.length);
+            return after(readFileIcons(volume, path, at, across), found=>{
+                if (!found.picture?.bgra)
+                {
+                    return made;
+                }
+                // The icon is made at the size asked for, its image stretched
+                // to it, and its hot spot is its centre whatever the file says.
+                const height = down > 0 ? down : across;
+                const hotSpot = { x: across >> 1, y: height >> 1 };
+                const bits = scaleBits(bitsFromPicture(found.picture), across, height);
+                const handle = host.handles.open('icon', { hotSpot, width: across, height,
+                    bits, picture: pictureFromBits(bits, hotSpot) });
+                writeU32s(host, (icons >>> 0) + made * 4, [handle]);
+                if ((ids >>> 0) !== 0)
+                {
+                    writeU32s(host, (ids >>> 0) + made * 4, [found.id ?? 0]);
+                }
+                return next(made + 1);
+            });
+        };
+        return next(0);
     };
 
     /**
@@ -1529,8 +2324,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      */
     const loadBitmap = (instance, name, wide)=>{
         const RT_BITMAP = 2;
-        const module = instance >>> 0;
-        const raw = name >>> 0;
+        const module = wholeAddress(instance);
+        const raw = wholeAddress(name);
         if (module === 0)
         {
             return 0;
@@ -1557,13 +2352,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * 0..65535 across the display, which is the only coordinate space the call
      * has, so it is scaled onto the screen here.
      *
-     * @param {{ dx: number, dy: number, data: number, flags: number }} event
+     * Each piece of it -- a move, a button, the wheel -- is first shown to
+     * the WH_MOUSE_LL hooks as the message it makes, with an MSLLHOOKSTRUCT
+     * flagged LLMHF_INJECTED (`lowLevelHook`): a hook of the calling thread
+     * that answers other than zero takes that piece away.
+     *
+     * @param {{ dx: number, dy: number, data: number, flags: number, extra?: number }} event
      *     The MOUSEINPUT's fields, as SendInput reads them or mouse_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectMouse = ({ dx, dy, data, flags })=>{
-        let inserted = false;
-
+    const injectMouse = ({ dx, dy, data, flags, extra: extraInfo = 0 })=>{
+        /** @type {{ message: number, data?: number, input: any, quiet?: boolean }[]} */
+        const pieces = [];
+        const before = host.cursor?.() ?? { x: 0, y: 0 };
+        let at = before;
         if ((flags & MOUSEEVENTF_MOVE) !== 0)
         {
             /** @type {{ kind: string, dx?: number, dy?: number,
@@ -1573,28 +2375,35 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 move.x = Math.round((dx | 0) * (screen.width - 1) / 65535);
                 move.y = Math.round((dy | 0) * (screen.height - 1) / 65535);
+                at = { x: move.x, y: move.y };
             }
             else
             {
                 move.dx = dx | 0;
                 move.dy = dy | 0;
+                at = { x: Math.min(Math.max(before.x + move.dx, 0), screen.width - 1),
+                    y: Math.min(Math.max(before.y + move.dy, 0), screen.height - 1) };
             }
-            host.sendInput?.(move);
-            inserted = true;
+            // A move of nothing is not shown to the hooks, as Windows since
+            // 10 1709 does not show it.
+            pieces.push({ message: WM_MOUSEMOVE, input: move,
+                quiet: (flags & MOUSEEVENTF_ABSOLUTE) === 0 && move.dx === 0 && move.dy === 0 });
         }
 
-        /** @type {[number, string, boolean][]} */
+        /** @type {[number, string, boolean, number][]} */
         const presses = [
-            [MOUSEEVENTF_LEFTDOWN, 'left', true], [MOUSEEVENTF_LEFTUP, 'left', false],
-            [MOUSEEVENTF_RIGHTDOWN, 'right', true], [MOUSEEVENTF_RIGHTUP, 'right', false],
-            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true], [MOUSEEVENTF_MIDDLEUP, 'middle', false],
+            [MOUSEEVENTF_LEFTDOWN, 'left', true, 0x0201],
+            [MOUSEEVENTF_LEFTUP, 'left', false, 0x0202],
+            [MOUSEEVENTF_RIGHTDOWN, 'right', true, 0x0204],
+            [MOUSEEVENTF_RIGHTUP, 'right', false, 0x0205],
+            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true, 0x0207],
+            [MOUSEEVENTF_MIDDLEUP, 'middle', false, 0x0208],
         ];
-        for (const [flag, button, down] of presses)
+        for (const [flag, button, down, message] of presses)
         {
             if ((flags & flag) !== 0)
             {
-                host.sendInput?.({ kind: 'pointerButton', button, down });
-                inserted = true;
+                pieces.push({ message, input: { kind: 'pointerButton', button, down } });
             }
         }
         // The two extra buttons share a flag pair and name themselves in the
@@ -1602,24 +2411,85 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const extra = (data >>> 0) >>> 16;
         if ((flags & MOUSEEVENTF_XDOWN) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: true });
-            inserted = true;
+            pieces.push({ message: 0x020b, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: true } });
         }
         if ((flags & MOUSEEVENTF_XUP) !== 0)
         {
-            host.sendInput?.({ kind: 'pointerButton',
-                button: extra === 2 ? 'x2' : 'x1', down: false });
-            inserted = true;
+            pieces.push({ message: 0x020c, data: extra << 16, input: { kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: false } });
         }
         if ((flags & MOUSEEVENTF_WHEEL) !== 0)
         {
             // mouseData is the wheel delta itself, in WHEEL_DELTA (120) units,
             // which is what both the message and DirectInput carry.
-            host.sendInput?.({ kind: 'wheel', delta: data | 0 });
-            inserted = true;
+            pieces.push({ message: 0x020a, data: (data & 0xffff) << 16,
+                input: { kind: 'wheel', delta: data | 0 } });
         }
-        return inserted;
+        /** @param {number} index @returns {boolean | Promise<boolean>} */
+        const next = index=>{
+            const piece = pieces[index];
+            if (!piece)
+            {
+                return pieces.length !== 0;
+            }
+            // MSLLHOOKSTRUCT: pt, mouseData, flags, time, dwExtraInfo.
+            const structure = ()=>new Uint8Array(new Uint32Array([at.x, at.y, piece.data ?? 0,
+                LLMHF_INJECTED, Math.floor(host.now?.() ?? 0), extraInfo]).buffer);
+            const shown = piece.quiet ? 0
+                : host.lowLevelHook?.(WH_MOUSE_LL, piece.message, structure) ?? 0;
+            return andThen(shown, (/** @type {number} */ taken)=>{
+                if ((taken | 0) === 0)
+                {
+                    host.sendInput?.({ ...piece.input, injected: true });
+                }
+                return next(index + 1);
+            });
+        };
+        return next(0);
+    };
+
+    /**
+     * The virtual key a low-level keyboard hook is told of: a side for a
+     * shift, control or alt named without one (the right control and alt by
+     * the extended flag; a shift is the left one either way), the key a scan
+     * code names when the program named it by its scan code, and VK_PACKET
+     * for a character put in with no key named.
+     *
+     * @param {number} vk @param {number} scan @param {number} flags
+     */
+    const lowLevelKey = (vk, scan, flags)=>{
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        if ((flags & KEYEVENTF_UNICODE) !== 0 && vk === 0)
+        {
+            return VK_PACKET;
+        }
+        if ((flags & KEYEVENTF_SCANCODE) !== 0)
+        {
+            const named = mapVirtualKey(scan & 0xff, MAPVK_VSC_TO_VK_EX);
+            if (extended)
+            {
+                return named === VK_LCONTROL ? VK_RCONTROL : named === VK_LMENU ? VK_RMENU : named;
+            }
+            // The keypad's digits are its arrows and the rest while NumLock is off.
+            const numLock = ((host.keyState?.(VK_NUMLOCK) ?? 0) & 0x01) !== 0;
+            if (!numLock && named >= VK_NUMPAD0 && named < VK_NUMPAD0 + 10)
+            {
+                return KEYPAD_NAVIGATION[named - VK_NUMPAD0];
+            }
+            return !numLock && named === VK_DECIMAL ? VK_DELETE : named;
+        }
+        switch (vk)
+        {
+            case VK_SHIFT:
+                return VK_LSHIFT;
+            case VK_CONTROL:
+                return extended ? VK_RCONTROL : VK_LCONTROL;
+            case VK_MENU:
+                return extended ? VK_RMENU : VK_LMENU;
+            default:
+                return vk;
+        }
     };
 
     /**
@@ -1634,30 +2504,64 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * VK_PACKET and lets TranslateMessage alone turn it into WM_CHAR, so only
      * the down half of such a pair produces anything here.
      *
-     * @param {{ wVk: number, wScan: number, flags: number }} event
+     * The press is first shown to the WH_KEYBOARD_LL hooks, with a
+     * KBDLLHOOKSTRUCT flagged LLKHF_INJECTED (`lowLevelHook`): a hook of the
+     * calling thread that answers other than zero takes it away. The hook
+     * hears the message the keys as they are after the press make -- with
+     * Alt down and Control up a system key and LLKHF_ALTDOWN, so Alt's own
+     * release is a plain WM_KEYUP -- and a character put in by KEYEVENTF_UNICODE
+     * as VK_PACKET unless a virtual key was named beside it (user32:input's
+     * keyboard sequences).
+     *
+     * @param {{ wVk: number, wScan: number, flags: number, extra?: number }} event
      *     The KEYBDINPUT's fields, as SendInput reads them or keybd_event takes them.
-     * @returns {boolean} whether anything was inserted.
+     * @returns {boolean | Promise<boolean>} whether anything was inserted.
      */
-    const injectKeyboard = ({ wVk, wScan, flags })=>{
+    const injectKeyboard = ({ wVk, wScan, flags, extra = 0 })=>{
         const up = (flags & KEYEVENTF_KEYUP) !== 0;
-
-        if ((flags & KEYEVENTF_UNICODE) !== 0)
-        {
-            if (!up)
+        const unicode = (flags & KEYEVENTF_UNICODE) !== 0;
+        // The right shift is an extended key to a low-level hook whether or
+        // not the program said so.
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0
+            || ((flags & (KEYEVENTF_SCANCODE | KEYEVENTF_UNICODE)) === 0
+                && (wVk & 0xff) === VK_RSHIFT);
+        const vk = lowLevelKey(wVk & 0xff, wScan, flags);
+        // A scan code, or a character with a virtual key beside it, is
+        // reported by its low byte; a character alone whole.
+        const scan = unicode && (wVk & 0xff) === 0 ? wScan & 0xffff : wScan & 0xff;
+        /** Whether one of two keys is down once this press is in. @param {number[]} pair */
+        const held = pair=>(pair.includes(vk) ? !up
+            : ((host.keyState?.(pair[0]) ?? 0) & 0x8000) !== 0);
+        const alt = held([VK_MENU, VK_LMENU, VK_RMENU]);
+        const altOnly = alt && !held([VK_CONTROL, VK_LCONTROL, VK_RCONTROL]);
+        const message = (altOnly || vk === VK_F10 ? 0x0104 : 0x0100) + (up ? 1 : 0);
+        // KBDLLHOOKSTRUCT: vkCode, scanCode, flags, time, dwExtraInfo.
+        const shown = host.lowLevelHook?.(WH_KEYBOARD_LL, message, ()=>new Uint8Array(
+            new Uint32Array([vk, scan, LLKHF_INJECTED | (up ? LLKHF_UP : 0)
+                | (extended ? LLKHF_EXTENDED : 0) | (altOnly ? LLKHF_ALTDOWN : 0),
+            Math.floor(host.now?.() ?? 0), extra]).buffer)) ?? 0;
+        return andThen(shown, (/** @type {number} */ taken)=>{
+            if ((taken | 0) !== 0)
             {
-                host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                return true;
             }
+            if (unicode)
+            {
+                if (!up)
+                {
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan),
+                        injected: true });
+                }
+                return true;
+            }
+            // A key named by its virtual key still carries the scan code the
+            // program wrote beside it, which is what DirectInput 8 reads.
+            const named = (flags & KEYEVENTF_SCANCODE) !== 0
+                ? { scan: wScan, extended }
+                : { vk: wVk, scanGiven: wScan, extended };
+            host.sendInput?.({ kind: 'key', ...named, down: !up, injected: true });
             return true;
-        }
-
-        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
-        // A key named by its virtual key still carries the scan code the
-        // program wrote beside it, which is what DirectInput 8 reads.
-        const named = (flags & KEYEVENTF_SCANCODE) !== 0
-            ? { scan: wScan, extended }
-            : { vk: wVk, scanGiven: wScan, extended };
-        host.sendInput?.({ kind: 'key', ...named, down: !up });
-        return true;
+        });
     };
 
     /**
@@ -1667,35 +2571,67 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * enumeration that never ends is a hang, so the list is finite and the end
      * is reported.
      *
-     * The two named indices answer the same mode: the current settings are
-     * the one mode there is, and so are the registry's. A program asks for
-     * the current settings to learn the desktop's depth before it picks
-     * its own, and one refused that answer settles for the shallowest
-     * depth it knows -- sixteen bits, for every surface it makes after.
+     * The two named indices answer the mode in effect and the registry's,
+     * the one a full-screen program's exit puts back (`registryMode`). A
+     * program asks for the current settings to learn the desktop's depth
+     * before it picks its own, and one refused that answer settles for the
+     * shallowest depth it knows -- sixteen bits, for every surface it makes
+     * after.
      *
+     * The display is named by the adapter's name or by none; any other name
+     * (a monitor's among them) answers FALSE with nothing written and the
+     * last error left alone. What is written is the DEVMODE up to its display
+     * frequency, the members a display has (dmSize says so), every mode with
+     * its orientation and flags, the mode in effect and the registry's with
+     * their position too (monitor.c test_ChangeDisplaySettingsEx);
+     * the Ex spelling writes no further than the caller's dmSize says it may,
+     * keeping that dmSize when it is shorter (sysparams.c
+     * test_EnumDisplaySettings).
+     *
+     * @param {number} name  The device's name, or 0.
      * @param {number} mode @param {number} devMode
      * @param {typeof DEVMODEA | typeof DEVMODEW} layout
+     * @param {boolean} [ex]  Whether the call was the Ex spelling.
      */
-    const enumDisplaySettings = (mode, devMode, layout)=>{
+    const enumDisplaySettings = (name, mode, devMode, layout, ex = false)=>{
+        const DM_POSITION = 0x00000020;
+        const DM_DISPLAYFLAGS = 0x00200000;
         const index = mode | 0;
         if ((devMode >>> 0) === 0)
         {
             return 0;
         }
+        if ((name >>> 0) !== 0 && readText(host, name >>> 0, layout === DEVMODEW)
+            .toUpperCase() !== DISPLAY_DEVICE_NAME)
+        {
+            return 0;
+        }
         const current = index === ENUM_CURRENT_SETTINGS || index === ENUM_REGISTRY_SETTINGS;
-        const listed = current ? null : displayModes(screen)[index];
+        const listed = current ? null : userModes()[index];
         if (!current && (index < 0 || !listed))
         {
             return 0;
         }
-        const answer = listed ?? { ...screen, refresh: refreshOf(screen) };
-        writeU16(host, devMode + layout.dmSize, layout.SIZE);
-        writeU16(host, devMode + layout.dmDriverExtra, 0);
-        writeU32s(host, devMode + layout.dmFields,
-            [DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY]);
-        writeU32s(host, devMode + layout.dmBitsPerPel,
-            [answer.bitsPerPixel, answer.width, answer.height]);
-        writeU32s(host, devMode + layout.dmDisplayFrequency, [answer.refresh]);
+        const answer = listed ?? { ...screen, refresh: refreshOf(screen),
+            ...(index === ENUM_REGISTRY_SETTINGS ? registryMode(screen) : {}) };
+        const whole = layout.dmDisplayFrequency + 4;
+        const given = ex ? readU16(devMode + layout.dmSize) : whole;
+        const room = Math.min(given, whole);
+        const image = new Uint8Array(whole);
+        image.set(host.readMemory(devMode, room));
+        const fields = new DataView(image.buffer);
+        fields.setUint16(layout.dmSize, given >= whole ? whole : given, true);
+        fields.setUint16(layout.dmDriverExtra, 0, true);
+        fields.setUint32(layout.dmFields, DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT
+            | DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION
+            | (current ? DM_POSITION : 0), true);
+        // dmPosition is the union's first eight bytes, before the orientation.
+        fields.setInt32(layout.dmDisplayOrientation - 8, 0, true);
+        fields.setInt32(layout.dmDisplayOrientation - 4, 0, true);
+        fields.setUint32(layout.dmDisplayOrientation, DMDO_DEFAULT, true);
+        [answer.bitsPerPixel, answer.width, answer.height, 0, answer.refresh]
+            .forEach((one, at)=>fields.setUint32(layout.dmBitsPerPel + at * 4, one >>> 0, true));
+        host.writeMemory(devMode, image.subarray(0, room));
         return 1;
     };
 
@@ -1716,41 +2652,89 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {typeof DEVMODEA | typeof DEVMODEW} [layout]  Which of the two the caller built.
      */
     const changeDisplaySettings = (devMode, flags, layout = DEVMODEA)=>{
-        const display = /** @type {{ displayWidth?: number, displayHeight?: number }} */ (screen);
+        const display = /** @type {{ registryWidth?: number, registryHeight?: number }} */ (screen);
         if ((devMode >>> 0) === 0)
         {
             // A null mode means "go back to what the registry says": the
-            // display's own size, which is where the launch put the screen.
+            // display's own size, which is where the launch put the screen,
+            // unless a program wrote another there.
             if ((flags & CDS_TEST) === 0)
             {
-                screen.width = display.displayWidth ?? screen.width;
-                screen.height = display.displayHeight ?? screen.height;
+                const mode = registryMode(screen);
+                return setMode(mode.width, mode.height, launchBits);
             }
             return DISP_CHANGE_SUCCESSFUL;
         }
         const named = readU32(devMode + layout.dmFields);
+        // A display here cannot turn: any orientation but its own is no
+        // mode it has (Wine's d3d9ex test_get_adapter_displaymode_ex skips
+        // on this answer).
+        if ((named & DM_DISPLAYORIENTATION) !== 0
+            && readU32(devMode + layout.dmDisplayOrientation) !== DMDO_DEFAULT)
+        {
+            return DISP_CHANGE_BADMODE;
+        }
         const width = (named & DM_PELSWIDTH) !== 0
             ? readU32(devMode + layout.dmPelsWidth) : screen.width;
         const height = (named & DM_PELSHEIGHT) !== 0
             ? readU32(devMode + layout.dmPelsHeight) : screen.height;
-        // The depth as well, when the caller named one. A program that walks
-        // its own list of modes takes the first this accepts as the depth of
-        // the display, and accepting a sixteen-bit request for a thirty-two-bit
-        // screen makes every surface it creates after sixteen bits deep.
+        // The depth as well, when the caller named one: a mode at a depth the
+        // list does not carry is refused, and one it does sets the display's
+        // depth with its size, so a program's surfaces after it are as deep as
+        // the display it asked for.
         const bits = (named & DM_BITSPERPEL) !== 0
             ? readU32(devMode + layout.dmBitsPerPel) : screen.bitsPerPixel;
-        const offered = displayModes(screen).some(mode=>
+        const offered = userModes().some(mode=>
             mode.width === width && mode.height === height && mode.bitsPerPixel === bits);
         if (!offered)
         {
             return DISP_CHANGE_BADMODE;
         }
-        if ((flags & CDS_TEST) === 0)
+        if ((flags & CDS_TEST) !== 0)
         {
-            screen.width = width;
-            screen.height = height;
+            return DISP_CHANGE_SUCCESSFUL;
         }
-        return DISP_CHANGE_SUCCESSFUL;
+        // Kept in the registry, it is the mode the display goes back to; with
+        // CDS_NORESET it is kept there and not set now (Wine's d3d9
+        // test_mode_change writes the registry this way).
+        if ((flags & CDS_UPDATEREGISTRY) !== 0)
+        {
+            display.registryWidth = width;
+            display.registryHeight = height;
+        }
+        return (flags & CDS_NORESET) === 0 ? setMode(width, height, bits)
+            : DISP_CHANGE_SUCCESSFUL;
+    };
+
+    /**
+     * The display set to a size, and every top-level window told when it
+     * moved, before the call returns, as Windows sends it (WM_DISPLAYCHANGE:
+     * the depth, and the size in the low and high words). A window whose
+     * thread does not answer is waited for DISPLAY_CHANGE_WAIT_MS, not for
+     * ever: a thread blocked outside its message loop holds no mode change.
+     *
+     * @param {number} width @param {number} height
+     * @param {number} [bits]  the depth, the display's own unless named
+     * @returns {number | Promise<number>}
+     */
+    const setMode = (width, height, bits = screen.bitsPerPixel)=>{
+        if (screen.width === width && screen.height === height && screen.bitsPerPixel === bits)
+        {
+            return DISP_CHANGE_SUCCESSFUL;
+        }
+        screen.width = width;
+        screen.height = height;
+        screen.bitsPerPixel = bits;
+        workArea = null;
+        // A resolution change resets the cursor's clip (Wine's monitor.c
+        // test_ChangeDisplaySettingsEx): one a program set for the mode it
+        // ran in and never lifted would otherwise stay the space the pointer
+        // is scaled into, and every click after the mode came back missed.
+        clip = null;
+        host.clipCursor?.(null);
+        return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
+            ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),
+        ()=>DISP_CHANGE_SUCCESSFUL);
     };
 
     /**
@@ -1782,13 +2766,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         const adapter = device === null;
-        const named = device !== null && device.toUpperCase() === DISPLAY_ADAPTER_NAME;
+        const named = device !== null && device.toUpperCase() === DISPLAY_DEVICE_NAME;
         if ((index >>> 0) !== 0 || (!adapter && !named))
         {
             return 0;
         }
         const who = adapter
-            ? { name: DISPLAY_ADAPTER_NAME, description: VIDEO_ADAPTER_NAME,
+            ? { name: DISPLAY_DEVICE_NAME, description: VIDEO_ADAPTER_NAME,
                 flags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
                 id: '' }
             : { name: '', description: 'Default Monitor',
@@ -1868,17 +2852,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return 0;
         }
         /** @param {number} weight */
-        const face = weight=>logFontBytes({ height: -11, width: 0, escapement: 0,
-            orientation: 0, weight, italic: 0, underline: 0, strikeOut: 0, charSet: 0,
-            outPrecision: 0, clipPrecision: 0, quality: 0, pitchAndFamily: 0,
-            faceName: 'Tahoma' }, wide);
+        const face = weight=>logFontBytes(systemFont(weight), wide);
         const bytes = new Uint8Array(cbSize);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number[]} values */
         const put = (at, values)=>values.forEach((one, index)=>{
             view.setInt32(at + index * 4, one, true);
         });
-        put(0, [cbSize, BORDER, SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
+        put(0, [cbSize, border(), SCROLLBAR, SCROLLBAR, metric(SM_CXSIZE), CAPTION_HEIGHT - 1]);
         bytes.set(face(700), 24);
         const smallCaption = 24 + font;
         put(smallCaption, [metric(SM_CXSMSIZE), metric(SM_CYSMSIZE)]);
@@ -1896,73 +2877,572 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     /**
      * MINIMIZEDMETRICS past its cbSize, as SPI_SETMINIMIZEDMETRICS last set
      * it: the width of a minimised window, the gaps between them, and where
-     * ArrangeIconicWindows starts and which way it goes.
+     * ArrangeIconicWindows starts and which way it goes. SM_CXMINIMIZED is
+     * the width and a frame of three pixels either side, the spacing metrics
+     * the minimised size and the gaps, SM_ARRANGE the arrangement: Windows 7
+     * starts at 160 pixels apart, bottom left, hidden.
      */
-    let minimizedMetrics = [FIXED_METRICS.get(SM_CXMINIMIZED) ?? 0, 0, 0,
-        FIXED_METRICS.get(SM_ARRANGE) ?? 0];
+    let minimizedMetrics = [MINIMIZED_WIDTH, 0, 0, FIXED_METRICS.get(SM_ARRANGE) ?? 0];
+
+    /** The icon spacing, across and down, and the icon title font (ICONMETRICS). */
+    const iconSpacing = { across: FIXED_METRICS.get(SM_CXICONSPACING_INDEX) ?? 0,
+        down: FIXED_METRICS.get(SM_CYICONSPACING_INDEX) ?? 0 };
+    /** @type {import('../gdi32/structs.js').LogFontFields} */
+    let iconFont = systemFont(400);
 
     /**
-     * SystemParametersInfo, both spellings: the work area, the hover
-     * parameters TrackMouseEvent works by, the non-client and minimised
-     * windows' metrics, whether text is smoothed, and a refusal for
-     * everything else.
+     * The settings that are GetSystemMetrics answers too and have no get
+     * action of their own, by set action: the double-click rectangle and
+     * whether the buttons are swapped.
      *
-     * @param {number} action @param {number} value @param {boolean} wide
+     * @type {Map<number, { index: number, value: number }>}
      */
-    const systemParameter = (action, value, wide)=>{
+    const metricSettings = new Map([
+        [0x001d, { index: SM_CXDOUBLECLK, value: FIXED_METRICS.get(SM_CXDOUBLECLK) ?? 0 }],
+        [0x001e, { index: SM_CYDOUBLECLK, value: FIXED_METRICS.get(SM_CYDOUBLECLK) ?? 0 }],
+        [0x0021, { index: SM_SWAPBUTTON, value: 0 }],
+    ]);
+
+    /**
+     * The one-number settings as they stand, by get and by set action: a set
+     * is what the next get reads.
+     *
+     * @type {Map<number, { get: number, set: number, from: 'param' | 'pointer', value: number }>}
+     */
+    const numberSettings = new Map();
+    for (const [get, set, value, from] of SPI_NUMBERS)
+    {
+        const setting = { get, set, from, value };
+        numberSettings.set(get, setting);
+        if (set !== 0)
+        {
+            numberSettings.set(set, setting);
+        }
+    }
+    /**
+     * The structure settings as they stand, by get and by set action.
+     *
+     * @type {Map<number, { get: number, set: number, words: number[] }>}
+     */
+    const structureSettings = new Map();
+    for (const [get, { set, words }] of SPI_STRUCTURES)
+    {
+        const setting = { get, set, words: [...words] };
+        structureSettings.set(get, setting);
+        structureSettings.set(set, setting);
+    }
+    /** SPI_GETMOUSE's thresholds and acceleration. */
+    let mouseThresholds = [6, 10, 1];
+    let highContrast = HIGHCONTRAST_DEFAULT_FLAGS;
+    let wallpaper = '';
+    /** The actions SystemParametersInfo has said it does not answer. */
+    const saidSettings = new Set();
+    /** What SystemParametersInfo has said it does not do, each said once. */
+    const saidParts = new Set();
+    /** @param {string} detail */
+    const sayOnce = detail=>{
+        if (!saidParts.has(detail))
+        {
+            saidParts.add(detail);
+            host.divergence?.('SystemParametersInfo', detail);
+        }
+    };
+    /** HIGHCONTRAST: cbSize, dwFlags, lpszDefaultScheme. */
+    const HIGHCONTRAST_SIZE = 12;
+    /** The default scheme's name, an empty string of each spelling, made once. */
+    const schemeNames = { ansi: 0, wide: 0 };
+    /** @param {boolean} wide */
+    const schemeName = wide=>{
+        const key = wide ? 'wide' : 'ansi';
+        if (schemeNames[key] === 0 && host.allocate)
+        {
+            schemeNames[key] = host.allocate(2) >>> 0;
+            host.writeMemory(schemeNames[key], new Uint8Array(2));
+        }
+        return schemeNames[key];
+    };
+    /** The border SPI_SETBORDER last set, a pixel at least. */
+    const border = ()=>numberSettings.get(SPI_GETBORDER)?.value ?? BORDER;
+    /** A sizing frame: the border and the dialog frame inside it. */
+    const sizeFrame = ()=>border() + DIALOG_FRAME;
+    /**
+     * A LOGFONT of the caller's spelling, as its fields.
+     *
+     * @param {number} at @param {boolean} wide
+     */
+    const readFont = (at, wide)=>(wide ? readLogFontW : readLogFont)(host, at);
+    /** UserPreferencesMask: a bit for each effect, eight bytes. */
+    const preferencesMask = ()=>{
+        const bytes = new Uint8Array(PREFERENCES_MASK_BYTES);
+        for (const [get, where] of SPI_PLACES)
+        {
+            const bit = maskBit(get);
+            if (where.as === 'bit' && (numberSettings.get(get)?.value ?? 0) !== 0)
+            {
+                bytes[bit >>> 3] |= 1 << (bit & 7);
+            }
+        }
+        return bytes;
+    };
+
+    /**
+     * The values of the profile each setting is kept in, by the action that
+     * sets it: what the setting writes there, and how it takes back what is
+     * there. The non-client sizes and fonts have no set here and are only
+     * written, so a profile holds what Windows' holds (by no action).
+     *
+     * @type {Map<number, ProfileValue[]>}
+     */
+    const profileValues = new Map();
+    /** @param {number} action @param {ProfileValue[]} values */
+    const keep = (action, values)=>profileValues.set(action,
+        [...profileValues.get(action) ?? [], ...values]);
+    for (const [action, where] of SPI_PLACES)
+    {
+        const setting = numberSettings.get(action);
+        const metricSetting = metricSettings.get(action);
+        const holder = setting ?? metricSetting ?? (action === SPI_SETDOUBLECLICKTIME
+            ? clickTime : null);
+        if (!holder)
+        {
+            continue;
+        }
+        keep(setting ? setting.set : action, [{ key: where.key, name: where.name,
+            written: ()=>(where.as === 'bit'
+                ? { type: REG_BINARY, data: preferencesMask() }
+                : placeValue(where.as, holder.value)),
+            read: found=>{
+                const number = placeNumber(where.as, found, maskBit(action));
+                if (number !== null)
+                {
+                    holder.value = SPI_KEPT_AS.get(action)?.(number) ?? number;
+                }
+            } }]);
+    }
+    for (const [get, { key, names: wordNames }] of SPI_STRUCTURE_PLACES)
+    {
+        const setting = structureSettings.get(get);
+        if (!setting)
+        {
+            continue;
+        }
+        keep(setting.set, wordNames.flatMap((name, index)=>(name === null ? [] : [{ key, name,
+            written: ()=>textValue(String(setting.words[index + 1] >>> 0)),
+            read: (/** @type {RegistryValue} */ found)=>{
+                const number = numberOf(found);
+                if (number !== null)
+                {
+                    setting.words[index + 1] = number >>> 0;
+                }
+            } }])));
+    }
+    keep(SPI_SETMOUSE, ['MouseThreshold1', 'MouseThreshold2', 'MouseSpeed'].map((name, index)=>({
+        key: MOUSE_KEY, name,
+        written: ()=>textValue(String(mouseThresholds[index] | 0)),
+        read: (/** @type {RegistryValue} */ found)=>{
+            const number = numberOf(found);
+            if (number !== null)
+            {
+                mouseThresholds[index] = number;
+            }
+        } })));
+    keep(SPI_SETHIGHCONTRAST, [{ key: `${ACCESSIBILITY_KEY}\\HighContrast`, name: 'Flags',
+        written: ()=>textValue(String(highContrast >>> 0)),
+        read: found=>{
+            highContrast = numberOf(found) ?? highContrast;
+        } }]);
+    keep(SPI_SETDESKWALLPAPER, [{ key: DESKTOP_KEY, name: 'Wallpaper',
+        written: ()=>textValue(wallpaper),
+        read: found=>{
+            wallpaper = textOf(found) ?? wallpaper;
+        } }]);
+    /** @type {ProfileValue[]} */
+    const spacingValues = [['IconSpacing', 'across'], ['IconVerticalSpacing', 'down']]
+        .map(([name, way])=>({ key: METRICS_KEY, name,
+            written: ()=>placeValue('twips', iconSpacing[/** @type {'across' | 'down'} */ (way)]),
+            read: found=>{
+                const number = placeNumber('twips', found, 0);
+                if (number !== null)
+                {
+                    iconSpacing[/** @type {'across' | 'down'} */ (way)] = number;
+                }
+            } }));
+    /** @type {ProfileValue} */
+    const iconFontValue = { key: METRICS_KEY, name: 'IconFont',
+        written: ()=>({ type: REG_BINARY, data: logFontBytes(iconFont, true) }),
+        read: found=>{
+            if (found.type === REG_BINARY && found.data.length >= LOGFONTW_SIZE)
+            {
+                iconFont = readLogFontW({ readMemory: (at, length)=>found.data.slice(at,
+                    at + length), writeMemory: ()=>{} }, 0);
+            }
+        } };
+    // Windows keeps the work area in no profile: a set is the session's.
+    keep(SPI_SETWORKAREA, []);
+    keep(SPI_ICONHORIZONTALSPACING, [spacingValues[0]]);
+    keep(SPI_ICONVERTICALSPACING, [spacingValues[1]]);
+    keep(SPI_SETICONTITLELOGFONT, [iconFontValue]);
+    keep(SPI_SETICONMETRICS, [...spacingValues, ...profileValues.get(SPI_SETICONTITLEWRAP) ?? [],
+        iconFontValue]);
+    keep(SPI_SETMINIMIZEDMETRICS, /** @type {[string, ProfileFormat][]} */ ([['MinWidth', 'twips'],
+        ['MinHorzGap', 'twips'], ['MinVertGap', 'twips'], ['MinArrange', 'text']])
+        .map(([name, as], index)=>({ key: METRICS_KEY, name,
+            written: ()=>placeValue(as, minimizedMetrics[index]),
+            read: found=>{
+                const number = placeNumber(as, found, 0);
+                if (number !== null)
+                {
+                    minimizedMetrics[index] = number;
+                }
+            } })));
+    // The sizes as NONCLIENTMETRICS has them, the metrics' less a pixel
+    // where it adds one; GetSystemMetrics itself is not asked while the
+    // functions are still being made.
+    keep(0, [...[['ScrollWidth', SCROLLBAR], ['ScrollHeight', SCROLLBAR],
+        ['CaptionWidth', FIXED_METRICS.get(SM_CXSIZE) ?? 0], ['CaptionHeight', CAPTION_HEIGHT - 1],
+        ['SmCaptionWidth', TOOL_CAPTION_HEIGHT - 1], ['SmCaptionHeight', TOOL_CAPTION_HEIGHT - 1],
+        ['MenuWidth', FIXED_METRICS.get(SM_CXMENUSIZE) ?? 0], ['MenuHeight', MENU_HEIGHT - 1]]
+        .map(([name, size])=>({ key: METRICS_KEY, name: String(name),
+            written: ()=>placeValue('twips', Number(size)) })),
+    ...[['CaptionFont', 700], ['SmCaptionFont', 700], ['MenuFont', 400], ['StatusFont', 400],
+        ['MessageFont', 400]].map(([name, weight])=>({ key: METRICS_KEY, name: String(name),
+        written: ()=>({ type: REG_BINARY, data: logFontBytes(systemFont(Number(weight)), true) }),
+    }))]);
+
+    /**
+     * The user's profile in the registry: the key a path names under
+     * HKEY_CURRENT_USER, made on the way when asked to be; null without a
+     * registry.
+     *
+     * @param {string} path @param {boolean} make
+     */
+    const profileKey = (path, make)=>{
+        const hive = host.registry;
+        const root = hive?.root(HKEY_CURRENT_USER) ?? null;
+        if (!root)
+        {
+            return null;
+        }
+        return make ? hive.create(root, path).key : hive.open(root, path);
+    };
+    /** @param {ProfileValue} value */
+    const writeKept = value=>{
+        const { type, data } = value.written();
+        const key = profileKey(value.key, true);
+        if (key)
+        {
+            host.registry.setValue(key, value.name, type, data);
+        }
+    };
+    // A process starts from the user's profile: what a set kept there, and,
+    // where the profile holds nothing yet, Windows' default written in, as a
+    // new user's profile holds it - the machine's own keys (`asMachine`), no
+    // change of the program's for a session to save. Each value is read once,
+    // though several settings may share it (the effects' mask).
+    const registry = host.registry;
+    registry?.asMachine(()=>{
+        for (const values of profileValues.values())
+        {
+            for (const value of values)
+            {
+                const key = profileKey(value.key, false);
+                const found = key ? registry.getValue(key, value.name) : null;
+                if (found)
+                {
+                    value.read?.(found);
+                }
+                else
+                {
+                    writeKept(value);
+                }
+            }
+        }
+    });
+
+    /**
+     * What a successful set does past keeping the value for the process:
+     * with SPIF_UPDATEINIFILE it is written where the user's profile keeps it,
+     * and with SPIF_SENDCHANGE every top-level window is sent WM_SETTINGCHANGE
+     * with the action in wParam (and no section named in lParam) before the
+     * call returns, a window that does not answer waited for
+     * SETTING_CHANGE_WAIT_MS.
+     *
+     * @param {number} action @param {number} ini
+     * @returns {number | Promise<number>}
+     */
+    const settled = (action, ini)=>{
+        if ((ini & SPIF_UPDATEINIFILE) !== 0)
+        {
+            const values = profileValues.get(action);
+            if (!values)
+            {
+                sayOnce(`action 0x${action.toString(16)} is kept for this run alone: the`
+                    + ' profile has no place for it');
+            }
+            else if (!host.registry)
+            {
+                sayOnce('there is no registry: a setting is kept for this run alone');
+            }
+            else
+            {
+                values.forEach(writeKept);
+            }
+        }
+        if ((ini & SPIF_SENDCHANGE) === 0)
+        {
+            return 1;
+        }
+        return andThen(sendMessage(HWND_BROADCAST, WM_SETTINGCHANGE, action, 0, false,
+            SETTING_CHANGE_WAIT_MS), ()=>1);
+    };
+
+    /**
+     * What a set of a one-number setting changes beyond what the next get
+     * reads, said where this build does not follow it: the window frames,
+     * the pointer's hover and the smoothing of text keep their own.
+     *
+     * @param {number} get @param {number} value
+     */
+    const sayUnfollowed = (get, value)=>{
+        const SPI_GETFONTSMOOTHING = 0x004a;
+        const SPI_GETMOUSEHOVERWIDTH = 0x0062;
+        const SPI_GETMOUSEHOVERTIME = 0x0066;
+        if (get === SPI_GETBORDER && value !== BORDER)
+        {
+            sayOnce('a window is framed at the default border whatever SPI_SETBORDER says;'
+                + ' the frame metrics follow it');
+        }
+        else if (get >= SPI_GETMOUSEHOVERWIDTH && get <= SPI_GETMOUSEHOVERTIME)
+        {
+            sayOnce('TrackMouseEvent hovers by the default time and rectangle whatever'
+                + ' SPI_SETMOUSEHOVER* says');
+        }
+        else if (get === SPI_GETFONTSMOOTHING && value !== 0)
+        {
+            sayOnce('text is drawn without smoothing whatever SPI_SETFONTSMOOTHING says');
+        }
+    };
+
+    /**
+     * A structure setting read or set: its cbSize must be the structure's.
+     *
+     * @param {{ get: number, set: number, words: number[] }} setting
+     * @param {number} action @param {number} at @param {number} ini
+     */
+    const structureSetting = (setting, action, at, ini)=>{
+        if (at === 0 || readU32(at) !== setting.words[0])
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (action === setting.set)
+        {
+            setting.words = setting.words.map((word, index)=>(index === 0 ? word
+                : readU32(at + index * 4)));
+            return settled(action, ini);
+        }
+        writeU32s(host, at + 4, setting.words.slice(1));
+        return 1;
+    };
+
+    /**
+     * SystemParametersInfo, both spellings: the work area, the non-client,
+     * icon and minimised windows' metrics, the icon title font, the mouse,
+     * the wallpaper, high contrast, the one-number settings and the
+     * accessibility structures (SPI_NUMBERS, SPI_STRUCTURES), each read back
+     * as it was last set, and GetSystemMetrics following those it derives
+     * from. A set is kept in the user's profile and announced as fWinIni asks
+     * (`settled`). A setting it does not know is refused with
+     * ERROR_INVALID_PARAMETER, as Windows refuses an action it does not have,
+     * and said once.
+     *
+     * @param {number} action @param {number} param  uiParam
+     * @param {number} value  pvParam @param {boolean} wide
+     * @param {number} [ini]  fWinIni
+     */
+    const systemParameter = (action, param, value, wide, ini = 0)=>{
+        const SPI_GETMOUSE = 0x0003;
+        const SPI_GETICONTITLELOGFONT = 0x001f;
+        const SPI_GETICONMETRICS = 0x002d;
+        const SPI_GETHIGHCONTRAST = 0x0042;
+        const SPI_GETDESKWALLPAPER = 0x0073;
         const SPI_GETMINIMIZEDMETRICS = 0x002b;
-        const SPI_SETMINIMIZEDMETRICS = 0x002c;
         const MINIMIZEDMETRICS_SIZE = 20;
         const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
-        const SPI_GETMOUSEHOVERWIDTH = 0x0062;
-        const SPI_GETMOUSEHOVERHEIGHT = 0x0064;
-        const SPI_GETMOUSEHOVERTIME = 0x0066;
-        const SPI_GETFONTSMOOTHING = 0x004a;
+        const asked = wholeAddress(action);
+        const number = numberSettings.get(asked);
+        if (number)
+        {
+            if (number.set === asked)
+            {
+                const given = (number.from === 'param' ? param : value) >>> 0;
+                number.value = SPI_KEPT_AS.get(number.get)?.(given) ?? given;
+                sayUnfollowed(number.get, number.value);
+                return settled(asked, ini);
+            }
+            if ((value >>> 0) === 0)
+            {
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            writeU32s(host, value >>> 0, [number.value]);
+            return 1;
+        }
+        const structure = structureSettings.get(asked);
+        if (structure)
+        {
+            return structureSetting(structure, asked, value >>> 0, ini);
+        }
+        const metricSetting = metricSettings.get(asked);
+        if (metricSetting)
+        {
+            metricSetting.value = asked === SPI_SETMOUSEBUTTONSWAP ? ((param >>> 0) !== 0 ? 1 : 0)
+                : param >>> 0;
+            sayOnce(asked === SPI_SETMOUSEBUTTONSWAP
+                ? 'the buttons are reported as swapped and not swapped in input'
+                : 'a double click is recognised in the default rectangle; GetSystemMetrics'
+                    + ' follows SPI_SETDOUBLECLK*');
+            return settled(asked, ini);
+        }
+        if (asked === SPI_SETDOUBLECLICKTIME)
+        {
+            clickTime.value = param >>> 0;
+            return settled(asked, ini);
+        }
+        // The icon spacing is set by uiParam with no pointer, an icon's width
+        // at least, and read with one.
+        if (asked === SPI_ICONHORIZONTALSPACING || asked === SPI_ICONVERTICALSPACING)
+        {
+            const way = asked === SPI_ICONHORIZONTALSPACING ? 'across' : 'down';
+            if ((value >>> 0) !== 0)
+            {
+                writeU32s(host, value >>> 0, [iconSpacing[way]]);
+                return 1;
+            }
+            iconSpacing[way] = Math.max(param | 0, LEAST_ICON_SPACING);
+            return settled(asked, ini);
+        }
         if ((value >>> 0) === 0)
         {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        switch (action >>> 0){
+        switch (asked){
+            case SPI_GETMOUSE:
+                writeU32s(host, value >>> 0, mouseThresholds);
+                return 1;
+            case SPI_SETMOUSE:
+                mouseThresholds = [0, 4, 8].map(at=>readU32(wholeAddress(value) + at));
+                return settled(asked, ini);
+            case SPI_GETICONTITLELOGFONT:
+                host.writeMemory(wholeAddress(value), logFontBytes(iconFont, wide));
+                return 1;
+            case SPI_SETICONTITLELOGFONT:
+                iconFont = readFont(value >>> 0, wide);
+                return settled(asked, ini);
+            case SPI_GETICONMETRICS:
+            case SPI_SETICONMETRICS: {
+                const size = 16 + (wide ? LOGFONTW_SIZE : LOGFONTA.SIZE);
+                if (readU32(wholeAddress(value)) !== size)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const wrap = /** @type {{ value: number }} */ (
+                    numberSettings.get(SPI_SETICONTITLEWRAP));
+                if (asked === SPI_SETICONMETRICS)
+                {
+                    const [across, down, titleWrap] = [4, 8,
+                        12].map(at=>readU32(wholeAddress(value) + at)
+                        | 0);
+                    iconSpacing.across = Math.max(across, LEAST_ICON_SPACING);
+                    iconSpacing.down = Math.max(down, LEAST_ICON_SPACING);
+                    wrap.value = titleWrap >>> 0;
+                    iconFont = readFont((value >>> 0) + 16, wide);
+                    return settled(asked, ini);
+                }
+                writeU32s(host, (value >>> 0) + 4, [iconSpacing.across, iconSpacing.down,
+                    wrap.value]);
+                host.writeMemory(wholeAddress(value) + 16, logFontBytes(iconFont, wide));
+                return 1;
+            }
+            case SPI_GETHIGHCONTRAST: {
+                if (readU32(wholeAddress(value)) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, (value >>> 0) + 4, [highContrast, schemeName(wide)]);
+                return 1;
+            }
+            case SPI_SETHIGHCONTRAST:
+                if (readU32(wholeAddress(value)) !== HIGHCONTRAST_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                highContrast = readU32(wholeAddress(value) + 4);
+                return settled(asked, ini);
+            case SPI_GETDESKWALLPAPER: {
+                const bytes = textBytes(wallpaper, wide);
+                host.writeMemory(wholeAddress(value), bytes.subarray(0, Math.min(bytes.length,
+                    Math.max(param >>> 0, wide ? 2 : 1))));
+                return 1;
+            }
+            case SPI_SETDESKWALLPAPER:
+                wallpaper = readText(host, value >>> 0, wide);
+                return settled(asked, ini);
             case SPI_GETNONCLIENTMETRICS:
                 return nonClientMetrics(value >>> 0, wide);
             case SPI_GETWORKAREA:
-                writeRect(host, value,
-                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
+                writeRect(host, value, workAreaRect());
                 return 1;
-            case SPI_GETMOUSEHOVERWIDTH:
-            case SPI_GETMOUSEHOVERHEIGHT:
-                writeU32s(host, value, [HOVER_SIZE]);
-                return 1;
-            case SPI_GETMOUSEHOVERTIME:
-                writeU32s(host, value, [HOVER_TIME]);
-                return 1;
-            // FALSE: text is drawn here without smoothing. A font renderer
-            // picks the quality it asks GDI for from this, and a refusal
-            // leaves it reporting an error on every font it makes.
-            case SPI_GETFONTSMOOTHING:
-                writeU32s(host, value, [0]);
-                return 1;
+            // Any rectangle with room in it: a maximised window still covers
+            // the screen, the work area being where a program asks to put
+            // its windows.
+            case SPI_SETWORKAREA: {
+                const area = readRect(host, value >>> 0);
+                if (area.right <= area.left || area.bottom <= area.top)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                workArea = area;
+                sayOnce('a window maximises over the whole screen whatever SPI_SETWORKAREA'
+                    + ' says');
+                return settled(asked, ini);
+            }
+            // The width and the gaps are none at least, and the arrangement
+            // is its four bits.
             case SPI_GETMINIMIZEDMETRICS:
             case SPI_SETMINIMIZEDMETRICS: {
-                const fields = new DataView(host.readMemory(value >>> 0,
+                const fields = new DataView(host.readMemory(wholeAddress(value),
                     MINIMIZEDMETRICS_SIZE).slice().buffer);
                 if (fields.getUint32(0, true) !== MINIMIZEDMETRICS_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((action >>> 0) === SPI_GETMINIMIZEDMETRICS)
+                if (asked === SPI_GETMINIMIZEDMETRICS)
                 {
                     writeU32s(host, (value >>> 0) + 4, minimizedMetrics);
+                    return 1;
                 }
-                else
-                {
-                    minimizedMetrics = [4, 8, 12, 16].map(at=>fields.getInt32(at, true));
-                }
-                return 1;
+                const [width, across, down, arrange] = [4, 8, 12, 16]
+                    .map(at=>fields.getInt32(at, true));
+                minimizedMetrics = [Math.max(width, 0), Math.max(across, 0), Math.max(down, 0),
+                    arrange & 0xf];
+                return settled(asked, ini);
             }
             default:
+                if (!saidSettings.has(asked))
+                {
+                    saidSettings.add(asked);
+                    host.divergence?.('SystemParametersInfo',
+                        `action 0x${asked.toString(16)} is not answered`);
+                }
+                host.setLastError?.(ERROR_INVALID_PARAMETER);
                 return 0;
         }
     };
@@ -2002,10 +3482,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         const startY = top ? vertGap : size.height - vertGap - height;
         let x = startX;
         let y = startY;
+        /** @type {number[][]} */
+        const moves = [];
         for (const icon of icons)
         {
-            setWindowPos([icon.hwnd, 0, x, y, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+            moves.push([icon.hwnd, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
             if ((arrange & ARW_UP) === 0)
             {
                 x += right ? -across : across;
@@ -2025,7 +3506,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
             }
         }
-        return icons.length;
+        return andThen(oneAfterAnother(moves), ()=>icons.length);
     };
 
     /**
@@ -2048,7 +3529,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return null;
         }
         const given = (count >>> 0) > 0 && (list >>> 0) !== 0
-            ? Array.from({ length: count >>> 0 }, (_, at)=>live(readU32((list >>> 0) + at * 4)))
+            ? Array.from({ length: count >>> 0 }, (_,
+                at)=>live(readU32(wholeAddress(list) + at * 4)))
             : ordered();
         const size = host.geometry.clientSize(record);
         return {
@@ -2062,17 +3544,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
-     * Places one arranged window: a window without a sizing frame keeps its
-     * size and only moves.
+     * Where one arranged window goes, as SetWindowPos's arguments: a window
+     * without a sizing frame keeps its size and only moves.
      *
      * @param {any} record @param {number} x @param {number} y
      * @param {number} width @param {number} height
      */
-    const arrangeOne = (record, x, y, width, height)=>setWindowPos([record.hwnd, 0, x, y,
+    const arrangeOne = (record, x, y, width, height)=>[record.hwnd, 0, x, y,
         width, height, SWP_NOZORDER | SWP_NOACTIVATE
-            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)]);
+            | ((record.style & WS_THICKFRAME) !== 0 ? 0 : SWP_NOSIZE)];
 
-    /** @param {number} index */
+    /**
+     * SetWindowPos for each window in turn: each may run its procedure, and
+     * the next is placed once the one before has returned.
+     *
+     * @param {number[][]} moves  SetWindowPos's arguments, one set a window.
+     * @returns {number | Promise<number>}
+     */
+    const oneAfterAnother = moves=>{
+        /** @param {number} at @returns {number | Promise<number>} */
+        const next = at=>(at >= moves.length ? 0
+            : andThen(setWindowPos(moves[at]), ()=>next(at + 1)));
+        return next(0);
+    };
+
+    /**
+     * LookupIconIdFromDirectory(Ex): the group directory read from guest
+     * memory, its header first for how many entries follow.
+     *
+     * @param {number} bits @param {number} icon @param {number} width  0 for the system's size
+     */
+    const lookupIconId = (bits, icon, width)=>{
+        if ((bits >>> 0) === 0)
+        {
+            return 0;
+        }
+        const header = host.readMemory(wholeAddress(bits), 6);
+        const count = header[4] | header[5] << 8;
+        const cursor = (icon >>> 0) === 0;
+        const size = width > 0 ? width : metric(cursor ? SM_CXCURSOR : SM_CXICON);
+        return groupImageId(host.readMemory(wholeAddress(bits), 6 + count * 14).slice(), cursor,
+            size)
+            ?? 0;
+    };
+
+    /** @param {number} index @returns {number} */
     const metric = index=>{
         switch (index | 0){
             case SM_CXSCREEN:
@@ -2100,9 +3616,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             case SM_CXFIXEDFRAME:
             case SM_CYFIXEDFRAME:
                 return DIALOG_FRAME;
+            // A sizing frame is the border SPI_SETBORDER sets and the
+            // dialog frame inside it.
             case SM_CXSIZEFRAME:
             case SM_CYSIZEFRAME:
-                return SIZE_FRAME;
+                return sizeFrame();
             case SM_CYMENU:
                 return MENU_HEIGHT;
             case SM_CXVSCROLL:
@@ -2115,24 +3633,54 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             // with some to spare, as Windows derives both.
             case SM_CYMIN:
             case SM_CYMINTRACK:
-                return CAPTION_HEIGHT + 2 * SIZE_FRAME;
+                return CAPTION_HEIGHT + 2 * sizeFrame();
+            // As narrow as three caption buttons, a caption button's height,
+            // four characters of the caption's font with two pixels either
+            // side, and two sizing frames.
+            case SM_CXMIN:
+            case SM_CXMINTRACK:
+                return 3 * metric(SM_CXSIZE) + metric(SM_CYSIZE) + 4 + 4 * CAPTION_CHAR_WIDTH
+                    + 2 * sizeFrame();
             case SM_CXMAXTRACK:
             case SM_CYMAXTRACK:
                 return ((index | 0) === SM_CXMAXTRACK ? screen.width : screen.height)
-                    + 4 + 2 * SIZE_FRAME;
+                    + 4 + 2 * sizeFrame();
             case SM_CXMAXIMIZED:
             case SM_CYMAXIMIZED:
                 return ((index | 0) === SM_CXMAXIMIZED ? screen.width : screen.height)
-                    + 2 * SIZE_FRAME;
+                    + 2 * sizeFrame();
+            case SM_CXICONSPACING_INDEX:
+                return iconSpacing.across;
+            case SM_CYICONSPACING_INDEX:
+                return iconSpacing.down;
+            // A minimised window is its width and a three-pixel frame
+            // either side wide, a caption and five pixels high; the spacing
+            // adds the gaps between two.
+            case SM_CXMINIMIZED:
+                return minimizedMetrics[0] + 6;
+            case SM_CYMINIMIZED:
+                return CAPTION_HEIGHT + 5;
+            case SM_CXMINSPACING:
+                return metric(SM_CXMINIMIZED) + minimizedMetrics[1];
+            case SM_CYMINSPACING:
+                return metric(SM_CYMINIMIZED) + minimizedMetrics[2];
+            case SM_ARRANGE:
+                return minimizedMetrics[3];
+            case SM_MENUDROPALIGNMENT:
+                return numberSettings.get(SPI_GETMENUDROPALIGNMENT)?.value ?? 0;
+            case SM_SHOWSOUNDS:
+                return numberSettings.get(SPI_GETSHOWSOUNDS)?.value ?? 0;
+            case SM_CXDOUBLECLK:
+            case SM_CYDOUBLECLK:
+            case SM_SWAPBUTTON:
+                return [...metricSettings.values()].find(setting=>setting.index === (index | 0))
+                    ?.value ?? 0;
             default:
                 return FIXED_METRICS.get(index | 0) ?? 0;
         }
     };
 
-    /** @param {any} value @param {(answer: any) => any} then */
-    const andThen = (value, then)=>(typeof value?.then === 'function'
-        ? value.then(then)
-        : then(value));
+    const andThen = afterWait(host);
 
     /**
      * ChildWindowFromPoint, both spellings: the topmost child whose rectangle
@@ -2194,8 +3742,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return 0;
         }
-        const original = wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
-            : host.readCString(name >>> 0, MAX_NAME);
+        const original = wide ? readWideString(wholeAddress(name)).slice(0, MAX_NAME)
+            : host.readCString(wholeAddress(name), MAX_NAME);
         const key = original.toLowerCase();
         if (key.length === 0)
         {
@@ -2225,15 +3773,38 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return names.registeredName(format);
     };
 
-    /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
-    const writeClassName = ([hwnd, out, maxCount], wide)=>{
+    /**
+     * GetClassName in either width, or RealGetWindowClass's (`real`): the
+     * class a built-in procedure marked the window with, else its own; no
+     * room is ERROR_INSUFFICIENT_BUFFER there.
+     *
+     * @param {number[]} args @param {boolean} wide @param {boolean} [real]
+     */
+    const writeClassName = ([hwnd, out, maxCount], wide, real = false)=>{
         const record = live(hwnd) ?? elsewhere(hwnd);
         const room = maxCount | 0;
+        if (real && record && room <= 0)
+        {
+            host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
         if (!record || (out >>> 0) === 0 || room <= 0)
         {
             return 0;
         }
-        return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
+        return (wide ? writeWideString : writeString)(out >>> 0,
+            real ? record.realClass ?? record.className : record.className, room);
+    };
+
+    /** A power notification's handle let go. @param {number} handle */
+    const unregisterPower = handle=>{
+        if (host.handles.typeOf?.(handle >>> 0) !== 'power-notification')
+        {
+            host.setLastError?.(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        host.handles.close(handle >>> 0);
+        return 1;
     };
 
     return {
@@ -2267,15 +3838,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const WM_SYSCOLORCHANGE = 0x0015;
                 const MAX_ELEMENTS = 0x400;
                 const many = Math.min(count | 0, MAX_ELEMENTS);
-                if (many > 0 && ((elements >>> 0) === 0 || (values >>> 0) === 0))
+                if (many > 0 && (wholeAddress(elements) === 0 || wholeAddress(values) === 0))
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
                 if (many > 0)
                 {
-                    const indices = new DataView(host.readMemory(elements >>> 0, many * 4).buffer);
-                    const colours = new DataView(host.readMemory(values >>> 0, many * 4).buffer);
+                    const indices = new DataView(host.readMemory(wholeAddress(elements),
+                        many * 4).buffer);
+                    const colours = new DataView(host.readMemory(wholeAddress(values),
+                        many * 4).buffer);
                     for (let at = 0; at < many; at++)
                     {
                         host.colors?.set(indices.getInt32(at * 4, true),
@@ -2313,15 +3886,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * BOOL SystemParametersInfoA(UINT uiAction, UINT uiParam, PVOID pvParam,
          *                            UINT fWinIni)
          *
-         * Only the work area, the one a window uses to place itself, the
-         * hover parameters and the non-client metrics are answered. Everything
-         * else reports failure rather than a default that would contradict the
-         * screen above.
+         * The settings `systemParameter` knows, Windows 7's defaults until a
+         * program sets them; any other is refused and said.
          */
         SystemParametersInfoA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, false),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, false,
+                ini),
         },
 
         /**
@@ -2333,7 +3905,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         SystemParametersInfoW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([action, , value])=>systemParameter(action, value, true),
+            handler: ([action, param, value, ini])=>systemParameter(action, param, value, true,
+                ini),
         },
 
         /**
@@ -2357,12 +3930,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         MonitorFromPoint: {
             argBytes: 12,
+            quadwords: [0],
             /** @param {number[]} args */
-            handler: ([x, y, flags])=>{
-                const inside = (x | 0) >= 0 && (y | 0) >= 0 && (x | 0) < screen.width
-                    && (y | 0) < screen.height;
-                return inside || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
-            },
+            handler: ([x, y, flags])=>monitorFromBox({ left: x | 0, top: y | 0,
+                right: (x | 0) + 1, bottom: (y | 0) + 1 }, flags),
         },
 
         /**
@@ -2376,14 +3947,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hdc, clipRect, callback, data])=>{
-                if ((callback >>> 0) === 0 || !host.call || !host.allocate)
+                if (wholeAddress(callback) === 0 || !host.call || !host.allocate)
                 {
                     return 0;
                 }
                 const box = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                if ((clipRect >>> 0) !== 0)
+                if (wholeAddress(clipRect) !== 0)
                 {
-                    const limit = readRect(host, clipRect >>> 0);
+                    const limit = readRect(host, wholeAddress(clipRect));
                     box.left = Math.max(box.left, limit.left);
                     box.top = Math.max(box.top, limit.top);
                     box.right = Math.min(box.right, limit.right);
@@ -2399,23 +3970,51 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 writeRect(host, at, box);
-                return Promise.resolve(host.call(callback >>> 0,
+                return Promise.resolve(host.call(wholeAddress(callback),
                     [PRIMARY_MONITOR, hdc >>> 0, at, data >>> 0], host.callerThread?.()))
                     .then(()=>1, ()=>0)
                     .finally(()=>host.release?.(at));
             },
         },
 
-        /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
+        /**
+         * HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags)
+         *
+         * The monitor the rectangle overlaps; an empty one is its top-left
+         * corner, a point (so (0, 0, -1, -1) is on the screen and
+         * (-1, 0, 2, -1) is not).
+         */
         MonitorFromRect: {
             argBytes: 8,
-            handler: ()=>PRIMARY_MONITOR,
+            /** @param {number[]} args */
+            handler: ([rect, flags])=>{
+                const box = readRect(host, wholeAddress(rect));
+                const empty = box.right <= box.left || box.bottom <= box.top;
+                return monitorFromBox(empty ? { left: box.left, top: box.top,
+                    right: box.left + 1, bottom: box.top + 1 } : box, flags);
+            },
         },
 
-        /** HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags) */
+        /**
+         * HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags)
+         *
+         * The monitor the window's rectangle overlaps; no window is no
+         * rectangle, which the flags answer as for one off every monitor.
+         */
         MonitorFromWindow: {
             argBytes: 8,
-            handler: ()=>PRIMARY_MONITOR,
+            /** @param {number[]} args */
+            handler: ([hwnd, flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return monitorFromBox(null, flags);
+                }
+                const box = host.geometry.windowRect(record);
+                const empty = box.right <= box.left || box.bottom <= box.top;
+                return monitorFromBox(empty ? { left: box.left, top: box.top,
+                    right: box.left + 1, bottom: box.top + 1 } : box, flags);
+            },
         },
 
         /** BOOL GetMonitorInfoA(HMONITOR hMonitor, LPMONITORINFO lpmi) */
@@ -2428,12 +4027,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * BOOL GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi)
          *
-         * MONITORINFO has no string in it, so the two spellings answer alike.
+         * MONITORINFO has no string in it, so the two spellings answer alike
+         * but for MONITORINFOEX's device name.
          */
         GetMonitorInfoW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([monitor, info])=>monitorInfo(monitor, info),
+            handler: ([monitor, info])=>monitorInfo(monitor, info, true),
         },
 
         /**
@@ -2443,14 +4043,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         EnumDisplaySettingsA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEA),
         },
 
         /** BOOL EnumDisplaySettingsW(LPCWSTR, DWORD iModeNum, DEVMODEW *lpDevMode) */
         EnumDisplaySettingsW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEW),
         },
 
         /**
@@ -2463,14 +4063,16 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         EnumDisplaySettingsExA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEA),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEA,
+                true),
         },
 
         /** BOOL EnumDisplaySettingsExW(LPCWSTR, DWORD, DEVMODEW *, DWORD dwFlags) */
         EnumDisplaySettingsExW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, mode, devMode])=>enumDisplaySettings(mode, devMode, DEVMODEW),
+            handler: ([name, mode, devMode])=>enumDisplaySettings(name, mode, devMode, DEVMODEW,
+                true),
         },
 
         /**
@@ -2487,8 +4089,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : host.readCString(device >>> 0, 32),
-                index >>> 0, out >>> 0, false),
+                wholeAddress(device) === 0 ? null : host.readCString(wholeAddress(device), 32),
+                index >>> 0, wholeAddress(out), false),
         },
 
         /**
@@ -2503,8 +4105,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : readWideString(device >>> 0),
-                index >>> 0, out >>> 0, true),
+                wholeAddress(device) === 0 ? null : readWideString(wholeAddress(device)),
+                index >>> 0, wholeAddress(out), true),
         },
 
         /**
@@ -2518,7 +4120,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         ChangeDisplaySettingsExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, devMode, , flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
+            handler: ([, devMode, , flags])=>changeDisplaySettings(wholeAddress(devMode),
+                flags >>> 0),
         },
 
         /**
@@ -2534,7 +4137,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         ChangeDisplaySettingsA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([devMode, flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
+            handler: ([devMode, flags])=>changeDisplaySettings(wholeAddress(devMode), flags >>> 0),
         },
 
         /** LONG ChangeDisplaySettingsW(DEVMODEW *lpDevMode, DWORD dwFlags) */
@@ -2542,7 +4145,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([devMode, flags])=>
-                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
+                changeDisplaySettings(wholeAddress(devMode), flags >>> 0, DEVMODEW),
         },
 
         /**
@@ -2553,7 +4156,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([, devMode, , flags])=>
-                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
+                changeDisplaySettings(wholeAddress(devMode), flags >>> 0, DEVMODEW),
         },
 
         /**
@@ -2588,7 +4191,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, point])=>{
                 const record = live(hwnd);
-                if (!record || (point >>> 0) === 0)
+                if (!record || wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -2607,7 +4210,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, point])=>{
                 const record = live(hwnd);
-                if (!record || (point >>> 0) === 0)
+                if (!record || wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -2662,7 +4265,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const record = live(hwnd);
+                const record = anyWindow(hwnd);
                 if (!record)
                 {
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -2685,7 +4288,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, flags])=>{
-                const record = live(hwnd);
+                const record = anyWindow(hwnd);
                 if (!record || host.isDesktop(record))
                 {
                     return 0;
@@ -2693,25 +4296,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 /** @param {any} from */
                 const rootOf = from=>{
                     let at = from;
-                    for (let depth = 0; live(at.parent) && depth < 256; depth++)
+                    for (let depth = 0, up = anyWindow(at.parent); up && depth < 256;
+                        depth++, up = anyWindow(at.parent))
                     {
-                        at = live(at.parent);
+                        at = up;
                     }
                     return at;
                 };
                 switch (flags >>> 0){
                     case GA_PARENT:
-                        return live(record.parent)?.hwnd ?? host.desktop().hwnd;
+                        return anyWindow(record.parent)?.hwnd ?? host.desktop().hwnd;
                     case GA_ROOT:
                         return rootOf(record).hwnd;
                     case GA_ROOTOWNER: {
                         let at = record;
-                        const seen = new Set([at]);
-                        for (let next = live(parentOf(at)); next && !seen.has(next);
-                            next = live(parentOf(at)))
+                        const seen = new Set([at.hwnd]);
+                        for (let next = anyWindow(parentOf(at)); next && !seen.has(next.hwnd);
+                            next = anyWindow(parentOf(at)))
                         {
                             at = next;
-                            seen.add(at);
+                            seen.add(at.hwnd);
                         }
                         return at.hwnd;
                     }
@@ -2764,15 +4368,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const target = (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0;
-                const inside = target === 0 ? null : live(target);
+                // Another process's window takes a child of this one's, as
+                // it does on Windows: the two share the desktop's tree.
+                const inside = target === 0 ? null : anyWindow(target);
                 if (target !== 0 && !inside)
                 {
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                for (let at = inside, depth = 0; at && depth < 256; at = live(at.parent), depth++)
+                for (let at = inside, depth = 0; at && depth < 256;
+                    at = anyWindow(at.parent), depth++)
                 {
-                    if (at === record)
+                    if (at.hwnd === record.hwnd)
                     {
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
@@ -2849,7 +4456,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return 0;
                 }
@@ -2887,7 +4494,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                if ((info >>> 0) === 0 || readU32(info) !== TITLEBARINFO_SIZE)
+                if (wholeAddress(info) === 0 || readU32(info) !== TITLEBARINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2932,14 +4539,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * DWORD GetListBoxInfo(HWND hwnd)
+         *
+         * What the list box answers LB_GETLISTBOXINFO with, as the
+         * documentation says this call is: the items one column holds.
+         */
+        GetListBoxInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>host.send?.(hwnd >>> 0, LB_GETLISTBOXINFO, 0, 0) ?? 0,
+        },
+
+        /**
          * BOOL GetComboBoxInfo(HWND hwndCombo, PCOMBOBOXINFO pcbi)
          *
          * A combo box's field and drop-down button, in its client
-         * coordinates, the button's state -- invisible for CBS_SIMPLE, which
-         * has none -- and its windows. This build's combo box is one window,
-         * its field and list drawn in it, so it names no edit and no list
-         * window of its own. Any other window is no combo box, and a cbSize
-         * that is not the structure's is refused.
+         * coordinates, the button's state - invisible for CBS_SIMPLE, which
+         * has none - and its windows: itself, its edit and its list. Any
+         * other window is no combo box, and a cbSize that is not the
+         * structure's is refused. Read from the combo box, not asked of it
+         * with CB_GETCOMBOBOXINFO: Windows sends nothing to a combo box of
+         * the caller's own thread (Wine's combo test, test_combo_info).
          */
         GetComboBoxInfo: {
             argBytes: 8,
@@ -2947,35 +4567,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([hwnd, info])=>{
                 const CBS_TYPEMASK = 0x3;
                 const CBS_SIMPLE = 0x1;
-                const COMBO_BUTTON = 16;
                 const record = live(hwnd);
-                if (!record || String(record.className).toLowerCase() !== 'combobox')
+                if (!record || String(record.className).toLowerCase() !== 'combobox'
+                    || !host.comboInfo)
                 {
                     return 0;
                 }
-                if ((info >>> 0) === 0 || readU32(info) !== COMBOBOXINFO_SIZE)
+                const pointer = host.pointerSize === 8 ? 8 : 4;
+                if (wholeAddress(info) === 0 || readU32(info) !== COMBOBOXINFO_SIZE[pointer])
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const client = host.geometry.clientRect(record);
-                const width = client.right - client.left;
-                const height = client.bottom - client.top;
                 const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
-                const button = simple ? { left: 0, top: 0, right: 0, bottom: 0 }
-                    : { left: width - 2 - COMBO_BUTTON, top: 2, right: width - 2,
-                        bottom: height - 2 };
-                writeRect(host, info + 4, { left: 3, top: 3,
-                    right: (simple ? width : button.left) - 2, bottom: height - 3 });
-                writeRect(host, info + 20, button);
-                writeU32s(host, info + 36,
-                    [simple ? STATE_SYSTEM_INVISIBLE : 0, record.hwnd, 0, 0]);
-                if (!comboWindowsSaid)
-                {
-                    comboWindowsSaid = true;
-                    host.divergence?.('GetComboBoxInfo', 'the combo box is one window: no edit'
-                        + ' and no list window are named');
-                }
+                const parts = host.comboInfo(record);
+                writeRect(host, info + 4, parts.item);
+                writeRect(host, info + 20, parts.button);
+                writeU32s(host, info + 36, [simple ? STATE_SYSTEM_INVISIBLE : 0]);
+                [record.hwnd, parts.edit, parts.list].forEach((handle, index)=>{
+                    writeU32s(host, info + 40 + index * pointer,
+                        pointer === 8 ? [handle >>> 0, 0] : [handle >>> 0]);
+                });
                 return 1;
             },
         },
@@ -2986,7 +4598,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, placement])=>{
                 const record = live(hwnd);
-                if (!record || (placement >>> 0) === 0)
+                if (!record || wholeAddress(placement) === 0)
                 {
                     return 0;
                 }
@@ -3009,29 +4621,36 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             },
         },
 
-        /** BOOL SetWindowPlacement(HWND hWnd, const WINDOWPLACEMENT *lpwndpl) */
+        /**
+         * BOOL SetWindowPlacement(HWND hWnd, const WINDOWPLACEMENT *lpwndpl)
+         *
+         * The normal rectangle is where the window is restored to; one neither
+         * minimised nor maximised goes there at once. Then the window is shown
+         * as showCmd says (Wine's WINPOS_SetPlacement).
+         */
         SetWindowPlacement: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, placement])=>{
                 const record = live(hwnd);
-                if (!record || (placement >>> 0) === 0)
+                if (!record || wholeAddress(placement) === 0)
                 {
                     return 0;
                 }
                 const bounds = readRect(host, placement + WINDOWPLACEMENT.rcNormalPosition);
-                if ((record.style & WS_MAXIMIZE) !== 0)
+                const normal = { x: bounds.left, y: bounds.top,
+                    width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
+                if ((record.style & (WS_MAXIMIZE | WS_MINIMIZE)) !== 0)
                 {
-                    record.normalPlace = { x: bounds.left, y: bounds.top,
-                        width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
-                    return 1;
+                    record.normalPlace = normal;
                 }
-                record.x = bounds.left;
-                record.y = bounds.top;
-                record.width = bounds.right - bounds.left;
-                record.height = bounds.bottom - bounds.top;
-                host.tell?.(record);
-                return 1;
+                else
+                {
+                    Object.assign(record, normal);
+                    host.tell?.(record);
+                }
+                const showCmd = readU32(placement + WINDOWPLACEMENT.showCmd);
+                return andThen(host.showWindow(record, showCmd, host.callerThread?.()), ()=>1);
             },
         },
 
@@ -3069,6 +4688,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const height = Math.floor((area.bottom - area.top) * 3 / 4);
                 let x = area.left;
                 let y = area.top;
+                /** @type {number[][]} */
+                const moves = [];
                 for (const [at, record] of [...found.windows].reverse().entries())
                 {
                     if (at > 0)
@@ -3076,9 +4697,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                         x = x + spacing + width > area.right ? area.left : x + spacing;
                         y = y + spacing + height > area.bottom ? area.top : y + spacing;
                     }
-                    arrangeOne(record, x, y, width, height);
+                    moves.push(arrangeOne(record, x, y, width, height));
                 }
-                return found.windows.length;
+                return andThen(oneAfterAnother(moves), ()=>found.windows.length);
             },
         },
 
@@ -3098,7 +4719,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([parent, how, rect, count, list])=>{
                 const MDITILE_HORIZONTAL = 0x0001;
-                const SM_CXMIN = 28;
                 const found = arrangement(parent, how, rect, count, list);
                 if (!found || found.windows.length === 0)
                 {
@@ -3113,18 +4733,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 const shorter = Math.floor(tiles.length / columns);
                 const longer = tiles.length % columns;
                 let at = 0;
+                /** @type {number[][]} */
+                const moves = [];
                 for (let column = 0; column < columns; column++)
                 {
                     const rows = shorter + (column >= columns - longer ? 1 : 0);
                     const height = Math.floor((area.bottom - area.top) / rows);
                     for (let row = 0; row < rows; row++, at++)
                     {
-                        arrangeOne(tiles[at], area.left + column * Math.floor(
+                        moves.push(arrangeOne(tiles[at], area.left + column * Math.floor(
                             (area.right - area.left) / columns), area.top + row * height, width,
-                        height);
+                        height));
                     }
                 }
-                return tiles.length;
+                return andThen(oneAfterAnother(moves), ()=>tiles.length);
             },
         },
 
@@ -3205,6 +4827,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         WindowFromPoint: {
             argBytes: 8,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([x, y])=>{
                 // Another program's window over the point is the answer; one
@@ -3230,6 +4853,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         ChildWindowFromPointEx: {
             argBytes: 16,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y, flags])=>childFromPoint(parent, x, y, flags),
         },
@@ -3237,6 +4861,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /** HWND ChildWindowFromPoint(HWND hWndParent, POINT pt) */
         ChildWindowFromPoint: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0),
         },
@@ -3249,6 +4874,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         RealChildWindowFromPoint: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0x0001 | 0x0004),
         },
@@ -3263,10 +4889,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * it on to copy from address zero.
          */
         CharNextA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -3277,10 +4904,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
         /** LPWSTR CharNextW(LPCWSTR lpsz): CharNextA, a character being two bytes */
         CharNextW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -3302,8 +4930,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, count >>> 0), OEM_PAGE, ANSI_PAGE));
+                // Null on either side is refused, as for the uncounted form.
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), count >>> 0), OEM_PAGE, ANSI_PAGE));
                 return 1;
             },
         },
@@ -3313,8 +4946,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, count >>> 0), ANSI_PAGE, OEM_PAGE));
+                // Null on either side is refused, as for the uncounted form.
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), count >>> 0), ANSI_PAGE, OEM_PAGE));
                 return 1;
             },
         },
@@ -3329,17 +4967,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
                 let length = 0;
-                while (host.readMemory((source >>> 0) + length, 1)[0] !== 0)
+                while (host.readMemory(wholeAddress(source) + length, 1)[0] !== 0)
                 {
                     length++;
                 }
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, length + 1), OEM_PAGE, ANSI_PAGE));
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), length + 1), OEM_PAGE, ANSI_PAGE));
                 return 1;
             },
         },
@@ -3349,13 +4987,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
-                const text = host.readCString(source >>> 0, 0x10000);
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, text.length + 1), ANSI_PAGE, OEM_PAGE));
+                const text = host.readCString(wholeAddress(source), 0x10000);
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), text.length + 1), ANSI_PAGE, OEM_PAGE));
                 return 1;
             },
         },
@@ -3370,12 +5008,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
-                const text = decodeOem(host.readMemory(source >>> 0, count >>> 0));
-                host.writeMemory(target >>> 0, textBytes(text, true).subarray(0, text.length * 2));
+                const text = decodeOem(host.readMemory(wholeAddress(source), count >>> 0));
+                host.writeMemory(wholeAddress(target), textBytes(text, true).subarray(0,
+                    text.length * 2));
                 return 1;
             },
         },
@@ -3385,13 +5024,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
-                const length = host.readCString(source >>> 0, 0x10000).length;
-                const text = decodeOem(host.readMemory(source >>> 0, length));
-                host.writeMemory(target >>> 0, textBytes(text, true));
+                const length = host.readCString(wholeAddress(source), 0x10000).length;
+                const text = decodeOem(host.readMemory(wholeAddress(source), length));
+                host.writeMemory(wholeAddress(target), textBytes(text, true));
                 return 1;
             },
         },
@@ -3399,24 +5038,24 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * BOOL CharToOemBuffW(LPCWSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
          *
-         * Exactly that many characters, each to its OEM byte, or to the
-         * default character where the page has none.
+         * Exactly that many characters, each to its OEM byte, its best fit,
+         * or '_' where the page has nothing close.
          */
         CharToOemBuffW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
-                const units = host.readMemory(source >>> 0, (count >>> 0) * 2);
+                const units = host.readMemory(wholeAddress(source), (count >>> 0) * 2);
                 let text = '';
                 for (let at = 0; at + 1 < units.length; at += 2)
                 {
                     text += String.fromCharCode(units[at] | units[at + 1] << 8);
                 }
-                host.writeMemory(target >>> 0, encodeOem(text));
+                host.writeMemory(wholeAddress(target), charToOem(text));
                 return 1;
             },
         },
@@ -3426,14 +5065,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
-                const text = readWideString(source >>> 0);
+                const text = readWideString(wholeAddress(source));
                 const bytes = new Uint8Array(text.length + 1);
-                bytes.set(encodeOem(text));
-                host.writeMemory(target >>> 0, bytes);
+                bytes.set(charToOem(text));
+                host.writeMemory(wholeAddress(target), bytes);
                 return 1;
             },
         },
@@ -3446,7 +5085,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * converted and handed back as a value; anything else is a pointer to
          * a string converted in place, and the pointer is the answer.
          */
-        CharLowerA: caseOfString(false),
+        CharLowerA: { ...caseOfString(false), returns: 'pointer' },
         CharUpperA: caseOfString(true),
 
         /**
@@ -3467,7 +5106,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          *
          * The same, a character being a UTF-16 unit.
          */
-        CharLowerW: caseOfWideString(false),
+        CharLowerW: { ...caseOfWideString(false), returns: 'pointer' },
         CharUpperW: caseOfWideString(true),
         CharLowerBuffW: caseOfWideBuffer(false),
         CharUpperBuffW: caseOfWideBuffer(true),
@@ -3491,15 +5130,32 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)
          *
-         * The previous character, never before the start: at the start the
-         * answer is the start, which is how a caller walking backwards knows
-         * to stop.
+         * The previous character in the process's page, never before the
+         * start: at or before the start the answer is the pointer as it came,
+         * which is how a caller walking backwards knows to stop.
          */
         CharPrevA: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, current])=>(
-                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 1 : start >>> 0),
+            handler: ([start, current])=>previousCharacter(0, wholeAddress(start),
+                wholeAddress(current)),
+        },
+
+        /**
+         * LPSTR CharPrevExA(WORD CodePage, LPCSTR lpStart, LPCSTR lpCurrentChar, DWORD dwFlags)
+         *
+         * CharPrevA in a code page the caller names. In a double-byte page
+         * the characters are found from the start forwards, a lead byte
+         * taking the byte after it whatever that is, since a trail byte can
+         * look like a lead one.
+         */
+        CharPrevExA: {
+            returns: 'pointer',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([codePage, start, current])=>
+                previousCharacter(codePage & 0xffff, wholeAddress(start), wholeAddress(current)),
         },
 
         /**
@@ -3509,10 +5165,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * past the start -- not the start, as the ANSI call answers.
          */
         CharPrevW: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, current])=>(
-                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 2 : current >>> 0),
+            handler: ([start, current])=>(wholeAddress(current) > wholeAddress(start)
+                ? wholeAddress(current) - 2 : wholeAddress(current)),
         },
 
         /**
@@ -3524,10 +5181,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * stepped over.
          */
         CharNextExA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([codePage, text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -3666,8 +5324,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         GrayStringA: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
         WinHelpA: { argBytes: 16, handler: ()=>0 },
-        /** void NotifyWinEvent(DWORD event, HWND hwnd, LONG idObject, LONG idChild): nobody listens */
-        NotifyWinEvent: { argBytes: 16, handler: ()=>0 },
         GrayStringW: { argBytes: 36, handler: ()=>0 },
         TabbedTextOutW: { argBytes: 32, handler: ()=>0 },
         WinHelpW: { argBytes: 16, handler: ()=>0 },
@@ -3770,11 +5426,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, rect])=>{
                 const box = live(hwnd)?.regionBox ?? null;
-                if (!box || (rect >>> 0) === 0)
+                if (!box || wholeAddress(rect) === 0)
                 {
                     return REGION_ERROR;
                 }
-                writeRect(host, rect >>> 0, box);
+                writeRect(host, wholeAddress(rect), box);
                 return SIMPLEREGION;
             },
         },
@@ -3849,11 +5505,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                // No room, not even for the terminator: nothing is written,
+                // and a NULL buffer is what such a caller passes.
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
-                return writeString(name >>> 0, text, count | 0);
+                return writeString(wholeAddress(name), text, count | 0);
             },
         },
         GetClipboardFormatNameW: {
@@ -3861,7 +5519,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([format, name, count])=>{
                 const text = clipboardFormatName(format >>> 0);
-                if (text === null)
+                if (text === null || (count | 0) <= 0)
                 {
                     return 0;
                 }
@@ -3894,10 +5552,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
-                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(wholeAddress(instance), id & 0xffff) ?? null;
+                if (text === null || wholeAddress(buffer) === 0 || (size | 0) <= 0)
                 {
-                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    if (wholeAddress(buffer) !== 0 && (size | 0) > 0)
                     {
                         host.writeMemory(buffer, new Uint8Array(1));
                     }
@@ -3926,24 +5585,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
-                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(wholeAddress(instance), id & 0xffff) ?? null;
+                if (text === null || wholeAddress(buffer) === 0 || (size | 0) <= 0)
                 {
-                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    if (wholeAddress(buffer) !== 0 && (size | 0) > 0)
                     {
                         host.writeMemory(buffer, new Uint8Array(2));
                     }
                     return 0;
                 }
                 const kept = text.slice(0, (size | 0) - 1);
-                const bytes = new Uint8Array((kept.length + 1) * 2);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    const code = kept.charCodeAt(at);
-                    bytes[at * 2] = code & 0xff;
-                    bytes[at * 2 + 1] = code >> 8;
-                }
-                host.writeMemory(buffer, bytes);
+                host.writeMemory(buffer, utf16z(kept));
                 return kept.length;
             },
         },
@@ -4103,7 +5756,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([first, second])=>{
                 const a = first >>> 0;
-                const b = second >>> 0;
+                const b = wholeAddress(second);
                 return a === b ? 0 : (a < b ? -1 >>> 0 : 1);
             },
         },
@@ -4129,16 +5782,33 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         LoadImageA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type, , , flags])=>
-                loadImage(instance, name, type, false, flags),
+            handler: ([instance, name, type, cx, , flags])=>
+                loadImage(instance, name, type, false, flags, cx),
         },
 
         /** HANDLE LoadImageW(HINSTANCE hInst, LPCWSTR name, UINT type, int cx, int cy, UINT) */
         LoadImageW: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([instance, name, type, , , flags])=>
-                loadImage(instance, name, type, true, flags),
+            handler: ([instance, name, type, cx, , flags])=>
+                loadImage(instance, name, type, true, flags, cx),
+        },
+
+        /**
+         * UINT PrivateExtractIconsA(LPCSTR szFileName, int nIconIndex, int cxIcon,
+         *   int cyIcon, HICON *phicon, UINT *piconid, UINT nIcons, UINT flags)
+         */
+        PrivateExtractIconsA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, false),
+        },
+
+        /** UINT PrivateExtractIconsW(LPCWSTR szFileName, ...): the same, the name wide. */
+        PrivateExtractIconsW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, true),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */
@@ -4161,14 +5831,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         LoadCursorFromFileA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, false, MAX_PATH)),
+            handler: ([name])=>loadCursorFile(readText(host, wholeAddress(name), false, MAX_PATH)),
         },
 
         /** HCURSOR LoadCursorFromFileW(LPCWSTR lpFileName) */
         LoadCursorFromFileW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, true, MAX_PATH)),
+            handler: ([name])=>loadCursorFile(readText(host, wholeAddress(name), true, MAX_PATH)),
         },
 
         /**
@@ -4239,13 +5909,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([info])=>{
                 const CURSORINFO_SIZE = 20;
                 const CURSOR_SHOWING = 0x1;
-                if ((info >>> 0) === 0 || readU32(info >>> 0) !== CURSORINFO_SIZE)
+                if (wholeAddress(info) === 0 || readU32(wholeAddress(info)) !== CURSORINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const at = host.cursor?.() ?? { x: 0, y: 0 };
-                writeU32s(host, (info >>> 0) + 4, [cursorShowCount >= 0 ? CURSOR_SHOWING : 0,
+                writeU32s(host, wholeAddress(info) + 4, [cursorShowCount >= 0 ? CURSOR_SHOWING : 0,
                     currentCursor, at.x, at.y]);
                 return 1;
             },
@@ -4274,7 +5944,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([point])=>{
-                if ((point >>> 0) === 0)
+                if (wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -4324,45 +5994,53 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([count, inputs, size])=>{
-                if ((size | 0) !== INPUT_SIZE || (count >>> 0) === 0)
+                const { INPUT } = layouts;
+                if ((size | 0) !== INPUT.SIZE || (count >>> 0) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((inputs >>> 0) === 0)
+                if (wholeAddress(inputs) === 0)
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
                 const events = count >>> 0;
-                const at = inputs >>> 0;
-                let inserted = 0;
-                for (let index = 0; index < events; index++)
-                {
-                    const piece = at + index * INPUT_SIZE;
-                    const type = readU32(piece);
+                const at = wholeAddress(inputs);
+                // One after the other: a low-level hook may run guest code
+                // between two of them.
+                /** @param {number} index @param {number} inserted @returns {any} */
+                const next = (index, inserted)=>{
+                    if (index >= events)
+                    {
+                        return inserted;
+                    }
+                    const piece = at + index * INPUT.SIZE;
+                    const type = readU32(piece + INPUT.type);
                     if (type === INPUT_MOUSE)
                     {
-                        injectMouse({ dx: readI32(piece + 4), dy: readI32(piece + 8),
-                            data: readU32(piece + 12), flags: readU32(piece + 16) });
-                        inserted++;
+                        return andThen(injectMouse({ dx: readI32(piece + INPUT.dx),
+                            dy: readI32(piece + INPUT.dy), data: readU32(piece + INPUT.mouseData),
+                            flags: readU32(piece + INPUT.dwFlags),
+                            extra: readU32(piece + INPUT.mouseExtra) }),
+                        ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_KEYBOARD)
+                    if (type === INPUT_KEYBOARD)
                     {
-                        injectKeyboard({ wVk: readU16(piece + 4),
-                            wScan: readU16(piece + 6), flags: readU32(piece + 8) });
-                        inserted++;
+                        return andThen(injectKeyboard({ wVk: readU16(piece + INPUT.wVk),
+                            wScan: readU16(piece + INPUT.wScan),
+                            flags: readU32(piece + INPUT.keyFlags),
+                            extra: readU32(piece + INPUT.keyExtra) }),
+                        ()=>next(index + 1, inserted + 1));
                     }
-                    else if (type === INPUT_HARDWARE)
+                    if (type === INPUT_HARDWARE)
                     {
-                        inserted++;
+                        return next(index + 1, inserted + 1);
                     }
-                    else
-                    {
-                        host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
-                    }
-                }
-                return inserted;
+                    host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
+                    return next(index + 1, inserted);
+                };
+                return next(0, 0);
             },
         },
 
@@ -4375,10 +6053,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         keybd_event: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([vk, scan, flags])=>{
-                injectKeyboard({ wVk: vk & 0xff, wScan: scan & 0xff, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([vk, scan, flags, extra])=>andThen(injectKeyboard({ wVk: vk & 0xff,
+                wScan: scan & 0xff, flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -4390,10 +6066,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         mouse_event: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([flags, dx, dy, data])=>{
-                injectMouse({ dx, dy, data, flags: flags >>> 0 });
-                return 0;
-            },
+            handler: ([flags, dx, dy, data, extra])=>andThen(injectMouse({ dx, dy, data,
+                flags: flags >>> 0, extra: extra >>> 0 }), ()=>0),
         },
 
         /**
@@ -4409,7 +6083,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                clip = (rect >>> 0) === 0 ? null : readRect(host, rect >>> 0);
+                clip = wholeAddress(rect) === 0 ? null : readRect(host, wholeAddress(rect));
                 host.clipCursor?.(clip);
                 return 1;
             },
@@ -4425,12 +6099,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
                 const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                writeRect(host, rect >>> 0, clip === null ? whole : {
+                writeRect(host, wholeAddress(rect), clip === null ? whole : {
                     left: Math.max(clip.left, 0),
                     top: Math.max(clip.top, 0),
                     right: Math.min(clip.right, screen.width),
@@ -4480,6 +6154,113 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * BOOL GetLastInputInfo(PLASTINPUTINFO plii): cbSize, then dwTime, the
+         * tick count of the last input -- nobody's input is counted apart
+         * here, so the start of the run.
+         */
+        GetLastInputInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if (wholeAddress(info) === 0
+                    || new DataView(host.readMemory(wholeAddress(info), 4).slice().buffer)
+                        .getUint32(0, true) !== 8)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, wholeAddress(info) + 4, [0]);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetPointerDevices(UINT32 *deviceCount, POINTER_DEVICE_INFO *pointerDevices)
+         *
+         * No pen and no touch screen: the mouse is not a pointer device in
+         * this sense, so none are listed.
+         */
+        GetPointerDevices: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([count])=>{
+                if (wholeAddress(count) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU32s(host, wholeAddress(count), [0]);
+                return 1;
+            },
+        },
+
+        /** BOOL RegisterPointerDeviceNotifications(HWND window, BOOL notifyRange): none ever come. */
+        RegisterPointerDeviceNotifications: { argBytes: 8, handler: ()=>1 },
+
+        /** DWORD GetGuiResources(HANDLE hProcess, DWORD uiFlags): not counted here. */
+        GetGuiResources: { argBytes: 8, handler: ()=>0 },
+
+        /**
+         * LONG GetDisplayConfigBufferSizes(UINT32 flags, UINT32 *numPathArrayElements,
+         *     UINT32 *numModeInfoArrayElements), and QueryDisplayConfig and
+         *     DisplayConfigGetDeviceInfo
+         *
+         * The display configuration database is not kept: ERROR_NOT_SUPPORTED,
+         * the answer of a driver without it, and a caller falls back to
+         * EnumDisplayDevices and EnumDisplaySettings.
+         */
+        GetDisplayConfigBufferSizes: { argBytes: 12, handler: ()=>ERROR_NOT_SUPPORTED },
+        QueryDisplayConfig: { argBytes: 24, handler: ()=>ERROR_NOT_SUPPORTED },
+        DisplayConfigGetDeviceInfo: { argBytes: 4, handler: ()=>ERROR_NOT_SUPPORTED },
+
+        /**
+         * HPOWERNOTIFY RegisterPowerSettingNotification(HANDLE hRecipient,
+         *     LPCGUID PowerSettingGuid, DWORD Flags), and
+         *     RegisterSuspendResumeNotification(HANDLE hRecipient, DWORD Flags)
+         *
+         * Power settings changing and the machine suspending are told to the
+         * window as WM_POWERBROADCAST. Neither happens here, so the
+         * registration is a handle nothing will ever use, as a device
+         * notification's is.
+         */
+        RegisterPowerSettingNotification: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([recipient, setting])=>{
+                if ((recipient >>> 0) === 0 || wholeAddress(setting) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return host.handles.open('power-notification', { recipient: recipient >>> 0 });
+            },
+        },
+        RegisterSuspendResumeNotification: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([recipient])=>{
+                if ((recipient >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return host.handles.open('power-notification', { recipient: recipient >>> 0 });
+            },
+        },
+
+        /** BOOL UnregisterPowerSettingNotification(HPOWERNOTIFY), UnregisterSuspendResumeNotification alike */
+        UnregisterPowerSettingNotification: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>unregisterPower(handle),
+        },
+        UnregisterSuspendResumeNotification: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>unregisterPower(handle),
+        },
+
+        /**
          * SHORT GetAsyncKeyState(int vKey) / SHORT GetKeyState(int nVirtKey)
          *
          * The high bit says the key is down; the low bit of GetAsyncKeyState
@@ -4499,11 +6280,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([key])=>host.asyncKeyState?.(key >>> 0) ?? 0,
         },
 
-        /** SHORT GetKeyState(int nVirtKey) */
+        /**
+         * SHORT GetKeyState(int nVirtKey)
+         *
+         * The thread's synchronous state: each key and button as of the last
+         * input message the thread took (`messages.js`), the keys as they
+         * are until it takes one. GetAsyncKeyState is the keys as they are.
+         */
         GetKeyState: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+            handler: ([key])=>host.queue?.syncedKeyState?.(key >>> 0)
+                ?? host.keyState?.(key >>> 0) ?? 0,
         },
 
         /**
@@ -4518,12 +6306,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
-                if ((state >>> 0) === 0)
+                if (wholeAddress(state) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(state >>> 0, host.keyboardState?.() ?? new Uint8Array(256));
+                host.writeMemory(wholeAddress(state), host.queue?.syncedKeyboard?.()
+                    ?? host.keyboardState?.() ?? new Uint8Array(256));
                 return 1;
             },
         },
@@ -4539,12 +6328,14 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
-                if ((state >>> 0) === 0)
+                if (wholeAddress(state) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.setKeyboardState?.(host.readMemory(state >>> 0, 256));
+                const bytes = host.readMemory(wholeAddress(state), 256);
+                host.queue?.setSyncedKeyboard?.(bytes);
+                host.setKeyboardState?.(bytes);
                 return 1;
             },
         },
@@ -4652,10 +6443,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ()=>HKL_EN_US,
         },
 
-        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME`, which nothing here changes. */
+        /** UINT GetCaretBlinkTime(void): `CARET_BLINK_TIME` until SetCaretBlinkTime sets another. */
         GetCaretBlinkTime: {
             argBytes: 0,
-            handler: ()=>CARET_BLINK_TIME,
+            handler: ()=>caretBlinkTime,
+        },
+
+        /** BOOL SetCaretBlinkTime(UINT uMSeconds): INFINITE is a caret that does not blink. */
+        SetCaretBlinkTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([ms])=>{
+                caretBlinkTime = ms >>> 0;
+                return 1;
+            },
         },
 
         /** void SetLastErrorEx(DWORD dwErrCode, DWORD dwType): the type is ignored, as since XP. */
@@ -4676,16 +6477,40 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetDoubleClickTime: {
             argBytes: 0,
-            handler: ()=>doubleClickTime,
+            handler: ()=>clickTime.value || DOUBLE_CLICK_TIME,
         },
 
-        /** BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default again. */
+        /**
+         * BOOL SetDoubleClickTime(UINT uInterval), zero meaning the default
+         * again: for the session, the profile left as it was (sysparams.c
+         * test_SPI_SETDOUBLECLICKTIME).
+         */
         SetDoubleClickTime: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([interval])=>{
-                doubleClickTime = (interval >>> 0) === 0 ? DOUBLE_CLICK_TIME : interval >>> 0;
+                clickTime.value = interval >>> 0;
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL SwapMouseButton(BOOL fSwap)
+         *
+         * Whether the buttons are swapped, as SPI_SETMOUSEBUTTONSWAP sets it
+         * and SM_SWAPBUTTON reads it, answering whether they were; the
+         * profile is left as it was.
+         */
+        SwapMouseButton: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([swap])=>{
+                const setting = /** @type {{ value: number }} */ (
+                    metricSettings.get(SPI_SETMOUSEBUTTONSWAP));
+                const was = setting.value;
+                setting.value = (swap >>> 0) !== 0 ? 1 : 0;
+                sayOnce('the buttons are reported as swapped and not swapped in input');
+                return was;
             },
         },
 
@@ -4722,11 +6547,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 {
                     return 1;
                 }
-                if ((room | 0) < 0 || (list >>> 0) === 0)
+                if ((room | 0) < 0 || wholeAddress(list) === 0)
                 {
                     return 0;
                 }
-                writeU32s(host, list >>> 0, [HKL_EN_US]);
+                writeU32s(host, wholeAddress(list), [HKL_EN_US]);
                 return 1;
             },
         },
@@ -4743,7 +6568,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([layout])=>{
                 const HKL_PREV = 0;
                 const HKL_NEXT = 1;
-                const wanted = layout >>> 0;
+                const wanted = wholeAddress(layout);
                 if (wanted === HKL_PREV || wanted === HKL_NEXT || wanted === HKL_EN_US)
                 {
                     return HKL_EN_US;
@@ -4948,10 +6773,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         DragDetect: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([hwnd, x, y])=>{
                 const VK_LBUTTON = 0x01;
-                const WM_MOUSEMOVE = 0x0200;
                 const WM_LBUTTONUP = 0x0202;
                 const WM_MOUSELAST = 0x020e;
                 const SM_CXDRAG = 68;
@@ -5007,16 +6832,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * message and never gets past the window it was for.
          */
         SetTimer: {
+            returns: 'pointer',
             argBytes: 16,
+            addresses: [3],
             /** @param {number[]} args */
-            handler: ([hwnd, id, elapse, proc])=>{
-                const window = hwnd >>> 0;
+            handler: args=>{
+                const [hwnd, , elapse, proc] = args;
+                const window = wholeAddress(hwnd);
+                // The id is the program's own name for the timer, a pointer of
+                // its own often enough: whole.
+                const id = forwarded(args, 1);
                 // A thread timer named again by the id SetTimer gave it is
                 // retuned, as a window's is; any other id is a new timer.
-                const timerId = window === 0 && !host.queue.hasTimer?.(0, id >>> 0)
-                    ? nextTimerId++
-                    : id >>> 0;
-                host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
+                const timerId = window === 0 && !host.queue.hasTimer?.(0, id) ? nextTimerId++ : id;
+                host.queue.setTimer(window, timerId, elapse >>> 0, proc);
                 return timerId === 0 ? 1 : timerId;
             },
         },
@@ -5025,7 +6854,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         KillTimer: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, id])=>(host.queue.killTimer(hwnd >>> 0, id >>> 0) ? 1 : 0),
+            handler: args=>(host.queue.killTimer(args[0] >>> 0, forwarded(args, 1)) ? 1 : 0),
         },
 
         /**
@@ -5041,7 +6870,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         SendMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>sendMessage(hwnd, message, wParam, lParam),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], false, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**
@@ -5053,8 +6886,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         SendMessageW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>
-                sendMessage(hwnd, message, wParam, lParam, true),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], true, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**
@@ -5097,7 +6933,39 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>programs(callerHolds(host.active?.() ?? 0)),
+            handler: ()=>programs(callerHolds(host.active?.() ?? 0)
+                || (host.activeOfThread?.(host.callerThread?.()) ?? 0)),
+        },
+
+        /**
+         * BOOL GetGUIThreadInfo(DWORD idThread, PGUITHREADINFO pgui)
+         *
+         * The GUITHREADINFO of the thread with the input: cbSize, flags, then
+         * the active, focus, capture, menu-owner, move-size and caret windows
+         * (each a pointer wide) and the caret's rectangle. No menu is tracked
+         * and no window moved here, and the caret is not reported, so those
+         * stay zero. A structure whose cbSize is not its size is refused.
+         */
+        GetGUIThreadInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                const pointer = host.pointerSize ?? 4;
+                const size = 8 + 6 * pointer + 16;
+                if (wholeAddress(out) === 0 || readU32(wholeAddress(out)) !== size)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const bytes = new Uint8Array(size);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, size, true);
+                const held = [host.active?.() ?? 0, host.focus?.() ?? 0, host.capture()];
+                held.forEach((hwnd, index)=>
+                    view.setUint32(8 + index * pointer, hwnd >>> 0, true));
+                host.writeMemory(wholeAddress(out), bytes);
+                return 1;
+            },
         },
 
         /**
@@ -5142,13 +7010,57 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             },
         },
 
+        // A 64-bit user32's pointer-sized class longs: eight of the class's
+        // extra bytes whole, or a field GCLP_ names sign-extended from the
+        // dword the class keeps.
+        ...host.pointerSize === 8 ? {
+            /** ULONG_PTR GetClassLongPtrA(HWND hWnd, int nIndex) */
+            GetClassLongPtrA: {
+                returns: 'pointer',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const cls = classOfWindow(hwnd);
+                    return cls ? readClassLongPtr(cls, index) : 0n;
+                },
+            },
+            /** ULONG_PTR GetClassLongPtrW(HWND hWnd, int nIndex) */
+            GetClassLongPtrW: {
+                returns: 'pointer',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([hwnd, index])=>{
+                    const cls = classOfWindow(hwnd);
+                    return cls ? readClassLongPtr(cls, index, true) : 0n;
+                },
+            },
+            /** ULONG_PTR SetClassLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetClassLongPtrA: {
+                returns: 'pointer',
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high,
+                    false),
+            },
+            /** ULONG_PTR SetClassLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
+            SetClassLongPtrW: {
+                returns: 'pointer',
+                argBytes: 16,
+                quadwords: [2],
+                /** @param {number[]} args */
+                handler: ([hwnd, index, low, high])=>setClassLongPtr(hwnd, index, low, high,
+                    true),
+            },
+        } : {},
+
         /** DWORD SetClassLongA(HWND hWnd, int nIndex, LONG dwNewLong) */
         SetClassLongA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }
@@ -5209,7 +7121,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index])=>{
                 const cls = classOfWindow(hwnd);
-                return cls ? readClassLong(cls, index) : 0;
+                return cls ? readClassLong(cls, index, true) : 0;
             },
         },
 
@@ -5219,12 +7131,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }
-                const previous = readClassLong(cls, index);
-                writeClassLong(cls, index, value);
+                const previous = readClassLong(cls, index, true);
+                writeClassLong(cls, index, value, true);
                 return previous;
             },
         },
@@ -5246,19 +7158,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * UINT RealGetWindowClassA/W(HWND, LPSTR/LPWSTR, UINT)
          *
-         * The class a window was made with: a superclass of a system class
-         * would answer the system class it is built on, and no window here is
-         * made on one, so it is the class name.
+         * The built-in class a window's messages were handled by - a
+         * superclass of Button answers Button once Button's procedure has seen
+         * the message that marks it (windows.js `REAL_CLASSES`) - else the
+         * class it was made of.
          */
         RealGetWindowClassA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, false),
+            handler: args=>writeClassName(args, false, true),
         },
         RealGetWindowClassW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, true),
+            handler: args=>writeClassName(args, true, true),
         },
 
         /**
@@ -5288,21 +7201,62 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 // A change is announced, as Windows announces it: a control
                 // greys itself on WM_ENABLE, and a program watches for it.
+                // A window disabled while it has the keyboard focus loses it
+                // first, to no window (Wine's dialog.c test_DisabledDialogTest
+                // sees Windows leave the focus nowhere). The focus is the
+                // input state's, so only a thread sharing it takes it away;
+                // another thread's disabling leaves it (win.c test_enablewindow).
                 const WM_ENABLE = 0x000a;
-                return andThen(sendMessage(hwnd, WM_ENABLE, disable ? 0 : 1, 0),
-                    ()=>(wasDisabled ? 1 : 0));
+                const losing = disable && (host.focus?.() ?? 0) === (hwnd >>> 0)
+                    && callerHolds(hwnd >>> 0) !== 0
+                    ? host.setFocus(0, host.callerThread?.()) : 0;
+                return andThen(losing, ()=>andThen(sendMessage(hwnd, WM_ENABLE,
+                    disable ? 0 : 1, 0), ()=>(wasDisabled ? 1 : 0)));
             },
         },
 
-        /** HWND SetActiveWindow(HWND hWnd) */
+        /**
+         * HWND SetActiveWindow(HWND hWnd)
+         *
+         * As win.c test_SetActiveWindow finds it: a handle that names no
+         * window is ERROR_INVALID_WINDOW_HANDLE; a child changes nothing and
+         * answers the active window; the desktop and another thread's window
+         * change nothing and answer NULL; and NULL, as Windows 10 answers it,
+         * changes nothing and answers NULL, the last error untouched (win.c
+         * test_SetActiveWindow_0_proc). Called by a thread while another
+         * thread of the program has the activation, it makes the window that
+         * thread's own active one and leaves the foreground where it is.
+         */
         SetActiveWindow: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
                 const previous = programs(host.active?.() ?? 0);
-                if (!live(hwnd))
+                if ((hwnd >>> 0) === 0)
                 {
                     return 0;
+                }
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
+                {
+                    return previous;
+                }
+                if (host.isDesktop?.(record) || callerHolds(hwnd >>> 0) === 0)
+                {
+                    return 0;
+                }
+                // Another thread of the program has the activation: the
+                // window is this thread's active one, and the foreground
+                // stays with that thread.
+                const current = host.active?.() ?? 0;
+                if (current !== 0 && callerHolds(current) === 0 && host.activateInThread)
+                {
+                    return host.activateInThread(hwnd >>> 0, host.callerThread?.());
                 }
                 return andThen(host.activate?.(hwnd >>> 0,
                     { thread: host.callerThread?.(), sent: true }), ()=>previous);
@@ -5341,9 +7295,50 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([processId])=>{
-                const id = processId >>> 0;
+                const id = wholeAddress(processId);
                 if (id !== ASFW_ANY && id !== (host.processId ?? 0)
                     && host.processExists?.(id) === false)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * int LookupIconIdFromDirectory(PBYTE presbits, BOOL fIcon) and
+         * int LookupIconIdFromDirectoryEx(PBYTE presbits, BOOL fIcon,
+         *     int cxDesired, int cyDesired, UINT Flags)
+         *
+         * The id of the image an RT_GROUP_ICON or RT_GROUP_CURSOR directory
+         * offers at the size asked for (the system's icon or cursor size for
+         * zero), the deepest of those; its first image where none is that
+         * size, as LoadIcon chooses (`groupImageId`). Zero for no directory.
+         */
+        LookupIconIdFromDirectory: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([bits, icon])=>lookupIconId(bits, icon, 0),
+        },
+        LookupIconIdFromDirectoryEx: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([bits, icon, width])=>lookupIconId(bits, icon, width | 0),
+        },
+
+        /**
+         * BOOL LockSetForegroundWindow(UINT uLockCode)
+         *
+         * Keeps other processes from taking the foreground (LSFW_LOCK), or
+         * lets them again (LSFW_UNLOCK). Nothing here takes it from a program,
+         * so the lock holds nothing to hold; any other code is refused.
+         */
+        LockSetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>{
+                if ((code >>> 0) !== 1 && (code >>> 0) !== 2)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -5448,12 +7443,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([parent, after, className, windowName])=>{
-                const wanted = (className >>> 0) === 0
+                const wanted = wholeAddress(className) === 0
                     ? null
-                    : host.readCString(className >>> 0, MAX_NAME);
-                const title = (windowName >>> 0) === 0
+                    : host.readCString(wholeAddress(className), MAX_NAME);
+                const title = wholeAddress(windowName) === 0
                     ? null
-                    : host.readCString(windowName >>> 0, MAX_NAME);
+                    : host.readCString(wholeAddress(windowName), MAX_NAME);
                 const siblings = ordered().filter(record=>record.parent === (parent >>> 0));
                 const start = (after >>> 0) === 0
                     ? 0
@@ -5533,15 +7528,15 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                         host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                         return 0;
                     }
-                    if ((out >>> 0) !== 0)
+                    if (wholeAddress(out) !== 0)
                     {
-                        writeU32s(host, out >>> 0, [other.processId]);
+                        writeU32s(host, wholeAddress(out), [other.processId]);
                     }
                     return other.threadId;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
+                    writeU32s(host, wholeAddress(out), [host.processId ?? 0x1000]);
                 }
                 return threadIdOf(record.thread) ?? threadIdOf(host.callerThread?.()) ?? 1;
             },
@@ -5563,11 +7558,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, left, top, right, bottom])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, {
+                writeRect(host, wholeAddress(out), {
                     left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
                 });
                 return 1;
@@ -5578,11 +7573,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                 return 1;
             },
         },
@@ -5591,11 +7586,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([out, source])=>{
-                if ((out >>> 0) === 0 || (source >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(source) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, readRect(host, source >>> 0));
+                writeRect(host, wholeAddress(out), readRect(host, wholeAddress(source)));
                 return 1;
             },
         },
@@ -5604,12 +7599,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                if ((first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 return a.left === b.left && a.top === b.top
                     && a.right === b.right && a.bottom === b.bottom ? 1 : 0;
             },
@@ -5619,12 +7614,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, dx, dy])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
-                writeRect(host, rect >>> 0, {
+                const r = readRect(host, wholeAddress(rect));
+                writeRect(host, wholeAddress(rect), {
                     left: r.left + (dx | 0), top: r.top + (dy | 0),
                     right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
                 });
@@ -5636,12 +7631,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, dx, dy])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
-                writeRect(host, rect >>> 0, {
+                const r = readRect(host, wholeAddress(rect));
+                writeRect(host, wholeAddress(rect), {
                     left: r.left - (dx | 0), top: r.top - (dy | 0),
                     right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
                 });
@@ -5654,11 +7649,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, x, y])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
+                const r = readRect(host, wholeAddress(rect));
                 const px = x | 0;
                 const py = y | 0;
                 return px >= r.left && px < r.right && py >= r.top && py < r.bottom ? 1 : 0;
@@ -5719,12 +7714,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 const meet = {
                     left: Math.max(a.left, b.left),
                     top: Math.max(a.top, b.top),
@@ -5732,7 +7728,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     bottom: Math.min(a.bottom, b.bottom),
                 };
                 const empty = meet.right <= meet.left || meet.bottom <= meet.top;
-                writeRect(host, out >>> 0,
+                writeRect(host, wholeAddress(out),
                     empty ? { left: 0, top: 0, right: 0, bottom: 0 } : meet);
                 return empty ? 0 : 1;
             },
@@ -5743,11 +7739,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 1;
                 }
-                const r = readRect(host, rect >>> 0);
+                const r = readRect(host, wholeAddress(rect));
                 return r.right <= r.left || r.bottom <= r.top ? 1 : 0;
             },
         },
@@ -5771,17 +7767,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 /** @param {{ left: number, top: number, right: number, bottom: number }} r */
                 const empty = r=>r.right <= r.left || r.bottom <= r.top;
                 if (empty(a))
                 {
-                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                     return 0;
                 }
                 const left = { ...a };
@@ -5814,7 +7811,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                         }
                     }
                 }
-                writeRect(host, out >>> 0, left);
+                writeRect(host, wholeAddress(out), left);
                 return empty(left) ? 0 : 1;
             },
         },
@@ -5823,20 +7820,21 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 /** @param {{ left: number, top: number, right: number, bottom: number }} r */
                 const empty = r=>r.right <= r.left || r.bottom <= r.top;
                 if (empty(a) && empty(b))
                 {
-                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                     return 0;
                 }
-                writeRect(host, out >>> 0, empty(a) ? b : empty(b) ? a : {
+                writeRect(host, wholeAddress(out), empty(a) ? b : empty(b) ? a : {
                     left: Math.min(a.left, b.left),
                     top: Math.min(a.top, b.top),
                     right: Math.max(a.right, b.right),
@@ -5857,6 +7855,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         CallWindowProcA: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, false),
         },
@@ -5870,6 +7869,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         CallWindowProcW: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, true),
         },
@@ -5887,6 +7887,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([hwnd])=>{
                 if ((hwnd >>> 0) !== 0 && !live(hwnd))
                 {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
                 return host.setFocus(hwnd >>> 0, host.callerThread?.());

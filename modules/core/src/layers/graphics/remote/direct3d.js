@@ -10,7 +10,7 @@
  * and the played root that draws, wherever its calls are carried to.
  */
 
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 import { WAIT, createWriter } from './wire.js';
 
 /** D3DQUERYTYPE_EVENT. */
@@ -100,6 +100,10 @@ export function recordedDirect3D(factory, services, transport){
         // What the played device has to say about the program is the whole
         // of it; this one would add what only lacking a renderer makes it say.
         divergence: undefined,
+        // The recording's diagnostic, not the device's: an option the device
+        // does not take lands in its caps, and a function there makes the caps
+        // an object to number, which the played side's never are.
+        checkDraws: undefined,
         renderedElsewhere: true,
         allocate: (/** @type {number} */ bytes)=>{
             const address = guest(Math.max(bytes, 1));
@@ -156,14 +160,17 @@ export function recordedDirect3D(factory, services, transport){
         observe: targets.observe,
         // Written here only: the played side made the same copies in its own
         // memory when it answered.
+        // Each row is read where it lies and written at once, before the
+        // guest runs again: no copy of it is kept.
         applyMoves: write && services.readMemory
             ? (/** @type {any[]} */ moves)=>{
+                const rowAt = services.windowMemory ?? services.readMemory;
                 for (const move of moves)
                 {
                     for (let row = 0; row < move.rows; row++)
                     {
                         write(move.to + row * move.toPitch,
-                            services.readMemory(move.from + row * move.fromPitch, move.rowBytes));
+                            rowAt(move.from + row * move.fromPitch, move.rowBytes));
                     }
                 }
             }
@@ -272,61 +279,35 @@ export function createTargetReads(){
  *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     counts: () => import('./replay.js').OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void,
+ *     figures: () => import('../figures.js').FrameFigures | null }}
  *     `read` reads a batch of calls for `play`, and answers how long the look
- *     at its objects at a count of zero took when the batch made one
+ *     at its objects at a count of zero took when the batch made one; `figures`
+ *     is the device made last's (`figures.js`), sent with every present
  */
 export function playedDirect3D(factory, services){
-    const mirror = createMirror();
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    /** Whether a call is being played: what it writes, the recorded one wrote too. */
-    let playing = false;
-    const write = services.writeMemory;
-    const root = factory({
+    const played = playedOverMirror(memory=>factory({
         ...services,
         // Without memory of the caller's, nor does this one have any: a
         // device that draws refuses to be made so.
-        readMemory: services.readMemory && mirror.read,
-        windowMemory: services.readMemory
-            && ((/** @type {number} */ address, /** @type {number} */ length)=>
-                mirror.window(address, length)),
-        // Only what is sent writes the mirror, so it says what was written:
-        // the renderer uploads that, and compares nothing.
-        watchWrites: services.readMemory
-            && ((/** @type {number} */ address, /** @type {number} */ length)=>
-                mirror.watch(address, length)),
-        writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
-            mirror.write(address, bytes);
-            if (!playing)
-            {
-                write(address, bytes);
-            }
-        }),
-        allocate: ()=>/** @type {ReturnType<typeof createPlayer>} */ (player).allocate(),
-        free: ()=>{},
+        readMemory: services.readMemory && memory.read,
+        windowMemory: services.readMemory && memory.window,
+        watchWrites: services.readMemory && memory.watch,
+        writeMemory: services.writeMemory && memory.write,
+        allocate: memory.allocate,
+        free: memory.free,
         // The ramp reaches the display through the recorded device, which
         // the program sets it on; this one only has to know whether it does.
         gamma: services.gamma && { applies: ()=>services.gamma.applies(), set: ()=>{} },
-    });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read, borrow: services.borrow });
-    const live = player;
+    }), { write: services.writeMemory, borrow: services.borrow });
+    const { root } = played;
     return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                return live.play(call);
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: live.read,
-        counts: live.counts,
+        ...played,
+        /** The device made last's figures (`figures.js`), sent with every present. */
+        figures: ()=>root.figures?.() ?? null,
     };
 }
 
@@ -334,7 +315,7 @@ export function playedDirect3D(factory, services){
  * A carrier that plays each call where it is made: the recorded and the
  * played root in one thread.
  *
- * @param {ReturnType<typeof playedDirect3D>} played
+ * @param {Pick<ReturnType<typeof playedDirect3D>, 'read' | 'play' | 'spent'>} played
  * @returns {import('./replay.js').Transport}
  */
 export function playedAtOnce(played){
@@ -350,9 +331,15 @@ export function playedAtOnce(played){
             }
         }
         let answer;
-        played.read(writer.take(), call=>{
+        // The batch is read off the writer's own buffer, which comes back to
+        // be written on once nothing played from it keeps a view of it, as
+        // the worker's batches do: a copy of each batch was a fresh buffer
+        // for every call a program waits on.
+        const { buffer, length } = writer.give();
+        played.read(buffer, call=>{
             answer = played.play(call);
-        });
+        }, length);
+        played.spent(buffer, ()=>writer.reuse(buffer));
         return answer;
     };
     return {

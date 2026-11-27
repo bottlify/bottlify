@@ -22,6 +22,7 @@ import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** DirectXSetup's answer when everything is in place and no restart is needed. */
 export const DSETUPERR_SUCCESS = 0;
@@ -48,7 +49,7 @@ const LICENCE_LANGUAGES = new Map([
  * @param {Uint8Array} library @param {number} language
  * @returns {Uint8Array | null}
  */
-export function licenceIn(library, language){
+function licenceIn(library, language){
     const suffix = language === 0 ? 'ENG'
         : LICENCE_LANGUAGES.get(language) ?? LICENCE_LANGUAGES.get(language & 0x3ff);
     if (!suffix)
@@ -73,7 +74,7 @@ export function licenceIn(library, language){
  * other, each the decimal number the dotted form spells, as a file version's
  * words are -- `4.09.00.0904` is 0x00040009 and 0x00000388.
  */
-export const versionWords = (version = DIRECTX_VERSION)=>{
+const versionWords = (version = DIRECTX_VERSION)=>{
     const [major, minor, release, build] = version.split('.').map(Number);
     return { version: (major << 16 | minor) >>> 0, revision: (release << 16 | build) >>> 0 };
 };
@@ -144,8 +145,8 @@ export function createDsetupFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: async([buffer, room, language])=>{
-            const to = buffer >>> 0;
-            const capacity = room >>> 0;
+            const to = wholeAddress(buffer);
+            const capacity = wholeAddress(room);
             if (to !== 0 && capacity !== 0)
             {
                 host.writeMemory(to, new Uint8Array(wide ? 2 : 1));
@@ -197,13 +198,13 @@ export function createDsetupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([version, revision])=>{
-                if ((version >>> 0) !== 0)
+                if (wholeAddress(version) !== 0)
                 {
-                    host.writeMemory(version >>> 0, dword(words.version));
+                    host.writeMemory(wholeAddress(version), dword(words.version));
                 }
-                if ((revision >>> 0) !== 0)
+                if (wholeAddress(revision) !== 0)
                 {
-                    host.writeMemory(revision >>> 0, dword(words.revision));
+                    host.writeMemory(wholeAddress(revision), dword(words.revision));
                 }
                 return 1;
             },

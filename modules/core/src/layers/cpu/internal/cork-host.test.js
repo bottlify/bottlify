@@ -5,7 +5,7 @@
  */
 
 /**
- * The cork host without an emulator: its own memory and layout, the state
+ * The cork host: its own memory and layout, the state
  * block captured and restored whole, the eager flags word, and the cpu api's
  * context over it. A small program runs here too, for the interpreter tier's
  * instruction count; the wider interpreter tier is `cork-host.itest.js`.
@@ -13,6 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { noCache } from '../../cache/module.js';
 import { CORK_TSC_MHZ, cacheShare, createCorkHost } from './cork-host.js';
 import { freshThreadFpu } from './context.js';
 import * as engine from '../../../../../cork/src/index.js';
@@ -20,16 +21,23 @@ import * as engine from '../../../../../cork/src/index.js';
 const MEMORY = 4 << 20;
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 
-/** @param {Record<string, unknown>} [config] */
+/**
+ * A host whose slices end by their instruction count alone, whatever cork
+ * config a test adds: an interpreted slice otherwise ends once it has taken
+ * its time (`sliceMs`), and how long that is a busy machine decides.
+ *
+ * @param {Record<string, any>} [config]
+ */
 function host(config = {}){
+    const { cork = {}, ...rest } = config;
     return createCorkHost({
         engine,
         memorySize: MEMORY,
         trapPort: 0x1234,
         entryVector: 0x7000,
         initialStack: 0x300000,
-        cork: {},
-        ...config,
+        ...rest,
+        cork: { sliceMs: Infinity, ...cork },
     });
 }
 
@@ -108,6 +116,10 @@ test('a captured context round-trips every block field', ()=>{
     {
         block[at] = (at * 31 + 7) & 0xff;
     }
+    // No arithmetic record pending: one is folded into the flags word at the
+    // capture (the next test), the same state said otherwise.
+    new DataView(block.buffer, block.byteOffset).setUint32(layout.flagRecord ?? 0, 0, true);
+    const pattern = block.slice();
     const context = h.captureContext();
     block.fill(0);
     h.restoreContext(context);
@@ -120,9 +132,46 @@ test('a captured context round-trips every block field', ()=>{
         {
             continue;
         }
-        assert.equal(restored[at], (at * 31 + 7) & 0xff, `byte ${at}`);
+        assert.equal(restored[at], pattern[at], `byte ${at}`);
     }
 });
+
+test('a captured context carries the flags word whole: a region\'s pending record folded in',
+    ()=>{
+        // A .NET collector reads a stopped thread's EFLAGS and puts them back with
+        // its context: the word alone, the record beside it dropped, has to be
+        // the flags the thread's last instruction left.
+        const h = host();
+        const layout = h.blockLayout();
+        const block = h.block();
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        const record = /** @type {number} */ (layout.flagRecord);
+        view.setUint32(layout.eflags, 0x202, true);
+        // A record left by `add eax, 1` with eax -1: result 0, carry out and zero.
+        const kindOfAdd = (()=>{
+            for (let kind = 1; kind < 64; kind++)
+            {
+                view.setUint32(layout.eflags, 0x202, true);
+                view.setUint32(record, kind, true);
+                view.setUint32(record + 4, 0, true);
+                view.setUint32(record + 8, 0xffffffff, true);
+                view.setUint32(record + 12, 1, true);
+                view.setUint32(record + 16, 0, true);
+                const context = h.captureContext();
+                const word = new DataView(context.block.buffer, context.block.byteOffset)
+                    .getUint32(layout.eflags, true);
+                if ((word & 0x41) === 0x41)
+                {
+                    return { kind, context };
+                }
+            }
+            return null;
+        })();
+        assert.ok(kindOfAdd, 'some record kind folds to CF and ZF');
+        const saved = new DataView(kindOfAdd.context.block.buffer,
+            kindOfAdd.context.block.byteOffset);
+        assert.equal(saved.getUint32(record, true), 0, 'the record cleared once folded');
+    });
 
 test('a restore leaves the live instruction counter where it is', ()=>{
     const h = host();
@@ -183,8 +232,9 @@ test('the interpreter\'s retired instructions read back through instructionCount
 test('a slice that interprets ends once it has taken its time, and the next goes on from there',
     ()=>{
         // Nothing translated: mov ecx, 1500000; dec ecx; jnz -3; hlt -- three million
-        // instructions, interpreted, under one slice's budget of all of them.
-        const h = host({ cork: { translate: false } });
+        // instructions, interpreted, under one slice's budget of all of them, on
+        // the host's own time slice.
+        const h = host({ cork: { translate: false, sliceMs: undefined } });
         load(h, 0x12000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
         const total = 1 + 1_500_000 * 2 + 1;
         const first = h.runSlice(total);
@@ -218,9 +268,9 @@ for (const wasmInterpreter of [false, true])
 {
     test(`a call through a null pointer faults where nothing runs, and the range still reads, `
         + `on the ${wasmInterpreter ? 'wasm' : 'JavaScript'} tier`, ()=>{
-        // The first 64 KiB stay open to reads, which a title leans on, but a
-        // call into them slid through zeroes into the entry vector and ran it --
-        // on the wasm tier, through zeroes into whatever lay above.
+        // noExecuteBelow alone leaves the range open to reads, but a call into
+        // it slid through zeroes into the entry vector and ran it -- on the wasm
+        // tier, through zeroes into whatever lay above.
         const h = host({ noExecuteBelow: 0x10000,
             cork: { wasmInterpreter, wasmInterpreterAfter: 0 } });
         // mov eax, [0x100]; xor ecx, ecx; call ecx -- at 0x20000.
@@ -235,6 +285,51 @@ for (const wasmInterpreter of [false, true])
         assert.equal(fault?.vector, 14, 'a page fault');
         assert.equal(fault?.eip, 0, 'at the address the call went to');
     });
+}
+
+// Wrapped reads (`checkReads` unset) test no page until the run's first fault on a
+// closed one: a read that ran warm before it reads the null range's zeros.
+const WARM_WRAPPED = 'a read translated before the run\'s first fault tests no page';
+for (const [tier, cork, warmTodo] of /** @type {[string, any, string | undefined][]} */ ([
+    ['JavaScript', { wasmInterpreter: false }, WARM_WRAPPED],
+    ['wasm', { wasmInterpreter: true, wasmInterpreterAfter: 0 }, WARM_WRAPPED],
+    ['translated, reads tested', { checkReads: true, wasmInterpreter: true,
+        wasmInterpreterAfter: 0 }, undefined],
+]))
+{
+    test(`a read of the null range faults with its address, on the ${tier} tier`, ()=>{
+        const h = host({ closedBelow: 0x10000, cork });
+        // xor ebx, ebx; mov eax, [ebx+0x54]; hlt -- at 0x20000.
+        load(h, 0x20000, [0x31, 0xdb, 0x8b, 0x43, 0x54, 0xf4]);
+        h.runSlice(100);
+        const fault = h.fault();
+        assert.equal(fault?.vector, 14, 'the read faulted');
+        assert.equal(fault?.address, 0x54);
+        assert.equal(fault?.errorCode, 0, 'as a read');
+        assert.equal(fault?.eip, 0x20002, 'at the read');
+    });
+
+    test(`a warm read of the null range faults with its address, on the ${tier} tier`,
+        { todo: warmTodo }, async()=>{
+            const h = host({ closedBelow: 0x10000, cork });
+            // mov ebx, 0x30000; mov ecx, 3000; L: mov eax, [ebx+0x54]; dec ecx; jnz L;
+            // xor ebx, ebx; jmp L -- at 0x20000: the read runs warm off a pointer, then
+            // the same instruction reads through NULL, as a JIT's field read with no null
+            // test of its own does (the .NET runtime's NullReferenceException).
+            load(h, 0x20000, [0xbb, 0, 0, 0x03, 0, 0xb9, 0xb8, 0x0b, 0, 0,
+                0x8b, 0x43, 0x54, 0x49, 0x75, 0xfa, 0x31, 0xdb, 0xeb, 0xf6, 0xf4]);
+            for (let slices = 0; !h.halted() && slices < 10_000; slices++)
+            {
+                h.runSlice(1000);
+                await h.cork().translatePending();
+            }
+            assert.equal(h.readReg32('ecx'), 0, 'every warm round ran, and no more');
+            const fault = h.fault();
+            assert.equal(fault?.vector, 14, 'the read faulted');
+            assert.equal(fault?.address, 0x54);
+            assert.equal(fault?.errorCode, 0, 'as a read');
+            assert.equal(fault?.eip, 0x2000a, 'at the read');
+        });
 }
 
 test('a call into code left untranslated runs on the wasm tier in place, not through the host',
@@ -283,18 +378,14 @@ test('the status words the wasm tier stores unless precise are counted in the di
 
 test('the host boots a real runtime over cork\'s own memory', ()=>{
     const h = host();
-    assert.equal(h.engine(), 'cork');
     assert.ok(h.cork(), 'the translator runtime is built');
     assert.equal(h.readReg32('eflags'), 0x2, 'the boot eflags word');
-    assert.equal(h.controlRegister(0), 1, 'PE is set: flat 32-bit protected mode');
-    assert.equal(h.controlRegister(3), 0, 'and no CR3');
-    assert.equal(h.inProtectedMode(), true);
 });
 
-test('guest memory is shared where the host can share it, and regions translate over it',
+test('guest memory is shared, and regions translate over it',
     async()=>{
         const h = host();
-        assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer, 'node can share it');
+        assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer);
         // mov ecx, 1000; L: add eax, ecx; dec ecx; jnz L; hlt
         load(h, 0x11000, [0xb9, 0xe8, 0x03, 0, 0, 0x01, 0xc8, 0x49, 0x75, 0xfb, 0xf4]);
         h.cork().noteHot(0x11000, 0);
@@ -307,10 +398,6 @@ test('guest memory is shared where the host can share it, and regions translate 
         assert.equal(h.readReg32('eax'), 500500);
         assert.deepEqual(/** @type {any} */ (h.cork().diagnostics()).refused?.batch, undefined,
             'and no batch refused');
-
-        const plain = host({ cork: { sharedMemory: false } });
-        assert.ok(!(plain.wasmMemory().buffer instanceof SharedArrayBuffer),
-            'unless it is told not');
     });
 
 test('an ask of another executor the handler puts off is asked again at the guest\'s next back'
@@ -357,7 +444,7 @@ test('a translated loop that stores nothing sees the interrupt word another thre
     assert.ok(h.cork().entryOf(0x11000, 0) >= 0, 'translated');
     let seenAt = 0;
     h.onInterrupt(()=>{
-        seenAt = performance.now();
+        seenAt++;
         h.stop();
         return true;
     });
@@ -367,13 +454,15 @@ test('a translated loop that stores nothing sees the interrupt word another thre
         setTimeout(()=>Atomics.store(new Int32Array(workerData.buffer), workerData.at,
             0x7fffffff), 100);`, { eval: true, workerData: { buffer: h.wasmMemory().buffer, at } });
     h.writeReg32('eip', 0x11000);
-    const startedAt = performance.now();
     const retired = h.runSlice(2 ** 31 - 1);
-    const ms = performance.now() - startedAt;
     await worker.terminate();
     assert.ok(seenAt > 0, 'the word was answered');
-    assert.ok(ms < 1500 && retired < 2 ** 30,
-        `left after ${ms.toFixed(0)} ms and ${retired} instructions`);
+    // Counted, not timed: left inside the loop with the slice's budget not
+    // spent. A word read once before the loop leaves only at the budget's end,
+    // 2^31 - 1 instructions, a second or two of this thread's work against the
+    // other's 100 ms; a wall bound on the run held the two threads' turns on a
+    // busy machine to it as well.
+    assert.ok(retired < 2 ** 31 - 1, `left after ${retired} instructions, inside its budget`);
     assert.equal(h.halted(), false, 'inside the loop');
 });
 
@@ -525,6 +614,22 @@ test('a host write into a translated page invalidates the region', async()=>{
     assert.equal(runtime.holdsPage(0x11000 >>> 12), false, 'the host write dropped it');
 });
 
+test('bytes taken as written drop the region over them and are not written again', async()=>{
+    // A host swap, or a worker's write into the shared RAM, is in the memory
+    // already: told, the region goes; the bytes, which another executor may
+    // have stored to since, are left as they are.
+    const h = host();
+    const runtime = h.cork();
+    h.writePhysical(0x11000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
+    runtime.noteHot(0x11000);
+    assert.equal(await runtime.translatePending(), 1, 'the region was formed');
+    const ram = /** @type {Uint8Array} */ (h.ramView());
+    ram[0x11001] = 2;
+    h.wrote(0x11000, 4);
+    assert.equal(runtime.holdsPage(0x11000 >>> 12), false, 'the write it was told of dropped it');
+    assert.deepEqual([...h.readPhysical(0x11000, 6)], [0xb8, 2, 0, 0, 0, 0xf4], 'nothing copied');
+});
+
 test('code the host rewrites between two calls of it runs as written; a host write beside it'
     + ' leaves it translated', async()=>{
     const h = host();
@@ -560,8 +665,8 @@ test('code the host rewrites between two calls of it runs as written; a host wri
 test('newContext under cork positions eip and esp', async()=>{
     const { cpuModule } = await import('../module.js');
     const api = await cpuModule.create({
-        engine: 'cork', engineUrl: ENGINE_URL, memorySize: MEMORY,
-    }, /** @type {any} */ ({ requireApi: ()=>({}), provide: ()=>{} }));
+        engineUrl: ENGINE_URL, memorySize: MEMORY,
+    }, /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}), provide: ()=>{} }));
     try
     {
         await api.boot();
@@ -569,7 +674,8 @@ test('newContext under cork positions eip and esp', async()=>{
         api.restoreContext(context, 0);
         assert.equal(api.readReg32('eip'), 0x401000);
         assert.equal(api.readReg32('esp'), 0x80000);
-        assert.equal(api.readReg32('eflags'), 0x2);
+        assert.equal(api.readReg32('eflags'), 0x202,
+            'interrupts enabled and nothing else, as a new thread on Windows');
     }
     finally
     {
@@ -689,7 +795,8 @@ test('a slow slice accounts for itself only when the translator\'s timings are a
     // its 20 ms floor, as a host call the program waits on does.
     for (const timings of [false, true])
     {
-        const h = host({ cork: { translate: false, timings } });
+        // The host's own time slice: what ends this one is its time.
+        const h = host({ cork: { translate: false, timings, sliceMs: undefined } });
         h.onTrap(()=>{
             const until = performance.now() + 25;
             while (performance.now() < until)
@@ -918,3 +1025,210 @@ test('a dword the host writes or reads is whole to a thread on the same memory',
         await worker.terminate();
     }
 });
+
+test('interpretedSteps counts what the interpreters retired, not zero', ()=>{
+    const h = host();
+    // mov eax, 0; inc eax; inc eax; inc eax; hlt -- five instructions, new code, interpreted.
+    load(h, 0x11000, [0xb8, 0, 0, 0, 0, 0x40, 0x40, 0x40, 0xf4]);
+    assert.equal(h.interpretedSteps(), 0);
+    h.runSlice(100);
+    assert.ok(h.interpretedSteps() > 0, 'a frame can tell code met for the first time');
+    assert.ok(h.interpretedSteps() <= h.instructionCount());
+});
+
+
+test('a memory with an engine range holds its floor, and grows as the host gives the guest more',
+    ()=>{
+        const MIB = 1 << 20;
+        const grown = host({ memorySize: 256 * MIB, engineArea: { at: 64 * MIB, span: 32 * MIB } });
+        assert.equal(grown.growing(), true);
+        // The floor: up to the engine's range's end, a power of two -- 128 MiB, not 256.
+        assert.equal(grown.ramHeld(), 128 * MIB);
+        assert.equal(grown.wasmMemory().buffer.byteLength, 128 * MIB + engine.WRAP_SLACK,
+            'the memory holds the floor and the slack, not the whole RAM');
+        assert.equal(grown.readU32(200 * MIB), 0, 'past the RAM held: zero, as a page never given');
+        assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (128 * MIB - 1));
+
+        /** @type {number[]} */
+        const told = [];
+        grown.onGrow((/** @type {number} */ held)=>told.push(held));
+        // A host write past it -- an image, a file read into a buffer -- grows it first.
+        grown.writeData(200 * MIB, Uint8Array.of(1, 2, 3, 4));
+        assert.equal(grown.ramHeld(), 256 * MIB);
+        assert.deepEqual(told, [256 * MIB]);
+        assert.equal(grown.readU32(200 * MIB), 0x04030201);
+        assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (256 * MIB - 1));
+        assert.equal(grown.growTo(512 * MIB), 256 * MIB, 'never past the ceiling');
+
+        // The engine's range is the engine's: a host write across it goes around it.
+        const range = grown.engineRange();
+        const before = grown.wasmMemory().buffer.slice(range.from, range.from + 16);
+        grown.writeData(range.from - 4, new Uint8Array(24).fill(0xee));
+        assert.deepEqual(
+            new Uint8Array(grown.wasmMemory().buffer.slice(range.from, range.from + 16)),
+            new Uint8Array(before));
+        assert.equal(grown.readU32(range.from - 4), 0xeeeeeeee);
+
+        const fixed = host({ memorySize: 256 * MIB });
+        assert.equal(fixed.growing(), false, 'no range: the whole RAM, as before');
+        assert.ok(fixed.wasmMemory().buffer.byteLength > 256 * MIB);
+    });
+
+test('a memory a gone process left is zeroed where its engine ran: the first executor\'s tables'
+    + ' at once, another executor\'s pages as it opens, and only those the gone one opened', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, executors: 3,
+        engineArea: { at: 32 * MIB, span: 68 * MIB } };
+    const gone = host(config);
+    // Executor 1 opened, executor 2 never did.
+    gone.makeRoomFor(1);
+    assert.equal(gone.executorsTouched(), 2);
+    const memory = gone.wasmMemory();
+    const range = gone.engineRange();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, range.from, range.to);
+    /** The bytes of the engine's range the gone process's mark is left on. */
+    const marked = ()=>bytes.subarray(range.from, range.to).reduce((sum, byte)=>sum
+        + (byte === 0x5a ? 1 : 0), 0);
+    const whole = range.to - range.from;
+    const next = host({ ...config, reused: { memory, guestEnd: 0,
+        executors: gone.executorsTouched() } });
+    assert.equal(next.wasmMemory(), memory, 'taken');
+    const atStart = marked();
+    assert.ok(atStart < whole, 'the first executor\'s tables and the shared record zeroed');
+    assert.ok(atStart > 0, 'the other executors\' pages not yet');
+    next.makeRoomFor(1);
+    const afterOne = marked();
+    assert.ok(afterOne < atStart, 'executor 1 zeroed as it opens: the gone one ran there');
+    next.makeRoomFor(2);
+    assert.equal(marked(), afterOne,
+        'executor 2 left as it was: the gone process never opened it, so it is as made');
+    assert.equal(next.executorsTouched(), 3);
+    const third = host({ ...config, reused: { memory, guestEnd: 0 } });
+    assert.equal(third.wasmMemory(), memory);
+    third.makeRoomFor(2);
+    assert.equal(marked(), 0, 'with no count every executor\'s pages are taken as written');
+});
+
+test('a memory taken with the ranges to zero named is zeroed there and in its first 64 KiB, the'
+    + ' rest left to whoever hands it out; a gone engine laid out elsewhere is zeroed whole', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, engineArea: { at: 64 * MIB, span: 32 * MIB } };
+    const gone = host(config);
+    const memory = gone.wasmMemory();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, 0x10000, 32 * MIB);
+    bytes.fill(0x5a, 0x5000, 0x6000);
+    const next = host({ ...config, reused: { memory, guestEnd: 32 * MIB,
+        written: [[MIB, 2 * MIB]],
+        engine: { layout: 'elsewhere', ranges: [[20 * MIB, 21 * MIB]] } } });
+    assert.equal(next.wasmMemory(), memory);
+    /** @param {number} from @param {number} to @param {number} value */
+    const all = (from, to, value)=>bytes.subarray(from, to).every(byte=>byte === value);
+    assert.ok(all(0x5000, 0x10000, 0), 'the first 64 KiB');
+    assert.ok(all(MIB, 2 * MIB, 0), 'a range named');
+    assert.ok(all(20 * MIB, 21 * MIB, 0), 'the gone engine\'s pages, laid out elsewhere');
+    assert.ok(all(2 * MIB, 20 * MIB, 0x5a) && all(21 * MIB, 32 * MIB, 0x5a),
+        'the rest as the gone process left it, for the heap to zero as it hands it out');
+});
+
+test('the other executors\' pages apart from the first\'s: the memory starts holding the first'
+    + ' range\'s floor, and reaches an executor\'s pages as it opens, the RAM held as it was', ()=>{
+    const MIB = 1 << 20;
+    const grown = host({ memorySize: 1024 * MIB, executors: 8,
+        engineArea: { at: 32 * MIB, span: 28 * MIB, others: { at: 320 * MIB, span: 140 * MIB } } });
+    assert.equal(grown.growing(), true);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'up to the first range, a power of two');
+    assert.equal(grown.wasmMemory().buffer.byteLength, 64 * MIB + engine.WRAP_SLACK,
+        'not the other executors\' pages');
+    grown.makeRoomFor(2);
+    const reached = grown.wasmMemory().buffer.byteLength;
+    assert.ok(reached > 320 * MIB && reached <= 360 * MIB,
+        `executor 2's pages and no further: ${reached}`);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'the RAM held and its wrap as they were');
+    assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (64 * MIB - 1));
+    grown.makeRoomFor(1);
+    assert.equal(grown.wasmMemory().buffer.byteLength, reached, 'executor 1 lies below it');
+    const ranges = grown.engineLeft().ranges;
+    assert.equal(ranges.length, 4, 'the first executor, 1 and 2, and the shared record');
+    assert.ok(ranges.every((/** @type {[number, number]} */ [from, to])=>to <= reached
+        && from < to));
+});
+
+test('where the browser makes no 64-bit memory, a program past 4 GiB is refused in plain words',
+    ()=>{
+        // Safari and iOS have no memory64: what the engine answers its attempt
+        // is not what the person who started the program should read.
+        const without = { ...engine, memory64: ()=>{
+            throw new RangeError('memory64 of 8589934592 bytes not made: address: bad');
+        } };
+        assert.throws(()=>host({ engine: without, bits: 64, memorySize: 2 ** 31,
+            window: 2 ** 33, codeBase: 2 ** 32 }),
+        /linked past 4 GiB and needs a 64-bit WebAssembly memory \(memory64\) of 8 GiB, which/);
+    });
+
+test('a wide window\'s RAM is made as long as the program is given, not the window', ()=>{
+    // Chrome weighs a wasm memory by its length against its thread's heap
+    // limit (about 8 GiB): an 8 GiB memory there collects without end.
+    /** @type {number[]} */
+    const asked = [];
+    const counting = { ...engine, memory64: (/** @type {number} */ bytes)=>{
+        asked.push(bytes);
+        throw new RangeError('not made');
+    } };
+    assert.throws(()=>host({ engine: counting, bits: 64, memorySize: 2 ** 33 - 4096,
+        window: 2 ** 33, codeBase: 0, wideRam: 7 * 2 ** 30 + 1 }), /memory64/);
+    assert.deepEqual(asked, [7 * 2 ** 30 + 65536], 'the program\'s bytes, to a whole page');
+    asked.length = 0;
+    assert.throws(()=>host({ engine: counting, bits: 64, memorySize: 2 ** 33 - 4096,
+        window: 2 ** 33, codeBase: 0 }), /memory64/);
+    assert.deepEqual(asked, [2 ** 33], 'the window whole where nothing less is named');
+});
+
+test('a dword the host stores into data is one word in the RAM: beside translated code it keeps'
+    + ' it, into it drops it, and unaligned it goes as bytes', async()=>{
+    const h = host();
+    const runtime = h.cork();
+    // call F; mov ebx, eax; mov dx, 0x1234; out dx, eax; call F; hlt -- F (0x11100): mov eax,
+    // 1; ret, translated before the program starts; the trap's handler stores over it.
+    load(h, 0x11000, [0xe8, 0xfb, 0x00, 0, 0, 0x89, 0xc3, 0x66, 0xba, 0x34, 0x12, 0xef,
+        0xe8, 0xef, 0x00, 0, 0, 0xf4]);
+    h.writePhysical(0x11100, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xc3]));
+    runtime.noteHot(0x11100);
+    assert.equal(await runtime.translatePending(), 1);
+    /** @type {boolean[]} */
+    const held = [];
+    h.onTrap(()=>{
+        h.writeU32Data(0x2fff00, 0x04030201);
+        h.writeU32Data(0x2fff05, 0x08070605);
+        held.push(runtime.entryOf(0x11100) >= 0);
+        // b8 07 00 00: mov eax, 7, its last immediate byte and the ret left as they are.
+        h.writeU32Data(0x11100, 0x000007b8);
+        held.push(runtime.entryOf(0x11100) >= 0);
+    });
+    for (let slice = 0; slice < 10 && !h.halted(); slice++)
+    {
+        h.runSlice(1000);
+    }
+    assert.equal(h.halted(), true);
+    assert.deepEqual([...h.readPhysical(0x2fff00, 9)], [1, 2, 3, 4, 0, 5, 6, 7, 8],
+        'aligned and unaligned, little-endian, nothing beside them touched');
+    assert.deepEqual(held, [true, false],
+        'kept past the stores beside it, dropped by the one into it');
+    assert.equal(h.readReg32('ebx'), 1, 'the first call ran the code as translated');
+    assert.equal(h.readReg32('eax'), 7, 'the second ran the code the host stored');
+});
+
+test('an XMM register read is a copy of its lanes, and lanes written as they come are its bits',
+    ()=>{
+        const made = host();
+        made.writeXmm(1, /** @type {any} */ ([-1, 2, 0x80000000, 4]));
+        const read = made.readXmm(1);
+        assert.deepEqual([...read], [0xffffffff, 2, 0x80000000, 4]);
+        assert.equal(read.buffer.byteLength, 16, 'a buffer of the reader\'s own');
+        read[0] = 9;
+        assert.equal(made.readXmm(1)[0], 0xffffffff, 'not the register itself');
+        made.writeXmm(1, Uint32Array.of(5, 6, 7, 8));
+        assert.deepEqual([...made.readXmm(1)], [5, 6, 7, 8]);
+        assert.deepEqual([...made.readXmm(0)], [0, 0, 0, 0], 'its neighbour untouched');
+    });

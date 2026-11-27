@@ -13,8 +13,6 @@
  */
 
 import { createHarness } from './harness.js';
-import { createMacrotask } from '../../../src/app.js';
-import { workerPacing } from '../../../src/host/serve.js';
 
 /** How often the call log so far is handed to the page. */
 const CALLS_MS = 500;
@@ -22,34 +20,6 @@ const CALLS_MS = 500;
 /** @type {import('./harness.js').Harness | null} */
 let harness = null;
 let sentLines = 0;
-
-// The loop of a thread that is nobody else's: an idle machine sleeps until
-// the guest's next deadline or a message from the page, and turns otherwise
-// run back to back. Nothing here counts what the page posts, so a yield is
-// taken on the clock rather than on a signal word.
-/** @type {(() => void) | null} */
-let poked = null;
-/** @type {Promise<void> | null} */
-let poking = null;
-const poke = ()=>{
-    if (!poking)
-    {
-        poking = new Promise(resolve=>{
-            poked = ()=>{
-                poking = null;
-                poked = null;
-                resolve();
-            };
-        });
-    }
-    return poking;
-};
-const pacing = workerPacing({
-    macrotask: createMacrotask(),
-    poke,
-    signalled: ()=>false,
-    now: ()=>performance.now(),
-});
 
 self.addEventListener('error', event=>{
     self.postMessage({ type: 'error', text: event.message });
@@ -75,12 +45,10 @@ const flushCalls = ()=>{
 };
 
 self.onmessage = ({ data })=>{
-    poked?.();
     switch (data.type)
     {
         case 'canvas':
             harness = createHarness(data.canvas, {
-                pacing: data.pacing === 'event' ? pacing : undefined,
                 // The sound is read on the page, off this thread, as a
                 // launcher's worklet reads it: a device here would stand still
                 // whenever the engine does, and hide every refill that came late.
@@ -101,7 +69,7 @@ self.onmessage = ({ data })=>{
                     self.postMessage({ type: 'result', result: {
                         ok: false,
                         error: String(error && error.message),
-                        stack: String(error && error.stack).split('\n').slice(0, 8).join('\n'),
+                        stack: String(error && error.stack).split('\n').slice(0, 24).join('\n'),
                     } });
                 });
             break;
@@ -147,13 +115,18 @@ self.onmessage = ({ data })=>{
                         error: String(error instanceof Error ? error.message : error) } }));
             break;
         case 'standing':
-            (harness ? harness.standing(data.list) : Promise.resolve(null)).then(value=>{
-                self.postMessage({ type: 'answer', id: data.id, value });
-            });
+            (harness ? harness.standing(data.list, data.journal) : Promise.resolve(null))
+                .then(value=>{
+                    self.postMessage({ type: 'answer', id: data.id, value });
+                });
             break;
         case 'journalRecent':
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.journalRecent(data.count) ?? [] });
+            break;
+        case 'readFile':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.readFile(data.path, data.tail) ?? null });
             break;
         case 'input':
             self.postMessage({ type: 'answer', id: data.id,

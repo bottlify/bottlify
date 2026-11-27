@@ -6,7 +6,8 @@
 
 /**
  * Compiles every `@guestCode` function under src/ into the module beside its
- * source: `inguest.js` into `inguest.x86.js`.
+ * source: `inguest.js` into `inguest.x86.js`, and, for the modules `LONG`
+ * names, into the x86-64 of `inguest.x64.js` too.
  *
  *   node scripts/build-guest-code.mjs           writes each module
  *   node scripts/build-guest-code.mjs --check   fails when one is not what
@@ -19,7 +20,7 @@
  */
 
 import { readFile, readdir, writeFile } from 'node:fs/promises';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { compileModule } from './guest-code/compile.mjs';
 
@@ -28,6 +29,39 @@ const SRC = join(ROOT, 'src');
 
 /** A `@guestCode` tag at the start of a line of a comment. */
 const TAG = /^\s*\*?\s*@guestCode\b/m;
+
+/**
+ * The modules a 64-bit process takes x86-64 code from, by their path under
+ * src/, and the functions of each it does not with why: a function whose
+ * memory holds a pointer is laid out for 32 bits in its source, and is its
+ * handler's trap at 64 bits, as everything the compiler refuses there is.
+ * A module not named here -- a structure of 32-bit pointers, a `va_list` of
+ * 4-byte slots, a double passed as two words -- has no x86-64 at all.
+ *
+ * @type {ReadonlyMap<string, Readonly<Record<string, string>>>}
+ */
+export const LONG = new Map([
+    ['layers/win32/msvcrt/inguest.js', {}],
+    ['layers/win32/msvcrt/inguest-math.js', {}],
+    ['layers/win32/msvcrt/inguest-print.js', {}],
+    ['layers/graphics/seam/inguest.js', {}],
+    ['layers/graphics/seam/d3d10-inguest.js', {}],
+    ['layers/graphics/glu/inguest.js', {}],
+    ['layers/win32/msvcrt/inguest-string.js', {}],
+    ['layers/win32/msvcrt/inguest-rtti.js', {}],
+    ['layers/win32/msvcrt/inguest-int64.js', {}],
+    ['layers/win32/msvcrt/inguest-scan.js', {}],
+    ['layers/win32/kernel32/inguest.js', {}],
+    ['layers/win32/kernel32/semaphore-guest.js', {}],
+    ['layers/win32/d3dx9/constants-setters.js', {}],
+    ['layers/win32/d3dx9/effect-setters.js', {}],
+    ['layers/win32/d3dx9/effect-commit.js', {}],
+    ['layers/win32/d3dx9/inguest.js', {}],
+    ['layers/win32/d3dx9/inguest-matrix.js', {}],
+    ['layers/win32/d3dx9/inguest-vector.js', {}],
+    ['layers/win32/d3dx9/inguest-quaternion.js', {}],
+    ['layers/win32/msvcrt/inguest-float.js', {}],
+]);
 
 /** @param {string} dir @param {string[]} [found] @returns {Promise<string[]>} */
 async function sources(dir, found = []){
@@ -38,7 +72,7 @@ async function sources(dir, found = []){
         {
             await sources(path, found);
         }
-        else if (/\.m?js$/.test(entry.name) && !/\.(test|itest|x86)\.m?js$/.test(entry.name))
+        else if (/\.m?js$/.test(entry.name) && !/\.(test|itest|x86|x64)\.m?js$/.test(entry.name))
         {
             found.push(path);
         }
@@ -47,7 +81,8 @@ async function sources(dir, found = []){
 }
 
 /**
- * Each source with `@guestCode` functions, and the module its x86 goes in.
+ * Each source with `@guestCode` functions, and the module its x86 goes in --
+ * and, for one `LONG` names, the module its x86-64 goes in.
  *
  * @param {string} [root]  Where to look; src/ by default.
  * @returns {Promise<{ source: string, target: string, text: string }[]>}
@@ -63,7 +98,8 @@ export async function compileGuestCode(root = SRC){
             continue;
         }
         const values = await import(pathToFileURL(source).href);
-        const functions = compileModule(text, { file: relative(ROOT, source), values });
+        const file = relative(ROOT, source);
+        const functions = compileModule(text, { file, values });
         if (functions.length === 0)
         {
             continue;
@@ -73,17 +109,37 @@ export async function compileGuestCode(root = SRC){
             target: source.replace(/\.m?js$/, '.x86.js'),
             text: render(basename(source), functions),
         });
+        const leftOut = LONG.get(relative(SRC, source).split(sep).join('/'));
+        if (leftOut === undefined)
+        {
+            continue;
+        }
+        /** @type {Record<string, string>} */
+        const refused = {};
+        const long = compileModule(text, { file, values, bits: 64, refuse: leftOut,
+            // The reason without its place, which moves as the source does.
+            onRefused: (name, reason)=>{
+                refused[name] = reason.replace(/^[^:]*:\d+:\d+: /, '')
+                    .replace(new RegExp(`^${name}: `), '');
+            } });
+        out.push({
+            source,
+            target: source.replace(/\.m?js$/, '.x64.js'),
+            text: render(basename(source), long, refused),
+        });
     }
     return out;
 }
 
 /**
- * The module the x86 is published in: a plain table, no imports.
+ * The module the code is published in: a plain table, no imports -- and, for
+ * x86-64 code, the functions it has none of and why.
  *
  * @param {string} from
  * @param {import('./guest-code/compile.mjs').CompiledFunction[]} functions
+ * @param {Record<string, string>} [refused]  Given for x86-64 code.
  */
-export function render(from, functions){
+export function render(from, functions, refused){
     const lines = [
         '/*',
         ' * Copyright © 2026 Bottlify Project',
@@ -91,9 +147,16 @@ export function render(from, functions){
         ' * See LICENSE for details',
         ' */',
         '',
-        `// The i386 of ${from}'s @guestCode functions, as \`npm run build\``,
-        '// (scripts/build-guest-code.mjs) compiles them. Not edited by hand: a unit',
-        '// test compiles the source again and fails when this differs.',
+        ...refused === undefined ? [
+            `// The i386 of ${from}'s @guestCode functions, as \`npm run build\``,
+            '// (scripts/build-guest-code.mjs) compiles them. Not edited by hand: a unit',
+            '// test compiles the source again and fails when this differs.',
+        ] : [
+            `// The x86-64 of ${from}'s @guestCode functions, for a 64-bit process, as`,
+            '// `npm run build` (scripts/build-guest-code.mjs) compiles them under the x64',
+            '// convention. Not edited by hand: a unit test compiles the source again and',
+            '// fails when this differs.',
+        ],
         '',
         'export const COMPILED = /** @type {const} */ ({',
     ];
@@ -139,6 +202,18 @@ export function render(from, functions){
         {
             lines.push(`        host: ${fn.host},`);
         }
+        if (fn.leaf !== undefined)
+        {
+            lines.push(`        leaf: ${fn.leaf},`);
+        }
+        if (fn.tables !== undefined)
+        {
+            const entries = Object.entries(fn.tables).map(([name, at])=>`${name}: ${at}`);
+            const one = `        tables: { ${entries.join(', ')} },`;
+            const wrapped = entries.map(entry=>`            ${entry},`);
+            lines.push(...one.length <= 100 ? [one]
+                : ['        tables: {', ...wrapped, '        },']);
+        }
         lines.push('        code: Uint8Array.of(');
         for (let at = 0; at < fn.code.length; at += 12)
         {
@@ -150,6 +225,39 @@ export function render(from, functions){
         lines.push('    },');
     }
     lines.push('});', '');
+    if (refused !== undefined)
+    {
+        lines.push('/** The functions with no x86-64 code, their handlers\' traps at 64 bits, and why. */',
+            'export const REFUSED = /** @type {const} */ ({');
+        for (const [name, reason] of Object.entries(refused))
+        {
+            // Within a hundred columns: the words in pieces of up to eighty,
+            // each after the first carrying the space before it.
+            /** @type {string[]} */
+            const pieces = [];
+            let piece = '';
+            for (const word of reason.split(' '))
+            {
+                const longer = piece === '' ? word : `${piece} ${word}`;
+                if (longer.length > 80 && piece.trim() !== '')
+                {
+                    pieces.push(piece);
+                    piece = ` ${word}`;
+                }
+                else
+                {
+                    piece = longer;
+                }
+            }
+            pieces.push(piece);
+            const quoted = (/** @type {string} */ text)=>
+                `'${text.replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}'`;
+            lines.push(`    ${name}:`);
+            pieces.forEach((text, i)=>lines.push(`        ${i === 0 ? '' : '+ '}${quoted(text)}`
+                + `${i === pieces.length - 1 ? ',' : ''}`));
+        }
+        lines.push('});', '');
+    }
     return lines.join('\n');
 }
 

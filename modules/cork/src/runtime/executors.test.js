@@ -72,7 +72,7 @@ test('an executor\'s layout moves its state and tables, and only those', ()=>{
     assert.equal(moved.nanFirst, base + /** @type {number} */ (own.nanFirst));
     assert.equal(moved.tables, base + PAGE);
     assert.equal(moved.ramBase, own.ramBase, 'guest RAM is the process\'s');
-    assert.equal(moved.flagsChanged, -1, 'an absent field stays absent');
+    assert.equal(moved.gsBase, -1, 'an absent field stays absent');
     assert.notEqual(moved.id, own.id, 'its translations are its own');
     assert.throws(()=>executorLayout(own, own.tables), /not one past the first's/);
 });
@@ -85,14 +85,18 @@ test('RAM from the memory\'s start puts the state page at LOW_STATE, each field 
     assert.equal(low.interrupt, LOW_STATE + /** @type {number} */ (paged.interrupt));
     assert.equal(low.nanFirst, LOW_STATE + /** @type {number} */ (paged.nanFirst));
     assert.notEqual(low.id, paged.id, 'its translations are its own');
+    // The process's lock word is no state field: one address for every executor.
     assert.deepEqual(blockFields(low), { ...blockFields(paged), ramBase: 0, tables: 1 << 20,
-        id: low.id }, 'a state block reads the same either way');
+        lockWord: low.lockWord, id: low.id }, 'a state block reads the same either way');
+    assert.equal(low.lockWord, LOW_STATE + /** @type {number} */ (paged.lockWord));
     assert.equal(blockFields(low).eflags, paged.eflags);
     const base = Math.ceil((low.tables + tablesSize(low)) / PAGE) * PAGE;
     const moved = executorLayout(low, base, 1);
     assert.deepEqual([moved.regs, moved.eflags, moved.tables], [base, base + paged.eflags,
         base + PAGE]);
+    assert.equal(moved.lockWord, low.lockWord, 'the first executor\'s, where it is');
     const shared = sharedLayout(low);
+    assert.equal(shared.lockWord, low.lockWord);
     assert.deepEqual([shared.regs, shared.eflags, shared.interrupt],
         [0, paged.eflags, sharedLayout(paged).interrupt], 'from the instance\'s state base');
     assert.equal(statePageOf(low), LOW_STATE);

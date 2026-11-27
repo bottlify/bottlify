@@ -29,7 +29,7 @@ function fakeHost(){
         // A view onto the memory rather than a copy, which is what the memory
         // layer really hands back and what a descriptor read has to survive.
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address */
@@ -296,4 +296,28 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.RtlUnicodeStringToAnsiString.argBytes, 12);
     assert.equal(fns.RtlFreeAnsiString.argBytes, 4);
     assert.equal(fns.RtlFreeUnicodeString.argBytes, 4);
+});
+
+test('RtlCreateUnicodeString copies into a buffer of its own, terminated, for freeing', ()=>{
+    const host = fakeHost();
+    const fns = createCountedStringFunctions(host);
+    putWide(host, TEXT, 'Software');
+    assert.equal(fns.RtlCreateUnicodeString.handler([DESTINATION, TEXT]), 1);
+    const made = descriptorAt(host, DESTINATION);
+    assert.deepEqual({ ...made, buffer: 0 }, { length: 16, maximumLength: 18, buffer: 0 });
+    assert.notEqual(made.buffer, TEXT, 'a copy, not the caller\'s characters');
+    assert.equal(host.readWideString(made.buffer), 'Software');
+});
+
+test('RtlCreateUnicodeStringFromAsciiz widens into a buffer of its own, for freeing', ()=>{
+    const host = fakeHost();
+    const fns = createCountedStringFunctions(host);
+    putAnsi(host, TEXT, 'testlib.dll');
+    assert.equal(fns.RtlCreateUnicodeStringFromAsciiz.argBytes, 8);
+    assert.equal(fns.RtlCreateUnicodeStringFromAsciiz.handler([DESTINATION, TEXT]), 1);
+    const made = descriptorAt(host, DESTINATION);
+    assert.deepEqual({ ...made, buffer: 0 }, { length: 22, maximumLength: 24, buffer: 0 });
+    assert.equal(host.readWideString(made.buffer), 'testlib.dll');
+    assert.equal(fns.RtlFreeUnicodeString.handler([DESTINATION]), 0);
+    assert.deepEqual(host.released, [made.buffer]);
 });

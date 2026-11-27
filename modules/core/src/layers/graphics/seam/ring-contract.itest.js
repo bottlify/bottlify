@@ -23,7 +23,8 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, SURFACE, TEXTURE, VERTEX_BUFFER7, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, TEXTURE, VERTEX_BUFFER7 } from './block.js';
+import { commandCode } from './routines/command.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
@@ -56,6 +57,8 @@ const TEXTURES = 0x1b000;
 const STACK = 0x300000;
 /** The device's interface: its block one word on. */
 const DEVICE = OBJECTS + 0x800;
+/** What a surface named `...Elsewhere` says made it: another device's block. */
+const OTHER_DEVICE = BLOCK + 0x100;
 
 const D3D_OK = 0;
 const D3DFMT_X8R8G8B8 = 22;
@@ -81,13 +84,17 @@ const u32 = value=>[
 const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
 
 /**
- * One call: its arguments -- a string names an object the setup made, 'data'
- * the address of `data` -- the dwords the pointer argument points at, and the
- * device state it is made in.
+ * One call: its arguments - a string names an object the setup made, 'data'
+ * the address of `data` and 'data+16' sixteen bytes on, for a second
+ * rectangle - the dwords the pointer arguments point at, and the device
+ * state it is made in.
  *
  * @typedef {{ label: string,
  *     args: (number | string | ((made: Record<string, any>) => number))[], data?: number[],
- *     caps?: object, setup?: (device: any, made: Record<string, any>) => void }} Case
+ *     caps?: object, setup?: (device: any, made: Record<string, any>) => void,
+ *     host?: boolean }} Case
+ *     `host`: a call the routine must leave to the host, which the device on its
+ *     own would take (a surface another device made, `OTHER_DEVICE`)
  *     an argument a function of what `setup` made: a value known only once it is made
  */
 
@@ -97,7 +104,7 @@ const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
 const machine = ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
@@ -292,7 +299,8 @@ function placeObjects(host, made, textures = false){
             const { Format, Type, Usage, Pool, Width, Height } = held.desc;
             host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
                 Usage, Pool, 0, 0, Width, Height,
-                container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
+                container ? /** @type {number} */ (containers.get(container)) : 0,
+                0, key.endsWith('Elsewhere') ? OTHER_DEVICE : BLOCK]).buffer));
         }
         host.writePhysical(at + 4, new Uint8Array(u32(block)));
         pointers.set(at, made[key]);
@@ -320,7 +328,7 @@ function gate(api, table){
         const shape = api.COMMANDS[name];
         const routine = commandCode(ROUTINE, TRAP,
             { ...shape, slot: api.commandSlot(name), mirror: api.mirrors[name] });
-        for (const { label, args, data = [], caps, setup } of cases)
+        for (const { label, args, data = [], caps, setup, host: toHost } of cases)
         {
             const device = api.device(caps);
             /** @type {Record<string, any>} */
@@ -331,7 +339,8 @@ function gate(api, table){
             /** @param {number | string | ((made: Record<string, any>) => number)} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
                 : typeof arg === 'function' ? arg(made) >>> 0
-                    : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
+                    : arg === 'data' ? DATA : arg === 'data+16' ? DATA + 16
+                        : OBJECTS + names.indexOf(arg) * 16);
             host.writePhysical(DATA, new Uint8Array(new Uint32Array(data).buffer));
             const values = args.map(value);
             const state = device.ringState();
@@ -339,6 +348,15 @@ function gate(api, table){
             const record = shape.self
                 ? run(routine, values[0], values.slice(1), state, valid)
                 : run(routine, DEVICE, values, state, valid);
+            if (toHost === true)
+            {
+                if (record !== null)
+                {
+                    wrong.push(`${name} (${label}): taken in the guest, `
+                        + 'which is the host\'s to refuse');
+                }
+                continue;
+            }
             if (record === null)
             {
                 continue;
@@ -648,6 +666,19 @@ const shared = drawable=>({
         { label: 'a type there is not', args: [9, 1, 'data', 16], data: TRIANGLE,
             setup: drawable },
     ],
+    // The indices in the first sixteen bytes, the triangle's vertices after them.
+    DrawIndexedPrimitiveUP: [
+        { label: 'a triangle by 16-bit indices', args: [4, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE], setup: drawable },
+        { label: 'by 32-bit indices', args: [4, 0, 3, 1, 'data', 102, 'data+16', 16],
+            data: [0, 1, 2, 0, ...TRIANGLE], setup: drawable },
+        { label: 'its vertices past a lowest index', args: [4, 1, 2, 1, 'data', 101, 'data+16',
+            16], data: [0x00020001, 0x00000001, 0, 0, ...TRIANGLE], setup: drawable },
+        { label: 'outside a scene', args: [4, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE] },
+        { label: 'a type there is not', args: [9, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE], setup: drawable },
+    ],
 });
 
 /**
@@ -688,7 +719,17 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                 { label: 'a target', args: [0, 'target'], setup: offscreen },
                 { label: 'the second target', args: [1, 'target'], setup: offscreen },
                 { label: 'none', args: [0, 0] },
+                // A game unsets its other targets before every pass.
+                { label: 'the second unset', args: [1, 0] },
+                { label: 'the fourth unset', args: [3, 0] },
+                { label: 'a fifth there is not', args: [4, 0] },
                 { label: 'a depth surface for a target', args: [0, 'depth'], setup: offscreen },
+                // Wine's test_render_target_device_mismatch.
+                { label: 'a target another device made', args: [0, 'targetElsewhere'],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.targetElsewhere = made.target;
+                    } },
                 { label: 'a texture level that is no target', args: [0, 'level'],
                     setup: (device, made)=>{
                         texture(device, made);
@@ -706,8 +747,30 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                     caps: ELSEWHERE, setup: targets },
                 { label: 'a device drawing itself', args: ['big', 0, 'small', 0, 2],
                     setup: targets },
+                // Each rectangle within its surface and not empty, or none.
                 { label: 'a rectangle', args: ['big', 'data', 'small', 0, 2], data: [0, 0, 8, 8],
                     caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle each', args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 32, 32, 4, 4, 12, 12], caps: ELSEWHERE, setup: targets },
+                { label: 'a target rectangle', args: ['small', 0, 'big', 'data', 0],
+                    data: [16, 16, 32, 32], caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle past the right edge', args: ['small', 'data', 'big', 0, 2],
+                    data: [0, 0, 17, 16], caps: ELSEWHERE, setup: targets },
+                { label: 'a target rectangle past the bottom',
+                    args: ['big', 0, 'small', 'data', 2], data: [0, 0, 16, 17], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'an empty rectangle', args: ['big', 'data', 'small', 0, 2],
+                    data: [4, 4, 4, 8], caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle turned round', args: ['big', 0, 'small', 'data', 2],
+                    data: [4, 9, 8, 2], caps: ELSEWHERE, setup: targets },
+                { label: 'a negative edge', args: ['big', 'data', 'small', 0, 2],
+                    data: [-1, 0, 4, 4], caps: ELSEWHERE, setup: targets },
+                { label: 'a good rectangle and a bad one',
+                    args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 8, 8, 0, 0, 16, 32], caps: ELSEWHERE, setup: targets },
+                { label: 'rectangles on a device drawing itself',
+                    args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 8, 8, 0, 0, 8, 8], setup: targets },
                 { label: 'a filter past anisotropic', args: ['big', 0, 'small', 0, 4],
                     caps: ELSEWHERE, setup: targets },
                 { label: 'the same surface', args: ['big', 0, 'big', 0, 2], caps: ELSEWHERE,
@@ -895,6 +958,35 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
                 { label: 'a target and a depth surface', args: ['target', 'depth'],
                     setup: offscreen },
                 { label: 'a target and none', args: ['target', 0], setup: offscreen },
+                // Wine's d3d8 test_depth_stencil_size.
+                { label: 'a depth surface smaller than the target', args: ['target', 'small'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(16, 8, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.small = out.surface;
+                    } },
+                { label: 'a depth surface larger than the target', args: ['target', 'large'],
+                    setup: (device, made)=>{
+                        offscreen(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateDepthStencilSurface(32, 32, D3DFMT_D24X8, out),
+                            D3D_OK);
+                        made.large = out.surface;
+                    } },
+                { label: 'a target another device made', args: ['targetElsewhere', 0],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.targetElsewhere = made.target;
+                    } },
+                { label: 'a depth surface another device made', args: ['target', 'depthElsewhere'],
+                    host: true, setup: (device, made)=>{
+                        offscreen(device, made);
+                        made.depthElsewhere = made.depth;
+                    } },
                 { label: 'no target', args: [0, 'depth'], setup: offscreen },
                 { label: 'a depth surface for a target', args: ['depth', 'depth'],
                     setup: offscreen },

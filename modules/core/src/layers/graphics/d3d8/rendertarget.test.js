@@ -687,8 +687,8 @@ test('bounds (D3D9): every write the device makes into guest memory stays inside
         'the last pixel of the level arrived');
     h.assertSentinels('UpdateSurface');
 
-    // UpdateTexture: three matched levels; a source larger than its
-    // destination at the matched level is refused before any byte moves.
+    // UpdateTexture: three matched levels; a source with no level of the
+    // destination's size is refused before any byte moves.
     const chain = texture(4, 4, 3, D3DPOOL.SYSTEMMEM);
     for (let level = 0; level < 3; level++)
     {
@@ -705,12 +705,19 @@ test('bounds (D3D9): every write the device makes into guest memory stays inside
     h.assertSentinels('an UpdateTexture whose source level is larger than the destination');
     assert.equal(refused, 0x8876086c,
         'a source level of another size than its matched destination level');
-    const deep = texture(8, 8, 3, D3DPOOL.SYSTEMMEM);
-    assert.equal(device.UpdateTexture(deep, small), 0x8876086c,
-        'the matched level of a deeper chain is its 2x2 one, not the 4x4');
-    assert.equal(device.UpdateTexture(deep, chained), 0x8876086c);
     assert.deepEqual(h.read(levelOf(small, 0).base, 64), before, 'nothing moved');
     h.assertSentinels('a refused UpdateTexture');
+    // A deeper chain is matched by size: its 4x4 level goes into the 4x4 top
+    // (Wine's d3d9 test_updatetexture, case 7).
+    const deep = texture(8, 8, 3, D3DPOOL.SYSTEMMEM);
+    for (let level = 0; level < 3; level++)
+    {
+        paint(levelOf(deep, level), 4 * (8 >> level) * (8 >> level));
+    }
+    assert.equal(device.UpdateTexture(deep, small), D3D_OK);
+    assert.equal(h.read(levelOf(small, 0).base + 60, 1)[0], 0x5a, 'its 4x4 level arrived');
+    assert.equal(device.UpdateTexture(deep, chained), D3D_OK);
+    h.assertSentinels('an UpdateTexture matched by size');
 
     // StretchRect through guest bytes: two offscreen plain surfaces, which
     // the GPU never holds.

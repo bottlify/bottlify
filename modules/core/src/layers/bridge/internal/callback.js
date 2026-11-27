@@ -9,8 +9,8 @@
  *
  * A host function that takes a function pointer -- a comparator, a window
  * procedure, an enumeration callback -- has to run guest code and use its
- * answer. It cannot simply call it: the handler runs inside the emulator's own
- * loop, and the emulator cannot be re-entered from within it.
+ * answer. It cannot simply call it: the handler runs inside the engine's own
+ * slice, and the engine cannot be re-entered from within it.
  *
  * So the call happens the way §12.3 describes, pointed the other way. The
  * calling thread is stopped where it stands, a frame for the callback is built
@@ -22,7 +22,42 @@
  * Both stacks here are per thread and both are stacks rather than single slots,
  * because either kind of call can nest: a callback may trap into another host
  * function, and that one may call the guest back in turn.
+ *
+ * An x86-64 process's routine takes its first four arguments in RCX, RDX, R8
+ * and R9, finds its return address at RSP eight past a multiple of 16, with
+ * 32 bytes of home space above it and its fifth argument past those. A thread
+ * is resumed with its low dwords set alone, so the four registers are loaded
+ * whole by a few guest instructions the thread starts at (`LONG_CALL_CODE`),
+ * which pop them off the frame and jump to the routine.
  */
+
+/**
+ * What a 64-bit thread is sent to first when a routine is called with
+ * arguments: RSP holds the routine's quadword, the four registers' quadwords,
+ * then the routine's frame. The routine comes off the stack whole: one in an
+ * image a 64-bit program keeps past 4 GiB is not its low dword, which is all
+ * a register set through the thread's context could carry.
+ *
+ *     pop rax                ; the routine
+ *     pop rcx
+ *     pop rdx
+ *     pop r8
+ *     pop r9
+ *     jmp rax
+ */
+export const LONG_CALL_CODE = Object.freeze([
+    0x58, 0x59, 0x5a, 0x41, 0x58, 0x41, 0x59, 0xff, 0xe0,
+]);
+
+/**
+ * An address as the engine keeps it: a 32-bit one unsigned, one past 4 GiB as it is.
+ *
+ * @param {number} address
+ */
+const whole = address=>(address >= 2 ** 32 ? address : address >>> 0);
+
+/** The quadwords a 64-bit frame always holds: four registers, the return, four homes, a spare. */
+const LONG_FRAME_SLOTS = 10;
 
 /**
  * @param {Object} deps
@@ -37,12 +72,26 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     /** @type {number | null} */
     let sentinelId = null;
     let sentinelAddress = 0;
+    /** Where `LONG_CALL_CODE` is, once placed; zero before. */
+    let longCallAddress = 0;
+    /**
+     * Who places it, in guest code memory this layer does not own: asked at
+     * the first 64-bit callback, by when the process's memory is there.
+     *
+     * @type {((code: Uint8Array) => number) | null}
+     */
+    let longCallPlacer = null;
     let calls = 0;
     let deepest = 0;
     let pending = 0;
     /** How often each host call suspended, by name: what keeps the run loop going to the
      * event loop turn after turn. @type {Map<string, number>} */
     const suspendedBy = new Map();
+    /**
+     * The host call that suspended last: what an idle turn is named by. With
+     * several calls out it names one of them, which for a profile is enough.
+     */
+    let lastSuspended = '';
     /**
      * Counts suspensions. A host call that calls the guest back builds the
      * callback's frame before it suspends, so a frame stamped with the count
@@ -80,6 +129,29 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * @returns {{ name: string, restingStack: number, hostReturn: number, at?: number }[]}
      */
     const hostCalls = thread=>(thread.hostCalls ??= []);
+
+    /**
+     * The threads whose innermost host call waits on the host, not on guest
+     * code it called back: what a run loop has to hand the thread over for.
+     * A call running a callback -- a window procedure under DispatchMessage, a
+     * COM method under a server's message window -- is its thread at work,
+     * and counted as waiting it sent the loop to the event loop every turn.
+     *
+     * @type {Set<any>}
+     */
+    const onHost = new Set();
+    /** @param {any} thread @param {boolean} waits */
+    const awaitHost = (thread, waits)=>{
+        thread.awaitingHost = waits;
+        if (waits)
+        {
+            onHost.add(thread);
+        }
+        else
+        {
+            onHost.delete(thread);
+        }
+    };
 
     /**
      * Where a thread's stack is while it is stopped: the lower of where its
@@ -164,12 +236,62 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     }
 
     /**
+     * A 64-bit routine's frame below `resting`: the routine's quadword below
+     * it, then RCX, RDX, R8 and R9, for `LONG_CALL_CODE` to pop, then the
+     * return address -- RSP eight past a multiple of 16 when the routine is
+     * entered -- the four home slots, which
+     * hold the first four arguments too, the rest of the arguments, and a
+     * spare quadword for the sentinel's park, as in the 32-bit frame. An
+     * argument is a dword widened by its sign as JavaScript holds it: a
+     * negative one -- an LPARAM of -1, a handle such as HWND_TOPMOST -- is
+     * sign-extended as a LONG is, any other zero-extended, which keeps every
+     * address below 4 GiB given unsigned as it is. A bigint is a quadword
+     * whole: an LPARAM or a pointer that came into the host whole goes back
+     * to the guest whole.
+     *
+     * @param {number} resting @param {(number | bigint)[]} args @param {number} entry
+     * @returns {{ frameBase: number, extent: number, start: number }} `start` the stack
+     *     the thread starts on, the routine's quadword
+     */
+    function longFrame(resting, args, entry){
+        const slots = LONG_FRAME_SLOTS + Math.max(0, args.length - 4);
+        const frameBase = ((resting - slots * 8 - 8) & ~15) + 8;
+        /** @param {number} at @param {number | bigint} value */
+        const quad = (at, value)=>{
+            if (typeof value === 'bigint')
+            {
+                memory.writeU32(at, Number(BigInt.asUintN(32, value)));
+                memory.writeU32(at + 4, Number(BigInt.asUintN(32, value >> 32n)));
+                return;
+            }
+            memory.writeU32(at, value);
+            memory.writeU32(at + 4, value < 0 ? 0xffffffff : 0);
+        };
+        for (let index = 0; index < slots; index++)
+        {
+            quad(frameBase + index * 8, 0);
+        }
+        args.slice(0, 4).forEach((value, index)=>{
+            quad(frameBase + index * 8, value);
+            quad(frameBase + 40 + index * 8, value);
+        });
+        args.slice(4).forEach((value, index)=>quad(frameBase + 72 + index * 8, value));
+        quad(frameBase + 32, sentinelAddress);
+        // The routine, popped first (`LONG_CALL_CODE`): below the frame, so the
+        // stack the routine starts on is the frame's alone.
+        quad(frameBase - 8, BigInt(whole(entry)));
+        return { frameBase, extent: frameBase + slots * 8, start: frameBase - 8 };
+    }
+
+    /**
      * Builds a callback's frame below where the thread's stack rests and
      * records it: what `call` and `callNow` both do before sending the thread.
      *
-     * @param {{ thread: any, entry: number, args: number[], stackAtRest?: number, by: string,
+     * @param {{ thread: any, entry: number, args: (number | bigint)[], stackAtRest?: number,
+     *     by: string,
      *     settle: (value: number) => void, now: boolean }} call
-     * @returns {number} the frame's base, the stack the routine starts on
+     * @returns {number} the stack the thread starts on: the frame's base, or below it the
+     *     routine's quadword a 64-bit thread pops first
      */
     function enter({ thread, entry, args, stackAtRest, by, settle, now }){
         if (!thread)
@@ -185,7 +307,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         // program's own null call, when in fact we chose the address -- and
         // which of our calls chose it is gone by the time anyone reads the
         // report. So it is refused here, named.
-        if ((entry >>> 0) === 0)
+        if (entry === 0)
         {
             throw new Error(`bridge: ${by} asked to run guest code at address zero`);
         }
@@ -224,40 +346,75 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         // register, or the return address of the procedure that made the
         // suspended call -- and the procedure returns into the park loop
         // once its call is answered, with nothing to say for itself.
-        const frameBase = resting - 4 * (args.length + 2);
-        // And it has to land on this thread's own stack. Three separate
-        // defects have written a callback frame onto a stack belonging to
-        // another thread -- each time because the resting position was read
-        // from something that had moved on while a handler awaited -- and
-        // every one of them was silent at the moment it happened, surfacing
-        // much later as a return into an address that holds no code. There
-        // is no legitimate reason for a frame to be anywhere else, so the
-        // fourth instance stops here and says whose stack it was about to
-        // write on instead of corrupting it.
-        if (thread.stackLimit !== undefined
-            && (frameBase < thread.stackLimit || frameBase > thread.stackTop))
+        const long = cpu.bits?.() === 64;
+        if (long && longCallAddress === 0)
+        {
+            longCallAddress = (longCallPlacer?.(Uint8Array.from(LONG_CALL_CODE)) ?? 0) >>> 0;
+            if (longCallAddress === 0)
+            {
+                throw new Error(`bridge: ${by} called the guest back in a 64-bit process,`
+                    + ' which has nowhere to start a callback');
+            }
+        }
+        const { frameBase, extent, start } = long ? longFrame(resting, args, entry)
+            : { frameBase: resting - 4 * (args.length + 2),
+                extent: resting - 4 * (args.length + 2) + 4 * (args.length + 2),
+                start: resting - 4 * (args.length + 2) };
+        // And it must not land on another thread's stack. Three separate
+        // defects have written a callback frame there -- each time because
+        // the resting position was read from something that had moved on
+        // while a handler awaited -- and every one of them was silent at the
+        // moment it happened, surfacing much later as a return into an
+        // address that holds no code. So the fourth instance stops here and
+        // says whose stack it was about to write on. Anywhere else is the
+        // program's to choose: Windows runs a thread on any stack it switched
+        // to (a fiber's, a coroutine's, a block of its heap), and calls it
+        // back there. A thread that has ended owns no stack: its record
+        // outlives it while a handle is open, and its stack is handed to the
+        // next thread made.
+        const other = kernel.threads().find((/** @type {any} */ one)=>one !== thread
+            && one.state !== 'terminated' && one.stackLimit !== undefined
+            && frameBase >= one.stackLimit && frameBase <= one.stackTop);
+        if (other)
         {
             throw new Error(`bridge: a callback frame for ${thread.name} at`
-                + ` 0x${(frameBase >>> 0).toString(16)} is outside its stack`
-                + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
-                + `..0x${(thread.stackTop >>> 0).toString(16)})`);
+                + ` 0x${(frameBase >>> 0).toString(16)} is on ${other.name}'s stack`
+                + ` (0x${(other.stackLimit >>> 0).toString(16)}`
+                + `..0x${(other.stackTop >>> 0).toString(16)})`);
         }
-        memory.writeU32(frameBase, sentinelAddress);
-        args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+        if (!long)
+        {
+            memory.writeU32(frameBase, sentinelAddress);
+            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4,
+                typeof value === 'bigint' ? Number(BigInt.asUintN(32, value)) : value));
+        }
 
         const frames = callbackFrames(thread);
         calls++;
         deepest = Math.max(deepest, frames.length + 1);
-        started.push({ entry: entry >>> 0, by, thread: thread.name });
+        started.push({ entry: whole(entry), by, thread: thread.name });
         if (started.length > STARTED_RING)
         {
             started.shift();
         }
-        frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle, epoch, now });
+        frames.push({ frameBase, extent, settle, epoch, now, entry: whole(entry), by,
+            since: Date.now() });
         // Off to run guest code, whatever it was doing before.
-        thread.awaitingHost = false;
-        return frameBase;
+        awaitHost(thread, false);
+        return start;
     }
+
+    /**
+     * Where a thread sent into `entry` starts, and the registers it starts
+     * with besides the caller's: the routine itself in a 32-bit process, the
+     * call code that pops the routine off the frame in a 64-bit one.
+     *
+     * @param {number} entry @param {Record<string, number>} [registers]
+     * @returns {{ eip: number, registers?: Record<string, number> }}
+     */
+    const startOf = (entry, registers)=>(cpu.bits?.() === 64
+        ? { eip: longCallAddress, ...registers ? { registers } : {} }
+        : { eip: entry, ...registers ? { registers } : {} });
 
     /**
      * The callback frame a return to the sentinel at `esp` comes back from:
@@ -298,6 +455,17 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         sentinel: ()=>sentinelId,
 
         /**
+         * Who places `LONG_CALL_CODE`, which a 64-bit process's callbacks start
+         * at: this layer has no guest memory of its own to put code in.
+         *
+         * @param {(code: Uint8Array) => number} place  Writes the code into
+         *     executable guest memory and answers its address, zero for none.
+         */
+        placeLongCall(place){
+            longCallPlacer = place;
+        },
+
+        /**
          * Records that a host call has suspended, and where the thread it
          * suspended will pick up its own code again.
          *
@@ -316,6 +484,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
             {
                 suspendedBy.set(call.name, (suspendedBy.get(call.name) ?? 0) + 1);
+                lastSuspended = call.name;
             }
             // A thread whose host call has not answered has nothing to run: it
             // is parked on `hlt` and retires the park loop and nothing else.
@@ -332,7 +501,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // window procedure, a script's message loop inside a COM call --
             // is a wait like any other, and counted runnable it spun the park
             // loop for as long as the wait lasted.
-            thread.awaitingHost = !callingBack;
+            awaitHost(thread, !callingBack);
             // Stamped so a report can say how long it has been waiting. A call
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a
@@ -352,6 +521,43 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         waiting: thread=>thread ? hostCalls(thread).map(call=>call.name) : [],
 
         /**
+         * The host call a callback returns into, by the stack its routine's
+         * frame left once undone -- somewhere inside the frame built for it:
+         * the deepest suspended call above that frame, which is the one that
+         * made it. Its return address and the stack past it are where the
+         * guest code that called the host goes on.
+         *
+         * @param {any} thread @param {number} stack
+         * @returns {{ rip: number, rsp: number } | null}
+         */
+        callerOf(thread, stack){
+            const frames = callbackFrames(thread);
+            let at = frames.length - 1;
+            while (at >= 0
+                && !(stack > frames[at].frameBase >>> 0 && stack <= frames[at].extent >>> 0))
+            {
+                at--;
+            }
+            if (at < 0)
+            {
+                return null;
+            }
+            const extent = frames[at].extent >>> 0;
+            const suspended = hostCalls(thread);
+            let made = suspended.length - 1;
+            while (made >= 0 && (suspended[made].restingStack >>> 0) < extent)
+            {
+                made--;
+            }
+            if (made < 0)
+            {
+                return null;
+            }
+            return { rip: whole(suspended[made].hostReturn),
+                rsp: suspended[made].restingStack >>> 0 };
+        },
+
+        /**
          * Where the guest was last sent, newest last, and by which host call.
          *
          * @returns {{ entry: number, by: string, thread: string }[]}
@@ -364,23 +570,34 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {Object} call
          * @param {any} call.thread
          * @param {number} call.entry            Guest address of the routine.
-         * @param {number[]} [call.args]
+         * @param {(number | bigint)[]} [call.args]  as `callGuest` takes them
          * @param {number} [call.stackAtRest]    Where the stack is, when nothing else knows.
          * @param {string} [call.by]             Which host call is starting it.
          * @param {Record<string, number>} [call.registers]
          *        What the routine finds in the registers besides its stack --
          *        a funclet reads its parent's frame through EBP before it has
          *        set anything.
-         * @returns {Promise<number>}
+         * @returns {Promise<number> & { high?: number }}  `high`, once resolved: the
+         *     high half of a 64-bit routine's RAX
          */
         call({ thread, entry, args = [], stackAtRest, by = 'somewhere', registers }){
             /** @type {(value: number) => void} */
-            let settle = ()=>{};
+            let resolved = ()=>{};
+            /** @type {Promise<number> & { high?: number }} */
             const answer = new Promise(resolve=>{
-                settle = resolve;
+                resolved = resolve;
             });
+            // The answer's high half, set on the promise before it resolves:
+            // whoever awaits it reads this call's, not a later one's.
+            /** @param {number} value @param {number} [high] */
+            const settle = (value, high)=>{
+                answer.high = high;
+                resolved(value);
+            };
             const frameBase = enter({ thread, entry, args, stackAtRest, by, settle, now: false });
-            kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
+            const start = startOf(entry, registers);
+            kernel.scheduleResume(thread, { eip: start.eip, esp: frameBase,
+                registers: start.registers });
             return answer;
         },
 
@@ -394,7 +611,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {Object} call
          * @param {any} call.thread
          * @param {number} call.entry
-         * @param {number[]} [call.args]
+         * @param {(number | bigint)[]} [call.args]  as `callGuest` takes them
          * @param {number} [call.stackAtRest]
          * @param {string} [call.by]
          * @param {(value: number) => void} call.onReturn
@@ -402,8 +619,13 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         callNow({ thread, entry, args = [], stackAtRest, by = 'somewhere', onReturn }){
             const frameBase = enter({ thread, entry, args, stackAtRest, by, settle: onReturn,
                 now: true });
+            const start = startOf(entry);
+            for (const [name, value] of Object.entries(start.registers ?? {}))
+            {
+                cpu.writeReg32(name, value);
+            }
             cpu.writeReg32('esp', frameBase);
-            cpu.writeReg32('eip', entry);
+            cpu.writeReg32('eip', start.eip);
         },
 
         /**
@@ -452,8 +674,12 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             }
             // Back inside whatever host call was waiting for it, which has not
             // answered yet: nothing for this thread to run until it does.
-            thread.awaitingHost = hostCalls(thread).length > 0;
-            frame.settle(cpu.readReg32('ecx') | 0);
+            awaitHost(thread, hostCalls(thread).length > 0);
+            // A 64-bit routine's answer is RAX whole, which the sentinel's stub
+            // kept in RCX: its high half goes beside the dword, for a caller
+            // that hands the answer on (an LRESULT).
+            frame.settle(cpu.readReg32('ecx') | 0, cpu.bits?.() === 64 && cpu.readReg64
+                ? Number(BigInt.asUintN(32, cpu.readReg64('rcx') >> 32n)) : undefined);
             return true;
         },
 
@@ -462,7 +688,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * code, with the stack it had before any of this started.
          *
          * @param {any} thread
-         * @param {number} returnValue
+         * @param {number | bigint} returnValue  a dword, or a quadword answered whole
          * @param {Record<string, number>} [registers]  What else the answer
          *     sets, for a call that answers in registers as well as in EAX.
          *     Applied when the thread is resumed, which is the only moment the
@@ -475,7 +701,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: a host call finished that was never suspended');
             }
             pending--;
-            thread.awaitingHost = false;
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
@@ -499,7 +725,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * and the thread goes back to its own code in this slice: EAX, and
          * where the call's stub would have returned with the stack it pops.
          *
-         * @param {any} thread @param {number} returnValue
+         * @param {any} thread
+         * @param {number | bigint} returnValue  a 64-bit caller's quadword whole (a
+         *     bigint), or a dword, which RAX takes by its sign
          */
         finishNow(thread, returnValue){
             const call = hostCalls(thread).pop();
@@ -508,16 +736,32 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: a host call finished that was never suspended');
             }
             pending--;
-            thread.awaitingHost = false;
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
                 answered = null;
                 open();
             }
-            cpu.writeReg32('eax', returnValue >>> 0);
+            if (cpu.bits?.() === 64)
+            {
+                cpu.writeReg64('rax', BigInt.asUintN(64, typeof returnValue === 'bigint'
+                    ? returnValue : BigInt(returnValue | 0)));
+            }
+            else
+            {
+                cpu.writeReg32('eax', Number(BigInt.asUintN(32, BigInt(returnValue))));
+            }
             cpu.writeReg32('esp', call.restingStack);
-            cpu.writeReg32('eip', call.hostReturn);
+            if (call.hostReturn >= 2 ** 32)
+            {
+                // A caller in an image past 4 GiB, which a dword of EIP cannot name.
+                cpu.writeReg64('rip', BigInt(call.hostReturn));
+            }
+            else
+            {
+                cpu.writeReg32('eip', call.hostReturn);
+            }
         },
 
         /**
@@ -550,20 +794,29 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         transfer(thread, registers, below){
             const target = (below ?? registers.esp) >>> 0;
-            const suspended = hostCalls(thread);
-            while (suspended.length > 0
-                && (suspended[suspended.length - 1].restingStack >>> 0) <= target)
-            {
-                suspended.pop();
-                pending--;
-            }
             const frames = callbackFrames(thread);
             while (frames.length > 0
                 && (frames[frames.length - 1].frameBase >>> 0) < target)
             {
                 frames.pop();
             }
-            thread.awaitingHost = false;
+            // A host call goes with the stack it rests on, and so does one
+            // resting inside the frame of the innermost callback left
+            // standing: only that callback's routine can have made it, and the
+            // thread leaves it. It lies above the target when the routine
+            // ended in a jump to an import (`jmp RaiseException`), handing it
+            // its own return and arguments; the call that built the frame
+            // rests at its extent or above.
+            const within = (frames.at(-1)?.extent ?? 0) >>> 0;
+            const suspended = hostCalls(thread);
+            while (suspended.length > 0
+                && ((suspended[suspended.length - 1].restingStack >>> 0) <= target
+                    || (suspended[suspended.length - 1].restingStack >>> 0) < within))
+            {
+                suspended.pop();
+                pending--;
+            }
+            awaitHost(thread, false);
             if (answered)
             {
                 const open = answered.settle;
@@ -585,6 +838,25 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * would spin until it gave up.
          */
         pendingCalls: ()=>pending,
+
+        /**
+         * How many threads wait on a host call's answer: the suspended calls
+         * less those whose guest code is running. A thread that ended while
+         * waiting waits on nothing.
+         */
+        waitingOnHost: ()=>{
+            for (const thread of onHost)
+            {
+                if (thread.state === 'terminated')
+                {
+                    onHost.delete(thread);
+                }
+            }
+            return onHost.size;
+        },
+
+        /** The host call that suspended last, or '' when none has. */
+        lastSuspended: ()=>lastSuspended,
 
 
         /**
@@ -624,6 +896,20 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                     name: call.name,
                     forMs: call.at ? Date.now() - call.at : 0,
                 }))),
+            // The guest code host calls are running now, innermost last, with the
+            // thread's state and the executor it is homed on: a host call that
+            // waits on a callback its thread is never given the turn to run is a
+            // hang that names no wait (ngen's BindToRuntimeWorker).
+            callingBack: kernel.threads().filter((/** @type {any} */ thread)=>
+                callbackFrames(thread).length > 0).map((/** @type {any} */ thread)=>({
+                thread: thread.name,
+                state: thread.state ?? null,
+                home: thread.home ?? null,
+                frames: callbackFrames(thread).map((/** @type {any} */ frame)=>({
+                    entry: (frame.entry ?? 0).toString(16), by: frame.by ?? null,
+                    forMs: frame.since ? Date.now() - frame.since : 0,
+                })),
+            })),
         }),
     };
 }

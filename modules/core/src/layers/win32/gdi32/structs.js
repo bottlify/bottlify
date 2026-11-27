@@ -20,6 +20,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** LOGPEN. Its width is a POINT, of which only the x is ever meaningful. */
 export const LOGPEN = Object.freeze({
@@ -116,6 +117,29 @@ export const DIBSECTION = Object.freeze({
 });
 
 /**
+ * The same structures in a 64-bit process, where bmBits, a LOGBRUSH's and an
+ * EXTLOGPEN's hatch (ULONG_PTR) and dshSection are eight bytes on an
+ * eight-byte boundary, and every structure holding one is padded to eight
+ * (wingdi.h under _WIN64).
+ */
+export const BITMAP64 = Object.freeze({
+    bmType: 0, bmWidth: 4, bmHeight: 8, bmWidthBytes: 12, bmPlanes: 16, bmBitsPixel: 18,
+    bmBits: 24, SIZE: 32,
+});
+export const DIBSECTION64 = Object.freeze({
+    dsBm: 0, dsBmih: 32, dsBitfields: 72, dshSection: 88, dsOffset: 96, SIZE: 104,
+});
+export const LOGBRUSH64 = Object.freeze({ lbStyle: 0, lbColor: 4, lbHatch: 8, SIZE: 16 });
+/**
+ * EXTLOGPEN at 64 bits: the hatch a quadword, the dash table after the
+ * count; GetObject writes it up to the last dash.
+ */
+export const EXTLOGPEN64 = Object.freeze({
+    elpPenStyle: 0, elpWidth: 4, elpBrushStyle: 8, elpColor: 12, elpHatch: 16,
+    elpNumEntries: 24, elpStyleEntry: 28, SIZE: 32,
+});
+
+/**
  * Bytes per row of a device-dependent bitmap, which pads to a WORD -- the
  * layout CreateBitmap's lpBits and GetBitmapBits' buffer are in.
  *
@@ -162,7 +186,7 @@ export const TEXTMETRICA = Object.freeze({
  * TEXTMETRICW: TEXTMETRICA's LONGs, then the four characters as WCHARs, so
  * everything after them sits four bytes further on and the whole is 60.
  */
-export const TEXTMETRICW = Object.freeze({
+const TEXTMETRICW = Object.freeze({
     tmFirstChar: 44,
     tmLastChar: 46,
     tmDefaultChar: 48,
@@ -206,7 +230,7 @@ export const PALETTEENTRY_SIZE = 4;
  * @returns {number} 0x00RRGGBB
  */
 export function paletteEntryToPixel(entry){
-    const value = entry >>> 0;
+    const value = wholeAddress(entry);
     return ((value & 0xff) << 16 | value & 0xff00 | (value >>> 16) & 0xff) >>> 0;
 }
 
@@ -221,7 +245,7 @@ export function paletteEntryToPixel(entry){
  * @param {number} address
  * @returns {number} the WORD at that address, unsigned
  */
-export function readU16(memory, address){
+function readU16(memory, address){
     const bytes = memory.readMemory(address, 2);
     return (bytes[0] | (bytes[1] << 8)) & 0xffff;
 }
@@ -244,7 +268,7 @@ export function readU32(memory, address){
  * @param {StructMemory} memory
  * @param {number} address
  */
-export function readI32(memory, address){
+function readI32(memory, address){
     return readU32(memory, address) | 0;
 }
 
@@ -319,6 +343,8 @@ export function readLogBrush(memory, address){
  * @property {number} quality
  * @property {number} pitchAndFamily
  * @property {string} faceName
+ * @property {import('./faces.js').RasterRealization} [raster]  How a bitmap face is
+ *           realised, carried by a font as a DC draws with it.
  */
 
 /**

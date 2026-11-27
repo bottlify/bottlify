@@ -515,8 +515,12 @@ test('a texture\'s sampler is rebuilt only when its filter or wrap parameters ch
     };
     draw();
     await r.swap();
-    const samplerOf = ()=>r.gpu.of('createBindGroup').at(-1).descriptor.entries
-        .find((/** @type {any} */ e)=>e.binding === 2).resource;
+    // The draw's group: the frame's show pass binds a sampler there too.
+    const samplerOf = ()=>r.gpu.of('createBindGroup')
+        .map((/** @type {any} */ call)=>call.descriptor.entries
+            .find((/** @type {any} */ e)=>e.binding === 2)?.resource)
+        .filter((/** @type {any} */ sampler)=>sampler?.descriptor?.label !== 'gl-show')
+        .at(-1);
     const first = samplerOf();
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     draw();
@@ -591,6 +595,11 @@ test('a DXT5 level reaches the upload decoded, its alpha per texel intact', asyn
     context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
         GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
     assert.equal(context.glGetError(), GL.NO_ERROR, 'the compressed level loaded');
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.equal(level.baseFormat, GL.RGBA, 'the level keeps the four components of DXT5');
+    assert.equal(level.compressedFormat, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT);
+    assert.deepEqual([...level.texels.subarray(3, 4)], [255], 'texel 0: table index 0');
+    assert.deepEqual([...level.texels.subarray(7, 8)], [0], 'texel 1: table index 1');
     context.glEnable(GL.TEXTURE_2D);
     context.glBegin(GL.TRIANGLES);
     context.glVertex2f(0, 0);
@@ -599,11 +608,7 @@ test('a DXT5 level reaches the upload decoded, its alpha per texel intact', asyn
     context.glEnd();
     await r.swap();
 
-    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
-    assert.equal(level.baseFormat, GL.RGBA, 'the level keeps the four components of DXT5');
-    assert.equal(level.compressedFormat, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT);
-    assert.deepEqual([...level.texels.subarray(3, 4)], [255], 'texel 0: table index 0');
-    assert.deepEqual([...level.texels.subarray(7, 8)], [0], 'texel 1: table index 1');
+    assert.equal(level.compressed, null, 'the blocks let go once the device holds their texels');
     const upload = r.gpu.of('writeTexture').find(w=>w.destination.origin.z === 0
         && w.destination.origin.x === 0);
     assert.ok(upload, 'the level was uploaded');
@@ -933,7 +938,8 @@ test('a depth range run backwards is the viewport\'s range with the depth turned
         const uniforms = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         const block = new Float32Array(uniforms[uniforms.length - 2].bytes.buffer,
             uniforms[uniforms.length - 2].bytes.byteOffset, UNIFORM.floats);
-        assert.equal(block[UNIFORM.misc + 1], -1, 'the vertex stage turns the depth round');
+        assert.deepEqual([...block.subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)],
+            [1, -0.5, 0.5], 'the vertex stage turns the depth round');
 
         context.glDepthRange(0.1, 0.9);
         context.glBegin(GL.TRIANGLES);
@@ -945,14 +951,55 @@ test('a depth range run backwards is the viewport\'s range with the depth turned
         const again = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         const forward = new Float32Array(again[again.length - 2].bytes.buffer,
             again[again.length - 2].bytes.byteOffset, UNIFORM.floats);
-        assert.equal(forward[UNIFORM.misc + 1], 1, 'and leaves a forward range alone');
+        assert.deepEqual([...forward.subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)],
+            [1, 0.5, 0.5], 'and leaves a forward range alone');
     });
 
-test('a read of the framebuffer on the device path is reported, not answered', ()=>{
+test('glClipControl: the origin turns y round, GL_ZERO_TO_ONE takes z as it is', async()=>{
     const r = rig();
     const { context } = r;
-    context.glReadPixels(0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
-    assert.ok(r.divergences.some(d=>/glReadPixels was accepted and read black/.test(d)));
+    /** @returns {Promise<number[]>} y's sign, z's and w's factors into z, of the last draw */
+    const drawn = async()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+        const blocks = uniformBlocks(r).filter(w=>/uniforms/.test(w.buffer.descriptor.label));
+        const last = blocks[blocks.length - 2];
+        return [...new Float32Array(last.bytes.buffer, last.bytes.byteOffset, UNIFORM.floats)
+            .subarray(UNIFORM.clipControl, UNIFORM.clipControl + 3)];
+    };
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_ORIGIN), [GL.LOWER_LEFT]);
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_DEPTH_MODE), [GL.NEGATIVE_ONE_TO_ONE]);
+    context.glClipControl(GL.UPPER_LEFT, GL.ZERO_TO_ONE);
+    assert.deepEqual(await drawn(), [-1, 1, 0], 'upside down, z as it is');
+    context.glDepthRange(1, 0);
+    assert.deepEqual(await drawn(), [-1, -1, 1], 'w - z for a backwards range');
+    context.glClipControl(GL.LOWER_LEFT, GL.NEGATIVE_ONE_TO_ONE);
+    assert.deepEqual(await drawn(), [1, -0.5, 0.5]);
+    context.glClipControl(GL.LOWER_LEFT, GL.ZERO_TO_ONE);
+    assert.deepEqual(await drawn(), [1, -1, 1], 'the depth mode alone is a change');
+    context.glClipControl(GL.UPPER_LEFT + 7, GL.ZERO_TO_ONE);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM);
+    context.glClipControl(GL.LOWER_LEFT, GL.LOWER_LEFT);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM);
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_DEPTH_MODE), [GL.ZERO_TO_ONE],
+        'a refused call changes nothing');
+    context.glClipControl(GL.UPPER_LEFT, GL.ZERO_TO_ONE);
+    context.glPushAttrib(GL.TRANSFORM_BIT);
+    context.glClipControl(GL.LOWER_LEFT, GL.NEGATIVE_ONE_TO_ONE);
+    context.glPopAttrib();
+    assert.deepEqual(context.glGetIntegerv(GL.CLIP_ORIGIN), [GL.UPPER_LEFT],
+        'kept by GL_TRANSFORM_BIT');
+});
+
+test('a read of depth on the device path is reported, not answered', ()=>{
+    const r = rig();
+    const { context } = r;
+    context.glReadPixels(0, 0, 2, 2, GL.DEPTH_COMPONENT, GL.FLOAT);
+    assert.ok(r.divergences.some(d=>/glReadPixels of depth was accepted and read zero/.test(d)));
 });
 
 test('the stencil test on the device path is not reported: the depth attachment carries it',
@@ -996,6 +1043,30 @@ test('GL_EXT_stencil_two_side: a back record set while the two-sided enable is o
     assert.deepEqual(pipeline.descriptor.depthStencil.stencilBack,
         pipeline.descriptor.depthStencil.stencilFront,
         'the back face the draw never enabled must not carry the ops set on GL_BACK');
+});
+
+test('GL_EXT_stencil_two_side: the back face set through the selector survives the front\'s '
+    + 'calls made before two-sided testing is on', async()=>{
+    // A shadow volume's two faces, set as a stencil-shadow renderer sets them:
+    // the back through the selector, then the front, and only then the
+    // two-sided test and no culling. The front's calls set OpenGL 2.0's back
+    // face, not the extension's.
+    const r = rig();
+    const { context } = r;
+    context.glEnable(GL.STENCIL_TEST);
+    context.glStencilFunc(GL.ALWAYS, 1, 0xff);
+    context.glActiveStencilFaceEXT(GL.BACK);
+    context.glStencilOp(GL.KEEP, GL.DECR_WRAP, GL.KEEP);
+    context.glActiveStencilFaceEXT(GL.FRONT);
+    context.glStencilOp(GL.KEEP, GL.INCR_WRAP, GL.KEEP);
+    context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
+    await drawTriangle(r);
+    const { depthStencil } = r.gpu.of('createRenderPipeline')
+        .find(p=>p.descriptor.depthStencil?.stencilFront?.depthFailOp === 'increment-wrap')
+        ?.descriptor ?? assert.fail('no pipeline took the front\'s ops');
+    assert.equal(depthStencil.stencilFront.depthFailOp, 'increment-wrap');
+    assert.equal(depthStencil.stencilBack.depthFailOp, 'decrement-wrap',
+        'the back face took the front\'s increment before');
 });
 
 test('GL_EXT_stencil_two_side: a differing reference is not reported when the back face '
@@ -1141,25 +1212,64 @@ test('a sub-image write after a draw sampled the texture reaches only the draws 
             'once nothing unflushed samples it, a write goes straight to the queue');
     });
 
-test('two overlapping sub-image writes upload their union once', async()=>{
-    const r = rig();
-    const { context } = r;
-    const draw = await definedTexture(r);
+test('a write placed among a frame\'s commands copies only rows that are the level\'s own',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const draw = await definedTexture(r);
+        /** Uint8Array copies made while `body` runs. @param {() => void} body */
+        const copiesIn = body=>{
+            const slice = Uint8Array.prototype.slice;
+            let copies = 0;
+            Uint8Array.prototype.slice = /** @this {Uint8Array} @param {number} [start] @param {number} [end] */ function(start, end){
+                copies++;
+                return slice.call(this, start, end);
+            };
+            try
+            {
+                body();
+            }
+            finally
+            {
+                Uint8Array.prototype.slice = slice;
+            }
+            return copies;
+        };
+        /** @param {number} x @param {number} width @param {number} value */
+        const write = (x, width, value)=>context.glTexSubImage2D(GL.TEXTURE_2D, 0, x, 0,
+            width, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(width * 2 * 4).fill(value));
 
-    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(3 * 3 * 4).fill(1));
-    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 2, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(3 * 3 * 4).fill(2));
-    draw();
-    await r.swap();
+        draw();
+        write(1, 3, 5);
+        assert.equal(copiesIn(draw), 0, 'a rectangle packed for the upload is its own already');
+        write(0, 8, 6);
+        assert.equal(copiesIn(draw), 1, 'whole rows are a view of the level: copied once');
+        await r.swap();
+        const staged = r.gpu.of('writeBuffer').map((/** @type {any} */ w)=>w.bytes[0]);
+        assert.ok(staged.includes(5) && staged.includes(6), 'both writes went up, staged');
+    });
 
-    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
-    assert.equal(uploads.length, 2, 'the full define, then one upload of the union');
-    const union = uploads[1];
-    // (1,1) 3x3 and (2,2) 3x3 -> (1,1) 4x4.
-    assert.deepEqual([union.destination.origin.x, union.destination.origin.y], [1, 1]);
-    assert.equal(union.bytes.length, 4 * 4 * 4);
-});
+test('two overlapping sub-image writes go up in the order written, nothing around them',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const draw = await definedTexture(r);
+
+        context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(3 * 3 * 4).fill(1));
+        context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 2, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(3 * 3 * 4).fill(2));
+        draw();
+        await r.swap();
+
+        const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
+        // The level's texels were let go after the define: one rectangle
+        // around both would send (4,1) and (1,4), which nothing wrote.
+        assert.deepEqual(uploads.slice(1).map(w=>[w.destination.origin.x,
+            w.destination.origin.y, w.bytes.length]), [[1, 1, 36], [2, 2, 36]]);
+        assert.deepEqual([...uploads[2].bytes], [...new Uint8Array(36).fill(2)],
+            'the later write last, whole');
+    });
 
 test('a full redefine after a sub-write uploads the whole level again', async()=>{
     const r = rig();
@@ -2054,6 +2164,40 @@ test('on a device a level\'s texels are let go once uploaded', async()=>{
     assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
 });
 
+test('on a device, rectangles written apart in a level let go go up apart: what lies between'
+    + ' them is the device\'s', async()=>{
+    // A font atlas filled a glyph at a time: one rectangle around two glyphs
+    // would send the texels between them, which this side no longer holds.
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(8 * 4 * 4).fill(0x40));
+    drawUnswapped(context);
+    await r.swap();
+    const uploads = r.gpu.of('writeTexture').length;
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(16).fill(1));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 5, 1, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(16).fill(2));
+    // Inside the first: no upload of its own.
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4).fill(3));
+    drawUnswapped(context);
+    await r.swap();
+    const sent = r.gpu.of('writeTexture').slice(uploads);
+    assert.deepEqual(sent.map((/** @type {any} */ w)=>[w.destination.origin, w.size]), [
+        [{ x: 0, y: 0, z: 0 }, { width: 2, height: 2, depthOrArrayLayers: 1 }],
+        [{ x: 5, y: 1, z: 0 }, { width: 2, height: 2, depthOrArrayLayers: 1 }],
+    ]);
+    assert.deepEqual([...sent[0].bytes], [...new Uint8Array(12).fill(1), 3, 3, 3, 3]);
+    assert.deepEqual([...sent[1].bytes], [...new Uint8Array(16).fill(2)]);
+    assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
+});
+
 test('on a device a DXT level is decoded for each read and a sub-image on it is kept', async()=>{
     const r = rig();
     const { context } = r;
@@ -2062,20 +2206,25 @@ test('on a device a DXT level is decoded for each read and a sub-image on it is 
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
         GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, new Uint8Array(16).fill(7));
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.notEqual(level.texels, level.texels, 'decoded when read, never kept');
     context.glEnable(GL.TEXTURE_2D);
     drawUnswapped(context);
     await r.swap();
-    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
-    assert.notEqual(level.texels, level.texels, 'decoded when read, never kept');
+    assert.deepEqual([level.texels, level.compressed], [null, null],
+        'once on the device, neither texels nor blocks are held here');
 
     context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
         Uint8Array.from([1, 2, 3, 4]));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 3, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from([5, 6, 7, 8]));
     const uploads = r.gpu.of('writeTexture').length;
     drawUnswapped(context);
     await r.swap();
-    const upload = r.gpu.of('writeTexture')[uploads];
-    assert.deepEqual([...upload.bytes.subarray(0, 4)], [1, 2, 3, 4],
-        'the written texel reaches the device over the decoded blocks');
+    const sent = r.gpu.of('writeTexture').slice(uploads);
+    assert.deepEqual(sent.map(upload=>[...upload.bytes]), [[1, 2, 3, 4], [5, 6, 7, 8]],
+        'the written texels alone reach the device, over the decoded blocks it holds');
+    assert.deepEqual(r.divergences.filter(d=>/let go|lost/.test(d)), []);
 });
 
 test('a context whose twin draws keeps no texture data, only its shapes', ()=>{
@@ -2135,4 +2284,391 @@ test('a level let go is carried on the device when its texture is given more lev
     assert.deepEqual(written().slice(uploads).sort(), [1, 2],
         'the new levels go up from their texels, after the carry');
     assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
+});
+
+test('an instanced draw with a divided array: a slot that steps by instance, moved to the base'
+    + ' instance, the indices moved by the base vertex, and no join with the next', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    // Two instances' colours after the vertices, four bytes each.
+    r.bytes.set([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255], 0x1000 + 0x200);
+    const [name] = context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, name);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 0x210, 0x1000, GL.STATIC_DRAW);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.COLOR_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+    context.glColorPointer(4, GL.UNSIGNED_BYTE, 4, 0x200);
+    context.glVertexAttribDivisor(3, 1);
+    r.words(0x2000, [0, 1, 1]);
+    context.glDrawElementsInstancedBaseVertexBaseInstance(GL.TRIANGLES, 3, GL.UNSIGNED_INT,
+        0x2000, 2, 1, 1);
+    context.glDrawElementsInstancedBaseVertexBaseInstance(GL.TRIANGLES, 3, GL.UNSIGNED_INT,
+        0x2000, 2, 1, 1);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    await r.swap();
+
+    const indexed = r.gpu.of('drawIndexed');
+    assert.deepEqual(indexed.map(d=>d.args), [[3, 2, 0, 1], [3, 2, 0, 1]],
+        'two instances each, the base vertex as WebGPU\'s, and the draws kept apart');
+    const slots = r.gpu.of('setVertexBuffer').slice(0, 2);
+    assert.deepEqual(slots.map(s=>s.offset), [0, 0x204],
+        'the divided slot starts at the base instance\'s element');
+    const [pipeline] = r.gpu.of('createRenderPipeline').map(p=>p.descriptor)
+        .filter(d=>d.vertex.buffers.length === 2);
+    assert.deepEqual(pipeline.vertex.buffers.map((/** @type {any} */ b)=>b.stepMode),
+        ['vertex', 'instance']);
+    assert.equal(r.renderer.diagnostics().fallbacks, 0);
+});
+
+test('a divisor past one copies each instance\'s element out, and a draw of no instance draws'
+    + ' nothing', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    r.bytes.set([10, 0, 0, 255, 20, 0, 0, 255], 0x3000);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.COLOR_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glColorPointer(4, GL.UNSIGNED_BYTE, 4, 0x3000);
+    context.glVertexAttribDivisor(3, 2);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, 0);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, 3);
+    context.glDrawArraysInstanced(GL.TRIANGLES, 0, 3, -1);
+    assert.equal(context.glGetError(), GL.INVALID_VALUE, 'a negative instance count');
+    await r.swap();
+    const draws = r.gpu.of('draw').filter(d=>d.args[0] === 3 && d.args[1] === 3);
+    assert.equal(draws.length, 1, 'only the draw of three instances');
+    // Instances 0 and 1 read element 0, instance 2 element 1.
+    const colour = r.gpu.of('setVertexBuffer')[1];
+    assert.deepEqual([...colour.buffer.bytes.subarray(colour.offset, colour.offset + 12)],
+        [10, 0, 0, 255, 10, 0, 0, 255, 20, 0, 0, 255], 'the elements copied out in instance order');
+});
+
+/** @param {ReturnType<typeof rig>} r @param {RegExp} label */
+function textureLabelled(r, label){
+    // The window's back buffer is the one labelled exactly so.
+    const whole = new RegExp(`${label.source}$`);
+    return r.gpu.of('createTexture').map((/** @type {any} */ call)=>call.texture)
+        .reverse().find((/** @type {any} */ texture)=>whole.test(texture.descriptor.label ?? ''));
+}
+
+test('glReadPixels on the device draws what was recorded first, then copies the back buffer',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        // The window's colour, BGRA with its top row first: the top row blue,
+        // the rest red.
+        const colour = textureLabelled(r, /gl-colour/);
+        for (let at = 0; at < colour.bytes.length; at += 4)
+        {
+            colour.bytes.set(at < 64 * 4 ? [255, 0, 0, 255] : [0, 0, 255, 255], at);
+        }
+        context.glClearColor(1, 0, 0, 1);
+        context.glScissor(0, 0, 1, 1);
+        context.glEnable(GL.SCISSOR_TEST);
+        context.glClear(GL.COLOR_BUFFER_BIT);
+        const reading = context.glReadPixels(62, 30, 3, 2, GL.RGBA, GL.UNSIGNED_BYTE);
+        assert.ok(reading instanceof Promise, 'the pixels come once the device has drawn them');
+        assert.deepEqual([...await reading], [
+            255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 0,
+            0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0,
+        ], 'GL\'s rows bottom first, RGBA, nothing outside the buffer');
+        const order = r.gpu.calls.filter((/** @type {any} */ c)=>c.op === 'draw'
+            || c.op === 'copyTextureToBuffer').map((/** @type {any} */ c)=>c.op);
+        assert.deepEqual(order, ['draw', 'copyTextureToBuffer'],
+            'the clear recorded before the read is drawn before the copy');
+        assert.match(r.gpu.of('copyTextureToBuffer')[0].source.texture.descriptor.label,
+            /gl-colour/);
+        // Drawn already, the clear is not drawn again at the swap.
+        await r.swap();
+        assert.equal(r.gpu.of('draw').filter((/** @type {any} */ c)=>c.args?.[0] === 3).length,
+            2, 'the clear once, and the frame shown');
+        assert.deepEqual(r.divergences.filter(d=>/glReadPixels/.test(d)), []);
+    });
+
+test('glReadPixels on the device reads a framebuffer object\'s texture the way GL lays it',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        // Two rows: the first given, GL's bottom one, red; the second green.
+        r.bytes.set([255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255], 0x3000);
+        context.glGenTextures(1);
+        context.glBindTexture(GL.TEXTURE_2D, 1);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 2, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x3000);
+        context.glGenFramebuffers(1);
+        context.bindFramebuffer(GL.FRAMEBUFFER, 1, false);
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 0);
+        assert.deepEqual([...await context.glReadPixels(1, 0, 1, 2, GL.RGBA, GL.UNSIGNED_BYTE)],
+            [255, 0, 0, 255, 0, 255, 0, 255]);
+        // A level past the first is copied from that level (the fake device
+        // keeps the texels of the first alone).
+        r.bytes.set([0, 0, 255, 255], 0x3100);
+        context.glTexImage2D(GL.TEXTURE_2D, 1, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            0x3100);
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, 1, 1);
+        await context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE);
+        const copy = r.gpu.of('copyTextureToBuffer').at(-1);
+        assert.equal(copy.source.mipLevel, 1);
+        assert.deepEqual([copy.size.width, copy.size.height], [1, 1]);
+    });
+
+test('a window\'s buffers are the window\'s: another context on it reads what the first drew',
+    async()=>{
+        const r = rig();
+        /** @type {any} */
+        const second = createGlContext({ gpu: r.renderer });
+        const window = { width: 8, height: 4, doubleBuffered: true, key: 'window:1' };
+        r.context.attach(window);
+        second.attach(window);
+        const colour = textureLabelled(r, /gl-colour/);
+        colour.bytes.set([0, 0, 255, 255], 0);
+        assert.deepEqual([...await second.glReadPixels(0, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)],
+            [255, 0, 0, 255], 'one colour surface for the window');
+        assert.deepEqual([...await r.context.glReadPixels(0, 3, 1, 1, GL.RGBA,
+            GL.UNSIGNED_BYTE)], [255, 0, 0, 255], 'and the first context moved onto it');
+        assert.equal(r.gpu.of('createTexture').filter((/** @type {any} */ call)=>
+            /gl-colour$/.test(call.texture.descriptor.label)).length, 2,
+        'the rig\'s own drawable, and the window\'s once');
+        // Another size is other buffers.
+        second.attach({ ...window, width: 16 });
+        assert.notEqual(textureLabelled(r, /gl-colour/), colour);
+    });
+
+test('a swap exchanges the buffers: the back one is the old front one after it', async()=>{
+    const r = rig();
+    const back = textureLabelled(r, /gl-colour/);
+    const front = textureLabelled(r, /gl-colour-front/);
+    back.bytes.fill(0x40);
+    const read = async()=>[...await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA,
+        GL.UNSIGNED_BYTE)];
+    assert.deepEqual(await read(), [0x40, 0x40, 0x40, 0x40]);
+    await r.swap();
+    assert.deepEqual(await read(), [0, 0, 0, 0], 'the front one, never drawn');
+    assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, front);
+    // What is drawn now lands in it.
+    r.context.glClear(GL.COLOR_BUFFER_BIT);
+    await read();
+    assert.equal(r.gpu.of('beginRenderPass').at(-1).descriptor.colorAttachments[0].view.texture,
+        front);
+    await r.swap();
+    assert.deepEqual(await read(), [0x40, 0x40, 0x40, 0x40], 'and back again');
+    // The frame shown is the one drawn before its swap, whatever is back now.
+    const shows = r.gpu.of('createBindGroup').filter((/** @type {any} */ call)=>call.descriptor
+        .entries.some((/** @type {any} */ e)=>e.resource?.descriptor?.label === 'gl-show'));
+    const shownFrom = shows.map((/** @type {any} */ call)=>call.descriptor.entries
+        .find((/** @type {any} */ e)=>e.binding === 1).resource.texture);
+    assert.deepEqual(shownFrom.slice(-2), [back, front]);
+});
+
+test('a context made current with a read DC reads that window\'s buffers, and draws into its own',
+    async()=>{
+        const r = rig();
+        r.context.attach({ width: 4, height: 4, doubleBuffered: true, key: 'read' });
+        const readBack = textureLabelled(r, /gl-colour/);
+        readBack.bytes.fill(0x40);
+        r.context.attach({ width: 8, height: 8, doubleBuffered: true, key: 'draw',
+            read: { width: 4, height: 4, key: 'read' } });
+        const drawBack = textureLabelled(r, /gl-colour/);
+        assert.notEqual(drawBack, readBack);
+        assert.deepEqual([...await r.context.glReadPixels(3, 3, 1, 1, GL.RGBA,
+            GL.UNSIGNED_BYTE)], [0x40, 0x40, 0x40, 0x40]);
+        r.context.glClear(GL.COLOR_BUFFER_BIT);
+        await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE);
+        assert.equal(r.gpu.of('beginRenderPass').at(-1).descriptor.colorAttachments[0].view
+            .texture, drawBack);
+        assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, readBack);
+    });
+
+test('a context left draws what it recorded, and another reads that drawable as it is',
+    async()=>{
+        const r = rig();
+        const pbuffer = { width: 16, height: 8, doubleBuffered: false, key: 'pbuffer:1' };
+        /** @type {any} */
+        const drawer = createGlContext({ gpu: r.renderer });
+        drawer.attach(pbuffer);
+        const colour = textureLabelled(r, /gl-colour/);
+        colour.bytes.fill(0x30);
+        drawer.glClear(GL.COLOR_BUFFER_BIT);
+        const passes = ()=>r.gpu.of('beginRenderPass').filter((/** @type {any} */ call)=>
+            call.descriptor.colorAttachments[0]?.view.texture === colour).length;
+        await r.renderer.settled();
+        assert.equal(passes(), 0, 'recorded, not drawn yet');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'drawn once it is left');
+        drawer.flushDevice();
+        await r.renderer.settled();
+        assert.equal(passes(), 1, 'and nothing twice');
+        assert.deepEqual([...(await r.context.readDrawable(pbuffer) ?? [])].slice(0, 4),
+            [0x30, 0x30, 0x30, 0x30], 'the other drawable\'s colour, the whole of it');
+        assert.equal(r.gpu.of('copyTextureToBuffer').at(-1).source.texture, colour);
+    });
+
+test('a single-buffered window keeps its one buffer across a swap', async()=>{
+    const r = rig();
+    r.context.attach({ width: 4, height: 4, doubleBuffered: false, key: 'single' });
+    const only = textureLabelled(r, /gl-colour/);
+    only.bytes.fill(0x40);
+    await r.swap();
+    assert.deepEqual([...await r.context.glReadPixels(0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)],
+        [0x40, 0x40, 0x40, 0x40]);
+});
+
+test('blending and colour masks set apart per draw buffer reach each target\'s pipeline state, '
+    + 'and glClearBuffer clears one target', async()=>{
+    const r = rig();
+    const { context } = r;
+    const names = context.glGenTextures(2);
+    for (const name of names)
+    {
+        context.glBindTexture(GL.TEXTURE_2D, name);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0);
+    }
+    context.glGenFramebuffers(1);
+    context.bindFramebuffer(GL.FRAMEBUFFER, 1, false);
+    names.forEach((/** @type {number} */ name, /** @type {number} */ k)=>
+        context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0 + k, GL.TEXTURE_2D,
+            name, 0));
+    context.glDrawBuffers([GL.COLOR_ATTACHMENT0, GL.COLOR_ATTACHMENT0 + 1]);
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
+    context.glDisablei(GL.BLEND, 1);
+    context.glColorMaski(1, 1, 0, 0, 0);
+    context.clearBuffer(GL.COLOR, 1, [0, 1, 0, 1], 'float');
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const targets = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets);
+    const drawn = targets.find((/** @type {any[]} */ list)=>list.length === 2 && list[0].blend);
+    assert.ok(drawn, 'a pipeline over both targets, the first blending');
+    assert.equal(drawn[1].blend, undefined, 'the second does not blend');
+    assert.deepEqual([drawn[0].writeMask, drawn[1].writeMask], [0xf, 0x1]);
+    const cleared = targets.find((/** @type {any[]} */ list)=>list.length === 2
+        && list[0].writeMask === 0);
+    assert.ok(cleared, 'the clear writes the first target nothing');
+    assert.equal(cleared[1].writeMask, 0x1, 'and the second under its own mask');
+
+    // The other way round: only the second buffer blends, and a pipeline
+    // that differs in nothing else is another one.
+    context.glDisable(GL.BLEND);
+    context.glEnablei(GL.BLEND, 1);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const swapped = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets).find((/** @type {any[]} */ list)=>list.length === 2
+        && !list[0].blend && list[1].blend);
+    assert.ok(swapped, 'a pipeline blending the second target alone');
+    assert.deepEqual([swapped[0].writeMask, swapped[1].writeMask], [0xf, 0x1]);
+
+    // Each blending buffer with its own factors (4.0).
+    context.glEnable(GL.BLEND);
+    context.glBlendFuncSeparatei(1, GL.ONE, GL.ONE, GL.ONE, GL.ONE);
+    context.glBlendEquationSeparatei(1, GL.MAX, GL.FUNC_ADD);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    const own = r.gpu.of('createRenderPipeline').map((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets).find((/** @type {any[]} */ list)=>list.length === 2
+        && list[1].blend?.color.operation === 'max');
+    assert.ok(own, 'the second target blends by its own equation');
+    assert.equal(own[0].blend.color.srcFactor, 'src-alpha', 'the first by the unindexed state');
+    assert.equal(own[1].blend.alpha.dstFactor, 'one');
+    // Other factors alone make another pipeline (min and max take none).
+    context.glBlendEquationSeparatei(1, GL.FUNC_ADD, GL.FUNC_ADD);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    context.glBlendFuncSeparatei(1, GL.ZERO, GL.ONE, GL.ONE, GL.ONE);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(0, 4);
+    context.glEnd();
+    await r.swap();
+    assert.ok(r.gpu.of('createRenderPipeline').some((/** @type {any} */ call)=>
+        call.descriptor.fragment.targets[1]?.blend?.color.srcFactor === 'zero'));
+});
+
+test('a unit\'s sampler object samples its texture in place of the texture\'s own state', async()=>{
+    /** @type {any[]} */
+    const made = [];
+    const r = rig({ createSampler: (/** @type {any} */ descriptor)=>{
+        made.push(descriptor);
+        return { kind: 'sampler', descriptor };
+    } });
+    const { context } = r;
+    r.bytes.set([255, 0, 0, 255], 0x3000);
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
+    context.glEnable(GL.TEXTURE_2D);
+    const [sampler] = context.glGenSamplers(1);
+    context.samplerParameter(sampler, GL.TEXTURE_MIN_FILTER, [GL.LINEAR]);
+    context.samplerParameter(sampler, GL.TEXTURE_WRAP_T, [GL.CLAMP_TO_EDGE]);
+    const draw = async()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glTexCoord2f(0, 0);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(0, 8);
+        context.glEnd();
+        await r.swap();
+    };
+    // The sampler the frame's last draw bound, not the last one made: a
+    // descriptor already made is reused.
+    const last = ()=>{
+        /** @param {any} group */
+        const samplerIn = group=>r.gpu.calls.find((/** @type {any} */ c)=>
+            c.op === 'createBindGroup' && c.createBindGroup === group)?.descriptor.entries
+            .map((/** @type {any} */ e)=>e.resource).find((/** @type {any} */ x)=>
+                x?.kind === 'sampler' && /gl-sampler/.test(x.descriptor.label ?? ''));
+        const sets = r.gpu.of('setBindGroup');
+        for (let k = sets.length - 1; k >= 0; k--)
+        {
+            const found = samplerIn(sets[k].group);
+            if (found)
+            {
+                return found.descriptor;
+            }
+        }
+        return null;
+    };
+    await draw();
+    assert.deepEqual([last().minFilter, last().addressModeV], ['nearest', 'repeat'],
+        'the texture\'s own');
+    context.glBindSampler(0, sampler);
+    await draw();
+    assert.deepEqual([last().minFilter, last().magFilter, last().addressModeV],
+        ['linear', 'linear', 'clamp-to-edge'], 'the sampler\'s, every parameter of it');
+    context.glBindSampler(0, 0);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.MIRRORED_REPEAT);
+    await draw();
+    assert.equal(last().addressModeV, 'mirror-repeat', 'the texture\'s again');
+    // The unit the texture is on is the sampler's: unit 1 alone enabled.
+    context.glDisable(GL.TEXTURE_2D);
+    context.glActiveTextureARB(GL.TEXTURE0 + 1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindSampler(1, sampler);
+    await draw();
+    assert.equal(last().addressModeV, 'clamp-to-edge', 'unit 1\'s sampler');
 });

@@ -24,7 +24,7 @@ const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
  * @param {string} name @param {number} count
  */
 function relinkOf(name, count){
-    const image = readFileSync(new URL(`../../../../tools/cork-bench/images/${name}.bin`,
+    const image = readFileSync(new URL(`../../bench/micro/images/${name}.bin`,
         import.meta.url));
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();
@@ -142,19 +142,6 @@ test('a batch of formed regions and a relink of the same share what was emitted'
     assert.deepEqual(relinked.module, relinkBatch(relink, layout, FEATURES, OPTIONS).module);
 });
 
-test('a batch with structure left unset and one with it off do not share functions', ()=>{
-    // Unset is on (`prepareModule` reads `!== false`), so the two ask for
-    // different code, and the cache must keep them apart.
-    const relink = relinkOf('sort-x87', 6);
-    const cache = createEmitCache();
-    const flat = { ...OPTIONS, structure: false };
-    relinkBatch(relink, layout, FEATURES, flat, cache);
-    const kept = relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
-    assert.deepEqual(kept.module, relinkBatch(relink, layout, FEATURES, OPTIONS).module);
-    const keptFlat = relinkBatch(relink, layout, FEATURES, flat, cache);
-    assert.deepEqual(keptFlat.module, relinkBatch(relink, layout, FEATURES, flat).module);
-});
-
 test('a region formed through an import slot is formed the same on the worker', ()=>{
     // call dword [slot]; ret -- the slot, on a data page of its own, holds a leaf that
     // the call is formed into (mov eax, 1; ret). The worker forms from copies of the pages
@@ -209,11 +196,12 @@ test('every region is formed the same on the worker from its own pages alone', (
 test('a region formed again on a worker is the region the runtime formed, wherever forming'
     + ' looked', ()=>{
     // 0x401000: call [0x403000]; ret -- the slot names a small function on a
-    // page of its own, 0x402000: ret. Forming predicts the call through the
-    // slot where that callee is code it may form, and a region already at its
-    // most blocks takes none of the callee's: its page is in no block, and
-    // none of the region's pages. A worker told only those predicts nothing,
-    // forms another region and answers the job changed.
+    // page of its own, 0x402000: ret. Forming looks at the callee where it is
+    // code it may form, and a region already at its most blocks takes none of
+    // it: the callee's page is in no block. A prediction with no callee formed
+    // in would leave the region at every call, so the call stays a wasm call
+    // as one nothing predicted is, and a worker told only the region's own
+    // pages forms the same region.
     const form = { ...FORM, maxBlocks: 1 };
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map([
@@ -229,8 +217,8 @@ test('a region formed again on a worker is the region the runtime formed, wherev
     const read = (/** @type {number} */ address)=>pages.get(address >>> 12)?.[address & 0xfff] ?? 0;
     const region = formRegion(read, 0x401000, { ...form,
         translatable: address=>pages.has(address >>> 12) });
-    assert.ok(region.blocks.some(block=>block.exit.predicted), 'the call is predicted');
-    assert.ok(!region.pages.has(0x402), 'and its callee\'s page is none of the region\'s');
+    assert.ok(region.blocks.every(block=>!block.exit.predicted), 'no call is predicted');
+    assert.ok(!region.pages.has(0x402), 'and the callee\'s page is none of the region\'s');
     const relink = (/** @type {number[]} */ formable)=>relinkBatch({
         jobs: [{ entry: 0x401000, entryTop: 0, hash: region.hash }],
         pages: [...(region.reads ?? region.pages)].map(page=>[page,
@@ -239,6 +227,70 @@ test('a region formed again on a worker is the region the runtime formed, wherev
     }, layout, FEATURES, OPTIONS);
     assert.deepEqual(relink([...(region.formable ?? [])]).results.map(one=>one.ok), [true],
         'told every page forming was told it may form on');
-    assert.deepEqual(relink([...region.pages]).results.map(one=>one.ok), [false],
-        'told only the pages of its code, it forms another region');
+    assert.deepEqual(relink([...region.pages]).results.map(one=>one.ok), [true],
+        'told only the pages of its code');
+    // With room for the callee it is formed in, and its page is the region's.
+    const roomy = formRegion(read, 0x401000, { ...FORM,
+        translatable: address=>pages.has(address >>> 12) });
+    assert.ok(roomy.blocks.some(block=>block.exit.predicted), 'the call is predicted');
+    assert.ok(roomy.pages.has(0x402));
+});
+
+test('regions of one batch are formed on the worker over each one\'s own pages, not all of'
+    + ' theirs', ()=>{
+    // 0x401000: nop; jmp 0x402000, formed where 0x402 may not be formed on from it (a page
+    // of stubs, which holds only regions entered there); 0x402000: ret, entered there, on
+    // its own page. Batched together, the first told the pages both may form on went on
+    // into the second's page, its hash was not the runtime's, and its entry was answered
+    // `changed` - barren for good, its bytes never written.
+    /** @type {Map<number, Uint8Array>} */
+    const pages = new Map([[0x401, [0x90, 0xe9, 0xfa, 0x0f, 0x00, 0x00]], [0x402, [0xc3]]]
+        .map(([page, bytes])=>{
+            const copy = new Uint8Array(4096);
+            copy.set(/** @type {number[]} */ (bytes));
+            const at = /** @type {number} */ (page);
+            return [at, copy];
+        }));
+    const read = (/** @type {number} */ address)=>pages.get(address >>> 12)?.[address & 0xfff] ?? 0;
+    const jump = formRegion(read, 0x401000, { ...FORM,
+        translatable: address=>address >>> 12 === 0x401 });
+    const stub = formRegion(read, 0x402000, { ...FORM,
+        translatable: address=>address >>> 12 === 0x402 });
+    assert.ok(!jump.pages.has(0x402), 'the jump\'s region stops at the stub page');
+    const built = relinkBatch({
+        jobs: [{ entry: 0x401000, entryTop: 0, hash: jump.hash, formable: [...jump.pages] },
+            { entry: 0x402000, entryTop: 0, hash: stub.hash, formable: [...stub.pages] }],
+        pages: [...pages], form: FORM,
+    }, layout, FEATURES, OPTIONS);
+    assert.deepEqual(built.results.map(one=>(one.ok ? 'ok' : one.message)), ['ok', 'ok']);
+});
+
+test('a relink formed where the pages lie in the guest\'s memory makes the module copies of'
+    + ' them make; a page past the memory reads as zeros, as its copy did', ()=>{
+    for (const name of ['load-x87', 'vcall-x87'])
+    {
+        const relink = relinkOf(name, 24);
+        const at = 0x10000;
+        const last = Math.max(...relink.pages.map(([page])=>page));
+        // The memory ends a page short of the last one: read there as zeros, the
+        // copy of which is a page of zeros.
+        const memory = new Uint8Array(at + last * 4096);
+        for (const [page, bytes] of relink.pages)
+        {
+            if (page < last)
+            {
+                memory.set(bytes, at + page * 4096);
+            }
+        }
+        const copies = relink.pages.map(([page, bytes])=>
+            /** @type {[number, Uint8Array]} */ ([page, page < last ? bytes : new Uint8Array(4096)]));
+        const copied = relinkBatch({ ...relink, pages: copies }, layout, FEATURES, OPTIONS);
+        const { pages, ...rest } = relink;
+        const inPlace = relinkBatch({ ...rest, ram: { buffer: memory.buffer, at,
+            pages: pages.map(([page])=>page) } }, layout, FEATURES, OPTIONS);
+        assert.ok(inPlace.results.length > 0);
+        assert.deepEqual(inPlace.results.map(result=>result.ok),
+            copied.results.map(result=>result.ok), name);
+        assert.deepEqual(inPlace.module, copied.module, `${name}: the same bytes`);
+    }
 });

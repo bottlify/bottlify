@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
+import { MULDIV_CODE, createSystemFunctions, imageBits, mulDiv } from './system.js';
+import { createActivationContexts } from './actctx.js';
 import { createProcessors } from './processor.js';
+import { childThread } from './cross-process.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const ERROR_INVALID_HANDLE = 6;
@@ -17,6 +19,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const FILE_TYPE_UNKNOWN = 0x0000;
 const FILE_TYPE_DISK = 0x0001;
 const FILE_TYPE_CHAR = 0x0002;
+const FILE_TYPE_PIPE = 0x0003;
 
 const STILL_ACTIVE = 259;
 const CURRENT_PROCESS = 0xffffffff;
@@ -61,10 +64,13 @@ function fakeHost(size = 0x1000){
         systemTimeMs: ()=>clock.wallMs,
         /** @param {number} code */
         setLastError: code=>errors.push(code),
-        /** @param {number} handle */
-        resolveHandle(handle){
+        /** @param {number} handle @param {string} [type] */
+        resolveHandle(handle, type){
             const held = handles.get(handle);
-            if (!held)
+            // A child's thread is the one kind told apart by its type here; with
+            // no type asked, any object is named, as the kernel's table does.
+            if (!held || (type !== undefined
+                && (type === 'process-thread') !== (held.handleType === 'process-thread')))
             {
                 throw new Error(`bad handle ${handle}`);
             }
@@ -94,7 +100,8 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint32(0x214, true), 1, 'and one processor');
     assert.equal(host.view.getUint32(0x21c, true), 0x10000, 'allocation granularity');
     assert.equal(host.view.getUint16(0x220, true), 6, 'the level is CPUID\'s family');
-    assert.equal(host.view.getUint16(0x222, true), 0x0703, 'the revision its model and stepping');
+    assert.equal(host.view.getUint16(0x222, true), 0x1a05,
+        'the revision its model, the extended model above it, and stepping');
 });
 
 test('GetSystemInfo counts a processor for each the kernel has, and masks all of them', ()=>{
@@ -139,7 +146,7 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
         const host = fakeHost();
         const fns = createSystemFunctions({ ...host,
             processors: createProcessors({ processors: ()=>count }) });
-        const needed = (count * 4 + 2) * 24;
+        const needed = (count * 5 + 2) * 24;
         host.view.setUint32(LENGTH, 0x400, true);
         assert.equal(fns.GetLogicalProcessorInformation.handler([BUFFER, LENGTH]), 1);
         assert.equal(host.view.getUint32(LENGTH, true), needed, 'what was written');
@@ -148,20 +155,62 @@ test('GetLogicalProcessorInformation lists a core and its caches for each proces
         for (let index = 0; index < count; index++)
         {
             const mask = 1 << index;
-            assert.deepEqual(entries.slice(index * 4, index * 4 + 4).map(entry=>
+            assert.deepEqual(entries.slice(index * 5, index * 5 + 5).map(entry=>
                 [entry.mask, entry.relationship, entry.relationship === 2 ? entry.cache
                     : entry.word]), [
                 [mask, 0, 0],
                 // Level, associativity, line, size, type: data 2, instruction 1, unified 0.
                 [mask, 2, [1, 8, 64, 32 << 10, 2]],
-                [mask, 2, [1, 8, 64, 32 << 10, 1]],
-                [mask, 2, [2, 24, 64, 6 << 20, 0]],
+                [mask, 2, [1, 4, 64, 32 << 10, 1]],
+                [mask, 2, [2, 8, 64, 256 << 10, 0]],
+                [mask, 2, [3, 16, 64, 8 << 20, 0]],
             ], `processor ${index} of ${count}`);
         }
-        assert.deepEqual(entries.slice(count * 4).map(entry=>
+        assert.deepEqual(entries.slice(count * 5).map(entry=>
             [entry.mask, entry.relationship, entry.word]), [[all, 3, 0], [all, 1, 0]],
         'one package and node 0, holding all of them');
     }
+});
+
+test('QueryIdleProcessorCycleTime: a ULONG64 a processor, without a buffer only a measure', ()=>{
+    // time.c test_processor_idle_cycle_time.
+    const LENGTH = 0x1fc;
+    const host = fakeHost();
+    const fns = createSystemFunctions({ ...host,
+        processors: createProcessors({ processors: ()=>4 }) });
+    host.view.setUint32(LENGTH, 0, true);
+    assert.equal(fns.QueryIdleProcessorCycleTime.handler([LENGTH, 0]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 32);
+    host.view.setUint32(LENGTH, 4, true);
+    assert.equal(fns.QueryIdleProcessorCycleTime.handler([LENGTH, 0]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 4, 'a length given stays');
+    host.view.setUint32(LENGTH, 64, true);
+    host.bytes.fill(0xcc, 0x200, 0x240);
+    assert.equal(fns.QueryIdleProcessorCycleTimeEx.handler([0, LENGTH, 0x200]), 1);
+    assert.equal(host.view.getUint32(LENGTH, true), 32);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x220)], new Array(32).fill(0));
+    assert.equal(host.bytes[0x220], 0xcc);
+    assert.deepEqual(host.errors, []);
+});
+
+test('SystemTimeToFileTime refuses a time that is none, FileTimeToSystemTime one past 2^63', ()=>{
+    // time.c test_conversions, test_invalid_arg and test_FileTimeToSystemTime.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const plant = (/** @type {number[]} */ words)=>words.forEach((word, at)=>
+        host.view.setUint16(0x240 + at * 2, word, true));
+    for (const words of [[1600, 12, 0, 31, 23, 59, 59, 999], [1980, 0, 0, 1, 0, 0, 0, 0],
+        [1980, 1, 0, 1, 24, 0, 0, 0], [1980, 1, 0, 1, 0, 60, 0, 0], [2001, 2, 0, 29, 0, 0, 0, 0]])
+    {
+        plant(words);
+        assert.equal(fns.SystemTimeToFileTime.handler([0x240, 0x260]), 0, words.join(' '));
+    }
+    plant([1601, 1, 0, 1, 0, 0, 0, 0]);
+    assert.equal(fns.SystemTimeToFileTime.handler([0x240, 0x260]), 1);
+    assert.equal(host.view.getBigUint64(0x260, true), 0n);
+    host.view.setBigUint64(0x260, 0xffffffffffffffffn, true);
+    assert.equal(fns.FileTimeToSystemTime.handler([0x260, 0x240]), 0);
+    assert.deepEqual(host.errors, new Array(6).fill(ERROR_INVALID_PARAMETER));
 });
 
 test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
@@ -174,11 +223,11 @@ test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
         processors: createProcessors({ processors: ()=>4 }) });
     host.view.setUint32(LENGTH, 0, true);
     assert.equal(fns.GetLogicalProcessorInformation.handler([0, LENGTH]), 0);
-    assert.equal(host.view.getUint32(LENGTH, true), 18 * 24);
-    host.view.setUint32(LENGTH, 17 * 24, true);
+    assert.equal(host.view.getUint32(LENGTH, true), 22 * 24);
+    host.view.setUint32(LENGTH, 21 * 24, true);
     host.bytes.fill(0xcc, 0x200, 0x400);
     assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, LENGTH]), 0);
-    assert.equal(host.view.getUint32(LENGTH, true), 18 * 24);
+    assert.equal(host.view.getUint32(LENGTH, true), 22 * 24);
     assert.ok(host.bytes.subarray(0x200, 0x400).every(byte=>byte === 0xcc), 'nothing written');
     assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, 0]), 0);
     assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INSUFFICIENT_BUFFER,
@@ -384,6 +433,39 @@ test('a console is a character device and a file is not', ()=>{
     assert.equal(fns.GetFileType.handler([0x14]), FILE_TYPE_DISK);
 });
 
+test('the console\'s standard handles are characters', ()=>{
+    // A runtime that finds its stdout of no type writes it nowhere: Mono's
+    // Console did, and a .NET program printed nothing. A file handed as a
+    // standard handle is an inherited file handle, a disk's.
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSystemFunctions(host);
+    assert.deepEqual([1, 2, 3].map(handle=>fns.GetFileType.handler([handle])),
+        [FILE_TYPE_CHAR, FILE_TYPE_CHAR, FILE_TYPE_CHAR]);
+    assert.deepEqual(host.errors, []);
+});
+
+test('a pipe is a pipe, a mailslot unknown, and an object that is no file a bad handle', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSystemFunctions(host);
+    /** @type {Record<number, string>} */
+    const types = { 0x10: 'pipe-read', 0x14: 'pipe-write', 0x18: 'mailslot', 0x1c: 'event',
+        0x20: 'mapping', 0x24: 'file' };
+    for (const handle of Object.keys(types))
+    {
+        host.handles.set(Number(handle), {});
+    }
+    host.handleType = (/** @type {number} */ handle)=>types[handle] ?? null;
+    assert.deepEqual([0x10, 0x14, 0x24].map(handle=>fns.GetFileType.handler([handle])),
+        [FILE_TYPE_PIPE, FILE_TYPE_PIPE, FILE_TYPE_DISK]);
+    assert.equal(fns.GetFileType.handler([0x18]), FILE_TYPE_UNKNOWN);
+    assert.equal(host.errors.at(-1), 0, 'no error: a file object of no type here');
+    for (const handle of [0x1c, 0x20])
+    {
+        assert.equal(fns.GetFileType.handler([handle]), FILE_TYPE_UNKNOWN);
+        assert.equal(host.errors.at(-1), ERROR_INVALID_HANDLE);
+    }
+});
+
 test('an unknown handle is a reported failure, not a guess', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
@@ -403,7 +485,12 @@ test('an unmapped pointer is bad and a mapped one is not', ()=>{
 
     assert.equal(fns.IsBadReadPtr.handler([0x200, 16]), 0);
     assert.equal(fns.IsBadReadPtr.handler([0x10, 16]), 1, 'below the mapped range');
-    assert.equal(fns.IsBadReadPtr.handler([0, 16]), 1, 'null is always bad');
+    assert.equal(fns.IsBadReadPtr.handler([0, 16]), 1, 'null is bad');
+    // Nothing to read or write is never bad (Wine's virtual.c test_IsBadReadPtr).
+    assert.equal(fns.IsBadReadPtr.handler([0, 0]), 0);
+    assert.equal(fns.IsBadReadPtr.handler([0xdeadbeef, 0]), 0);
+    assert.equal(fns.IsBadWritePtr.handler([0, 0]), 0);
+    assert.equal(fns.IsBadWritePtr.handler([0xdeadbeef, 0]), 0);
     assert.equal(fns.IsBadWritePtr.handler([0x200, 16]), 0);
     assert.equal(fns.IsBadCodePtr.handler([0x200]), 0);
     assert.equal(fns.IsBadCodePtr.handler([0]), 1);
@@ -433,6 +520,32 @@ test('a write pointer is bad where a region without write access covers any of i
     assert.equal(fns.IsBadReadPtr.handler([0x402, 1]), 0, 'readable all the same');
 });
 
+test('a write pointer is bad on a page VirtualQuery answers without write access', ()=>{
+    // Wine's concrt140, msvcp110 and msvcp120 tests: a runtime's read-only
+    // data export (byte_reverse_table, in .rdata) is not writable.
+    const host = fakeHost(0x5000);
+    /** @type {Record<number, { state: number, protect: number }>} */
+    const pages = {
+        0x0000: { state: 0x1000, protect: 0x04 }, // committed, PAGE_READWRITE
+        0x1000: { state: 0x1000, protect: 0x02 }, // PAGE_READONLY: an image's .rdata
+        0x2000: { state: 0x1000, protect: 0x80 }, // PAGE_EXECUTE_WRITECOPY
+        0x3000: { state: 0x1000, protect: 0x104 }, // a guard page
+        0x4000: { state: 0x2000, protect: 0 }, // reserved
+    };
+    const fns = createSystemFunctions({ ...host,
+        pageState: (/** @type {number} */ address)=>pages[address - address % 0x1000] });
+    assert.equal(fns.IsBadWritePtr.handler([0x100, 16]), 0, 'read-write');
+    assert.equal(fns.IsBadWritePtr.handler([0x1010, 256]), 1, 'read-only');
+    assert.equal(fns.IsBadWritePtr.handler([0x0ff0, 0x20]), 1, 'runs into read-only');
+    assert.equal(fns.IsBadWritePtr.handler([0x2000, 16]), 0, 'write-copy');
+    assert.equal(fns.IsBadWritePtr.handler([0x3000, 16]), 1, 'a guard page trips');
+    assert.equal(fns.IsBadWritePtr.handler([0x4000, 16]), 1, 'reserved, not committed');
+    // A read goes by the same pages: a stack's reserved page, a guard page.
+    assert.equal(fns.IsBadReadPtr.handler([0x1010, 256]), 0, 'read-only is readable');
+    assert.equal(fns.IsBadReadPtr.handler([0x4000, 4]), 1, 'reserved, not committed');
+    assert.equal(fns.IsBadReadPtr.handler([0x3000, 4]), 1, 'a guard page trips');
+});
+
 test('a string pointer is bad when its terminator is not in mapped memory', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
@@ -460,6 +573,17 @@ test('a running process reports that it is still running', ()=>{
 
     assert.equal(fns.GetExitCodeProcess.handler([0x10, 0x200]), 0, 'and no such process exists');
     assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+
+    // Its own process by a real handle, as DuplicateHandle of (HANDLE)-1 makes
+    // one, and a child that has not ended: still running, as .NET's Process
+    // asks before it answers anything of itself.
+    host.handles.set(0x14, { kind: 'process', current: true });
+    host.handles.set(0x18, { kind: 'process', exitCode: null });
+    host.handles.set(0x1c, { kind: 'process', exitCode: 3 });
+    assert.deepEqual([0x14, 0x18, 0x1c].map(handle=>{
+        fns.GetExitCodeProcess.handler([handle, 0x200]);
+        return host.view.getUint32(0x200, true);
+    }), [STILL_ACTIVE, STILL_ACTIVE, 3]);
 });
 
 test('the native machine is the one GetSystemInfo reports, with no 64-bit system beneath',
@@ -490,6 +614,27 @@ test('IsWow64Process answers FALSE for this process and a child, and fails a str
     assert.equal(fns.IsWow64Process.argBytes, 8);
 });
 
+test('IsWow64Process2: no process is a WOW64 one, on an i386 machine', ()=>{
+    const host = fakeHost();
+    host.handles.set(0x40, { exitCode: STILL_ACTIVE });
+    const fns = createSystemFunctions(host);
+    for (const handle of [CURRENT_PROCESS, 0x40])
+    {
+        host.view.setUint32(0x200, 0xdeaddead, true);
+        assert.equal(fns.IsWow64Process2.handler([handle, 0x200, 0x202]), 1);
+        assert.equal(host.view.getUint16(0x200, true), 0, 'IMAGE_FILE_MACHINE_UNKNOWN');
+        assert.equal(host.view.getUint16(0x202, true), 0x14c, 'IMAGE_FILE_MACHINE_I386');
+    }
+    host.view.setUint32(0x200, 0xdeaddead, true);
+    assert.equal(fns.IsWow64Process2.handler([CURRENT_PROCESS, 0x200, 0]), 1,
+        'the native machine need not be asked for');
+    assert.equal(host.view.getUint16(0x200, true), 0);
+    assert.equal(host.view.getUint16(0x202, true), 0xdead);
+    assert.equal(fns.IsWow64Process2.handler([0x10, 0x200, 0x202]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+    assert.equal(fns.IsWow64Process2.argBytes, 12);
+});
+
 test('a 32-bit system has no WOW64 directory, and says the call is not implemented', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
@@ -502,6 +647,92 @@ test('a 32-bit system has no WOW64 directory, and says the call is not implement
     }
     assert.deepEqual(host.errors, [120, 120, 120, 120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.ok(host.bytes.subarray(0x200, 0x300).every(byte=>byte === 0x55), 'nothing written');
+});
+
+test('on a 64-bit machine a 32-bit process runs under WOW64 and sees the x64 machine beneath',
+    async()=>{
+        // Wine's kernel32 test_IsWow64Process and test_GetNativeSystemInfo: a
+        // WOW64 process's GetSystemInfo names x86 and its native one x64, in
+        // the 32-bit layout; another process is judged by its own image.
+        const host = Object.assign(fakeHost(), { machine64: true,
+            imageBitsOf: (/** @type {any} */ process)=>Promise.resolve(process.bits) });
+        host.handles.set(0x40, { exitCode: STILL_ACTIVE, bits: 32 });
+        host.handles.set(0x44, { exitCode: STILL_ACTIVE, bits: 64 });
+        const fns = createSystemFunctions(host);
+        assert.equal(fns.IsWow64Process.handler([CURRENT_PROCESS, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 1, 'this process is under WOW64');
+        assert.equal(await fns.IsWow64Process.handler([0x40, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 1, 'and so is a 32-bit child');
+        assert.equal(await fns.IsWow64Process.handler([0x44, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 0, 'a 64-bit child is not');
+
+        fns.GetSystemInfo.handler([0x200]);
+        fns.GetNativeSystemInfo.handler([0x280]);
+        assert.equal(host.view.getUint16(0x200, true), 0, 'PROCESSOR_ARCHITECTURE_INTEL');
+        assert.equal(host.view.getUint16(0x280, true), 9, 'PROCESSOR_ARCHITECTURE_AMD64');
+        assert.equal(host.view.getUint32(0x280 + 24, true), 8664, 'PROCESSOR_AMD_X8664');
+        assert.deepEqual(host.bytes.slice(0x284, 0x298), host.bytes.slice(0x204, 0x218),
+            'the rest the same, in the 32-bit layout');
+    });
+
+test('redirection is not implemented on a 32-bit system, and under WOW64 the calling thread'
+    + ' turns it off, back as it was, and on', ()=>{
+    const plain = fakeHost();
+    const none = createSystemFunctions(plain);
+    assert.equal(none.Wow64DisableWow64FsRedirection.handler([0x200]), 0);
+    assert.deepEqual(plain.errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    let off = false;
+    const host = Object.assign(fakeHost(), { machine64: true, pointerSize: 4,
+        fsRedirection: { disabled: ()=>off, set: (/** @type {boolean} */ to)=>{
+            off = to;
+        } } });
+    const fns = createSystemFunctions(host);
+    assert.equal(fns.Wow64DisableWow64FsRedirection.handler([0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'the old value: it was on');
+    assert.equal(off, true, 'and now it is off');
+    assert.equal(fns.Wow64DisableWow64FsRedirection.handler([0x204]), 1);
+    assert.equal(host.view.getUint32(0x204, true), 1, 'off already');
+    assert.equal(fns.Wow64RevertWow64FsRedirection.handler([0]), 1);
+    assert.equal(off, false, 'the first old value put back');
+    assert.equal(fns.Wow64EnableWow64FsRedirection.handler([0]), 1);
+    assert.equal(off, true, 'Enable(FALSE) turns it off');
+    assert.equal(fns.Wow64EnableWow64FsRedirection.handler([1]), 1);
+    assert.equal(off, false);
+    assert.deepEqual(host.errors, []);
+});
+
+test('a 64-bit machine\'s WOW64 directory, to a process of either width', ()=>{
+    for (const pointerSize of [4, 8])
+    {
+        const host = Object.assign(fakeHost(), { machine64: true, pointerSize });
+        const fns = createSystemFunctions(host);
+        assert.equal(fns.GetSystemWow64DirectoryA.handler([0x200, 4]), 20,
+            'too small: the room it needs, its terminator counted');
+        assert.equal(fns.GetSystemWow64DirectoryA.handler([0x200, 0x40]), 19);
+        assert.equal(new TextDecoder().decode(host.bytes.subarray(0x200, 0x214)),
+            'C:\\WINDOWS\\SysWOW64\0');
+        assert.equal(fns.GetSystemWow64DirectoryW.handler([0x300, 0x40]), 19);
+        assert.equal(new TextDecoder('utf-16le').decode(host.bytes.subarray(0x300, 0x328)),
+            'C:\\WINDOWS\\SysWOW64\0');
+        assert.deepEqual(host.errors, []);
+    }
+});
+
+test('an image\'s width is read off its optional header\'s magic', ()=>{
+    /** @param {number} magic */
+    const head = magic=>{
+        const bytes = new Uint8Array(0x200);
+        const view = new DataView(bytes.buffer);
+        bytes.set([0x4d, 0x5a]);
+        view.setUint32(0x3c, 0x80, true);
+        view.setUint32(0x80, 0x4550, true);
+        view.setUint16(0x80 + 24, magic, true);
+        return bytes;
+    };
+    assert.equal(imageBits(head(0x10b)), 32);
+    assert.equal(imageBits(head(0x20b)), 64);
+    assert.equal(imageBits(head(0x107)), null, 'a ROM image is neither');
+    assert.equal(imageBits(new Uint8Array(0x200)), null, 'nor is what is not an image');
 });
 
 test('a child process reports its own exit code, not this process\'s', ()=>{
@@ -560,6 +791,34 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
     assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
 });
 
+
+test('a child\'s thread reports the exit code the child gives, until its end is known here',
+    async()=>{
+        const host = /** @type {any} */ (fakeHost());
+        /** @type {any[]} */
+        const asked = [];
+        host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 1, error: null,
+                outs: [null, new Uint8Array([42, 0, 0, 0])] });
+        };
+        host.setLastErrorFor = ()=>{};
+        const fns = createSystemFunctions(host);
+        const child = { exitCode: STILL_ACTIVE };
+        /** @type {any} */
+        const remote = Object.assign(childThread(child, 0x30, 0x84),
+            { handleType: 'process-thread' });
+        host.handles.set(0x44, remote);
+
+        assert.equal(await fns.GetExitCodeThread.handler([0x44, 0x200]), 1);
+        assert.deepEqual(asked, [[child, { call: 'GetExitCodeThread', args: [0x84, { out: 4 }] }]]);
+        assert.equal(host.view.getUint32(0x200, true), 42);
+
+        remote.exitCode = 7;
+        assert.equal(fns.GetExitCodeThread.handler([0x44, 0x200]), 1);
+        assert.equal(host.view.getUint32(0x200, true), 7, 'known here, not asked');
+        assert.equal(asked.length, 1);
+    });
 
 test('a thread reports STILL_ACTIVE until it has exited, then the code it left with', ()=>{
     const host = fakeHost();
@@ -629,7 +888,7 @@ test('a priority on a handle that is not a thread is a reported failure', ()=>{
     assert.deepEqual(host.errors, [6, 6], 'ERROR_INVALID_HANDLE each time');
 });
 
-test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
+test('lstrcmpW compares wide strings in the word sort, by sign, folded or not', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
     /** @param {number} at @param {string} text */
@@ -644,9 +903,15 @@ test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
     };
     wide(0x200, 'abc');
     wide(0x300, 'ABD');
-    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), 1, '"a" sorts after "A"');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), -1, 'the letters first, case after');
     assert.equal(fns.lstrcmpiW.handler([0x200, 0x300]), -1, 'folded, "abc" is before "abd"');
+    wide(0x300, 'ABC');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), -1, '"a" before "A" when all else is equal');
+    assert.equal(fns.lstrcmpiW.handler([0x200, 0x300]), 0);
     assert.equal(fns.lstrcmpW.handler([0x200, 0x200]), 0);
+    assert.equal(fns.lstrcmpW.handler([0, 0x200]), -1, 'NULL first');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0]), 1);
+    assert.equal(fns.lstrcmpW.handler([0, 0]), 0);
     assert.equal(fns.lstrcmpW.argBytes, 8);
 });
 
@@ -730,6 +995,28 @@ test('FormatMessageA formats a caller\'s own string, not only the system table',
     assert.equal(fns.FormatMessageA.handler([0x400, 0x200, 0, 0, 0x300, 0x40, 0]), 7);
     assert.equal(host.bytes[0x300 + 7], 0, 'terminated');
     assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x307)), 'Forward');
+});
+
+test('FormatMessage reads a module own message table, then the system table', ()=>{
+    // An installer logs through its image's RT_MESSAGETABLE: a NULL source
+    // is the process's own image. Without the table every line it logs is lost.
+    const host = fakeHost();
+    /** @type {number[][]} */
+    const asked = [];
+    const fns = createSystemFunctions({ ...host, findMessage: (module, language, id)=>{
+        asked.push([module, language, id]);
+        return id === 101 ? 'Detect begin, %1!u! packages' : null;
+    } });
+    host.view.setUint32(0x260, 3, true);
+    // FROM_HMODULE | ARGUMENT_ARRAY
+    assert.equal(fns.FormatMessageW.handler([0x2800, 0, 101, 0, 0x300, 0x80, 0x260]), 24);
+    const message = new Uint16Array(host.bytes.slice(0x300, 0x300 + 48).buffer);
+    assert.equal(String.fromCharCode(...message), 'Detect begin, 3 packages');
+    assert.deepEqual(asked, [[0, 0, 101]]);
+    assert.equal(fns.FormatMessageW.handler([0x2800, 0, 102, 0, 0x300, 0x80, 0x260]), 0,
+        'an id the table has not');
+    // FROM_HMODULE | FROM_SYSTEM: the module has no such message, the system has.
+    assert.equal(fns.FormatMessageW.handler([0x1a00, 0x400000, 2, 0, 0x300, 0x80, 0]) > 0, true);
 });
 
 test('FormatMessageA expands inserts from the arguments it is handed', ()=>{
@@ -839,50 +1126,56 @@ test('FormatMessageW formats in UTF-16, a bare insert wide and a capital S narro
         String.fromCharCode(...host.bytes.slice(0x500, 0x500 + length)), 'the same system text');
 });
 
-test('CreateActCtx fails as for an unusable manifest, and says it diverged', ()=>{
-    // A caller that meets INVALID_HANDLE_VALUE takes its no-context path; a
-    // handle that resolved to nothing would be activated and then misbehave.
-    const host = fakeHost();
-    /** @type {string[]} */
-    const said = [];
-    const fns = createSystemFunctions({
-        ...host,
-        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
-    });
-    host.view.setUint32(0x200, 32, true);
-
-    for (const entry of [fns.CreateActCtxA, fns.CreateActCtxW])
-    {
-        assert.equal(entry.argBytes, 4);
-        assert.equal(entry.handler([0x200]) >>> 0, 0xffffffff);
-        assert.equal(host.errors.at(-1), 14001, 'ERROR_SXS_CANT_GEN_ACTCTX');
-    }
-    assert.equal(said.length, 2);
-    assert.match(said[0], /^CreateActCtxA: /);
-
-    assert.equal(fns.CreateActCtxW.handler([0]) >>> 0, 0xffffffff);
-    assert.equal(host.errors.at(-1), 87, 'no ACTCTX is ERROR_INVALID_PARAMETER');
-    host.view.setUint32(0x200, 4, true);
-    assert.equal(fns.CreateActCtxW.handler([0x200]) >>> 0, 0xffffffff);
-    assert.equal(host.errors.at(-1), 87, 'nor is one too short to name its source');
-    assert.equal(said.length, 2, 'a bad parameter is the real answer, not a divergence');
-});
-
-test('activations stack by cookie, and the current context is always none', ()=>{
-    const host = fakeHost();
+test('FormatMessage leaves its buffers as Windows does, and a va_list past what it read', ()=>{
+    // Wine's format_msg.c: the insufficient, empty and allocating cases, A and W.
+    const ERROR_NO_WORK_DONE = 235;
+    const ERROR_MR_MID_NOT_FOUND = 317;
+    const host = { ...fakeHost(), allocate: ()=>0x400 };
     const fns = createSystemFunctions(host);
-    host.view.setUint32(0x300, 0xdeadbeef, true);
-    assert.equal(fns.GetCurrentActCtx.handler([0x300]), 1);
-    assert.equal(host.view.getUint32(0x300, true), 0);
-    assert.equal(fns.ActivateActCtx.handler([0xffffffff, 0x304]), 1);
-    assert.equal(fns.ActivateActCtx.handler([0xffffffff, 0x308]), 1);
-    const inner = host.view.getUint32(0x308, true);
-    assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 0,
-        'only the innermost comes off');
-    assert.equal(host.errors.at(-1), 14065);
-    assert.equal(fns.DeactivateActCtx.handler([0, inner]), 1);
-    assert.equal(fns.DeactivateActCtx.handler([0, host.view.getUint32(0x304, true)]), 1);
-    assert.equal(fns.ActivateActCtx.handler([0, 0]), 0, 'no cookie to hand back');
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>host.writeMemory(at,
+        new Uint8Array(Uint16Array.from([...text, '\0'].map(c=>c.charCodeAt(0))).buffer));
+    /** @param {number} at @param {number} units */
+    const readBack = (at, units)=>String.fromCharCode(
+        ...new Uint16Array(host.bytes.slice(at, at + units * 2).buffer));
+    /** @param {number} at @param {number} count */
+    const ansi = (at, count)=>
+        String.fromCharCode(...host.bytes.subarray(at, at + count));
+
+    wide(0x200, 'test');
+    wide(0x300, 'xxxxxx');
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 4, 0]), 0);
+    assert.equal(readBack(0x300, 6), 'tes\0xx', 'cut to the buffer, terminated');
+    host.writeMemory(0x220, Uint8Array.from([...'test', '\0'].map(c=>c.charCodeAt(0))));
+    host.writeMemory(0x340, Uint8Array.from([...'xxxxx'].map(c=>c.charCodeAt(0))));
+    assert.equal(fns.FormatMessageA.handler([0x400, 0x220, 0, 0, 0x340, 4, 0]), 0);
+    assert.equal(ansi(0x340, 5), 'xxxxx', 'FormatMessageA writes no part of a message');
+
+    wide(0x200, 'test%');
+    wide(0x300, 'xxxxxx');
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 16, 0]), 0);
+    assert.equal(readBack(0x300, 6), 'testxx', 'formatted until the error, unterminated');
+
+    host.errors.length = 0;
+    wide(0x200, '');
+    host.view.setUint32(0x2f0, 0xdeadbeef, true);
+    assert.equal(fns.FormatMessageW.handler([0x500, 0x200, 0, 0, 0x2f0, 0, 0]), 0);
+    assert.equal(host.view.getUint32(0x2f0, true), 0, 'no message, no buffer');
+    assert.equal(fns.FormatMessageW.handler([0x1000, 0, 3044, 0, 0x300, 16, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_NO_WORK_DONE, ERROR_MR_MID_NOT_FOUND]);
+
+    assert.equal(fns.FormatMessageA.handler([0x1000, 0, 2, 0, 0x340, 0x80, 0]), 44);
+    assert.equal(ansi(0x340, 44), 'The system cannot find the file specified.\r\n');
+    assert.equal(fns.FormatMessageA.handler([0x1000 | 0xff, 0, 0x80070002, 0, 0x340, 0x80, 0]),
+        43, 'an HRESULT of FACILITY_WIN32, and a width turning the line break into a space');
+
+    wide(0x200, '%1!s! %2!s!');
+    wide(0x240, 'eaten');
+    host.view.setUint32(0x280, 0x240, true);
+    host.view.setUint32(0x284, 0x240, true);
+    host.view.setUint32(0x290, 0x280, true);
+    assert.equal(fns.FormatMessageW.handler([0x400, 0x200, 0, 0, 0x300, 1, 0x290]), 0);
+    assert.equal(host.view.getUint32(0x290, true), 0x284, 'the va_list past the one read');
 });
 
 test('the undecorated lstr names are the ANSI entries themselves', ()=>{
@@ -934,22 +1227,184 @@ test('SetThreadExecutionState answers the lasting request before the call', ()=>
     assert.equal(host.errors.at(-1), 87);
 });
 
-test('FindActCtxSectionString is absent, as no activation context is built', ()=>{
-    // Twice now a lookup answering "not found" stopped programs before their first
-    // instruction: the Visual C++ 2005 runtime (msvcr80, vcomp) finds the function through
-    // GetProcAddress, takes the answer for a load without its manifest and raises R6034 --
-    // Gothic 3 at vcomp.dll. Absent, the runtime takes the system for one without
-    // side-by-side support and goes on. Building activation contexts from manifests is
-    // what would let it be present.
-    const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
-    for (const name of ['FindActCtxSectionStringA', 'FindActCtxSectionStringW'])
+/**
+ * The load check of a Visual C++ 2005 or 2008 runtime's DllMain, as msvcr80.dll
+ * (8.0.50727.6195) and vcomp.dll make it: with FindActCtxSectionStringW present,
+ * a runtime loaded from the system directory, or one the active context does
+ * not redirect, stops with R6034; found, it runs from WinSxS or beside its
+ * assembly's manifest, and stops anywhere else.
+ *
+ * @param {any} functions  the activation context table
+ * @param {(path: string) => boolean} exists
+ * @param {{ dll: string, assembly: string }} runtime @param {string} loadedFrom
+ */
+function runtimeCheck(functions, exists, runtime, loadedFrom){
+    if (!functions.FindActCtxSectionStringW)
     {
-        assert.equal(fns[name], undefined, `${name} is not exported`);
+        return 'runs';
     }
-});
+    const directory = loadedFrom.slice(0, loadedFrom.lastIndexOf('\\') + 1).toLowerCase();
+    if (directory === 'c:\\windows\\system32\\')
+    {
+        return 'R6034';
+    }
+    const found = functions.FindActCtxSectionStringW.lookup(runtime.dll);
+    if (!found)
+    {
+        return 'R6034';
+    }
+    if (directory.startsWith('c:\\windows\\winsxs\\'))
+    {
+        return 'runs';
+    }
+    return exists(`${directory}${runtime.assembly}.manifest`) ? 'runs' : 'R6034';
+}
+
+test('a C runtime checking its own load runs where Windows runs it, and stops where it stops',
+    async()=>{
+        const runtime = { dll: 'msvcr90.dll', assembly: 'Microsoft.VC90.CRT' };
+        const asked = '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">'
+            + '<dependency><dependentAssembly><assemblyIdentity type="win32" '
+            + 'name="Microsoft.VC90.CRT" version="9.0.30729.6161" processorArchitecture="x86" '
+            + 'publicKeyToken="1fc8b3b9a1e18e3b"/></dependentAssembly></dependency></assembly>';
+        const own = '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">'
+            + '<noInheritable/><assemblyIdentity type="win32" name="Microsoft.VC90.CRT" '
+            + 'version="9.0.30729.6161" processorArchitecture="x86" '
+            + 'publicKeyToken="1fc8b3b9a1e18e3b"/><file name="msvcr90.dll"/></assembly>';
+        /**
+         * One layout: the files on the volume, the program's own manifest,
+         * and what the loader and the runtime then do.
+         *
+         * @param {Record<string, string>} volume @param {string | null} embedded
+         */
+        const run = async(volume, embedded)=>{
+            const files = new Map(Object.entries(volume).map(([path, text])=>[
+                path.toLowerCase(), new TextEncoder().encode(text)]));
+            const exists = (/** @type {string} */ path)=>files.has(path.toLowerCase());
+            const bytes = new Uint8Array(0x10000);
+            let next = 0x4000;
+            const { functions, loaderApi } = createActivationContexts({
+                readMemory: (address, length)=>bytes.slice(address, address + length),
+                writeMemory: (address, data)=>bytes.set(data, address),
+                readCString: ()=>'',
+                readWideString: address=>{
+                    let text = '';
+                    for (let at = address; bytes[at] | bytes[at + 1]; at += 2)
+                    {
+                        text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+                    }
+                    return text;
+                },
+                setLastError: ()=>{},
+                allocate: size=>{
+                    const at = next;
+                    next += (size + 15) & ~15;
+                    return at;
+                },
+                teb: ()=>0x100,
+                readFile: path=>files.get(path.toLowerCase()) ?? null,
+                stat: path=>(exists(path) ? { exists: true, isDirectory: false } : null),
+                fullPath: path=>path,
+                imagePath: ()=>'C:\\app\\game.exe',
+                encodeAnsi: text=>new TextEncoder().encode(text),
+                decodeAnsi: data=>new TextDecoder().decode(data),
+            });
+            const failed = await loaderApi.processDefaultFrom(
+                embedded === null ? null : new TextEncoder().encode(embedded), 'C:\\app\\game.exe');
+            if (failed !== null)
+            {
+                return 'does not start';
+            }
+            // Where the loader takes it from: the context's assembly, else the
+            // search, beside the program first.
+            const redirected = loaderApi.redirect(runtime.dll);
+            const loadedFrom = redirected?.path ?? (['C:\\app\\', 'C:\\WINDOWS\\system32\\']
+                .map(place=>`${place}${runtime.dll}`).find(exists) ?? null);
+            if (loadedFrom === null)
+            {
+                return 'not found';
+            }
+            const table = /** @type {any} */ ({ ...functions });
+            table.FindActCtxSectionStringW = { lookup: (/** @type {string} */ name)=>{
+                const key = 0x8000;
+                [...`${name}\0`].forEach((unit, at)=>{
+                    bytes[key + at * 2] = unit.charCodeAt(0);
+                    bytes[key + at * 2 + 1] = 0;
+                });
+                new DataView(bytes.buffer).setUint32(0x9000, 0x40, true);
+                return functions.FindActCtxSectionStringW.handler([0, 0, 2, key, 0x9000]) === 1;
+            } };
+            return runtimeCheck(table, exists, runtime, loadedFrom);
+        };
+        const dll = 'MZ';
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own }, asked), 'runs',
+        'its manifest named by the program\'s, the runtime and its manifest beside it');
+        assert.equal(await run({ 'C:\\app\\Microsoft.VC90.CRT\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT\\Microsoft.VC90.CRT.manifest': own }, asked), 'runs',
+        'in its assembly\'s folder');
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own, 'C:\\app\\game.exe.manifest': asked },
+        null), 'runs', 'an external manifest');
+        assert.equal(await run({ 'C:\\WINDOWS\\system32\\msvcr90.dll': dll }, asked), 'runs',
+            'installed: seen in the store, as the redistributable puts it');
+        assert.equal(await run({ 'C:\\app\\msvcr90.dll': dll,
+            'C:\\app\\Microsoft.VC90.CRT.manifest': own }, null), 'R6034',
+        'no manifest of the program\'s names it');
+        assert.equal(await run({ 'C:\\WINDOWS\\system32\\msvcr90.dll': dll }, null), 'R6034',
+            'in the system directory, named by nothing');
+        assert.equal(await run({}, asked), 'does not start',
+            'an assembly found nowhere: the side-by-side configuration is incorrect');
+    });
 
 test('win.ini is not kernel32\'s table to answer', ()=>{
     const fns = /** @type {any} */ (createSystemFunctions(fakeHost()));
     assert.equal(fns.GetProfileStringA, undefined,
         'win.ini is the profile functions\' to answer, not a fixed default here');
+});
+
+test('GetLogicalProcessorInformationEx answers records of their own sizes, one kind or all', ()=>{
+    // Wine's kernel32 process.c test_GetLogicalProcessorInformationEx.
+    const host = fakeHost(0x4000);
+    const fns = createSystemFunctions(host);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0xffff, 0, 0]), 0);
+    assert.equal(host.errors.at(-1), 87, 'no length to read');
+    host.view.setUint32(0x200, 0, true);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0, 0, 0x200]), 0);
+    assert.equal(host.errors.at(-1), 122);
+    const cores = host.view.getUint32(0x200, true);
+    assert.ok(cores > 0 && cores % 44 === 0, 'whole core records');
+    host.view.setUint32(0x200, 0, true);
+    fns.GetLogicalProcessorInformationEx.handler([0xffff, 0, 0x200]);
+    const length = host.view.getUint32(0x200, true);
+    assert.ok(length > cores);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([0xffff, 0x400, 0x200]), 1);
+    /** @type {number[]} */
+    const kinds = [];
+    for (let at = 0x400; at < 0x400 + length; at += host.view.getUint32(at + 4, true))
+    {
+        kinds.push(host.view.getUint32(at, true));
+        assert.ok(host.view.getUint32(at + 4, true) > 0);
+    }
+    assert.deepEqual([...new Set(kinds)].sort(), [0, 1, 2, 3, 4], 'every kind, one group');
+    assert.equal(kinds.at(-1), 4);
+    assert.equal(fns.GetLogicalProcessorInformationEx.handler([9, 0x400, 0x200]), 0);
+});
+
+test('GetSystemInfo bounds a 64-bit process\'s addresses by its memory, in quadwords', ()=>{
+    // A 64-bit program on 4 GiB is large-address aware: Windows answers
+    // 0xFFFEFFFF there, the last byte below the 64 KiB kept off the top.
+    const host = { ...fakeHost(), pointerSize: 8, ramTop: 2 ** 32 };
+    const fns = createSystemFunctions(host);
+    fns.GetSystemInfo.handler([0x200]);
+    assert.equal(host.view.getBigUint64(0x208, true), 0x10000n, 'lpMinimumApplicationAddress');
+    assert.equal(host.view.getBigUint64(0x210, true), 0xfffeffffn, 'lpMaximumApplicationAddress');
+    // Past 4 GiB, in a wider window, the quadword holds it whole.
+    const wide = { ...fakeHost(), pointerSize: 8, ramTop: 2 ** 33 };
+    createSystemFunctions(wide).GetSystemInfo.handler([0x200]);
+    assert.equal(wide.view.getBigUint64(0x210, true), 0x1fffeffffn);
+    // A 32-bit process on 2 GiB keeps the 32-bit top.
+    const narrow = { ...fakeHost(), ramTop: 2 ** 31 };
+    createSystemFunctions(narrow).GetSystemInfo.handler([0x200]);
+    assert.equal(narrow.view.getUint32(0x20c, true), 0x7ffeffff);
 });

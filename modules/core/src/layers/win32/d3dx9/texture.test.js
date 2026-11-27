@@ -47,6 +47,15 @@ function rig(){
         return at;
     };
     const device = object({ device: true });
+    /**
+     * A surface of 32-bit texels; one of pool 0 will not lock, as a render
+     * target's does not.
+     *
+     * @param {number} width @param {number} height @param {number} format @param {number} pool
+     * @returns {number}
+     */
+    const surface = (width, height, format, pool = 1)=>object({ surface: true, width, height,
+        format, pool, data: heap.allocate(width * height * 4) });
     // The bridge finds the stack for a call into the guest from the host call in
     // flight, which a handler's is only once it has returned its promise.
     let inHandler = false;
@@ -76,6 +85,36 @@ function rig(){
             source.data.forEach((/** @type {number} */ at, /** @type {number} */ level)=>{
                 memory.copyWithin(target.data[level], at, at + 4096);
             });
+            return 0;
+        }
+        if (self.surface && slot === 3)
+        {
+            calls.push(['GetDevice']);
+            view.setUint32(args[1], device, true);
+            return 0;
+        }
+        if (self.device && slot === 36)
+        {
+            const [, width, height, format, pool, out] = args;
+            calls.push(['CreateOffscreenPlainSurface', width, height, format, pool]);
+            view.setUint32(out, surface(width, height, format, pool), true);
+            return 0;
+        }
+        if (self.device && slot === 30)
+        {
+            // The source whole onto the destination at the point, both 32-bit.
+            const [, from, rect, to, point] = args;
+            const source = textures.get(from);
+            const target = textures.get(to);
+            const x = view.getInt32(point, true);
+            const y = view.getInt32(point + 4, true);
+            calls.push(['UpdateSurface', rect === 0 ? 'whole' : 'rect', x, y]);
+            for (let row = 0; row < source.height; row++)
+            {
+                memory.copyWithin(target.data + ((y + row) * target.width + x) * 4,
+                    source.data + row * source.width * 4,
+                    source.data + (row + 1) * source.width * 4);
+            }
             return 0;
         }
         if (self.surface && slot === 12)
@@ -173,13 +212,6 @@ function rig(){
             }
         },
     };
-    /**
-     * A surface of 32-bit texels.
-     *
-     * @param {number} width @param {number} height @param {number} format @param {number} pool
-     */
-    const surface = (width, height, format, pool = 1)=>object({ surface: true, width, height,
-        format, pool, data: heap.allocate(width * height * 4) });
     /** @param {number[]} bytes */
     const place = bytes=>{
         const at = heap.allocate(bytes.length);
@@ -320,6 +352,30 @@ test('D3DXLoadSurfaceFromSurface copies a whole surface into a rectangle of anot
     assert.match(diverged.join(' | '), /D3DXLoadSurfaceFromSurface: the source would not lock/);
 });
 
+test('a destination that will not lock is written through a system-memory surface and'
+    + ' UpdateSurface, at the rectangle\'s corner', async()=>{
+    // What D3DX does for a render target's surface, which no LockRect opens
+    // (Wine's d3dx9 lock_surface and unlock_surface): a program sets a render
+    // target's texels this way - XNA's Texture2D.SetData on a RenderTarget2D,
+    // which a game's map is made with - and was answered D3DERR_INVALIDCALL.
+    const { textures, calls, diverged, loader, place, surface, memory } = rig();
+    const source = surface(2, 2, FMT.A8R8G8B8);
+    const target = surface(4, 2, FMT.A8R8G8B8, 0);
+    memory.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], textures.get(source).data);
+    const rect = place([2, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 2, 0, 0, 0]);
+    assert.equal(await loader.loadSurface([target, 0, rect, source, 0, 0, 1, 0]), 0);
+    const at = textures.get(target).data;
+    assert.deepEqual([...memory.subarray(at, at + 32)], [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+        0, 0, 0, 0, 0, 0, 0, 0, 9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
+    assert.deepEqual(calls.slice(2), [['LockRect', 'rect', 0], ['GetDevice'],
+        ['CreateOffscreenPlainSurface', 2, 2, FMT.A8R8G8B8, 2], ['LockRect', 'whole', 0],
+        ['UnlockRect'], ['UpdateSurface', 'whole', 2, 0], ['Release'], ['Release']],
+    'the copy and the device let go');
+    assert.deepEqual(diverged, []);
+});
+
 test('D3DXLoadSurfaceFromSurface between two surfaces of one compressed format and size copies'
     + ' the blocks as they are', async()=>{
     const { textures, loader, surface, memory } = rig();
@@ -332,6 +388,23 @@ test('D3DXLoadSurfaceFromSurface between two surfaces of one compressed format a
     assert.equal(await loader.loadSurface([dest, 0, 0, source, 0, 0, 1, 0]), 0);
     const at = textures.get(dest).data;
     assert.deepEqual([...memory.subarray(at, at + 8)], block, 'byte for byte, not encoded again');
+});
+
+test('D3DXLoadSurfaceFromSurface copies a format it has no codec for into the same format and'
+    + ' size, and refuses it any other way, said', async()=>{
+    // A2R10G10B10: no codec here, four bytes a texel.
+    const A2R10G10B10 = 35;
+    const { textures, loader, surface, memory, diverged } = rig();
+    const source = surface(2, 1, A2R10G10B10);
+    const dest = surface(2, 1, A2R10G10B10);
+    const texels = [1, 2, 3, 4, 5, 6, 7, 8];
+    memory.set(texels, textures.get(source).data);
+    assert.equal(await loader.loadSurface([dest, 0, 0, source, 0, 0, 1, 0]), 0);
+    const at = textures.get(dest).data;
+    assert.deepEqual([...memory.subarray(at, at + 8)], texels, 'byte for byte');
+    const other = surface(2, 1, FMT.A8R8G8B8);
+    assert.equal(await loader.loadSurface([other, 0, 0, source, 0, 0, 1, 0]), 0x8876086c);
+    assert.match(diverged.join(' | '), /format 35 2x1 into format 21 2x1 is not a copy/);
 });
 
 test('D3DXLoadSurfaceFromMemory reads the source rectangle of an image at its pitch into a'

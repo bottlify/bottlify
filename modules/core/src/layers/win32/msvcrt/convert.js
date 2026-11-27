@@ -20,20 +20,36 @@
  */
 
 import { readDouble, returningDouble } from './float.js';
-import { ERANGE } from './globals.js';
+import { EINVAL, ERANGE } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { decimalToExtended, extendedDigits } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import * as inGuest64 from './inguest-int64.js';
+import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
+import { utf16z } from '../common/utf16.js';
+
+/** A double as the first argument, which a 64-bit caller passes in XMM0. */
+const DOUBLE_FIRST = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
 
 const MAX_STRING = 1 << 20;
 
 const LONG_MAX = 0x7fffffffn;
 const LONG_MIN = -0x80000000n;
 const ULONG_MAX = 0xffffffffn;
+const INT64_MAX = 0x7fffffffffffffffn;
+const INT64_MIN = -0x8000000000000000n;
+const UINT64_MAX = 0xffffffffffffffffn;
+
+/** `_atodbl`'s answers for a value out of range, and the least normal double. */
+const OVERFLOW = 3;
+const UNDERFLOW = 4;
+const MIN_NORMAL = 2.2250738585072014e-308;
 
 /** What `isspace` accepts, which is what every conversion skips first. */
 const WHITESPACE = ' \t\n\v\f\r';
@@ -65,6 +81,9 @@ function digitValue(character){
     }
     return -1;
 }
+
+/** Above the largest magnitude any integer conversion clamps at (2^64). */
+const PAST_EVERY_LIMIT = 1n << 72n;
 
 /**
  * The integer scanner behind strtol and strtoul, and scanf's integers.
@@ -115,7 +134,13 @@ export function scanInteger(text, requestedBase, zeroBeforeX = false, prefix = t
         {
             break;
         }
-        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        // Past every limit a caller compares with, more digits change
+        // nothing it can see: the magnitude stops growing, so a long run of
+        // them costs a step each rather than a multiplication of its length.
+        if (magnitude < PAST_EVERY_LIMIT)
+        {
+            magnitude = magnitude * BigInt(base) + BigInt(digit);
+        }
         at++;
     }
 
@@ -163,11 +188,14 @@ const isWideSpace = character=>character !== undefined && (WHITESPACE.includes(c
  * any of them the one a `0x` prefix or an octal number begins with.
  *
  * @param {string} text @param {number} requestedBase
+ * @param {(character: string | undefined) => boolean} [isSpace]  The white
+ *        space skipped before the number: msvcrt's, unless a runtime with its
+ *        own rule asks (`WIDE_READINGS`).
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  */
-export function scanWideInteger(text, requestedBase){
+function scanWideInteger(text, requestedBase, isSpace = isWideSpace){
     let at = 0;
-    while (isWideSpace(text[at]))
+    while (isSpace(text[at]))
     {
         at++;
     }
@@ -194,10 +222,44 @@ export function scanWideInteger(text, requestedBase){
     for (let digit = wideDigitValue(text[at]); digit >= 0 && digit < base;
         digit = wideDigitValue(text[at]))
     {
-        magnitude = magnitude * BigInt(base) + BigInt(digit);
+        // Past every limit a caller compares with, more digits change
+        // nothing it can see: the magnitude stops growing, so a long run of
+        // them costs a step each rather than a multiplication of its length.
+        if (magnitude < PAST_EVERY_LIMIT)
+        {
+            magnitude = magnitude * BigInt(base) + BigInt(digit);
+        }
         at++;
     }
     return at === start ? null : { magnitude, negative, end: at };
+}
+
+/**
+ * atoi's reading of a wide string, as `_wtoi` in the guest reads it: the
+ * white space `isSpace` names, a sign, ASCII digits, the value wrapping in
+ * 32 bits.
+ *
+ * @param {string} text
+ * @param {(character: string | undefined) => boolean} isSpace
+ */
+function wideAtoi(text, isSpace){
+    let at = 0;
+    while (isSpace(text[at]))
+    {
+        at++;
+    }
+    const negative = text[at] === '-';
+    if (negative || text[at] === '+')
+    {
+        at++;
+    }
+    let total = 0;
+    while (at < text.length && text[at] >= '0' && text[at] <= '9')
+    {
+        total = (Math.imul(total, 10) + text.charCodeAt(at) - 0x30) | 0;
+        at++;
+    }
+    return negative ? (0 - total) | 0 : total;
 }
 
 /** As much of a floating-point literal as C recognises, and where it ends. */
@@ -272,6 +334,116 @@ export function scanDecimal(text){
 }
 
 /**
+ * The key the universal runtime's readings of a number are carried under in
+ * the runtime's table: a symbol, so it is no export a program could name.
+ */
+export const STANDARD_NUMBERS = Symbol('standard numbers');
+
+/**
+ * The key a factory of the wide integer readings is carried under in the
+ * runtime's table, for a runtime that reads them as msvcrt does but skips
+ * other white space before the number (ntdll's: the Latin-1 blanks alone).
+ * Given that rule it answers `_wtoi`, `_wtol`, `_wtoi64`, `wcstol` and
+ * `wcstoul`, read by the host.
+ */
+export const WIDE_READINGS = Symbol('wide readings');
+
+/**
+ * A hexadecimal significand's digits and the power of two they are scaled
+ * by, as the nearest double: ties to even, the digits past the kept ones
+ * counted in `sticky`, a subnormal rounded at its own last bit.
+ *
+ * @param {bigint} significand @param {number} scale @param {boolean} sticky
+ */
+function scaledBinary(significand, scale, sticky){
+    if (significand === 0n)
+    {
+        return 0;
+    }
+    const top = significand.toString(2).length - 1 + scale;
+    if (top > 1100)
+    {
+        return Infinity;
+    }
+    if (top < -1200)
+    {
+        return 0;
+    }
+    // The power of two the double's last bit stands for: 52 below the top
+    // bit, or the subnormals' fixed one.
+    const last = Math.max(top - 52, -1074);
+    const drop = last - scale;
+    let kept = significand;
+    if (drop > 0)
+    {
+        const shift = BigInt(drop);
+        kept = significand >> shift;
+        const rest = significand & (1n << shift) - 1n;
+        const half = 1n << shift - 1n;
+        if (rest > half || rest === half && (sticky || (kept & 1n) === 1n))
+        {
+            kept += 1n;
+        }
+    }
+    else if (drop < 0)
+    {
+        kept = significand << BigInt(-drop);
+    }
+    return Number(kept) * 2 ** last;
+}
+
+/**
+ * What the universal runtime's strtod reads (C99): white space and a sign,
+ * then `inf` or `infinity`, `nan` with an optional `(chars)`, a hexadecimal
+ * number after `0x` with its exponent after `p`, or decimal digits with a
+ * point among them and an exponent after `e`, no other letter; null where
+ * none is there. Out of range is an infinity from finite digits or a zero
+ * from digits that were not all zero; a subnormal is in range.
+ *
+ * @param {string} text
+ * @returns {{ value: number, end: number, range: boolean } | null}
+ */
+export function scanStandardDecimal(text){
+    const lead = /^[ \t\n\v\f\r]*([+-]?)/.exec(text) ?? ['', ''];
+    const sign = lead[1] === '-' ? -1 : 1;
+    const rest = text.slice(lead[0].length);
+    const special = /^(?:(infinity|inf)|(nan)(?:\([0-9A-Za-z_]*\))?)/i.exec(rest);
+    if (special)
+    {
+        return { value: special[1] ? sign * Infinity : NaN,
+            end: lead[0].length + special[0].length, range: false };
+    }
+    const hex = /^0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?/.exec(rest);
+    if (hex && (hex[1] !== '' || (hex[2] ?? '') !== ''))
+    {
+        const exponent = /^[pP]([+-]?[0-9]+)/.exec(rest.slice(hex[0].length));
+        const whole = hex[1];
+        const fraction = hex[2] ?? '';
+        // Forty digits are more than a double holds; the rest only say
+        // whether anything follows the last of them.
+        const all = (whole + fraction).replace(/^0+/, '');
+        const kept = all.slice(0, 40);
+        const scale = 4 * (all.length - kept.length - fraction.length)
+            + Number(exponent?.[1] ?? 0);
+        const value = sign * scaledBinary(kept === '' ? 0n : BigInt(`0x${kept}`), scale,
+            /[1-9a-fA-F]/.test(all.slice(40)));
+        return { value, end: lead[0].length + hex[0].length + (exponent?.[0].length ?? 0),
+            range: kept !== '' && (value === 0 || !Number.isFinite(value)) };
+    }
+    const match = /^(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(rest);
+    if (!match)
+    {
+        return null;
+    }
+    const value = sign * Number(match[0]);
+    return {
+        value,
+        end: lead[0].length + match[0].length,
+        range: !Number.isFinite(value) || value === 0 && /^[^eE]*[1-9]/.test(match[0]),
+    };
+}
+
+/**
  * @typedef {Object} ConversionHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -282,12 +454,17 @@ export function scanDecimal(text){
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
  * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where the end
+ *           pointer a conversion writes back is a quadword; absent, 4.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Where an __int64 answer puts its high half, EDX.
  */
 
 /**
  * @param {ConversionHost} host
  */
 export function createConversionFunctions(host){
+    const width = pointerWidth(host.pointerSize);
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
@@ -303,13 +480,7 @@ export function createConversionFunctions(host){
 
     /** @param {number} pointer @param {string} text */
     const writeWideString = (pointer, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /** @param {number} pointer @param {number} value */
@@ -321,6 +492,19 @@ export function createConversionFunctions(host){
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
         host.writeMemory(pointer, bytes);
+    };
+
+    /**
+     * Where a conversion stopped, through the caller's `char **`: a pointer,
+     * all of it, at the process's width.
+     *
+     * @param {number} pointer @param {number} value
+     */
+    const writeEnd = (pointer, value)=>{
+        if ((pointer >>> 0) !== 0)
+        {
+            host.writeMemory(wholeAddress(pointer), width.bytes(value));
+        }
     };
 
     /**
@@ -345,21 +529,29 @@ export function createConversionFunctions(host){
      *        The value, or null when it is out of range and `limit` answers.
      * @param {(negative: boolean) => bigint} limit
      * @param {boolean} [wide]  A wide string, two bytes a character.
+     * @param {boolean} [quadword]  An __int64 answer, its high half in EDX.
+     * @param {(character: string | undefined) => boolean} [isSpace]  The
+     *        white space a wide reading skips first.
      */
-    const strtoInteger = (argBytes, convert, limit, wide = false)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false, quadword = false,
+        isSpace = isWideSpace)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: ([string, end, base])=>{
             const scanned = wide
                 ? scanWideInteger(wideStringAt(/** @type {(address: number, length: number)
-                    => Uint8Array} */ (host.readMemory), string), base | 0)
+                    => Uint8Array} */ (host.readMemory), string), base | 0, isSpace)
                 : scanInteger(readString(string), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
-            writeInt(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
+            writeEnd(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
             if (scanned === null)
             {
+                if (quadword)
+                {
+                    host.setRegisters?.({ edx: 0 });
+                }
                 return 0;
             }
             // errno is set only when the value does not fit: a caller clears it
@@ -370,9 +562,42 @@ export function createConversionFunctions(host){
                 host.errno?.(ERANGE);
                 value = limit(scanned.negative);
             }
+            if (quadword)
+            {
+                const bits = BigInt.asUintN(64, value);
+                host.setRegisters?.({ edx: Number(bits >> 32n) });
+                return Number(bits & 0xffffffffn);
+            }
             return Number(BigInt.asIntN(32, value));
         },
     });
+
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toInt64 = (magnitude, negative)=>{
+        const value = negative ? -magnitude : magnitude;
+        return value > INT64_MAX || value < INT64_MIN ? null : value;
+    };
+    /** @param {boolean} negative */
+    const int64Limit = negative=>(negative ? INT64_MIN : INT64_MAX);
+    /**
+     * The unsigned reading as strtoul's: a magnitude past the type clamped,
+     * then negated within it -- "-99999999999999999999" is 1 (Wine's
+     * msvcrt test__strtoi64).
+     *
+     * @param {bigint} magnitude @param {boolean} negative
+     */
+    const toUint64 = (magnitude, negative)=>{
+        if (magnitude > UINT64_MAX)
+        {
+            return null;
+        }
+        return negative ? BigInt.asUintN(64, -magnitude) : magnitude;
+    };
+    /** @param {boolean} negative */
+    const uint64Limit = negative=>(negative ? BigInt.asUintN(64, -UINT64_MAX) : UINT64_MAX);
+
+    /** `_wcstoi64`, which `_wtoi64` reads with. */
+    const wideInt64 = strtoInteger(12, toInt64, int64Limit, true, true);
 
     /**
      * The `_*toa` family: same shape, differing only in how the value is read.
@@ -389,6 +614,8 @@ export function createConversionFunctions(host){
     const toText = (valueSlots, signed, wide = false)=>({
         convention: 'cdecl',
         argBytes: (valueSlots + 2) * 4,
+        // An __int64 value is one argument to an x86-64 caller.
+        ...valueSlots === 2 ? { quadwords: [0] } : {},
         /** @param {number[]} args */
         handler: args=>{
             const buffer = args[valueSlots];
@@ -397,40 +624,18 @@ export function createConversionFunctions(host){
             {
                 return 0;
             }
-            const width = valueSlots * 32;
+            const bits = valueSlots * 32;
             let pattern = 0n;
             for (let slot = valueSlots - 1; slot >= 0; slot--)
             {
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
             (wide ? writeWideString : writeString)(buffer, signed && radix === 10
-                ? BigInt.asIntN(width, pattern).toString(10)
+                ? BigInt.asIntN(bits, pattern).toString(10)
                 : pattern.toString(radix));
             return buffer;
         },
     });
-
-    /**
-     * int _wtoi(const wchar_t *str) and long _wtol: atoi's reading over a
-     * wide string -- white space, a sign, ASCII digits -- and atoi's
-     * overflow, which wraps in 32 bits rather than clamping.
-     */
-    const wideAtoi = {
-        convention: 'cdecl',
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([string])=>{
-            const text = wideStringAt(/** @type {(address: number, length: number)
-                => Uint8Array} */ (host.readMemory), string);
-            const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]*)/.exec(text);
-            let total = 0;
-            for (const digit of match?.[2] ?? '')
-            {
-                total = (Math.imul(total, 10) + digit.charCodeAt(0) - 0x30) | 0;
-            }
-            return match?.[1] === '-' ? (0 - total) | 0 : total;
-        },
-    };
 
     /** long strtol(const char *str, char **end, int base) */
     /** @param {bigint} magnitude @param {boolean} negative */
@@ -472,6 +677,7 @@ export function createConversionFunctions(host){
     const cvt = fixed=>({
         convention: 'cdecl',
         argBytes: 20,
+        floats: DOUBLE_FIRST,
         /** @param {number[]} args */
         handler: args=>{
             const { digits, point, negative } = cvtDigits(
@@ -485,17 +691,183 @@ export function createConversionFunctions(host){
         },
     });
 
+    /**
+     * _atodbl's body.
+     *
+     * @param {number} value @param {number} text
+     */
+    const toDouble = (value, text)=>{
+        const scanned = (text >>> 0) === 0 ? null : scanDecimal(readString(text));
+        const number = scanned ? scanned.value : 0;
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setFloat64(0, number, true);
+        host.writeMemory(wholeAddress(value), bytes);
+        if (!scanned)
+        {
+            return 0;
+        }
+        if (!Number.isFinite(number))
+        {
+            return OVERFLOW;
+        }
+        return number !== 0 && Math.abs(number) < MIN_NORMAL || scanned.range ? UNDERFLOW : 0;
+    };
+
+    /**
+     * _gcvt's text of the double in the first two slots: `digits` significant
+     * digits, the trailing zeros of the fraction dropped and the point kept
+     * -- "-314150." -- or, for an exponent below -4 or not below `digits`,
+     * one digit, the fraction, and an exponent of three digits ("1.2e+005").
+     *
+     * @param {number[]} slots @param {number} digits
+     */
+    const gcvtText = (slots, digits)=>{
+        const value = readDouble(slots, 0);
+        if (!Number.isFinite(value))
+        {
+            return String(value);
+        }
+        const count = Math.max(1, Math.min(digits, MAX_DIGITS));
+        const { digits: text, point, negative } = cvtDigits({ value, low: slots[0] >>> 0,
+            high: slots[1] >>> 0 }, count, false);
+        const sign = negative && value !== 0 ? '-' : '';
+        if (value === 0)
+        {
+            return `${sign}0.`;
+        }
+        const exponent = point - 1;
+        if (exponent < -4 || exponent >= count)
+        {
+            return `${sign}${text[0]}.${text.slice(1).replace(/0+$/, '')}e${
+                exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(3, '0')}`;
+        }
+        if (point > 0)
+        {
+            return `${sign}${text.slice(0, point)}.${text.slice(point).replace(/0+$/, '')}`;
+        }
+        return `${sign}0.${'0'.repeat(-point)}${text.replace(/0+$/, '')}`;
+    };
+
+    /** @param {boolean} fixed */
+    const secureCvt = fixed=>({
+        convention: 'cdecl',
+        argBytes: 28,
+        // The double after the buffer and its size.
+        floats: { 2: /** @type {'f64'} */ ('f64') },
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [buffer, size, low, high, count, point, sign])=>{
+            if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (point >>> 0) === 0
+                || (sign >>> 0) === 0)
+            {
+                host.errno?.(EINVAL);
+                return EINVAL;
+            }
+            const answer = cvtDigits({ value: readDouble([low, high], 0), low: low >>> 0,
+                high: high >>> 0 }, count | 0, fixed);
+            writeInt(point, answer.point);
+            writeInt(sign, answer.negative ? 1 : 0);
+            if (answer.digits.length + 1 > (size >>> 0))
+            {
+                writeString(buffer, '');
+                host.errno?.(ERANGE);
+                return ERANGE;
+            }
+            writeString(buffer, answer.digits);
+            return 0;
+        },
+    });
+
     const { readMemory, writeMemory } = host;
+    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize,
+        ...host.setRegisters ? { setRegisters: host.setRegisters } : {} };
     const table = {
+        /**
+         * int $I10_OUTPUT(_LDOUBLE value, int precision, int flags, I10_OUTPUT_data *out)
+         *
+         * The digits of an extended (ldouble.js `extendedDigits`), passed by
+         * value in three stack slots, into `{ short pos; char sign; BYTE len;
+         * char str[100]; }`: the sign ' ' or '-', the digits terminated after
+         * `len`. Bit 0 of `flags` counts the precision after the point.
+         */
+        '$I10_OUTPUT': {
+            convention: 'cdecl',
+            argBytes: 24,
+            // The ten-byte extended by value: a pointer to a copy to a 64-bit caller.
+            structs: { 0: 3 },
+            /** @param {number[]} args */
+            handler: ([low, high, top, precision, flags, out])=>{
+                const value = new Uint8Array(10);
+                const view = new DataView(value.buffer);
+                view.setUint32(0, low >>> 0, true);
+                view.setUint32(4, high >>> 0, true);
+                view.setUint16(8, top & 0xffff, true);
+                const answer = extendedDigits(value, precision | 0, (flags & 1) !== 0);
+                const bytes = new Uint8Array(4 + answer.buffer.length + 1);
+                const record = new DataView(bytes.buffer);
+                record.setInt16(0, answer.pos, true);
+                bytes[2] = answer.negative ? 0x2d : 0x20;
+                bytes[3] = answer.len;
+                for (let at = 0; at < answer.buffer.length; at++)
+                {
+                    bytes[4 + at] = answer.buffer.charCodeAt(at);
+                }
+                bytes[4 + answer.len] = 0;
+                host.writeMemory(wholeAddress(out), bytes.subarray(0, Math.max(4 + answer.len + 1,
+                    4 + answer.buffer.length)));
+                return answer.ok;
+            },
+        },
+
+        /**
+         * int __STRINGTOLD(_LDOUBLE *value, char **end, const char *text, int flags)
+         *
+         * strtod's reading of `text` into the x87's ten-byte extended, rounded
+         * once (ldouble.js): 0, 1 for an underflow, 2 for an overflow (the
+         * value an infinity), 4 when there is no number -- the value zero and
+         * `*end` the text itself. errno is not touched; `flags` asks for
+         * nothing msvcrt is known to read.
+         */
+        __STRINGTOLD: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([value, end, text])=>{
+                const { bytes, end: read, status } = decimalToExtended(readString(text));
+                host.writeMemory(value, bytes);
+                if (wholeAddress(end) !== 0)
+                {
+                    const pointer = new Uint8Array(4);
+                    new DataView(pointer.buffer).setUint32(0, text + read >>> 0, true);
+                    host.writeMemory(end, pointer);
+                }
+                return status;
+            },
+        },
+
         // Code in the guest (`inguest.js`), which hands the host a value out
         // of range -- errno is the calling thread's, and only the host
         // reaches it -- and a base it does not take; the handlers above
         // answer those, through a trap the code jumps to.
+        /**
+         * __int64 _strtoi64(const char *str, char **end, int base) and
+         * unsigned __int64 _strtoui64: strtol and strtoul in 64 bits, the
+         * high half in EDX; out of range clamped with ERANGE.
+         */
+        // An i64 answered in the JavaScript sets EDX through `setRegisters`.
+        _strtoi64: readMemory && host.setRegisters
+            ? guestEntry(inGuest64._strtoi64, INT64_CODE._strtoi64, entryHost,
+                strtoInteger(12, toInt64, int64Limit, false, true))
+            : strtoInteger(12, toInt64, int64Limit, false, true),
+        _strtoui64: readMemory && host.setRegisters
+            ? guestEntry(inGuest64._strtoui64, INT64_CODE._strtoui64, entryHost,
+                strtoInteger(12, toUint64, uint64Limit, false, true))
+            : strtoInteger(12, toUint64, uint64Limit, false, true),
+
         strtol: readMemory
-            ? guestEntry(inGuest.strtol, COMPILED.strtol, { readMemory, writeMemory }, strtol)
+            ? guestEntry(inGuest.strtol, COMPILED.strtol, entryHost, strtol)
             : strtol,
         strtoul: readMemory
-            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
+            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, entryHost, strtoul)
             : strtoul,
 
         ...readMemory ? {
@@ -503,38 +875,97 @@ export function createConversionFunctions(host){
              * long wcstol(const wchar_t *str, wchar_t **end, int base) and
              * unsigned long wcstoul: strtol and strtoul over a wide string,
              * reading the decimal digits of the scripts msvcrt reads and the
-             * separators Unicode has as white space.
+             * separators Unicode has as white space -- in the guest, which
+             * hands this handler a unit past ASCII where its reading stops.
              */
-            wcstol: strtoInteger(12, toLong, longLimit, true),
-            wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+            wcstol: guestEntry(inGuest.wcstol, COMPILED.wcstol, entryHost,
+                strtoInteger(12, toLong, longLimit, true)),
+            wcstoul: guestEntry(inGuest.wcstoul, COMPILED.wcstoul, entryHost,
+                strtoInteger(12, toUnsignedLong, unsignedLongLimit, true)),
 
-            _wtoi: wideAtoi,
-            _wtol: wideAtoi,
+            /**
+             * __int64 _wcstoi64(const wchar_t *str, wchar_t **end, int base)
+             * and unsigned __int64 _wcstoui64: the wide readings in 64 bits,
+             * the high half in EDX.
+             */
+            _wcstoi64: wideInt64,
+            _wcstoui64: strtoInteger(12, toUint64, uint64Limit, true, true),
+
+            /** __int64 _wtoi64(const wchar_t *str): `_wcstoi64` in base ten, no end. */
+            _wtoi64: {
+                convention: 'cdecl',
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([string])=>wideInt64.handler([string, 0, 10]),
+            },
+
+            _wtoi: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
+            _wtol: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
+
+            /**
+             * The same readings with another runtime's white space, read by
+             * the host: `_wtoi` and `_wtol` wrap in 32 bits as atoi does,
+             * `_wtoi64` clamps as `_wcstoi64` does.
+             *
+             * @param {(character: string | undefined) => boolean} isSpace
+             */
+            [WIDE_READINGS]: (/** @type {(character: string | undefined) => boolean} */
+                isSpace)=>{
+                const int64 = strtoInteger(12, toInt64, int64Limit, true, true, isSpace);
+                const atoi = { convention: 'cdecl', argBytes: 4,
+                    handler: (/** @type {number[]} */ [string])=>wideAtoi(
+                        wideStringAt(readMemory, string), isSpace) };
+                return {
+                    _wtoi: atoi,
+                    _wtol: atoi,
+                    _wtoi64: { convention: 'cdecl', argBytes: 4,
+                        handler: (/** @type {number[]} */ [string])=>
+                            int64.handler([string, 0, 10]) },
+                    wcstol: strtoInteger(12, toLong, longLimit, true, false, isSpace),
+                    wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true, false,
+                        isSpace),
+                };
+            },
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */
-        _itow: toText(1, true, true),
+        _itow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ltow(long value, wchar_t *buffer, int radix) */
-        _ltow: toText(1, true, true),
+        _ltow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix) */
-        _ultow: toText(1, false, true),
+        _ultow: readMemory ? guestEntry(inGuest._ultow, COMPILED._ultow, entryHost,
+            toText(1, false, true)) : toText(1, false, true),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
-        _ltoa: toText(1, true),
+        _ltoa: readMemory ? guestEntry(inGuest._itoa, COMPILED._itoa, entryHost,
+            toText(1, true)) : toText(1, true),
 
         /** char *ltoa(long, char *, int) -- the name without the underscore */
-        ltoa: toText(1, true),
+        ltoa: { ...toText(1, true), returns: 'pointer' },
 
         /** char *_ultoa(unsigned long value, char *buffer, int radix) */
-        _ultoa: toText(1, false),
+        _ultoa: readMemory ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
+            toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
-        _ui64toa: toText(2, false),
+        _ui64toa: readMemory ? guestEntry(inGuest64._ui64toa, INT64_CODE._ui64toa, entryHost,
+            toText(2, false)) : toText(2, false),
 
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
-        _i64toa: toText(2, true),
+        _i64toa: readMemory ? guestEntry(inGuest64._i64toa, INT64_CODE._i64toa, entryHost,
+            toText(2, true)) : toText(2, true),
+
+        /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
+        _ui64tow: readMemory ? guestEntry(inGuest64._ui64tow, INT64_CODE._ui64tow, entryHost,
+            toText(2, false, true)) : toText(2, false, true),
+
+        /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
+        _i64tow: readMemory ? guestEntry(inGuest64._i64tow, INT64_CODE._i64tow, entryHost,
+            toText(2, true, true)) : toText(2, true, true),
 
         /** int abs(int value) -- in the guest */
         abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
@@ -551,7 +982,7 @@ export function createConversionFunctions(host){
          * a power of ten. `count` significant digits, of the seventeen msvcrt
          * converts a double to (`cvtDigits`).
          */
-        _ecvt: cvt(false),
+        _ecvt: { ...cvt(false), returns: 'pointer' },
 
         /**
          * char *_fcvt(double value, int count, int *dec, int *sign)
@@ -559,27 +990,95 @@ export function createConversionFunctions(host){
          * The count is digits after the point here, not significant digits, and
          * a value below one loses its leading zeros to a negative *dec.
          */
-        _fcvt: cvt(true),
+        _fcvt: { ...cvt(true), returns: 'pointer' },
+
+        /**
+         * int _atodbl(_CRT_DOUBLE *value, char *str)
+         *
+         * strtod's reading into the caller's double: 0, or _UNDERFLOW (4) or
+         * _OVERFLOW (3) for a value out of range -- the value written as
+         * strtod has it, a denormal kept -- and errno untouched.
+         */
+        _atodbl: { convention: 'cdecl', argBytes: 8, handler: (/** @type {number[]} */ args)=>
+            toDouble(args[0], args[1]) },
+
+        /**
+         * int _atodbl_l(_CRT_DOUBLE *value, char *str, _locale_t locale)
+         *
+         * _atodbl in the locale given, which is the C locale's: the only one
+         * carried.
+         */
+        _atodbl_l: { convention: 'cdecl', argBytes: 12, handler: (/** @type {number[]} */ args)=>
+            toDouble(args[0], args[1]) },
+
+        /**
+         * errno_t _ecvt_s(char *buffer, size_t size, double value, int count,
+         *                 int *dec, int *sign) and _fcvt_s
+         *
+         * _ecvt's and _fcvt's digits into the caller's buffer: EINVAL for no
+         * buffer, no room or no pointer for the point or the sign, ERANGE
+         * and an empty buffer when the digits do not fit with a terminator.
+         */
+        _ecvt_s: secureCvt(false),
+        _fcvt_s: secureCvt(true),
 
         /**
          * char *_gcvt(double value, int digits, char *buffer)
          *
          * This one writes into the caller's buffer and prints a complete
-         * number, point and sign included -- the shortest of the fixed and
-         * exponential forms, which is what %g does.
+         * number, point and sign included (`gcvtText`). No buffer is null
+         * and EINVAL, a negative count null and ERANGE.
          */
         _gcvt: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
+            floats: DOUBLE_FIRST,
             /** @param {number[]} args */
             handler: args=>{
-                const value = readDouble(args, 0);
-                const digits = Math.max(1, Math.min(args[2] | 0, MAX_DIGITS));
                 const buffer = args[3];
-                writeString(buffer, Number.isFinite(value)
-                    ? value.toPrecision(digits).replace(/e([+-])(\d)$/, 'e$10$2')
-                    : String(value));
+                if ((args[2] | 0) < 0)
+                {
+                    host.errno?.(ERANGE);
+                    return 0;
+                }
+                if ((buffer >>> 0) === 0)
+                {
+                    host.errno?.(EINVAL);
+                    return 0;
+                }
+                writeString(buffer, gcvtText(args, args[2] | 0));
                 return buffer;
+            },
+        },
+
+        /**
+         * errno_t _gcvt_s(char *buffer, size_t size, double value, int digits)
+         *
+         * _gcvt into a buffer of `size`: EINVAL for none, ERANGE and an empty
+         * buffer when it cannot hold `digits` or the text.
+         */
+        _gcvt_s: {
+            convention: 'cdecl',
+            argBytes: 20,
+            sizes: [1],
+            floats: { 2: 'f64' },
+            /** @param {number[]} args */
+            handler: ([buffer, size, low, high, digits])=>{
+                if (wholeAddress(buffer) === 0 || (size >>> 0) === 0 || (digits | 0) < 0)
+                {
+                    host.errno?.(EINVAL);
+                    return EINVAL;
+                }
+                const text = gcvtText([low, high], digits | 0);
+                if ((digits | 0) >= (size >>> 0) || text.length + 1 > (size >>> 0))
+                {
+                    writeString(buffer, '');
+                    host.errno?.(ERANGE);
+                    return ERANGE;
+                }
+                writeString(buffer, text);
+                return 0;
             },
         },
     };
@@ -641,10 +1140,20 @@ export function createConversionFunctions(host){
         return readString(pointer);
     };
 
-    /** @param {number[]} args */
+    /**
+     * strtod's handler: no text is zero and EINVAL, the end null.
+     *
+     * @param {number[]} args
+     */
     const strtod = args=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
         const scanned = scanDecimal(decimalText(args[0]));
-        writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
+        writeEnd(args[1], scanned ? args[0] + scanned.end : args[0]);
         return decimal(scanned);
     };
 
@@ -655,16 +1164,69 @@ export function createConversionFunctions(host){
      * @param {number[]} args
      */
     const wcstod = args=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
         const text = wideStringAt(/** @type {(address: number, length: number)
             => Uint8Array} */ (readMemory), args[0]);
         const scanned = scanDecimal(text);
-        writeInt(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
+        writeEnd(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
         return decimal(scanned);
+    };
+
+    /**
+     * strtod's and wcstod's handlers as the universal runtime reads: the
+     * whole string, by `scanStandardDecimal`.
+     *
+     * @param {(pointer: number) => string} textAt @param {number} unit  bytes a character
+     */
+    const standardReading = (textAt, unit)=>(/** @type {number[]} */ args)=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
+        const scanned = scanStandardDecimal(textAt(args[0]));
+        writeEnd(args[1], scanned ? args[0] + scanned.end * unit : args[0]);
+        return decimal(scanned);
+    };
+
+    /** @param {any} guest */
+    const standardNumbers = guest=>{
+        const fpu = /** @type {import('./float.js').FloatHost} */ (host.fpu);
+        const narrow = standardReading(readString, 1);
+        const entries = {
+            strtod: returningDouble(fpu, 8, narrow),
+            atof: returningDouble(fpu, 4, args=>narrow([args[0], 0])),
+            _strtod_l: returningDouble(fpu, 12, narrow),
+            _atof_l: returningDouble(fpu, 8, args=>narrow([args[0], 0])),
+        };
+        if (!readMemory)
+        {
+            return entries;
+        }
+        const read = readMemory;
+        const wide = standardReading(pointer=>wideStringAt(read, pointer), 2);
+        return {
+            ...entries,
+            strtod: guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, entries.strtod),
+            atof: guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, entries.atof),
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+                returningDouble(fpu, 8, wide)),
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+                returningDouble(fpu, 4, args=>wide([args[0], 0]))),
+            _wcstod_l: returningDouble(fpu, 12, wide),
+            _wtof_l: returningDouble(fpu, 8, args=>wide([args[0], 0])),
+        };
     };
 
     const handlers = {
         /** double atof(const char *str) */
-        atof: returningDouble(host.fpu, 4, args=>decimal(scanDecimal(decimalText(args[0])))),
+        atof: returningDouble(host.fpu, 4, args=>strtod([args[0], 0])),
 
         /** double strtod(const char *str, char **end) */
         strtod: returningDouble(host.fpu, 8, strtod),
@@ -673,15 +1235,32 @@ export function createConversionFunctions(host){
     // Code in the guest (`inguest-float.js`), which reads the number and
     // computes the values Clinger's fast path makes exact; the handlers above
     // answer the rest, and set errno for an overflow or an underflow.
-    const guest = { readMemory, writeMemory, fpu: host.fpu };
+    const guest = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
     return {
         ...table,
-        ...readMemory ? { wcstod: returningDouble(host.fpu, 8, wcstod) } : {},
+        ...readMemory ? {
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+                returningDouble(host.fpu, 8, wcstod)),
+            /** double _wtof(const wchar_t *str): `wcstod`, no end. */
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+                returningDouble(host.fpu, 4, args=>wcstod([args[0], 0]))),
+        } : {},
         atof: readMemory
             ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
             : handlers.atof,
         strtod: readMemory
             ? guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, handlers.strtod)
             : handlers.strtod,
+
+        // The `_l` forms' locale is the C one, the only one carried.
+        /** double _atof_l(const char *str, _locale_t locale) */
+        _atof_l: returningDouble(host.fpu, 8, args=>strtod([args[0], 0])),
+        /** double _strtod_l(const char *str, char **end, _locale_t locale) */
+        _strtod_l: returningDouble(host.fpu, 12, strtod),
+
+        // The universal runtime's, which read C99's infinities, NaNs and
+        // hexadecimal numbers too; the code in the guest is the same, and
+        // hands those to these.
+        [STANDARD_NUMBERS]: standardNumbers(guest),
     };
 }

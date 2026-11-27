@@ -32,6 +32,6 @@ unattended. The bottle server is `@bottlify/installer/server`.
 
 ## Documentation
 
-[Installing from a terminal or a browser, how it works, the bottle server](https://github.com/bottlify/bottlify/blob/main/docs/installer/README.md)
+[Installing from a terminal or a browser, how it works, the bottle server](https://bottlify.app/docs/installer/)
 
 MPL-2.0.

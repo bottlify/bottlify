@@ -12,7 +12,7 @@ import {
     IID_DIRECTMUSIC_PERFORMANCE, IID_DIRECTMUSIC_PERFORMANCE8, registerDirectMusic,
 } from './classes.js';
 import { CLSID_DIRECTMUSIC_SYNTH, DMUS_PORTCAPS, IID_DIRECTMUSIC_PORT } from './ids.js';
-import { readGuid } from '../../win32/ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 
 function registered(){
     /** @type {Map<string, () => any>} */

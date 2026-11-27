@@ -47,11 +47,15 @@ import {
 import {
     SOCKADDR_IN_SIZE, formatAddress, parseAddress, readSockaddr, swap16, swap32, writeSockaddr,
 } from './sockaddr.js';
+import { formatIpv6Text, parseIpv4Text, parseIpv6Text } from './inet.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
+import { formatGuid } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
-const HOSTNAME = 'bottlify';
+export const HOSTNAME = 'bottlify';
 
 /**
  * The services of the services file Windows ships that a program may ask for
@@ -74,6 +78,32 @@ const SERVENT = { s_name: 0, s_aliases: 4, s_port: 8, s_proto: 12, SIZE: 16 };
 
 /** The one extension lookup a program makes before it settles for the plain calls. */
 const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
+/**
+ * The WSAIoctl controls a program sets on a socket as it makes it (mstcpip.h,
+ * ws2def.h): what a UDP socket does with an ICMP unreachable or a TTL
+ * expiry, TCP keep-alive's timing, the loopback fast path, the base
+ * provider's handle, and the address a socket would send from.
+ */
+const SIO_KEEPALIVE_VALS = 0x98000004;
+const SIO_UDP_CONNRESET = 0x9800000c;
+const SIO_UDP_NETRESET = 0x9800000f;
+const SIO_LOOPBACK_FAST_PATH = 0x98000010;
+const SIO_BASE_HANDLE = 0x48000022;
+const SIO_ADDRESS_LIST_QUERY = 0x48000016;
+const SIO_ROUTING_INTERFACE_QUERY = 0xc8000014;
+
+/**
+ * The extension functions SIO_GET_EXTENSION_FUNCTION_POINTER names by GUID
+ * (mswsock.h), each the mswsock export of the same name: a program built for
+ * completion ports asks for these before it opens a connection.
+ */
+const EXTENSION_GUIDS = Object.freeze({
+    'b5367df1-cbac-11cf-95ca-00805f48a192': 'AcceptEx',
+    'b5367df2-cbac-11cf-95ca-00805f48a192': 'GetAcceptExSockaddrs',
+    'b5367df0-cbac-11cf-95ca-00805f48a192': 'TransmitFile',
+    '25a207b9-ddf3-4660-8ee9-76e58c74063e': 'ConnectEx',
+    '7fda2e11-8630-436f-a031-f536a6eec157': 'DisconnectEx',
+});
 
 /**
  * The protocols of the protocol file Windows ships, each with its number and
@@ -109,6 +139,8 @@ const TRANSMIT_CHUNK = 0x10000;
 /**
  * @typedef {Object} WinsockHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose hostent and fd_set hold
+ *           quadword pointers and handles; absent, 4.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {() => any} currentThread
@@ -129,7 +161,58 @@ const TRANSMIT_CHUNK = 0x10000;
  *           TransmitFile reads its file through ReadFile. Absent, those
  *           calls are refused.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(name: string) => number | Promise<number>} [extension]
+ *           Where mswsock's export of this name is, mswsock loaded first if
+ *           it is not yet, as ws2_32 loads it for its provider; zero for one
+ *           it does not export. Absent, the extension lookup is refused.
+ * @property {(socket: number, bytes: number, overlapped: number, status: number,
+ *     atOnce: boolean) => void} [completed]
+ *           An overlapped operation on a socket finished: the packet the
+ *           completion port the socket is bound to owes (kernel32's), left out
+ *           for one that finished in its own call when the socket's completion
+ *           modes skip those. Its WSAOVERLAPPED and event are written here.
  */
+
+/**
+ * A GUID as its text, lower case, from the sixteen bytes a structure holds.
+ *
+ * @param {Uint8Array} bytes
+ */
+const guidText = bytes=>formatGuid(bytes).slice(1, -1).toLowerCase();
+
+const AF_INET6 = 23;
+const WSASERVICE_NOT_FOUND = 10108;
+const WSAENOBUFS = 10055;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * WSAPROTOCOL_INFOW, the wide description WSCEnumProtocols fills: the
+ * narrow one is the same up to szProtocol, which holds 256 characters of
+ * either width.
+ */
+const PROTOCOL_INFO = Object.freeze({
+    SERVICE_FLAGS1: 0, PROVIDER_FLAGS: 16, PROVIDER_ID: 20, CATALOG_ENTRY: 36,
+    CHAIN_LENGTH: 40, VERSION: 72, ADDRESS_FAMILY: 76, MAX_SOCKADDR: 80, MIN_SOCKADDR: 84,
+    SOCKET_TYPE: 88, PROTOCOL: 92, MESSAGE_SIZE: 108, NAME: 116,
+    SIZE_A: 372, SIZE_W: 628,
+});
+
+/** The base provider every Windows has for TCP/IP, mswsock's MSAFD, by its GUID's bytes. */
+const MSAFD_TCPIP = Uint8Array.of(0xa0, 0x1a, 0x0f, 0xe7, 0x8b, 0xab, 0xcf, 0x11,
+    0x8c, 0xa3, 0x00, 0x80, 0x5f, 0x48, 0xa1, 0x92);
+const MSAFD_PATH = '%SystemRoot%\\system32\\mswsock.dll';
+/**
+ * The two base protocols this stack carries, as the catalogue lists them:
+ * TCP (guaranteed, ordered, graceful close, expedited data) and UDP
+ * (connectionless, message oriented, broadcast and multipoint), both with
+ * IFS handles and matching protocol zero.
+ */
+const BASE_PROTOCOLS = Object.freeze([
+    { name: 'MSAFD Tcpip [TCP/IP]', catalog: 1001, type: SOCK_STREAM, protocol: 6,
+        flags: 0x20066, messageSize: 0 },
+    { name: 'MSAFD Tcpip [UDP/IP]', catalog: 1002, type: SOCK_DGRAM, protocol: 17,
+        flags: 0x20e09, messageSize: 65527 },
+]);
 
 /**
  * @param {WinsockHost} host
@@ -169,15 +252,42 @@ export function createWinsockFunctions(host){
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
-        host.writeMemory(address >>> 0, new Uint8Array([
+        host.writeMemory(wholeAddress(address), new Uint8Array([
             value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
         ]));
     };
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /**
+     * WSAHtonl and its kin: the value swapped into network order, written
+     * where the caller asked, as a long or a short.
+     *
+     * @param {number[]} args @param {2 | 4} size
+     */
+    const orderFor = ([handle, value, out], size)=>{
+        if (!socketOf(handle))
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if ((out >>> 0) === 0)
+        {
+            return fail(WSAEFAULT);
+        }
+        if (size === 4)
+        {
+            writeDword(out, swap32(value >>> 0));
+        }
+        else
+        {
+            const swapped = swap16(value & 0xffff);
+            host.writeMemory(wholeAddress(out), new Uint8Array([swapped & 0xff, swapped >>> 8]));
+        }
+        return ok(0);
     };
 
     /** Terminated, in the ANSI page a name a program passes is read in. @param {string} text */
@@ -235,7 +345,7 @@ export function createWinsockFunctions(host){
      * @param {number} pointer
      */
     const protoOf = pointer=>((pointer >>> 0) === 0
-        ? null : host.readCString(pointer >>> 0, 16).toLowerCase());
+        ? null : host.readCString(wholeAddress(pointer), 16).toLowerCase());
 
     /**
      * A service as struct servent, in the buffer both lookups share: named by
@@ -244,20 +354,25 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string[]]} service @param {string | null} proto
      */
     const writeServent = ([name, port, protocols], proto)=>{
-        const block = staticBuffer('servent', SERVENT.SIZE + 48);
-        const nameAt = block + SERVENT.SIZE;
+        // At 64 bits the pointers are quadwords and the protocol comes before
+        // the port (winsock.h's _WIN64 order).
+        const layout = POINTER === 8
+            ? { s_name: 0, s_aliases: 8, s_proto: 16, s_port: 24, SIZE: 32 } : SERVENT;
+        const block = staticBuffer('servent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasesAt = nameAt + 32;
-        const protoAt = aliasesAt + 4;
+        const protoAt = aliasesAt + POINTER;
         host.writeMemory(nameAt, sz(name));
-        writeDword(aliasesAt, 0);
+        putPointer(aliasesAt, 0);
         host.writeMemory(protoAt, sz(proto ?? protocols[0]));
-        const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
-        record.setUint32(SERVENT.s_name, nameAt, true);
-        record.setUint32(SERVENT.s_aliases, aliasesAt, true);
-        record.setUint16(SERVENT.s_port, port, false);
-        record.setUint32(SERVENT.s_proto, protoAt, true);
+        // The record's upper halves and padding zero: the pointers lie below 4 GiB.
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.s_name, nameAt, true);
+        record.setUint32(layout.s_aliases, aliasesAt, true);
+        record.setUint16(layout.s_port, port, false);
+        record.setUint32(layout.s_proto, protoAt, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /**
@@ -383,7 +498,7 @@ export function createWinsockFunctions(host){
             }
             if (outcome.value > 0)
             {
-                host.writeMemory(buffer >>> 0, outcome.bytes);
+                host.writeMemory(wholeAddress(buffer), outcome.bytes);
             }
             if (name !== 0 && outcome.from)
             {
@@ -398,8 +513,102 @@ export function createWinsockFunctions(host){
             return outcome.truncated ? fail(WSAEMSGSIZE) : ok(outcome.value);
         }, first);
 
+    /**
+     * A stream send past its first try, waiting for room until every byte is
+     * handed over: a blocking or overlapped send answers only when it has all
+     * gone, as on Windows. An error after some went is the answer, the rest
+     * lost with the connection.
+     *
+     * @param {any} socket @param {Uint8Array} bytes @param {number} sent
+     * @returns {Promise<any>}
+     */
+    const sendRest = async(socket, bytes, sent)=>{
+        while (sent < bytes.length)
+        {
+            const outcome = registry.send(socket, bytes.subarray(sent));
+            if (outcome.error === WSAEWOULDBLOCK)
+            {
+                if (socket.closed)
+                {
+                    return { error: WSAENOTSOCK };
+                }
+                await registry.writableSoon(socket);
+                continue;
+            }
+            if (outcome.error)
+            {
+                return outcome;
+            }
+            sent += outcome.value;
+        }
+        return { value: sent };
+    };
+
+    /**
+     * Every byte sent, now or once the connection has room for them.
+     *
+     * @param {any} socket @param {Uint8Array} bytes
+     * @param {{ host: number, port: number } | null} target
+     * @param {(outcome: any) => any} settle
+     */
+    const sendAll = (socket, bytes, target, settle)=>{
+        const first = registry.send(socket, bytes, target);
+        if (first.error === WSAEWOULDBLOCK)
+        {
+            return sendRest(socket, bytes, 0).then(settle);
+        }
+        if (first.error || first.value === bytes.length)
+        {
+            return settle(first);
+        }
+        return sendRest(socket, bytes, first.value).then(settle);
+    };
+
+    /** @param {any} outcome */
+    const settleSend = outcome=>(outcome.error ? fail(outcome.error) : ok(outcome.value));
+
+    /**
+     * send, sendto and WSASend without an overlapped: a non-blocking socket
+     * hands over what the connection holds, or says it would block and arms
+     * FD_WRITE again; a blocking one waits until all of it went.
+     *
+     * @param {any} socket @param {Uint8Array} bytes
+     * @param {{ host: number, port: number } | null} target
+     * @param {(outcome: any) => any} settle
+     */
+    const sendNow = (socket, bytes, target, settle)=>{
+        if (!socket.nonBlocking)
+        {
+            return sendAll(socket, bytes, target, settle);
+        }
+        const outcome = registry.send(socket, bytes, target);
+        if (outcome.error === WSAEWOULDBLOCK)
+        {
+            rearm(socket, 'write');
+        }
+        return settle(outcome);
+    };
+
+    /**
+     * A pointer's bytes in the caller's layout: 8 in a 64-bit process, whose
+     * hostent and fd_set hold quadword pointers and handles.
+     */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    /** struct hostent in the caller's layout: the 32-bit one, or with quadword pointers. */
+    const HOSTENT_HERE = POINTER === 8
+        ? { h_name: 0, h_aliases: 8, h_addrtype: 16, h_length: 18, h_addr_list: 24, SIZE: 32 }
+        : HOSTENT;
+    /** @param {number} at @param {number} value  a pointer or a handle, below 4 GiB */
+    const putPointer = (at, value)=>{
+        writeDword(at, value);
+        if (POINTER === 8)
+        {
+            writeDword(at + 4, 0);
+        }
+    };
+
     /** How many bytes writeHostentAt needs, past what the caller already has room for. */
-    const HOSTENT_BLOCK_SIZE = HOSTENT.SIZE + 64;
+    const HOSTENT_BLOCK_SIZE = HOSTENT_HERE.SIZE + 64;
 
     /**
      * Lays out a hostent at a given block and returns it back.
@@ -407,26 +616,26 @@ export function createWinsockFunctions(host){
      * @param {number} block @param {string} name @param {number} address host order
      */
     const writeHostentAt = (block, name, address)=>{
-        const nameAt = block + HOSTENT.SIZE;
+        const nameAt = block + HOSTENT_HERE.SIZE;
         const aliasesAt = nameAt + 32;
-        const listAt = aliasesAt + 8;
-        const addressAt = listAt + 8;
+        const listAt = aliasesAt + POINTER;
+        const addressAt = listAt + 2 * POINTER;
 
         host.writeMemory(nameAt, sz(name));
-        writeDword(aliasesAt, 0);
+        putPointer(aliasesAt, 0);
         writeDword(addressAt, swap32(address));
-        writeDword(listAt, addressAt);
-        writeDword(listAt + 4, 0);
+        putPointer(listAt, addressAt);
+        putPointer(listAt + POINTER, 0);
 
-        const record = new Uint8Array(HOSTENT.SIZE);
+        const record = new Uint8Array(HOSTENT_HERE.SIZE);
         const view = new DataView(record.buffer);
-        view.setUint32(HOSTENT.h_name, nameAt, true);
-        view.setUint32(HOSTENT.h_aliases, aliasesAt, true);
-        view.setUint16(HOSTENT.h_addrtype, AF_INET, true);
-        view.setUint16(HOSTENT.h_length, 4, true);
-        view.setUint32(HOSTENT.h_addr_list, listAt, true);
+        view.setUint32(HOSTENT_HERE.h_name, nameAt, true);
+        view.setUint32(HOSTENT_HERE.h_aliases, aliasesAt, true);
+        view.setUint16(HOSTENT_HERE.h_addrtype, AF_INET, true);
+        view.setUint16(HOSTENT_HERE.h_length, 4, true);
+        view.setUint32(HOSTENT_HERE.h_addr_list, listAt, true);
         host.writeMemory(block, record);
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /**
@@ -438,7 +647,7 @@ export function createWinsockFunctions(host){
     const writeHostent = (name, address)=>
         writeHostentAt(staticBuffer('hostent', HOSTENT_BLOCK_SIZE), name, address);
 
-    /** fd_set is a count followed by that many handles. */
+    /** fd_set is a count followed by that many handles, each a pointer's width and aligned to it. */
     const readFdSet = (/** @type {number} */ pointer)=>{
         if (pointer === 0)
         {
@@ -448,7 +657,7 @@ export function createWinsockFunctions(host){
         const handles = [];
         for (let at = 0; at < total; at++)
         {
-            handles.push(readDword((pointer >>> 0) + 4 + at * 4));
+            handles.push(readDword(wholeAddress(pointer) + POINTER + at * POINTER));
         }
         return handles;
     };
@@ -472,7 +681,8 @@ export function createWinsockFunctions(host){
             return false;
         }
         writeDword(pointer, sockets.length);
-        sockets.forEach((socket, at)=>writeDword((pointer >>> 0) + 4 + at * 4, socket.handle));
+        sockets.forEach((socket, at)=>
+            putPointer((pointer >>> 0) + POINTER + at * POINTER, socket.handle));
         return true;
     };
 
@@ -531,8 +741,7 @@ export function createWinsockFunctions(host){
     /** @param {any} socket */
     const isStream = socket=>socket.type === SOCK_STREAM;
 
-    /** @param {any} socket */
-    const isWritable = socket=>!socket.closed && (!isStream(socket) || socket.connected);
+    const isWritable = registry.writable;
 
     /**
      * Checks every edge but FD_CONNECT, which only ever fires from the
@@ -571,12 +780,12 @@ export function createWinsockFunctions(host){
     };
 
     /**
-     * Re-enables FD_READ or FD_ACCEPT, then re-checks at once: the call that
-     * re-enabled it may itself have left more to report -- a `recv` for less
-     * than what was queued, an `accept` with another connection still
-     * backlogged.
+     * Re-enables FD_READ, FD_ACCEPT or FD_WRITE, then re-checks at once: the
+     * call that re-enabled it may itself have left more to report -- a `recv`
+     * for less than what was queued, an `accept` with another connection still
+     * backlogged, a send that found the connection full and room already made.
      *
-     * @param {any} socket @param {'read' | 'accept'} which
+     * @param {any} socket @param {'read' | 'accept' | 'write'} which
      */
     const rearm = (socket, which)=>{
         const state = selectionOf(socket);
@@ -587,6 +796,11 @@ export function createWinsockFunctions(host){
         if (which === 'read')
         {
             state.readArmed = true;
+        }
+        else if (which === 'write')
+        {
+            // FD_WRITE comes again only after a send found the connection full.
+            state.writeSent = false;
         }
         else
         {
@@ -713,20 +927,23 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string]} protocol
      */
     const writeProtoent = ([name, number, alias])=>{
-        const block = staticBuffer('protoent', PROTOENT.SIZE + 48);
-        const nameAt = block + PROTOENT.SIZE;
+        const layout = POINTER === 8 ? { p_name: 0, p_aliases: 8, p_proto: 16, SIZE: 24 }
+            : PROTOENT;
+        const block = staticBuffer('protoent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasAt = nameAt + 16;
         const aliasesAt = aliasAt + 16;
         host.writeMemory(nameAt, sz(name));
         host.writeMemory(aliasAt, sz(alias));
-        writeDword(aliasesAt, aliasAt);
-        writeDword(aliasesAt + 4, 0);
-        const record = new DataView(new ArrayBuffer(PROTOENT.SIZE));
-        record.setUint32(PROTOENT.p_name, nameAt, true);
-        record.setUint32(PROTOENT.p_aliases, aliasesAt, true);
-        record.setInt16(PROTOENT.p_proto, number, true);
+        // The list: the alias, then the null that ends it, each a pointer wide.
+        putPointer(aliasesAt, aliasAt);
+        putPointer(aliasesAt + POINTER, 0);
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.p_name, nameAt, true);
+        record.setUint32(layout.p_aliases, aliasesAt, true);
+        record.setInt16(layout.p_proto, number, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /** A kernel32 export's handler, read when it is called. @param {string} name */
@@ -806,12 +1023,17 @@ export function createWinsockFunctions(host){
      * Completes an operation: its status and byte count where the system keeps
      * them, then its event -- signalled also for one that completed at once,
      * which Windows signals too, so a program that waits on it either way
-     * never waits for nothing.
+     * never waits for nothing -- then the packet of the completion port the
+     * socket is bound to, which is what a pool of threads in
+     * GetQueuedCompletionStatus waits for, for one that completed at once as
+     * well. An hEvent with its low bit set asks for no packet.
      *
      * @param {number} overlapped @param {number} event
      * @param {{ error: number, bytes: number }} outcome
+     * @param {any} [socket] @param {boolean} [atOnce]  Finished in its own call.
      */
-    const complete = (overlapped, event, { error, bytes })=>{
+    const complete = (overlapped, event, { error, bytes }, socket = null, atOnce = true)=>{
+        const quiet = (readDword(overlapped + WSAOVERLAPPED.hEvent) & 1) !== 0;
         inFlight.delete(overlapped);
         if (error === 0)
         {
@@ -826,6 +1048,10 @@ export function createWinsockFunctions(host){
         if (event !== 0)
         {
             signalEvent(event);
+        }
+        if (socket && !quiet)
+        {
+            host.completed?.(socket.handle, bytes, overlapped, statusOf(error), atOnce);
         }
     };
 
@@ -908,7 +1134,7 @@ export function createWinsockFunctions(host){
             }
             if (overlapped !== 0)
             {
-                complete(overlapped, event, result);
+                complete(overlapped, event, result, socket);
             }
             if ((call.received >>> 0) !== 0)
             {
@@ -943,7 +1169,7 @@ export function createWinsockFunctions(host){
                 }
                 const result = deliver(outcome);
                 complete(overlapped, event, result.error === WSAENOTSOCK
-                    ? { error: WSA_OPERATION_ABORTED, bytes: 0 } : result);
+                    ? { error: WSA_OPERATION_ABORTED, bytes: 0 } : result, socket, false);
             }));
             return fail(WSA_IO_PENDING);
         }
@@ -985,21 +1211,47 @@ export function createWinsockFunctions(host){
         }
         const overlapped = call.overlapped >>> 0;
         const event = overlapped === 0 ? 0 : eventOf(overlapped);
-        const outcome = registry.send(socket, gather(readBuffers(call.buffers, call.count >>> 0)),
-            target);
-        if (outcome.error)
+        const bytes = gather(readBuffers(call.buffers, call.count >>> 0));
+        /** @param {any} outcome */
+        const settle = outcome=>{
+            if (outcome.error)
+            {
+                return fail(outcome.error);
+            }
+            if (overlapped !== 0)
+            {
+                complete(overlapped, event, { error: 0, bytes: outcome.value }, socket);
+            }
+            if ((call.sent >>> 0) !== 0)
+            {
+                writeDword(call.sent, outcome.value);
+            }
+            return ok(0);
+        };
+        if (overlapped === 0)
         {
-            return fail(outcome.error);
+            return sendNow(socket, bytes, target, settle);
         }
-        if (overlapped !== 0)
+        // Overlapped, the send is queued whole: it completes in its
+        // WSAOVERLAPPED once the connection has taken every byte.
+        const first = registry.send(socket, bytes, target);
+        if (first.error && first.error !== WSAEWOULDBLOCK)
         {
-            complete(overlapped, event, { error: 0, bytes: outcome.value });
+            return fail(first.error);
         }
-        if ((call.sent >>> 0) !== 0)
+        const sent = first.error ? 0 : first.value;
+        if (sent === bytes.length)
         {
-            writeDword(call.sent, outcome.value);
+            return settle(first);
         }
-        return ok(0);
+        begin(overlapped);
+        inFlight.set(overlapped, sendRest(socket, bytes, sent).then(outcome=>{
+            complete(overlapped, event, outcome.error
+                ? { error: outcome.error === WSAENOTSOCK ? WSA_OPERATION_ABORTED : outcome.error,
+                    bytes: 0 }
+                : { error: 0, bytes: outcome.value }, socket, false);
+        }));
+        return fail(WSA_IO_PENDING);
     };
 
     /**
@@ -1125,6 +1377,70 @@ export function createWinsockFunctions(host){
         return fail(WSAEINVAL);
     };
 
+    /** UTF-16LE with its terminator. @param {string} text */
+    const wide = text=>{
+        return utf16z(text);
+    };
+
+    /**
+     * The protocol catalogue into `buffer`, as WSCEnumProtocols and
+     * WSAEnumProtocols give it: the base protocols the zero-terminated list
+     * at `protocols` names (all, without one), their count as the answer.
+     *
+     * @param {number} protocols @param {number} buffer @param {number} length
+     * @param {boolean} wideNames @param {(code: number) => number} refuseWith
+     */
+    const enumProtocols = (protocols, buffer, length, wideNames, refuseWith)=>{
+        if ((length >>> 0) === 0)
+        {
+            return refuseWith(WSAEFAULT);
+        }
+        /** @type {number[] | null} */
+        let wanted = null;
+        if ((protocols >>> 0) !== 0)
+        {
+            wanted = [];
+            for (let at = wholeAddress(protocols); wanted.length < 64; at += 4)
+            {
+                const protocol = readDword(at);
+                if (protocol === 0)
+                {
+                    break;
+                }
+                wanted.push(protocol);
+            }
+        }
+        const chosen = BASE_PROTOCOLS.filter(entry=>wanted === null
+            || wanted.includes(entry.protocol));
+        const size = wideNames ? PROTOCOL_INFO.SIZE_W : PROTOCOL_INFO.SIZE_A;
+        if ((buffer >>> 0) === 0 || readDword(length) < chosen.length * size)
+        {
+            writeDword(length, chosen.length * size);
+            return refuseWith(WSAENOBUFS);
+        }
+        chosen.forEach((entry, index)=>{
+            const record = new Uint8Array(size);
+            const view = new DataView(record.buffer);
+            view.setUint32(PROTOCOL_INFO.SERVICE_FLAGS1, entry.flags, true);
+            // PFL_MATCHES_PROTOCOL_ZERO: socket(AF_INET, type, 0) finds it.
+            view.setUint32(PROTOCOL_INFO.PROVIDER_FLAGS, 0x8, true);
+            record.set(MSAFD_TCPIP, PROTOCOL_INFO.PROVIDER_ID);
+            view.setUint32(PROTOCOL_INFO.CATALOG_ENTRY, entry.catalog, true);
+            // A base protocol's chain is itself alone.
+            view.setUint32(PROTOCOL_INFO.CHAIN_LENGTH, 1, true);
+            view.setUint32(PROTOCOL_INFO.VERSION, 2, true);
+            view.setUint32(PROTOCOL_INFO.ADDRESS_FAMILY, AF_INET, true);
+            view.setUint32(PROTOCOL_INFO.MAX_SOCKADDR, SOCKADDR_IN_SIZE, true);
+            view.setUint32(PROTOCOL_INFO.MIN_SOCKADDR, SOCKADDR_IN_SIZE, true);
+            view.setUint32(PROTOCOL_INFO.SOCKET_TYPE, entry.type, true);
+            view.setUint32(PROTOCOL_INFO.PROTOCOL, entry.protocol, true);
+            view.setUint32(PROTOCOL_INFO.MESSAGE_SIZE, entry.messageSize, true);
+            record.set(wideNames ? wide(entry.name) : sz(entry.name), PROTOCOL_INFO.NAME);
+            host.writeMemory(wholeAddress(buffer) + index * size, record);
+        });
+        return chosen.length;
+    };
+
     const table = {
         WSAStartup: {
             argBytes: 8,
@@ -1149,7 +1465,7 @@ export function createWinsockFunctions(host){
                     const legacy = (asked & 0xff) < 2;
                     view.setUint16(WSADATA.iMaxSockets, legacy ? 32767 : 0, true);
                     view.setUint16(WSADATA.iMaxUdpDg, legacy ? 65467 : 0, true);
-                    host.writeMemory(data >>> 0, block);
+                    host.writeMemory(wholeAddress(data), block);
                 }
                 return ok(0);
             },
@@ -1174,7 +1490,7 @@ export function createWinsockFunctions(host){
         // and the message loop run beside -- so there is no hook to run and
         // nothing to cancel, and each answers as Wine's tests see Windows do.
         /** FARPROC WSASetBlockingHook(FARPROC lpBlockFunc): the hook before it, none. */
-        WSASetBlockingHook: { argBytes: 4, handler: ()=>0 },
+        WSASetBlockingHook: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         /** int WSAUnhookBlockingHook(void) */
         WSAUnhookBlockingHook: { argBytes: 0, handler: ()=>0 },
         /** int WSACancelBlockingCall(void) */
@@ -1296,9 +1612,8 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK);
                 }
-                const bytes = host.readMemory(buffer >>> 0, length >>> 0);
-                const outcome = registry.send(socket, bytes);
-                return outcome.error ? fail(outcome.error) : ok(outcome.value);
+                const bytes = host.readMemory(wholeAddress(buffer), length >>> 0);
+                return sendNow(socket, bytes, null, settleSend);
             },
         },
 
@@ -1338,9 +1653,8 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                const bytes = host.readMemory(buffer >>> 0, length >>> 0);
-                const outcome = registry.send(socket, bytes, target);
-                return outcome.error ? fail(outcome.error) : ok(outcome.value);
+                const bytes = host.readMemory(wholeAddress(buffer), length >>> 0);
+                return sendNow(socket, bytes, target, settleSend);
             },
         },
 
@@ -1363,6 +1677,25 @@ export function createWinsockFunctions(host){
                     return fail(WSAEWOULDBLOCK);
                 }
                 return receiveInto(socket, wanted, buffer, name, lengthPointer, first);
+            },
+        },
+
+        /**
+         * int WSASendDisconnect(SOCKET s, LPWSABUF lpOutboundDisconnectData)
+         *
+         * shutdown(s, SD_SEND); TCP carries no disconnect data, so the buffer is not read.
+         */
+        WSASendDisconnect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const socket = socketOf(handle);
+                if (!socket)
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                const outcome = registry.shutdown(socket, 1);
+                return outcome.error ? fail(outcome.error) : ok(0);
             },
         },
 
@@ -1474,25 +1807,144 @@ export function createWinsockFunctions(host){
          *
          * The two commands ioctlsocket takes, in the buffered form: FIONBIO
          * reads its flag from the input buffer, FIONREAD writes its count to
-         * the output one. The extension-function lookup is refused as not
-         * supported, which is what a stack without those extensions says and
-         * what sends a program to the plain calls it also has.
+         * the output one. SIO_GET_EXTENSION_FUNCTION_POINTER answers a GUID
+         * mswsock.h names with the address of mswsock's export of that
+         * function, as the provider does; a GUID it does not know is
+         * WSAEINVAL, and with no mswsock to point into, the lookup is refused
+         * as a stack without the extensions refuses it.
          */
         WSAIoctl: {
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, command, input, , output, outputSize, returned])=>{
+            handler: ([handle, command, input, inputSize, output, outputSize, returned])=>{
                 if (!socketOf(handle))
                 {
                     return fail(WSAENOTSOCK);
                 }
                 if ((command >>> 0) === SIO_GET_EXTENSION_FUNCTION_POINTER)
                 {
-                    return fail(WSAEOPNOTSUPP);
+                    if (!host.extension)
+                    {
+                        return fail(WSAEOPNOTSUPP);
+                    }
+                    if ((inputSize >>> 0) < 16 || wholeAddress(input) === 0
+                        || (outputSize >>> 0) < 4 || wholeAddress(output) === 0)
+                    {
+                        return fail(WSAEFAULT);
+                    }
+                    const name = EXTENSION_GUIDS[
+                        /** @type {keyof typeof EXTENSION_GUIDS} */ (
+                            guidText(host.readMemory(wholeAddress(input), 16)))];
+                    if (!name)
+                    {
+                        return fail(WSAEINVAL);
+                    }
+                    const answer = (/** @type {number} */ address)=>{
+                        if (address === 0)
+                        {
+                            return fail(WSAEINVAL);
+                        }
+                        writeDword(output, address);
+                        if (wholeAddress(returned) !== 0)
+                        {
+                            writeDword(returned, 4);
+                        }
+                        return ok(0);
+                    };
+                    const address = host.extension(name);
+                    return address instanceof Promise ? address.then(answer) : answer(address);
                 }
                 if ((command >>> 0) === FIONBIO)
                 {
                     return ioctl(handle, command, input);
+                }
+                const socket = /** @type {any} */ (socketOf(handle));
+                /** An out-buffer answer of `bytes`, its size in `returned`. @param {Uint8Array} bytes */
+                const answerWith = bytes=>{
+                    if (wholeAddress(output) === 0 || (outputSize >>> 0) < bytes.length)
+                    {
+                        if (wholeAddress(returned) !== 0)
+                        {
+                            writeDword(returned, bytes.length);
+                        }
+                        return fail(WSAEFAULT);
+                    }
+                    host.writeMemory(wholeAddress(output), bytes);
+                    if (wholeAddress(returned) !== 0)
+                    {
+                        writeDword(returned, bytes.length);
+                    }
+                    return ok(0);
+                };
+                switch (command >>> 0)
+                {
+                    // A datagram socket's: an ICMP unreachable or expired TTL
+                    // reported to the next receive, or not. No ICMP reaches a
+                    // socket here, so the choice is kept and changes nothing.
+                    case SIO_UDP_CONNRESET:
+                    case SIO_UDP_NETRESET:
+                        if (isStream(socket))
+                        {
+                            return fail(WSAEINVAL);
+                        }
+                        if ((inputSize >>> 0) < 4 || wholeAddress(input) === 0)
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        return ok(0);
+                    // A stream socket's keep-alive timing (struct tcp_keepalive)
+                    // and its loopback fast path: kept, with nothing to time or
+                    // to shorten -- the relay keeps the real connection alive.
+                    case SIO_KEEPALIVE_VALS:
+                    case SIO_LOOPBACK_FAST_PATH:
+                        if (!isStream(socket))
+                        {
+                            return fail(WSAEOPNOTSUPP);
+                        }
+                        if (wholeAddress(input) === 0 || (inputSize >>> 0)
+                            < ((command >>> 0) === SIO_KEEPALIVE_VALS ? 12 : 4))
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        return ok(0);
+                    // No layered provider sits over the base one: the socket is
+                    // its own base.
+                    case SIO_BASE_HANDLE: {
+                        const bytes = new Uint8Array(4);
+                        new DataView(bytes.buffer).setUint32(0, handle >>> 0, true);
+                        return answerWith(bytes);
+                    }
+                    // SOCKET_ADDRESS_LIST of the machine's one address: a count,
+                    // a SOCKET_ADDRESS (pointer, length), then the sockaddr_in
+                    // it points at, in the same buffer.
+                    case SIO_ADDRESS_LIST_QUERY: {
+                        const bytes = new Uint8Array(12 + SOCKADDR_IN_SIZE);
+                        const view = new DataView(bytes.buffer);
+                        view.setUint32(0, 1, true);
+                        view.setUint32(4, (wholeAddress(output) + 12) >>> 0, true);
+                        view.setInt32(8, SOCKADDR_IN_SIZE, true);
+                        const address = new Uint8Array(SOCKADDR_IN_SIZE);
+                        writeSockaddr((/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                            address.set(data, at), 0,
+                        { host: registry.localAddress(), port: 0 });
+                        bytes.set(address, 12);
+                        return answerWith(bytes);
+                    }
+                    // The local address a datagram to the destination would
+                    // leave from: the machine's one address.
+                    case SIO_ROUTING_INTERFACE_QUERY: {
+                        if (wholeAddress(input) === 0 || (inputSize >>> 0) < SOCKADDR_IN_SIZE)
+                        {
+                            return fail(WSAEFAULT);
+                        }
+                        const address = new Uint8Array(SOCKADDR_IN_SIZE);
+                        writeSockaddr((/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                            address.set(data, at), 0,
+                        { host: registry.localAddress(), port: 0 });
+                        return answerWith(address);
+                    }
+                    default:
+                        break;
                 }
                 if ((command >>> 0) === FIONREAD)
                 {
@@ -1558,15 +2010,15 @@ export function createWinsockFunctions(host){
                 if (timeout !== 0)
                 {
                     const seconds = readDword(timeout);
-                    const micro = readDword((timeout >>> 0) + 4);
+                    const micro = readDword(wholeAddress(timeout) + 4);
                     const milliseconds = seconds * 1000 + Math.floor(micro / 1000);
                     if (milliseconds === 0)
                     {
                         return answer();
                     }
-                    return registry.anyReadableSoon(read, milliseconds).then(answer);
+                    return registry.anyReadySoon(read, write, milliseconds).then(answer);
                 }
-                return registry.anyReadableSoon(read, null).then(answer);
+                return registry.anyReadySoon(read, write, null).then(answer);
             },
         },
 
@@ -1685,7 +2137,7 @@ export function createWinsockFunctions(host){
                 for (let bit = 0; bit < FD_MAX_EVENTS; bit++)
                 {
                     const error = armed && (pending & (1 << bit)) ? armed.errors[bit] : 0;
-                    writeDword((eventsPointer >>> 0) + 4 + bit * 4, error);
+                    writeDword(wholeAddress(eventsPointer) + 4 + bit * 4, error);
                 }
                 if (armed)
                 {
@@ -1709,7 +2161,7 @@ export function createWinsockFunctions(host){
                 {
                     return INADDR_NONE;
                 }
-                const host32 = parseAddress(host.readCString(pointer >>> 0, 64));
+                const host32 = parseAddress(host.readCString(wholeAddress(pointer), 64));
                 // The answer is in network order, because it goes straight into
                 // a sockaddr without passing through htonl.
                 return host32 === INADDR_NONE ? INADDR_NONE : swap32(host32);
@@ -1722,7 +2174,7 @@ export function createWinsockFunctions(host){
             handler: ([value])=>{
                 const buffer = staticBuffer('inet_ntoa', 16);
                 host.writeMemory(buffer, sz(formatAddress(swap32(value))));
-                return buffer >>> 0;
+                return wholeAddress(buffer);
             },
         },
 
@@ -1734,7 +2186,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                host.writeMemory(buffer >>> 0, sz(HOSTNAME));
+                host.writeMemory(wholeAddress(buffer), sz(HOSTNAME));
                 return ok(0);
             },
         },
@@ -1754,7 +2206,8 @@ export function createWinsockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const name = pointer === 0 ? HOSTNAME : host.readCString(pointer >>> 0, 256);
+                const name = pointer === 0 ? HOSTNAME : host.readCString(wholeAddress(pointer),
+                    256);
                 const literal = parseAddress(name);
                 const known = name === HOSTNAME || name === 'localhost';
                 if (literal !== INADDR_NONE || known)
@@ -1781,6 +2234,7 @@ export function createWinsockFunctions(host){
          * machine's own name. Any other address is not found.
          */
         gethostbyaddr: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, length, type])=>{
@@ -1792,7 +2246,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEAFNOSUPPORT, 0);
                 }
-                const bytes = host.readMemory(pointer >>> 0, 4);
+                const bytes = host.readMemory(wholeAddress(pointer), 4);
                 const address = (bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3]) >>> 0;
                 return address === INADDR_LOOPBACK
                     ? writeHostent(HOSTNAME, address) : fail(WSAHOST_NOT_FOUND, 0);
@@ -1807,6 +2261,7 @@ export function createWinsockFunctions(host){
          * it does not list, or a protocol it is not listed for, is not found.
          */
         getservbyname: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([namePointer, protoPointer])=>{
@@ -1814,7 +2269,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const name = host.readCString(namePointer >>> 0, 64).toLowerCase();
+                const name = host.readCString(wholeAddress(namePointer), 64).toLowerCase();
                 const proto = protoOf(protoPointer);
                 const found = SERVICES.find(([service, , protocols])=>service === name
                     && (proto === null || protocols.includes(proto)));
@@ -1830,6 +2285,7 @@ export function createWinsockFunctions(host){
          * buffer -- one call overwrites what the other returned.
          */
         getservbyport: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([port, protoPointer])=>{
@@ -1865,7 +2321,7 @@ export function createWinsockFunctions(host){
                 const task = nextAsyncTask++;
                 asyncTasks.set(task, { cancelled: false });
                 const name = namePointer === 0
-                    ? HOSTNAME : host.readCString(namePointer >>> 0, 256);
+                    ? HOSTNAME : host.readCString(wholeAddress(namePointer), 256);
 
                 const deliver = (/** @type {number} */ error)=>{
                     const record = asyncTasks.get(task);
@@ -1890,7 +2346,7 @@ export function createWinsockFunctions(host){
                         deliver(WSAEFAULT);
                         return;
                     }
-                    writeHostentAt(buf >>> 0, name, address);
+                    writeHostentAt(wholeAddress(buf), name, address);
                     deliver(0);
                 };
 
@@ -1912,7 +2368,7 @@ export function createWinsockFunctions(host){
                         found.length === 0 ? WSAHOST_NOT_FOUND : 0, found[0]));
                 });
 
-                return task >>> 0;
+                return wholeAddress(task);
             },
         },
 
@@ -2029,15 +2485,15 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK, 0);
                 }
-                if ((overlapped >>> 0) === 0 || (transferred >>> 0) === 0)
+                if (wholeAddress(overlapped) === 0 || wholeAddress(transferred) === 0)
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const at = overlapped >>> 0;
+                const at = wholeAddress(overlapped);
                 const report = ()=>{
                     const status = readDword(at + WSAOVERLAPPED.Internal);
                     writeDword(transferred, readDword(at + WSAOVERLAPPED.InternalHigh));
-                    if ((flags >>> 0) !== 0)
+                    if (wholeAddress(flags) !== 0)
                     {
                         writeDword(flags, NO_FLAGS);
                     }
@@ -2127,13 +2583,44 @@ export function createWinsockFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([handle, name, length, , calleeData])=>{
-                if ((calleeData >>> 0) !== 0 && socketOf(handle))
+                if (wholeAddress(calleeData) !== 0 && socketOf(handle))
                 {
                     writeDword(calleeData, 0);
                 }
                 return connectCall(handle, name, length);
             },
         },
+
+        /**
+         * SOCKET WSAAccept(SOCKET s, struct sockaddr *addr, LPINT addrlen,
+         *   LPCONDITIONPROC lpfnCondition, DWORD_PTR dwCallbackData)
+         *
+         * accept. A condition function is not called: every connection is
+         * accepted as if it answered CF_ACCEPT, and that is said.
+         */
+        WSAAccept: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, name, lengthPointer, condition])=>{
+                if (wholeAddress(condition) !== 0)
+                {
+                    host.divergence?.('WSAAccept',
+                        'the condition function is not called; the connection is accepted');
+                }
+                return table.accept.handler([handle, name, lengthPointer]);
+            },
+        },
+
+        /**
+         * int WSAHtonl(SOCKET s, u_long hostlong, u_long *lpnetlong), and its
+         * three kin: htonl and the rest for the socket's provider, which for
+         * TCP/IP is network order. The socket must be one, and the out pointer
+         * there.
+         */
+        WSAHtonl: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 4) },
+        WSANtohl: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 4) },
+        WSAHtons: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 2) },
+        WSANtohs: { argBytes: 12, handler: (/** @type {number[]} */ args)=>orderFor(args, 2) },
 
         /**
          * SOCKET WSASocketA(int af, int type, int protocol,
@@ -2154,10 +2641,267 @@ export function createWinsockFunctions(host){
                     return fail(WSAEINVAL, INVALID_SOCKET);
                 }
                 const described = (/** @type {number} */ value, /** @type {number} */ offset)=>
-                    ((value | 0) === FROM_PROTOCOL_INFO && (info >>> 0) !== 0
-                        ? readDword((info >>> 0) + offset) : value);
+                    ((value | 0) === FROM_PROTOCOL_INFO && wholeAddress(info) !== 0
+                        ? readDword(wholeAddress(info) + offset) : value);
                 return createSocket(described(family, WSAPROTOCOL_INFO.iAddressFamily),
                     described(type, WSAPROTOCOL_INFO.iSocketType));
+            },
+        },
+
+        /** SOCKET WSASocketW: WSASocketA, the description read the same up to its name. */
+        WSASocketW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>table.WSASocketA.handler(args),
+        },
+
+        /**
+         * int WSASendMsg(SOCKET Handle, LPWSAMSG lpMsg, DWORD dwFlags,
+         *   LPDWORD lpNumberOfBytesSent, LPWSAOVERLAPPED lpOverlapped,
+         *   LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         *
+         * WSASendTo with its arguments in a WSAMSG: name, namelen, the
+         * WSABUF array and its count, the control data and the flags. The
+         * control data is ancillary information TCP/IP has no use for here
+         * (no option it would set is carried by the relay), so it is not sent.
+         */
+        WSASendMsg: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, message, , sent, overlapped, routine])=>{
+                if (wholeAddress(message) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                const at = wholeAddress(message);
+                return sendCall({ handle, buffers: readDword(at + 8), count: readDword(at + 12),
+                    sent, to: readDword(at), toLength: readDword(at + 4), overlapped, routine },
+                'WSASendMsg');
+            },
+        },
+
+        /**
+         * INT inet_pton(INT Family, PCSTR pszAddrString, PVOID pAddrBuf)
+         *
+         * 1 with the address written in network order, 0 for text that is
+         * not one, -1 with WSAEAFNOSUPPORT for a family other than the two.
+         */
+        inet_pton: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([family, text, out])=>{
+                if (wholeAddress(text) === 0 || wholeAddress(out) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                if (family !== AF_INET && family !== AF_INET6)
+                {
+                    return fail(WSAEAFNOSUPPORT);
+                }
+                const string = host.readCString(wholeAddress(text), 64);
+                const bytes = family === AF_INET ? parseIpv4Text(string) : parseIpv6Text(string);
+                if (!bytes)
+                {
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(out), bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * PCSTR inet_ntop(INT Family, const VOID *pAddr, PSTR pStringBuf,
+         *   size_t StringBufSize)
+         *
+         * The buffer, or NULL: WSAEAFNOSUPPORT for another family,
+         * ERROR_INVALID_PARAMETER for no buffer or one too short for the text
+         * and its terminator.
+         */
+        inet_ntop: {
+            returns: 'pointer',
+            argBytes: 16,
+            sizes: [3],
+            /** @param {number[]} args */
+            handler: ([family, address, buffer, size])=>{
+                if (family !== AF_INET && family !== AF_INET6)
+                {
+                    return fail(WSAEAFNOSUPPORT, 0);
+                }
+                if (wholeAddress(address) === 0 || wholeAddress(buffer) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0);
+                }
+                const bytes = host.readMemory(wholeAddress(address), family === AF_INET ? 4 : 16);
+                const text = family === AF_INET ? [...bytes].join('.') : formatIpv6Text(bytes);
+                if ((size >>> 0) < text.length + 1)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0);
+                }
+                host.writeMemory(wholeAddress(buffer), sz(text));
+                return wholeAddress(buffer);
+            },
+        },
+
+        /**
+         * int WSADuplicateSocketW(SOCKET s, DWORD dwProcessId,
+         *   LPWSAPROTOCOL_INFOW lpProtocolInfo)
+         *
+         * A socket is this process's registry's alone; no other process can
+         * be handed it, so the duplicate is refused as for a process it
+         * cannot go to.
+         */
+        WSADuplicateSocketW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, , info])=>{
+                if (!socketOf(handle))
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                if (wholeAddress(info) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                host.divergence?.('WSADuplicateSocketW',
+                    'a socket cannot be shared with another process');
+                return fail(WSAEINVAL);
+            },
+        },
+
+        /**
+         * int WSCEnumProtocols(LPINT lpiProtocols, LPWSAPROTOCOL_INFOW lpProtocolBuffer,
+         *   LPDWORD lpdwBufferLength, LPINT lpErrno)
+         *
+         * The catalogue: MSAFD's TCP and UDP, or those of them the protocol
+         * list names. Too little room is WSAENOBUFS with the length needed.
+         */
+        WSCEnumProtocols: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length, errno])=>enumProtocols(protocols, buffer,
+                length, true, code=>{
+                    if (wholeAddress(errno) !== 0)
+                    {
+                        writeDword(errno, code);
+                    }
+                    return SOCKET_ERROR;
+                }),
+        },
+
+        /** int WSAEnumProtocolsA(LPINT, LPWSAPROTOCOL_INFOA, LPDWORD): the catalogue, narrow. */
+        WSAEnumProtocolsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length])=>(needStarted()
+                ? fail(WSANOTINITIALISED)
+                : enumProtocols(protocols, buffer, length, false, code=>fail(code))),
+        },
+
+        /** int WSAEnumProtocolsW(LPINT, LPWSAPROTOCOL_INFOW, LPDWORD): the catalogue, wide. */
+        WSAEnumProtocolsW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([protocols, buffer, length])=>(needStarted()
+                ? fail(WSANOTINITIALISED)
+                : enumProtocols(protocols, buffer, length, true, code=>fail(code))),
+        },
+
+        /**
+         * int WSCGetProviderPath(LPGUID lpProviderId, WCHAR *lpszProviderDllPath,
+         *   LPINT lpProviderDllPathLen, LPINT lpErrno)
+         *
+         * MSAFD's library, as the catalogue keeps it -- unexpanded. Its
+         * length counts the terminator; short of it, WSAEFAULT with the
+         * length needed. Another provider is WSAEINVAL.
+         */
+        WSCGetProviderPath: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([guid, path, length, errno])=>{
+                const refuseWith = (/** @type {number} */ code)=>{
+                    if (wholeAddress(errno) !== 0)
+                    {
+                        writeDword(errno, code);
+                    }
+                    return SOCKET_ERROR;
+                };
+                if (wholeAddress(guid) === 0 || wholeAddress(length) === 0)
+                {
+                    return refuseWith(WSAEFAULT);
+                }
+                const id = host.readMemory(wholeAddress(guid), 16);
+                if (!id.every((byte, index)=>byte === MSAFD_TCPIP[index]))
+                {
+                    return refuseWith(WSAEINVAL);
+                }
+                if (wholeAddress(path) === 0 || readDword(length) < MSAFD_PATH.length + 1)
+                {
+                    writeDword(length, MSAFD_PATH.length + 1);
+                    return refuseWith(WSAEFAULT);
+                }
+                host.writeMemory(wholeAddress(path), wide(MSAFD_PATH));
+                writeDword(length, MSAFD_PATH.length + 1);
+                return 0;
+            },
+        },
+
+        /**
+         * The name space calls. No name space provider is installed here --
+         * names resolve through getaddrinfo and the relay, not a provider a
+         * program can query -- so the list is empty and every lookup finds
+         * no service.
+         */
+
+        /** INT WSAEnumNameSpaceProvidersW(LPDWORD lpdwBufferLength, LPWSANAMESPACE_INFOW) */
+        WSAEnumNameSpaceProvidersW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([length])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                if (wholeAddress(length) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                return 0;
+            },
+        },
+
+        /** INT WSALookupServiceBeginW(LPWSAQUERYSETW, DWORD dwControlFlags, LPHANDLE) */
+        WSALookupServiceBeginW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([query, , out])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                if (wholeAddress(query) === 0 || wholeAddress(out) === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                return fail(WSASERVICE_NOT_FOUND);
+            },
+        },
+
+        /** INT WSALookupServiceNextW(HANDLE, DWORD, LPDWORD, LPWSAQUERYSETW): no lookup was begun. */
+        WSALookupServiceNextW: { argBytes: 16, handler: ()=>fail(WSA_INVALID_HANDLE) },
+
+        /** INT WSALookupServiceEnd(HANDLE hLookup): no lookup was begun. */
+        WSALookupServiceEnd: { argBytes: 4, handler: ()=>fail(WSA_INVALID_HANDLE) },
+
+        /** INT WSASetServiceW(LPWSAQUERYSETW, WSAESETSERVICEOP, DWORD): no provider takes it. */
+        WSASetServiceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([query])=>{
+                if (needStarted())
+                {
+                    return fail(WSANOTINITIALISED);
+                }
+                return fail(wholeAddress(query) === 0 ? WSAEFAULT : WSASERVICE_NOT_FOUND);
             },
         },
 
@@ -2176,7 +2920,7 @@ export function createWinsockFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([nodePointer, servicePointer, hintsPointer, result])=>{
-                if ((result >>> 0) !== 0)
+                if (wholeAddress(result) !== 0)
                 {
                     writeDword(result, 0);
                 }
@@ -2184,11 +2928,11 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSANOTINITIALISED);
                 }
-                if ((result >>> 0) === 0)
+                if (wholeAddress(result) === 0)
                 {
                     return eai(WSAEINVAL);
                 }
-                if ((nodePointer >>> 0) === 0 && (servicePointer >>> 0) === 0)
+                if (wholeAddress(nodePointer) === 0 && wholeAddress(servicePointer) === 0)
                 {
                     return eai(WSAHOST_NOT_FOUND);
                 }
@@ -2196,10 +2940,10 @@ export function createWinsockFunctions(host){
                 let family = AF_UNSPEC;
                 let socktype = 0;
                 let protocol = 0;
-                if ((hintsPointer >>> 0) !== 0)
+                if (wholeAddress(hintsPointer) !== 0)
                 {
                     const hints = new DataView(
-                        host.readMemory(hintsPointer >>> 0, ADDRINFO.SIZE).slice().buffer);
+                        host.readMemory(wholeAddress(hintsPointer), ADDRINFO.SIZE).slice().buffer);
                     flags = hints.getInt32(ADDRINFO.ai_flags, true);
                     family = hints.getInt32(ADDRINFO.ai_family, true);
                     socktype = hints.getInt32(ADDRINFO.ai_socktype, true);
@@ -2212,7 +2956,7 @@ export function createWinsockFunctions(host){
                     }
                 }
                 if ((flags & ~(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST)) !== 0
-                    || ((flags & AI_CANONNAME) !== 0 && (nodePointer >>> 0) === 0))
+                    || ((flags & AI_CANONNAME) !== 0 && wholeAddress(nodePointer) === 0))
                 {
                     return eai(WSAEINVAL);
                 }
@@ -2227,9 +2971,9 @@ export function createWinsockFunctions(host){
                 }
 
                 let port = 0;
-                if ((servicePointer >>> 0) !== 0)
+                if (wholeAddress(servicePointer) !== 0)
                 {
-                    const service = host.readCString(servicePointer >>> 0, 64);
+                    const service = host.readCString(wholeAddress(servicePointer), 64);
                     if (/^\d+$/.test(service))
                     {
                         port = Number(service);
@@ -2264,11 +3008,11 @@ export function createWinsockFunctions(host){
                     writeDword(result, list);
                     return 0;
                 };
-                if ((nodePointer >>> 0) === 0)
+                if (wholeAddress(nodePointer) === 0)
                 {
                     return reply([(flags & AI_PASSIVE) !== 0 ? INADDR_ANY : INADDR_LOOPBACK], null);
                 }
-                const name = host.readCString(nodePointer >>> 0, 256);
+                const name = host.readCString(wholeAddress(nodePointer), 256);
                 const numeric = parseAddress(name) !== INADDR_NONE
                     || name.trim() === '255.255.255.255';
                 if ((flags & AI_NUMERICHOST) !== 0 && !numeric)
@@ -2300,7 +3044,7 @@ export function createWinsockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                let node = list >>> 0;
+                let node = wholeAddress(list);
                 while (node !== 0 && addrinfoNodes.has(node))
                 {
                     const next = readDword(node + ADDRINFO.ai_next);
@@ -2329,12 +3073,12 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSANOTINITIALISED);
                 }
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     return eai(WSAEFAULT);
                 }
                 const address = /** @type {{ family: number, host: number, port: number }} */ (
-                    readSockaddr(host.readMemory, pointer >>> 0));
+                    readSockaddr(host.readMemory, wholeAddress(pointer)));
                 if (address.family !== AF_INET)
                 {
                     return eai(WSAEAFNOSUPPORT);
@@ -2343,8 +3087,8 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSAEFAULT);
                 }
-                const wantHost = (hostOut >>> 0) !== 0 && (hostLength >>> 0) !== 0;
-                const wantService = (servOut >>> 0) !== 0 && (servLength >>> 0) !== 0;
+                const wantHost = wholeAddress(hostOut) !== 0 && (hostLength >>> 0) !== 0;
+                const wantService = wholeAddress(servOut) !== 0 && (servLength >>> 0) !== 0;
                 if (!wantHost && !wantService)
                 {
                     return eai(WSAHOST_NOT_FOUND);
@@ -2379,11 +3123,11 @@ export function createWinsockFunctions(host){
                 }
                 if (hostText)
                 {
-                    host.writeMemory(hostOut >>> 0, hostText);
+                    host.writeMemory(wholeAddress(hostOut), hostText);
                 }
                 if (serviceText)
                 {
-                    host.writeMemory(servOut >>> 0, serviceText);
+                    host.writeMemory(wholeAddress(servOut), serviceText);
                 }
                 return 0;
             },
@@ -2398,14 +3142,15 @@ export function createWinsockFunctions(host){
          * it. One it does not list is WSANO_DATA and NULL.
          */
         getprotobyname: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const name = host.readCString(pointer >>> 0, 64).toLowerCase();
+                const name = host.readCString(wholeAddress(pointer), 64).toLowerCase();
                 const found = PROTOCOLS.find(([own, , alias])=>own === name
                     || alias.toLowerCase() === name);
                 return found ? writeProtoent(found) : fail(WSANO_DATA, 0);
@@ -2413,6 +3158,7 @@ export function createWinsockFunctions(host){
         },
 
         getprotobynumber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([number])=>{
@@ -2448,8 +3194,9 @@ export function createWinsockFunctions(host){
                 const taken = (at, bytes)=>(at === 0 || bytes === 0
                     ? new Uint8Array(0) : host.readMemory(at, bytes).slice());
                 const extra = (buffers >>> 0) === 0 ? null : {
-                    head: taken(readDword(buffers), readDword((buffers >>> 0) + 4)),
-                    tail: taken(readDword((buffers >>> 0) + 8), readDword((buffers >>> 0) + 12)),
+                    head: taken(readDword(buffers), readDword(wholeAddress(buffers) + 4)),
+                    tail: taken(readDword(wholeAddress(buffers) + 8),
+                        readDword(wholeAddress(buffers) + 12)),
                 };
                 const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
                 const wanted = total >>> 0;
@@ -2484,7 +3231,11 @@ export function createWinsockFunctions(host){
                         body.set(part, at);
                         at += part.length;
                     }
-                    const outcome = registry.send(socket, body);
+                    return sendAll(socket, body, null, outcome=>settleTransmit(outcome));
+                };
+
+                /** What the send of the whole came to. @param {any} outcome */
+                const settleTransmit = outcome=>{
                     if (outcome.error)
                     {
                         return fail(outcome.error, 0);
@@ -2495,7 +3246,8 @@ export function createWinsockFunctions(host){
                     }
                     if ((overlapped >>> 0) !== 0)
                     {
-                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value });
+                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value },
+                            socket, (file >>> 0) === 0);
                     }
                     return 1;
                 };
@@ -2546,67 +3298,145 @@ export function createWinsockFunctions(host){
 
     /** The extensions, which a program reaches by name through GetProcAddress. */
     const extensions = {
+        /**
+         * BOOL AcceptEx(SOCKET sListenSocket, SOCKET sAcceptSocket,
+         *   PVOID lpOutputBuffer, DWORD dwReceiveDataLength,
+         *   DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength,
+         *   LPDWORD lpdwBytesReceived, LPOVERLAPPED lpOverlapped)
+         *
+         * A connection waiting is taken at once; otherwise the call is pending
+         * and completes when one arrives, on the listening socket's port. The
+         * two addresses go into the buffer after the receive area, where
+         * GetAcceptExSockaddrs finds them.
+         */
         AcceptEx: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([listenHandle, acceptHandle])=>{
+            handler: ([listenHandle, acceptHandle, buffer, receiveLength, localLength, , received,
+                overlapped])=>{
                 const listener = socketOf(listenHandle);
                 const accepting = socketOf(acceptHandle);
                 if (!listener || !accepting)
                 {
                     return fail(WSAENOTSOCK, 0);
                 }
+                const event =
+                    wholeAddress(overlapped) === 0 ? 0 : eventOf(wholeAddress(overlapped));
+                /** @param {number} handle  What accept produced. */
+                const fold = handle=>{
+                    // The caller supplied the socket the connection is to arrive
+                    // on, so what accept produced is folded onto it rather than
+                    // handed back: AcceptEx has no return value for a handle.
+                    const ready = registry.get(handle);
+                    accepting.local = ready.local;
+                    accepting.remote = ready.remote;
+                    accepting.connected = true;
+                    accepting.peer = ready.peer;
+                    if (ready.peer)
+                    {
+                        ready.peer.peer = accepting;
+                    }
+                    accepting.rx = ready.rx;
+                    // Detached before it is closed. Closing a stream socket tells
+                    // its peer the connection is finished, and this one still
+                    // names the client -- so leaving it attached would greet a
+                    // client with its own connection hanging up at once.
+                    ready.peer = null;
+                    registry.close(ready);
+                    if (wholeAddress(buffer) !== 0)
+                    {
+                        const at = wholeAddress(buffer) + (receiveLength >>> 0);
+                        writeSockaddr(host.writeMemory, at, accepting.local);
+                        if (accepting.remote)
+                        {
+                            writeSockaddr(host.writeMemory, at + (localLength >>> 0),
+                                accepting.remote);
+                        }
+                    }
+                };
                 const outcome = registry.accept(listener);
-                if (outcome.error)
+                // ponytail: completes with no bytes even when a receive area was
+                // given; Windows waits for the first data then.
+                if (!outcome.error)
+                {
+                    fold(outcome.value);
+                    if (wholeAddress(received) !== 0)
+                    {
+                        writeDword(wholeAddress(received), 0);
+                    }
+                    if (wholeAddress(overlapped) !== 0)
+                    {
+                        complete(wholeAddress(overlapped), event, { error: 0, bytes: 0 }, listener);
+                    }
+                    return 1;
+                }
+                if (outcome.error !== WSAEWOULDBLOCK || wholeAddress(overlapped) === 0)
                 {
                     return fail(outcome.error === WSAEWOULDBLOCK
                         ? WSA_IO_PENDING : outcome.error, 0);
                 }
-                // The caller supplied the socket the connection is to arrive on,
-                // so what accept produced is folded onto it rather than handed
-                // back: AcceptEx has no return value that could carry a handle.
-                const ready = registry.get(outcome.value);
-                accepting.local = ready.local;
-                accepting.remote = ready.remote;
-                accepting.connected = true;
-                accepting.peer = ready.peer;
-                if (ready.peer)
-                {
-                    ready.peer.peer = accepting;
-                }
-                accepting.rx = ready.rx;
-                // Detached before it is closed. Closing a stream socket tells
-                // its peer the connection is finished, and this one still names
-                // the client -- so leaving it attached would greet a client with
-                // its own connection hanging up the instant it was accepted.
-                ready.peer = null;
-                registry.close(ready);
-                return 1;
+                begin(wholeAddress(overlapped));
+                inFlight.set(wholeAddress(overlapped), until(listener,
+                    ()=>registry.accept(listener))
+                    .then(arrived=>{
+                        if (arrived.error)
+                        {
+                            complete(wholeAddress(overlapped), event,
+                                { error: WSA_OPERATION_ABORTED, bytes: 0 }, listener, false);
+                            return;
+                        }
+                        fold(arrived.value);
+                        complete(wholeAddress(overlapped), event, { error: 0, bytes: 0 }, listener,
+                            false);
+                    }));
+                return fail(WSA_IO_PENDING, 0);
             },
         },
 
+        /**
+         * void GetAcceptExSockaddrs(PVOID lpOutputBuffer, DWORD dwReceiveDataLength,
+         *   DWORD dwLocalAddressLength, DWORD dwRemoteAddressLength,
+         *   LPSOCKADDR *LocalSockaddr, LPINT LocalSockaddrLength,
+         *   LPSOCKADDR *RemoteSockaddr, LPINT RemoteSockaddrLength)
+         *
+         * Where AcceptEx put the two addresses in the buffer.
+         */
         GetAcceptExSockaddrs: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([, , , , , , localOut, remoteOut])=>{
-                // The addresses live in the buffer AcceptEx was given, which we
-                // never wrote into, so there is nothing honest to report here.
-                if (localOut !== 0)
+            handler: ([buffer, receiveLength, localLength, , localOut, localLengthOut, remoteOut,
+                remoteLengthOut])=>{
+                const at = wholeAddress(buffer) + (receiveLength >>> 0);
+                for (const [out, lengthOut, address] of [[localOut, localLengthOut, at],
+                    [remoteOut, remoteLengthOut, at + (localLength >>> 0)]])
                 {
-                    writeDword(localOut, 0);
-                }
-                if (remoteOut !== 0)
-                {
-                    writeDword(remoteOut, 0);
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeDword(wholeAddress(out), address);
+                    }
+                    if ((lengthOut >>> 0) !== 0)
+                    {
+                        writeDword(wholeAddress(lengthOut), SOCKADDR_IN_SIZE);
+                    }
                 }
                 return 0;
             },
         },
 
+        /**
+         * BOOL ConnectEx(SOCKET s, const sockaddr *name, int namelen,
+         *   PVOID lpSendBuffer, DWORD dwSendDataLength, LPDWORD lpdwBytesSent,
+         *   LPOVERLAPPED lpOverlapped)
+         *
+         * Overlapped, the call is pending while the connection is made and
+         * completes in its OVERLAPPED, its event and the socket's port, the
+         * bytes to send sent first; a connection made in the call completes at
+         * once, the port told all the same.
+         */
         ConnectEx: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, name, length])=>{
+            handler: ([handle, name, length, data, dataLength, sent, overlapped])=>{
                 const socket = socketOf(handle);
                 if (!socket)
                 {
@@ -2621,12 +3451,74 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const settle = (/** @type {any} */ outcome)=>{
+                const event =
+                    wholeAddress(overlapped) === 0 ? 0 : eventOf(wholeAddress(overlapped));
+                const payload = wholeAddress(data) === 0 || (dataLength >>> 0) === 0 ? null
+                    : host.readMemory(wholeAddress(data), dataLength >>> 0).slice();
+                /** @param {any} delivery @returns {{ error: number, bytes: number }} */
+                const delivered = delivery=>({
+                    error: delivery.error ?? 0, bytes: delivery.value ?? 0,
+                });
+                /**
+                 * The connection made, then the payload sent whole.
+                 *
+                 * @param {any} outcome
+                 * @returns {{ error: number, bytes: number }
+                 *     | Promise<{ error: number, bytes: number }>}
+                 */
+                const connected = outcome=>{
                     notifyConnect(socket, outcome);
-                    return outcome.error ? fail(outcome.error, 0) : 1;
+                    if (outcome.error)
+                    {
+                        return { error: outcome.error, bytes: 0 };
+                    }
+                    return payload ? sendAll(socket, payload, null, delivered)
+                        : { error: 0, bytes: 0 };
+                };
+                /** @param {{ error: number, bytes: number }} result */
+                const answer = result=>{
+                    if (result.error)
+                    {
+                        return fail(result.error, 0);
+                    }
+                    if (wholeAddress(sent) !== 0)
+                    {
+                        writeDword(wholeAddress(sent), result.bytes);
+                    }
+                    if (wholeAddress(overlapped) !== 0)
+                    {
+                        complete(wholeAddress(overlapped), event, result, socket);
+                    }
+                    return 1;
                 };
                 const outcome = registry.connect(socket, address);
-                return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
+                if (!(outcome instanceof Promise))
+                {
+                    const result = connected(outcome);
+                    if (!(result instanceof Promise))
+                    {
+                        return answer(result);
+                    }
+                    if (wholeAddress(overlapped) === 0)
+                    {
+                        return result.then(answer);
+                    }
+                    begin(wholeAddress(overlapped));
+                    inFlight.set(wholeAddress(overlapped), result.then(made=>{
+                        complete(wholeAddress(overlapped), event, made, socket, false);
+                    }));
+                    return fail(WSA_IO_PENDING, 0);
+                }
+                if (wholeAddress(overlapped) === 0)
+                {
+                    return outcome.then(made=>connected(made)).then(answer);
+                }
+                begin(wholeAddress(overlapped));
+                inFlight.set(wholeAddress(overlapped),
+                    outcome.then(made=>connected(made)).then(result=>{
+                        complete(wholeAddress(overlapped), event, result, socket, false);
+                    }));
+                return fail(WSA_IO_PENDING, 0);
             },
         },
 

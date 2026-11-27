@@ -120,8 +120,8 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
         },
     });
 
-    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0]), 0,
-        'the callback stopped the run');
+    assert.equal(await fns.EnumTimeFormatsA.handler([0x1234, 0x0409, 0]), 1,
+        'the callback stopped the run, and the call succeeded');
     assert.deepEqual(seen, ['h:mm:ss tt', 'hh:mm:ss tt', 'H:mm:ss'],
         'the locale formats, first three then stopped');
     // Three arguments, as winnls.h declares it: a fourth popped moved the
@@ -130,7 +130,7 @@ test('EnumTimeFormatsA hands each format to the callback until it stops', async(
     assert.equal(fns.EnumTimeFormatsW.argBytes, 12);
 });
 
-test('EnumSystemLocales hands the callback the one locale, as eight hex digits', async()=>{
+test('EnumSystemLocales hands out every locale, as eight hex digits, sorts apart', async()=>{
     // A launcher picks its language from what this hands out; the old
     // failure, with nothing handed out, sent one looking for ever.
     const host = fakeHost();
@@ -162,10 +162,13 @@ test('EnumSystemLocales hands the callback the one locale, as eight hex digits',
     const LCID_INSTALLED = 1;
     const LCID_ALTERNATE_SORTS = 4;
     assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_INSTALLED]), 1);
-    assert.deepEqual(seen, ['00000409']);
-    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_ALTERNATE_SORTS]), 1,
-        'en-US has no other sort: nothing handed out, and done');
-    assert.deepEqual(seen, ['00000409']);
+    assert.ok(seen.includes('00000409') && seen.includes('00000411'));
+    assert.ok(seen.every(lcid=>/^0000[0-9A-F]{4}$/.test(lcid)), 'specific locales, default sorts');
+    assert.ok(!seen.includes('00000009'), 'no neutral one');
+    seen.length = 0;
+    assert.equal(await fns.EnumSystemLocalesA.handler([0x1234, LCID_ALTERNATE_SORTS]), 1);
+    assert.ok(seen.includes('00010407'), 'German phone-book order');
+    assert.ok(seen.every(lcid=>!lcid.startsWith('0000')), 'the alternate sorts alone');
     assert.equal(fns.EnumSystemLocalesW.argBytes, 8);
 });
 
@@ -253,6 +256,81 @@ test('a source length of -1 carries the terminator into the result', ()=>{
     assert.equal(host.readWide(0x200, 4), 'abc\0');
 });
 
+test('every negative source length means up to and with the terminator', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'foobar');
+    host.plantWide(0x300, 'foobar');
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, -2002, 0x400, 10]), 7);
+    assert.equal(host.readWide(0x400, 7), 'foobar\0');
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, -2002, 0x500, 10, 0, 0]), 7);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x500, 0x507)), 'foobar\0');
+    assert.deepEqual(host.errors, []);
+});
+
+test('CP_UTF7 converts both ways, takes no flags, and fills a short buffer by whole units', ()=>{
+    const CP_UTF7 = 65000;
+    const ERROR_INVALID_FLAGS = 1004;
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, '\u4f60\u597d\u5417');
+    host.plantAnsi(0x200, '+T2BZfQ-');
+
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0, 0x100, -1, 0, 0, 0, 0]), 11);
+    host.bytes.fill(0x23, 0x300, 0x310);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0, 0x100, 1, 0x300, 4, 0, 0]), 0);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x300, 0x305)), '+T2##');
+    assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER]);
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF7, 0, 0x200, -2, 0x400, 8]), 3);
+    assert.equal(host.readWide(0x400, 3), '\u4f60\u597d\0');
+
+    host.errors.length = 0;
+    assert.equal(fns.MultiByteToWideChar.handler([CP_UTF7, 1, 0x200, -1, 0x400, 8]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_UTF7, 0x400, 0x100, -1, 0x300, 16, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_FLAGS, ERROR_INVALID_FLAGS]);
+});
+
+test('other pages convert, a double-byte one has lead bytes, a number past 0xffff is none', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    assert.equal(fns.IsValidCodePage.handler([1251]), 1);
+    assert.equal(fns.IsValidCodePage.handler([932]), 1);
+    assert.equal(fns.IsValidCodePage.handler([65000]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([932, 0x81]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([932, 0xa0]), 0);
+
+    assert.equal(fns.GetCPInfo.handler([932, 0x400]), 1);
+    assert.deepEqual([...host.bytes.subarray(0x400, 0x412)],
+        [2, 0, 0, 0, 0x3f, 0, 0x81, 0x9f, 0xe0, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    host.plantWide(0x100, 'Th\u0440i');
+    assert.equal(fns.WideCharToMultiByte.handler([1251, 0, 0x100, -1, 0x200, 16, 0, 0]), 5);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x205)], [0x54, 0x68, 0xf0, 0x69, 0]);
+    host.bytes.set([0xe0, 0], 0x300);
+    assert.equal(fns.MultiByteToWideChar.handler([1251, 0, 0x300, -1, 0x400, 4]), 2);
+    assert.equal(host.readWide(0x400, 1), '\u0430');
+
+    assert.equal(fns.MultiByteToWideChar.handler([0xdeadbeef, 0x10, 0x300, 2, 0x400, 4]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('lpUsedDefaultChar is about what was written, and lpDefaultChar replaces "?"', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, 'Th\u0440i');
+    host.plantAnsi(0x300, '*');
+
+    const convert = (/** @type {number} */ room, /** @type {number} */ given)=>
+        fns.WideCharToMultiByte.handler([CP_WINDOWS_1252, 0, 0x100, -1, 0x200, room, given, 0x500]);
+    assert.equal(convert(1, 0), 0);
+    assert.equal(host.bytes[0x500], 0, 'the one byte written is "T"');
+    assert.equal(convert(16, 0x300), 5);
+    assert.equal(host.bytes[0x500], 1);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x200, 0x204)), 'Th*i');
+});
+
 test('an exact source length carries no terminator of its own', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
@@ -323,6 +401,32 @@ test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
     assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0, -1, 0, 0]), 0);
     assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0, -1, 0, 0, 0, 0]), 0);
     assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+});
+
+test('a NULL destination with a size, an unknown flag, a default for UTF-7: refused', ()=>{
+    // As Windows answers them, before anything is read or written.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, 'Hello');
+    host.plantWide(0x300, 'Hello');
+    const ERROR_INVALID_FLAGS = 1004;
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, 6, 0, 6]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, 6, 0, 6, 0, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([65000, 0, 0x300, 6, 0x400, 16, 0x100, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([42, 0, 0x300, 6, 0x400, 16, 0, 0x500]), 0);
+    assert.deepEqual(host.errors, Array(4).fill(ERROR_INVALID_PARAMETER));
+
+    host.errors.length = 0;
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0x10, 0x100, -1, 0x400, 16]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x100, 0x300, -1, 0x400, 16, 0, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x800, 0x300, -1, 0x400, 16, 0, 0]), 0);
+    assert.deepEqual(host.errors, Array(3).fill(ERROR_INVALID_FLAGS));
+    // A NULL source outranks an unknown flag.
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x100, 0, -1, 0x400, 16, 0, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0x400, 0x300, -1, 0x400, 16, 0, 0]), 6,
+        'WC_NO_BEST_FIT_CHARS is a flag it knows');
 });
 
 test('a destination too small is filled as far as it goes, and the call still fails', ()=>{
@@ -638,9 +742,8 @@ test('a type the locale lacks, or a flag the call cannot take, is ERROR_INVALID_
     assert.equal(host.readWide(0x100, 7), 'January');
 
     host.errors.length = 0;
-    assert.equal(fns.GetLocaleInfoA.handler([0x419, SDECIMAL, 0x100, 64]), 0);
-    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER],
-        'a locale we do not carry is still that');
+    assert.equal(fns.GetLocaleInfoA.handler([0x1234, SDECIMAL, 0x100, 64]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER], 'an LCID no locale has');
 });
 
 test('the abbreviated names, the digit grouping and the currency are answered', ()=>{
@@ -786,6 +889,18 @@ test("a thread's preferred UI languages are its own: the ones known kept, the re
         [MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, COUNT, 0, SIZE]), 1);
     assert.equal(view.getUint32(COUNT, true), 1, "and is then given the user's");
 
+    // Any specific locale the machine has, not only the interface's own
+    // (locale.c test_GetThreadPreferredUILanguages).
+    plantList('fr-BE\0en-US\0fr-BE\0en-GB\0');
+    view.setUint32(COUNT, 0xdeadbeef, true);
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
+    assert.equal(view.getUint32(COUNT, true), 3, 'each once');
+    assert.equal(threadList(), 'fr-BE\0en-US\0en-GB\0\0');
+    assert.equal(fns.GetThreadUILanguage.handler(), 0x080c, 'the first is the thread\'s');
+    plantList('en-GB\0en-US\0fr-FR\0fr-BE\0de-DE\0de-AT\0it-IT\0');
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
+    assert.equal(view.getUint32(COUNT, true), 5, 'five at most');
+
     plantList('xx-YY\0en-US\0en-US\0');
     view.setUint32(COUNT, 0xdeadbeef, true);
     assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
@@ -913,6 +1028,8 @@ test('FoldStringW folds digits, the compatibility zone and ligatures, and refuse
         return host.readWide(0x300, length - 1);
     };
     assert.equal(fold(0x80, '٣²①９\u{1d7ce}x'), '32190x', 'MAP_FOLDDIGITS');
+    assert.equal(fold(0x80, '\u{10107}\u{1010f}\u{10320}\u{10321}\u{10322}'), '1915\u{10322}',
+        'the digits past the basic plane, and no more of them');
     assert.equal(fold(0x10, 'Ｗineϋǰ ª'), 'Wineϋǰ a',
         'MAP_FOLDCZONE');
     assert.equal(fold(0x2000, 'ÆßﬃǄ'), 'AEssffiDŽ',
@@ -1116,6 +1233,28 @@ test('GetCalendarInfo answers the Gregorian calendar, a number in lpValue when a
         ERROR_INSUFFICIENT_BUFFER]);
 });
 
+test('every calendar answers its two-digit year limit; the Gregorian one its era too', ()=>{
+    // time.c test_GetCalendarInfo's walk of CAL_GREGORIAN..CAL_UMALQURA.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const CAL_ITWODIGITYEARMAX = 0x30;
+    for (const [calendar, year] of /** @type {[number, string][]} */ ([[1, '2049'], [3, '99'],
+        [8, '5810'], [23, '1451']]))
+    {
+        assert.equal(fns.GetCalendarInfoW.handler([0x0409, calendar, CAL_ITWODIGITYEARMAX,
+            0x200, 20, 0]), year.length + 1, `calendar ${calendar}`);
+        assert.equal(host.readWide(0x200, year.length), year);
+    }
+    assert.equal(fns.GetCalendarInfoW.handler([0x0409, 24, CAL_ITWODIGITYEARMAX, 0x200, 20, 0]), 0);
+    for (const [type, text] of /** @type {[number, string][]} */ ([[3, '0'], [4, 'A.D.'],
+        [0x39, 'AD']]))
+    {
+        assert.equal(fns.GetCalendarInfoW.handler([0x0409, 1, type, 0x200, 20, 0]),
+            text.length + 1);
+        assert.equal(host.readWide(0x200, text.length), text);
+    }
+});
+
 test('GetGeoInfo answers for the machine\'s own location, by the types Windows XP has', ()=>{
     // locale.c test_GetGeoInfo's protocol, on the United States (244).
     /** @type {string[]} */
@@ -1161,4 +1300,341 @@ test('GetLocaleInfo takes LOCALE_NEUTRAL (0) as the user\'s locale, as Windows d
     assert.equal(fns.GetLocaleInfoW.handler([0, ILANGUAGE, 0, 0]), 5, '"0409" and its terminator');
     assert.equal(fns.GetLocaleInfoA.handler([0, ILANGUAGE, 0x100, 8]), 5);
     assert.equal(new TextDecoder().decode(host.bytes.subarray(0x100, 0x104)), '0409');
+});
+
+test('an LCID is named by its language and region, and a name finds its LCID', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    const nameAt = (/** @type {number} */ at, /** @type {number} */ count)=>
+        String.fromCharCode(...new Uint16Array(host.bytes.slice(at, at + count * 2).buffer));
+    assert.equal(fns.LCIDToLocaleName.handler([0x0409, 0, 0, 0]), 6, 'the room, asked with none');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0407, 0x100, 16, 0]), 6);
+    assert.equal(nameAt(0x100, 6), 'de-DE\0');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0400, 0x100, 16, 0]), 6, 'the user default');
+    assert.equal(nameAt(0x100, 5), 'en-US');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0009, 0x100, 16, 0x08000000]), 3,
+        'LOCALE_ALLOW_NEUTRAL_NAMES: the language alone');
+    assert.equal(nameAt(0x100, 2), 'en');
+    assert.equal(fns.LCIDToLocaleName.handler([0x007f, 0x100, 16, 0]), 1, 'invariant: empty');
+    assert.equal(fns.LCIDToLocaleName.handler([0x0409, 0x100, 3, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(fns.LCIDToLocaleName.handler([0x0477, 0x100, 16, 0]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    host.plantWide(0x200, 'FR-fr');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0x040c);
+    host.plantWide(0x200, '');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0x007f);
+    host.plantWide(0x200, 'xx-YY');
+    assert.equal(fns.LocaleNameToLCID.handler([0x200, 0]), 0);
+});
+
+test('every locale answers by its LCID: neutral ones as their default, the invariant one too', ()=>{
+    // Wine's locale.c test_GetLocaleInfoW, test_invariant and codepage.c test_threadcp.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const RETURN_NUMBER = 0x20000000;
+    /** @param {number} lcid @param {number} type */
+    const text = (lcid, type)=>{
+        const length = fns.GetLocaleInfoW.handler([lcid, type, 0x200, 64]);
+        return length === 0 ? null : host.readWide(0x200, length - 1);
+    };
+    /** @param {number} lcid @param {number} type */
+    const number = (lcid, type)=>(fns.GetLocaleInfoW.handler([lcid, type | RETURN_NUMBER, 0x200, 2])
+        ? new DataView(host.bytes.buffer).getUint32(0x200, true) : null);
+    const SNAME = 0x5c;
+    const IDEFAULTANSICODEPAGE = 0x1004;
+    assert.equal(text(0x0009, SNAME), 'en-US');
+    assert.equal(text(0x000a, SNAME), 'es-ES');
+    assert.equal(text(0x001a, SNAME), 'hr-HR');
+    assert.equal(number(0x0004, 0x01), 0x0804, 'ILANGUAGE of the neutral Chinese');
+    assert.equal(number(0x0419, IDEFAULTANSICODEPAGE), 1251);
+    assert.equal(number(0x0439, IDEFAULTANSICODEPAGE), 0);
+    assert.equal(text(0x007f, 0x02), 'Invariant Language (Invariant Country)');
+    assert.equal(text(0x007f, 0x1f), 'MM/dd/yyyy');
+    assert.equal(text(0x0419, 0x0e), ',', 'Russian\'s decimal separator');
+    const january = text(0x0419, 0x38);
+    const genitive = text(0x0419, 0x38 | 0x10000000);
+    assert.ok(january !== null && genitive !== null && january !== genitive,
+        'a Russian month as a date names it differs from its name');
+});
+
+test('LocaleNameToLCID, LCIDToLocaleName and ConvertDefaultLocale agree on neutral names', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const LOCALE_ALLOW_NEUTRAL_NAMES = 0x08000000;
+    host.plantWide(0x100, 'en');
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, 0]), 0x0409);
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, LOCALE_ALLOW_NEUTRAL_NAMES]), 0x0009);
+    host.plantWide(0x100, 'de-DE_phoneb');
+    assert.equal(fns.LocaleNameToLCID.handler([0x100, 0]), 0x10407);
+    assert.equal(fns.LCIDToLocaleName.handler([0x10407, 0x200, 64, 0]), 13);
+    assert.equal(host.readWide(0x200, 12), 'de-DE_phoneb');
+    assert.equal(fns.LCIDToLocaleName.handler([0x7c04, 0x200, 64, 0]), 6);
+    assert.equal(host.readWide(0x200, 5), 'zh-HK');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x000a]), 0x0c0a);
+    assert.equal(fns.ConvertDefaultLocale.handler([0x7c1a]), 0x241a);
+    assert.equal(fns.ConvertDefaultLocale.handler([0x10011]), 0x10011, 'a sort keeps it neutral');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x0809]), 0x0809);
+});
+
+test('the thread\'s locale picks CP_THREAD_ACP; SetLocaleInfo takes only the user\'s formats', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions({ ...host, callerThread: ()=>'thread' });
+    const CP_THREAD_ACP = 3;
+    assert.equal(fns.SetThreadLocale.handler([0x0411]), 1);
+    assert.equal(fns.IsDBCSLeadByteEx.handler([CP_THREAD_ACP, 0x81]), 1);
+    assert.equal(fns.SetThreadLocale.handler([0x0439]), 1);
+    assert.equal(fns.GetCPInfoExW.handler([CP_THREAD_ACP, 0, 0x300]), 1);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x300 + 20, true), 1252,
+        'a locale with no ANSI page leaves the machine\'s');
+    assert.equal(fns.SetThreadLocale.handler([0x1234]), 0);
+
+    host.plantWide(0x100, '5');
+    assert.equal(fns.SetLocaleInfoW.handler([0x0400, 0x11, 0x100]), 1, 'IDIGITS');
+    assert.equal(fns.GetLocaleInfoW.handler([0x0400, 0x11, 0x200, 8]), 2);
+    assert.equal(host.readWide(0x200, 1), '5');
+    assert.equal(fns.SetLocaleInfoW.handler([0x0400, 0x5c, 0x100]), 0, 'SNAME is the locale\'s');
+    assert.equal(host.errors.at(-1), 1004);
+});
+
+test('GetNumberFormat groups by a NUMBERFMT\'s number or the locale\'s SGROUPING', ()=>{
+    // Wine's locale.c test_GetNumberFormatA, its grouping table among it.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x80, '.');
+    host.plantAnsi(0x84, ',');
+    host.plantAnsi(0x100, '123456789');
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} grouping */
+    const byNumber = grouping=>{
+        [1, 0, grouping, 0x80, 0x84, 0].forEach((value, at)=>
+            view.setUint32(0x40 + at * 4, value, true));
+        const length = fns.GetNumberFormatA.handler([0x409, 0, 0x100, 0x40, 0x200, 64]);
+        return String.fromCharCode(...host.bytes.subarray(0x200, 0x200 + length - 1));
+    };
+    assert.equal(byNumber(23), '1,234,567,89.0');
+    assert.equal(byNumber(230), '1234,567,89.0');
+    assert.equal(byNumber(203), '1,234,567,,89.0');
+    assert.equal(byNumber(1200), '123456,,78,9.0');
+
+    host.plantAnsi(0x100, '1234567890.54321');
+    for (const [grouping, expected] of [['3;0', '1,234,567,890.54'], ['2;3', '12345,678,90.54'],
+        ['0;1', '123456789,0.54'], ['2;0;0;0', '12345678,,90.54'],
+        ['1;3;2;0', '12,34,56,789,0.54']])
+    {
+        host.plantAnsi(0x300, grouping);
+        assert.equal(fns.SetLocaleInfoA.handler([0x400, 0x10, 0x300]), 1);
+        const length = fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0, 0x200, 64]);
+        const text = String.fromCharCode(...host.bytes.subarray(0x200, 0x200 + length - 1));
+        assert.equal(text, expected, grouping);
+    }
+});
+
+test('a neutral name answers as itself: a culture\'s parents end at the invariant locale', ()=>{
+    // .NET walks a culture's parents by LOCALE_SPARENT until the invariant
+    // locale; "en" answered as en-US named "en" its own parent, and a program's
+    // resources fell back from "en" to "en" for ever.
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    /** @param {string} name @param {number} type */
+    const info = (name, type)=>{
+        host.plantWide(0x200, name);
+        const length = fns.GetLocaleInfoEx.handler([0x200, type, 0x300, 64]);
+        return length === 0 ? null : host.readWide(0x300, length - 1);
+    };
+    const [SNAME, SPARENT, INEUTRAL, ILANGUAGE] = [0x5c, 0x6d, 0x71, 0x1];
+    for (const [name, parent] of [['en-US', 'en'], ['en', ''], ['ru-RU', 'ru'], ['ru', '']])
+    {
+        assert.equal(info(name, SNAME), name, `${name}: LOCALE_SNAME`);
+        assert.equal(info(name, SPARENT), parent, `${name}: LOCALE_SPARENT`);
+        assert.equal(info(name, INEUTRAL), name.includes('-') ? '0' : '1', `${name}: neutral`);
+    }
+    // Its language is its default's, as Windows answers it (locale.c
+    // test_GetLocaleInfoEx: "en" is 0x0409, "zh" 0x0804).
+    assert.equal(info('en', ILANGUAGE), '0409', 'the default specific language');
+    assert.equal(info('zh', ILANGUAGE), '0804');
+    // The walk ends: from en-US through its parents to the invariant locale.
+    const walked = [];
+    for (let name = 'en-US'; name !== ''; name = /** @type {string} */ (info(name, SPARENT)))
+    {
+        walked.push(name);
+        assert.ok(walked.length < 4, walked.join(' > '));
+    }
+    assert.deepEqual(walked, ['en-US', 'en']);
+});
+
+test('the name-based forms answer as the LCID forms for the locale the name names', async()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    // LOCALE_SENGLANGUAGE (0x1001) of French by its name, and by no name the user's.
+    host.plantWide(0x200, 'fr-FR');
+    assert.equal(fns.GetLocaleInfoEx.handler([0x200, 0x1001, 0x300, 32]),
+        fns.GetLocaleInfoW.handler([0x040c, 0x1001, 0x400, 32]));
+    assert.equal(host.readWide(0x300, 6), 'French');
+    assert.equal(fns.GetLocaleInfoEx.handler([0, 0x5c, 0x300, 32]), 6, 'LOCALE_SNAME');
+    assert.equal(host.readWide(0x300, 5), 'en-US');
+    host.plantWide(0x200, 'xx-YY');
+    assert.equal(fns.GetLocaleInfoEx.handler([0x200, 0x1001, 0x300, 32]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    assert.equal(fns.GetUserDefaultLocaleName.handler([0x300, 85]), 6);
+    assert.equal(host.readWide(0x300, 5), 'en-US');
+    assert.equal(fns.GetUserDefaultLocaleName.handler([0x300, 3]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+
+    // A SYSTEMTIME of 2024-03-05.
+    host.bytes.set([0xe8, 0x07, 3, 0, 2, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0x500);
+    host.plantWide(0x200, 'en-US');
+    const wanted = fns.GetDateFormatW.handler([0x0409, 0, 0x500, 0, 0x600, 64]);
+    assert.equal(fns.GetDateFormatEx.handler([0x200, 0, 0x500, 0, 0x700, 64, 0]), wanted);
+    assert.equal(host.readWide(0x700, wanted), host.readWide(0x600, wanted));
+    assert.equal(fns.GetDateFormatEx.argBytes, 28);
+    host.plantWide(0x520, '1234.5');
+    assert.equal(fns.GetNumberFormatEx.handler([0x200, 0, 0x520, 0, 0x700, 64]),
+        fns.GetNumberFormatW.handler([0x0409, 0, 0x520, 0, 0x600, 64]));
+    assert.equal(fns.GetCurrencyFormatEx.handler([0x200, 0, 0x520, 0, 0x700, 64]),
+        fns.GetCurrencyFormatW.handler([0x0409, 0, 0x520, 0, 0x600, 64]));
+    assert.ok(fns.GetTimeFormatEx.handler([0x200, 0, 0x500, 0, 0x700, 64]) > 0);
+});
+
+test('ResolveLocaleName finds the best specific locale, the invariant one for nothing', ()=>{
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    host.plantWide(0x200, 'de');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6);
+    assert.equal(host.readWide(0x300, 5), 'de-DE');
+    host.plantWide(0x200, 'fr-XX');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6, 'the language\'s');
+    assert.equal(host.readWide(0x300, 5), 'fr-FR');
+    host.plantWide(0x200, 'qq');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 1);
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0, 0]), 1, 'the room it needs');
+    host.plantWide(0x200, 'de-DE');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 3]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(host.readWide(0x300, 3), 'de\0', 'as much as fits, terminated');
+    host.plantWide(0x200, '!x-sys-default-locale');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6,
+        'LOCALE_NAME_SYSTEM_DEFAULT is the system\'s');
+    assert.equal(host.readWide(0x300, 5), 'en-US');
+});
+
+test('EnumSystemLocalesEx hands out names with their kind and the lParam', async()=>{
+    const host = fakeHost();
+    /** @type {[string, number, number][]} */
+    const seen = [];
+    let next = 0x800;
+    const fns = /** @type {any} */ (createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer, kind, parameter])=>{
+            void entry;
+            let length = 0;
+            while (host.bytes[buffer + length * 2] !== 0)
+            {
+                length++;
+            }
+            seen.push([host.readWide(buffer, length), kind, parameter]);
+            return seen.length < 1000 ? 1 : 0;
+        },
+    }));
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0, 0x77, 0]), 1);
+    assert.ok(seen.some(([name, kind])=>name === 'en-US' && kind === 0x21));
+    assert.ok(seen.some(([name, kind])=>name === 'en' && kind === 0x11));
+    assert.ok(seen.every(([, , parameter])=>parameter === 0x77));
+    seen.length = 0;
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0x20, 0, 0]), 1);
+    assert.ok(seen.length > 0 && seen.every(([, kind])=>kind === 0x21), 'specific alone');
+    assert.equal(fns.EnumSystemLocalesEx.handler([0, 0, 0, 0]), 0);
+});
+
+test('EnumSystemLocalesEx hands the names out in order, a language before its regions', async()=>{
+    // The C runtime's setlocale("chinese") takes the first locale whose
+    // language is Chinese and Wine's msvcr120 test expects "zh", as
+    // setlocale("american") the first whose abbreviation is ENU, "en".
+    const host = fakeHost();
+    /** @type {string[]} */
+    const seen = [];
+    const fns = /** @type {any} */ (createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        allocate: ()=>0x800,
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            seen.push(host.readWide(buffer, host.stringLength(buffer, 2)));
+            return 1;
+        },
+    }));
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0, 0, 0]), 1);
+    const lower = seen.map(name=>name.toLowerCase());
+    assert.deepEqual(lower, [...lower].sort());
+    assert.deepEqual(seen.filter(name=>/^zh(-|$)/.test(name)).slice(0, 3), ['zh', 'zh-CN', 'zh-Hans']);
+    assert.ok(seen.indexOf('en') < seen.indexOf('en-US'));
+});
+
+test('a locale answers Windows\' three-letter codes, a neutral one its default\'s country', ()=>{
+    // What the C runtime's setlocale matches "american", "chs" and
+    // "Chinese_China" against (Wine's msvcr110 test_setlocale, msvcr120
+    // test____lc_locale_name_func); every locale answered en-US's "ENU".
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    /** @param {string} name @param {number} type */
+    const info = (name, type)=>{
+        host.plantWide(0x200, name);
+        const length = fns.GetLocaleInfoEx.handler([0x200, type, 0x300, 64]);
+        return length === 0 ? null : host.readWide(0x300, length - 1);
+    };
+    const [SABBREVLANGNAME, SABBREVCTRYNAME, SISO639LANGNAME2, SISO3166CTRYNAME2] =
+        [0x03, 0x07, 0x67, 0x68];
+    const [SENGLANGUAGE, SENGCOUNTRY, SSHORTDATE, SNAME] = [0x1001, 0x1002, 0x1f, 0x5c];
+    for (const [name, language, abbreviation, country, alpha3] of [
+        ['ar-SA', 'Arabic', 'ARA', 'Saudi Arabia', 'SAU'],
+        ['zh-CN', 'Chinese (Simplified)', 'CHS', 'China', 'CHN'],
+        ['zh-TW', 'Chinese (Traditional)', 'CHT', 'Taiwan', 'TWN'],
+        ['zh', 'Chinese', 'CHS', 'China', 'CHN'],
+        ['zh-Hans', 'Chinese (Simplified)', 'CHS', 'China', 'CHN'],
+        ['nn-NO', 'Norwegian Nynorsk', 'NON', 'Norway', 'NOR'],
+        ['en-GB', 'English', 'ENG', 'United Kingdom', 'GBR'],
+        ['en', 'English', 'ENU', 'United States', 'USA'],
+        ['es', 'Spanish', 'ESP', 'Spain', 'ESP'], ['es-ES', 'Spanish', 'ESN', 'Spain', 'ESP'],
+        ['sr-Latn-RS', 'Serbian (Latin)', 'SRM', 'Serbia', 'SRB']])
+    {
+        assert.equal(info(name, SENGLANGUAGE), language, `${name}: LOCALE_SENGLANGUAGE`);
+        assert.equal(info(name, SABBREVLANGNAME), abbreviation, `${name}: LOCALE_SABBREVLANGNAME`);
+        assert.equal(info(name, SENGCOUNTRY), country, `${name}: LOCALE_SENGCOUNTRY`);
+        assert.equal(info(name, SABBREVCTRYNAME), alpha3, `${name}: LOCALE_SABBREVCTRYNAME`);
+        assert.equal(info(name, SISO3166CTRYNAME2), alpha3, `${name}: LOCALE_SISO3166CTRYNAME2`);
+        assert.equal(info(name, SNAME), name, `${name}: its own name`);
+    }
+    assert.equal(info('zh-CN', SISO639LANGNAME2), 'zho');
+    assert.equal(info('ro-RO', SISO639LANGNAME2), 'ron');
+    assert.equal(info('en', SSHORTDATE), 'M/d/yyyy', 'the neutral English dates as en-US');
+});
+
+test('IsValidLanguageGroup: the one locale\'s group installed, seventeen known', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const LGRPID_INSTALLED = 1;
+    const LGRPID_SUPPORTED = 2;
+    assert.equal(fns.IsValidLanguageGroup.argBytes, 8);
+    assert.equal(fns.IsValidLanguageGroup.handler([1, LGRPID_INSTALLED]), 1, 'Western Europe');
+    assert.equal(fns.IsValidLanguageGroup.handler([10, LGRPID_INSTALLED]), 0,
+        'Simplified Chinese is known, not installed');
+    assert.equal(fns.IsValidLanguageGroup.handler([10, LGRPID_SUPPORTED]), 1);
+    assert.equal(fns.IsValidLanguageGroup.handler([17, LGRPID_SUPPORTED]), 1, 'Armenian, the last');
+    assert.equal(fns.IsValidLanguageGroup.handler([18, LGRPID_SUPPORTED]), 0);
+    assert.equal(fns.IsValidLanguageGroup.handler([0, LGRPID_SUPPORTED]), 0);
+    assert.equal(fns.IsValidLanguageGroup.handler([1, 3]), 0, 'both flags at once');
+    assert.equal(host.errors.at(-1), 1004, 'ERROR_INVALID_FLAGS');
 });

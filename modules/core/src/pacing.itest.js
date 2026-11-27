@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp, pagePacing } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -95,7 +95,6 @@ for (const cores of [1, 2])
             const app = await createApp({
                 executable: buildProgram(cores > 1 ? COUNT * 20 : COUNT),
                 imagePath: 'C:\\App\\Pacing.exe',
-                engine: 'cork',
                 cpu: { cores },
                 // Turns of a quantum, as counted: one among ready threads is
                 // otherwise as long as a quarter of a millisecond takes.

@@ -7,18 +7,24 @@
 /**
  * comctl32 — image lists (imagelist.js), the mouse-tracking request,
  * property sheets (propsheet.js), flat scroll bars (flatsb.js), and the
- * toolbar, mapped-bitmap and drag-list helpers (helpers.js).
+ * toolbar, mapped-bitmap and drag-list helpers (helpers.js), window
+ * subclassing (subclass.js).
  */
 
+import { DATA_ORDINALS, createDataStructureFunctions } from './dpa.js';
 import { createFlatScrollBarFunctions } from './flatsb.js';
 import { createHelperFunctions } from './helpers.js';
 import { createImageListFunctions } from './imagelist-stream.js';
 import { createPropertySheetFunctions } from './propsheet.js';
+import { createSubclassFunctions } from './subclass.js';
+import { UDM_SETBUDDY, UDM_SETPOS, UDM_SETRANGE, UPDOWN_CLASS } from './updown.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ComctlHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the arrays (DPA, DSA) take its layout.
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
  *           Absent in a build without gdi32 behind it, and then a strip counts
@@ -38,9 +44,13 @@ import { createPropertySheetFunctions } from './propsheet.js';
  *           size is accepted and nothing is tracked.
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  *           user32's exports, which a property sheet is built with.
+ * @property {(name: string) => ((args: number[]) => any) | undefined} [kernel32]
+ *           kernel32's handlers, which the arrays and the allocator take their
+ *           memory through (dpa.js).
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
- * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown)
+ *     => number | Promise<number>} [call]
  * @property {() => unknown} [callerThread]
  * @property {(name: string, handler: (args: number[]) => number | Promise<number>) => number}
  *     [procedure]
@@ -60,8 +70,13 @@ const u32 = (bytes, at)=>(bytes[at] | bytes[at + 1] << 8
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
 
-/** comctl32.dll's own version on Windows XP SP3, the 5.82 library. */
-const VERSION = Object.freeze({ major: 5, minor: 82, build: 2900, qfe: 5512 });
+/**
+ * The two libraries a program can be given (`commonControlsFaces`):
+ * system32's 5.82, as on Windows XP SP3, and Common Controls 6 from the
+ * assembly, the version the engine's store holds.
+ */
+const VERSION_5 = Object.freeze({ major: 5, minor: 82, build: 2900, qfe: 5512 });
+const VERSION_6 = Object.freeze({ major: 6, minor: 0, build: 2600, qfe: 2180 });
 const DLLVER_PLATFORM_NT = 2;
 /** DLLVERSIONINFO and DLLVERSIONINFO2, told apart by their cbSize. */
 const DLLVERSIONINFO_SIZE = 20;
@@ -77,11 +92,62 @@ const DLLVERSIONINFO2_SIZE = 32;
  * @type {Readonly<Record<number, string>>}
  */
 export const COMCTL32_ORDINALS = Object.freeze({
+    ...DATA_ORDINALS,
     8: 'CreateMappedBitmap',
     13: 'MakeDragList',
     14: 'LBItemFromPt',
     17: 'InitCommonControls',
+    // An image list's palette, exported by number alone.
+    390: '#390',
+    // Exported by number alone before Windows XP, and found so still.
+    410: 'SetWindowSubclass',
+    411: 'GetWindowSubclass',
+    412: 'RemoveWindowSubclass',
+    413: 'DefSubclassProc',
 });
+
+/**
+ * The window classes the 5.82 library registers, by the lower-case names
+ * RegisterClassNameW is asked for; version 6 adds SysLink and the user
+ * controls, which it carries its own of.
+ */
+const CLASSES_5 = new Set(['comboboxex32', 'msctls_hotkey32', 'msctls_progress32',
+    'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32', 'nativefontctl',
+    'rebarwindow32', 'sysanimate32', 'sysdatetimepick32', 'sysheader32', 'sysipaddress32',
+    'syslistview32', 'sysmonthcal32', 'syspager', 'systabcontrol32', 'systreeview32',
+    'toolbarwindow32', 'tooltips_class32']);
+const CLASSES_6 = new Set([...CLASSES_5, 'button', 'combobox', 'combolbox', 'edit', 'listbox',
+    'static', 'syslink']);
+
+/**
+ * The exports only Common Controls 6 has: the 5.82 library a program gets
+ * without the assembly has none of them (Wine's misc test lists them).
+ */
+export const VERSION_6_EXPORTS = Object.freeze(['DllInstall', 'DrawShadowText', 'DPA_GetSize',
+    'DSA_Clone', 'DSA_GetSize', 'GetWindowSubclass', 'HIMAGELIST_QueryInterface',
+    'ImageList_CoCreateInstance', 'ImageList_WriteEx', 'LoadIconMetric',
+    'LoadIconWithScaleDown', 'TaskDialog', 'TaskDialogIndirect']);
+
+/**
+ * One implementation, the two libraries it is to a program: `system`, the
+ * 5.82 library in system32, and `assembly`, Common Controls 6, which the
+ * loader binds where an activation context holds that assembly. They differ
+ * in what is version 6's alone: its exports, its classes and its version.
+ *
+ * @param {ComctlHost} host
+ * @returns {{ system: Record<string, any>, assembly: Record<string, any> }}
+ */
+export function commonControlsFaces(host){
+    const table = createComctlFunctions(host);
+    const system = Object.fromEntries(Object.entries(table)
+        .filter(([name])=>!VERSION_6_EXPORTS.includes(name)));
+    return {
+        system: { ...system, DllGetVersion: dllGetVersion(host, VERSION_5),
+            RegisterClassNameW: registerClassName(host, CLASSES_5) },
+        assembly: { ...table, DllGetVersion: dllGetVersion(host, VERSION_6),
+            RegisterClassNameW: registerClassName(host, CLASSES_6) },
+    };
+}
 
 /**
  * @param {ComctlHost} host
@@ -90,6 +156,7 @@ export function createComctlFunctions(host){
     const sheets = createPropertySheetFunctions(host);
     const images = createImageListFunctions(host);
     return {
+        ...createDataStructureFunctions(host),
         /**
          * void InitCommonControls(void)
          *
@@ -113,7 +180,7 @@ export function createComctlFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([controls])=>{
-                const size = u32(host.readMemory(controls >>> 0, 4), 0);
+                const size = u32(host.readMemory(wholeAddress(controls), 4), 0);
                 return size === 8 ? 1 : 0;
             },
         },
@@ -134,52 +201,51 @@ export function createComctlFunctions(host){
             handler: ([track])=>{
                 if (host.trackMouseEvent)
                 {
-                    return host.trackMouseEvent(track >>> 0);
+                    return host.trackMouseEvent(wholeAddress(track));
                 }
-                const size = u32(host.readMemory(track >>> 0, 4), 0);
+                const size = u32(host.readMemory(wholeAddress(track), 4), 0);
                 return size === 16 ? 1 : 0;
             },
         },
 
         /**
-         * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
+         * HWND CreateUpDownControl(DWORD dwStyle, int x, int y, int cx, int cy,
+         *     HWND hParent, int nID, HINSTANCE hInst, HWND hBuddy, int nUpper,
+         *     int nLower, int nPos)
          *
-         * The common controls a program gets without asking for version 6
-         * in a manifest: Windows XP Service Pack 3's 5.82.2900.5512, on the
-         * NT platform. A program reads the major version to decide which
-         * control messages and structure sizes it may use, so this has to be
-         * the library it is actually talking to. The caller says which
-         * structure it passed by its first field -- DLLVERSIONINFO, 20 bytes,
-         * or DLLVERSIONINFO2, 32, which adds flags and the version as one
-         * 64-bit number -- and any other size is refused.
+         * An up-down control made and set up in one call: its buddy, its range
+         * and its position, each as its message sets it.
          */
-        DllGetVersion: {
-            argBytes: 4,
+        CreateUpDownControl: {
+            argBytes: 48,
             /** @param {number[]} args */
-            handler: ([info])=>{
-                if ((info >>> 0) === 0)
+            handler: ([style, x, y, cx, cy, parent, id, instance, buddy, upper, lower, pos])=>{
+                const create = host.user32?.('CreateWindowExA');
+                const send = host.user32?.('SendMessageA');
+                const name = host.allocate?.(UPDOWN_CLASS.length + 1) ?? 0;
+                if (!create || !send || name === 0)
                 {
-                    return E_INVALIDARG;
+                    return 0;
                 }
-                const size = u32(host.readMemory(info >>> 0, 4), 0);
-                if (size !== DLLVERSIONINFO_SIZE && size !== DLLVERSIONINFO2_SIZE)
-                {
-                    return E_INVALIDARG;
-                }
-                const fields = new DataView(new ArrayBuffer(size - 4));
-                fields.setUint32(0, VERSION.major, true);
-                fields.setUint32(4, VERSION.minor, true);
-                fields.setUint32(8, VERSION.build, true);
-                fields.setUint32(12, DLLVER_PLATFORM_NT, true);
-                if (size === DLLVERSIONINFO2_SIZE)
-                {
-                    // dwFlags stays zero; ullVersion is major.minor.build.qfe,
-                    // a word each, the major in the top word.
-                    fields.setUint32(20, (VERSION.build << 16 | VERSION.qfe) >>> 0, true);
-                    fields.setUint32(24, (VERSION.major << 16 | VERSION.minor) >>> 0, true);
-                }
-                host.writeMemory((info >>> 0) + 4, new Uint8Array(fields.buffer));
-                return S_OK;
+                host.writeMemory(name, new Uint8Array([...UPDOWN_CLASS].map(c=>c.charCodeAt(0))
+                    .concat(0)));
+                /** @param {unknown} value @param {(answer: any) => any} then */
+                const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then
+                    === 'function' ? /** @type {Promise<unknown>} */ (value).then(then)
+                    : then(value));
+                return andThen(create.handler([0, name, 0, style, x, y, cx, cy, parent, id,
+                    instance, 0]), hwnd=>{
+                    host.release?.(name);
+                    if ((hwnd >>> 0) === 0)
+                    {
+                        return 0;
+                    }
+                    return andThen(send.handler([hwnd, UDM_SETBUDDY, buddy, 0]),
+                        ()=>andThen(send.handler([hwnd, UDM_SETRANGE, 0,
+                            ((lower & 0xffff) << 16 | upper & 0xffff) >>> 0]),
+                        ()=>andThen(send.handler([hwnd, UDM_SETPOS, 0, pos & 0xffff]),
+                            ()=>hwnd >>> 0)));
+                });
             },
         },
 
@@ -187,11 +253,109 @@ export function createComctlFunctions(host){
         ...sheets,
         ...createFlatScrollBarFunctions(host),
         ...createHelperFunctions(host),
+        ...createSubclassFunctions(host),
 
         // The undecorated names the library exports for the ANSI forms, which
         // a program that looks a call up by hand may ask for.
         PropertySheet: sheets.PropertySheetA,
         CreatePropertySheetPage: sheets.CreatePropertySheetPageA,
         ImageList_LoadImage: images.ImageList_LoadImageA,
+    };
+}
+
+/**
+ * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
+ *
+ * The version of the library the program is talking to, on the NT
+ * platform: 5.82.2900.5512 for system32's, as on Windows XP SP3, and
+ * 6.0.2600.2180 for Common Controls 6. A program reads the major version
+ * to decide which control messages and structure sizes it may use. The
+ * caller says which structure it passed by its first field -
+ * DLLVERSIONINFO, 20 bytes, or DLLVERSIONINFO2, 32, which adds flags and
+ * the version as one 64-bit number - and any other size is refused.
+ *
+ * @param {ComctlHost} host
+ * @param {{ major: number, minor: number, build: number, qfe: number }} version
+ */
+function dllGetVersion(host, version){
+    return {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([info])=>{
+            if ((info >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const size = u32(host.readMemory(wholeAddress(info), 4), 0);
+            if (size !== DLLVERSIONINFO_SIZE && size !== DLLVERSIONINFO2_SIZE)
+            {
+                return E_INVALIDARG;
+            }
+            const fields = new DataView(new ArrayBuffer(size - 4));
+            fields.setUint32(0, version.major, true);
+            fields.setUint32(4, version.minor, true);
+            fields.setUint32(8, version.build, true);
+            fields.setUint32(12, DLLVER_PLATFORM_NT, true);
+            if (size === DLLVERSIONINFO2_SIZE)
+            {
+                // dwFlags stays zero; ullVersion is major.minor.build.qfe,
+                // a word each, the major in the top word.
+                fields.setUint32(20, (version.build << 16 | version.qfe) >>> 0, true);
+                fields.setUint32(24, (version.major << 16 | version.minor) >>> 0, true);
+            }
+            host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
+            return S_OK;
+        },
+    };
+}
+
+/**
+ * BOOL RegisterClassNameW(LPCWSTR className)
+ *
+ * What user32 asks comctl32 for from Vista on when a window is made of
+ * a class nobody registered: the library registers that one of its
+ * own classes. Here the common controls are classes of the window
+ * manager from the start, so the call answers whether the name is one
+ * of comctl32's and is there; a name of another library's, or one
+ * this machine has no control for, is refused.
+ *
+ * @param {ComctlHost} host
+ * @param {Set<string>} classes  the library's own, lower case
+ */
+function registerClassName(host, classes){
+    return {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([name])=>{
+            if (name >>> 0 === 0)
+            {
+                return 0;
+            }
+            const units = [];
+            for (let at = wholeAddress(name); units.length < 256; at += 2)
+            {
+                const unit = host.readMemory(at, 2);
+                const code = unit[0] | unit[1] << 8;
+                if (code === 0)
+                {
+                    break;
+                }
+                units.push(code);
+            }
+            const text = String.fromCharCode(...units);
+            if (!classes.has(text.toLowerCase()) || !host.allocate || !host.user32)
+            {
+                return 0;
+            }
+            const info = host.allocate(40);
+            try
+            {
+                return host.user32('GetClassInfoW')?.handler([0, name >>> 0, info]) ? 1 : 0;
+            }
+            finally
+            {
+                host.release?.(info);
+            }
+        },
     };
 }

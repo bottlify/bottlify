@@ -37,6 +37,16 @@ function setup(){
         free: ()=>{},
         hive: createHive(),
         callerThread: ()=>null,
+        // As the filesystem resolves: an empty path is no path at all.
+        fullPath: (/** @type {string} */ path)=>{
+            if (path === '')
+            {
+                throw Object.assign(new Error('An empty path names nothing'),
+                    { code: 'INVALID_PATH' });
+            }
+            return path;
+        },
+        files: { stat: ()=>null },
     })));
     /** @param {number} at @param {string} text */
     const put = (at, text)=>{
@@ -85,4 +95,17 @@ test('an installed product is reached through the package the machine kept for i
     assert.equal(await fns.MsiConfigureProductA.handler([unknown, 0, 9]), 87,
         'a state that is not one of the four');
     assert.equal(await fns.MsiOpenProductA.handler([unknown, 0]), 87);
+});
+
+test('an empty package path is a package that is not there, not a failure of the layer', async()=>{
+    // Wine's suminfo and msi tests hand "" where a path goes.
+    const { fns, put } = setup();
+    const EMPTY = put(0x1000, '');
+    const ERROR_INSTALL_PACKAGE_OPEN_FAILED = 1619;
+    const ERROR_OPEN_FAILED = 110;
+    assert.equal(await fns.MsiGetSummaryInformationA.handler([0, EMPTY, 0, 0x40]),
+        1620, 'ERROR_INSTALL_PACKAGE_INVALID');
+    assert.equal(await fns.MsiOpenPackageA.handler([EMPTY, 0x40]),
+        ERROR_INSTALL_PACKAGE_OPEN_FAILED);
+    assert.equal(await fns.MsiOpenDatabaseA.handler([EMPTY, 0, 0x40]), ERROR_OPEN_FAILED);
 });

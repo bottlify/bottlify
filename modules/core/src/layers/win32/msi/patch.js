@@ -28,8 +28,8 @@ import {
 } from './steps.js';
 
 export const ERROR_PATCH_PACKAGE_OPEN_FAILED = 1635;
-export const ERROR_PATCH_PACKAGE_INVALID = 1636;
-export const ERROR_PATCH_TARGET_NOT_FOUND = 1642;
+const ERROR_PATCH_PACKAGE_INVALID = 1636;
+const ERROR_PATCH_TARGET_NOT_FOUND = 1642;
 export const ERROR_PATCH_NO_SEQUENCE = 1648;
 
 /** A summary information stream's name in a storage. */
@@ -150,7 +150,7 @@ const ALL_CONDITIONS = MSITRANSFORM_ERROR.ADDEXISTINGROW | MSITRANSFORM_ERROR.DE
  *
  * @param {Database} db @param {Database} extra
  */
-export function overlayStreams(db, extra){
+function overlayStreams(db, extra){
     const own = {
         hasStream: db.hasStream, streamSize: db.streamSize, readStream: db.readStream,
         readStreamRange: db.readStreamRange,

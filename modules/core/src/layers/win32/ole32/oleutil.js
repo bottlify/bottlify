@@ -16,7 +16,10 @@
  * the same calls in the same order -- the order Windows makes them in.
  */
 
-import { GUID_SIZE, parseGuid } from './guid.js';
+import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
+import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 
@@ -34,9 +37,6 @@ export const SLOT = Object.freeze({
 export const FORMATETC_SIZE = 20;
 /** STGMEDIUM: tymed, the handle or pointer, pUnkForRelease. */
 export const STGMEDIUM_SIZE = 12;
-/** STATSTG, and where its CLSID lies. */
-export const STATSTG_SIZE = 72;
-export const STATSTG_CLSID = 48;
 
 export const TYMED = Object.freeze({
     NULL: 0, HGLOBAL: 1, FILE: 2, ISTREAM: 4, ISTORAGE: 8, GDI: 16, MFPICT: 32, ENHMF: 64,
@@ -76,8 +76,11 @@ const READ_MAX = 1 << 20;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown,
  *              block: (address: number) => { size: number } | null }} heap
- *           Task memory and, being the same heap, HGLOBALs.
- * @property {(object: number, slot: number, args: number[], thread?: unknown)
+ *           Task memory and, being the same heap, a fixed HGLOBAL.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *           kernel32's global family, through which a moveable HGLOBAL's
+ *           bytes are found.
+ * @property {(object: number, slot: number, args: (number | bigint)[], thread?: unknown)
  *     => Promise<number>} callMethod
  * @property {(object: number, iid: string, thread: unknown) => Promise<number>} queryPointer
  *           QueryInterface: the pointer, which the caller releases, or 0.
@@ -93,23 +96,28 @@ const READ_MAX = 1 << 20;
  *           Whether the thread is inside OleInitialize, not only CoInitialize.
  * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
  *              getValue: (key: any, name: string) => { data: Uint8Array } | null,
- *              subkeys?: (key: any) => string[] } | undefined} [hive]
+ *              subkeys?: (key: any) => string[],
+ *              create?: (key: any, path: string) => { key: any },
+ *              setValue?: (key: any, name: string, type: number, data: Uint8Array) => void }
+ *     | undefined} [hive]
  * @property {((library: string, name: string, args: number[], thread?: unknown)
  *     => number | Promise<number> | null) | undefined} [system]
  *           Another library's export, as ole32's import of it calls it.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  */
 
 /** @param {OleEnv} env */
 export function createOleUtil(env){
+    const STATSTG = statstgLayout(env.pointerSize);
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = env.readMemory(address >>> 0, 4);
+        const bytes = env.readMemory(wholeAddress(address), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} address */
     const readU16 = address=>{
-        const bytes = env.readMemory(address >>> 0, 2);
+        const bytes = env.readMemory(wholeAddress(address), 2);
         return bytes[0] | (bytes[1] << 8);
     };
     /** @param {number} address @param {number[]} words */
@@ -117,24 +125,13 @@ export function createOleUtil(env){
         const bytes = new Uint8Array(words.length * 4);
         const view = new DataView(bytes.buffer);
         words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>writeWords(address, [value]);
     /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>env.writeMemory(address >>> 0,
+    const writeU16 = (address, value)=>env.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
-
-    /** @param {string} text  With its terminator. */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        return bytes;
-    };
 
     /**
      * A terminated UTF-16 string, read no further than `max` units.
@@ -143,7 +140,7 @@ export function createOleUtil(env){
      */
     const readWide = (address, max = 1024)=>{
         let text = '';
-        for (let at = address >>> 0; text.length < max; at += 2)
+        for (let at = wholeAddress(address); text.length < max; at += 2)
         {
             const unit = readU16(at);
             if (unit === 0)
@@ -170,7 +167,7 @@ export function createOleUtil(env){
         return block;
     };
     /** @param {string} text */
-    const lendWide = text=>lend(wideBytes(text));
+    const lendWide = text=>lend(utf16z(text));
     /** @param {string} guid */
     const lendGuid = guid=>lend(/** @type {Uint8Array} */ (parseGuid(guid)));
 
@@ -274,9 +271,9 @@ export function createOleUtil(env){
      * @param {number} storage @param {unknown} thread
      * @returns {Promise<{ hr: number, clsid: Uint8Array }>}
      */
-    const storageClass = async(storage, thread)=>(await withScratch(STATSTG_SIZE, async block=>{
+    const storageClass = async(storage, thread)=>(await withScratch(STATSTG.SIZE_OF, async block=>{
         const hr = (await env.callMethod(storage, SLOT.STORAGE_STAT, [block, 1], thread)) | 0;
-        return { hr, clsid: env.readMemory(block + STATSTG_CLSID, GUID_SIZE).slice() };
+        return { hr, clsid: env.readMemory(block + STATSTG.CLSID, GUID_SIZE).slice() };
     })) ?? { hr: 0x8007000e | 0, clsid: new Uint8Array(GUID_SIZE) };
 
     /**
@@ -436,21 +433,40 @@ export function createOleUtil(env){
     };
 
     /**
+     * Where an HGLOBAL's bytes are and how many: a moveable handle's block
+     * through kernel32's global family, a fixed one itself; null for a handle
+     * that is neither.
+     *
+     * @param {number} handle
+     * @returns {{ at: number, size: number } | null}
+     */
+    const globalBytes = handle=>{
+        const memory = env.globalMemory?.();
+        const at = memory?.isHandle(handle >>> 0) ? memory.pointer(handle >>> 0) : handle >>> 0;
+        if (at === 0)
+        {
+            return memory?.has(handle >>> 0) ? { at: 0, size: 0 } : null;
+        }
+        const block = env.heap.block(at);
+        return block ? { at, size: block.size } : null;
+    };
+
+    /**
      * A copy of an HGLOBAL's bytes in a block of its own; 0 for a handle
      * that is no block, or no memory.
      *
      * @param {number} handle
      */
     const copyGlobal = handle=>{
-        const block = env.heap.block(handle >>> 0);
-        if (!block)
+        const bytes = globalBytes(handle);
+        if (!bytes)
         {
             return 0;
         }
-        const copy = env.heap.allocate(Math.max(block.size, 1)) >>> 0;
-        if (copy !== 0)
+        const copy = env.heap.allocate(Math.max(bytes.size, 1)) >>> 0;
+        if (copy !== 0 && bytes.size !== 0)
         {
-            env.writeMemory(copy, env.readMemory(handle >>> 0, block.size).slice());
+            env.writeMemory(copy, env.readMemory(bytes.at, bytes.size).slice());
         }
         return copy;
     };
@@ -484,13 +500,13 @@ export function createOleUtil(env){
             }
             case TYMED.MFPICT:
             {
-                const picture = env.heap.block(handle >>> 0);
+                const picture = globalBytes(handle);
                 if (!picture || picture.size < METAFILEPICT_SIZE)
                 {
                     return 0;
                 }
                 const metafile = await system('GDI32.dll', 'CopyMetaFileW',
-                    [readU32(handle + METAFILEPICT_HANDLE), 0], thread);
+                    [readU32(picture.at + METAFILEPICT_HANDLE), 0], thread);
                 if (!metafile)
                 {
                     if (metafile === null)
@@ -512,8 +528,8 @@ export function createOleUtil(env){
     };
 
     return {
-        readU32, readU16, writeU32, writeU16, writeWords, wideBytes, readWide, lend, lendWide,
-        lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release,
+        readU32, readU16, writeU32, writeU16, writeWords, utf16z, readWide, lend, lendWide,
+        lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release, globalBytes,
         storageClass, openStream, readStream, writeStream, readFormat, writeFormat, formatsOf,
         tymedOf, copyGlobal, duplicate,
     };

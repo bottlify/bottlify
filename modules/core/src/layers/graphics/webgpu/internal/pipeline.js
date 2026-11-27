@@ -30,6 +30,8 @@
  * picture.
  */
 
+import { formatTraits } from './textures.js';
+
 /**
  * Where the fog factor of a draw comes from, which is decided by which of the
  * two fog modes is set and not by the curve either of them names.
@@ -147,10 +149,11 @@ function lookUp(table, value, what){
  * @property {number} [colorArg0]  MULTIPLYADD's and LERP's third operand; CURRENT if absent
  * @property {number} [alphaArg0]
  * @property {number} texCoordIndex
- * @property {number} [projected]
- *     For a stage generating its coordinate: which component the transformed
- *     coordinate is divided by at the sample -- 3 or 4 under
- *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
+ * @property {number} [transform]
+ *     What D3DTSS_TEXTURETRANSFORMFLAGS make of the stage's coordinate
+ *     (`coordinateTransformOf` in fixedfunction.js): the count the fixed vertex stage
+ *     runs the matrix over, and D3DTTFF_PROJECTED, which the pixel divides by
+ *     w for. Zero or absent for neither.
  * @property {number[]} [bump]
  *     A BUMPENVMAP stage's matrix and luminance, as numbers: BUMPENVMAT00, 01,
  *     10, 11, BUMPENVLSCALE, BUMPENVLOFFSET. Carried in the draw's uniform block
@@ -158,9 +161,11 @@ function lookUp(table, value, what){
  * @property {number} [colorKey]
  *     Direct3D 7 colour keying in force on this stage's texture: the key as
  *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
- * @property {'cube' | '3d'} [dimension]
+ * @property {'cube' | '3d' | 'shadow'} [dimension]
  *     The texture the stage samples, when it is not two-dimensional: its
- *     coordinate is then three components and its binding another kind.
+ *     coordinate is then three components and its binding another kind; or a
+ *     depth texture, a shadow map, which the stage compares with the
+ *     coordinate's z.
  * @property {number} [ones]
  *     The channels the stage's texture samples as one that the GPU's texture
  *     lacks (`sampledOnes` in `d3d9/constants.js`), when there are any.
@@ -227,8 +232,17 @@ function lookUp(table, value, what){
  * @property {number} [destBlendAlpha]
  * @property {number} [blendOpAlpha]
  * @property {number} colorWrite         D3DCOLORWRITEENABLE bits.
+ * @property {({ format: string, colorWrite: number } | null)[]} [extraTargets]
+ *     The render targets bound at indices 1 to 3, a pixel shader's oC1 to oC3,
+ *     each with D3DRS_COLORWRITEENABLE1 to 3 -- none where the stage does not
+ *     write it, which leaves it as it was -- and null where none is bound.
+ *     Blended as the first is, where the format blends.
  * @property {boolean} alphaTest
  * @property {number} alphaFunc
+ * @property {boolean} [srgbWrite]       D3DRS_SRGBWRITEENABLE into an eight-bit target:
+ *     the fragment stage encodes its colour to sRGB.
+ * @property {boolean} [luminance]       A luminance target: the fragment stage writes its
+ *     red into all three colours.
  * @property {number} fogMode            D3DFOG, the curve; NONE is 0.
  * @property {number} [fogSource]
  *     FOG_SOURCE, where the factor comes from; absent is vertex fog for a
@@ -310,7 +324,7 @@ export function pipelineKey(state){
         .map(stage=>[
             stage.colorOp, stage.colorArg1, stage.colorArg2,
             stage.alphaOp, stage.alphaArg1, stage.alphaArg2,
-            stage.texCoordIndex, stage.projected ?? 0,
+            stage.texCoordIndex, stage.transform ?? 0,
             ...(stage.colorArg0 === undefined && stage.alphaArg0 === undefined ? []
                 : [`a${stage.colorArg0 ?? 1}/${stage.alphaArg0 ?? 1}`]),
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
@@ -348,6 +362,8 @@ export function pipelineKey(state){
         state.srcBlendAlpha === undefined ? '-'
             : `${state.srcBlendAlpha}/${state.destBlendAlpha}/${state.blendOpAlpha}`,
         state.colorWrite,
+        ...(state.extraTargets?.length ? [`x${state.extraTargets.map(target=>(target
+            ? `${target.format}:${target.colorWrite}` : '-')).join('+')}`] : []),
         state.alphaTest ? 1 : 0,
         state.alphaFunc,
         `${fogSourceOf(state)}/${state.fogMode}`,
@@ -364,6 +380,8 @@ export function pipelineKey(state){
         // each named so that no two optional parts can be read as each other.
         ...(state.vertexLayoutKey === undefined ? [] : [state.vertexLayoutKey]),
         ...(state.normalizeNormals ? ['normalize'] : []),
+        ...(state.srgbWrite ? ['srgb'] : []),
+        ...(state.luminance ? ['lum'] : []),
         ...(state.flatShading ? ['flat'] : []),
         ...(state.rangeFog ? ['range'] : []),
         ...(state.points
@@ -492,21 +510,28 @@ export function pipelineDescriptor(state, layout){
             ...(state.stencil ? stencilDescriptor(state.stencil) : {}),
         };
 
+    /**
+     * One blend component. D3DBLENDOP_MIN and MAX take the source and the
+     * destination as they are, whatever the factors say, and WebGPU refuses a
+     * min or max whose factors are not both one: the program's factors would
+     * make the pipeline invalid and its draws vanish.
+     *
+     * @param {number} src @param {number} dst @param {number} op
+     */
+    const component = (src, dst, op)=>{
+        const operation = lookUp(BLEND_OP, op, 'blend operation');
+        const minMax = operation === 'min' || operation === 'max';
+        return {
+            srcFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, src, 'source blend'),
+            dstFactor: minMax ? 'one' : lookUp(BLEND_FACTOR, dst, 'destination blend'),
+            operation,
+        };
+    };
     const blend = state.blend
         ? {
-            color: {
-                srcFactor: lookUp(BLEND_FACTOR, state.srcBlend, 'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.destBlend, 'destination blend'),
-                operation: lookUp(BLEND_OP, state.blendOp, 'blend operation'),
-            },
-            alpha: {
-                srcFactor: lookUp(BLEND_FACTOR, state.srcBlendAlpha ?? state.srcBlend,
-                    'source blend'),
-                dstFactor: lookUp(BLEND_FACTOR, state.destBlendAlpha ?? state.destBlend,
-                    'destination blend'),
-                operation: lookUp(BLEND_OP, state.blendOpAlpha ?? state.blendOp,
-                    'blend operation'),
-            },
+            color: component(state.srcBlend, state.destBlend, state.blendOp),
+            alpha: component(state.srcBlendAlpha ?? state.srcBlend,
+                state.destBlendAlpha ?? state.destBlend, state.blendOpAlpha ?? state.blendOp),
         }
         : undefined;
 
@@ -534,6 +559,17 @@ export function pipelineDescriptor(state, layout){
             blend,
             writeMask: colorWriteMask(state.colorWrite),
         },
+        // Every colour target, by location: the first, then the extra ones.
+        targets: [
+            { format: state.targetFormat, blend, writeMask: colorWriteMask(state.colorWrite) },
+            ...(state.extraTargets ?? []).map(extra=>(extra
+                ? {
+                    format: extra.format,
+                    ...(blend && formatTraits(extra.format).blendable ? { blend } : {}),
+                    writeMask: colorWriteMask(extra.colorWrite),
+                }
+                : null)),
+        ],
     };
 }
 

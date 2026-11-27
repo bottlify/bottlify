@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * msvcirt -- the old iostream library, `<iostream.h>` rather than `<iostream>`,
  * which Windows keeps in its system directory for programs built with Visual
@@ -159,7 +161,7 @@ export function createIostreamFunctions(host){
 
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} at */
@@ -168,12 +170,12 @@ export function createIostreamFunctions(host){
     const put = (at, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at */
-    const byte = at=>host.readMemory(at >>> 0, 1)[0];
+    const byte = at=>host.readMemory(wholeAddress(at), 1)[0];
     /** @param {number} at @param {number} length */
-    const zero = (at, length)=>host.writeMemory(at >>> 0, new Uint8Array(length));
+    const zero = (at, length)=>host.writeMemory(wholeAddress(at), new Uint8Array(length));
 
     /** The ios of a stream whose vbtable is at `object`. @param {number} object */
     const iosOf = object=>(object + i32(u32(object) + 4)) >>> 0;
@@ -1657,7 +1659,8 @@ export function createIostreamFunctions(host){
         '??6ostream@@QAEAAV0@PBD@Z': thiscall(8, function* (self, text){
             if (yield* opfx(self))
             {
-                yield* writePadded(self, '', text ? host.readCString(text >>> 0, 0x7fffffff) : '');
+                yield* writePadded(self, '', text ? host.readCString(wholeAddress(text),
+                    0x7fffffff) : '');
                 yield* osfx(self);
             }
             return self;

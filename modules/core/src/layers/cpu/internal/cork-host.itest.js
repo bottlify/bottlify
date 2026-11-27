@@ -5,10 +5,9 @@
  */
 
 /**
- * `engine: 'cork'` runs with nothing of the emulator loaded: the cork host's
- * own memory and the engine loaded by URL. Step 5.2 wires the interpreter
- * tier in, so an address the translator has no entry for runs on cork's own
- * decoder and evaluator; an instruction the evaluator has no model for is an
+ * The cork host runs over its own memory and the engine loaded by URL. Step
+ * 5.2 wires the interpreter tier in, so an address the translator has no entry
+ * for runs on cork's own decoder and evaluator; an instruction the evaluator has no model for is an
  * invalid-opcode fault, and a fault becomes the host's fault record.
  */
 
@@ -16,10 +15,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import * as engine from '../../../../../cork/src/index.js';
+import { allowMemory64 } from '../../../../../cork/src/testing/memory64.js';
 
 const ENTRY_VECTOR = 0x7000;
 
-/** A host over the engine module, with nothing of the emulator loaded. */
+/**
+ * A host over the engine module, its slices ended by their instruction count
+ * alone: an interpreted slice otherwise ends once it has taken its time
+ * (`sliceMs`), and with eight busy loops beside the suite one ended at the
+ * trap, short of the hlt after it.
+ */
 function host(){
     return createCorkHost({
         engine,
@@ -27,7 +32,7 @@ function host(){
         trapPort: 0x1234,
         entryVector: ENTRY_VECTOR,
         initialStack: 0x300000,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
 }
 
@@ -190,4 +195,156 @@ test('eight bytes copied through the x87 arrive whole however the slices cut the
         assert.deepEqual([out.getBigUint64(0, true), out.getBigUint64(8, true)], words,
             `slices of ${slice}`);
     }
+});
+
+test('long mode on the shared runtime steps a self-patching routine an instruction at a time',
+    ()=>{
+        const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+            entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+            cork: { sliceMs: Infinity } });
+        // At 0x11000: for ebx in 0..2999, r12d += scale(edi = ebx, esi = ebx & 3); hlt.
+        // At 0x12000, scale: cmp [add's imm], esi; je; mov [add's imm], esi;
+        // imul eax, edi, 0x12345678; add eax, imm; ret -- a store into its own page
+        // three calls in four, so its region is dropped and each patch is a forced step.
+        load(h, 0x11000, hex('31db4531e489de83e60389dfe8ef0f00004101c4ffc381fbb80b000075e7f4'));
+        h.writePhysical(0x12000,
+            Uint8Array.from(hex('39350f000000740689350700000069c7785634120545230100c3')));
+        h.runSlice(100_000);
+        while (!h.halted())
+        {
+            h.cork().translatePending().catch(()=>{});
+            h.runSlice(100_000);
+        }
+        let sum = 0;
+        for (let i = 0; i < 3000; i++)
+        {
+            sum = (sum + Math.imul(i, 0x12345678) + (i & 3)) >>> 0;
+        }
+        assert.equal(Number(h.readReg64('r12') & 0xffffffffn), sum);
+        // A forced step that ran on to the next entry interpreted the caller's loop
+        // whole after each patch, tens of instructions a call.
+        const script = h.corkDiagnostics().interpretedByScript;
+        assert.ok(script < 3000, `${script} instructions interpreted by the script`);
+    });
+
+test('long mode\'s writes to the trap port run translated on the shared runtime', async()=>{
+    const h = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        cork: { sliceMs: Infinity } });
+    // For ebx in 0..1999: mov edx, port; mov eax, ebx; out dx, eax; add r12, rax; hlt.
+    load(h, 0x11000, hex('31dbba3412000089d8ef4901c4ffc381fbd007000075ebf4'));
+    let calls = 0;
+    // The handler answers in rax, as a host call's does.
+    h.onTrap((/** @type {number} */ value)=>{
+        calls++;
+        h.writeReg64('rax', BigInt(value) * 3n);
+    });
+    // A slice of a few hundred instructions, the region formed before the next.
+    h.runSlice(300);
+    while (!h.halted())
+    {
+        await h.cork().translatePending();
+        h.runSlice(300);
+    }
+    assert.equal(calls, 2000);
+    assert.equal(h.readReg64('r12'), 3n * 1999000n);
+    const { interpreted } = h.corkDiagnostics();
+    assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
+});
+
+test('long mode over a 4 GiB memory that grows: RAM past 2 GiB held when given, used translated,'
+    + ' the window\'s last page the engine\'s', async()=>{
+    const MIB = 1 << 20;
+    const h = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
+        cork: { sliceMs: Infinity } });
+    assert.equal(h.growing(), true, 'a 64-bit process\'s memory grows as a 32-bit one\'s does');
+    assert.equal(h.ramHeld(), 128 * MIB, 'its floor, not the whole 4 GiB');
+    const far = 0xc0001000;
+    h.writeData(far, Uint8Array.of(0, 0, 0, 0));
+    assert.equal(h.ramHeld(), 2 ** 32, 'given RAM past 3 GiB, it holds it');
+    // For ecx in 0..4999: mov eax, far; mov [rax], ecx; add ebx, [rax]; hlt -- an address
+    // past 2 GiB whose upper half is zero, as a 32-bit operation leaves it.
+    load(h, 0x11000, hex('31c931dbb8001000c089080318ffc181f98813000075edf4'));
+    // A slice of a few hundred instructions, the region formed before the next.
+    h.runSlice(300);
+    while (!h.halted())
+    {
+        await h.cork().translatePending();
+        h.runSlice(300);
+    }
+    assert.equal(Number(h.readReg64('rbx') & 0xffffffffn), (4999 * 5000 / 2) >>> 0);
+    assert.equal(h.readU32(far), 4999);
+    const { interpreted } = h.corkDiagnostics();
+    assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
+
+    // mov eax, 0xfffff000; mov dword [rax], 1; hlt: the window's last page faults.
+    const last = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
+        cork: { sliceMs: Infinity } });
+    load(last, 0x11000, hex('b800f0ffffc70001000000f4'));
+    last.growTo(2 ** 32);
+    last.runSlice(1000);
+    assert.ok(last.fault() !== null, 'a store into the window\'s last page faults');
+    assert.equal(last.readU32(0xfffff000), 0, 'and writes nothing');
+    last.writeData(0xfffff000, Uint8Array.of(1, 2, 3, 4));
+    assert.equal(last.readU32(0xfffff000), 0,
+        'the host\'s writes go around it, as an engine range');
+});
+
+/** @param {string} text */
+function hex(text){
+    return (text.match(/../g) ?? []).map(byte=>parseInt(byte, 16));
+}
+
+test('long mode over an 8 GiB window: an image at 0x140000000 runs translated, its data past 4 GiB',
+    async()=>{
+        allowMemory64();
+        const code = 0x140001000;
+        const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+            entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
+            codeBase: 2 ** 32, cork: { sliceMs: Infinity } });
+        // 1: add qword ptr [rip + data], 3; dec ecx; jnz 1b; mov rax, [rip + data]; hlt -- the
+        // data on the next page, a store into the code's page being a store into code.
+        const program = hex('488305f80f000003ffc975f4488b05ed0f0000f4');
+        const data = code + 0x1000;
+        h.writePhysical(code, Uint8Array.from(program));
+        h.writePhysical(data, Uint8Array.from(hex('0000000001000000')));
+        h.writeReg64('rcx', 300_000n);
+        h.writeReg64('rip', BigInt(code));
+        for (let guard = 0; !h.halted() && guard < 10_000; guard++)
+        {
+            await h.cork().translatePending().catch(()=>{});
+            h.runSlice(5000);
+        }
+        assert.equal(h.readReg64('rax'), 0x100000000n + 900_000n,
+            'the loop added into its quadword');
+        assert.equal(h.readReg64('rip'), BigInt(code + program.length), 'past the hlt, whole');
+        const quad = h.readPhysical(data, 8);
+        assert.equal(new DataView(quad.buffer, quad.byteOffset, 8).getBigUint64(0, true),
+            0x100000000n + 900_000n, 'past 4 GiB in the RAM\'s own memory');
+        const script = h.corkDiagnostics().interpretedByScript;
+        assert.ok(script < 90_000, `${script} of 900 000 interpreted: the rest translated`);
+    });
+
+test('over a wide window the host reaches the image through its low dword', ()=>{
+    allowMemory64();
+    const image = 0x140000000;
+    const h = createCorkHost({ engine, memorySize: 2 ** 33 - 4096, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64, window: 2 ** 33,
+        codeBase: 2 ** 32, hostAlias: { at: 0x40000000, size: 0x20000 } });
+    // A string in the image, where a handler handed `args[i] >>> 0` reads it.
+    h.writePhysical(image + 0x1100, Uint8Array.from([0x6b, 0x33, 0x32, 0]));
+    assert.deepEqual([...h.readPhysical(0x40001100, 4)], [0x6b, 0x33, 0x32, 0]);
+    assert.equal(h.readU32(0x40001100), 0x0032336b);
+    // A handler's answer written through the low half lands in the image.
+    h.writeData(0x40001200, Uint8Array.from([1, 2, 3, 4]));
+    assert.deepEqual([...h.readPhysical(image + 0x1200, 4)], [1, 2, 3, 4]);
+    // Past the span the low space is its own.
+    h.writeData(0x40020000, Uint8Array.from([9]));
+    assert.equal(h.readPhysical(image + 0x20000, 1)[0], 0, 'the image untouched past its span');
+    assert.equal(h.readPhysical(0x40020000, 1)[0], 9);
+    assert.equal(h.ramView(), null, 'no view in place to miss the alias');
 });

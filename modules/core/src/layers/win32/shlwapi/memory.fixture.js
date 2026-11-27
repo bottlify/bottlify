@@ -28,18 +28,28 @@ export function shlwapiMachine(extra = {}){
     const errors = [];
     /** @type {string[]} */
     const divergences = [];
+    // As the memory layer reads: the limit is in bytes, and a string with no
+    // terminator within it is refused, not cut.
+    const unterminated = ()=>Object.assign(new Error('unterminated'), { code: 'UNTERMINATED' });
     const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
         let end = address;
-        while (end < address + maxLength && memory[end] !== 0)
+        while (memory[end] !== 0)
         {
-            end++;
+            if (++end >= Math.min(address + maxLength, memory.length))
+            {
+                throw unterminated();
+            }
         }
         return decodeAnsi(memory.subarray(address, end));
     };
     const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
         let text = '';
-        for (let at = address; at < address + maxLength * 2; at += 2)
+        for (let at = address; ; at += 2)
         {
+            if (at + 2 > Math.min(address + maxLength, memory.length))
+            {
+                throw unterminated();
+            }
             const unit = view.getUint16(at, true);
             if (unit === 0)
             {

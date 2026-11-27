@@ -41,12 +41,13 @@ import {
     D3DERR_VIEWPORTDATANOTSET, D3DERR_VIEWPORTHASNODEVICE, D3DFILTER, D3DLIGHTSTATE,
     D3DLIGHT_ACTIVE, D3DLIGHT_GLSPOT, D3DLIGHT_NO_SPECULAR, D3DLIGHT_PARALLELPOINT, D3DNEXT_HEAD,
     D3DNEXT_NEXT, D3DNEXT_TAIL, D3DPT, D3DRENDERSTATE_D3D7_ONLY, D3DTA, D3DTBLEND, D3DTOP,
-    D3DTRANSFORMSTATE, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
+    D3DTRANSFORMSTATE, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS,
 } from './constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { IDENTITY, multiplyMatrices } from '../d3d8/render.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { DDPF_ALPHAPIXELS } from '../ddraw/constants.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** The render states these versions number and the Direct3D 7 device answers too. */
 const RS = Object.freeze({
@@ -60,6 +61,7 @@ const RS = Object.freeze({
     AMBIENT: 139,
     FOGVERTEXMODE: 140,
     COLORVERTEX: 141,
+    LOCALVIEWER: 142,
 });
 
 /** D3DTADDRESS_WRAP, and D3DWRAP_U / _V in D3DRENDERSTATE_WRAP0. */
@@ -90,7 +92,7 @@ const D3DLIGHT7_DIRECTIONAL = 3;
  * The devices the older versions can make: the software rasteriser and the
  * hardware one. A transform-and-lighting device is Direct3D 7's alone.
  */
-export const LEGACY_DEVICES = /** @type {readonly string[]} */ (
+const LEGACY_DEVICES = /** @type {readonly string[]} */ (
     Object.freeze([DEVICE_IDS.RGB, DEVICE_IDS.HAL]));
 
 /**
@@ -323,6 +325,14 @@ export function createTextureHandles(){
 
     return {
         existing,
+        // Material and matrix handles are the process's as well: a handle
+        // from one DirectDraw object's device names the same material or
+        // matrix through another's (Wine's ddraw1 test_multiple_devices).
+        /** @type {Map<number, any>} */
+        materials: new Map(),
+        /** @type {Map<number, Float32Array>} */
+        matrices: new Map(),
+        next: { material: 1, matrix: 1 },
 
         /**
          * A surface's handle, made on first asking. Nothing keeps a surface
@@ -480,6 +490,24 @@ function createViewport(materialOf){
                     minZ: 0, maxZ: 1,
                 },
             };
+        },
+
+        /**
+         * What IDirect3DViewport::TransformVertices carries a point through, and
+         * the rectangle it lands in; an error without a device or data.
+         *
+         * @returns {{ hr: number, matrix?: ArrayLike<number>, data?: ViewportData }}
+         */
+        transformMatrix(){
+            if (!device)
+            {
+                return { hr: D3DERR_VIEWPORTHASNODEVICE };
+            }
+            if (!data)
+            {
+                return { hr: D3DERR_VIEWPORTDATANOTSET };
+            }
+            return { hr: D3D_OK, matrix: device.transformOf(data), data };
         },
 
         /** @returns {{ hr: number, viewport?: ViewportData }} */
@@ -681,16 +709,15 @@ function createLight(){
 
 /**
  * The Direct3D object of the older versions, over one Direct3D 7 object.
- * Material handles are the object's: a handle is a small number a program
- * passes back in a light state, a background or an execute buffer.
+ * Its materials' handles are small numbers a program passes back in a light
+ * state, a background or an execute buffer, from the process's table.
  *
  * @param {any} d3d7  What createDirect3D7 made for the same DirectDraw object.
- * @param {ReturnType<typeof createTextureHandles>} textures  The surfaces' handles.
+ * @param {ReturnType<typeof createTextureHandles>} textures  The process's handles:
+ *        surfaces', materials' and matrices'.
  */
 export function createLegacyDirect3D(d3d7, textures){
-    /** @type {Map<number, any>} */
-    const materials = new Map();
-    let nextMaterial = 1;
+    const materials = textures.materials;
 
     /** @param {number} handle @returns {any | null} */
     const materialOf = handle=>materials.get(handle >>> 0) ?? null;
@@ -707,10 +734,11 @@ export function createLegacyDirect3D(d3d7, textures){
         createLight,
 
         createMaterial(){
-            let handle = 0;
+            /** @type {Map<any, number>} its handle on each device asked through */
+            const handles = new Map();
             let data = emptyMaterial();
             const life = counted(()=>{
-                if (handle !== 0)
+                for (const handle of handles.values())
                 {
                     materials.delete(handle);
                 }
@@ -734,11 +762,19 @@ export function createLegacyDirect3D(d3d7, textures){
                     };
                     return D3D_OK;
                 },
-                /** The handle that names this material, made on first asking and kept. */
-                getHandle(){
-                    if (handle === 0)
+                /**
+                 * The handle that names this material on a device, made on first
+                 * asking and kept: one a device, each naming it on any of them
+                 * (Wine's ddraw2 and ddraw4 test_multiple_devices).
+                 *
+                 * @param {any} [device]
+                 */
+                getHandle(device = null){
+                    let handle = handles.get(device);
+                    if (handle === undefined)
                     {
-                        handle = nextMaterial++;
+                        handle = textures.next.material++;
+                        handles.set(device, handle);
                         materials.set(handle, material);
                     }
                     return handle;
@@ -758,7 +794,7 @@ export function createLegacyDirect3D(d3d7, textures){
             {
                 return { hr: DDERR_NOTFOUND, device: null };
             }
-            const made = d3d7.createDevice(deviceId, surface);
+            const made = d3d7.createDevice(deviceId, surface, { legacy: true });
             if (made.hr !== D3D_OK)
             {
                 return made;
@@ -794,9 +830,9 @@ function createLegacyDevice(inner, version, legacy){
         [D3DLIGHTSTATE.AMBIENT, 0],
         [D3DLIGHTSTATE.COLORMODEL, D3DCOLOR_RGB],
         [D3DLIGHTSTATE.FOGMODE, 0],
-        [D3DLIGHTSTATE.FOGSTART, floatToDword(0)],
-        [D3DLIGHTSTATE.FOGEND, floatToDword(1)],
-        [D3DLIGHTSTATE.FOGDENSITY, floatToDword(1)],
+        [D3DLIGHTSTATE.FOGSTART, floatBits(0)],
+        [D3DLIGHTSTATE.FOGEND, floatBits(1)],
+        [D3DLIGHTSTATE.FOGDENSITY, floatBits(1)],
         [D3DLIGHTSTATE.COLORVERTEX, 1],
     ]);
 
@@ -840,6 +876,9 @@ function createLegacyDevice(inner, version, legacy){
     // Specular highlights start on through IDirect3DDevice2 and off through
     // the third (Wine's ddraw2.c and ddraw4.c test_lighting_interface_versions).
     inner.SetRenderState(RS.SPECULARENABLE, version < 3 ? 1 : 0);
+    // Colour keying starts on in the first version, keying only a texture
+    // that has a key, and off after it (Wine's ddraw1 and ddraw2 test_ck_default).
+    inner.SetRenderState(RS.COLORKEYENABLE, version === 1 ? 1 : 0);
 
     /**
      * Whether stage zero's texture is the one TEXTUREHANDLE names, looked up
@@ -862,12 +901,46 @@ function createLegacyDevice(inner, version, legacy){
         }
     };
 
+    /**
+     * Stage zero's alpha under TEXTUREMAPBLEND's MODULATE, set when the blend
+     * or the texture changes: the texture's alpha where it has one, the
+     * colour's where it has none; no texture leaves it as it is. It reads back
+     * so (Wine's ddraw4 test_texturemapblend) and counts as what the blend set.
+     */
+    const fixAlphaOp = ()=>{
+        const mode = ownStates.get(RS.TEXTUREMAPBLEND);
+        if (!legacyBlend || (mode !== D3DTBLEND.MODULATE && mode !== D3DTBLEND.MODULATEMASK))
+        {
+            return;
+        }
+        /** @type {{ surface?: any }} */
+        const bound = {};
+        inner.GetTexture(0, bound);
+        if (!bound.surface)
+        {
+            return;
+        }
+        const hasAlpha = (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
+        bound.surface.release();
+        const op = hasAlpha ? D3DTOP.SELECTARG1 : D3DTOP.SELECTARG2;
+        blendSet.set(D3DTSS.ALPHAOP, op);
+        inner.SetTextureStageState(0, D3DTSS.ALPHAOP, op);
+    };
+
     /** Draws, by kind, for GetStats. */
     const stats = { triangles: 0, lines: 0, points: 0, vertices: 0 };
 
-    /** @type {Map<number, Float32Array>} the first generation's matrices, by handle */
-    const matrices = new Map();
-    let nextMatrix = 1;
+    /** The first generation's matrices, by handle: the process's (`createTextureHandles`). */
+    const matrices = textures.matrices;
+    /**
+     * The handle each transform was last set from by an execute buffer: the
+     * transform is that matrix, and SetMatrix on it moves the transform with
+     * it (Wine's ddraw1 test_lighting sets the world once and its matrix
+     * after).
+     *
+     * @type {Map<number, number>}
+     */
+    const boundMatrices = new Map();
 
     /**
      * An immediate-mode primitive being built by Begin, Vertex and Index.
@@ -927,10 +1000,17 @@ function createLegacyDevice(inner, version, legacy){
             multiplyMatrices(projection, clipVolumeMatrix(data)));
     };
 
-    /** The active lights of the viewport in effect, as the Direct3D 7 device's first few. */
+    /**
+     * The active lights of the viewport in effect, as the Direct3D 7 device's
+     * first few. A light of no colour adds nothing to any term of the
+     * equation - this version's lights have no ambient of their own - so it
+     * takes none of the few: a program that adds dozens of black lights
+     * before its own is lit by its own (Wine's ddraw4 test_specular_lighting
+     * adds 64).
+     */
     const syncLights = ()=>{
-        const on = (inEffect()?.lights ?? []).filter((/** @type {any} */ light)=>light.active)
-            .slice(0, MAX_ACTIVE_LIGHTS);
+        const on = (inEffect()?.lights ?? []).filter((/** @type {any} */ light)=>light.active
+            && !isBlack(light.data.color)).slice(0, MAX_ACTIVE_LIGHTS);
         on.forEach((/** @type {any} */ light, /** @type {number} */ index)=>{
             inner.SetLight(index, lightFor(light.data));
             inner.LightEnable(index, true);
@@ -948,7 +1028,11 @@ function createLegacyDevice(inner, version, legacy){
         if (material)
         {
             const m = material.data;
-            inner.SetMaterial({ Diffuse: m.diffuse, Ambient: m.ambient, Specular: m.specular,
+            // A material of no power has no highlight in these versions, and a
+            // highlight's alpha is none of the material's (Wine's ddraw2 and
+            // ddraw4 test_specular_lighting).
+            inner.SetMaterial({ Diffuse: m.diffuse, Ambient: m.ambient,
+                Specular: m.power > 0 ? { ...m.specular, a: 0 } : black(),
                 Emissive: m.emissive, Power: m.power });
             syncLights();
         }
@@ -956,40 +1040,22 @@ function createLegacyDevice(inner, version, legacy){
     };
 
     /**
-     * Lighting, material and lights for one draw, the texture a handle
-     * names, and the stage-zero alpha TEXTUREMAPBLEND's MODULATE means for
-     * the texture bound now. Answers what to put back afterwards.
+     * Lighting, material and lights for one draw, and the texture a handle
+     * names now, with the stage-zero alpha TEXTUREMAPBLEND's MODULATE means
+     * for it.
      *
      * @param {number} fvf @param {number} flags
-     * @returns {() => void}
      */
     const prepare = (fvf, flags)=>{
         if (textureByHandle)
         {
-            inner.SetTexture(0, textures.surfaceOf(ownStates.get(RS.TEXTUREHANDLE) ?? 0));
+            inner.SetTexture(0, textures.surfaceOf(ownStates.get(RS.TEXTUREHANDLE) ?? 0),
+                { unheld: true });
+            fixAlphaOp();
         }
         const lit = (fvf & FVF_POSITION_MASK) !== FVF_XYZRHW && (fvf & FVF_NORMAL) !== 0
             && (flags & D3DDP_DONOTLIGHT) === 0 && applyMaterial() !== null;
         inner.SetRenderState(RS.LIGHTING, lit ? 1 : 0);
-        const mode = ownStates.get(RS.TEXTUREMAPBLEND);
-        if (legacyBlend && (mode === D3DTBLEND.MODULATE || mode === D3DTBLEND.MODULATEMASK))
-        {
-            /** @type {{ surface?: any }} */
-            const bound = {};
-            inner.GetTexture(0, bound);
-            const hasAlpha = bound.surface
-                && (bound.surface.pixelFormat.flags & DDPF_ALPHAPIXELS) !== 0;
-            bound.surface?.release();
-            if (!hasAlpha)
-            {
-                /** @type {{ value?: number }} */
-                const kept = {};
-                inner.GetTextureStageState(0, D3DTSS.ALPHAOP, kept);
-                inner.SetTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2);
-                return ()=>inner.SetTextureStageState(0, D3DTSS.ALPHAOP, kept.value);
-            }
-        }
-        return ()=>{};
     };
 
     /**
@@ -1001,9 +1067,8 @@ function createLegacyDevice(inner, version, legacy){
      * @param {() => number} run
      */
     const draw = (type, fvf, flags, elements, vertices, run)=>{
-        const restore = prepare(fvf, flags);
+        prepare(fvf, flags);
         const hr = run();
-        restore();
         if (hr === D3D_OK)
         {
             const primitives = primitivesOf(type, elements);
@@ -1155,6 +1220,26 @@ function createLegacyDevice(inner, version, legacy){
         },
 
         /**
+         * World, view and projection, and a viewport's clip volume after them:
+         * the matrix TransformVertices carries a point through.
+         *
+         * @param {ViewportData} data
+         * @returns {ArrayLike<number>}
+         */
+        transformOf(data){
+            /** @param {number} type */
+            const held = type=>{
+                /** @type {{ matrix?: ArrayLike<number> }} */
+                const out = {};
+                inner.GetTransform(type, out);
+                return out.matrix ?? IDENTITY;
+            };
+            return multiplyMatrices(multiplyMatrices(multiplyMatrices(
+                held(D3DTRANSFORMSTATE.WORLD), held(D3DTRANSFORMSTATE.VIEW)), projection),
+            clipVolumeMatrix(data));
+        },
+
+        /**
          * Whether the render target holds a viewport's rectangle.
          *
          * @param {ViewportData} data
@@ -1221,7 +1306,7 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {any} surface */
         setRenderTarget(surface){
-            const hr = inner.SetRenderTarget(surface);
+            const hr = inner.SetRenderTarget(surface, { unheldDepth: version === 2 });
             if (hr === D3D_OK)
             {
                 applyViewport();
@@ -1233,6 +1318,12 @@ function createLegacyDevice(inner, version, legacy){
 
         /** @param {number} state @param {number} value */
         setRenderState(state, value){
+            // These versions have no LOCALVIEWER: they light as Direct3D 7 does
+            // with it on, whatever is set (ddraw4 test_specular_lighting).
+            if (state === RS.LOCALVIEWER)
+            {
+                return D3D_OK;
+            }
             if (!ownStates.has(state))
             {
                 return inner.SetRenderState(state, value);
@@ -1241,9 +1332,14 @@ function createLegacyDevice(inner, version, legacy){
             ownStates.set(state, value >>> 0);
             switch (state)
             {
-                case RS.TEXTUREHANDLE:
+                case RS.TEXTUREHANDLE: {
+                    // A handle binds the texture without holding it (Wine's
+                    // ddraw2 test_texturemapblend releases it while bound).
                     textureByHandle = true;
-                    return inner.SetTexture(0, textures.surfaceOf(value));
+                    const hr = inner.SetTexture(0, textures.surfaceOf(value), { unheld: true });
+                    fixAlphaOp();
+                    return hr;
+                }
                 case RS.TEXTUREMAPBLEND:
                     if (value !== previous)
                     {
@@ -1253,6 +1349,7 @@ function createLegacyDevice(inner, version, legacy){
                         {
                             inner.SetTextureStageState(0, type, setting);
                         }
+                        fixAlphaOp();
                     }
                     return D3D_OK;
                 case RS.TEXTUREMAG:
@@ -1338,8 +1435,29 @@ function createLegacyDevice(inner, version, legacy){
             return D3D_OK;
         },
 
+        /**
+         * A transform set from a matrix handle, which it then follows.
+         *
+         * @param {number} type @param {number} handle
+         * @returns {number}
+         */
+        bindMatrix(type, handle){
+            const matrix = matrices.get(handle);
+            if (!matrix)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const hr = device.setTransform(type, matrix);
+            if (hr === D3D_OK)
+            {
+                boundMatrices.set(type, handle);
+            }
+            return hr;
+        },
+
         /** @param {number} type @param {ArrayLike<number>} matrix */
         setTransform(type, matrix){
+            boundMatrices.delete(type);
             if (type !== D3DTRANSFORMSTATE.PROJECTION)
             {
                 return inner.SetTransform(type, matrix);
@@ -1395,7 +1513,8 @@ function createLegacyDevice(inner, version, legacy){
          *
          * @param {number} state
          */
-        answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0),
+        answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0)
+            || state >>> 0 === RS.LOCALVIEWER,
 
         /**
          * A call a routine wrote into the Direct3D 7 device's ring, told as the
@@ -1421,6 +1540,7 @@ function createLegacyDevice(inner, version, legacy){
             if (hr === D3D_OK && stage === 0)
             {
                 textureByHandle = false;
+                fixAlphaOp();
             }
             return hr;
         },
@@ -1567,7 +1687,7 @@ function createLegacyDevice(inner, version, legacy){
         // --- the first generation's matrices ---
 
         createMatrix(){
-            const handle = nextMatrix++;
+            const handle = textures.next.matrix++;
             matrices.set(handle, Float32Array.from(IDENTITY));
             return handle;
         },
@@ -1578,6 +1698,11 @@ function createLegacyDevice(inner, version, legacy){
                 return D3DERR_MATRIX_SETDATA_FAILED;
             }
             matrices.set(handle, Float32Array.from(matrix));
+            const following = [...boundMatrices].filter(([, bound])=>bound === handle);
+            for (const [type] of following)
+            {
+                device.bindMatrix(type, handle);
+            }
             return D3D_OK;
         },
         /** @param {number} handle @returns {Float32Array | null} */
@@ -1587,6 +1712,13 @@ function createLegacyDevice(inner, version, legacy){
     };
     return device;
 }
+
+/**
+ * Whether a colour is black in all three channels: a light of it lights nothing.
+ *
+ * @param {{ r: number, g: number, b: number }} colour
+ */
+const isBlack = colour=>colour.r === 0 && colour.g === 0 && colour.b === 0;
 
 /**
  * A light of these versions as the Direct3D 7 device lights with one. The
@@ -1623,5 +1755,6 @@ function lightFor(light){
         Attenuation2: light.attenuation2,
         Theta: light.theta,
         Phi: light.phi,
+        Legacy: true,
     };
 }

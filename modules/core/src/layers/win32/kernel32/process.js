@@ -5,8 +5,9 @@
  */
 
 
-import { TEB } from './teb.js';
+import { TEB, TEB64, blockLayouts } from './teb.js';
 import { createProcessors } from './processor.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
 /**
@@ -32,6 +33,9 @@ const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_BAD_ARGUMENTS = 160;
 const ERROR_OLD_WIN_VERSION = 1150;
 
+/** The group number that names every processor group. */
+const ALL_PROCESSOR_GROUPS = 0xffff;
+
 /** What TlsAlloc returns when every slot is taken. */
 const TLS_OUT_OF_INDEXES = 0xffffffff;
 
@@ -43,14 +47,14 @@ const TLS_OUT_OF_INDEXES = 0xffffffff;
 export const TLS_SLOTS = 1088;
 
 /**
- * How many of those live in the block a program can reach through FS.
+ * How many of those live in the thread's block, TlsSlots (`TEB.TLS_SLOTS`),
+ * where the guest's own TlsGetValue and TlsSetValue reach them through FS; the
+ * rest are the host's, as Windows keeps them in an expansion block apart.
  *
- * The compiler does not call TlsGetValue. `__declspec(thread) x` becomes
- * `mov eax, _tls_index / mov ecx, fs:[0x2c] / mov eax, [ecx+eax*4]` -- it
- * reads the array directly. So a slot in this range has two readers, the API
- * and that sequence, and they have to see the same value; a slot above it has
- * only the API, which is why Windows keeps the rest in an expansion block
- * reached another way.
+ * They are not the array behind FS:[0x2c], which holds each image's
+ * thread-local block at the index the loader gave the image: a compiler's
+ * `__declspec(thread)` reads that one directly, and an image built to assume
+ * index 0 for the program's own reads `[fs:[0x2c]]` whatever TlsAlloc gave out.
  */
 const TLS_SLOTS_IN_BLOCK = 64;
 
@@ -77,6 +81,8 @@ const CURRENT_PROCESS = 0xffffffff;
 
 /** EncodePointer and DecodePointer's guest code: `mov eax, [esp+4]; ret 4`. */
 const POINTER_AS_IS = [0x8b, 0x44, 0x24, 0x04, 0xc2, 0x04, 0x00];
+/** The same at 64 bits, the whole quadword: `mov rax, rcx; ret`. */
+const LONG_POINTER_AS_IS = [0x48, 0x89, 0xc8, 0xc3];
 
 /**
  * Ticks per second for the performance counter unless `config.json` says another: a
@@ -88,7 +94,7 @@ const POINTER_AS_IS = [0x8b, 0x44, 0x24, 0x04, 0xc2, 0x04, 0x00];
  * ahead by more than a read's worth. It stays exact in a double for about a
  * hundred days of a process's life.
  */
-const PERFORMANCE_FREQUENCY = 1_000_000_000n;
+export const PERFORMANCE_FREQUENCY = 1_000_000_000n;
 
 /**
  * Byte offsets within the block the clock routines read.
@@ -122,11 +128,10 @@ export const CLOCK = {
 };
 
 /**
- * The block takes a page of its own, and the reason is the emulator's: the
- * engine writes the block whenever the guest's clock moves, and a write into
- * a page holding compiled code makes the emulator discard everything compiled
- * for that page -- so a block sharing a page with the routines above would
- * have every credit throw them away and run them interpreted after.
+ * The block takes a page of its own: the engine writes the block whenever the
+ * guest's clock moves, and a write near translated code drops what the
+ * translator made of it -- so a block sharing a page with the routines above
+ * would have every credit throw them away and run them interpreted after.
  */
 const PAGE = 4096;
 
@@ -134,7 +139,11 @@ const PAGE = 4096;
 const FILETIME_EPOCH_MS = 11_644_473_600_000n;
 
 /** Nothing sensible names a module beyond MAX_PATH. */
-const MAX_MODULE_NAME = 260;
+/**
+ * A module name is read to its terminator, as Windows reads it: a path may
+ * run to 32 767 characters, and one cut short names another module.
+ */
+const WHOLE_NAME = 32767;
 /** The one priority a process runs at here. */
 const NORMAL_PRIORITY_CLASS = 0x20;
 
@@ -152,8 +161,14 @@ const ERROR_NOACCESS = 998;
 
 /**
  * @typedef {Object} ProcessHost
+ * @property {ReturnType<typeof createThreadState>} [threadState]  The process's, where
+ *     another part of it keeps the last error too: one state, so a call made between
+ *     turns leaves its error where GetLastError then reads it.
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
+ * @property {number} [timeStampMhz]  The rate the processor's rdtsc advances at, in MHz:
+ *     where it is a whole multiple of the performance frequency, the counter's guest
+ *     code reads it and moves inside a slice.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
@@ -207,6 +222,7 @@ const ERROR_NOACCESS = 998;
  * @property {import('./processor.js').Processors} [processors]  The process's
  *           processors and its affinity, which every other interface that
  *           counts or sets them shares. Absent, one processor.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -223,14 +239,23 @@ const ERROR_NOACCESS = 998;
  * @param {() => any} currentThread
  * @param {{ readU32: (address: number) => number,
  *           writeU32: (address: number, value: number) => void } | null} [memory]
+ * @param {{ LAST_ERROR: number }} [block]  The thread block's layout: a
+ *        64-bit process's keeps the error at its own offset.
  */
-export function createThreadState(currentThread, memory = null){
+export function createThreadState(currentThread, memory = null, block = TEB){
+    /**
+     * The state of a call made between turns, when no thread is running: a
+     * parent's call made in this process (`cross-process.js`) leaves its
+     * error here, not in whichever thread ran last.
+     */
+    const between = {};
+
     /**
      * @param {any} [thread]  Whose state. Defaults to the thread that is running.
      *   Naming one is for an answer produced on somebody else's turn: a call
      *   that parked has no turn of its own left in which to record its result.
      */
-    const stateOf = (thread = currentThread())=>{
+    const stateOf = (thread = currentThread() ?? between)=>{
         if (!thread.kernel32)
         {
             thread.kernel32 = {
@@ -250,7 +275,7 @@ export function createThreadState(currentThread, memory = null){
         const teb = blockOf(thread);
         if (teb !== 0 && memory)
         {
-            memory.writeU32(teb + TEB.LAST_ERROR, code >>> 0);
+            memory.writeU32(teb + block.LAST_ERROR, code >>> 0);
         }
         else
         {
@@ -259,10 +284,10 @@ export function createThreadState(currentThread, memory = null){
     };
 
     /** @param {any} [thread] */
-    const lastErrorOf = (thread = currentThread())=>{
+    const lastErrorOf = (thread = currentThread() ?? between)=>{
         const teb = blockOf(thread);
         return teb !== 0 && memory
-            ? memory.readU32(teb + TEB.LAST_ERROR)
+            ? memory.readU32(teb + block.LAST_ERROR)
             : stateOf(thread).lastError;
     };
 
@@ -271,7 +296,7 @@ export function createThreadState(currentThread, memory = null){
         lastErrorOf,
         setErrorOn,
         /** @param {number} code */
-        setError: code=>setErrorOn(currentThread(), code),
+        setError: code=>setErrorOn(currentThread() ?? between, code),
     };
 }
 
@@ -313,8 +338,8 @@ export function setLastErrorCode(){
 }
 
 /**
- * TlsGetValue as guest code: a slot of the block's array, and success clears
- * the error, as the host does. An index past the array goes to the host,
+ * TlsGetValue as guest code: a slot of the block's TlsSlots, and success clears
+ * the error, as the host does. An index past them goes to the host,
  * which answers for it; a slot nobody allocated reads as whatever it holds,
  * as it does on Windows.
  *
@@ -322,14 +347,13 @@ export function setLastErrorCode(){
  * @param {number} trap  The host's TlsGetValue.
  */
 export function tlsGetValueCode(at, trap){
-    const slow = 33;
+    const slow = 31;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
         0x64, 0xc7, 0x05, ...dword(TEB.LAST_ERROR), ...dword(0),     // mov dword fs:[0x34], 0
-        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
-        0x8b, 0x04, 0x81,                                            // mov eax, [ecx+eax*4]
+        0x64, 0x8b, 0x04, 0x85, ...dword(TEB.TLS_SLOTS),             // mov eax, fs:[0xe10+eax*4]
         0xc2, 0x04, 0x00,                                            // ret 4
         // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
@@ -338,31 +362,88 @@ export function tlsGetValueCode(at, trap){
 
 /**
  * TlsSetValue as guest code: the value into a slot of the block. An index past
- * the array goes to the host, which keeps the rest.
+ * its TlsSlots goes to the host, which keeps the rest.
  *
- * A slot in the array is written whether or not anybody allocated it, and
- * success leaves the last error alone, as on Windows: the array is the
+ * A slot in the block is written whether or not anybody allocated it, and
+ * success leaves the last error alone, as on Windows: the slots are the
  * thread's own, and what keeps a freed slot's old value -- or one set in it
  * while it was free -- from its next tenant is TlsFree and TlsAlloc clearing
- * that slot in every thread's array.
+ * that slot in every thread's block.
  *
  * @param {number} at    Where the code lands, for the jump to the trap.
  * @param {number} trap  The host's TlsSetValue.
  */
 export function tlsSetValueCode(at, trap){
-    const slow = 31;
+    const slow = 29;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
         0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
         0x73, slow - 9,                                              // jae slow
-        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
         0x8b, 0x54, 0x24, 0x08,                                      // mov edx, [esp+8]
-        0x89, 0x14, 0x81,                                            // mov [ecx+eax*4], edx
+        0x64, 0x89, 0x14, 0x85, ...dword(TEB.TLS_SLOTS),             // mov fs:[0xe10+eax*4], edx
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x08, 0x00,                                            // ret 8
         // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
+}
+
+/**
+ * The same five at 64 bits, where a 64-bit process runs no i386: the fields of
+ * the 64-bit block through GS, the argument in ECX (and the value in RDX), the
+ * slots a quadword each. A routine that hands an index past the block's
+ * TlsSlots to the host jumps to its trap, whose rel32 is at `jump`.
+ */
+const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...dword(offset)];
+
+/** GetLastError at 64 bits: mov eax, gs:[0x68]; ret */
+const getLastErrorLongCode = ()=>Uint8Array.of(
+    0x65, 0x8b, ...gs(TEB64.LAST_ERROR), 0xc3);
+
+/** SetLastError at 64 bits: mov gs:[0x68], ecx; ret */
+const setLastErrorLongCode = ()=>Uint8Array.of(
+    0x65, 0x89, 0x0c, 0x25, ...dword(TEB64.LAST_ERROR), 0xc3);
+
+/** GetCurrentThreadId at 64 bits: mov eax, gs:[0x48]; ret */
+const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
+    0x65, 0x8b, ...gs(TEB64.THREAD_ID), 0xc3);
+
+/**
+ * TlsGetValue at 64 bits: the slot's quadword, the error cleared; past the
+ * block's TlsSlots, the host's.
+ *
+ *     mov ecx, ecx; cmp ecx, 64; jae slow
+ *     mov dword gs:[0x68], 0; mov rax, gs:[0x1480+rcx*8]; ret
+ *     slow: jmp trap
+ */
+function tlsGetValueLongCode(){
+    const slow = 29;
+    const code = Uint8Array.of(
+        0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
+        0x65, 0xc7, ...gs(TEB64.LAST_ERROR), ...dword(0),
+        0x65, 0x48, 0x8b, 0x04, 0xcd, ...dword(TEB64.TLS_SLOTS),
+        0xc3,
+        0xe9, ...dword(0));
+    return { code, jump: slow + 1 };
+}
+
+/**
+ * TlsSetValue at 64 bits: the value into the slot, the error left alone; past
+ * the block's TlsSlots, the host's.
+ *
+ *     mov ecx, ecx; cmp ecx, 64; jae slow
+ *     mov gs:[0x1480+rcx*8], rdx; mov eax, 1; ret
+ *     slow: jmp trap
+ */
+function tlsSetValueLongCode(){
+    const slow = 22;
+    const code = Uint8Array.of(
+        0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
+        0x65, 0x48, 0x89, 0x14, 0xcd, ...dword(TEB64.TLS_SLOTS),
+        0xb8, ...dword(1),
+        0xc3,
+        0xe9, ...dword(0));
+    return { code, jump: slow + 1 };
 }
 
 /**
@@ -430,7 +511,11 @@ export function tlsSetValueCode(at, trap){
  * @param {number} trap   The host's QueryPerformanceCounter.
  * @param {number} block  The clock block.
  */
-export function queryPerformanceCounterCode(at, trap, block){
+export function queryPerformanceCounterCode(at, trap, block, perCount = 0){
+    if (perCount > 0)
+    {
+        return queryPerformanceCounterTscCode(at, trap, block, perCount);
+    }
     const slow = 114;
     const sequence = block + CLOCK.SEQUENCE;
     const counter = block + CLOCK.COUNTER;
@@ -451,32 +536,224 @@ export function queryPerformanceCounterCode(at, trap, block){
         0x75, (18 - 47) & 0xff,                                      // jne read
         0xa1, ...dword(last),                                        // mov eax, [last]
         0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
-        // next: (58)
-        0x89, 0xfb,                                                  // mov ebx, edi
-        0x89, 0xf1,                                                  // mov ecx, esi
-        0x39, 0xd1,                                                  // cmp ecx, edx
-        0x77, 82 - 66,                                               // ja swap
-        0x72, 72 - 68,                                               // jb bump
-        0x39, 0xc3,                                                  // cmp ebx, eax
-        0x77, 82 - 72,                                               // ja swap
-        // bump: (72)
-        0x89, 0xc3,                                                  // mov ebx, eax
-        0x89, 0xd1,                                                  // mov ecx, edx
-        0x83, 0xc3, 0x01,                                            // add ebx, 1
-        0x83, 0xd1, 0x00,                                            // adc ecx, 0
-        // swap: (82)
-        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
-        0x75, (58 - 92) & 0xff,                                      // jne next
-        0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
-        0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
-        0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
-        0xb8, ...dword(1),                                           // mov eax, 1
-        0xc2, 0x04, 0x00,                                            // ret 4
+        ...counterTail(last),
         // spin: (110)
         0xf3, 0x90,                                                  // pause
         0xeb, (18 - 114) & 0xff,                                     // jmp read
         // slow: (114)
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * The counter's answer from the time-stamp counter rather than the block:
+ * `rdtsc` divided by the time-stamp ticks of one count.
+ *
+ * The block moves only between slices, and a thread nobody else is ready
+ * beside runs a turn of a million instructions: a game waiting for its next
+ * frame by reading the counter in a loop that never calls the host read the
+ * same count for the whole turn - 5 to 20 ms - and drew late, at intervals of
+ * 12 and 21 ms where it meant 16.7, with a frame of 30 to 50 now and then.
+ * The time-stamp counter is the guest's clock too, moving on at the page's
+ * rate inside a slice (`readTsc` in cork-host.js), the same on every
+ * executor and never backward; the last answer is kept as before, so every
+ * answer is later than every one before it, the trap's included.
+ *
+ *     ...as above, to read:
+ *     rdtsc                       ; edx:eax the time-stamp count
+ *     mov ecx, eax / mov eax, edx / xor edx, edx / mov ebx, perCount
+ *     div ebx / mov esi, eax      ; the high word's quotient
+ *     mov eax, ecx / div ebx / mov edi, eax   ; and the low's, the remainder carried
+ *     mov eax, [last] / mov edx, [last+4]
+ *     ...as above, from next:
+ *
+ * @param {number} at @param {number} trap @param {number} block
+ * @param {number} perCount  time-stamp ticks a count, a whole number
+ */
+function queryPerformanceCounterTscCode(at, trap, block, perCount){
+    const slow = 104;
+    const last = block + CLOCK.LAST;
+    return new Uint8Array([
+        0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
+        0x85, 0xc9,                                                  // test ecx, ecx
+        0x0f, 0x84, ...dword(slow - 12),                             // jz slow
+        0x53, 0x56, 0x57, 0x55,                                      // push ebx, esi, edi, ebp
+        0x89, 0xcd,                                                  // mov ebp, ecx
+        // read: (18)
+        0x0f, 0x31,                                                  // rdtsc
+        0x89, 0xc1,                                                  // mov ecx, eax
+        0x89, 0xd0,                                                  // mov eax, edx
+        0x31, 0xd2,                                                  // xor edx, edx
+        0xbb, ...dword(perCount),                                    // mov ebx, perCount
+        0xf7, 0xf3,                                                  // div ebx
+        0x89, 0xc6,                                                  // mov esi, eax
+        0x89, 0xc8,                                                  // mov eax, ecx
+        0xf7, 0xf3,                                                  // div ebx
+        0x89, 0xc7,                                                  // mov edi, eax
+        0xa1, ...dword(last),                                        // mov eax, [last]
+        0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
+        ...counterTail(last),
+        // slow: (104)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * Both 32-bit counters' end, 52 bytes from `next`: edi:esi the count read,
+ * edx:eax the last answer; the later of the count and the last answer and
+ * one, moved into the last answer and the caller's LARGE_INTEGER.
+ *
+ * @param {number} last  the last answer's address
+ */
+function counterTail(last){
+    return [
+        // next: (+0)
+        0x89, 0xfb,                                                  // mov ebx, edi
+        0x89, 0xf1,                                                  // mov ecx, esi
+        0x39, 0xd1,                                                  // cmp ecx, edx
+        0x77, 24 - 8,                                                // ja swap
+        0x72, 14 - 10,                                               // jb bump
+        0x39, 0xc3,                                                  // cmp ebx, eax
+        0x77, 24 - 14,                                               // ja swap
+        // bump: (+14)
+        0x89, 0xc3,                                                  // mov ebx, eax
+        0x89, 0xd1,                                                  // mov ecx, edx
+        0x83, 0xc3, 0x01,                                            // add ebx, 1
+        0x83, 0xd1, 0x00,                                            // adc ecx, 0
+        // swap: (+24)
+        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
+        0x75, (0 - 34) & 0xff,                                       // jne next
+        0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
+        0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
+        0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc2, 0x04, 0x00,                                            // ret 4
+    ];
+}
+
+/**
+ * QueryPerformanceCounter's x86-64, for a 64-bit process: the routine above
+ * under the x64 convention -- the LARGE_INTEGER in RCX, which a null leaves
+ * for the trap untouched -- the block's address in R8 and the counter read
+ * whole between two looks at the sequence, the last answer moved by
+ * `lock cmpxchg` on its quadword. It changes RAX, RDX, R8 and R9 alone, the
+ * registers a callee may.
+ *
+ *     test rcx, rcx / jz slow
+ *     mov r8d, block
+ *   read:
+ *     mov eax, [r8+sequence] / test al, 1 / jnz spin
+ *     mov r9, [r8+counter]
+ *     cmp eax, [r8+sequence] / jne read
+ *     mov rax, [r8+last]
+ *   next:                         ; rdx = the counter if later, else last + 1
+ *     mov rdx, r9 / cmp rdx, rax / ja swap
+ *     lea rdx, [rax+1]
+ *   swap:
+ *     lock cmpxchg [r8+last], rdx / jne next
+ *     mov [rcx], rdx / mov eax, 1 / ret
+ *   spin: pause / jmp read
+ *   slow: jmp trap
+ *
+ * @param {number} at @param {number} trap @param {number} block  below 4 GiB
+ */
+export function queryPerformanceCounterCode64(at, trap, block, perCount = 0){
+    if (perCount > 0)
+    {
+        // As the 32-bit routine's: rdtsc / perCount for the count read
+        // (`queryPerformanceCounterTscCode`), and the same end from next.
+        const slow = 77;
+        return new Uint8Array([
+            0x48, 0x85, 0xc9,                                        // test rcx, rcx
+            0x0f, 0x84, ...dword(slow - 9),                          // jz slow
+            0x41, 0xb8, ...dword(block),                             // mov r8d, block
+            // read: (15)
+            0x0f, 0x31,                                              // rdtsc
+            0x48, 0xc1, 0xe2, 0x20,                                  // shl rdx, 32
+            0x48, 0x09, 0xd0,                                        // or rax, rdx
+            0x31, 0xd2,                                              // xor edx, edx
+            0x41, 0xb9, ...dword(perCount),                          // mov r9d, perCount
+            0x49, 0xf7, 0xf1,                                        // div r9
+            0x49, 0x89, 0xc1,                                        // mov r9, rax
+            0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                  // mov rax, [r8+last]
+            // next: (45)
+            0x4c, 0x89, 0xca,                                        // mov rdx, r9
+            0x48, 0x39, 0xc2,                                        // cmp rdx, rax
+            0x77, 57 - 53,                                           // ja swap
+            0x48, 0x8d, 0x50, 0x01,                                  // lea rdx, [rax+1]
+            // swap: (57)
+            0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),      // lock cmpxchg [r8+last], rdx
+            0x75, (45 - 68) & 0xff,                                  // jne next
+            0x48, 0x89, 0x11,                                        // mov [rcx], rdx
+            0xb8, ...dword(1),                                       // mov eax, 1
+            0xc3,                                                    // ret
+            // slow: (77)
+            0xe9, ...dword(trap - (at + slow + 5)),                  // jmp trap
+        ]);
+    }
+    const slow = 85;
+    return new Uint8Array([
+        0x48, 0x85, 0xc9,                                            // test rcx, rcx
+        0x0f, 0x84, ...dword(slow - 9),                              // jz slow
+        0x41, 0xb8, ...dword(block),                                 // mov r8d, block
+        // read: (15)
+        0x41, 0x8b, 0x80, ...dword(CLOCK.SEQUENCE),                  // mov eax, [r8+sequence]
+        0xa8, 0x01,                                                  // test al, 1
+        0x75, 81 - 26,                                               // jnz spin
+        0x4d, 0x8b, 0x88, ...dword(CLOCK.COUNTER),                   // mov r9, [r8+counter]
+        0x41, 0x3b, 0x80, ...dword(CLOCK.SEQUENCE),                  // cmp eax, [r8+sequence]
+        0x75, (15 - 42) & 0xff,                                      // jne read
+        0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                      // mov rax, [r8+last]
+        // next: (49)
+        0x4c, 0x89, 0xca,                                            // mov rdx, r9
+        0x48, 0x39, 0xc2,                                            // cmp rdx, rax
+        0x77, 61 - 57,                                               // ja swap
+        0x48, 0x8d, 0x50, 0x01,                                      // lea rdx, [rax+1]
+        // swap: (61)
+        0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),          // lock cmpxchg [r8+last], rdx
+        0x75, (49 - 72) & 0xff,                                      // jne next
+        0x48, 0x89, 0x11,                                            // mov [rcx], rdx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // spin: (81)
+        0xf3, 0x90,                                                  // pause
+        0xeb, (15 - 85) & 0xff,                                      // jmp read
+        // slow: (85)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * QueryPerformanceFrequency's x86-64: the frequency into the LARGE_INTEGER in
+ * RCX, a null left for the trap.
+ *
+ * @param {number} at @param {number} trap @param {number} [frequency]  a dword, zero-extended
+ */
+export function queryPerformanceFrequencyCode64(at, trap,
+    frequency = Number(PERFORMANCE_FREQUENCY))
+{
+    const slow = 19;
+    return new Uint8Array([
+        0x48, 0x85, 0xc9,                                            // test rcx, rcx
+        0x74, slow - 5,                                              // jz slow
+        0xb8, ...dword(frequency),                                   // mov eax, frequency
+        0x48, 0x89, 0x01,                                            // mov [rcx], rax
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc3,                                                        // ret
+        // slow: (19)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * GetTickCount's x86-64: the block's word, read through an absolute address.
+ *
+ * @param {number} block  below 4 GiB
+ */
+export function tickCountCode64(block){
+    return new Uint8Array([
+        0x8b, 0x04, 0x25, ...dword(block + CLOCK.TICKS),             // mov eax, [block+ticks]
+        0xc3,                                                        // ret
     ]);
 }
 
@@ -511,29 +788,36 @@ export function queryPerformanceFrequencyCode(at, trap, frequency = Number(PERFO
  * 16.8 million calls a run, four of every five crossings into the host; on
  * another executor each waited for the process's executor to answer.
  *
+ * SleepEx(0, FALSE) is the same call (its page: not alertable, it is Sleep) and
+ * answers zero, which eax then holds: a .NET runtime yields with it, thousands
+ * of times a second in a game's frame. An alertable one is the host's, which
+ * has the thread's queued routines to run.
+ *
  *     mov eax, [esp+4]        ; dwMilliseconds
- *     test eax, eax
+ *     test eax, eax           ; SleepEx: or eax, [esp+8], bAlertable
  *     jnz slow
  *     cmp dword [word], 0     ; threads ready with no executor
  *     jne slow
- *     ret 4
+ *     ret 4                   ; SleepEx: ret 8
  *   slow:
  *     jmp trap
  *
  * @param {number} at    Where the code lands, for the jump to the trap.
- * @param {number} trap  The host's Sleep.
+ * @param {number} trap  The host's Sleep, or its SleepEx.
  * @param {number} word  The kernel's count of threads waiting to run.
+ * @param {boolean} [ex]  SleepEx's two arguments rather than Sleep's one.
  */
-export function sleepCode(at, trap, word){
-    const slow = 20;
+export function sleepCode(at, trap, word, ex = false){
+    const test = ex ? [0x0b, 0x44, 0x24, 0x08] : [0x85, 0xc0];
+    const slow = 18 + test.length;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
-        0x85, 0xc0,                                                  // test eax, eax
-        0x75, slow - 8,                                              // jnz slow
+        ...test,
+        0x75, slow - 6 - test.length,                                // jnz slow
         0x83, 0x3d, ...dword(word), 0x00,                            // cmp dword [word], 0
-        0x75, slow - 17,                                             // jne slow
-        0xc2, 0x04, 0x00,                                            // ret 4
-        // slow: (20)
+        0x75, 3,                                                     // jne slow
+        0xc2, ex ? 0x08 : 0x04, 0x00,                                // ret
+        // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
@@ -562,6 +846,7 @@ export function tickCountCode(block){
  * @param {ProcessHost} host
  */
 export function createProcessFunctions(host){
+    const width = pointerWidth(host.pointerSize);
     const performanceFrequency = host.performanceFrequency ?? Number(PERFORMANCE_FREQUENCY);
     if (!Number.isInteger(performanceFrequency) || performanceFrequency < 1
         || performanceFrequency > 0xffffffff)
@@ -569,6 +854,11 @@ export function createProcessFunctions(host){
         throw new Error(`kernel32: the performance frequency is a whole number of ticks `
             + `from 1 to 4294967295 a second, not ${performanceFrequency}`);
     }
+    // Time-stamp ticks a count, where they are a whole number: the counter's
+    // guest code then reads rdtsc (`queryPerformanceCounterTscCode`), else the block.
+    const perCount = (host.timeStampMhz ?? 0) * 1_000_000 / performanceFrequency;
+    const timeStampPerCount = Number.isInteger(perCount) && perCount >= 1
+        && perCount <= 0xffffffff ? perCount : 0;
     /**
      * Slot bookkeeping is process-wide, the values in them are not.
      *
@@ -580,6 +870,10 @@ export function createProcessFunctions(host){
      * @type {(number | null)[]}
      */
     const slots = new Array(TLS_SLOTS).fill(null);
+    // Index 0 is taken before the program runs and never handed out, so it
+    // reads as zero in every thread until a program writes it, as Windows
+    // answers TlsGetValue(0): the system's own libraries hold it there.
+    slots[0] = 0;
     let generation = 0;
 
     const memory = {
@@ -591,8 +885,26 @@ export function createProcessFunctions(host){
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
-    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+    // The thread block at the process's width: the last error's offset, and
+    // TlsSlots', a pointer each.
+    const blocks = blockLayouts(host.pointerSize);
+    const { stateOf, setError, lastErrorOf } = host.threadState
+        ?? createThreadState(host.currentThread, memory, blocks.teb);
     const processors = host.processors ?? createProcessors();
+
+    /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */
+    const processorsIn = group=>{
+        const wanted = group & 0xffff;
+        if (wanted !== ALL_PROCESSOR_GROUPS && wanted !== 0)
+        {
+            setError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return processors.count();
+    };
+
+    /** SetProcessPriorityBoost's setting. */
+    let priorityBoostDisabled = false;
 
     /** The process's place in the shutdown order, which it may move. */
     const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
@@ -635,8 +947,8 @@ export function createProcessFunctions(host){
             }
             const base = (asked & FROM_ADDRESS) !== 0
                 ? (host.moduleContaining?.(name >>> 0) ?? 0) >>> 0
-                : host.moduleHandle((name >>> 0) === 0 ? null : read(name >>> 0)) >>> 0;
-            host.writeMemory(out >>> 0, Uint8Array.from(dword(base)));
+                : host.moduleHandle((name >>> 0) === 0 ? null : read(wholeAddress(name))) >>> 0;
+            host.writeMemory(wholeAddress(out), Uint8Array.from(dword(base)));
             if (base === 0)
             {
                 setError(ERROR_MOD_NOT_FOUND);
@@ -681,9 +993,14 @@ export function createProcessFunctions(host){
             handler: args=>table.TlsSetValue.handler(args),
         });
         /** @param {(at: number) => Uint8Array} code */
+        // Where the machine's memory has no room, none is placed: the export
+        // stays its host handler.
         const place = code=>{
             const at = allocate(code(0).length);
-            host.writeMemory(at, code(at));
+            if (at !== 0)
+            {
+                host.writeMemory(at, code(at));
+            }
             return at;
         };
         fastPaths = {
@@ -846,45 +1163,59 @@ export function createProcessFunctions(host){
             host.writeMemory(at, code(at, trap));
             return at;
         };
+        const long = host.pointerSize === 8;
         clocks = {
             counter: place('<performance-counter>', 'QueryPerformanceCounter',
-                (at, trap)=>queryPerformanceCounterCode(at, trap, block)),
+                (at, trap)=>(long ? queryPerformanceCounterCode64 : queryPerformanceCounterCode)(
+                    at, trap, block, timeStampPerCount)),
             frequency: place('<performance-frequency>', 'QueryPerformanceFrequency',
-                (at, trap)=>queryPerformanceFrequencyCode(at, trap, performanceFrequency)),
-            ticks: place('<tick-count>', 'GetTickCount', ()=>tickCountCode(block)),
+                (at, trap)=>(long ? queryPerformanceFrequencyCode64
+                    : queryPerformanceFrequencyCode)(at, trap, performanceFrequency)),
+            ticks: place('<tick-count>', 'GetTickCount',
+                ()=>(long ? tickCountCode64 : tickCountCode)(block)),
         };
         return clocks;
     };
 
-    /** Where Sleep's guest code went, once placed. @type {number | null} */
-    let sleepAt = null;
+    /** Where Sleep's guest code went, and SleepEx's, once placed. @type {Map<string, number>} */
+    const sleepAt = new Map();
+    /** The word of the kernel's both read, once asked for. @type {number | null} */
+    let readyWord = null;
     /**
-     * Sleep's guest code and the word of the kernel's it reads, placed on the
-     * first bind (`sleepCode`).
+     * Sleep's guest code, or SleepEx's, and the word of the kernel's it reads,
+     * placed on the first bind (`sleepCode`).
      *
      * @param {import('./sync.js').GuestBuilder} builder
+     * @param {{ argBytes: number, handler: (args: number[]) => any } | null} [ex]  SleepEx's
+     *     entry, which is another module's (the alertable waits'); absent, Sleep
      */
-    const placedSleep = builder=>{
-        if (sleepAt !== null)
+    const placedSleep = (builder, ex = null)=>{
+        const name = ex ? 'KERNEL32.dll!SleepEx' : 'KERNEL32.dll!Sleep';
+        const already = sleepAt.get(name);
+        if (already !== undefined)
         {
-            return sleepAt;
+            return already;
         }
-        const trap = builder.register('KERNEL32.dll!Sleep', {
-            argBytes: table.Sleep.argBytes,
+        const entry = ex ?? table.Sleep;
+        const trap = builder.register(name, {
+            argBytes: entry.argBytes,
             /** @param {number[]} args */
-            handler: args=>table.Sleep.handler(args),
+            handler: args=>entry.handler(args),
         });
         const allocate = host.allocateCode ?? host.allocate;
         if (!host.allocate || !allocate || !host.readyWord)
         {
-            sleepAt = trap;
+            sleepAt.set(name, trap);
             return trap;
         }
-        const word = host.allocate(4);
-        const at = allocate(sleepCode(0, trap, word).length);
-        host.writeMemory(at, sleepCode(at, trap, word));
-        host.readyWord(word);
-        sleepAt = at;
+        if (readyWord === null)
+        {
+            readyWord = host.allocate(4);
+            host.readyWord(readyWord);
+        }
+        const at = allocate(sleepCode(0, trap, readyWord, ex !== null).length);
+        host.writeMemory(at, sleepCode(at, trap, readyWord, ex !== null));
+        sleepAt.set(name, at);
         return at;
     };
 
@@ -902,16 +1233,17 @@ export function createProcessFunctions(host){
         ? {
             /** @param {import('./sync.js').GuestBuilder} builder */
             guest: builder=>placedClocks(builder)[which],
+            // Its x86-64 in a 64-bit process, placed the same way.
+            guestLong: true,
         }
         : {});
 
     /**
-     * The running thread's array, when `slot` is one of the slots it holds:
-     * there the array is the value's one record, which the guest-side paths
-     * and the compiler's own `fs:[0x2c]` sequence read and write without
-     * asking. Zero past the array, or for a thread with no block -- a build
-     * with no process blocks assembled keeps every value here, which is what
-     * the tests drive.
+     * The running thread's TlsSlots, when `slot` is one of those its block
+     * holds: there the block is the value's one record, which the guest-side
+     * paths read and write without asking. Zero past them, or for a thread
+     * with no block -- a build with no process blocks assembled keeps every
+     * value here, which is what the tests drive.
      *
      * @param {number} slot
      */
@@ -921,7 +1253,7 @@ export function createProcessFunctions(host){
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;
 
     /**
-     * Clears a slot of the array in every thread's block, or in the running
+     * Clears a slot in every thread's block, or in the running
      * thread's alone where the host cannot name the others.
      *
      * @param {number} index  Below TLS_SLOTS_IN_BLOCK.
@@ -932,17 +1264,17 @@ export function createProcessFunctions(host){
             const block = blockFor(index);
             if (block !== 0)
             {
-                memory.writeU32(block + index * 4, 0);
+                host.writeMemory(block + index * width.size, width.bytes(0));
             }
             return;
         }
         for (const thread of host.allThreads())
         {
             const teb = thread.tebAddress ?? 0;
-            const block = teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+            const block = teb === 0 ? 0 : teb + blocks.teb.TLS_SLOTS;
             if (block !== 0)
             {
-                memory.writeU32(block + index * 4, 0);
+                host.writeMemory(block + index * width.size, width.bytes(0));
             }
         }
     };
@@ -956,7 +1288,7 @@ export function createProcessFunctions(host){
 
     /** @param {number} address */
     const readU32 = address=>new DataView(
-        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+        host.readMemory(address, 4).buffer).getUint32(0, true);
 
     const told = host.version ?? DEFAULT_VERSION;
 
@@ -1015,9 +1347,9 @@ export function createProcessFunctions(host){
      * @param {number[]} args @param {boolean} wide
      */
     const verify = ([pointer, typeMask, maskLow, maskHigh], wide)=>{
-        const at = pointer >>> 0;
+        const at = wholeAddress(pointer);
         const extended = host.readMemory(
-            at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8).slice();
+            at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8);
         const fields = new DataView(extended.buffer);
         const answer = verifyVersion(told, {
             major: readU32(at + 4),
@@ -1043,7 +1375,7 @@ export function createProcessFunctions(host){
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
      *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
-     *     code?: () => Uint8Array }>}
+     *     code?: () => Uint8Array, quadwords?: number[], sizes?: number[], returns?: string }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -1072,6 +1404,31 @@ export function createProcessFunctions(host){
             handler: ()=>host.currentThread().id >>> 0,
             /** @param {import('./sync.js').GuestBuilder} builder */
             guest: builder=>placed(builder).getCurrentThreadId,
+        },
+
+        /**
+         * VOID GetCurrentThreadStackLimits(PULONG_PTR LowLimit, PULONG_PTR HighLimit)
+         *
+         * The running stack's whole span, from the thread block: the bottom
+         * of its reservation and its base - a fiber's while one runs.
+         */
+        GetCurrentThreadStackLimits: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([low, high])=>{
+                const teb = host.currentThread().tebAddress >>> 0;
+                const long = host.pointerSize === 8;
+                /** @param {number} at */
+                const read = at=>(long
+                    ? new DataView(host.readMemory(at, 8).buffer).getBigUint64(0, true)
+                    : BigInt(memory.readU32(at)));
+                /** @param {number} at @param {bigint} value */
+                const write = (at, value)=>(long ? writeU64(at, value)
+                    : memory.writeU32(at, Number(value)));
+                write(wholeAddress(low), read(teb + blocks.teb.DEALLOCATION_STACK));
+                write(wholeAddress(high), read(teb + blocks.teb.STACK_BASE));
+                return 0;
+            },
         },
 
         /** DWORD GetCurrentProcessId(VOID) */
@@ -1115,28 +1472,30 @@ export function createProcessFunctions(host){
 
         /** HMODULE GetModuleHandleA(LPCSTR lpModuleName) */
         GetModuleHandleA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readCString(pointer >>> 0, MAX_MODULE_NAME)),
+                : host.readCString(wholeAddress(pointer), WHOLE_NAME)),
         },
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
         GetModuleHandleW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readWideString?.(pointer >>> 0, MAX_MODULE_NAME) ?? ''),
+                : host.readWideString?.(wholeAddress(pointer), WHOLE_NAME * 2) ?? ''),
         },
 
         /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
-        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, MAX_MODULE_NAME)),
+        GetModuleHandleExA: moduleHandleEx(pointer=>host.readCString(pointer, WHOLE_NAME)),
 
         /** BOOL GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE *phModule) */
         GetModuleHandleExW: moduleHandleEx(pointer=>
-            host.readWideString?.(pointer, MAX_MODULE_NAME) ?? ''),
+            host.readWideString?.(pointer, WHOLE_NAME * 2) ?? ''),
 
         /**
          * BOOL GetSystemPowerStatus(LPSYSTEM_POWER_STATUS lpSystemPowerStatus)
@@ -1148,12 +1507,12 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>{
-                if ((status >>> 0) === 0)
+                if (wholeAddress(status) === 0)
                 {
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(status >>> 0,
+                host.writeMemory(wholeAddress(status),
                     Uint8Array.of(1, 128, 255, 0, ...dword(0xffffffff), ...dword(0xffffffff)));
                 return 1;
             },
@@ -1172,18 +1531,43 @@ export function createProcessFunctions(host){
             code: ()=>Uint8Array.from([0xb8, ...dword(table.GetVersion.handler()), 0xc3]),
         },
 
+        /**
+         * BOOL GetProductInfo(DWORD dwOSMajorVersion, DWORD dwOSMinorVersion,
+         *   DWORD dwSpMajorVersion, DWORD dwSpMinorVersion, PDWORD pdwReturnedProductType)
+         *
+         * The edition the machine is, for any system from Vista on that the
+         * caller names; one before Vista had no editions, so it is
+         * PRODUCT_UNDEFINED and FALSE, as is every question on a machine that
+         * is older itself.
+         */
+        GetProductInfo: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([major, , , , out])=>{
+                const PRODUCT_UNDEFINED = 0;
+                if (wholeAddress(out) === 0)
+                {
+                    return 0;
+                }
+                const known = (major >>> 0) >= 6 && told.edition !== undefined;
+                host.writeMemory(wholeAddress(out),
+                    Uint8Array.from(dword(known ? told.edition ?? 0 : PRODUCT_UNDEFINED)));
+                return known ? 1 : 0;
+            },
+        },
+
         /** BOOL GetVersionExA(LPOSVERSIONINFOA lpVersionInformation) */
         GetVersionExA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>versionEx(pointer >>> 0, false),
+            handler: ([pointer])=>versionEx(wholeAddress(pointer), false),
         },
 
         /** BOOL GetVersionExW(LPOSVERSIONINFOW lpVersionInformation) */
         GetVersionExW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>versionEx(pointer >>> 0, true),
+            handler: ([pointer])=>versionEx(wholeAddress(pointer), true),
         },
 
         /**
@@ -1192,6 +1576,7 @@ export function createProcessFunctions(host){
          */
         VerifyVersionInfoA: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: args=>verify(args, false),
         },
@@ -1202,6 +1587,7 @@ export function createProcessFunctions(host){
          */
         VerifyVersionInfoW: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: args=>verify(args, true),
         },
@@ -1213,6 +1599,7 @@ export function createProcessFunctions(host){
         ...setRegisters ? {
             VerSetConditionMask: {
                 argBytes: 16,
+                quadwords: [0],
                 /** @param {number[]} args */
                 handler: ([low, high, typeMask, condition])=>{
                     const mask = setCondition(BigInt(low >>> 0) | BigInt(high >>> 0) << 32n,
@@ -1234,6 +1621,23 @@ export function createProcessFunctions(host){
             ...clockGuest('ticks'),
         },
 
+        /**
+         * ULONGLONG GetTickCount64(VOID)
+         *
+         * The same milliseconds since boot, which never wrap: a quadword, in
+         * EDX:EAX for a 32-bit caller and RAX for a 64-bit one.
+         */
+        ...setRegisters ? {
+            GetTickCount64: {
+                argBytes: 0,
+                handler: ()=>{
+                    const ticks = BigInt(Math.floor(host.now()));
+                    setRegisters({ edx: Number(ticks >> 32n & 0xffffffffn) });
+                    return Number(ticks & 0xffffffffn);
+                },
+            },
+        } : {},
+
         /** VOID GetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime) */
         GetSystemTimeAsFileTime: {
             argBytes: 4,
@@ -1241,10 +1645,38 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 const units = (BigInt(Math.floor(host.systemTimeMs())) + FILETIME_EPOCH_MS)
                     * 10_000n;
-                writeU64(pointer >>> 0, units);
+                writeU64(wholeAddress(pointer), units);
                 return 0;
             },
         },
+
+        /**
+         * VOID GetSystemTimePreciseAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
+         *
+         * The same time at the best resolution the system has: the guest's
+         * wall clock to the hundred nanoseconds it carries, where
+         * GetSystemTimeAsFileTime's moves a millisecond at a time - a caller
+         * spinning until the precise time changes sees it change by less than
+         * a millisecond, as on Windows.
+         */
+        GetSystemTimePreciseAsFileTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.systemTimeMs() * 10_000))
+                    + FILETIME_EPOCH_MS * 10_000n);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL PrefetchVirtualMemory(HANDLE hProcess, ULONG_PTR NumberOfEntries,
+         *     PWIN32_MEMORY_RANGE_ENTRY VirtualAddresses, ULONG Flags)
+         *
+         * A hint that the ranges will be read soon. Every page of a process is
+         * in memory here already, so there is nothing to bring in: TRUE.
+         */
+        PrefetchVirtualMemory: { argBytes: 16, handler: ()=>1 },
 
         /**
          * BOOL GetSystemTimeAdjustment(PDWORD lpTimeAdjustment, PDWORD lpTimeIncrement,
@@ -1264,7 +1696,7 @@ export function createProcessFunctions(host){
                 {
                     if ((pointer >>> 0) !== 0)
                     {
-                        host.writeMemory(pointer >>> 0, Uint8Array.of(value & 0xff,
+                        host.writeMemory(wholeAddress(pointer), Uint8Array.of(value & 0xff,
                             value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
                     }
                 }
@@ -1277,10 +1709,41 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, nextCount());
+                writeU64(wholeAddress(pointer), nextCount());
                 return 1;
             },
             ...clockGuest('counter'),
+        },
+
+        /**
+         * BOOL QueryUnbiasedInterruptTime(PULONGLONG), and the Precise form
+         * (which returns nothing): the time since boot in 100-nanosecond
+         * units, with no suspended time to leave out -- this machine is never
+         * suspended. No place to write it is ERROR_INVALID_PARAMETER.
+         */
+        QueryUnbiasedInterruptTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if (wholeAddress(pointer) === 0)
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
+                return 1;
+            },
+        },
+        QueryUnbiasedInterruptTimePrecise: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) !== 0)
+                {
+                    writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
+                }
+                return 0;
+            },
         },
 
         /** BOOL QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency) */
@@ -1288,7 +1751,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, BigInt(performanceFrequency));
+                writeU64(wholeAddress(pointer), BigInt(performanceFrequency));
                 return 1;
             },
             ...clockGuest('frequency'),
@@ -1310,7 +1773,7 @@ export function createProcessFunctions(host){
                 // Object(h, 0) then Sleep(0), round and round -- spun out its
                 // whole turn while the thread it waited for stood in the queue:
                 // millions of calls a second, and a world loading at a crawl.
-                const wait = milliseconds >>> 0;
+                const wait = wholeAddress(milliseconds);
                 if (wait === 0)
                 {
                     return host.yieldTurn?.() ? host.park() : 0;
@@ -1322,6 +1785,13 @@ export function createProcessFunctions(host){
                 ? {
                     /** @param {import('./sync.js').GuestBuilder} builder */
                     guest: builder=>placedSleep(builder),
+                    /**
+                     * SleepEx's, for the entry the alertable waits made.
+                     *
+                     * @param {import('./sync.js').GuestBuilder} builder
+                     * @param {{ argBytes: number, handler: (args: number[]) => any }} entry
+                     */
+                    guestEx: (builder, entry)=>placedSleep(builder, entry),
                 }
                 : {},
         },
@@ -1345,6 +1815,41 @@ export function createProcessFunctions(host){
         },
 
         /**
+         * BOOL SetProcessPriorityBoost(HANDLE hProcess, BOOL bDisablePriorityBoost)
+         * BOOL GetProcessPriorityBoost(HANDLE hProcess, PBOOL pDisablePriorityBoost)
+         *
+         * The process's setting is also every thread's: setting it sets each
+         * thread's, and a thread may then set its own back without changing
+         * the process's. Like the thread's, it changes nothing a thread can
+         * measure here, and reads back as it was set.
+         */
+        SetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, disable])=>{
+                priorityBoostDisabled = (disable >>> 0) !== 0;
+                for (const thread of host.allThreads?.() ?? [host.currentThread()])
+                {
+                    thread.priorityBoostDisabled = priorityBoostDisabled;
+                }
+                return 1;
+            },
+        },
+        GetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    setError(ERROR_NOACCESS);
+                    return 0;
+                }
+                memory.writeU32(wholeAddress(out), priorityBoostDisabled ? 1 : 0);
+                return 1;
+            },
+        },
+
+        /**
          * BOOL GetProcessAffinityMask(HANDLE hProcess, PDWORD_PTR lpProcessAffinityMask,
          *                             PDWORD_PTR lpSystemAffinityMask)
          *
@@ -1356,17 +1861,43 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, processMask, systemMask])=>{
-                if ((processMask >>> 0) !== 0)
+                // DWORD_PTRs: a quadword each in a 64-bit process.
+                if (wholeAddress(processMask) !== 0)
                 {
-                    memory.writeU32(processMask >>> 0, processors.processMask());
+                    host.writeMemory(wholeAddress(processMask),
+                        width.bytes(processors.processMask()));
                 }
-                if ((systemMask >>> 0) !== 0)
+                if (wholeAddress(systemMask) !== 0)
                 {
-                    memory.writeU32(systemMask >>> 0, processors.systemMask());
+                    host.writeMemory(wholeAddress(systemMask),
+                        width.bytes(processors.systemMask()));
                 }
                 return 1;
             },
         },
+
+        /**
+         * DWORD GetActiveProcessorCount(WORD GroupNumber)
+         * DWORD GetMaximumProcessorCount(WORD GroupNumber)
+         * WORD GetActiveProcessorGroupCount(VOID)
+         * WORD GetMaximumProcessorGroupCount(VOID)
+         *
+         * One group of every processor the machine has. ALL_PROCESSOR_GROUPS
+         * counts them all; a group that is not there is 0 and
+         * ERROR_INVALID_PARAMETER.
+         */
+        GetActiveProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetMaximumProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetActiveProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
+        GetMaximumProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
 
         /**
          * BOOL SetProcessAffinityMask(HANDLE hProcess, DWORD_PTR dwProcessAffinityMask)
@@ -1408,6 +1939,7 @@ export function createProcessFunctions(host){
          */
         SetProcessWorkingSetSize: {
             argBytes: 12,
+            sizes: [1, 2],
             handler: ()=>1,
         },
 
@@ -1450,13 +1982,13 @@ export function createProcessFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([level, flags])=>{
-                if ((level >>> 0) === 0 || (flags >>> 0) === 0)
+                if (wholeAddress(level) === 0 || wholeAddress(flags) === 0)
                 {
                     setError(ERROR_NOACCESS);
                     return 0;
                 }
-                memory.writeU32(level >>> 0, shutdown.level);
-                memory.writeU32(flags >>> 0, shutdown.flags);
+                memory.writeU32(wholeAddress(level), shutdown.level);
+                memory.writeU32(wholeAddress(flags), shutdown.flags);
                 return 1;
             },
         },
@@ -1472,13 +2004,13 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, minimum, maximum])=>{
-                if ((minimum >>> 0) !== 0)
+                if (wholeAddress(minimum) !== 0)
                 {
-                    memory.writeU32(minimum >>> 0, 50 * 4096);
+                    memory.writeU32(wholeAddress(minimum), 50 * 4096);
                 }
-                if ((maximum >>> 0) !== 0)
+                if (wholeAddress(maximum) !== 0)
                 {
-                    memory.writeU32(maximum >>> 0, 345 * 4096);
+                    memory.writeU32(wholeAddress(maximum), 345 * 4096);
                 }
                 return 1;
             },
@@ -1533,6 +2065,7 @@ export function createProcessFunctions(host){
 
         /** LPVOID TlsGetValue(DWORD dwTlsIndex) */
         TlsGetValue: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([index])=>{
@@ -1549,7 +2082,7 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    return memory.readU32(block + slot * 4);
+                    return memory.readU32(block + slot * width.size);
                 }
                 const entry = stateOf().tls.get(slot);
                 return entry && entry.generation === slots[slot] ? entry.value : 0;
@@ -1572,49 +2105,15 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    memory.writeU32(block + slot * 4, value >>> 0);
+                    host.writeMemory(block + slot * width.size, width.bytes(value));
                     return 1;
                 }
                 stateOf().tls.set(slot, {
                     generation: /** @type {number} */ (slots[slot]),
-                    value: value >>> 0,
+                    value: wholeAddress(value),
                 });
                 return 1;
             },
-            /** @param {import('./sync.js').GuestBuilder} builder */
-            guest: builder=>placed(builder).tlsSetValue,
-        },
-
-        // Fibre-local storage is thread-local storage on a machine with no
-        // fibres, which is this one: a fibre is a thread the program schedules
-        // itself, and without one there is exactly one fibre per thread. A C
-        // runtime looks these up at run time and falls back to the Tls pair
-        // when they are absent -- but it looks them up on every start, and a
-        // fallback path is a path fewer programs have exercised.
-        //
-        // The callback FlsAlloc takes is not called. It runs when a fibre ends,
-        // and nothing here ends one.
-        /** DWORD FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback) */
-        FlsAlloc: { argBytes: 4, handler: ()=>table.TlsAlloc.handler([]) },
-        /** BOOL FlsFree(DWORD dwFlsIndex) */
-        FlsFree: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: args=>table.TlsFree.handler(args),
-        },
-        /** PVOID FlsGetValue(DWORD dwFlsIndex) */
-        FlsGetValue: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: args=>table.TlsGetValue.handler(args),
-            /** @param {import('./sync.js').GuestBuilder} builder */
-            guest: builder=>placed(builder).tlsGetValue,
-        },
-        /** BOOL FlsSetValue(DWORD dwFlsIndex, PVOID lpFlsData) */
-        FlsSetValue: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: args=>table.TlsSetValue.handler(args),
             /** @param {import('./sync.js').GuestBuilder} builder */
             guest: builder=>placed(builder).tlsSetValue,
         },
@@ -1635,9 +2134,10 @@ export function createProcessFunctions(host){
          * run, so the identity is guest code, with no crossing.
          */
         EncodePointer: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>pointer >>> 0,
+            handler: ([pointer])=>wholeAddress(pointer),
             code: ()=>Uint8Array.from(POINTER_AS_IS),
         },
         DecodePointer: {
@@ -1658,5 +2158,28 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>pointer >>> 0,
         },
     };
+    // At 64 bits the same routines in x86-64 (`long`), a routine that hands
+    // a call to the host jumping to the export's own trap.
+    /**
+     * @param {string} name
+     * @param {() => { code: Uint8Array, jump: number }} make
+     */
+    const longWithTrap = (name, make)=>(
+        /** @type {{ register: (trap: any) => number, jump: (at: number, target: number) => void }} */
+        builder)=>{
+        const { code, jump } = make();
+        builder.jump(jump, builder.register(table[name]));
+        return code;
+    };
+    Object.assign(table.GetLastError, { long: getLastErrorLongCode });
+    Object.assign(table.SetLastError, { long: setLastErrorLongCode });
+    Object.assign(table.GetCurrentThreadId, { long: getCurrentThreadIdLongCode });
+    Object.assign(table.TlsGetValue, { long: longWithTrap('TlsGetValue', tlsGetValueLongCode) });
+    Object.assign(table.TlsSetValue, { long: longWithTrap('TlsSetValue', tlsSetValueLongCode) });
+    for (const name of ['EncodePointer', 'DecodePointer', 'EncodeSystemPointer',
+        'DecodeSystemPointer'])
+    {
+        Object.assign(table[name], { long: ()=>Uint8Array.from(LONG_POINTER_AS_IS) });
+    }
     return table;
 }

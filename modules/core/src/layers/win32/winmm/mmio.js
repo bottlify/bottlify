@@ -40,6 +40,14 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 const MMIO_READ = 0x0000;
 const MMIO_WRITE = 0x0001;
@@ -248,14 +256,7 @@ const encode = (text, wide)=>{
     {
         return encodeAnsi(`${text}\0`);
     }
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const unit = text.charCodeAt(index);
-        bytes[index * 2] = unit & 0xff;
-        bytes[index * 2 + 1] = unit >>> 8;
-    }
-    return bytes;
+    return utf16z(text);
 };
 
 /**
@@ -869,7 +870,7 @@ export function createMmioFunctions(host){
      * @returns {number | Promise<number>}
      */
     const openFile = (path, info, flags, wide)=>{
-        const record = info >>> 0;
+        const record = wholeAddress(info);
         /** @param {number} error */
         const refuse = error=>{
             if (record !== 0)
@@ -1084,7 +1085,7 @@ export function createMmioFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [fcc, proc, flags])=>{
-            const code = fcc >>> 0;
+            const code = wholeAddress(fcc);
             const installed = procedures.get(code)?.entry ?? 0;
             if (((flags >>> 0) & MMIO_INSTALLPROC) !== 0)
             {
@@ -1093,7 +1094,7 @@ export function createMmioFunctions(host){
                     return 0;
                 }
                 procedures.set(code, { entry: proc >>> 0, wide });
-                return proc >>> 0;
+                return wholeAddress(proc);
             }
             if (((flags >>> 0) & MMIO_REMOVEPROC) !== 0)
             {
@@ -1113,7 +1114,7 @@ export function createMmioFunctions(host){
      * @returns {number | Promise<number>}
      */
     const renameFile = (from, to, info, wide)=>{
-        const record = info >>> 0;
+        const record = wholeAddress(info);
         const { fcc, memory, named, procedure } = procedureFor(from, record, wide);
         if (procedure === null)
         {
@@ -1218,7 +1219,7 @@ export function createMmioFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : host.readCString(name >>> 0, MAX_PATH),
+                wholeAddress(name) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
                 info, flags >>> 0, false),
         },
 
@@ -1227,7 +1228,8 @@ export function createMmioFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : wideAt(name >>> 0, MAX_PATH), info, flags >>> 0,
+                wholeAddress(name) === 0 ? null : wideAt(wholeAddress(name),
+                    MAX_PATH), info, flags >>> 0,
                 true),
         },
 
@@ -1306,7 +1308,7 @@ export function createMmioFunctions(host){
                 return then(take(file, count | 0), bytes=>{
                     if (bytes.length > 0)
                     {
-                        host.writeMemory(buffer >>> 0, bytes);
+                        host.writeMemory(wholeAddress(buffer), bytes);
                     }
                     return bytes.length;
                 });
@@ -1332,7 +1334,7 @@ export function createMmioFunctions(host){
                 {
                     return 0;
                 }
-                return put(file, host.readMemory(buffer >>> 0, count | 0).slice());
+                return put(file, host.readMemory(wholeAddress(buffer), count | 0).slice());
             },
         },
 
@@ -1395,7 +1397,7 @@ export function createMmioFunctions(host){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                host.writeMemory(record >>> 0, describe(file));
+                host.writeMemory(wholeAddress(record), describe(file));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1408,7 +1410,7 @@ export function createMmioFunctions(host){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                adopt(file, record >>> 0);
+                adopt(file, wholeAddress(record));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1436,15 +1438,15 @@ export function createMmioFunctions(host){
                 {
                     return MMIOERR_UNBUFFERED;
                 }
-                if ((record >>> 0) !== 0)
+                if (wholeAddress(record) !== 0)
                 {
-                    adopt(file, record >>> 0);
+                    adopt(file, wholeAddress(record));
                 }
                 /** @param {number} result */
                 const answer = result=>{
-                    if ((record >>> 0) !== 0)
+                    if (wholeAddress(record) !== 0)
                     {
-                        host.writeMemory(record >>> 0, describe(file));
+                        host.writeMemory(wholeAddress(record), describe(file));
                     }
                     return result;
                 };
@@ -1492,7 +1494,8 @@ export function createMmioFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 return then(flush(file), written=>(written
-                    ? replaceBuffer(file, pointer >>> 0, count >>> 0) : MMIOERR_CANNOTWRITE));
+                    ? replaceBuffer(file, wholeAddress(pointer),
+                        count >>> 0) : MMIOERR_CANNOTWRITE));
             },
         },
 
@@ -1550,14 +1553,14 @@ export function createMmioFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 const find = (flags >>> 0) & (MMIO_FINDCHUNK | MMIO_FINDRIFF | MMIO_FINDLIST);
-                const wanted = find === 0 ? 0 : field(info >>> 0,
+                const wanted = find === 0 ? 0 : field(wholeAddress(info),
                     find === MMIO_FINDCHUNK ? MMCKINFO_CKID : MMCKINFO_FCCTYPE);
                 // Nothing lies past the parent's data: a search that ran on
                 // would read the next sibling's chunks as the parent's.
-                const limit = (parent >>> 0) === 0
+                const limit = wholeAddress(parent) === 0
                     ? Number.MAX_SAFE_INTEGER
-                    : field(parent >>> 0, MMCKINFO_DWDATAOFFSET)
-                        + field(parent >>> 0, MMCKINFO_CKSIZE);
+                    : field(wholeAddress(parent), MMCKINFO_DWDATAOFFSET)
+                        + field(wholeAddress(parent), MMCKINFO_CKSIZE);
 
                 /** @param {number} value */
                 const is = value=>wanted === 0 || value === wanted;
@@ -1570,7 +1573,7 @@ export function createMmioFunctions(host){
                     const notFound = seen=>{
                         if (seen)
                         {
-                            writeChunk(info >>> 0, seen, 0);
+                            writeChunk(wholeAddress(info), seen, 0);
                         }
                         return MMIOERR_CHUNKNOTFOUND;
                     };
@@ -1593,7 +1596,7 @@ export function createMmioFunctions(host){
                         {
                             return walk(header.data + header.size + (header.size & 1), header);
                         }
-                        writeChunk(info >>> 0, header, 0);
+                        writeChunk(wholeAddress(info), header, 0);
                         return then(moveTo(file, header.after), ()=>MMSYSERR_NOERROR);
                     });
                 };
@@ -1618,7 +1621,7 @@ export function createMmioFunctions(host){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                const record = info >>> 0;
+                const record = wholeAddress(info);
                 return drive((function* (){
                     const data = field(record, MMCKINFO_DWDATAOFFSET);
                     if ((field(record, MMCKINFO_DWFLAGS) & MMIO_DIRTY) === 0)
@@ -1664,7 +1667,7 @@ export function createMmioFunctions(host){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                const record = info >>> 0;
+                const record = wholeAddress(info);
                 const kind = (flags >>> 0) & (MMIO_CREATERIFF | MMIO_CREATELIST);
                 const id = kind === MMIO_CREATERIFF ? FOURCC_RIFF
                     : kind === MMIO_CREATELIST ? FOURCC_LIST : field(record, MMCKINFO_CKID);
@@ -1729,15 +1732,16 @@ export function createMmioFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([from, to, info])=>renameFile(
-                (from >>> 0) === 0 ? '' : host.readCString(from >>> 0, MAX_PATH),
-                (to >>> 0) === 0 ? '' : host.readCString(to >>> 0, MAX_PATH), info, false),
+                wholeAddress(from) === 0 ? '' : host.readCString(wholeAddress(from), WHOLE_NAME),
+                wholeAddress(to) === 0 ? '' : host.readCString(wholeAddress(to),
+                    WHOLE_NAME), info, false),
         },
         mmioRenameW: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([from, to, info])=>renameFile(
-                (from >>> 0) === 0 ? '' : wideAt(from >>> 0, MAX_PATH),
-                (to >>> 0) === 0 ? '' : wideAt(to >>> 0, MAX_PATH), info, true),
+                wholeAddress(from) === 0 ? '' : wideAt(wholeAddress(from), MAX_PATH),
+                wholeAddress(to) === 0 ? '' : wideAt(wholeAddress(to), MAX_PATH), info, true),
         },
 
         /**
@@ -1749,8 +1753,8 @@ export function createMmioFunctions(host){
         mmioStringToFOURCCA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? ''
-                : host.readCString(text >>> 0, 4), ((flags >>> 0) & MMIO_TOUPPER) !== 0),
+            handler: ([text, flags])=>fourccOf(wholeAddress(text) === 0 ? ''
+                : host.readCString(wholeAddress(text), 4), ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
 
         /**
@@ -1762,7 +1766,8 @@ export function createMmioFunctions(host){
         mmioStringToFOURCCW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? '' : wideAt(text >>> 0, 4),
+            handler: ([text,
+                flags])=>fourccOf(wholeAddress(text) === 0 ? '' : wideAt(wholeAddress(text), 4),
                 ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
 
@@ -1774,7 +1779,7 @@ export function createMmioFunctions(host){
          * finding and removing answer the one installed, or null. A file
          * already open keeps the procedure it was opened through.
          */
-        mmioInstallIOProcA: install(false),
+        mmioInstallIOProcA: { ...install(false), returns: 'pointer' },
         mmioInstallIOProcW: install(true),
     };
 }

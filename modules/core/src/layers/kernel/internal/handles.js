@@ -42,11 +42,11 @@ export const FIRST_HANDLE = 0x40;
  *
  * @param {Object} [options]
  * @param {number} [options.limit]  Highest handle to issue before reusing closed ones.
- * @param {{ opened: (handle: number, type: string, object: any) => void,
+ * @param {{ opened: (handle: number, type: string, object: any, access: number | null) => void,
  *     closed: (handle: number) => void }} [options.watch]  told of every open and close
  */
 export function createHandleTable({ limit = 0x40000000, watch } = {}){
-    /** @type {Map<number, { type: string, object: any }>} */
+    /** @type {Map<number, { type: string, object: any, access: number | null }>} */
     const entries = new Map();
     /** @type {number[]} */
     const free = [];
@@ -58,10 +58,17 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
         /**
          * @param {string} type    Kind of object, for diagnostics and type checks.
          * @param {any} object
+         * @param {number | null} [access]  The rights the handle was granted, where
+         *        it was opened with fewer than all of them; null for every right.
          * @returns {number} the handle
          */
-        open(type, object){
+        open(type, object, access = null){
             let handle;
+            // Past the numbers a handle was adopted at.
+            while (next <= limit && entries.has(next))
+            {
+                next += HANDLE_STRIDE;
+            }
             if (next <= limit)
             {
                 handle = next;
@@ -75,10 +82,38 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             {
                 throw new Error('Handle table exhausted');
             }
-            entries.set(handle, { type, object });
+            entries.set(handle, { type, object, access });
             opened++;
-            watch?.opened(handle, type, object);
+            watch?.opened(handle, type, object, access);
             return handle;
+        },
+
+        /**
+         * Files an object under a handle number chosen elsewhere: a handle a
+         * child inherits has its parent's number, which the parent told it on
+         * its command line, and the rights its parent's handle was granted.
+         * Refused for a number taken or not a handle's.
+         *
+         * @param {number} handle @param {string} type @param {any} object
+         * @param {number | null} [access]  null for all of them
+         * @returns {boolean}
+         */
+        adopt(handle, type, object, access = null){
+            if (entries.has(handle) || handle < FIRST_HANDLE || handle % HANDLE_STRIDE !== 0
+                || handle > limit)
+            {
+                return false;
+            }
+            // A number closed before is free no longer.
+            const freed = free.indexOf(handle);
+            if (freed >= 0)
+            {
+                free.splice(freed, 1);
+            }
+            entries.set(handle, { type, object, access });
+            opened++;
+            watch?.opened(handle, type, object, access);
+            return true;
         },
 
         /**
@@ -134,6 +169,16 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
         },
 
         /**
+         * The rights a handle was granted: null for every right, as every
+         * handle but one opened by name with fewer has.
+         *
+         * @param {number} handle @returns {number | null}
+         */
+        access(handle){
+            return entries.get(handle)?.access ?? null;
+        },
+
+        /**
          * Closes a handle. Closing one that is not open is an error the caller
          * turns into a failure code, not something to ignore: a guest that closes
          * twice is usually a guest whose bookkeeping has already gone wrong.
@@ -154,10 +199,10 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             return entry.object;
         },
 
-        /** @returns {{ handle: number, type: string, object: any }[]} */
+        /** @returns {{ handle: number, type: string, object: any, access: number | null }[]} */
         list(){
             return [...entries.entries()].map(([handle, entry])=>({ handle, type: entry.type,
-                object: entry.object }));
+                object: entry.object, access: entry.access }));
         },
 
         diagnostics(){

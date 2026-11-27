@@ -23,13 +23,15 @@
  * the NDR buffer the generated code marshaled, through an IRpcChannelBuffer
  * of this file's.
  *
- * The model is COM's single-threaded apartment, which is what every program
- * of this era that serves a class out of process uses. An object belongs to
- * the thread that exported it, and a call for it runs there and nowhere
- * else: posted to the apartment's hidden window, the way ole32 posts an
- * incoming call, so it runs when that thread's message loop dispatches it --
- * or, when the thread is itself waiting on a call it made, inside that wait,
- * as COM's modal loop runs one.
+ * An object exported from a single-threaded apartment belongs to the thread
+ * that exported it, and a call for it runs there and nowhere else: posted to
+ * the apartment's hidden window, the way ole32 posts an incoming call, so it
+ * runs when that thread's message loop dispatches it -- or, when the thread
+ * is itself waiting on a call it made, inside that wait, as COM's modal loop
+ * runs one. An object of the multithreaded apartment belongs to no thread:
+ * its calls run on a thread of the process's own that waits for them, as
+ * COM's RPC threads run them, so a server whose threads all sit in a wait
+ * still answers.
  *
  * The table of registered class objects is the service control manager's:
  * one for the whole run, shared by every process in it. A process that asks
@@ -43,12 +45,15 @@
  * ends gives back everything its proxies held, as COM's rundown does.
  */
 
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { IUNKNOWN_METHODS } from './objects.js';
 import {
-    IID_ICLASSFACTORY, IID_IUNKNOWN, argumentBytes, createInterfaceCatalog,
-    marshalReply, marshalRequest, unmarshalReply, unmarshalRequest,
+    IID_ICLASSFACTORY, IID_ITYPEINFO, IID_IUNKNOWN, argumentBytes, argumentSlots,
+    createInterfaceCatalog, layoutOf, marshalReply, marshalRequest, unmarshalReply,
+    unmarshalRequest, unsupportedAt,
 } from '../oleaut32/marshal.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 /**
@@ -99,9 +104,16 @@ const SLOT_ERROR_SET_SOURCE = 4;
 const SLOT_ERROR_SET_HELP_CONTEXT = 7;
 const GUID_BYTES = 16;
 
-/** RPCOLEMESSAGE, as a channel reads and writes it. */
-const MESSAGE = Object.freeze({
-    DATA_REPRESENTATION: 4, BUFFER: 8, BUFFER_LENGTH: 12, METHOD: 16, SIZE: 44,
+/**
+ * RPCOLEMESSAGE, as a channel reads and writes it, by the width of a pointer:
+ * the reserved pointer first, then the representation, the buffer's pointer,
+ * its length and the method, five reserved pointers and the flags.
+ */
+const MESSAGES = Object.freeze({
+    4: Object.freeze({ DATA_REPRESENTATION: 4, BUFFER: 8, BUFFER_LENGTH: 12, METHOD: 16,
+        SIZE: 44 }),
+    8: Object.freeze({ DATA_REPRESENTATION: 8, BUFFER: 16, BUFFER_LENGTH: 24, METHOD: 28,
+        SIZE: 80 }),
 });
 
 /** Little-endian, ASCII, IEEE: what every buffer here is in. */
@@ -137,9 +149,10 @@ const MSHCTX_LOCAL = 0;
 
 /**
  * @typedef {Object} ClassTableHooks
- * @property {(request: { command: string, clsid: string }, process: unknown)
- *     => { exited: Promise<unknown> } | null} [launch]
- *     Starts a server as a process beside the caller's, or says it cannot.
+ * @property {(request: { command: string, clsid: string, service?: string },
+ *     process: unknown) => { exited: Promise<unknown> } | null} [launch]
+ *     Starts a server as a process beside the caller's, or says it cannot: a
+ *     service (`service`, a class's LocalService) as the manager starts it.
  */
 
 /**
@@ -180,6 +193,49 @@ export function createClassTable(hooks = {}){
      */
     const running = new Map();
     let nextRunning = 1;
+    /**
+     * The services whose processes the manager started, by name in lower
+     * case: the promise of each one's end. A service runs once, whoever asks
+     * for it -- StartService, or COM for a class it serves.
+     *
+     * @type {Map<string, Promise<unknown>>}
+     */
+    const services = new Map();
+    /** The ends of services held for processes across links (`holdService`). @type {Map<string, () => void>} */
+    const heldServices = new Map();
+    /**
+     * A service's process: the one standing, or one started now with `launch`
+     * (the table's own by default) on the service's command line. Null when
+     * there is none and none can be started.
+     *
+     * @param {{ command: string, service: string, clsid?: string }} request
+     * @param {unknown} process  the process that asked
+     * @param {ClassTableHooks['launch']} [launch]
+     * @returns {{ exited: Promise<unknown>, fresh: boolean } | null}
+     */
+    const serviceProcess = (request, process, launch = hooks.launch)=>{
+        const key = String(request.service).toLowerCase();
+        const standing = services.get(key);
+        if (standing)
+        {
+            return { exited: standing, fresh: false };
+        }
+        const launched = launch?.({ command: request.command, service: request.service,
+            clsid: request.clsid ?? '' }, process) ?? null;
+        if (!launched)
+        {
+            return null;
+        }
+        services.set(key, launched.exited);
+        const forget = ()=>{
+            if (services.get(key) === launched.exited)
+            {
+                services.delete(key);
+            }
+        };
+        launched.exited.then(forget, forget);
+        return { exited: launched.exited, fresh: true };
+    };
     /**
      * The RPC endpoints processes listen on -- the protocol sequence and the
      * endpoint a server named, as one key -- and the endpoint of the process
@@ -305,6 +361,60 @@ export function createClassTable(hooks = {}){
             }
         },
 
+        /** A service's process, standing or started now (`serviceProcess`). */
+        serviceProcess,
+
+        /**
+         * StartService's answer: 'started', 'running' for a service whose
+         * process stands, null when no process can be started.
+         *
+         * @param {{ command: string, service: string }} request @param {unknown} process
+         * @returns {'started' | 'running' | null}
+         */
+        startService(request, process){
+            const one = serviceProcess(request, process);
+            return one === null ? null : one.fresh ? 'started' : 'running';
+        },
+
+        /** Whether a service's process the manager started stands. @param {string} name */
+        serviceRunning: name=>services.has(String(name).toLowerCase()),
+
+        /**
+         * A service a process across a link started beside itself, where the run
+         * had no room for it: standing from now until `releaseService`. False
+         * when it stands already.
+         *
+         * @param {string} name
+         */
+        holdService(name){
+            const key = String(name).toLowerCase();
+            if (services.has(key))
+            {
+                return false;
+            }
+            /** @type {() => void} */
+            let end = ()=>{};
+            const exited = new Promise(resolve=>{
+                end = ()=>resolve(undefined);
+            });
+            heldServices.set(key, end);
+            services.set(key, exited);
+            exited.then(()=>{
+                if (services.get(key) === exited)
+                {
+                    services.delete(key);
+                }
+            });
+            return true;
+        },
+
+        /** The process of a service `holdService` stood for is gone. @param {string} name */
+        releaseService(name){
+            const key = String(name).toLowerCase();
+            heldServices.get(key)?.();
+            heldServices.delete(key);
+        },
+
         /**
          * Waits until someone registers the class, or until `ended` settles:
          * the server that was started for it gave up without registering.
@@ -419,9 +529,13 @@ export function createClassTable(hooks = {}){
  * @property {unknown} process   Whatever names this process to the table's hooks.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its interface pointers, vtable
+ *     slots, out-parameters and structures are quadwords.
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
- * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} call
- * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown) => Promise<number>} call
+ *     An argument past 4 GiB a bigint, as the bridge takes a quadword.
+ * @property {(entry: number, args: (number | bigint)[], thread: unknown) => Promise<number>}
+ *     [guardedCall]
  *     The same inside a frame that takes whatever the routine raises and
  *     answers RPC_E_SERVERFAULT: how a stub runs a method, so that an
  *     exception in it fails the call rather than the server.
@@ -431,11 +545,11 @@ export function createClassTable(hooks = {}){
  * @property {{ allocate: (bytes: Uint8Array) => number, free: (bstr: number) => unknown }} bstr
  * @property {{ create: (vt: number, bounds: { elements: number, lower: number }[]) => number,
  *     destroy: (array: number) => unknown }} [safeArray]
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *         => number | Promise<number>,
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *         thread: unknown) => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
- *     A hidden window on the calling thread, whose procedure is `handler`,
- *     and a way to post to it.
+ *     A hidden window on `thread`, whose procedure is `handler`, and a way to
+ *     post to it.
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *     What a thread waiting on a call it made runs meanwhile, besides the
  *     calls into its apartment: the messages other threads sent it and its
@@ -444,6 +558,10 @@ export function createClassTable(hooks = {}){
  *     The apartment a thread is in: two threads of one apartment call an
  *     object directly, any other through a proxy. Absent, every thread is in
  *     the same one.
+ * @property {(body: (thread: unknown) => Promise<void>) => boolean} [worker]
+ *     Starts a thread of this process whose whole work is `body`, given that
+ *     thread: where the multithreaded apartment's calls run. False when none
+ *     could be started.
  * @property {import('../oleaut32/marshal.js').CatalogHost} catalog
  * @property {{ factory: (iid: string, thread: unknown) => Promise<number> }} [proxyStub]
  *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
@@ -463,29 +581,51 @@ export function createClassTable(hooks = {}){
  * @param {RemotingHost} host
  */
 export function createRemoting(host){
-    const catalog = createInterfaceCatalog(host.catalog);
     const report = (/** @type {string} */ detail)=>host.divergence?.('COM', detail);
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
+
+    /**
+     * The process's width: every interface pointer, vtable slot, out-pointer
+     * and structure field that holds one is a pointer of it, and so is each
+     * slot of a 64-bit call's arguments.
+     */
+    const width = layoutOf(host.pointerSize);
+    const POINTER = width.pointer;
+    const MESSAGE = MESSAGES[POINTER];
+    const catalog = createInterfaceCatalog({ ...host.catalog, pointerSize: POINTER });
+    const { read: readPointer, write: writePointer } = pointerIo({
+        readMemory: (address, length)=>host.readMemory(wholeAddress(address), length),
+        writeMemory: (address, bytes)=>host.writeMemory(wholeAddress(address), bytes),
+    }, POINTER);
+    /** An argument to a guest call: a pointer past 4 GiB goes whole. @param {number | bigint} value */
+    const guestValue = value=>(typeof value === 'number' && value >= 2 ** 32 ? BigInt(value)
+        : value);
+    /** @param {number} pointer @param {number} slot */
+    const methodAt = (pointer, slot)=>readPointer(readPointer(pointer) + slot * POINTER);
 
     /**
      * A method of a guest object, called on the thread whose host call is
      * waiting.
      *
-     * @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread
+     * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
+     * @param {unknown} thread
      */
-    const callSlot = (pointer, slot, args, thread)=>
-        host.call(readU32(readU32(pointer) + slot * 4), [pointer >>> 0, ...args], thread);
-    /** @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread */
+    const callSlot = (pointer, slot, args, thread)=>host.call(methodAt(pointer, slot),
+        [pointer, ...args].map(guestValue), thread);
+    /**
+     * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
+     * @param {unknown} thread
+     */
     const callGuarded = (pointer, slot, args, thread)=>(host.guardedCall ?? host.call)(
-        readU32(readU32(pointer) + slot * 4), [pointer >>> 0, ...args], thread);
+        methodAt(pointer, slot), [pointer, ...args].map(guestValue), thread);
 
     /**
      * QueryInterface on a guest object, the IID and the answer in task memory
@@ -495,15 +635,16 @@ export function createRemoting(host){
      * @returns {Promise<{ hr: number, pointer: number }>}
      */
     const queryGuest = async(pointer, iid, thread)=>{
-        const block = host.heap.allocate(20);
+        const block = host.heap.allocate(POINTER + GUID_BYTES);
         if (block === 0)
         {
             return { hr: E_OUTOFMEMORY, pointer: 0 };
         }
-        writeU32(block, 0);
-        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(iid)));
-        const hr = (await callSlot(pointer, SLOT_QUERY_INTERFACE, [block + 4, block], thread)) | 0;
-        const found = readU32(block);
+        writePointer(block, 0);
+        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        const hr = (await callSlot(pointer, SLOT_QUERY_INTERFACE, [block + POINTER, block],
+            thread)) | 0;
+        const found = readPointer(block);
         host.heap.free(block);
         return { hr, pointer: hr < 0 ? 0 : found };
     };
@@ -520,6 +661,9 @@ export function createRemoting(host){
      * @property {Map<string, number>} stubs  The MIDL stubs its calls go through.
      * @property {number} refs
      * @property {unknown} thread
+     * @property {boolean} [borrowed]
+     *     A registered class object: the registration's count is the one
+     *     CoRegisterClassObject took, and nothing is released for it here.
      */
 
     /** @type {Map<number, Exported>} */
@@ -530,23 +674,88 @@ export function createRemoting(host){
 
     /**
      * @typedef {Object} Apartment
-     * @property {{ message: any, resolve: (reply: any) => void }[]} queue
+     * @property {{ message: any, resolve: (reply: any) => void, since: number }[]} queue
      * @property {number} window
      * @property {Promise<number> | null} making
      * @property {number} outgoing  Calls this thread is waiting on.
      * @property {(() => void) | null} waiting
      * @property {Set<(reply: any) => void>} running  Answers owed for calls under way.
+     * @property {Set<{ what: string, queuedFor: number, since: number }>} runs
+     *     The same calls, what each is, for `diagnostics`.
      */
 
     /** @type {Map<unknown, Apartment>} */
     const apartments = new Map();
+    /**
+     * Calls this process sent and has no answer to yet, for `diagnostics`: a
+     * caller stuck on another process names the process and the call here.
+     *
+     * @type {Set<{ target: number, what: string, since: number }>}
+     */
+    const inFlight = new Set();
+    /**
+     * What a thread making a call is doing before it sends it, for
+     * `diagnostics`: marshaling, and within it the step it waits on -- its
+     * apartment's window being made, or a method of the interface it exports
+     * running in the guest. A call stuck there has sent nothing and waits on
+     * nothing another process holds.
+     *
+     * @type {Map<unknown, { what: string, since: number }>}
+     */
+    const stages = new Map();
+    /**
+     * Notes `what` as the step `thread` is on until `pending` settles, then
+     * the step it was on before.
+     *
+     * @template T
+     * @param {unknown} thread @param {string} what @param {Promise<T> | T} pending
+     * @returns {Promise<T>}
+     */
+    const during = async(thread, what, pending)=>{
+        const before = stages.get(thread);
+        stages.set(thread, { what, since: Date.now() });
+        try
+        {
+            return await pending;
+        }
+        finally
+        {
+            if (before)
+            {
+                stages.set(thread, before);
+            }
+            else
+            {
+                stages.delete(thread);
+            }
+        }
+    };
+    /** @param {unknown} thread */
+    const threadName = thread=>String(/** @type {any} */ (thread)?.name
+        ?? /** @type {any} */ (thread)?.id ?? 'thread');
+    /** @param {any} message */
+    const callName = message=>(message?.kind === 'call' || message?.kind === 'ndr'
+        ? `${message.kind} ${message.iid ?? ''} #${message.slot ?? message.method ?? ''}`
+        : String(message?.kind ?? '?'));
+    /** The multithreaded apartment's calls, which its worker runs. */
+    const MTA_CALLS = Symbol('multithreaded apartment');
+    /** @type {boolean | null} Null until the first call for the apartment. */
+    let workerStarted = null;
+    /**
+     * Whether a call for an object `thread` exported runs on the worker:
+     * only where threads have apartments and something can start one.
+     *
+     * @param {unknown} thread
+     */
+    const servedByWorker = thread=>host.worker !== undefined && host.apartmentOf !== undefined
+        && host.apartmentOf(thread) !== thread;
     /** @param {unknown} thread @returns {Apartment} */
     const apartment = thread=>{
         let found = apartments.get(thread);
         if (!found)
         {
             found = { queue: [], window: 0, making: null, outgoing: 0, waiting: null,
-                running: new Set() };
+                running: new Set(), runs: new Set() };
             apartments.set(thread, found);
         }
         return found;
@@ -560,33 +769,45 @@ export function createRemoting(host){
      */
     const ensureWindow = async thread=>{
         const home = apartment(thread);
-        if (home.window !== 0 || !host.apartmentWindow)
+        // The multithreaded apartment has no window: its calls are the
+        // worker's (`enqueue`), as COM's RPC threads serve it. One made as a
+        // thread of it ran its creation's messages on that thread wherever it
+        // was - in a Sleep inside a call it served.
+        if (home.window !== 0 || !host.apartmentWindow || servedByWorker(thread) && startWorker())
         {
             return;
         }
+        // Made as `thread`'s: this runs past the awaits of a call being
+        // marshaled, where the thread the bridge has on the processor is
+        // another's, and a window made as that one's was sent its creation's
+        // messages across threads to one waiting in no message loop (ngen's
+        // BindToRuntimeWorker, never sent).
         home.making ??= Promise.resolve(host.apartmentWindow.create(message=>{
             if (message !== WM_OLE_CALL)
             {
                 return 0;
             }
             return drain(host.callerThread()).then(()=>0);
-        }));
+        }, thread));
         home.window = (await home.making) >>> 0;
     };
 
     /**
-     * Runs every call waiting for this thread, on it.
+     * Runs every call waiting for an apartment, on `thread`: its own, or the
+     * worker's for the multithreaded one.
      *
-     * @param {unknown} thread
+     * @param {unknown} thread @param {Apartment} [home]
      */
-    const drain = async thread=>{
-        const home = apartment(thread);
+    const drain = async(thread, home = apartment(thread))=>{
         while (home.queue.length > 0)
         {
-            const item = /** @type {{ message: any, resolve: (reply: any) => void }} */ (
+            const item = /** @type {{ message: any, resolve: (reply: any) => void, since: number }} */ (
                 home.queue.shift());
             let reply;
             home.running.add(item.resolve);
+            const run = { what: callName(item.message), queuedFor: Date.now() - item.since,
+                since: Date.now() };
+            home.runs.add(run);
             try
             {
                 reply = await execute(item.message, thread);
@@ -596,8 +817,43 @@ export function createRemoting(host){
                 reply = { hr: RPC_E_SERVERFAULT };
             }
             home.running.delete(item.resolve);
+            home.runs.delete(run);
             item.resolve(reply);
         }
+    };
+
+    /**
+     * The multithreaded apartment's worker, started with its first call: it
+     * runs what is queued, then waits for the next. False when no thread
+     * could be started, and the exporting thread's window is used instead.
+     *
+     * @returns {boolean}
+     */
+    const startWorker = ()=>{
+        if (workerStarted !== null)
+        {
+            return workerStarted;
+        }
+        const home = apartment(MTA_CALLS);
+        workerStarted = host.worker?.(async thread=>{
+            for (;;)
+            {
+                await drain(thread, home);
+                // Looked at and armed in one step: a call queued while the
+                // drain was finishing is not left for a wake nobody sends.
+                if (home.queue.length > 0)
+                {
+                    continue;
+                }
+                await new Promise(resolve=>{
+                    home.waiting = ()=>{
+                        home.waiting = null;
+                        resolve(null);
+                    };
+                });
+            }
+        }) === true;
+        return workerStarted;
     };
 
     /**
@@ -607,8 +863,28 @@ export function createRemoting(host){
      * @returns {Promise<any>}
      */
     const enqueue = (thread, message)=>new Promise(resolve=>{
-        const home = apartment(thread);
-        home.queue.push({ message, resolve });
+        const shared = servedByWorker(thread) && startWorker();
+        const home = apartment(shared ? MTA_CALLS : thread);
+        home.queue.push({ message, resolve, since: Date.now() });
+        if (shared)
+        {
+            home.waiting?.();
+        }
+        else
+        {
+            wake(home);
+        }
+    });
+
+    /**
+     * Has an apartment's own thread run what is queued for it: woken where
+     * it waits in COM's modal loop, sent its window's message where it is
+     * idle; while it waits on a call of its own and is between looks, its
+     * modal loop finds the queue at the next one (`awaitServing`).
+     *
+     * @param {Apartment} home
+     */
+    const wake = home=>{
         if (home.waiting)
         {
             home.waiting();
@@ -620,10 +896,12 @@ export function createRemoting(host){
         else if (home.outgoing === 0)
         {
             report('a call arrived for an apartment with no window to deliver it through');
-            home.queue.pop();
-            resolve({ hr: RPC_E_DISCONNECTED });
+            for (const item of home.queue.splice(0))
+            {
+                item.resolve({ hr: RPC_E_DISCONNECTED });
+            }
         }
-    });
+    };
 
     /**
      * A BSTR's text, read where it lies, and the BSTR given back.
@@ -662,20 +940,20 @@ export function createRemoting(host){
         {
             return null;
         }
-        const block = host.heap.allocate(GUID_BYTES + 4);
+        const block = host.heap.allocate(GUID_BYTES + POINTER);
         if (block === 0)
         {
             await callSlot(pointer, SLOT_RELEASE, [], thread);
             return null;
         }
-        host.writeMemory(block, new Uint8Array(GUID_BYTES + 4));
+        host.writeMemory(block, new Uint8Array(GUID_BYTES + POINTER));
         await callSlot(pointer, SLOT_ERROR_GET_GUID, [block], thread);
         const guid = formatGuid(host.readMemory(block, GUID_BYTES).slice());
         /** @param {number} slot */
         const text = async slot=>{
-            writeU32(block + GUID_BYTES, 0);
+            writePointer(block + GUID_BYTES, 0);
             const hr = (await callSlot(pointer, slot, [block + GUID_BYTES], thread)) | 0;
-            return hr < 0 ? null : takeBstr(readU32(block + GUID_BYTES));
+            return hr < 0 ? null : takeBstr(readPointer(block + GUID_BYTES));
         };
         const source = await text(SLOT_ERROR_GET_SOURCE);
         const description = await text(SLOT_ERROR_GET_DESCRIPTION);
@@ -703,30 +981,26 @@ export function createRemoting(host){
         }
         const strings = [values.source, values.description, values.helpFile]
             .map(value=>(value ?? ''));
-        const size = GUID_BYTES + 4 + strings.reduce((sum, value)=>sum + (value.length + 1) * 2, 0);
+        const size = POINTER + GUID_BYTES
+            + strings.reduce((sum, value)=>sum + (value.length + 1) * 2, 0);
         const block = host.heap.allocate(size);
         if (block === 0)
         {
             return;
         }
-        writeU32(block, 0);
-        if ((host.errors.create(block) | 0) < 0 || readU32(block) === 0)
+        writePointer(block, 0);
+        if ((host.errors.create(block) | 0) < 0 || readPointer(block) === 0)
         {
             host.heap.free(block);
             return;
         }
-        const creator = readU32(block);
-        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(values.guid)));
-        await callSlot(creator, SLOT_ERROR_SET_GUID, [block + 4], thread);
-        let at = block + 4 + GUID_BYTES;
+        const creator = readPointer(block);
+        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(values.guid)));
+        await callSlot(creator, SLOT_ERROR_SET_GUID, [block + POINTER], thread);
+        let at = block + POINTER + GUID_BYTES;
         for (const [index, value] of strings.entries())
         {
-            const bytes = new Uint8Array((value.length + 1) * 2);
-            for (let unit = 0; unit < value.length; unit++)
-            {
-                bytes[unit * 2] = value.charCodeAt(unit) & 0xff;
-                bytes[unit * 2 + 1] = value.charCodeAt(unit) >>> 8;
-            }
+            const bytes = utf16z(value);
             host.writeMemory(at, bytes);
             await callSlot(creator, SLOT_ERROR_SET_SOURCE + index, [at], thread);
             at += bytes.length;
@@ -788,6 +1062,14 @@ export function createRemoting(host){
         finally
         {
             home.outgoing--;
+            // A call that came in as the answer did was queued for this loop,
+            // which has ended without running it: it is the idle apartment's
+            // now. Left in the queue it was never run, and its caller waited
+            // for good (ngen's BindToRuntimeWorker into mscorsvw.exe).
+            if (home.queue.length > 0)
+            {
+                wake(home);
+            }
         }
     };
 
@@ -819,7 +1101,16 @@ export function createRemoting(host){
         {
             return { hr: RPC_E_DISCONNECTED, disconnected: true };
         }
-        return endpoint.deliver(message);
+        const sent = { target, what: callName(message), since: Date.now() };
+        inFlight.add(sent);
+        try
+        {
+            return await endpoint.deliver(message);
+        }
+        finally
+        {
+            inFlight.delete(sent);
+        }
     };
 
     /**
@@ -830,6 +1121,7 @@ export function createRemoting(host){
      * @returns {import('../oleaut32/marshal.js').MarshalSide}
      */
     const sideOn = thread=>({
+        pointerSize: POINTER,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         allocate: bytes=>host.heap.allocate(bytes),
@@ -867,8 +1159,9 @@ export function createRemoting(host){
             }
             return { endpoint: proxy.endpoint, object: proxy.object };
         }
-        await ensureWindow(thread);
-        const identity = await queryGuest(pointer, IID_IUNKNOWN, thread);
+        await during(thread, 'apartment window', ensureWindow(thread));
+        const identity = await during(thread, 'QueryInterface(IUnknown) in the guest',
+            queryGuest(pointer, IID_IUNKNOWN, thread));
         const unknown = identity.hr < 0 ? pointer >>> 0 : identity.pointer;
         let entry = exported.get(byIdentity.get(unknown) ?? 0);
         if (!entry)
@@ -880,11 +1173,13 @@ export function createRemoting(host){
         }
         else if (identity.hr >= 0)
         {
-            await callSlot(unknown, SLOT_RELEASE, [], thread);
+            await during(thread, 'Release in the guest',
+                callSlot(unknown, SLOT_RELEASE, [], thread));
         }
         if (identity.hr < 0)
         {
-            await callSlot(unknown, SLOT_ADD_REF, [], thread);
+            await during(thread, 'AddRef in the guest',
+                callSlot(unknown, SLOT_ADD_REF, [], thread));
         }
         if (!entry.interfaces.has(iid))
         {
@@ -915,6 +1210,10 @@ export function createRemoting(host){
             return;
         }
         exported.delete(entry.id);
+        if (entry.borrowed)
+        {
+            return;
+        }
         byIdentity.delete(entry.unknown);
         // A stub holds the object too, and is the DLL's to release.
         for (const stub of entry.stubs.values())
@@ -995,10 +1294,11 @@ export function createRemoting(host){
         {
             return existing;
         }
+        /** @type {any[]} */
         const methods = [
-            { name: 'QueryInterface', argBytes: 12,
+            { name: 'QueryInterface', argBytes: 12, addresses: [1, 2],
                 invoke: (/** @type {Proxy} */ proxy, /** @type {number[]} */ [riid, out])=>
-                    queryProxy(proxy, riid >>> 0, out >>> 0) },
+                    queryProxy(proxy, wholeAddress(riid), wholeAddress(out)) },
             { name: 'AddRef', argBytes: 4,
                 invoke: (/** @type {Proxy} */ proxy)=>++proxy.local },
             { name: 'Release', argBytes: 4,
@@ -1012,7 +1312,8 @@ export function createRemoting(host){
                 methods.push({ name: `slot ${slot}`, argBytes: 4, invoke: ()=>E_NOTIMPL });
                 continue;
             }
-            methods.push({ name: method.name, argBytes: argumentBytes(method),
+            methods.push({ name: method.name, argBytes: argumentBytes(method, width),
+                ...argumentSlots(method, width),
                 invoke: (/** @type {Proxy} */ proxy, /** @type {number[]} */ args)=>
                     callProxy(proxy, iid, description.name, method, [...args]) });
         }
@@ -1063,19 +1364,20 @@ export function createRemoting(host){
             return false;
         }
         const outer = host.vtables.publish(proxy, IID_IUNKNOWN) >>> 0;
-        const block = outer === 0 ? 0 : host.heap.allocate(24);
+        // The proxy buffer's and the interface's out-pointers, then the IID.
+        const block = outer === 0 ? 0 : host.heap.allocate(2 * POINTER + GUID_BYTES);
         if (block === 0)
         {
             return false;
         }
         proxyAt.set(outer, proxy);
-        writeU32(block, 0);
-        writeU32(block + 4, 0);
-        host.writeMemory(block + 8, /** @type {Uint8Array} */ (parseGuid(iid)));
-        const hr = (await callSlot(factory, SLOT_CREATE_PROXY, [outer, block + 8, block, block + 4],
-            thread)) | 0;
-        const buffer = readU32(block);
-        const pointer = readU32(block + 4);
+        writePointer(block, 0);
+        writePointer(block + POINTER, 0);
+        host.writeMemory(block + 2 * POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        const hr = (await callSlot(factory, SLOT_CREATE_PROXY,
+            [outer, block + 2 * POINTER, block, block + POINTER], thread)) | 0;
+        const buffer = readPointer(block);
+        const pointer = readPointer(block + POINTER);
         host.heap.free(block);
         if (hr < 0 || buffer === 0 || pointer === 0)
         {
@@ -1125,6 +1427,7 @@ export function createRemoting(host){
         {
             name: 'GetBuffer',
             argBytes: 12,
+            addresses: [1, 2],
             /** HRESULT GetBuffer(RPCOLEMESSAGE *pMessage, REFIID riid) */
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
                 const buffer = host.heap.allocate(Math.max(readU32(message + MESSAGE.BUFFER_LENGTH),
@@ -1133,7 +1436,7 @@ export function createRemoting(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(message + MESSAGE.BUFFER, buffer);
+                writePointer(message + MESSAGE.BUFFER, buffer);
                 writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
                 return S_OK;
             },
@@ -1141,22 +1444,24 @@ export function createRemoting(host){
         {
             name: 'SendReceive',
             argBytes: 12,
+            addresses: [1, 2],
             /** HRESULT SendReceive(RPCOLEMESSAGE *pMessage, ULONG *pStatus) */
             invoke: (/** @type {{ side: ChannelSide }} */ channel,
                 /** @type {number[]} */ [message, status])=>channel.side
-                ? sendReceive(channel.side, message >>> 0, status >>> 0)
+                ? sendReceive(channel.side, wholeAddress(message), wholeAddress(status))
                 : E_NOTIMPL,
         },
         {
             name: 'FreeBuffer',
             argBytes: 8,
+            addresses: [1],
             /** HRESULT FreeBuffer(RPCOLEMESSAGE *pMessage) */
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [message])=>{
-                const buffer = readU32(message + MESSAGE.BUFFER);
+                const buffer = readPointer(message + MESSAGE.BUFFER);
                 if (buffer !== 0)
                 {
                     host.heap.free(buffer);
-                    writeU32(message + MESSAGE.BUFFER, 0);
+                    writePointer(message + MESSAGE.BUFFER, 0);
                 }
                 return S_OK;
             },
@@ -1164,15 +1469,16 @@ export function createRemoting(host){
         {
             name: 'GetDestCtx',
             argBytes: 12,
+            addresses: [1, 2],
             /** HRESULT GetDestCtx(DWORD *pdwDestContext, void **ppvDestContext) */
             invoke: (/** @type {any} */ _channel, /** @type {number[]} */ [context, pointer])=>{
-                if ((context >>> 0) !== 0)
+                if (wholeAddress(context) !== 0)
                 {
                     writeU32(context, MSHCTX_LOCAL);
                 }
-                if ((pointer >>> 0) !== 0)
+                if (wholeAddress(pointer) !== 0)
                 {
-                    writeU32(pointer, 0);
+                    writePointer(pointer, 0);
                 }
                 return S_OK;
             },
@@ -1228,7 +1534,7 @@ export function createRemoting(host){
         {
             return RPC_E_DISCONNECTED;
         }
-        const request = readU32(message + MESSAGE.BUFFER);
+        const request = readPointer(message + MESSAGE.BUFFER);
         const bytes = host.readMemory(request, readU32(message + MESSAGE.BUFFER_LENGTH)).slice();
         const reply = await outgoing(thread, proxy.endpoint, { kind: 'ndr', object: proxy.object,
             iid, method: readU32(message + MESSAGE.METHOD), bytes });
@@ -1249,7 +1555,7 @@ export function createRemoting(host){
         }
         host.writeMemory(buffer, answer);
         host.heap.free(request);
-        writeU32(message + MESSAGE.BUFFER, buffer);
+        writePointer(message + MESSAGE.BUFFER, buffer);
         writeU32(message + MESSAGE.BUFFER_LENGTH, answer.length);
         writeU32(message + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
         if (status !== 0)
@@ -1275,16 +1581,16 @@ export function createRemoting(host){
             return known;
         }
         const factory = await host.proxyStub?.factory(iid, thread) ?? 0;
-        const block = factory === 0 ? 0 : host.heap.allocate(20);
+        const block = factory === 0 ? 0 : host.heap.allocate(POINTER + GUID_BYTES);
         if (block === 0)
         {
             return 0;
         }
-        writeU32(block, 0);
-        host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(iid)));
-        const hr = (await callSlot(factory, SLOT_CREATE_STUB, [block + 4, entry.unknown, block],
-            thread)) | 0;
-        const stub = readU32(block);
+        writePointer(block, 0);
+        host.writeMemory(block + POINTER, /** @type {Uint8Array} */ (parseGuid(iid)));
+        const hr = (await callSlot(factory, SLOT_CREATE_STUB,
+            [block + POINTER, entry.unknown, block], thread)) | 0;
+        const stub = readPointer(block);
         host.heap.free(block);
         if (hr < 0 || stub === 0)
         {
@@ -1320,13 +1626,13 @@ export function createRemoting(host){
         host.writeMemory(rpc, new Uint8Array(MESSAGE.SIZE));
         host.writeMemory(request, bytes);
         writeU32(rpc + MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
-        writeU32(rpc + MESSAGE.BUFFER, request);
+        writePointer(rpc + MESSAGE.BUFFER, request);
         writeU32(rpc + MESSAGE.BUFFER_LENGTH, bytes.length);
         writeU32(rpc + MESSAGE.METHOD, message.method);
         const hr = (await callGuarded(stub, SLOT_INVOKE, [rpc, stubChannel.pointer], thread)) | 0;
         // The request stays until the stub is done: what it unmarshaled in
         // place is read from there while the method runs.
-        const replied = readU32(rpc + MESSAGE.BUFFER);
+        const replied = readPointer(rpc + MESSAGE.BUFFER);
         const reply = replied !== request && replied !== 0
             ? host.readMemory(replied, readU32(rpc + MESSAGE.BUFFER_LENGTH)).slice()
             : new Uint8Array(0);
@@ -1383,7 +1689,12 @@ export function createRemoting(host){
         // thread is the nearest to it.
         const here = host.apartmentOf?.(thread) ?? null;
         const home = entry ? host.apartmentOf?.(entry.thread) ?? null : null;
-        if (entry && (home === here || /** @type {any} */ (home)?.multithreaded))
+        // A type description holds no apartment's state, and within a process
+        // is handed over as itself: IDispatch::GetTypeInfo from another
+        // apartment (an InstallScript engine's object, asked on its caller's
+        // thread) answers the same ITypeInfo.
+        if (entry && (home === here || /** @type {any} */ (home)?.multithreaded
+            || iid === IID_ITYPEINFO))
         {
             let pointer = entry.interfaces.get(iid) ?? 0;
             if (pointer === 0)
@@ -1432,7 +1743,7 @@ export function createRemoting(host){
         {
             return E_POINTER;
         }
-        writeU32(out, 0);
+        writePointer(out, 0);
         const iid = formatGuid(host.readMemory(riid, 16));
         if (!proxy.records.has(iid) && !proxy.midl.has(iid))
         {
@@ -1454,7 +1765,7 @@ export function createRemoting(host){
         }
         proxyAt.set(pointer, proxy);
         proxy.local++;
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return S_OK;
     };
 
@@ -1528,10 +1839,10 @@ export function createRemoting(host){
      * @param {number[]} args
      */
     const callProxy = async(proxy, iid, name, method, args)=>{
-        if (method.unsupported)
+        const unsupported = method.unsupported ?? unsupportedAt(method, width);
+        if (unsupported)
         {
-            report(`${name}::${method.name} cannot cross to another process:`
-                + ` ${method.unsupported}`);
+            report(`${name}::${method.name} cannot cross to another process: ${unsupported}`);
             return E_NOTIMPL;
         }
         const thread = host.callerThread();
@@ -1539,7 +1850,8 @@ export function createRemoting(host){
         let request;
         try
         {
-            request = await marshalRequest(side, method, args);
+            request = await during(thread, `marshaling ${method.name}`,
+                marshalRequest(side, method, args));
         }
         catch (e){
             report(`${name}::${method.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1625,12 +1937,13 @@ export function createRemoting(host){
                 {
                     return { hr: factory.hr };
                 }
-                const block = host.heap.allocate(20);
-                writeU32(block, 0);
-                host.writeMemory(block + 4, /** @type {Uint8Array} */ (parseGuid(message.iid)));
+                const block = host.heap.allocate(POINTER + GUID_BYTES);
+                writePointer(block, 0);
+                host.writeMemory(block + POINTER,
+                    /** @type {Uint8Array} */ (parseGuid(message.iid)));
                 const hr = (await callGuarded(factory.pointer, SLOT_CREATE_INSTANCE,
-                    [0, block + 4, block], thread)) | 0;
-                const made = readU32(block);
+                    [0, block + POINTER, block], thread)) | 0;
+                const made = readPointer(block);
                 host.heap.free(block);
                 await callSlot(factory.pointer, SLOT_RELEASE, [], thread);
                 if (hr < 0 || made === 0)
@@ -1649,6 +1962,13 @@ export function createRemoting(host){
                 if (!pointer || !method)
                 {
                     return { hr: E_NOINTERFACE };
+                }
+                const refused = unsupportedAt(method, width);
+                if (refused)
+                {
+                    report(`${description?.name}::${method.name} cannot be called here:`
+                        + ` ${refused}`);
+                    return { hr: E_NOTIMPL };
                 }
                 const side = sideOn(thread);
                 const call = await unmarshalRequest(side, method, message.request);
@@ -1711,9 +2031,17 @@ export function createRemoting(host){
          */
         async registerClass(clsid, object, flags, cookie){
             const thread = host.callerThread();
-            const reference = await exportInterface(object, IID_IUNKNOWN, false, thread);
-            registered.set(cookie, reference.object);
-            host.table.register({ clsid, endpoint: endpointId, object: reference.object, flags,
+            await ensureWindow(thread);
+            // Not exported as a client's reference is: what an activation
+            // hands out is exported then, and goes when that client lets go,
+            // so an idle server holds its class object by the registration's
+            // one count, as ole_server.c counts it.
+            /** @type {Exported} */
+            const entry = { id: nextObject++, unknown: object >>> 0, interfaces: new Map(),
+                stubs: new Map(), refs: 1, thread, borrowed: true };
+            exported.set(entry.id, entry);
+            registered.set(cookie, entry.id);
+            host.table.register({ clsid, endpoint: endpointId, object: entry.id, flags,
                 cookie, suspended: (flags & REGCLS_SUSPENDED) !== 0, used: false });
         },
 
@@ -1827,7 +2155,8 @@ export function createRemoting(host){
          * or started with `command` and waited for.
          *
          * @param {string} clsid @param {string} iid @param {number} out
-         * @param {string | null} command  The server's command line, or null.
+         * @param {string | { command: string, service: string } | null} command  The
+         *        server's command line, or the service that serves it; null for none.
          * @param {'activate' | 'classobject'} kind
          *        An instance, or the class object itself.
          * @returns {Promise<number>}
@@ -1841,11 +2170,17 @@ export function createRemoting(host){
                 {
                     return REGDB_E_CLASSNOTREG;
                 }
-                const launched = host.table.hooks.launch?.({ command, clsid }, host.process)
-                    ?? null;
+                const request = typeof command === 'string' ? { command, clsid }
+                    : { ...command, clsid };
+                // A class's LocalService runs once: one StartService started is
+                // waited on for its registration rather than started again.
+                const launched = 'service' in request && request.service
+                    ? host.table.serviceProcess?.(/** @type {any} */ (request), host.process)
+                        ?? null
+                    : host.table.hooks.launch?.(request, host.process) ?? null;
                 if (!launched)
                 {
-                    report(`the server of ${clsid} (${command}) cannot be started here`);
+                    report(`the server of ${clsid} (${request.command}) cannot be started here`);
                     return CO_E_SERVER_EXEC_FAILURE;
                 }
                 if (!await host.table.whenRegistered(clsid, launched.exited))
@@ -1874,7 +2209,7 @@ export function createRemoting(host){
             {
                 return E_NOINTERFACE;
             }
-            writeU32(out, pointer);
+            writePointer(out, pointer);
             return S_OK;
         },
 
@@ -1948,10 +2283,39 @@ export function createRemoting(host){
             return S_OK;
         },
 
-        diagnostics: ()=>({
-            exported: exported.size,
-            proxies: proxies.size,
-            registered: registered.size,
-        }),
+        diagnostics: ()=>{
+            const queued = [...apartments.values()].flatMap(home=>home.queue);
+            return {
+                exported: exported.size,
+                proxies: proxies.size,
+                registered: registered.size,
+                // Calls from other processes not yet run here: one waiting long is
+                // a caller stuck on this process.
+                queuedCalls: queued.length,
+                oldestQueuedMs: queued.length > 0
+                    ? Date.now() - Math.min(...queued.map(item=>item.since)) : 0,
+                worker: workerStarted,
+                // Each apartment that ever had a call: who runs its calls and
+                // what it is doing now. A call queued where nothing will run
+                // it, or one run for minutes, is the hang read off here.
+                apartments: [...apartments.entries()].map(([key, home])=>({
+                    apartment: key === MTA_CALLS ? 'mta worker' : threadName(key),
+                    window: home.window,
+                    outgoing: home.outgoing,
+                    looking: home.waiting !== null,
+                    queued: home.queue.map(item=>({ what: callName(item.message),
+                        forMs: Date.now() - item.since })),
+                    running: [...home.runs].map(run=>({ what: run.what,
+                        queuedMs: run.queuedFor, forMs: Date.now() - run.since })),
+                })),
+                // Calls being made and not sent yet, by the step each is on.
+                making: [...stages.entries()].map(([thread, stage])=>({
+                    thread: threadName(thread), what: stage.what,
+                    forMs: Date.now() - stage.since })),
+                waitingOn: [...inFlight].map(sent=>({ endpoint: sent.target,
+                    alive: host.table.endpoint(sent.target)?.alive ?? false,
+                    what: sent.what, forMs: Date.now() - sent.since })),
+            };
+        },
     };
 }

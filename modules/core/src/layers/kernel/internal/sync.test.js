@@ -156,6 +156,24 @@ test('a semaphore admits up to its count and refuses beyond it', ()=>{
     assert.equal(sync.diagnostics()[0].state, '0/2', 'the released slot went straight to c');
 });
 
+test('a semaphore wakes its waiters one a count, in the order they queued', ()=>{
+    // The order the itests cannot see from the guest on several executors:
+    // which thread came to the host's queue first is the host's to know.
+    const { scheduler, sync } = setup();
+    const semaphore = sync.createSemaphore({ initial: 0, maximum: 4, name: 'jobs' });
+    const waiters = ['c', 'a', 'd', 'b'].map(thread);
+    for (const one of waiters)
+    {
+        assert.equal(sync.wait(semaphore, one), null);
+    }
+    sync.releaseSemaphore(semaphore);
+    sync.releaseSemaphore(semaphore, 2);
+    sync.releaseSemaphore(semaphore);
+    assert.deepEqual(scheduler.log.filter(line=>line.startsWith('wake')),
+        ['wake c', 'wake a', 'wake d', 'wake b']);
+    assert.equal(sync.diagnostics()[0].state, '0/4', 'every count went to a waiter');
+});
+
 test('a semaphore cannot be released past its maximum', ()=>{
     const { sync } = setup();
     const semaphore = sync.createSemaphore({ initial: 1, maximum: 2 });

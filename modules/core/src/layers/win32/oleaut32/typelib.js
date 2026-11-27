@@ -22,7 +22,7 @@
  * an unrelated table, so both are decoded in exactly one place each.
  */
 
-import { GUID_SIZE, formatGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 
 /** 'MSFT', as the first four bytes read as a little-endian word. */

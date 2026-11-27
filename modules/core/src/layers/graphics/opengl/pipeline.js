@@ -41,6 +41,8 @@ import { lightVertex, normalise } from './lighting.js';
 import { transform } from './matrix.js';
 import { rasterLine, rasterPoint, rasterTriangle, toByte, writeFragment } from './raster.js';
 import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
+import { swizzleTexel } from './objects.js';
+import { stippleKeeps } from './legacy-state.js';
 
 /**
  * @typedef {Object} PipelineVertex
@@ -61,6 +63,14 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  */
 
 /**
+ * What a scene draws with when its draw buffers do not agree: each buffer's
+ * blending and colour mask (red 1, green 2, blue 4, alpha 8). Null when they do.
+ *
+ * @typedef {{ blend: boolean[], masks: number[], functions?: (SceneBlend | null)[] | null }
+ *     | null} PerBuffer
+ */
+
+/**
  * @typedef {Object} SceneUnit
  * @property {number} index  which texture coordinate set it reads
  * @property {import('./objects.js').TextureObject} texture   the object bound,
@@ -69,6 +79,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {boolean} cube
  * @property {number} baseFormat
  * @property {import('./texture.js').SamplerParameters} parameters
+ * @property {boolean} [rectangle]  read at texel coordinates (3.1)
+ * @property {string} [swizzle]  the texture's swizzle (`objects.js` swizzleCode), empty for none
  * @property {import('./texture.js').TextureEnvironment} env
  * @property {ArrayLike<number>} matrix
  * @property {TextureGeneration | null} generation
@@ -127,39 +139,104 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {ArrayLike<number>} projection
  * @property {readonly number[]} viewport   x, y, width, height
  * @property {readonly number[]} depthRange
+ * @property {{ upperLeft: boolean, zeroToOne: boolean }} [clipControl]  glClipControl's
+ *           origin and depth mode (4.5), GL_LOWER_LEFT and GL_NEGATIVE_ONE_TO_ONE when
+ *           absent
  * @property {import('./raster.js').Framebuffer} framebuffer
  * @property {import('./raster.js').Box} scissor
+ * @property {(index: number) => { viewport: readonly number[], depthRange: readonly number[],
+ *     scissor: import('./raster.js').Box }} [viewportAt]  each viewport's rectangles
+ *     (4.1), the first being the three above; read while the draw is recorded
  * @property {readonly (readonly number[])[]} clipPlanes  eye space, enabled only
  * @property {SceneLighting | null} lighting
  * @property {SceneFog | null} fog
  * @property {readonly SceneUnit[]} units  the enabled, complete texture units
  * @property {PipelineVertex} current   the current attributes, for an array that is off
- * @property {{ src: number, dst: number } | null} blend   the factors, when blending is on
+ * @property {SceneBlend | null} blend   the factors and equations, when blending is on
+ * @property {readonly number[]} [blendColor]  GL_BLEND_COLOR
+ * @property {PerBuffer} [perBuffer]  each draw buffer's blending and colour mask, when
+ *           they differ (glEnablei, glColorMaski)
+ * @property {(import('./objects.js').SamplerObject | null)[] | null} [samplers]
+ *           each texture unit's sampler object, whose sampling state stands in for the
+ *           textures' own; null when no unit has one
+ * @property {{ fbo: import('./objects.js').FramebufferObject, width: number,
+ *     height: number } | null} [target]  the framebuffer object drawn into, or the window
+ * @property {import('./objects.js').FramebufferObject | null}
+ *     [readFramebuffer]  the framebuffer object read from, or the window
+ * @property {boolean} [twoSide]  GL_VERTEX_PROGRAM_TWO_SIDE
+ * @property {() => any} [glslState]  what a GLSL program's built-in state uniforms read
  * @property {SceneStencil | null} stencil   when the stencil test is on
  * @property {SceneStencil | null} stencilBack   GL_EXT_stencil_two_side's back-face
  *           record, present exactly when `stencil` is -- and equal to it whenever
  *           two-sided stencil testing (`GL_STENCIL_TEST_TWO_SIDE_EXT`) is off, per the
  *           extension's "front for all fragments" rule for a disabled test
- * @property {{ factor: number, units: number } | null} polygonOffset   when filled
+ * @property {{ words: Uint32Array, key: string } | null} [polygonStipple]  the
+ *           stipple filled polygons are cut by, when it is on (`context-legacy.js`)
+ * @property {{ factor: number, units: number, clamp: number } | null} polygonOffset   when filled
  *           polygons are offset
  * @property {boolean} colourSum
  * @property {{ mode: number, frontIsCcw: boolean } | null} cull
  * @property {boolean} frontIsCcw
  * @property {boolean} flat
+ * @property {boolean} [lastProvokes]  GL_LAST_VERTEX_CONVENTION: a flat value is a
+ *           primitive's last vertex's
  * @property {readonly number[]} polygonMode  front, back
  * @property {number} pointSize
  * @property {{ func: number, reference: number } | null} alphaTest
  * @property {import('./raster.js').FragmentOperations} operations
- * @property {{ vertex: SceneProgram | null, fragment: SceneProgram | null }} programs
- *           the enabled, loaded programs; null per stage when that stage is fixed
+ * @property {{ vertex: SceneProgram | null, fragment: SceneProgram | null,
+ *     glsl?: import('./glsl-link.js').Executable | null }} programs
+ *           the enabled, loaded programs; null per stage when that stage is fixed,
+ *           and the GLSL program in use, which takes the place of both
  * @property {readonly (readonly number[])[]} genericAttribs  the current
  *           generic vertex attribute values, by attribute number
  * @property {readonly (ArrayLike<number> | null)[]} textureMatrices  the texture
  *           matrix of each unit, whether or not it is enabled
  * @property {readonly { twoD: import('./objects.js').TextureObject | null,
- *             cube: import('./objects.js').TextureObject | null }[]} boundTextures
+ *             cube: import('./objects.js').TextureObject | null,
+ *             oneD?: import('./objects.js').TextureObject | null,
+ *             rectangle?: import('./objects.js').TextureObject | null,
+ *             buffer?: import('./objects.js').TextureObject | null,
+ *             twoDMultisample?: import('./objects.js').TextureObject | null,
+ *             twoDMultisampleArray?: import('./objects.js').TextureObject | null }[]}
+ *           boundTextures
  *           what each unit has bound per target, whether or not it is enabled,
  *           which is what a fragment program samples
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [uniformBuffers]  what each uniform buffer
+ *           binding point holds (glBindBufferRange), for a GLSL program's blocks
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [storageBuffers]  what each shader storage
+ *           binding point holds (4.3)
+ * @property {readonly ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *             size: number } | null)[]} [counterBuffers]  what each atomic counter
+ *           buffer binding point holds (4.2)
+ * @property {readonly ({ texture: import('./objects.js').TextureObject | null, level: number,
+ *             layered: boolean, layer: number, access: number, format: number }
+ *             | null)[]} [imageUnits]  what each image unit binds (glBindImageTexture, 4.2)
+ * @property {{ primitive: number, feedback: import('./glsl-link.js').Feedback,
+ *     buffers: ({ buffer: import('./objects.js').BufferObject, offset: number,
+ *     size: number } | null)[], most: number } | null} [feedback]
+ *           what transform feedback captures a draw into, while it does
+ *           (`context-transform-feedback.js` FeedbackSession); the renderer
+ *           adds to `most` the vertices each draw may capture
+ * @property {{ key: string, chosen: Map<string, Map<string, string>> } | null} [subroutines]
+ *           the function each of a GLSL program's subroutine uniforms names, by stage
+ *           (4.0), where the program chose; `key` names the choice
+ * @property {boolean} [discard]  GL_RASTERIZER_DISCARD: the draw rasterizes nothing
+ * @property {{ vertices: number, outer: readonly number[], inner: readonly number[] }
+ *     | null} [patch]  GL_PATCH_VERTICES and the default levels, for a program with
+ *           tessellation shaders (`context-tessellation.js`)
+ */
+
+/**
+ * @typedef {Object} SceneBlend
+ * @property {number} src  the colour's source factor
+ * @property {number} dst
+ * @property {number} [srcAlpha]  the alpha's, when they are separate (OpenGL 1.4)
+ * @property {number} [dstAlpha]
+ * @property {number} [equation]  GL_FUNC_ADD and the others (1.4), the colour's
+ * @property {number} [equationAlpha]
  */
 
 /** Where each attribute sits in the interpolated vector. */
@@ -629,8 +706,15 @@ function shade(scene, fragment){
         }
         else
         {
-            texel = sample2D(
-                unit.images[0], unit.parameters, attributes[at] / q, attributes[at + 1] / q);
+            const image = unit.images[0];
+            // A rectangle's coordinates count texels (3.1 section 3.8.8).
+            const [w, h] = unit.rectangle ? [image.width, image.height] : [1, 1];
+            texel = sample2D(image, unit.parameters, attributes[at] / q / w,
+                attributes[at + 1] / q / h);
+        }
+        if (unit.swizzle)
+        {
+            texel = swizzleTexel(texel, unit.swizzle, 255);
         }
         colour = applyTextureEnvironment(
             unit.env, unit.baseFormat, colour, texel.map(value=>value / 255), primary);
@@ -780,9 +864,19 @@ export function drawPrimitive(scene, mode, vertices){
         }
         else
         {
+            const pattern = scene.polygonStipple;
+            // Rows run down here and the stipple's up from the bottom one.
+            const fill = pattern
+                ? (/** @type {import('./raster.js').Fragment} */ fragment)=>{
+                    if (stippleKeeps(pattern, fragment.x, target.height - 1 - fragment.y))
+                    {
+                        emit(fragment);
+                    }
+                }
+                : emit;
             for (let i = 1; i + 1 < shaded.length; i++)
             {
-                rasterTriangle(target, [shaded[0], shaded[i], shaded[i + 1]], scene.scissor, emit);
+                rasterTriangle(target, [shaded[0], shaded[i], shaded[i + 1]], scene.scissor, fill);
             }
         }
     }

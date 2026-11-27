@@ -145,6 +145,48 @@ test('an uncompressed DDS is named by its masks and read into texels', ()=>{
     assert.equal(readImage(Uint8Array.from([...luminance, 9])).format, FMT.L8);
 });
 
+test('a sixteen-bit luminance DDS is D3DFMT_L16, its texels kept whole', ()=>{
+    // 3DMark06's gloss maps: DDPF_LUMINANCE, sixteen bits, the red mask all of
+    // them. The working form has eight bits a channel, so the level is held as
+    // the file has it for a texture of the same format to take.
+    const header = ddsHeader({ width: 2, height: 1, pfFlags: 0x20000, bits: 16, r: 0xffff });
+    const image = readImage(Uint8Array.from([...header, 0x34, 0x12, 0xff, 0xff]));
+    assert.equal(image.format, FMT.L16);
+    assert.deepEqual(image.levels.map(l=>[l.format, ...l.data]),
+        [[FMT.L16, 0x34, 0x12, 0xff, 0xff]]);
+    const other = ddsHeader({ width: 1, height: 1, pfFlags: 0x20000, bits: 16, r: 0xff00 });
+    assert.throws(()=>readImage(Uint8Array.from([...other, 0, 0])),
+        /pixel format this loader does not know \(flags 0x20000, FourCC 0x0, 16 bits, masks 0xff00/,
+        'another sixteen-bit luminance is named, not taken for L16');
+});
+
+test('a DDS named A16B16G16R16 by its FourCC field keeps its sixteen-bit texels', ()=>{
+    // 3DMark06's Canyon Flight cube maps; the FourCC field carries the
+    // D3DFORMAT number for a format FourCC has no name for.
+    const header = ddsHeader({ width: 1, height: 1, pfFlags: 0x4, fourCC: FMT.A16B16G16R16 });
+    const texel = [1, 2, 3, 4, 5, 6, 7, 8];
+    const image = readImage(Uint8Array.from([...header, ...texel]));
+    assert.equal(image.format, FMT.A16B16G16R16);
+    assert.deepEqual([...image.levels[0].data], texel);
+    const masked = ddsHeader({ width: 1, height: 1, pfFlags: 0x40, bits: 32, r: 0xffff,
+        g: 0xffff0000 });
+    assert.equal(readImage(Uint8Array.from([...masked, 0, 0, 0, 0])).format, FMT.G16R16);
+});
+
+test('a signed bump-map DDS is named by DDPF_BUMPDUDV and its masks, its texels kept', ()=>{
+    // 3DMark06's normal maps: Q8W8V8U8, four signed bytes.
+    const header = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 32, r: 0xff,
+        g: 0xff00, b: 0xff0000, a: 0xff000000 });
+    const image = readImage(Uint8Array.from([...header, 0x81, 0x7f, 0, 0xff]));
+    assert.equal(image.format, FMT.Q8W8V8U8);
+    assert.deepEqual([...image.levels[0].data], [0x81, 0x7f, 0, 0xff]);
+    const pair = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 16, r: 0xff, g: 0xff00 });
+    assert.equal(readImage(Uint8Array.from([...pair, 0, 0])).format, FMT.V8U8);
+    const wide = ddsHeader({ width: 1, height: 1, pfFlags: 0x80000, bits: 32, r: 0xffff,
+        g: 0xffff0000 });
+    assert.equal(readImage(Uint8Array.from([...wide, 0, 0, 0, 0])).format, FMT.V16U16);
+});
+
 test('a palette-indexed DDS reads its texels through the palette, alpha from peFlags', ()=>{
     // DDPF_PALETTEINDEXED8, eight bits a texel, 256 entries of r, g, b and the alpha
     // Direct3D keeps in peFlags, between the header and the texels.

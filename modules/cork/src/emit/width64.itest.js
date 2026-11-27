@@ -1,0 +1,342 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The shared emitter at long mode's width (`width.js`) judged by the
+ * long-mode interpreter, as the long translator is (`testing/long-machine.js`):
+ * every case of the hardware corpus and seeded programs drawn from it, run as
+ * the emitter's regions (`testing/shared-runner64.js`) and on the interpreter
+ * alone, and everything a program can see compared.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+    CORPUS, FAR_CALL, HOISTED_SWITCHES, MASKED_SWITCHES, OVERWRITTEN_SWITCH, SWITCHES, compare,
+    flagsLeftUndefined,
+    load, loopCases, machine, nested, pool, program, run, stacked,
+} from '../testing/long-machine.js';
+import { ifRoom } from '../testing/memory64.js';
+import { createSharedRunner64 } from '../testing/shared-runner64.js';
+
+/** @param {WebAssembly.Memory} memory @param {any} layout */
+const shared = (memory, layout)=>createSharedRunner64({ memory, layout });
+
+test('long-mode regions of the shared emitter do what the interpreter does on the'
+    + ' corpus', ifRoom(()=>{
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(CORPUS.cases, { budget, makeRunner: shared });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
+        assert.ok(stats.translated > 5000, JSON.stringify(stats));
+    }
+}));
+
+/**
+ * Width edges the corpus meets by chance only: each operation over registers
+ * whose high halves are set, every count that changes the answer (zero, the
+ * width and past it), with its flags read at the exit and with them
+ * overwritten after it.
+ *
+ * @param {string[]} codes  each operation's bytes, in hex
+ * @param {(number | bigint)[]} counts  rcx's values
+ * @param {string[]} [before]  code put before each operation, in hex
+ */
+function edges(codes, counts, before = ['']){
+    const one = CORPUS.cases[0];
+    const regs = [...one.regs];
+    regs[0] = 'fedcba9876543210';
+    regs[2] = '8000000180000001';
+    regs[8] = '7fffffff80000000';
+    regs[9] = 'ffffffffffffffff';
+    return before.flatMap(first=>codes.flatMap(code=>counts.flatMap(count=>['', '31d2'].map(
+        after=>({ ...one, text: `${first} ${code} rcx ${count} ${after}`,
+            code: first + code + after, regs: regs.map((value, i)=>(i === 1
+                ? BigInt.asUintN(64, BigInt(count)).toString(16) : value)) })))));
+}
+
+test('width edges of shifts run in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    const cases = edges([
+        'd3e0', 'd3e8', 'd3f8', 'c1e000', 'c1e81f', 'c1f801', // shl/shr/sar eax
+        '48d3e0', '48d3e8', '48d3f8', '48c1e03f', '48c1f83f', '48d1e0', // rax
+        '41d3e0', '49d3e8', '66d3e0', '66d3f8', // r8d, r8, ax
+        'd2e0', 'd2fc', '41d2e1', // al, ah, r9b
+        '40d2e6', // sil
+    ], [0, 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('width edges of rotations run in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    const cases = edges([
+        'd3c0', 'd3c8', 'd3d0', 'd3d8', 'c1c000', 'c1d000', 'c1d801', // rol/ror/rcl/rcr eax
+        '48d3c0', '48d3c8', '48d3d0', '48d3d8', '48c1c03f', '48c1d03f', '48d1d8', // rax
+        '49d3d0', '49d3d9', '66d3d0', '66d3c8', 'd2d0', 'd2dc', '41d2c1', // r8, r9, ax, al, ah, r9b
+    ], [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65]).flatMap(one=>[one,
+        // The carry in set: rcl and rcr take it into the value.
+        { ...one, text: `${one.text} stc`, code: `f9${one.code}` }]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('width edges of multiplies and divides run in the shared emitter\'s regions as interpreted',
+    ifRoom(()=>{
+        const counts = [0, 1, 2, 3, 7, -1, -3, 0x80000000, 0x100000000, 0x7fffffffffffffffn,
+            -0x8000000000000000n];
+        const multiplies = edges([
+            '48f7e1', '48f7e9', '49f7e0', '49f7e9', '48f7e2', '48f7ea', // mul/imul rcx, r8, r9, rdx
+            'f7e1', 'f7e9', '66f7e1', '66f7e9', 'f6e1', 'f6e9', // ecx, cx, cl
+            '480fafc1', '4c0fafc1', '0fafc1', '660fafc1', '480fafc0', // imul r, r
+            '486bc103', '4869c1ffffff7f', '486bc1ff', '6bc1fd', // imul r, r, imm
+            '0faf0424', '660faf0424', '6b0424fd', '4469042401800000', // imul r, [rsp][, imm]
+        ], counts, ['', 'b864000000', '48c7c09cffffff']);
+        const divides = edges([
+            '48f7f1', '48f7f9', 'f7f1', 'f7f9', '66f7f1', '66f7f9', 'f6f1', 'f6f9', // rcx..cl
+            '49f7f0', '49f7f9', // r8, r9
+        ], counts, ['', '31d2', '4899', 'b86400000031d2', '48c7c09cffffff4899', '99']);
+        for (const cases of [multiplies, divides])
+        {
+            const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+            assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+            assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+        }
+    }));
+
+test('width edges of moves, scans, swaps and widenings run in the shared emitter\'s regions as'
+    + ' interpreted', ifRoom(()=>{
+    const cases = edges([
+        '4891', '87c8', '87c0', '4987c8', '6687c8', '86e1', // xchg rax/eax/r8/cx/ah
+        'f3480fb8c1', 'f30fb8c1', 'f3660fb8c1', // popcnt rax/eax/ax, rcx
+        '4898', '98', '6698', '4899', '99', '6699', // cdqe cwde cbw cqo cdq cwd
+        '480fbcc1', '0fbcc1', '480fbdc1', '0fbdc1', '660fbcc1', // bsf/bsr from rcx
+        '480fc8', '0fc8', '490fc8', // bswap rax eax r8
+        '480f44c1', '0f44c1', '0f45c1', '660f44c1', '4c0f42c1', '0f47c1', // cmov from rcx
+        '0f94c0', '410f95c0', '400f9cc6', '0f97c4', // sete al, setne r8b, setl sil, seta ah
+    ], [0, 1, 0x80, 0x8000, 0x80000000, 0x100000000, -1, -0x8000000000000000n],
+    ['', '4885c9', '31c0', 'b8feffffff', '66b8fe80']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('a float compare or a bit test fused with its branch over stores and arithmetic between'
+    + ' them runs in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    // xmm0 from rcx, xmm1 from ebx; the compare, what stands between, a branch
+    // of each condition past `add edx, 1`, the flags written again after it.
+    // and bit tests, of rcx by rax's low bits and of ecx by ebx's
+    const compares = ['0f2fc1', '0f2ec8', '660f2fc1', '0f2fc0', '480fa3c1', '0fa3d9'];
+    const between = ['', 'f30f110424', 'f30f59c8', 'c7042400000000', '8908', // 8908 faults: rax
+        'f30f110424f30f59c80f28c8'];
+    const conditions = ['72', '73', '74', '75', '76', '77', '7a', '7b', '7c', '7e'];
+    const codes = compares.flatMap(first=>between.flatMap(standing=>conditions.map(cc=>
+        `f30f2ac1f30f2acb${first}${standing}${cc}0383c20101d8`)));
+    const cases = edges(codes, [0, 1, 7, -1, 0x7fffffff, 0x100000000]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('a compare whose result its branch leaves unmade has the flags it makes on the way on and'
+    + ' at the exit, as interpreted', ifRoom(()=>{
+    // cmp of each width, a branch the operands answer, past a flag reader;
+    // the flags read again where the region leaves.
+    const compares = ['4839c8', '39c8', '6639c8', '38c8', '4c39c0', '483b0424', '4881f9ffffff7f'];
+    const conditions = ['72', '73', '74', '75', '76', '77', '7c', '7d', '7e', '7f'];
+    const codes = compares.flatMap(first=>conditions.map(cc=>`${first}${cc}030f9cc2`));
+    const cases = edges(codes, [0, 1, -1, 0x7fffffff, 0x80000000, 0xffffffff, 0x100000000,
+        -0x8000000000000000n, 0x7fffffffffffffffn, 0xfedcba9876543210n]);
+    for (const budget of [1, 7])
+    {
+        const { failures, stats } = compare(cases, { budget, makeRunner: shared });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+    }
+}));
+
+test('lea under the address-size prefix keeps the address\'s low 32 bits in the shared'
+    + ' emitter\'s regions, as interpreted', ifRoom(()=>{
+    const cases = edges([
+        '67488d0408', '67488d40f0', '678d0408', '674c8d0410', '67488d8401ffffff7f', // lea r, [e..]
+        '67668d0408', '488d0408', // lea ax, [eax + ecx]; lea rax, [rax + rcx]
+    ], [0, 1, 0x7fffffff, 0xffffffff, 0x100000000, -1]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('leave and indirect jumps and calls run in the shared emitter\'s regions as'
+    + ' interpreted', ifRoom(()=>{
+    const cases = edges([
+        'c9', '66c9', // leave, its word form
+        '488d0502000000ffe0', '488d0502000000ffd0', // jmp rax, call rax to the next instruction
+        '4c8d050300000041ffe0', // jmp r8
+        '48b80000000001000000ffe0', '48b80000000001000000ffd0', // past the window
+        '488d050200000050c3', '488d050400000050c20800', // ret, ret 8 to the next instruction
+        '48b8000000000100000050c3', '48b8000000000100000050c20800', // ret past the window
+        '48b8ffffffff0000000050c3', // ret to the window's last byte
+        'e800000000480fba2c2420c3', // call; bts qword [rsp], 32; ret: the call's address + 4 GiB
+    ], [0], ['', '4885c9']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('a predicted call past the 4 GiB window faults as interpreted', ifRoom(()=>{
+    // FAR_CALL's `call rdx` (at 9) predicted to its callee (at 0x1e), which the region
+    // forms in: the call matches it on the whole quadword, and only a miss tests the window.
+    const callTargets = new Map([[CORPUS.codeAt + 9, [CORPUS.codeAt + 0x1e]]]);
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `far call ${i}`, code: FAR_CALL }));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, { budget,
+            makeRunner: (memory, layout)=>createSharedRunner64({ memory, layout, callTargets }) });
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.equal(exits, 0, 'every program faults past the window');
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+}));
+
+test('SIMD moves and conversions of quadword general operands run in the shared emitter\'s'
+    + ' regions as interpreted', ifRoom(()=>{
+    const cases = edges([
+        '66480f6ec1', '66490f6ec1', '480f6ec1', // movq xmm0/xmm0/mm0 <- rcx/r9/rcx
+        '66480f7ec8', '66490f7ec0', '480f7ec8', // movq rax/r8/rax <- xmm1/xmm0/mm1
+        '66480f6e0424', '66480f7e0424', // movq xmm0 <- [rsp], [rsp] <- xmm0
+        'f2480f2ac1', 'f3480f2ac1', 'f2480f2a0424', // cvtsi2sd/ss xmm0, rcx; cvtsi2sd [rsp]
+        'f2480f2cc0', 'f2480f2dc0', 'f3480f2cc0', 'f3480f2dc0', // cvt(t)sd/ss2si rax, xmm0
+        'f20f2cc0', 'f30f2dc0', // the dword forms
+    ], [0, 1, -1, 0x7fffffff, 0x80000000, 0x7fffffffffffffffn, -0x8000000000000000n, 12345678901n],
+    ['', 'f2480f2ac1', 'f3480f2ac1', '66480f6ec1', '48b800000000000000c3', '48b80000000000f04743']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('bit tests run in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    const cases = edges([
+        '480fa3c8', '0fa3c8', '660fa3c8', '480fabc8', '480fb3c8', '480fbbc8', // bt/s/r/c rax, rcx
+        '0fabc8', '0fb3c8', '0fbbc8', '490fa3c8', // eax forms, r8
+        '480fbae03f', '0fbae81f', '480fbaf001', // bt rax, 63; bts eax, 31; btr rax, 1
+        '480fa30c24', '0fab0c24', '660fb30c24', '480fbb0c24', // bit strings from [rsp]
+        '480fba242405', '0fba2c241f', // bt [rsp], imm
+    ], [0, 1, 31, 32, 63, 64, 100, -1, -64, -65, -0x1000]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+    // Every bit string lies in the data around rsp: none leaves for the interpreter.
+    assert.equal(stats.exits, 0, JSON.stringify(stats));
+}));
+
+test('switches run in the shared emitter\'s regions as interpreted, their index a'
+    + ' quadword', ifRoom(()=>{
+    const cases = [SWITCHES, HOISTED_SWITCHES, MASKED_SWITCHES].flatMap(code=>CORPUS.cases
+        .slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>({ ...one, text: `switch ${i}`,
+            code })));
+    for (const budget of [7, 100000])
+    {
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: shared });
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+}));
+
+test('a switch whose table read writes its index over keeps its cases in its region', ifRoom(()=>{
+    const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `overwritten ${i}`, code: OVERWRITTEN_SWITCH }));
+    const { failures, exits, stats } = compare(cases, { budget: 100000, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.equal(exits, cases.length);
+    // One region a program: a case picked by the target, not by the register the
+    // read wrote over, is a jump inside it, never an exit that forms one of its own.
+    assert.equal(stats.regions, cases.length, JSON.stringify(stats));
+}));
+
+test('seeded long programs run in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    const instructions = pool();
+    const straight = Array.from({ length: 600 },
+        (_, i)=>program(instructions, 0x5eed + i, 20 + i % 60));
+    const loops = Array.from({ length: 400 }, (_, i)=>nested(instructions, 0x1005 + i));
+    for (const [cases, budget] of /** @type {const} */ ([[straight, 7], [loops, 7],
+        [loops, 1000]]))
+    {
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: shared });
+        assert.ok(exits > cases.length * 0.6, `${exits} programs ran to their exit`);
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > 0, JSON.stringify(stats));
+    }
+}));
+
+test('loops whose accesses move by a stride run as interpreted, to the turn a page or the'
+    + ' 4 GiB window stops them', ifRoom(()=>{
+    // The emitter alone notes no store into code: the runtime's gate has those.
+    const cases = loopCases(false);
+    for (const budget of [7, 100000])
+    {
+        const { failures, stats } = compare(cases, { budget, makeRunner: shared });
+        assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
+        assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+    }
+}));
+
+test('seeded stack traffic and untested reads run in loose regions as interpreted', ifRoom(()=>{
+    // Outside `precise`, as the runtime emits: rsp's accesses take its low half
+    // untested (`stackAccess`, `push`) and a read's address is summed in i32
+    // (`windowed`), each beside the interpreter's quadword address and test.
+    const loose = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
+        createSharedRunner64({ memory, layout, precise: false, looseStacks: true });
+    // The flags a program leaves undefined are the emitter's to leave as it will
+    // there, and a program that reads one is left out.
+    const instructions = pool();
+    const interpreter = machine();
+    const bytes = new Uint8Array(interpreter.memory.buffer);
+    const cases = Array.from({ length: 600 }, (_, i)=>stacked(instructions, 0x57ac + i,
+        10 + i % 50)).flatMap(one=>{
+        load(interpreter, one);
+        const undefinedFlags = flagsLeftUndefined(interpreter.state,
+            address=>bytes[interpreter.layout.ramBase + address]);
+        load(interpreter, one);
+        return undefinedFlags !== null && run(interpreter, false).fault === 'exit'
+            ? [{ ...one, undefinedFlags }] : [];
+    });
+    assert.ok(cases.length > 450, `${cases.length} programs`);
+    // RAM of 1 GiB too: a read then wraps with one `and`, and a block's reads
+    // of several fields off the same registers share one wrapped sum (`wrappedFirst`).
+    for (const [budget, ramSize] of [[7, undefined], [100000, undefined], [7, 1 << 30],
+        [100000, 1 << 30]])
+    {
+        const { failures, exits, stats } = compare(cases, { budget, makeRunner: loose, ramSize });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.equal(exits, cases.length);
+        assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
+    }
+}));
+
+test('a non-temporal store with REX.W stores its quadword whole, in the shared emitter\'s regions'
+    + ' as interpreted', ifRoom(()=>{
+    // movnti [rbx], rdx / [rbx], edx / [rbx+8], r10: the C runtime's memset of
+    // a large block, whose regions were refused whole while the store was
+    // read as a dword's.
+    const cases = edges(['480fc313', '0fc313', '4c0fc35308'], [0]);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));
+
+test('an explicit-length string compare reads its lengths as dwords, or with REX.W as saturated'
+    + ' quadwords, in the shared emitter\'s regions as interpreted', ifRoom(()=>{
+    // pcmpestri xmm0, xmm1, 0x0c / with REX.W / pcmpestrm; rax and rdx with
+    // their high halves set, then small, negative and past the element count.
+    const cases = edges(['660f3a61c10c', '66480f3a61c10c', '660f3a60c118'], [0],
+        ['', 'b805000000ba03000000', '48c7c0f6ffffff48c7c2feffffff', 'b828000000ba11000000']);
+    const { failures, stats } = compare(cases, { budget: 7, makeRunner: shared });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.ok(stats.translated >= cases.length, JSON.stringify(stats));
+}));

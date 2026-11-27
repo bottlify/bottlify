@@ -10,6 +10,8 @@ import { createTestMachine } from '../testing/machine.js';
 import { decode } from '../decode/decoder.js';
 import { createState, evaluate } from '../ir.js';
 import { CF, OF, PF, SF, ZF } from '../decode/table.js';
+import { BRAND } from '../cpuid.js';
+import { apicWord } from '../runtime/layout.js';
 
 const CODE = 0x1000;
 const STACK = 0x80000;
@@ -285,6 +287,48 @@ test('conditional moves and sets, bit tests, scans, bswap, cmpxchg, cwde/cdq', (
     agree(r);
 });
 
+test('cmovcc of every condition, dword and word, from a register and memory, in the block'
+    + ' of its compare and at the start of the next', ()=>{
+    /** @param {number} value */
+    const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24];
+    const pairs = [[1, 2], [2, 1], [5, 5], [0x80000000, 1], [1, 0x80000000],
+        [0x7fffffff, 0xffffffff], [0, 0]];
+    for (const precise of [true, false])
+    {
+        for (let cc = 0; cc < 16; cc++)
+        {
+            for (const apart of [false, true])
+            {
+                const bytes = [];
+                pairs.forEach(([a, c], k)=>{
+                    bytes.push(0xb8, ...dword(a), 0xbb, ...dword(c));   // mov eax, a; mov ebx, c
+                    bytes.push(0xb9, ...dword(0x11111111), 0xba, ...dword(0x22222222));
+                    bytes.push(0xbe, ...dword(0x33333333), 0xbf, ...dword(0x44444444));
+                    bytes.push(0x39, 0xd8);                             // cmp eax, ebx
+                    if (apart)
+                    {
+                        bytes.push(0xeb, 0x00);                         // jmp to the next block
+                    }
+                    bytes.push(0x0f, 0x40 + cc, 0xca);                  // cmovcc ecx, edx
+                    bytes.push(0x66, 0x0f, 0x40 + cc, 0xf7);            // cmovcc si, di
+                    bytes.push(0x0f, 0x40 + cc, 0x3d, ...dword(0x2000)); // cmovcc edi, [0x2000]
+                    for (const [reg, at] of [[0x0d, 0], [0x35, 4], [0x3d, 8]])
+                    {
+                        bytes.push(0x89, reg, ...dword(0x3000 + 12 * k + at));
+                    }
+                });
+                bytes.push(0xf4);
+                const r = both(bytes, { precise, memory: [[0x2000, dword(0x55667788)]] });
+                assert.equal(r.exit.kind, 3);
+                agree(r);
+                assert.deepEqual([...r.m.read(0x3000, 12 * pairs.length)],
+                    [...r.ram.subarray(0x3000, 0x3000 + 12 * pairs.length)],
+                    `cc ${cc}${apart ? ' apart' : ''}${precise ? ' precise' : ''}`);
+            }
+        }
+    }
+});
+
 test('the string instructions with rep, repne and the direction flag', ()=>{
     const source = Array.from({ length: 16 }, (_, i)=>i + 1);
     const r = both([
@@ -497,21 +541,23 @@ test('an instruction the emitter leaves out ends the run at its address, state i
 });
 
 test('rdtsc reads the host\'s counter into edx:eax', ()=>{
-    const m = createTestMachine({ rdtsc: ()=>0x123456789abcdef0n });
+    // A whole count below 2^53, with both words' top bits set: the high word
+    // whole, the low word unsigned.
+    const m = createTestMachine({ rdtsc: ()=>0x1f_ffff_fedc_ba98 });
     m.write(CODE, [0x0f, 0x31, 0xf4]); // rdtsc; hlt
     assert.equal(m.runProgram(CODE).kind, 3);
-    assert.equal(m.reg('eax'), 0x9abcdef0);
-    assert.equal(m.reg('edx'), 0x12345678);
+    assert.equal(m.reg('eax'), 0xfedcba98);
+    assert.equal(m.reg('edx'), 0x1fffff);
 });
 
-test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
+test('cpuid answers the leaves cpuid.js lists and zero for the rest', ()=>{
     const one = createTestMachine();
     one.write(CODE, [0xb8, 1, 0, 0, 0, 0x0f, 0xa2, 0xf4]); // mov eax, 1; cpuid; hlt
     assert.equal(one.runProgram(CODE).kind, 3);
-    assert.equal(one.reg('eax'), 0x00000673);
+    assert.equal(one.reg('eax'), 0x000106a5);
     assert.equal(one.reg('ebx'), 0x00010800);
-    assert.equal(one.reg('ecx'), 0xc0800001);
-    assert.equal(one.reg('edx'), 0x0780a979);
+    assert.equal(one.reg('ecx'), 0x00982201);
+    assert.equal(one.reg('edx'), 0x0788a979);
     const vendor = createTestMachine();
     vendor.write(CODE, [0x31, 0xc0, 0x0f, 0xa2, 0xf4]); // xor eax, eax; cpuid; hlt
     assert.equal(vendor.runProgram(CODE).kind, 3);
@@ -527,7 +573,7 @@ test('cpuid answers the pinned emulator\'s leaves and zero for the rest', ()=>{
     assert.equal(unknown.reg('edx'), 0);
 });
 
-test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator does', ()=>{
+test('cpuid reads its subleaf from ecx where a leaf has them', ()=>{
     /** @param {number} leaf @param {number} subleaf */
     const ask = (leaf, subleaf)=>{
         const m = createTestMachine();
@@ -537,12 +583,18 @@ test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator do
         assert.equal(m.runProgram(CODE).kind, 3);
         return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
     };
-    assert.deepEqual(ask(4, 1), [0x122, 0x01c0003f, 0x3f, 1]);
-    assert.deepEqual(ask(4, 2), [0x143, 0x05c0003f, 0xfff, 1]);
-    assert.deepEqual(ask(4, 3), [0, 0, 0, 0], 'a subleaf the leaf does not list');
-    assert.deepEqual(ask(7, 0), [0, 0x200, 0, 0]);
-    assert.deepEqual(ask(7, 1), [0, 0, 0, 0]);
-    assert.deepEqual(ask(5, 9), [0x40, 0x40, 3, 0x00142120], 'a plain leaf ignores ecx');
+    assert.deepEqual(ask(4, 0), [0x121, 0x01c0003f, 0x3f, 0]);
+    assert.deepEqual(ask(4, 1), [0x122, 0x00c0003f, 0x7f, 0]);
+    assert.deepEqual(ask(4, 2), [0x143, 0x01c0003f, 0x1ff, 0]);
+    assert.deepEqual(ask(4, 3), [0x163, 0x03c0003f, 0x1fff, 2], 'the level 3, inclusive');
+    assert.deepEqual(ask(4, 4), [0, 0, 0, 0], 'a subleaf the leaf does not list');
+    assert.deepEqual(ask(0x80000006, 9), [0, 0, 0x01006040, 0], 'a plain leaf ignores ecx');
+    assert.deepEqual(ask(0x80000000, 0), [0x80000008, 0, 0, 0]);
+    assert.deepEqual(ask(0x80000001, 0), [0, 0, 1, 0x20100000], 'LAHF, NX and long mode');
+    const brand = [0x80000002, 0x80000003, 0x80000004].flatMap(leaf=>ask(leaf, 0))
+        .flatMap(word=>[word & 0xff, word >>> 8 & 0xff, word >>> 16 & 0xff, word >>> 24]);
+    assert.equal(String.fromCharCode(...brand).replace(/\0+$/, ''), BRAND);
+    assert.deepEqual(ask(0x40000000, 0), [0, 0, 0, 0], 'no hypervisor leaves');
 });
 
 test('cpuid describes the executors as processors: their count, the asking one\'s APIC id,'
@@ -555,16 +607,46 @@ test('cpuid describes the executors as processors: their count, the asking one\'
         assert.equal(m.runProgram(CODE).kind, 3);
         return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
     };
-    assert.deepEqual(ask(1, 0, 1), [0x673, 0x00010800, 0xc0800001, 0x0780a979],
-        'one processor: as the pinned emulator answers');
-    assert.deepEqual(ask(4, 0, 1), [0x673, 0x00040800, 0xc0800001, 0x1780a979],
+    assert.deepEqual(ask(1, 0, 1), [0x106a5, 0x00010800, 0x00982201, 0x0788a979],
+        'one processor: the table as it stands');
+    assert.deepEqual(ask(4, 0, 1), [0x106a5, 0x00040800, 0x00982201, 0x1788a979],
         'four: the count in EBX[23:16], HTT in EDX');
-    assert.deepEqual(ask(4, 3, 1), [0x673, 0x03040800, 0xc0800001, 0x1780a979],
+    assert.deepEqual(ask(4, 3, 1), [0x106a5, 0x03040800, 0x00982201, 0x1788a979],
         'the fourth executor: APIC id 3 in EBX[31:24]');
-    assert.deepEqual(ask(4, 2, 4, 0), [0x0c000121, 0x01c0003f, 0x3f, 1],
+    assert.deepEqual(ask(4, 2, 4, 0), [0x0c000121, 0x01c0003f, 0x3f, 0],
         'leaf 4: three more cores in the package, no cache shared');
-    assert.deepEqual(ask(4, 2, 4, 2), [0x0c000143, 0x05c0003f, 0xfff, 1]);
+    assert.deepEqual(ask(4, 2, 4, 1), [0x0c000122, 0x00c0003f, 0x7f, 0]);
     assert.deepEqual(ask(4, 1, 0), ask(1, 0, 0), 'the vendor leaf does not move');
+});
+
+test('cpuid translated for every executor at once names the executor it runs on', ()=>{
+    // mov eax, leaf; xor ecx, ecx; cpuid; hlt
+    const code = (/** @type {number} */ leaf)=>[0xb8, leaf, 0, 0, 0, 0x31, 0xc9, 0x0f, 0xa2, 0xf4];
+    for (const executor of [0, 1, 3])
+    {
+        const [shared, own] = [true, false].map(yes=>{
+            const m = createTestMachine({ processors: 4, executor, shared: yes });
+            return (/** @type {number} */ leaf)=>{
+                m.write(CODE, code(leaf));
+                const exit = m.runProgram(CODE);
+                assert.equal(exit.kind, 3);
+                assert.equal(exit.unsupported.size, 0, 'cpuid is translated');
+                return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
+            };
+        });
+        for (const leaf of [0, 1, 2, 4])
+        {
+            assert.deepEqual(shared(leaf), own(leaf), `executor ${executor}, leaf ${leaf}`);
+        }
+        assert.equal(shared(1)[1] >>> 24, executor);
+    }
+    // The host trades processors: the word is what the code answers from then on.
+    const m = createTestMachine({ processors: 4, executor: 1, shared: true });
+    m.write(CODE, code(1));
+    new DataView(m.memory.buffer).setUint32(/** @type {number} */ (m.layout.apic),
+        apicWord(2), true);
+    assert.equal(m.runProgram(CODE).unsupported.size, 0);
+    assert.equal(m.reg('ebx') >>> 0, 0x02040800);
 });
 
 test('int3 and int n are left to the other executor, before the instruction', ()=>{
@@ -575,10 +657,10 @@ test('int3 and int n are left to the other executor, before the instruction', ()
     assert.equal(m.counter(), 1, 'the nop alone');
 });
 
-test('bound is the no-op the emulator makes it, even out of range', ()=>{
+test('bound is a no-op, even out of range', ()=>{
     // mov eax, -1; mov ebx, bounds; bound eax, [ebx]; inc eax; hlt. A real
-    // processor raises #BR for -1 outside the {0, 0} pair; the emulator does
-    // not, so translated code must not either -- the run reaches the `inc`.
+    // processor raises #BR for -1 outside the {0, 0} pair; the interpreter
+    // does not, so translated code must not either -- the run reaches the `inc`.
     const r = both(
         [0xb8, 0xff, 0xff, 0xff, 0xff, 0xbb, 0x00, 0x20, 0x00, 0x00,
             0x62, 0x03, 0x40, 0xf4],
@@ -588,10 +670,9 @@ test('bound is the no-op the emulator makes it, even out of range', ()=>{
     assert.equal(r.m.reg('eax') >>> 0, 0, 'the instruction changed nothing');
     assert.equal(r.exit.unsupported.size, 0, 'bound was translated, not left out');
     agree(r);
-    // The register form (`bound eax, ebx`) is refused by the decoder's
-    // memory-only rule on paper but consumed by the emulator's decoder; a
-    // return into the entry vector's bytes reaches exactly this form, so it
-    // must translate as the same no-op.
+    // The register form (`bound eax, ebx`) is refused by the memory-only
+    // rule on paper; a return into the entry vector's bytes reaches exactly
+    // this form, so it must translate as the same no-op.
     const reg = both([0x62, 0xc3, 0x40, 0xf4]); // bound eax, ebx; inc eax; hlt
     assert.equal(reg.exit.kind, 3, 'the register form halts too');
     assert.equal(reg.exit.eip, CODE + 4);

@@ -18,12 +18,15 @@
  * or per window of accesses (see the groups below).
  */
 
+import { CRT_EFFECTS } from '../helpers.js';
+import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
-import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
+import { FAR as FAR_SPACE, Tables, codeRangesAt, farBase, pageFlagsAt, windowBits }
+    from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
-import { I32 } from './flags.js';
+import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
 import { atTables } from './bases.js';
 
@@ -45,6 +48,38 @@ export const HELD = 1;
 export const PRECISION = 2;
 
 /**
+ * The vector of an untranslated exit before a call the region would have made
+ * as the operation it is (`crt.js`) and leaves to be made as it was: back to
+ * the host, which runs the call. Through the hash it would find the call's own
+ * block, were that an entry, and leave again for ever - so a block beginning at
+ * such a call had no entry, and code a call returns to that begins `call
+ * _ftol2_sse` (a float's result made an integer) ran interpreted on every return.
+ */
+export const MADE = 5;
+
+/**
+ * The vector of an untranslated exit before an instruction whose rare case the
+ * region leaves to the interpreter - a jump or a call at 64 bits whose target
+ * lies past 4 GiB, a quadword made a float under a rounding control other than
+ * nearest: back to the host, which runs the instruction. Bare, the exit made a
+ * block that begins with such an instruction no entry (through the hash it
+ * would find itself), and every import thunk of a 64-bit program, `jmp
+ * [rip+slot]`, ran interpreted.
+ */
+export const RARE = 6;
+
+/**
+ * The vector of an untranslated exit to a target in another 4 GiB block of a
+ * wide window (`wideLayout`), the instruction done - a return, a jump or a
+ * call from the image's code into the system's below 4 GiB, or back: `FAR`
+ * plus the target's high half, which the region's RIP (its low half, the
+ * block's high one) cannot say: the last vector, so any of an untranslated
+ * exit from `FAR` on is one. The runtime puts it back into RIP, and the host
+ * enters the other block's runtime there.
+ */
+export const FAR = 8;
+
+/**
  * Whether an instruction that only reads is left untested, its address wrapped
  * into RAM (`wrapIntoRam`): not under `precise`, nor `checkReads`, where a page
  * the program cannot read faults.
@@ -56,40 +91,124 @@ export function readsWrapped(context){
 }
 
 /**
- * Wraps the address in `addr` into RAM for a read left untested: with RAM a
- * power of two, one `and`; with any other size, an address past RAM is taken
- * modulo the largest power of two below it, and one inside RAM is left as it
- * is, without a branch. Both read RAM where the access would have raised #GP.
- * A RAM of 1.5 or 3 GB tested every read before (the access's page flags
- * loaded and tested, an exit for the fault): a load was 46 bytes of wasm.
+ * Where a read left untested finds `address`: in RAM, as it is; past RAM,
+ * modulo the largest power of two not above RAM's size, counted from that
+ * many bytes below RAM's end. With RAM a power of two that is the address
+ * modulo the size; with any other, the top of RAM, so an address past RAM
+ * lands at the same distance from RAM's end whatever the size: the system's
+ * shared page at 0x7FFE0000 in a RAM short of it at RAM's end less 128 KiB,
+ * where the host keeps it (`readThrough`). The interpreters read a page given
+ * to them that way through this; the emitter's `wrapIntoRam` is the same.
+ *
+ * @param {number} address @param {number} ramSize
+ */
+export function wrappedAddress(address, ramSize){
+    const at = address >>> 0;
+    if (at < ramSize)
+    {
+        return at;
+    }
+    const below = (ramSize & ramSize - 1) === 0 ? ramSize : 2 ** Math.floor(Math.log2(ramSize));
+    return (at & below - 1) + (ramSize - below);
+}
+
+/**
+ * Wraps the address in the i32 local `addr` into RAM for a read left
+ * untested, as `wrappedAddress` says: with RAM a power of two, one `and`; with
+ * any other size, an address inside RAM is left as it is and one past RAM
+ * taken into its top, without a branch. Both read RAM where the access would
+ * have raised #GP. A RAM of 1.5 or 3 GB tested every read before (the
+ * access's page flags loaded and tested, an exit for the fault): a load was 46
+ * bytes of wasm. The long-mode emitter wraps its reads the same way.
+ *
+ * A growing layout (`ramFloor`) wraps by the mask in its `wrap` word, the RAM
+ * the memory holds now less one: one load more than the constant `and`, and
+ * every executor finds the memory's growth at its next read.
  *
  * @param {import('./region.js').RegionEmitter['b']} b
- * @param {number} ramSize
+ * @param {{ ramSize: number, wrap?: number }} layout
+ * @param {number} [addr]  the local, the 32-bit emitter's `Local.addr` unless given
  */
-function wrapIntoRam(b, ramSize){
+function wrapIntoRam(b, layout, addr = Local.addr){
+    const { ramSize } = layout;
+    if (layout.wrap !== undefined)
+    {
+        b.localGet(addr);
+        wrapMask(b, layout);
+        b.op(I32.and).localSet(addr);
+        return;
+    }
     if ((ramSize & ramSize - 1) === 0)
     {
-        b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
+        b.localGet(addr).i32const(ramSize - 1).op(I32.and).localSet(addr);
         return;
     }
     const below = 2 ** Math.floor(Math.log2(ramSize));
-    b.localGet(Local.addr);
-    b.localGet(Local.addr).i32const(below - 1).op(I32.and);
-    b.localGet(Local.addr).i32const(ramSize | 0).op(I32.ltU);
-    b.select().localSet(Local.addr);
+    b.localGet(addr);
+    b.localGet(addr).i32const(below - 1).op(I32.and).i32const(ramSize - below | 0).op(I32.add);
+    b.localGet(addr).i32const(ramSize | 0).op(I32.ltU);
+    b.select().localSet(addr);
+}
+
+/**
+ * The growing layout's wrap mask (`wrapIntoRam`) on the stack: its word, an
+ * absolute address every executor's code reads alike.
+ *
+ * @param {import('./region.js').RegionEmitter['b']} b
+ * @param {{ wrap?: number }} layout
+ */
+export function wrapMask(b, layout){
+    b.i32const(0).load('i32', { offset: /** @type {number} */ (layout.wrap) });
+}
+
+/**
+ * The RAM a static reach may count on being inside the memory: a growing
+ * layout's floor, the whole RAM otherwise.
+ *
+ * @param {{ ramSize: number, ramFloor?: number }} layout
+ */
+export const ramAlways = layout=>layout.ramFloor ?? layout.ramSize;
+
+/**
+ * The memarg of an access to the guest's RAM at the i32 address on the stack
+ * (`offset` past it): RAM's place in the memory, and `guest`, which a wide
+ * window's body (`Body.guest`) takes to its own memory past 4 GiB.
+ *
+ * @param {E} e @param {number} [offset]
+ */
+export const ram = (e, offset = 0)=>({ guest: true, offset: e.layout.ramBase + offset });
+
+/** A guest access's memarg at a wasm offset already counting RAM's place (`ram`). @param {number} offset */
+export const ramAt = offset=>({ guest: true, offset });
+
+/**
+ * Whether the current instruction's access goes untested, its address wrapped
+ * into RAM. Outside `precise` an instruction that only reads is not tested: the
+ * one page flag a read can find is INACCESSIBLE, which only the pages past RAM
+ * carry, so its address is wrapped into RAM instead (`wrapIntoRam`), in place of
+ * a shift, a load and a branch. A read past the end of guest memory then reads
+ * RAM where it raised #GP -- in long mode one past the 4 GiB window too, as a
+ * 32-bit address wraps at 4 GiB.
+ *
+ * @param {E} e @param {boolean} store
+ */
+export function wrapsRead(e, store){
+    return !store && readsWrapped(e.context) && readsOnly(e.current);
 }
 
 /**
  * The flags of the page whose index is on the stack, as `type` loads them:
- * the table's address joined to the index by `or` where its low 20 bits are
- * clear, which an arm64 `orr` takes as an immediate, and as the load's offset
- * otherwise.
+ * on an arm64 host the table's address joined to the index by `or` where its
+ * low 20 bits are clear, which an arm64 `orr` takes as an immediate where an
+ * offset that large is a constant moved into a register and an add; as the
+ * load's offset otherwise, which an x86-64 load takes into its address for
+ * nothing (V8 14.6: a store's test 6 instructions with the `or`, 5 without).
  *
- * @param {import('./region.js').RegionEmitter['b']} b @param {number} table
- * @param {'i32_8u' | 'i32_16u'} type
+ * @param {E} e @param {number} table @param {'i32_8u' | 'i32_16u'} type
  */
-function loadFlags(b, table, type){
-    if ((table & 0xfffff) === 0)
+function loadFlags(e, table, type){
+    const { b } = e;
+    if ((table & 0xfffff) === 0 && e.context.features?.armHost === true)
     {
         return b.i32const(table | 0).op(I32.or).load(type, { offset: 0 });
     }
@@ -120,51 +239,93 @@ const noted = new WeakMap();
  * beside an unmapped page or a code page is neither a fault nor a note
  * unless it reaches it.
  *
+ * In long mode (`window`, the whole address in `t64`, `windowAddress`) the
+ * address's high half is joined to that test: an access past the 4 GiB
+ * window finds a flag up, and the test under it faults. One that starts
+ * inside the window and ends past it starts on the window's last page, which
+ * no RAM reaches (`longLayout`), so its own flags fault it.
+ *
  * @param {E} e @param {number} size
- * @param {{ counted?: boolean, store?: boolean }} [options]  `counted` false
- *     inside a `rep` loop, where the instruction is not counted and a fault
+ * @param {{ counted?: boolean, store?: boolean, window?: boolean }} [options]  `counted`
+ *     false inside a `rep` loop, where the instruction is not counted and a fault
  *     leaves at it without uncounting; `store` when the access is only
- *     written and its `noteStore` follows with no exit between
+ *     written and its `noteStore` follows with no exit between; `window` for long
+ *     mode's address (`windowAddress`)
  */
-export function checkAccess(e, size, { counted = true, store = false } = {}){
+export function checkAccess(e, size, { counted = true, store = false, window = false } = {}){
     const { b } = e;
     if (planned(e, size, store))
     {
+        // The group's test covered the window too.
         return;
     }
-    // Outside `precise` an instruction that only reads is not tested: the
-    // one page flag a read can find is INACCESSIBLE, which only the pages past
-    // RAM carry, so its address is wrapped into RAM instead (`wrapIntoRam`),
-    // in place of a shift, a load and a branch. A read past the end of
-    // guest memory then reads RAM where it raised #GP.
-    if (!store && readsWrapped(e.context) && e.layout.codePages < 0 && readsOnly(e.current))
+    if (wrapsRead(e, store))
     {
-        wrapIntoRam(b, e.layout.ramSize);
+        if (e.guest !== null)
+        {
+            // A wide window's read: its whole address wrapped into the window, as a
+            // 4 GiB one's is into RAM - by `windowed` already, or here from the
+            // quadword `windowAddress` left in `t64`.
+            if (window && e.layout.far !== undefined)
+            {
+                // Past the window to its far chunk's frame (`farTranslate`), tested.
+                windowTest(e, size, counted);
+                b.localGet(Local.t64).localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+            }
+            else if (window)
+            {
+                b.localGet(Local.t64).i64const(BigInt(/** @type {number} */ (e.layout.window) - 1))
+                    .op(I64.and).localTee(Local.t64).localTee(e.guest.whole).op(I64.wrap)
+                    .localSet(Local.addr);
+            }
+            return;
+        }
+        if (window)
+        {
+            windowTest(e, size, counted);
+        }
+        wrapIntoRam(b, e.layout);
         return;
     }
     const table = pageFlagsAt(e.layout);
-    const noting = store && e.layout.codePages < 0 && size <= 16;
+    const noting = store && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
-    b.localGet(Local.addr).i32const(12).op(I32.shrU);
-    loadFlags(b, table, size > 1 ? 'i32_16u' : 'i32_8u')
+    pageIndex(e);
+    loadFlags(e, table, size > 1 ? 'i32_16u' : 'i32_8u')
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x01010101 : bits).op(I32.and);
+    if (window)
+    {
+        beyond(e);
+        b.op(I32.or);
+    }
     e.openGuard('flagged', EMPTY);
+    if (window)
+    {
+        beyond(e);
+        e.openGuard('beyond', EMPTY);
+        if (e.layout.far === undefined)
+        {
+            faultHere(e, counted);
+        }
+        else
+        {
+            // The frame's flags from here on, the last byte's or'd in below.
+            farTranslate(e, size, counted);
+            pageIndex(e);
+            loadFlags(e, table, 'i32_8u').localSet(Local.pflags);
+        }
+        e.close();
+    }
     if (size > 1)
     {
-        b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
-        b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
+        pageIndex(e);
+        b.load('i32_8u', { offset: table });
+        pageIndex(e, size - 1);
+        b.load('i32_8u', { offset: table }).op(I32.or).localSet(Local.pflags);
     }
     b.localGet(Local.pflags).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     e.openGuard('inaccessible', EMPTY);
-    if (counted)
-    {
-        e.exitBefore(e.current.eip, Exit.FAULT, 13);
-    }
-    else
-    {
-        e.exitAt(e.current.eip, Exit.FAULT, 13);
-    }
+    faultHere(e, counted);
     e.close();
     if (noting)
     {
@@ -208,27 +369,21 @@ export function noteStore(e, size){
         noted.delete(e);
         return;
     }
-    if (e.layout.codePages < 0)
+    // `checkAccess` left both pages' flags in `pflags`, and a store to a page
+    // without code -- nearly every store -- goes on with no call.
+    b.localGet(Local.pflags);
+    if (size > 16)
     {
-        // Only this engine's code to look for: `checkAccess` left both pages'
-        // flags in `pflags`, and a store to a page without code -- nearly
-        // every store -- goes on with no call.
-        b.localGet(Local.pflags);
-        if (size > 16)
-        {
-            // A state save (fsave, fnstenv): its access was checked at the
-            // operand's size, so its last page's flags are read here.
-            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-                .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
-        }
-        // The next page's flag too: a wide access's halfword holds it.
-        b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
-        e.openGuard('maybeCode', EMPTY);
-        noteCodeStore(e, size);
-        e.close();
-        return;
+        // A state save (fsave, fnstenv): its access was checked at the
+        // operand's size, so its last page's flags are read here.
+        pageIndex(e, size - 1);
+        b.load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
     }
+    // The next page's flag too: a wide access's halfword holds it.
+    b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
+    e.openGuard('maybeCode', EMPTY);
     noteCodeStore(e, size);
+    e.close();
 }
 
 /**
@@ -238,31 +393,20 @@ export function noteStore(e, size){
  */
 function noteCodeStore(e, size){
     const { b } = e;
-    // This engine's own code, to the granule: the page's flag and then its
-    // range, for the store's first byte, its last, and one byte in every
-    // granule between -- a state save (`fnsave`) spans several.
-    b.localGet(Local.addr).call(e.context.codeHit);
+    // To the granule: the page's flag and then its range, for the store's
+    // first byte, its last, and one byte in every granule between -- a state
+    // save (`fnsave`) spans several.
+    b.localGet(Local.addr).widenGuest().call(e.context.codeHit);
     const granule = 1 << Tables.CODE_GRANULE_SHIFT;
     for (let at = granule; at < size - 1; at += granule)
     {
-        b.localGet(Local.addr).i32const(at).op(I32.add).call(e.context.codeHit).op(I32.or);
+        b.localGet(Local.addr).i32const(at).op(I32.add).widenGuest()
+            .call(e.context.codeHit).op(I32.or);
     }
     if (size > 1)
     {
-        b.localGet(Local.addr).i32const(size - 1).op(I32.add).call(e.context.codeHit).op(I32.or);
-    }
-    if (e.layout.codePages >= 0)
-    {
-        // The other executor's own table too, for the store's first page and
-        // its last: its compiled page is as much code as this engine's, and
-        // the runtime dirties its cache.
-        b.localGet(Local.addr).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
-        if (size > 1)
-        {
-            b.localGet(Local.addr).i32const(size - 1).op(I32.add).i32const(12).op(I32.shrU)
-                .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
-        }
+        b.localGet(Local.addr).i32const(size - 1).op(I32.add).widenGuest()
+            .call(e.context.codeHit).op(I32.or);
     }
     e.openGuard('code', EMPTY);
     b.i32const(1).localSet(Local.stale);
@@ -270,6 +414,25 @@ function noteCodeStore(e, size){
     // into code more than once before the exit after it -- a `rep movs` or
     // `rep stos` element after element, page after page; `pushad` across two
     // pages -- and every page each store reached is code to drop.
+    if (e.layout.staleSpan !== undefined)
+    {
+        // A wide window's span, as quadwords at a place of its own.
+        const span = e.layout.staleSpan;
+        const higher64 = (/** @type {() => void} */ value, /** @type {number} */ offset)=>{
+            b.i32const(0);
+            value();
+            b.i32const(0).load('i64', { offset });
+            value();
+            b.i32const(0).load('i64', { offset }).op(I64.gtU);
+            b.select().store('i64', { offset });
+        };
+        higher64(()=>b.localGet(Local.addr).widenGuest().i64const(-1n).op(I64.xor), span);
+        higher64(()=>b.localGet(Local.addr).widenGuest().i64const(BigInt(size)).op(I64.add),
+            span + 8);
+        e.close();
+        e.staleCheck = true;
+        return;
+    }
     const low = e.layout.tables + Tables.STALE_LOW;
     const end = e.layout.tables + Tables.STALE_END;
     // Unsigned maxima of the complemented lowest byte and of the end, each
@@ -302,12 +465,23 @@ function noteCodeStore(e, size){
  * @returns {number} the function index
  */
 export function addCodeHitHelper(m, layout, shared = false){
-    const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+    // A wide window's address is its i64 one (`Body.widenGuest`).
+    const wide = layout.window !== undefined;
+    const type = m.type({ params: [wide ? ValType.i64 : ValType.i32], results: [ValType.i32] });
     const b = new Body();
     const flags = pageFlagsAt(layout);
     const ranges = codeRangesAt(layout);
     // local 1: the page; local 2: the granule; local 3: the page's flags
-    b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
+    if (wide)
+    {
+        // Inside the table whatever the address, as `pageIndex` keeps it.
+        b.localGet(0).i64const(12n).op(I64.shrU).op(I64.wrap).i32const(windowPagesMask(layout))
+            .op(I32.and).localSet(1);
+    }
+    else
+    {
+        b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
+    }
     b.localGet(1).load('i32_8u', { offset: flags }).localTee(3)
         .i32const(PageFlag.WATCH).op(I32.and);
     b.if(EMPTY);
@@ -340,7 +514,12 @@ export function addCodeHitHelper(m, layout, shared = false){
     b.if(EMPTY);
     b.i32const(0).op(0x0f); // return
     b.end();
-    b.localGet(0).i32const(Tables.CODE_GRANULE_SHIFT).op(I32.shrU)
+    b.localGet(0);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.i32const(Tables.CODE_GRANULE_SHIFT).op(I32.shrU)
         .i32const(0xfff >>> Tables.CODE_GRANULE_SHIFT).op(I32.and).localSet(2);
     b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges })
         .op(I32.geU);
@@ -356,14 +535,22 @@ export function addCodeHitHelper(m, layout, shared = false){
  * it and at `hi`, so one byte of every granule the bytes lie in.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m @param {number} codeHit
+ * @param {boolean} [wide]  a wide window's, its addresses i64 (`addCodeHitHelper`)
  * @returns {number} the function index
  */
-export function addSpanHitHelper(m, codeHit){
-    const type = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
+export function addSpanHitHelper(m, codeHit, wide = false){
+    const address = wide ? ValType.i64 : ValType.i32;
+    const ops = wide ? I64 : I32;
+    const type = m.type({ params: [address, address], results: [ValType.i32] });
     const b = new Body();
     // local 2: the granules past `lo` still to look at, counted rather than
     // compared, so a span that wraps at 4 GiB ends.
-    b.localGet(1).localGet(0).op(I32.sub).i32const(5).op(I32.shrU).localSet(2);
+    b.localGet(1).localGet(0).op(ops.sub);
+    if (wide)
+    {
+        b.op(I64.wrap);
+    }
+    b.i32const(5).op(I32.shrU).localSet(2);
     b.loop(EMPTY);
     b.localGet(0).call(codeHit);
     b.if(EMPTY);
@@ -371,7 +558,16 @@ export function addSpanHitHelper(m, codeHit){
     b.end();
     b.localGet(2);
     b.if(EMPTY);
-    b.localGet(0).i32const(32).op(I32.add).localSet(0);
+    b.localGet(0);
+    if (wide)
+    {
+        b.i64const(32n);
+    }
+    else
+    {
+        b.i32const(32);
+    }
+    b.op(ops.add).localSet(0);
     b.localGet(2).i32const(1).op(I32.sub).localSet(2);
     b.br(1);
     b.end();
@@ -394,12 +590,40 @@ export function addSpanHitHelper(m, codeHit){
  */
 export function addWindowHitHelper(m, layout, spanHit){
     const i32 = ValType.i32;
-    const type = m.type({ params: [i32, i32, i32, i32], results: [i32] });
+    // A wide window's address is its i64 one, the offsets past it i32 still.
+    const wide = layout.window !== undefined;
+    const type = m.type({ params: [wide ? ValType.i64 : i32, i32, i32, i32], results: [i32] });
     const b = new Body();
     const flags = pageFlagsAt(layout);
-    b.localGet(0).i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
-    b.localGet(0).localGet(1).op(I32.add).i32const(12).op(I32.shrU)
-        .load('i32_8u', { offset: flags });
+    /** The address and `offset`, the local of one past it, added. @param {number} [offset] */
+    const past = offset=>{
+        b.localGet(0);
+        if (offset !== undefined)
+        {
+            b.localGet(offset);
+            if (wide)
+            {
+                b.op(I64.extendU);
+            }
+            b.op(wide ? I64.add : I32.add);
+        }
+    };
+    /** The page of the address past it by the local `offset`. @param {number} [offset] */
+    const page = offset=>{
+        past(offset);
+        if (wide)
+        {
+            b.i64const(12n).op(I64.shrU).op(I64.wrap).i32const(windowPagesMask(layout)).op(I32.and);
+        }
+        else
+        {
+            b.i32const(12).op(I32.shrU);
+        }
+    };
+    page();
+    b.load('i32_8u', { offset: flags });
+    page(1);
+    b.load('i32_8u', { offset: flags });
     b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and);
     b.if(EMPTY);
     b.i32const(1).op(0x0f); // return
@@ -408,8 +632,8 @@ export function addWindowHitHelper(m, layout, spanHit){
     b.if(EMPTY);
     b.i32const(0).op(0x0f); // return
     b.end();
-    b.localGet(0).localGet(2).op(I32.add);
-    b.localGet(0).localGet(3).op(I32.add);
+    past(2);
+    past(3);
     b.call(spanHit);
     return m.function(type, [], b.toBytes());
 }
@@ -481,12 +705,12 @@ const INT_RW = new Set([
 ]);
 /** Integer operations whose memory source is read. */
 const INT_READ = new Set([
-    'mov', 'movzx', 'movsx', 'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp', 'test',
-    'imul', 'bsf', 'bsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
+    'mov', 'movzx', 'movsx', 'movsxd', 'add', 'sub', 'adc', 'sbb', 'and', 'or', 'xor', 'cmp',
+    'test', 'imul', 'bsf', 'bsr', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si',
 ]);
 /** Integer operations that write their first operand and no other register. */
 const INT_WRITE_DST = new Set([
-    ...INT_RW, 'mov', 'movzx', 'movsx', 'imul', 'bsf', 'bsr', 'bswap',
+    ...INT_RW, 'mov', 'movzx', 'movsx', 'movsxd', 'imul', 'bsf', 'bsr', 'bswap',
     'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si', 'movmskps', 'movmskpd', 'pmovmskb',
 ]);
 /** Integer operations that write no register. */
@@ -518,6 +742,10 @@ const STRING_ACCESSES = new Map([
 const SAVED_EBP = /** @type {import('../decode/decoder.js').Operand} */ ({
     kind: 'mem', size: 4, base: 5, index: -1, scale: 1, disp: 0, segment: 3, addressSize: 32,
 });
+/** Long mode's: the saved rbp. */
+const SAVED_RBP = /** @type {import('../decode/decoder.js').Operand} */ ({
+    ...SAVED_EBP, size: 8, addressSize: 64,
+});
 
 /**
  * @typedef {{ block: number, i: number, off: number, size: number, store: boolean }} Access
@@ -533,53 +761,64 @@ const SAVED_EBP = /** @type {import('../decode/decoder.js').Operand} */ ({
  *     the tree of blocks taking windows, and the values it follows
  * @typedef {{ checks: Group[], access: Access | null, size: number, store: boolean,
  *     used: boolean }} Planned
- * @typedef {{ blocks: Map<number, Planned>[], entry: Group[][], inherit: number[] }} RegionPlan
+ * @typedef {{ blocks: Map<number, Planned>[], entry: Group[][], inherit: number[],
+ *     skips: (Set<number> | undefined)[] }} RegionPlan
  *     per block: its instructions' plans, the windows tested when it is entered
- *     other than from the block it takes them from, and that block (-1 for none)
+ *     other than from the block it takes them from, that block (-1 for none), and
+ *     the blocks further up its chain whose jumps into it pass its test too
+ *     (`passersBy`)
  * @typedef {{ base: number, index: number, scale: number, disp: number, size: number,
  *     store: boolean }} Place
  * @typedef {Map<number, { group: Growing, access: Access }[]>} Joined
  *     a block's accesses by instruction, each with the group it joined
- * @typedef {{ sym: number[], delta: number[], next: { n: number } }} Values
+ * @typedef {{ sym: number[], delta: number[], next: { n: number }, isym?: number[],
+ *     iscale?: number[], cuts?: Cut[] }} Values
  *     what each register holds: a value the planner cannot see into (`sym`),
- *     moved by a known amount (`delta`)
+ *     moved by a known amount (`delta`); in a long-mode loop's plan also
+ *     another such value times a scale (`isym`, -1 for none, `iscale`), and
+ *     the points where a dword write cut a value to its low half (`cuts`)
+ * @typedef {{ sym: number, isym: number, iscale: number, d: number }} Cut
+ *     a value a dword write took or made: the model holds it only while it
+ *     lies in [0, 2^32)
  */
 
 /**
  * The one access an instruction makes that a group can take, or null.
  *
  * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {4 | 8} [word]  the stack's slot: 8 in long mode, whose addresses a
+ *     32-bit address size truncates (such an access is left to its own test)
  * @returns {{ operand: import('../decode/decoder.js').Operand | null, size: number,
  *     store: boolean, stack: number } | null}
  *     `stack`: the access's offset from esp for a push or pop, else 0
  */
-function accessOf(ins){
+function accessOf(ins, word = 4){
     const { op, operands } = ins;
-    const [dst] = operands;
+    const dst = operands[0];
     if (ins.prefixes.operand && (op === 'call' || op === 'ret' || op === 'leave'))
     {
         return null;
     }
     if (op === 'call' && (dst.kind === 'rel' || dst.kind === 'reg'))
     {
-        return { operand: null, size: 4, store: true, stack: -4 };
+        return { operand: null, size: word, store: true, stack: -word };
     }
     if (op === 'ret')
     {
-        return { operand: null, size: 4, store: false, stack: 0 };
+        return { operand: null, size: word, store: false, stack: 0 };
     }
     if (op === 'leave')
     {
-        return { operand: SAVED_EBP, size: 4, store: false, stack: 0 };
+        return { operand: word === 8 ? SAVED_RBP : SAVED_EBP, size: word, store: false, stack: 0 };
     }
-    if (op === 'push' && ins.size === 4
-        && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === 4))
+    if (op === 'push' && ins.size === word
+        && (dst.kind === 'imm' || dst.kind === 'reg' && dst.size === word))
     {
-        return { operand: null, size: 4, store: true, stack: -4 };
+        return { operand: null, size: word, store: true, stack: -word };
     }
-    if (op === 'pop' && dst.kind === 'reg' && dst.size === 4)
+    if (op === 'pop' && dst.kind === 'reg' && dst.size === word)
     {
-        return { operand: null, size: 4, store: false, stack: 0 };
+        return { operand: null, size: word, store: false, stack: 0 };
     }
     const at = operands.findIndex(o=>o.kind === 'mem');
     if (at < 0 || operands.some((o, k)=>k !== at && o.kind === 'mem'))
@@ -587,7 +826,8 @@ function accessOf(ins){
         return null;
     }
     const mem = operands[at];
-    if (mem.addressSize === 16 || mem.segment === 4 || mem.segment === 5 || ins.prefixes.rep
+    if (mem.addressSize === (word === 8 ? 32 : 16) || mem.segment === 4 || mem.segment === 5
+        || ins.prefixes.rep
         || ins.prefixes.repne || ins.prefixes.lock)
     {
         return null;
@@ -632,7 +872,7 @@ function accessOf(ins){
  *
  * @param {import('../decode/decoder.js').Instruction} ins
  */
-function readsOnly(ins){
+export function readsOnly(ins){
     if (accessOf(ins)?.store === false)
     {
         return true;
@@ -646,24 +886,25 @@ function readsOnly(ins){
  * two of a `push`, `call` or `jmp` through memory -- the operand read, then
  * the push.
  *
- * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {import('../decode/decoder.js').Instruction} ins @param {4 | 8} [word]  (`accessOf`)
  * @returns {Place[]}
  */
-function groupAccessesOf(ins){
+function groupAccessesOf(ins, word = 4){
     const { op, operands, prefixes } = ins;
     if (!ins.memory && !STACK_OPS.has(op))
     {
         return NO_PLACES;
     }
-    const [dst] = operands;
-    if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem' && dst.size === 4
-        && !prefixes.operand && dst.addressSize !== 16 && dst.segment !== 4 && dst.segment !== 5)
+    const dst = operands[0];
+    if ((op === 'push' || op === 'call' || op === 'jmp') && dst?.kind === 'mem'
+        && dst.size === word && !prefixes.operand && dst.addressSize !== (word === 8 ? 32 : 16)
+        && dst.segment !== 4 && dst.segment !== 5)
     {
-        const read = placeOf({ operand: dst, size: 4, store: false, stack: 0 });
+        const read = placeOf({ operand: dst, size: word, store: false, stack: 0 });
         return op === 'jmp' ? [read]
-            : [read, placeOf({ operand: null, size: 4, store: true, stack: -4 })];
+            : [read, placeOf({ operand: null, size: word, store: true, stack: -word })];
     }
-    const access = accessOf(ins);
+    const access = accessOf(ins, word);
     return access === null ? NO_PLACES : [placeOf(access)];
 }
 
@@ -696,21 +937,25 @@ function placeOf({ operand, size, store, stack }){
  * than from the block it takes them from.
  *
  * @param {import('../region.js').Block[]} blocks  in address order
- * @param {{ entry?: number, backward?: boolean, heads?: Set<number>,
- *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean }} [options]  entry:
- *     the region's entry; backward: a jump back can carry windows (the dispatch
- *     takes an inner label for it); heads: blocks that take none (a
- *     structured region's loop heads); returns: by ret block, the return
+ * @param {{ entry?: number, heads?: Set<number>,
+ *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean,
+ *     long?: boolean }} [options]  entry:
+ *     the region's entry; heads: blocks that take none (the region's loop
+ *     heads); returns: by ret block, the return
  *     addresses it jumps to (`inlineReturns`); reach: false keeps every group
  *     within its block; masked: a read is wrapped into RAM rather than tested
  *     (`checkAccess`): a group that only reads is no window, and a store is
- *     one on its own
+ *     one on its own; long: long mode's sixteen registers and quadword stack slots
  * @returns {RegionPlan}
  */
 export function planRegion(blocks, options = {}){
-    const { entry = blocks[0]?.start ?? 0, backward = false, heads = new Set(),
-        returns = new Map(), reach = true, masked = false } = options;
-    const inherit = reach ? inheritance(blocks, entry, backward, heads, returns)
+    const { entry = blocks[0]?.start ?? 0, heads = new Set(),
+        returns = new Map(), reach = true, masked = false, long = false } = options;
+    const word = long ? 8 : 4;
+    const regs = long ? 16 : 8;
+    /** @type {{ into?: number[][] }} */
+    const ways = {};
+    const inherit = reach ? inheritance(blocks, entry, heads, returns, ways)
         : blocks.map(()=>-1);
     // Most blocks take nothing and give nothing: what each keeps is made
     // only when it has something to keep.
@@ -746,7 +991,7 @@ export function planRegion(blocks, options = {}){
     /** @param {Values} values @param {number} depth */
     const split = (values, depth)=>{
         const { sym, delta } = values;
-        for (let r = 1; r < 8; r++)
+        for (let r = 1; r < regs; r++)
         {
             for (let q = 0; q < r; q++)
             {
@@ -761,11 +1006,16 @@ export function planRegion(blocks, options = {}){
             }
         }
     };
+    /** By block, its depth in the tree of blocks taking windows. */
+    const depths = new Array(blocks.length).fill(0);
+    /** @type {Values[]} by block, what the registers hold at its end */
+    const ends = [];
     /**
      * @param {number} s @param {Values} values @param {Map<number, Growing>} open
      * @param {number} depth
      */
     const walk = (s, values, open, depth)=>{
+        depths[s] = depth;
         if (depth > 0)
         {
             split(values, depth);
@@ -776,7 +1026,7 @@ export function planRegion(blocks, options = {}){
         for (let i = 0; i < instructions.length; i++)
         {
             const ins = instructions[i];
-            const places = groupAccessesOf(ins);
+            const places = groupAccessesOf(ins, word);
             blockPlaces.push(places);
             for (let k = 0; k < places.length; k++)
             {
@@ -829,8 +1079,9 @@ export function planRegion(blocks, options = {}){
                     row.push({ group, access });
                 }
             }
-            effect(ins, values);
+            effect(ins, values, false, word);
         }
+        ends[s] = copyValues(values);
         // The last child goes on with the values and groups themselves:
         // nothing after it needs them.
         const kids = children[s] ?? [];
@@ -844,7 +1095,7 @@ export function planRegion(blocks, options = {}){
     inherit.forEach((p, s)=>{
         if (p < 0)
         {
-            walk(s, freshValues(next), new Map(), 0);
+            walk(s, freshValues(next, regs), new Map(), 0);
         }
     });
     // A window's test costs what one access's does, where its exit is the
@@ -873,7 +1124,7 @@ export function planRegion(blocks, options = {}){
     const entries = blocks.map((_, s)=>{
         const covered = reached[s];
         return covered === undefined ? NO_TESTS
-            : entryTests({ blocks, children, joined, placesOf, next }, s, covered, dropped);
+            : entryTests({ blocks, children, joined, placesOf, next, word }, s, covered, dropped);
     });
     /** @type {(Map<number, Planned> | undefined)[]} */
     const plans = [];
@@ -905,7 +1156,93 @@ export function planRegion(blocks, options = {}){
             slot.store = pairs.some(({ access })=>access.store);
         }
     }));
-    return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit };
+    const skips = ways.into === undefined ? []
+        : passersBy({ blocks, inherit, into: ways.into, entries, depths, ends, joined, kept });
+    return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit, skips };
+}
+
+/**
+ * The instructions that may reach the host and come back into the function:
+ * a call, a port write, an interrupt -- after which the pages' flags may not
+ * be what a test found.
+ */
+export const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int1', 'int3',
+    'into', 'syscall', 'sysenter', 'hlt']);
+
+/**
+ * By block, the blocks above the one it takes windows from whose jumps into it
+ * go past its entry test as that one's way in does. A block a branch reaches
+ * both straight from a block and through the blocks after it -- `lea esi, [esp
+ * + 0x10]`, `jl`, `lea esi, [esp + 0x3c]`, then `mov edi, [esi]`, as `std::min`
+ * on references compiles -- took its windows from the last of them and tested
+ * them again on the branch, at every step of 3DMark06's path search. The branch
+ * goes past the test where its block is on the chain the windows came down
+ * (each block taking from the one before), and every access the test covers
+ * lies, by what the registers hold at the branch, inside a group already tested
+ * at that block or above it: `[esi]` with esi `esp + 0x10` inside the stack's
+ * group that `mov [esp + 0x10], esi` began. The blocks between reach no host
+ * (whose call may change the pages' flags) and hold no x87 instruction (the
+ * stack's shape is the chain's at the block's start).
+ *
+ * @param {{ blocks: import('../region.js').Block[], inherit: number[], into: number[][],
+ *     entries: Group[][], depths: number[], ends: Values[], joined: (Joined | undefined)[],
+ *     kept: Set<Growing> }} plan
+ * @returns {(Set<number> | undefined)[]}
+ */
+function passersBy(plan){
+    const { blocks, inherit, into, entries, depths, ends, joined, kept } = plan;
+    /** @type {(Set<number> | undefined)[]} */
+    const skips = [];
+    /** @type {(boolean | undefined)[]} */
+    const plain = [];
+    /** Whether a block reaches no host and holds no x87 instruction. @param {number} c */
+    const quiet = c=>(plain[c] ??= !blocks[c].instructions.some(ins=>HOST_OPS.has(ins.op)
+        || isX87Opcode(ins.opcode)));
+    /**
+     * Whether every access a window covers lies, from what the registers hold at
+     * block p's end, inside a group tested at p or above.
+     * @param {Group} window @param {number} p
+     */
+    const covered = (window, p)=>{
+        const at = ends[p];
+        if (at === undefined || window.index >= 0 || window.base < 0)
+        {
+            return false;
+        }
+        const sym = at.sym[window.base];
+        const moved = at.delta[window.base];
+        return window.list.every(({ block, i, off, size })=>{
+            const pairs = joined[block]?.get(i);
+            return pairs !== undefined && pairs.some(({ group })=>kept.has(group)
+                && group.index < 0 && group.baseSym === sym && group.depth <= depths[p]
+                && moved + off >= group.lo && moved + off + size <= group.hi);
+        });
+    };
+    entries.forEach((windows, t)=>{
+        if (windows.length === 0 || inherit[t] < 0)
+        {
+            return;
+        }
+        for (const way of into[t])
+        {
+            const p = way >> 1;
+            if ((way & 1) === 0 || p === inherit[t] || p === t || loopsOnto(blocks[p])
+                || p > t)
+            {
+                continue;
+            }
+            let c = inherit[t];
+            while (c >= 0 && c !== p && quiet(c))
+            {
+                c = inherit[c];
+            }
+            if (c === p && windows.every(window=>covered(window, p)))
+            {
+                (skips[t] ??= new Set()).add(p);
+            }
+        }
+    });
+    return skips;
 }
 
 /**
@@ -966,16 +1303,17 @@ export function planBlock(instructions){
  * instruction), nor a trap's way on, whose host call may change what is
  * accessible. The entry and a block that loops onto itself take none, and the
  * latter gives none either (its registers at its end are many turns'); a
- * jump back carries windows only where `backward` says the dispatch can take
- * it.
+ * jump back carries none.
  *
  * @param {import('../region.js').Block[]} blocks @param {number} entry
- * @param {boolean} backward @param {Set<number>} heads
+ * @param {Set<number>} heads
  * @param {Map<number, number[]>} returns  by ret block's start: the return
  *     addresses it jumps to inside the region
+ * @param {{ into?: number[][] }} [out]  given, each block's ways in, as `2 * p + 1` for
+ *     one from block p that carries windows and `2 * p` for one that does not
  * @returns {number[]}
  */
-function inheritance(blocks, entry, backward, heads, returns){
+function inheritance(blocks, entry, heads, returns, out = undefined){
     const count = blocks.length;
     /** @type {number[]} */
     const inherit = new Array(count).fill(-1);
@@ -995,6 +1333,10 @@ function inheritance(blocks, entry, backward, heads, returns){
     // for one that does not.
     /** @type {number[][]} */
     const into = blocks.map(()=>[]);
+    if (out !== undefined)
+    {
+        out.into = into;
+    }
     /** @param {number} p @param {number | undefined} target @param {boolean} carries */
     const edge = (p, target, carries)=>{
         const s = target === undefined ? undefined : index.get(target);
@@ -1048,7 +1390,7 @@ function inheritance(blocks, entry, backward, heads, returns){
             const p = way >> 1;
             one &&= p === ways[0] >> 1;
             later ||= p >= s;
-            if ((way & 1) === 1 && p !== s && loops[p] === 0 && (p < s || backward))
+            if ((way & 1) === 1 && p !== s && loops[p] === 0 && p < s)
             {
                 before = p === s - 1 ? p : before;
                 lowest = lowest < 0 || p < lowest ? p : lowest;
@@ -1122,17 +1464,18 @@ function loopsOnto(block){
  *
  * @param {{ blocks: import('../region.js').Block[], children: (number[] | undefined)[],
  *     joined: (Joined | undefined)[], placesOf: (Place[][] | undefined)[],
- *     next: { n: number } }} walked
+ *     next: { n: number }, word: 4 | 8 }} walked
  *     the region's blocks, which take from which, the group of each access, and each
- *     instruction's accesses
+ *     instruction's accesses, and the stack's slot (`planRegion`'s `long`)
  * @param {number} s @param {Set<Access>} reached @param {Set<Access>} dropped
  * @returns {Group[]}
  */
-function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dropped){
-    const values = freshValues(next);
+function entryTests({ blocks, children, joined, placesOf, next, word }, s, reached, dropped){
+    const regs = word === 8 ? 16 : 8;
+    const values = freshValues(next, regs);
     const first = values.sym[0];
     /** The register a value was in at the start, or -1. @param {number} sym */
-    const held = sym=>(sym >= first && sym < first + 8 ? sym - first : -1);
+    const held = sym=>(sym >= first && sym < first + regs ? sym - first : -1);
     /** One window per group and register: each within its group's 4096 bytes, by
      * `(base + 1, index + 1, scale)`. */
     /** @type {Map<Growing, Map<number, Group & { hi: number }>>} */
@@ -1163,7 +1506,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
         for (let i = 0; i < instructions.length; i++)
         {
             const ins = instructions[i];
-            const places = placesOf[t]?.[i] ?? groupAccessesOf(ins);
+            const places = placesOf[t]?.[i] ?? groupAccessesOf(ins, word);
             for (let k = 0; k < places.length; k++)
             {
                 const { base, index, scale, disp, size, store } = places[k];
@@ -1185,7 +1528,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
                     + (index < 0 ? 0 : at.delta[index] * scale);
                 const own = windows.get(group) ?? new Map();
                 windows.set(group, own);
-                const key = ((from + 1) * 16 + by + 1) * 16 + scale;
+                const key = ((from + 1) * 32 + by + 1) * 16 + scale;
                 const window = own.get(key) ?? { base: from, index: by, scale, db: 0, di: 0,
                     first: 0, list: [], lo: off, hi: off + size, width: 0 };
                 own.set(key, window);
@@ -1194,7 +1537,7 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
                 window.hi = Math.max(window.hi, off + size);
                 window.width = window.hi - window.lo;
             }
-            effect(ins, at);
+            effect(ins, at, false, word);
         }
         for (const child of (children[t] ?? []).filter(needed))
         {
@@ -1206,16 +1549,25 @@ function entryTests({ blocks, children, joined, placesOf, next }, s, reached, dr
 }
 
 /**
- * Eight registers holding values of their own.
+ * The registers -- eight, or long mode's sixteen -- holding values of their own.
  *
  * @param {{ n: number }} next  the count the values are numbered from
+ * @param {number} [regs]
  * @returns {Values}
  */
-function freshValues(next){
+function freshValues(next, regs = 8){
     const n = next.n;
-    next.n += 8;
-    return { sym: [n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7],
-        delta: [0, 0, 0, 0, 0, 0, 0, 0], next };
+    next.n += regs;
+    // A loop, not `Array.from` with a mapping function: that is V8's generic path,
+    // a twelfth as fast, and every block's plan starts from these.
+    const sym = new Array(regs);
+    const delta = new Array(regs);
+    for (let r = 0; r < regs; r++)
+    {
+        sym[r] = n + r;
+        delta[r] = 0;
+    }
+    return { sym, delta, next };
 }
 
 /** @param {Values} values @returns {Values} */
@@ -1241,13 +1593,16 @@ const KNOWN_OPS = new Map();
  * @param {Values} values
  * @param {boolean} [forward]  DF is known clear: a string instruction with no
  *     repeat moves its pointers by its size rather than starting them afresh
+ * @param {4 | 8} [word]  a register's width and the stack's slot: in long mode
+ *     only a quadword write moves a register by a known amount, a dword one
+ *     giving it a value of its own (it zero-extends)
  */
-function effect(ins, values, forward = false){
+function effect(ins, values, forward = false, word = 4){
     const { op, operands, prefixes } = ins;
     const [dst, src] = operands;
     const { sym, delta } = values;
-    const reg32 = dst?.kind === 'reg' && dst.size === 4 ? /** @type {number} */ (dst.reg) : -1;
-    const from = src?.kind === 'reg' && src.size === 4 ? /** @type {number} */ (src.reg) : -1;
+    const reg32 = dst?.kind === 'reg' && dst.size === word ? /** @type {number} */ (dst.reg) : -1;
+    const from = src?.kind === 'reg' && src.size === word ? /** @type {number} */ (src.reg) : -1;
     const pointers = STRING_POINTERS.get(op);
     if (pointers !== undefined && !prefixes.address)
     {
@@ -1273,27 +1628,27 @@ function effect(ins, values, forward = false){
         }
         return;
     }
-    if (op === 'push' && (ins.size === 4 || ins.size === 2) && dst.kind !== 'seg')
+    if (op === 'push' && (ins.size === word || ins.size === 2) && dst.kind !== 'seg')
     {
         delta[4] -= ins.size;
         return;
     }
     if (op === 'pop' && reg32 >= 0)
     {
-        delta[4] += 4;
+        delta[4] += word;
         bumpReg(values, reg32);
         return;
     }
     if ((op === 'pushf' || op === 'popf' || op === 'call' || op === 'ret') && !prefixes.operand)
     {
         // A call pushes its return address; a return pops it, and imm16 more.
-        delta[4] += op === 'pushf' || op === 'call' ? -4
-            : 4 + (op === 'ret' && dst?.kind === 'imm' ? /** @type {number} */ (dst.value) : 0);
+        delta[4] += op === 'pushf' || op === 'call' ? -word
+            : word + (op === 'ret' && dst?.kind === 'imm' ? /** @type {number} */ (dst.value) : 0);
         return;
     }
     if (op === 'leave' && !prefixes.operand)
     {
-        copyReg(values, 4, 5, 4);
+        copyReg(values, 4, 5, word);
         bumpReg(values, 5);
         return;
     }
@@ -1315,20 +1670,45 @@ function effect(ins, values, forward = false){
     if (op === 'xchg' && reg32 >= 0 && from >= 0)
     {
         const [held, by] = [sym[reg32], delta[reg32]];
+        const [heldIndex, heldScale] = [values.isym?.[reg32] ?? -1, values.iscale?.[reg32] ?? 1];
         copyReg(values, reg32, from, 0);
         sym[from] = held;
         delta[from] = by;
+        if (values.isym && values.iscale)
+        {
+            values.isym[from] = heldIndex;
+            values.iscale[from] = heldScale;
+        }
         return;
     }
     if (op === 'lea' && reg32 >= 0)
     {
-        if ((src.base ?? -1) >= 0 && (src.index ?? -1) < 0 && src.addressSize !== 16)
+        if ((src.base ?? -1) >= 0 && (src.index ?? -1) < 0
+            && src.addressSize !== (word === 8 ? 32 : 16) && !src.rip)
         {
             copyReg(values, reg32, /** @type {number} */ (src.base), src.disp ?? 0);
         }
         else
         {
             bumpReg(values, reg32);
+        }
+        return;
+    }
+    if (op === 'crt')
+    {
+        // A C runtime operation (`crt.js`): what it writes, and esp as it moves it.
+        const { writes, esp } = CRT_EFFECTS[/** @type {import('../helpers.js').Crt} */ (ins.crt)];
+        for (const r of writes)
+        {
+            bumpReg(values, r);
+        }
+        if (esp === null)
+        {
+            bumpReg(values, 4);
+        }
+        else
+        {
+            delta[4] += esp;
         }
         return;
     }
@@ -1371,7 +1751,7 @@ function effect(ins, values, forward = false){
     const known = byOp || isX87Opcode(ins.opcode) || operands.some(o=>o.kind === 'xmm');
     if (!known || op === 'push' || op === 'pop')
     {
-        for (let r = 0; r < 8; r++)
+        for (let r = 0; r < sym.length; r++)
         {
             bumpReg(values, r);
         }
@@ -1384,6 +1764,124 @@ function effect(ins, values, forward = false){
 }
 
 /**
+ * The registers a block leaves holding other values than it found (`effect`),
+ * as a mask: one moved and moved back -- `add ebx, 4`, `sub ebx, 4` -- holds
+ * its own again, one popped or written from memory never does.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {4 | 8} [word]  (`effect`)
+ */
+export function registersChanged(instructions, word = 4){
+    const values = freshValues({ n: 0 }, word === 8 ? 16 : 8);
+    for (const ins of instructions)
+    {
+        effect(ins, values, false, word);
+    }
+    let mask = 0;
+    for (let r = 0; r < values.sym.length; r++)
+    {
+        mask |= values.sym[r] !== r || values.delta[r] !== 0 ? 1 << r : 0;
+    }
+    return mask;
+}
+
+/**
+ * By instruction of a block, each memory operand's registers as the values
+ * they hold there (`effect`), as a key, null for an operand not in memory:
+ * two operands off one register across a write of it -- `[rdx + 4]`,
+ * `add rdx, 8`, `[rdx]` -- have keys of their own.
+ *
+ * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {4 | 8} [word]  (`effect`)
+ * @returns {(string | null)[][]}
+ */
+export function operandValues(instructions, word = 4){
+    const values = freshValues({ n: 0 }, word === 8 ? 16 : 8);
+    /** @param {number | undefined} r */
+    const held = r=>((r ?? -1) < 0 ? '-'
+        : `${values.sym[/** @type {number} */ (r)]}+${values.delta[/** @type {number} */ (r)]}`);
+    return instructions.map(ins=>{
+        const keys = ins.operands.map(operand=>(operand.kind === 'mem'
+            ? `${held(operand.base)},${held(operand.index)},${operand.scale ?? 1},`
+                + `${operand.segment ?? -1}` : null));
+        effect(ins, values, false, word);
+        return keys;
+    });
+}
+
+/**
+ * Long mode's writes a loop's plan follows besides `effect`'s: a dword `add`,
+ * `sub`, `inc` or `dec` by a constant, a dword `mov` from a register and a
+ * `lea` of one or two registers (a quadword one too) keep the value they move,
+ * where `effect` gives a dword write a value of its own. A dword write cuts
+ * its value to the low half, which the model holds only while the values it
+ * took and made lie in [0, 2^32): each such value is a cut, tested before the
+ * turns with the streams (`emitStreamWindow`). False for any other write,
+ * left to `effect`.
+ *
+ * @param {import('../decode/decoder.js').Instruction} ins
+ * @param {Values} values  with `isym`, `iscale` and `cuts`
+ */
+function longWrite(ins, values){
+    const { op, operands } = ins;
+    const [dst, src] = operands;
+    const { sym, delta } = values;
+    const isym = /** @type {number[]} */ (values.isym);
+    const iscale = /** @type {number[]} */ (values.iscale);
+    const cuts = /** @type {Cut[]} */ (values.cuts);
+    if (dst?.kind !== 'reg' || (dst.size !== 4 && !(dst.size === 8 && op === 'lea')))
+    {
+        return false;
+    }
+    const r = /** @type {number} */ (dst.reg);
+    /** @param {number} at */
+    const cut = at=>cuts.push({ sym: sym[at], isym: isym[at], iscale: iscale[at], d: delta[at] });
+    if ((op === 'add' || op === 'sub') && src.kind === 'imm' || op === 'inc' || op === 'dec')
+    {
+        cut(r);
+        delta[r] += op === 'inc' ? 1 : op === 'dec' ? -1
+            : (op === 'add' ? 1 : -1) * /** @type {number} */ (src.value);
+        cut(r);
+        return true;
+    }
+    if (op === 'mov' && src.kind === 'reg' && src.size === 4)
+    {
+        cut(/** @type {number} */ (src.reg));
+        copyReg(values, r, /** @type {number} */ (src.reg), 0);
+        return true;
+    }
+    if (op !== 'lea' || src.addressSize === 32 || src.rip)
+    {
+        return false;
+    }
+    const base = src.base ?? -1;
+    const index = src.index ?? -1;
+    const scale = index < 0 ? 1 : src.scale ?? 1;
+    const disp = src.disp ?? 0;
+    if (base >= 0 && index < 0 || base < 0 && index >= 0 && scale === 1)
+    {
+        copyReg(values, r, base >= 0 ? base : index, disp);
+    }
+    else if (base >= 0 && index >= 0 && isym[base] < 0 && isym[index] < 0)
+    {
+        delta[r] = delta[base] + delta[index] * scale + disp;
+        isym[r] = sym[index];
+        iscale[r] = scale;
+        sym[r] = sym[base];
+    }
+    else
+    {
+        bumpReg(values, r);
+        return true;
+    }
+    if (dst.size === 4)
+    {
+        cut(r);
+    }
+    return true;
+}
+
+/**
  * A register given a value of its own.
  *
  * @param {Values} values @param {number} r
@@ -1391,6 +1889,10 @@ function effect(ins, values, forward = false){
 function bumpReg(values, r){
     values.sym[r] = values.next.n++;
     values.delta[r] = 0;
+    if (values.isym)
+    {
+        values.isym[r] = -1;
+    }
 }
 
 /**
@@ -1401,6 +1903,68 @@ function bumpReg(values, r){
 function copyReg(values, r, from, by){
     values.sym[r] = values.sym[from];
     values.delta[r] = values.delta[from] + by;
+    if (values.isym && values.iscale)
+    {
+        values.isym[r] = values.isym[from];
+        values.iscale[r] = values.iscale[from];
+    }
+}
+
+/**
+ * Pushes long mode's sum of a group's registers and `start`: the quadword's
+ * (`wide`), or the dword of their low halves an access's own address sums
+ * (`emitAddress`), which the host computes once for both.
+ *
+ * @param {E} e @param {{ base: number, index: number, scale: number }} group
+ * @param {number} start @param {boolean} wide
+ */
+function groupSum(e, { base, index, scale }, start, wide){
+    const { b } = e;
+    const ops = wide ? I64 : I32;
+    /** @param {number} r */
+    const register = r=>{
+        b.localGet(registerLocal(e, r));
+        if (!wide)
+        {
+            b.op(I64.wrap);
+        }
+    };
+    if (base >= 0)
+    {
+        register(base);
+    }
+    if (index >= 0)
+    {
+        register(index);
+        if (scale > 1)
+        {
+            if (wide)
+            {
+                b.i64const(BigInt(Math.log2(scale)));
+            }
+            else
+            {
+                b.i32const(Math.log2(scale));
+            }
+            b.op(ops.shl);
+        }
+        if (base >= 0)
+        {
+            b.op(ops.add);
+        }
+    }
+    if (wide)
+    {
+        b.i64const(BigInt(start));
+    }
+    else
+    {
+        b.i32const(start | 0);
+    }
+    if (base >= 0 || index >= 0)
+    {
+        b.op(ops.add);
+    }
 }
 
 /**
@@ -1464,20 +2028,51 @@ export function emitGroupChecks(e, checks, at = -1){
     {
         // The window's first byte: the registers now are their version's
         // value moved by what the block did to them since.
-        if (group.base >= 0)
+        const start = group.lo - group.db - group.di * group.scale;
+        if (e.width.bits === 64)
         {
-            b.localGet(Local.reg + group.base);
+            // Long mode's quadword registers: a window past the 4 GiB one is
+            // not clean (the interpreter faults its access). Its high half is
+            // tested with the page flags, at one branch: a window that starts
+            // inside 4 GiB and ends past it starts on the last page, which no
+            // RAM reaches (`longLayout`), so it is flagged INACCESSIBLE. The
+            // high half, of the quadword sum, is kept in `t64`; the low one is
+            // the sum of the registers' low halves, as the accesses' own
+            // addresses are (`emitAddress`), which the host computes once.
+            groupSum(e, group, start, true);
+            if (e.guest !== null)
+            {
+                // A wide window's: the whole sum where its pages' flags are
+                // (`pageIndex`), its low half that sum's own, and past the window
+                // rather than past 4 GiB.
+                b.localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+                b.localGet(e.guest.whole);
+            }
+            b.i64const(BigInt(windowBits(e.layout))).op(I64.shrU).localSet(Local.t64);
+            if (e.guest === null)
+            {
+                groupSum(e, group, start, false);
+                b.localSet(Local.addr);
+            }
+            b.localGet(Local.t64).op(I64.wrap);
         }
         else
         {
-            b.i32const(0);
+            if (group.base >= 0)
+            {
+                b.localGet(registerLocal(e, group.base));
+            }
+            else
+            {
+                b.i32const(0);
+            }
+            if (group.index >= 0)
+            {
+                b.localGet(registerLocal(e, group.index)).i32const(group.scale).op(I32.mul)
+                    .op(I32.add);
+            }
+            b.i32const(start | 0).op(I32.add).localSet(Local.addr);
         }
-        if (group.index >= 0)
-        {
-            b.localGet(Local.reg + group.index).i32const(group.scale).op(I32.mul).op(I32.add);
-        }
-        b.i32const((group.lo - group.db - group.di * group.scale) | 0).op(I32.add)
-            .localSet(Local.addr);
         // The common case is one test, as for a single access: the flags of
         // the window's page and the next, read as a halfword (the window lies
         // in the two), against INACCESSIBLE -- and against HAS_CODE and WATCH
@@ -1485,18 +2080,27 @@ export function emitGroupChecks(e, checks, at = -1){
         // pages and the stores' granules looked at.
         const stores = group.list.some(access=>access.store);
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
-        b.localGet(Local.addr).i32const(12).op(I32.shrU);
-        loadFlags(b, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
+        pageIndex(e);
+        loadFlags(e, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
+        if (e.width.bits === 64)
+        {
+            b.op(I32.or);
+        }
         // Out of line: a window seldom finds a flag up, and its test inline
         // was most of the bytes of a region's stack accesses.
         e.openGuard('window', EMPTY);
+        if (e.width.bits === 64)
+        {
+            b.localGet(Local.t64).op(I64.wrap);
+            leaveIf('beyond');
+        }
         const [first = [1, 0], ...more] = storeSpans(group.list, group.lo);
-        b.localGet(Local.addr).i32const(group.width - 1).i32const(first[0]).i32const(first[1])
-            .call(e.context.windowHit);
+        b.localGet(Local.addr).widenGuest().i32const(group.width - 1).i32const(first[0])
+            .i32const(first[1]).call(e.context.windowHit);
         for (const [from, to] of more)
         {
-            b.localGet(Local.addr).i32const(from).op(I32.add)
-                .localGet(Local.addr).i32const(to).op(I32.add)
+            b.localGet(Local.addr).i32const(from).op(I32.add).widenGuest()
+                .localGet(Local.addr).i32const(to).op(I32.add).widenGuest()
                 .call(e.context.spanHit).op(I32.or);
         }
         leaveIf('window');
@@ -1530,7 +2134,13 @@ export function emitGroupChecks(e, checks, at = -1){
 
 /**
  * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
- *     stride: number, store: boolean }} Stream
+ *     stride: number, store: boolean, tested?: boolean }} Stream
+ *     tested: some access of it is a read tested where reads go untested (a string
+ *     instruction's), which a page's flags fault
+ * @typedef {{ base: number, index: number, scale: number, lo: number, hi: number,
+ *     stride: number }} Range
+ *     the values a long-mode loop's dword writes cut (`longWrite`), off a base and an
+ *     index register as the turn found them: from `lo` to `hi` past them in a turn
  */
 
 /**
@@ -1540,42 +2150,77 @@ export function emitGroupChecks(e, checks, at = -1){
  * when no access qualifies.
  *
  * @param {import('../decode/decoder.js').Instruction[]} instructions
+ * @param {boolean} [long]  long mode's: sixteen registers, quadword pointers
  * @returns {{ plan: Map<number, Planned>, streams: Stream[], turns: number,
- *     forward: boolean } | null}  `forward`: planned for DF clear
+ *     forward: boolean, ranges: Range[] } | null}  `forward`: planned for DF clear;
+ *     `ranges` the values the turns must keep in [0, 2^32) (long mode's dword writes)
  */
-export function planLoop(instructions){
+export function planLoop(instructions, long = false){
+    const word = long ? 8 : 4;
     // A string instruction moves its pointers by its size a turn while DF is
     // clear, and a loop that writes no DF keeps it as it was found: such a
     // loop is planned for DF clear, and its window test takes DF too.
     const forward = instructions.every(ins=>(ins.flagsWritten & DF) === 0);
-    const values = freshValues({ n: 0 });
+    const values = freshValues({ n: 0 }, long ? 16 : 8);
     const { sym: initial } = copyValues(values);
     const { delta } = values;
+    if (long)
+    {
+        values.isym = new Array(16).fill(-1);
+        values.iscale = new Array(16).fill(1);
+        values.cuts = [];
+    }
+    const isym = values.isym ?? [];
+    const iscale = values.iscale ?? [];
+    /**
+     * An access's registers as the turn found them: its base's and index's
+     * values, a base that is itself a sum (`isym`) taking the index's place.
+     *
+     * @param {number} base @param {number} index @param {number} scale
+     * @returns {{ base: number, index: number, scale: number } | null}
+     */
+    const rootsOf = (base, index, scale)=>{
+        if (base >= 0 && (isym[base] ?? -1) >= 0)
+        {
+            return index >= 0 ? null : { base: initial.indexOf(values.sym[base]),
+                index: initial.indexOf(isym[base]), scale: iscale[base] };
+        }
+        if (index >= 0 && (isym[index] ?? -1) >= 0)
+        {
+            return null;
+        }
+        return { base: base < 0 ? -1 : initial.indexOf(values.sym[base]),
+            index: index < 0 ? -1 : initial.indexOf(values.sym[index]), scale };
+    };
     /** @type {{ i: number, base: number, index: number, scale: number, off: number,
      *     size: number, store: boolean }[]} */
     const found = [];
     /** How many accesses each instruction makes that a stream could take. */
     const made = instructions.map(()=>0);
     instructions.forEach((ins, i)=>{
-        const accesses = loopAccessesOf(ins, forward);
+        const accesses = loopAccessesOf(ins, forward, word);
         made[i] = accesses.length;
         for (const { base, index, scale, disp, size, store } of accesses)
         {
             // Off the values registers held as the turn found them, moved by
             // known amounts -- each by the register that held it then.
-            const from = base < 0 ? -1 : initial.indexOf(values.sym[base]);
-            const by = index < 0 ? -1 : initial.indexOf(values.sym[index]);
-            if ((base < 0 || from >= 0) && (index < 0 || by >= 0))
+            const roots = rootsOf(base, index, scale);
+            if (roots !== null && (base < 0 || roots.base >= 0)
+                && (index < 0 && (base < 0 || (isym[base] ?? -1) < 0) || roots.index >= 0))
             {
                 const off = disp + (base >= 0 ? delta[base] : 0)
                     + (index >= 0 ? delta[index] * scale : 0);
-                found.push({ i, base: from, index: by, scale, off, size, store });
+                found.push({ i, base: roots.base, index: roots.index, scale: roots.scale, off,
+                    size, store });
             }
         }
-        effect(ins, values, forward);
+        if (!long || !longWrite(ins, values))
+        {
+            effect(ins, values, forward, word);
+        }
     });
     /** A register holding its own value of the turn's start, moved by `delta`. @param {number} r */
-    const fixed = r=>r < 0 || values.sym[r] === initial[r];
+    const fixed = r=>r < 0 || values.sym[r] === initial[r] && (isym[r] ?? -1) < 0;
     /** @param {{ base: number, index: number, scale: number }} a */
     const keyOf = a=>`${a.base}.${a.index}.${a.scale}`;
     /** @type {Map<string, Stream>} */
@@ -1600,6 +2245,8 @@ export function planLoop(instructions){
         stream.lo = Math.min(stream.lo, access.off);
         stream.hi = Math.max(stream.hi, access.off + access.size);
         stream.store ||= access.store;
+        stream.tested ||= !readsOnly(instructions[access.i])
+            || STRING_ACCESSES.has(instructions[access.i].op);
         const entry = plan.get(access.i);
         plan.set(access.i, { checks: [], access: entry?.access ?? { block: 0, i: access.i,
             off: access.off, size: access.size, store: access.store }, size: access.size,
@@ -1626,7 +2273,46 @@ export function planLoop(instructions){
     const widest = Math.max(...kept.map(stream=>Math.abs(stream.stride)));
     const turns = widest === 0 ? 1 << 16 : 1 + Math.floor(4096 / widest);
     const strings = forward && instructions.some(ins=>STRING_POINTERS.has(ins.op));
-    return { plan, streams: kept, turns, forward: strings };
+    return { plan, streams: kept, turns, forward: strings,
+        ranges: rangesOf(values.cuts ?? [], initial, fixed, delta) };
+}
+
+/**
+ * A loop's cuts (`longWrite`) by the registers their values go off as the
+ * turn found them: the span of the values each pair of registers takes in a
+ * turn, and how far they move a turn. A cut off a register the turn does not
+ * move by a stride is on no stream's way, and left out.
+ *
+ * @param {Cut[]} cuts @param {number[]} initial
+ * @param {(r: number)=>boolean} fixed @param {number[]} delta
+ * @returns {Range[]}
+ */
+function rangesOf(cuts, initial, fixed, delta){
+    /** @type {Map<string, Range>} */
+    const ranges = new Map();
+    for (const { sym, isym, iscale, d } of cuts)
+    {
+        const base = initial.indexOf(sym);
+        const index = isym < 0 ? -1 : initial.indexOf(isym);
+        if (base < 0 || isym >= 0 && index < 0 || !fixed(base) || !fixed(index))
+        {
+            continue;
+        }
+        const scale = index < 0 ? 1 : iscale;
+        const key = `${base}.${index}.${scale}`;
+        const range = ranges.get(key);
+        if (range === undefined)
+        {
+            ranges.set(key, { base, index, scale, lo: d, hi: d,
+                stride: delta[base] + (index < 0 ? 0 : delta[index] * scale) });
+        }
+        else
+        {
+            range.lo = Math.min(range.lo, d);
+            range.hi = Math.max(range.hi, d);
+        }
+    }
+    return [...ranges.values()];
 }
 
 /**
@@ -1635,10 +2321,10 @@ export function planLoop(instructions){
  * a string instruction with no repeat, off esi and edi.
  *
  * @param {import('../decode/decoder.js').Instruction} ins
- * @param {boolean} forward
+ * @param {boolean} forward @param {4 | 8} [word]  (`accessOf`)
  * @returns {Place[]}
  */
-function loopAccessesOf(ins, forward){
+function loopAccessesOf(ins, forward, word = 4){
     const strings = STRING_ACCESSES.get(ins.op);
     if (strings !== undefined)
     {
@@ -1651,7 +2337,7 @@ function loopAccessesOf(ins, forward){
         return strings.map(([base, store])=>({ base, index: -1, scale: 1, disp: 0,
             size: ins.size, store }));
     }
-    return groupAccessesOf(ins);
+    return groupAccessesOf(ins, word);
 }
 
 /**
@@ -1664,8 +2350,10 @@ function loopAccessesOf(ins, forward){
  * @param {E} e @param {Stream[]} streams @param {number} turns
  * @param {boolean} [forward]  the streams move as they do with DF clear: 0
  *     when it is set
+ * @param {Range[]} [ranges]  values the turns cut to 32 bits: 0 unless each
+ *     lies in [0, 2^32) through the turns
  */
-export function emitStreamWindow(e, streams, turns, forward = false){
+export function emitStreamWindow(e, streams, turns, forward = false, ranges = []){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
     if (forward)
@@ -1676,33 +2364,88 @@ export function emitStreamWindow(e, streams, turns, forward = false){
     {
         b.i32const(0);
     }
+    const long = e.width.bits === 64;
     for (const stream of streams)
     {
         const span = (turns - 1) * stream.stride;
         const from = stream.lo + Math.min(0, span);
         const width = stream.hi - stream.lo + Math.abs(span);
-        if (stream.base >= 0)
+        if (long)
         {
-            b.localGet(Local.reg + stream.base);
+            // Long mode's registers are quadwords: the reach lies inside the
+            // 4 GiB window, or the window is not clean.
+            if (stream.base >= 0)
+            {
+                b.localGet(registerLocal(e, stream.base));
+            }
+            else
+            {
+                b.i64const(0n);
+            }
+            if (stream.index >= 0)
+            {
+                b.localGet(registerLocal(e, stream.index)).i64const(BigInt(stream.scale))
+                    .op(I64.mul).op(I64.add);
+            }
+            b.i64const(BigInt(from)).op(I64.add).localTee(Local.t64)
+                .localGet(Local.t64).i64const(BigInt(width - 1)).op(I64.add).op(I64.or)
+                .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap).op(I32.or);
+            b.localGet(Local.t64).op(I64.wrap).localSet(Local.addr);
+            if (e.guest !== null)
+            {
+                // A wide window's pages are found by the whole address (`pageIndex`).
+                b.localGet(Local.t64).localSet(e.guest.whole);
+            }
         }
         else
         {
-            b.i32const(0);
+            if (stream.base >= 0)
+            {
+                b.localGet(registerLocal(e, stream.base));
+            }
+            else
+            {
+                b.i32const(0);
+            }
+            if (stream.index >= 0)
+            {
+                b.localGet(registerLocal(e, stream.index)).i32const(stream.scale).op(I32.mul)
+                    .op(I32.add);
+            }
+            b.i32const(from | 0).op(I32.add).localSet(Local.addr);
+            if (!stream.store && stream.tested !== true && readsWrapped(e.context)
+                && e.guest === null
+                && width <= ramAlways(e.layout))
+            {
+                // A stream that only reads, where reads go untested: its reach
+                // inside RAM is all the unchecked copy needs, a read there being
+                // the one its address wrapped into RAM makes -- one compare, where
+                // the pages' flags were three loads. A growing layout's RAM is
+                // what its wrap word says now: the mask less the width, plus two.
+                b.localGet(Local.addr);
+                if (e.layout.wrap !== undefined)
+                {
+                    wrapMask(b, e.layout);
+                    b.i32const(width - 2).op(I32.sub);
+                }
+                else
+                {
+                    b.i32const(e.layout.ramSize - width + 1 | 0);
+                }
+                b.op(I32.geU).op(I32.or);
+                continue;
+            }
         }
-        if (stream.index >= 0)
+        if (width - 1 > 8192)
         {
-            b.localGet(Local.reg + stream.index).i32const(stream.scale).op(I32.mul).op(I32.add);
+            // Three pages' flags cover no more.
+            throw new Error(`emit: a stream window of ${width} bytes`);
         }
-        b.i32const(from | 0).op(I32.add).localSet(Local.addr);
         const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
         const reach = [0, Math.min(4096, width - 1), width - 1];
         reach.forEach((at, k)=>{
-            b.localGet(Local.addr);
-            if (at !== 0)
-            {
-                b.i32const(at).op(I32.add);
-            }
-            loadFlags(b.i32const(12).op(I32.shrU), table, 'i32_8u');
+            pageIndex(e, at);
+            loadFlags(e, table, 'i32_8u');
             if (k > 0)
             {
                 b.op(I32.or);
@@ -1713,9 +2456,12 @@ export function emitStreamWindow(e, streams, turns, forward = false){
             // A watched page is marked written here, every page the turns may
             // reach, and the turns run untested as on pages written already:
             // left to the checked copy, a loop filling a watched buffer ran
-            // every store tested to its end, three times as slow.
+            // every store tested to its end, three times as slow. Out of the
+            // way: few pages are watched, and its calls inline had the host's
+            // compiler spill the loop's registers on the way every window
+            // test takes (a Crysis loop's head stored eleven to its frame).
             b.localTee(Local.pflags).i32const(PageFlag.WATCH).op(I32.and);
-            b.if(EMPTY);
+            b.unlikely().if(EMPTY);
             for (const at of reach)
             {
                 b.localGet(Local.addr);
@@ -1723,13 +2469,27 @@ export function emitStreamWindow(e, streams, turns, forward = false){
                 {
                     b.i32const(at).op(I32.add);
                 }
-                b.call(e.context.codeHit).drop();
+                b.widenGuest().call(e.context.codeHit).drop();
             }
             b.end();
             b.localGet(Local.pflags);
         }
         // This stream's flagged pages, into the word under it.
         b.i32const(bits).op(I32.and).op(I32.or);
+    }
+    for (const range of ranges)
+    {
+        const span = (turns - 1) * range.stride;
+        b.localGet(registerLocal(e, range.base));
+        if (range.index >= 0)
+        {
+            b.localGet(registerLocal(e, range.index)).i64const(BigInt(range.scale))
+                .op(I64.mul).op(I64.add);
+        }
+        b.localTee(Local.t64).i64const(BigInt(range.lo + Math.min(0, span))).op(I64.add)
+            .localGet(Local.t64).i64const(BigInt(range.hi + Math.max(0, span))).op(I64.add)
+            .op(I64.or).i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap)
+            .op(I32.or);
     }
     b.op(I32.eqz);
 }
@@ -1763,13 +2523,223 @@ function planned(e, size, store){
  * @param {E} e @param {number} size
  */
 export function stackAccess(e, size){
-    e.b.localGet(Local.reg + 4).localSet(Local.addr);
+    if (e.width.bits === 64 && (e.memPlan?.access != null || e.context.looseStacks === true))
+    {
+        // A stream's window test covered it, the window included; or the
+        // stack is loose, its accesses tested no more than esp's are at 32
+        // bits: rsp's low half addresses it, and an rsp a program moved past
+        // the 4 GiB window reads there rather than faulting.
+        stackLow(e, 0);
+    }
+    else if (e.width.bits === 64)
+    {
+        windowAddress(e, ()=>e.b.localGet(registerLocal(e, 4)));
+    }
+    else
+    {
+        e.b.localGet(registerLocal(e, 4)).localSet(Local.addr);
+    }
     if (e.context.looseStacks === true)
     {
         planned(e, size, false);
         return;
     }
-    checkAccess(e, size);
+    checkAccess(e, size, { window: e.width.bits === 64 });
+}
+
+/**
+ * Long mode's untested stack address, rsp less `below`, into `addr` as its low
+ * half - and, over a wide window, the whole of it into the address every guest
+ * access takes (`Body.guest`): the last access before it may have left another
+ * there (a store through a pointer past 4 GiB, then a `ret` reading below it),
+ * and a push below a 4 GiB line of the window borrows from the high half.
+ *
+ * @param {E} e @param {number} below
+ */
+export function stackLow(e, below){
+    const rsp = registerLocal(e, 4);
+    if (e.guest !== null)
+    {
+        // The whole of it, inside the window as 4 GiB's low half is inside its 4 GiB:
+        // an rsp a program moved past the window reads and writes there, untested,
+        // rather than leaving wasm's bounds.
+        e.b.localGet(rsp);
+        if (below !== 0)
+        {
+            e.b.i64const(BigInt(below)).op(I64.sub);
+        }
+        e.b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
+            .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+        return;
+    }
+    e.b.localGet(rsp).op(I64.wrap);
+    if (below !== 0)
+    {
+        e.b.i32const(below).op(I32.sub);
+    }
+    e.b.localSet(Local.addr);
+}
+
+/**
+ * Long mode's address of an access, the i64 `pushAddress` pushes, into `addr`
+ * as the window's 32 bits, the whole of it kept in `t64` for the access's
+ * `checkAccess` (`window`) to fault (#GP) where any of its bytes lies past the
+ * 4 GiB window, as the processor faults on an address no page maps there.
+ *
+ * @param {E} e @param {() => void} pushAddress
+ */
+export function windowAddress(e, pushAddress){
+    pushAddress();
+    e.b.localTee(Local.t64);
+    if (e.guest !== null)
+    {
+        e.b.localTee(e.guest.whole);
+    }
+    e.b.op(I64.wrap).localSet(Local.addr);
+}
+
+/**
+ * Pushes, as an i32, whether the address in `t64` lies past the window: its
+ * bits from the window's (`windowBits`, 32 for 4 GiB) on.
+ *
+ * @param {E} e
+ */
+function beyond(e){
+    e.b.localGet(Local.t64).i64const(BigInt(windowBits(e.layout))).op(I64.shrU).op(I64.wrap);
+}
+
+/**
+ * Pushes the index of the page holding `addr` + `delta`, its byte in the page
+ * flags. A wide window's is the whole address's page (`Body.guest`): one index
+ * for the window, as its flags are one table.
+ * ponytail: an access across a 4 GiB line of a wide window finds its last byte's
+ * page in the block below the line; an i64 sum of the whole address when a program
+ * keeps data across one.
+ *
+ * @param {E} e @param {number} [delta]
+ */
+function pageIndex(e, delta = 0){
+    const { b } = e;
+    b.localGet(Local.addr);
+    if (delta !== 0)
+    {
+        b.i32const(delta).op(I32.add);
+    }
+    if (e.guest !== null)
+    {
+        // The whole address's page (`Body.guest`) with the pages `addr` lies from
+        // its low half - none where it is that half, and the engine sees so
+        // (`Body.widenGuest`). Inside the table whatever the address: one past the
+        // window faults on its own test, after its flags are read.
+        b.localGet(e.guest.whole).op(I64.wrap).op(I32.xor).i32const(12).op(I32.shrU)
+            .localGet(e.guest.whole).i64const(12n).op(I64.shrU).op(I64.wrap)
+            .i32const(windowPagesMask(e.layout)).op(I32.and).op(I32.xor);
+        return;
+    }
+    b.i32const(12).op(I32.shrU);
+}
+
+/**
+ * Leaves with #GP where the `size`-byte access whose whole address is in
+ * `t64` reaches past the 4 GiB window: a test of its own, for an access the
+ * page flags do not test.
+ *
+ * @param {E} e @param {number} size @param {boolean} counted
+ */
+function windowTest(e, size, counted){
+    const { b } = e;
+    // Past the window where its last byte is: one compare, unsigned, which takes
+    // an address near 2^64 (a negative pointer) as past it too.
+    b.localGet(Local.t64)
+        .i64const(BigInt(2 ** windowBits(e.layout) - Math.max(size, 1))).op(I64.gtU);
+    e.openGuard('window', EMPTY);
+    if (e.layout.far === undefined)
+    {
+        faultHere(e, counted);
+    }
+    else
+    {
+        farTranslate(e, size, counted);
+    }
+    e.close();
+}
+
+/**
+ * Long mode's access past the 4 GiB window in a layout with far chunks
+ * (`FAR_SPACE`): its whole address in `t64` made the address of its chunk's frame in
+ * `addr` - the chunk's entry less one added to the address's low half. An
+ * address past the far space, a chunk with no frame, and an access across two
+ * chunks whose frames are not adjacent leave as a fault before the
+ * instruction, which the interpreter runs again: it raises the access
+ * violation at the far address, or makes the access a byte at a time.
+ * Leaves `pflags` holding the entry.
+ *
+ * @param {E} e @param {number} size @param {boolean} counted
+ */
+function farTranslate(e, size, counted){
+    const { b } = e;
+    b.localGet(Local.t64).i64const(BigInt(Math.log2(FAR_SPACE.TOP))).op(I64.shrU).op(I64.wrap);
+    e.openGuard('farTop', EMPTY);
+    faultHere(e, counted);
+    e.close();
+    farEntryOf(e, 0);
+    b.localSet(Local.pflags);
+    if (size > 1)
+    {
+        b.localGet(Local.t64).localGet(Local.t64).i64const(BigInt(size - 1)).op(I64.add)
+            .op(I64.xor).i64const(BigInt(FAR_SPACE.SHIFT)).op(I64.shrU).op(I64.wrap);
+        e.openGuard('farAcross', EMPTY);
+        farEntryOf(e, size - 1);
+        b.localGet(Local.pflags).op(I32.ne);
+        e.openGuard('farApart', EMPTY);
+        faultHere(e, counted);
+        e.close();
+        e.close();
+    }
+    b.localGet(Local.pflags).op(I32.eqz);
+    e.openGuard('farNone', EMPTY);
+    faultHere(e, counted);
+    e.close();
+    b.localGet(Local.t64).op(I64.wrap).localGet(Local.pflags).op(I32.add)
+        .i32const(-1).op(I32.add).localSet(Local.addr);
+    if (e.guest !== null)
+    {
+        // A wide window's frame lies below 4 GiB too: its whole address, zero-extended.
+        b.localGet(Local.addr).op(I64.extendU).localTee(Local.t64).localSet(e.guest.whole);
+    }
+}
+
+/**
+ * Pushes the far table's entry of the chunk `t64` + `delta` lies in.
+ *
+ * @param {E} e @param {number} delta
+ */
+function farEntryOf(e, delta){
+    const { b } = e;
+    b.localGet(Local.t64);
+    if (delta !== 0)
+    {
+        b.i64const(BigInt(delta)).op(I64.add);
+    }
+    b.i64const(BigInt(FAR_SPACE.SHIFT)).op(I64.shrU).op(I64.wrap)
+        .i32const(farBase(e.layout) / FAR_SPACE.CHUNK).op(I32.sub).i32const(2).op(I32.shl)
+        .load('i32', { offset: /** @type {number} */ (e.layout.far) });
+}
+
+/**
+ * Leaves with #GP at the current instruction, `counted` as `checkAccess` has it.
+ *
+ * @param {E} e @param {boolean} counted
+ */
+function faultHere(e, counted){
+    if (counted)
+    {
+        e.exitBefore(e.current.eip, Exit.FAULT, 13);
+    }
+    else
+    {
+        e.exitAt(e.current.eip, Exit.FAULT, 13);
+    }
 }
 
 /**
@@ -1904,3 +2874,11 @@ export function spansOf(entries){
     }
     return out;
 }
+
+/**
+ * The page indices of a layout's window, less one: a wide window's page index
+ * is kept inside its flags by it (`pageIndex`).
+ *
+ * @param {{ window?: number }} layout
+ */
+const windowPagesMask = layout=>(layout.window ?? 2 ** 32) / 4096 - 1;

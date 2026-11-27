@@ -17,6 +17,8 @@
  * instructions it retired in `VALUE`.
  */
 
+import { waitFor, wake } from '@bottlify/cellar';
+
 /**
  * Where each word lies, as indices into the channel's `Int32Array`. `EPOCH`
  * counts the executor's runs of guest code, odd while one is on: a slice
@@ -25,18 +27,14 @@
  * the host. The process's write watch reads it (`write-clock.js`). `RETIRED`
  * is what the slice out has retired so far, zeroed by the process as it starts
  * one: a slice runs on for a quarter of a second while nothing else wants the
- * executor, and the scheduler measures what the program gets done by the
- * millisecond (the kernel's `placement.js`). `WAITED` is the microseconds the
- * executor has waited for the process's answers since it opened, never reset:
- * what a thread placed there loses to calls into the host, which the scheduler
- * weighs against the thread's own work when it places it. `PLAYS` is the
+ * executor, and the process's count of what it retired includes it. `PLAYS` is the
  * processor the executor plays, one more than its number, while it is not its
  * own (the kernel trades them), zero otherwise: the one `cpuid` names from the
  * next slice, set only between slices. `SLEEPING` counts the waits asleep on
  * `STATE` (`sleep`): a side ending its turn wakes the other only when it sleeps.
  */
 export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
-    RETIRED: 5, WAITED: 6, PLAYS: 7, SLEEPING: 8 });
+    RETIRED: 5, PLAYS: 6, SLEEPING: 7 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
@@ -50,7 +48,9 @@ export const Said = Object.freeze({ HALTED: 1, STOPPED: 2, CLAIMED: 4, FAULTED: 
 /**
  * How long a side looks at a word before it sleeps on it, in ms: the other side
  * mostly answers within microseconds, and a sleeping thread's wake costs tens
- * of them on a loaded machine -- two a slice, two a host call.
+ * of them on a loaded machine -- two a slice, two a host call. The waits and
+ * wakes are Cellar's bell (`waitFor`, `wake`): a side ending its turn notifies
+ * only when the other sleeps on the word.
  */
 export const SPIN_MS = 0.05;
 
@@ -77,89 +77,6 @@ export const BUSY_BESIDE = 2;
  */
 export const ANSWER_BOUNDS_US = Object.freeze([10, 25, 50, 100, 200, 500, 1000, 5000]);
 
-/**
- * Waits until `word[index]` is no longer `value`: a look for `spinMs` (`SPIN_MS`),
- * then a sleep for at most `ms`, counted in `word[sleepers]` when that is given.
- *
- * @param {Int32Array} word @param {number} index @param {number} value @param {number} [ms]
- * @param {number} [spinMs] @param {number} [sleepers]
- * @returns {boolean} whether it slept
- */
-export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS, sleepers = -1){
-    const began = performance.now();
-    while (Atomics.load(word, index) === value)
-    {
-        if (performance.now() - began >= spinMs)
-        {
-            sleep(word, index, value, ms, sleepers);
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * Sleeps on `word[index]` while it is `value`, at most `ms`, counted in
- * `word[sleepers]` (not, when negative) for `wake`. The count is raised before
- * the wait looks at the word, and both are sequentially consistent: a side
- * that stores the word and then finds no sleeper knows that a wait yet to
- * come sees what it stored, and one that finds a sleeper notifies under the
- * lock the wait takes, so no wake is lost between the look and the sleep.
- *
- * @param {Int32Array} word @param {number} index @param {number} value @param {number} ms
- * @param {number} sleepers
- */
-export function sleep(word, index, value, ms, sleepers){
-    if (sleepers < 0)
-    {
-        Atomics.wait(word, index, value, ms);
-        return;
-    }
-    Atomics.add(word, sleepers, 1);
-    Atomics.wait(word, index, value, ms);
-    Atomics.sub(word, sleepers, 1);
-}
-
-/**
- * The same sleep without blocking (`Atomics.waitAsync`): counted until it ends,
- * for a side whose other wakes come through its event loop.
- *
- * @param {Int32Array} word @param {number} index @param {number} value @param {number} ms
- * @param {number} sleepers
- * @returns {Promise<void>}
- */
-export function sleepAsync(word, index, value, ms, sleepers){
-    Atomics.add(word, sleepers, 1);
-    const waiting = /** @type {any} */ (Atomics).waitAsync(word, index, value, ms);
-    if (!waiting.async)
-    {
-        Atomics.sub(word, sleepers, 1);
-        return Promise.resolve();
-    }
-    return waiting.value.then(()=>{
-        Atomics.sub(word, sleepers, 1);
-    });
-}
-
-/**
- * Wakes what sleeps on `word[index]`, which the caller has just stored, when
- * something does (`word[sleepers]`, `sleep`): a notify takes a lock every
- * thread of the page shares -- the process's own executor answers every other
- * executor's host calls, and its notify after each answer found the asker
- * mostly still looking.
- *
- * @param {Int32Array} word @param {number} index @param {number} sleepers
- * @returns {boolean} whether it notified
- */
-export function wake(word, index, sleepers){
-    if (Atomics.load(word, sleepers) === 0)
-    {
-        return false;
-    }
-    Atomics.notify(word, index);
-    return true;
-}
-
 /** Bytes before the text, and the text's room. */
 const TEXT_AT = 64;
 const TEXT_BYTES = 4096;
@@ -175,22 +92,16 @@ export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2, RUNNING: 3 }
 export const BELL_BYTES = 16;
 
 /**
- * How long a wait looks before it sleeps, asked as each wait begins: the run's
- * own `spinMs` when it names one; otherwise `SPARE_SPIN_MS` while the slices
- * out and the threads beside them (`BUSY_BESIDE`) leave one of the host's
- * `processors` free, and `SPIN_MS` when they do not -- or when the host does
- * not say how many it has.
+ * How long a wait looks before it sleeps, asked as each wait begins:
+ * `SPARE_SPIN_MS` while the slices out and the threads beside them
+ * (`BUSY_BESIDE`) leave one of the host's `processors` free, and `SPIN_MS`
+ * when they do not -- or when the host does not say how many it has.
  *
  * @param {Int32Array | null} bell  the process's bell (`Bell.RUNNING`)
  * @param {number | undefined} processors  the host's (`navigator.hardwareConcurrency`)
- * @param {number | undefined} spinMs  the run's
  * @returns {() => number}
  */
-export function lookFor(bell, processors, spinMs){
-    if (spinMs !== undefined)
-    {
-        return ()=>spinMs;
-    }
+export function lookFor(bell, processors){
     if (bell === null || processors === undefined || !(processors > 0))
     {
         return ()=>SPIN_MS;
@@ -249,12 +160,9 @@ export function channelOf(buffer, bell = null, spin = SPIN_MS){
          * @param {number} state
          */
         await(state){
-            while (Atomics.load(words, Word.STATE) === state)
+            if (waitFor(words, Word.STATE, state, Word.SLEEPING, Infinity, look()) === 'woke')
             {
-                if (waitWhile(words, Word.STATE, state, Infinity, look(), Word.SLEEPING))
-                {
-                    counts.slept++;
-                }
+                counts.slept++;
             }
             return Atomics.load(words, Word.STATE);
         },

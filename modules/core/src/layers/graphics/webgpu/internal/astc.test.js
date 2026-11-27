@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dxt1ToAstc, dxt1Transcodes } from './astc.js';
-import { decodeS3tc } from './s3tc.js';
+import { decodeS3tc } from '../../../media/internal/s3tc.js';
 
 /**
  * The texels of one ASTC 4x4 block, as Khronos' specification decodes it

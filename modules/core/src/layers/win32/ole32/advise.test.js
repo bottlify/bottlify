@@ -93,8 +93,9 @@ test('a data advise holder tells each sink of a change, with the data it asked f
         E_INVALIDARG, 'no format');
     assert.equal(p.u32(connection), 0);
 
-    assert.equal(await p.callMethod(holder, 2, []), 0);
-    assert.equal(second.refs, 1, 'the last release lets every sink go');
+    // Counted before anything else runs: the sinks go inside the Release.
+    const left = p.callMethod(holder, 2, []).then(answer=>[answer, second.refs]);
+    assert.deepEqual(await left, [0, 1], 'the last release lets every sink go');
 });
 
 test('ADVF_PRIMEFIRST tells a sink at once, ADVF_ONLYONCE only once', async()=>{
@@ -135,8 +136,8 @@ test('EnumAdvise lists the connections, each sink handed out with a reference', 
         p.u32(statdata + 28)], [CF_TEXT, ADVF_NODATA, one.pointer, 1]);
     assert.equal(one.refs, 4, 'the holder, the snapshot and the caller');
     await p.callMethod(one.pointer, 2, []);
-    await p.callMethod(enumerator, 2, []);
-    assert.equal(one.refs, 2);
+    assert.deepEqual(await p.callMethod(enumerator, 2, []).then(()=>one.refs), 2,
+        'the snapshot lets go inside the enumerator\'s last Release');
 });
 
 test('an OLE advise holder sends renames, saves and closes to every sink', async()=>{

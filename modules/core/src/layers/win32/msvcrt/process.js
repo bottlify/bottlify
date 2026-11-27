@@ -22,7 +22,8 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { VARIADIC_SLOTS } from './scan.js';
-import { EINVAL, ENOENT } from './globals.js';
+import { EBADF, EINVAL, ENOENT } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The signals msvcrt.dll keeps a handler for; any other number is EINVAL. */
 const SIGNALS = new Set([
@@ -47,6 +48,8 @@ const DEFAULT_ACTION_EXIT = 3;
 /** The code a raised SIGFPE's handler is given as its second argument: _FPE_EXPLICITGEN. */
 const FPE_EXPLICITGEN = 0x8c;
 const SIGFPE = 8;
+/** The signals an exception is raised as: SIGILL, SIGFPE and SIGSEGV. */
+const EXCEPTION_SIGNALS = new Set([4, 8, 11]);
 
 /** _spawn's modes: _P_WAIT, _P_NOWAIT, _P_OVERLAY, _P_NOWAITO, _P_DETACH. */
 const SPAWN_MODES = 5;
@@ -72,6 +75,8 @@ const MOST_ARGUMENTS = 1024;
  * @property {(handle: number) => void} [closeHandle]
  * @property {(address: number) => string} [readCString]
  * @property {(address: number) => number} [readU32]
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
@@ -92,6 +97,23 @@ export function createProcessFunctions(host){
         answer: 0xffffffff,
         lastError: ENOENT,
         why: 'there is no command interpreter to run a command with',
+    });
+
+    /**
+     * `_popen`'s refusal, cdecl as the runtime's calls are: the caller takes
+     * its arguments off the stack.
+     *
+     * @param {string} name
+     */
+    const noPipeTo = name=>({
+        convention: /** @type {'cdecl'} */ ('cdecl'),
+        argBytes: 8,
+        handler: refuse(name, {
+            argBytes: 8,
+            answer: 0,
+            lastError: ENOENT,
+            why: 'there is no command interpreter to run a command with',
+        }).handler,
     });
 
     const noWait = refuse('_spawnl', {
@@ -159,7 +181,53 @@ export function createProcessFunctions(host){
         return found;
     };
 
-    return {
+    /**
+     * Each thread's `_pxcptinfoptrs`, made the first time it is asked for.
+     *
+     * @type {Map<any, number>}
+     */
+    const pointerCells = new Map();
+
+    /** The calling thread's cell, zero where no memory can hold one. */
+    const exceptionPointers = ()=>{
+        const thread = host.currentThread?.() ?? null;
+        let cell = pointerCells.get(thread) ?? 0;
+        if (cell === 0 && host.allocate && host.writeMemory)
+        {
+            cell = host.allocate(4);
+            if (cell !== 0)
+            {
+                writeCell(cell, 0);
+                pointerCells.set(thread, cell);
+            }
+        }
+        return cell;
+    };
+
+    /** @param {number} cell */
+    const readCell = cell=>host.readU32?.(cell) ?? 0;
+
+    /** @param {number} cell @param {number} value */
+    const writeCell = (cell, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory?.(cell, bytes);
+    };
+
+    const table = {
+        /**
+         * void **__pxcptinfoptrs(void)
+         *
+         * Where the calling thread's runtime keeps the EXCEPTION_POINTERS of
+         * the exception a signal handler was called for: null until one is.
+         */
+        __pxcptinfoptrs: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>exceptionPointers(),
+        },
+
         /**
          * void (*signal(int sig, void (*func)(int)))(int)
          *
@@ -173,7 +241,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([signal, action])=>{
                 const number = signal | 0;
-                const given = action >>> 0;
+                const given = wholeAddress(action);
                 if (!SIGNALS.has(number) || given === SIG_SGE || given === SIG_ACK)
                 {
                     host.errno(EINVAL);
@@ -181,7 +249,7 @@ export function createProcessFunctions(host){
                 }
                 const previous = handlers.get(number) ?? 0;
                 handlers.set(number, given);
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -218,7 +286,19 @@ export function createProcessFunctions(host){
                     throw new Error('raise: no way into guest code to run a signal handler');
                 handlers.set(number, 0);
                 const args = number === SIGFPE ? [number, FPE_EXPLICITGEN] : [number];
+                // A signal an exception raises sees no exception's pointers
+                // while its handler runs: there was none, raise is a call.
+                const pointers = EXCEPTION_SIGNALS.has(number) ? exceptionPointers() : 0;
+                const kept = pointers === 0 ? 0 : readCell(pointers);
+                if (pointers !== 0)
+                {
+                    writeCell(pointers, 0);
+                }
                 await host.callGuest(action, args, host.currentThread?.());
+                if (pointers !== 0)
+                {
+                    writeCell(pointers, kept);
+                }
                 return 0;
             },
         },
@@ -234,7 +314,31 @@ export function createProcessFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([command])=>((command >>> 0) === 0 ? 0 : noInterpreter.handler()),
+            handler: ([command])=>(wholeAddress(command) === 0 ? 0 : noInterpreter.handler()),
+        },
+
+        /**
+         * FILE *_popen(const char *command, const char *mode), and _wpopen
+         *
+         * Null with ENOENT, as `system` answers: the command interpreter
+         * that would run the command and be piped to is not there.
+         */
+        _popen: { ...noPipeTo('_popen'), returns: 'pointer' },
+        _wpopen: noPipeTo('_wpopen'),
+
+        /**
+         * int _pclose(FILE *stream)
+         *
+         * -1 with EBADF for a stream `_popen` did not open, which, with no
+         * stream ever opened by it, is every one.
+         */
+        _pclose: {
+            convention: 'cdecl',
+            argBytes: 4,
+            handler: ()=>{
+                host.errno?.(EBADF);
+                return 0xffffffff;
+            },
         },
 
         /**
@@ -248,7 +352,7 @@ export function createProcessFunctions(host){
             argBytes: 8 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: ([mode, name, ...rest])=>{
-                if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
+                if ((mode >>> 0) >= SPAWN_MODES || wholeAddress(name) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
@@ -267,16 +371,37 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([mode, name, argv])=>{
-                if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
+                if ((mode >>> 0) >= SPAWN_MODES || wholeAddress(name) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
                 }
                 const { readU32 } = host;
-                const list = (argv >>> 0) === 0 || !readU32 ? []
-                    : untilNull(index=>readU32((argv >>> 0) + index * 4), MOST_ARGUMENTS);
+                const list = wholeAddress(argv) === 0 || !readU32 ? []
+                    : untilNull(index=>readU32(wholeAddress(argv) + index * 4), MOST_ARGUMENTS);
                 return spawn(mode >>> 0, name, list);
             },
         },
+    };
+    /**
+     * intptr_t _execv(const char *cmdname, const char *const *argv): the
+     * image run in the caller's place, as _spawnv's _P_OVERLAY.
+     */
+    const execv = {
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([name, argv])=>table._spawnv.handler([P_OVERLAY, name, argv]),
+    };
+    return {
+        ...table,
+        // The PATH forms. The image is resolved as CreateProcess resolves
+        // the name; the runtime's own walk of PATH's directories is not made.
+        _spawnlp: table._spawnl,
+        _spawnvp: table._spawnv,
+        _execv: execv,
+        _execvp: execv,
+        // int _wsystem(const wchar_t *command): `system`'s answers.
+        _wsystem: table.system,
     };
 }

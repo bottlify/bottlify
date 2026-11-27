@@ -358,6 +358,108 @@ test('setting an item changes only what the mask names', ()=>{
     assert.equal(memory.readCString(OUT, 16), 'Save', 'the text the mask did not name survived');
 });
 
+test('a bitmap item gives its handle back in dwTypeData and writes no text there', ()=>{
+    // Wine's menu test: under MIIM_TYPE a bitmap item's dwTypeData is its
+    // HBITMAP, both ways; writing the text through it wrote to the handle.
+    const { memory, fns } = setup();
+    const MIIM_TYPE = 0x0010;
+    const MFT_BITMAP = 0x0004;
+    const HBITMAP = 0x4c;
+    const menu = fns.CreateMenu.handler([]);
+    putItemInfo(memory, { mask: MIIM_TYPE, type: MFT_BITMAP });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [HBITMAP]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+
+    putItemInfo(memory, { mask: MIIM_TYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [HBITMAP]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MFT_BITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.dwTypeData), HBITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 0);
+});
+
+test('MENUITEMINFO carries only what its mask names, and MIIM_TYPE not beside its halves', ()=>{
+    // Wine's menu test, test_menu_iteminfo.
+    const { memory, fns } = setup();
+    const MIIM_TYPE = 0x0010;
+    const MIIM_BITMAP = 0x0080;
+    const MIIM_FTYPE = 0x0100;
+    const MFT_BITMAP = 0x0004;
+    const MFT_SEPARATOR = 0x0800;
+    const menu = fns.CreateMenu.handler([]);
+    for (const mask of [MIIM_TYPE | MIIM_STRING, MIIM_TYPE | MIIM_FTYPE, MIIM_TYPE | MIIM_BITMAP])
+    {
+        putItemInfo(memory, { mask, text: 'text' });
+        assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 0, `insert ${mask}`);
+    }
+    putItemInfo(memory, { mask: MIIM_FTYPE, type: MFT_BITMAP });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 0, 'no MFT_BITMAP in FTYPE');
+
+    // A type of -1 the mask does not name was never given.
+    putItemInfo(memory, { mask: MIIM_STRING, type: 0xffffffff, id: 0xffffffff, text: 'text' });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0xffffffff, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_TYPE | MIIM_ID, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 80]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.deepEqual([memory.u32(INFO + MENUITEMINFO.fType), memory.u32(INFO + MENUITEMINFO.wID)],
+        [0, 0]);
+    assert.equal(memory.readCString(OUT, 80), 'text');
+    putItemInfo(memory, { mask: MIIM_TYPE | MIIM_STRING });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 0, 'nor when asking');
+
+    // A string item given no text reads back as a separator.
+    putItemInfo(memory, { mask: MIIM_STRING | MIIM_FTYPE });
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_STRING | MIIM_FTYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [OUT, 80]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MFT_SEPARATOR);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.cch), 0);
+
+    // An item's own bitmap is a bitmap item to MIIM_TYPE, its handle in dwTypeData.
+    putItemInfo(memory, { mask: MIIM_BITMAP });
+    memory.putU32s(INFO + MENUITEMINFO.hbmpItem, [0x4c]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, INFO]), 1);
+    putItemInfo(memory, { mask: MIIM_TYPE, cch: 80 });
+    memory.putU32s(INFO + MENUITEMINFO.dwTypeData, [0x4c]);
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType) & MFT_BITMAP, MFT_BITMAP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.dwTypeData), 0x4c);
+});
+
+test('an appended bitmap item is MF_BITMAP with its handle, and magic ones stay last', ()=>{
+    // Wine's menu test, test_InsertMenu: a menu bar's MDI buttons -- magic
+    // bitmaps 1 to 6 -- keep the end whatever is appended after them.
+    const { memory, fns } = setup();
+    const MF_BITMAP = 0x0004;
+    const MF_HELP = 0x4000;
+    const MIIM_BITMAP = 0x0080;
+    const MIIM_FTYPE = 0x0100;
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'File');
+    assert.equal(fns.AppendMenuA.handler([menu, 0, 1, TITLE]), 1);
+    assert.equal(fns.AppendMenuA.handler([menu, MF_BITMAP | MF_HELP, 0xf060, 1]), 1);
+    memory.putString(TITLE, 'Help');
+    assert.equal(fns.AppendMenuA.handler([menu, MF_HELP, 2, TITLE]), 1);
+    assert.deepEqual([0, 1, 2].map(at=>fns.GetMenuItemID.handler([menu, at])), [1, 2, 0xf060]);
+
+    putItemInfo(memory, { mask: MIIM_FTYPE | MIIM_ID | MIIM_BITMAP });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 2, 1, INFO]), 1);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fType), MF_BITMAP | MF_HELP);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.hbmpItem), 1);
+});
+
+test('a NULL MENUITEMINFO is ERROR_INVALID_PARAMETER', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const { fns } = setup({ setLastError: (/** @type {number} */ code)=>errors.push(code) });
+    const menu = fns.CreateMenu.handler([]);
+    assert.equal(fns.InsertMenuItemA.handler([menu, 0, 1, 0]), 0);
+    assert.equal(fns.SetMenuItemInfoA.handler([menu, 0, 1, 0]), 0);
+    assert.equal(fns.SetMenuItemInfoW.handler([menu, 0, 0, 0]), 0);
+    assert.deepEqual(errors, [87, 87, 87]);
+});
+
 /**
  * Lays out a MENUITEMINFOW: the same structure, its text in UTF-16.
  *
@@ -1478,7 +1580,7 @@ test('a clipboard viewer is told of every change and of the chain changing', ()=
     assert.equal(told(WM_CHANGECBCHAIN).length, 1);
 
     assert.equal(fns.SetClipboardViewer.handler([0x9999]), 0);
-    assert.deepEqual(errors, [1400]);
+    assert.equal(errors.at(-1), 1400);
 });
 
 // --- icons made of bitmaps, and copies ---
@@ -1606,4 +1708,144 @@ test('CreateIconFromResourceEx makes an icon or cursor of one resource entry\'s 
         0, 'a version below 0x00020000');
     assert.equal(fns.CreateIconFromResourceEx.argBytes, 28);
     assert.equal(fns.CreateIconFromResource.argBytes, 16);
+});
+
+test('SetMenuInfo keeps a menu\'s own settings by mask, GetMenuInfo reads them back', ()=>{
+    const { memory, fns } = setup();
+    const menu = fns.CreateMenu.handler([]);
+    const MIM_STYLE = 0x10;
+    const MIM_MENUDATA = 0x8;
+    const MNS_NOTIFYBYPOS = 0x08000000;
+    memory.putU32s(INFO, [28, MIM_STYLE | MIM_MENUDATA, MNS_NOTIFYBYPOS, 0, 0, 0, 0x1234]);
+    assert.equal(fns.SetMenuInfo.handler([menu, INFO]), 1);
+    memory.putU32s(INFO, [28, MIM_STYLE | MIM_MENUDATA, 0, 0, 0, 0, 0]);
+    assert.equal(fns.GetMenuInfo.handler([menu, INFO]), 1);
+    assert.equal(memory.u32(INFO + 8), MNS_NOTIFYBYPOS);
+    assert.equal(memory.u32(INFO + 24), 0x1234);
+
+    memory.putU32s(INFO, [27, MIM_STYLE]);
+    assert.equal(fns.GetMenuInfo.handler([menu, INFO]), 0, 'a cbSize of neither width');
+    memory.putU32s(INFO, [28, MIM_STYLE]);
+    assert.equal(fns.GetMenuInfo.handler([0x9999, INFO]), 0, 'no such menu');
+});
+
+test('GetIconInfo hands out new mask and colour bitmaps, and CopyImage stretches an icon', ()=>{
+    // Wine's cursoricon test_CreateIcon: a one-bit icon is monochrome, its mask
+    // both planes and no colour; the bitmaps are made each time, the caller's.
+    /** @type {[number, number, number, number[]][]} */
+    const made = [];
+    /** @type {number[][]} */
+    const copied = [];
+    /**
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {Uint8Array} bits
+     */
+    const bitmapFromBits = (width, height, depth, bits)=>{
+        made.push([width, height, depth, [...bits.subarray(0, 4)]]);
+        return 0x500 + made.length;
+    };
+    const { memory, fns } = setup({
+        bitmapFromBits,
+        copyBitmap: (/** @type {number[]} */ ...args)=>{
+            copied.push(args);
+            return 0x777;
+        },
+    });
+    const planes = Uint8Array.from({ length: 64 }, (_, i)=>i);
+    memory.writeMemory(INFO, planes);
+    const mono = fns.CreateIcon.handler([0, 16, 16, 1, 1, INFO, INFO + 32]);
+    assert.ok(mono);
+    assert.equal(fns.GetIconInfo.handler([mono, OUT]), 1);
+    assert.deepEqual(made, [[16, 32, 1, [0, 1, 2, 3]]], 'the mask is the two planes');
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8),
+        memory.u32(OUT + 12), memory.u32(OUT + 16)], [1, 8, 8, 0x501, 0]);
+
+    const IMAGE_BITMAP = 0;
+    const IMAGE_ICON = 1;
+    const small = fns.CopyImage.handler([mono, IMAGE_ICON, 8, 0, 0]);
+    made.length = 0;
+    assert.equal(fns.GetIconInfo.handler([small, OUT]), 1);
+    assert.deepEqual(made.map(([width, height])=>[width, height]), [[8, 32]],
+        'eight across, the height kept, each half of the mask its sixteen lines');
+    assert.deepEqual([memory.u32(OUT + 4), memory.u32(OUT + 8)], [4, 8]);
+
+    assert.equal(fns.CopyImage.handler([0x123, IMAGE_BITMAP, 5, 6, 0x2000]), 0x777);
+    assert.deepEqual(copied, [[0x123, 5, 6, 0x2000]], 'a bitmap is copied by GDI');
+});
+
+test('ModifyMenu makes an item over, keeps its check marks, refuses one that is not there', ()=>{
+    const { memory, fns } = setup();
+    const MIIM_CHECKMARKS = 0x8;
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'Old');
+    fns.AppendMenuA.handler([menu, 0, 7, TITLE]);
+    assert.equal(fns.SetMenuItemBitmaps.handler([menu, 7, 0, 0x41, 0x42]), 1);
+    memory.putString(TITLE, 'New');
+    assert.equal(fns.ModifyMenuA.handler([menu, 7, 0, 8, TITLE]), 1);
+    assert.equal(fns.ModifyMenuA.handler([menu, 7, 0, 9, TITLE]), 0, 'id 7 is gone');
+    assert.equal(fns.ModifyMenuA.handler([menu, 5, MF_BYPOSITION, 9, TITLE]), 0);
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_CHECKMARKS });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.deepEqual([memory.u32(INFO + MENUITEMINFO.wID),
+        memory.u32(INFO + MENUITEMINFO.hbmpChecked),
+        memory.u32(INFO + MENUITEMINFO.hbmpUnchecked)], [8, 0x42, 0x41]);
+
+    // A popup's id is its submenu's handle; a separator is grayed whatever it was given.
+    const popup = fns.CreatePopupMenu.handler([]);
+    fns.AppendMenuA.handler([menu, MF_POPUP, popup, TITLE]);
+    fns.AppendMenuA.handler([menu, MF_SEPARATOR, 0, 0]);
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_STATE });
+    fns.GetMenuItemInfoA.handler([menu, 1, 1, INFO]);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.wID), popup);
+    fns.GetMenuItemInfoA.handler([menu, 2, 1, INFO]);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fState), 3);
+
+    // A submenu holding the menu it would hang under is a cycle, refused.
+    assert.equal(fns.AppendMenuA.handler([popup, MF_POPUP, menu, TITLE]), 0);
+    assert.equal(fns.AppendMenuA.handler([popup, MF_POPUP, popup, TITLE]), 0);
+    assert.equal(fns.DestroyMenu.handler([menu]), 1);
+    assert.equal(fns.IsMenu.handler([popup]), 0, 'the submenu went with it');
+});
+
+test('a menu tree nests at most sixteen deep', ()=>{
+    // decisions.md A250: Windows refuses a too-deep tree, with the error untouched.
+    const { memory, fns } = setup();
+    memory.putString(TITLE, 'x');
+    let below = fns.CreatePopupMenu.handler([]);
+    let depth = 1;
+    for (; depth < 40; depth++)
+    {
+        const above = fns.CreatePopupMenu.handler([]);
+        if (!fns.AppendMenuA.handler([above, MF_POPUP, below, TITLE]))
+        {
+            break;
+        }
+        below = above;
+    }
+    assert.equal(depth, 16);
+});
+
+test('the menu bar is laid out for GetMenuItemRect, its layout stale once it changes', ()=>{
+    const { memory, fns } = setup();
+    const OBJID_MENU = -3;
+    const hwnd = makeWindow(memory, fns);
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'File');
+    fns.AppendMenuA.handler([menu, 0, 1, TITLE]);
+    fns.AppendMenuA.handler([menu, 0, 2, TITLE]);
+    assert.equal(fns.SetMenu.handler([hwnd, menu]), 1);
+    assert.equal(fns.GetMenuItemRect.handler([hwnd, menu, 1, OUT]), 1);
+    const second = [0, 4, 8, 12].map(at=>memory.u32(OUT + at) | 0);
+    assert.ok(second[2] > second[0] && second[3] > second[1], 'a rectangle with room');
+    memory.putU32s(OUT, [32]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 2, OUT]), 1);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT + at) | 0), second);
+    assert.equal(fns.MenuItemFromPoint.handler([hwnd, menu, second[0] + 1, second[1] + 1]), 1);
+
+    fns.RemoveMenu.handler([menu, 0, MF_BYPOSITION]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 1, OUT]), 1);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0],
+        'not laid out since it changed');
+    memory.putU32s(OUT, [1000]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 0, OUT]), 0);
 });

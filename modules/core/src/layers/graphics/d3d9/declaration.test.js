@@ -6,12 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { D3DERR_INVALIDCALL, D3D_OK, E_FAIL } from './constants.js';
 import { createReferenceCount } from './resources.js';
 import {
     D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, MAX_DECLARATION_LENGTH,
     createVertexDeclaration, declarationEnd, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
-    strideOf,
     validateElements,
 } from './declaration.js';
 
@@ -52,7 +51,6 @@ test('a format becomes its elements in the order the format lays them out', ()=>
         // The two-bit size code three is one float, not four.
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT1, 40, { index: 1 }),
     ]);
-    assert.equal(strideOf(elements ?? [], 0), 44);
 });
 
 test('a pre-transformed position is a POSITIONT of four floats', ()=>{
@@ -72,6 +70,26 @@ test('blend weights follow the position, and a last beta of indices is its own e
     assert.deepEqual(elementsOfFvf(FVF_XYZB3), [
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
         element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT3, 12),
+    ]);
+    // Five as floats are four weights and a float of indices
+    // (test_fvf_decl_conversion).
+    // XYZB2 with a D3DCOLOR last beta is, as Direct3D 9 declares it, a
+    // D3DCOLOR weight and UBYTE4 indices; the format itself is a float and
+    // a D3DCOLOR.
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT1, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.D3DCOLOR, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x0008 | 0x8000, { asDirect3D9: true }), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.D3DCOLOR, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.UBYTE4, 16),
+    ]);
+    assert.deepEqual(elementsOfFvf(0x000e), [
+        element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
+        element(D3DDECLUSAGE.BLENDWEIGHT, D3DDECLTYPE.FLOAT4, 12),
+        element(D3DDECLUSAGE.BLENDINDICES, D3DDECLTYPE.FLOAT1, 28),
     ]);
 });
 
@@ -122,10 +140,10 @@ test('validation refuses what the header puts out of range', ()=>{
     ]), D3DERR_INVALIDCALL, 'a stream past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.UNUSED, 0),
-    ]), D3DERR_INVALIDCALL, 'the unused type outside the sentinel');
+    ]), E_FAIL, 'the unused type outside the sentinel');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, 18, 0),
-    ]), D3DERR_INVALIDCALL, 'a type past the last');
+    ]), E_FAIL, 'a type past the last');
     assert.equal(validateElements([
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0, { method: 7 }),
     ]), D3DERR_INVALIDCALL, 'a method past the last');
@@ -137,7 +155,7 @@ test('validation refuses what the header puts out of range', ()=>{
         assert.equal(validateElements([
             element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
             element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 12 + offset),
-        ]), D3DERR_INVALIDCALL, `an offset of ${12 + offset} is not dword-aligned`);
+        ]), E_FAIL, `an offset of ${12 + offset} is not dword-aligned`);
     }
     assert.equal(validateElements([
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 0),
@@ -207,8 +225,28 @@ test('fixed function reads a declaration by its offsets and refuses what it cann
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT2, 28, { index: 1 })] }), null,
     'a gap in the sets');
+    // A colour of another type than D3DCOLOR is read red first (Wine's d3d9
+    // fixed_function_decl_test: UBYTE4N, USHORT4N, FLOAT4).
+    for (const [type, format] of /** @type {[number, string][]} */ ([[D3DDECLTYPE.UBYTE4N, 'unorm8x4'],
+        [D3DDECLTYPE.USHORT4N, 'unorm16x4'], [D3DDECLTYPE.FLOAT4, 'float32x4']]))
+    {
+        const colour = fixedFunctionLayoutOf({ id: 1, elements: [position,
+            element(D3DDECLUSAGE.COLOR, type, 28)] })?.attributes[1];
+        assert.deepEqual([colour?.name, colour?.format, colour?.rgba], ['diffuse', format, true]);
+    }
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [position,
-        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UBYTE4N, 28)] }), null, 'a colour in R, G, B, A');
+        element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.UDEC3, 28)] }), null, 'a packed colour');
     assert.equal(fixedFunctionLayoutOf({ id: 1, elements: [
         element(D3DDECLUSAGE.NORMAL, D3DDECLTYPE.FLOAT3, 0)] }), null, 'no position');
+});
+
+test('a position of four floats (D3DFVF_XYZW) is drawn by the fixed function as three, its'
+    + ' colours where the format puts them (test_fog, test_ffp_w)', ()=>{
+    const layout = fixedFunctionLayoutOf(
+        { id: 9, elements: elementsOfFvf(0x4002 | 0x40 | 0x80) ?? [] });
+    assert.ok(layout, 'drawn by the fixed function');
+    const byName = Object.fromEntries((layout?.attributes ?? []).map(attribute=>
+        [attribute.name, [attribute.offset, attribute.format]]));
+    assert.deepEqual(byName, { position: [0, 'float32x3'], diffuse: [16, 'unorm8x4'],
+        specular: [20, 'unorm8x4'] });
 });

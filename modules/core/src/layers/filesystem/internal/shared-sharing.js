@@ -23,6 +23,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
+import { wake, waitFor } from '@bottlify/cellar';
 
 /** How many files the run may hold open at once, across every process. */
 export const SLOTS = 2048;
@@ -33,6 +34,8 @@ const KEY_UNITS = 300;
 const LOCK = 0;
 const SEQUENCE = 1;
 const HIGH = 2;
+/** The threads asleep on a held lock (Cellar's bell): the holder notifies only when one is. */
+const LOCK_SLEEPS = 3;
 const HEADER = 4;
 
 // A slot: its token (0: free), its terms, its key's length and hashes, its key.
@@ -48,6 +51,12 @@ const READ = 1;
 const WRITE = 2;
 const SHARE_READ = 4;
 const SHARE_WRITE = 8;
+const DELETE = 16;
+const SHARE_DELETE = 32;
+/** An image section's hold, which refuses writers and holds no access of its own. */
+const IMAGE = 64;
+/** The bits that are access, as against sharing: an open with none refuses nothing. */
+const ACCESS = READ | WRITE | DELETE | IMAGE;
 
 /** The memory of a run's sharing, handed to every thread that opens files. */
 export function createSharingMemory(){
@@ -66,7 +75,9 @@ const hashOf = (key, seed)=>{
 
 /** @param {import('./handles.js').OpenTerms} terms */
 const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRITE : 0)
-    | (terms.share.read ? SHARE_READ : 0) | (terms.share.write ? SHARE_WRITE : 0);
+    | (terms.access.delete ? DELETE : 0) | (terms.access.image ? IMAGE : 0)
+    | (terms.share.read ? SHARE_READ : 0)
+    | (terms.share.write ? SHARE_WRITE : 0) | (terms.share.delete ? SHARE_DELETE : 0);
 
 /**
  * Whether one open refuses the other: either's access not shared by the
@@ -74,10 +85,13 @@ const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRI
  *
  * @param {number} mine @param {number} theirs
  */
-const refuses = (mine, theirs)=>((mine & READ) !== 0 && (theirs & SHARE_READ) === 0)
+const refuses = (mine, theirs)=>(mine & ACCESS) !== 0 && (theirs & ACCESS) !== 0
+    && (((mine & READ) !== 0 && (theirs & SHARE_READ) === 0)
     || ((mine & WRITE) !== 0 && (theirs & SHARE_WRITE) === 0)
+    || ((mine & DELETE) !== 0 && (theirs & SHARE_DELETE) === 0)
     || ((theirs & READ) !== 0 && (mine & SHARE_READ) === 0)
-    || ((theirs & WRITE) !== 0 && (mine & SHARE_WRITE) === 0);
+    || ((theirs & WRITE) !== 0 && (mine & SHARE_WRITE) === 0)
+    || ((theirs & DELETE) !== 0 && (mine & SHARE_DELETE) === 0));
 
 /**
  * The run's sharing over `memory`, from any thread.
@@ -93,19 +107,19 @@ export function openSharedSharing(memory){
 
     // Held for a scan of the table and a write of one slot: a thread that
     // finds it held tries again, and sleeps only if the holder was put off
-    // its processor in the middle.
+    // its processor in the middle - until the holder lets it go.
     const lock = ()=>{
         for (let tries = 0; Atomics.compareExchange(words, LOCK, 0, 1) !== 0; tries++)
         {
             if (tries > 1000 && canBlock)
             {
-                Atomics.wait(words, LOCK, 1, 1);
+                waitFor(words, LOCK, 1, LOCK_SLEEPS, Infinity, 0);
             }
         }
     };
     const unlock = ()=>{
         Atomics.store(words, LOCK, 0);
-        Atomics.notify(words, LOCK, 1);
+        wake(words, LOCK, LOCK_SLEEPS);
     };
 
     /** @param {string} key */

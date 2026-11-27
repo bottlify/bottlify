@@ -22,8 +22,8 @@
  */
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
-import { DRAW, SHADOW } from '../seam/shadow.js';
-import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
+import { DRAW, SHADOW } from '../seam/block.js';
+import { D3DERR_INVALIDCALL, D3DFMT_INDEX, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -81,8 +81,8 @@ const first = (kind, length)=>{
  *     reused by the next record
  * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
  *     of its own, for a method that keeps them or reads more than the scratch holds
- * @property {(bytes: number) => Uint8Array} view  the same bytes in place, for a method
- *     that copies what it reads before it returns
+ * @property {(bytes: number, from?: number) => Uint8Array} view  the same bytes in place,
+ *     `from` bytes into the copy, for a method that copies what it reads before it returns
  */
 
 /**
@@ -108,6 +108,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, mask: number, nullable?: boolean }
  *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]
  * @property {{ buffer: number, start: number, count: number }} [vertexRange]
+ * @property {{ target: number, depth: number }} [depthCovers]
  * @property {number} [token]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
@@ -115,6 +116,10 @@ const first = (kind, length)=>{
  * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
+ * @property {IndexedVertices} [indexedVertices]  or an indexed draw's indices and the
+ *     vertices they reach, two copies (`commandCode`)
+ * @property {readonly number[]} [rects]  or arguments each pointing at a RECT or null,
+ *     sixteen bytes a place in order (`commandCode`)
  * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
  * @property {'rect' | 'box'} [dirty]  a texture's dirty rectangle or box (`dirtyPrologue`)
@@ -122,7 +127,10 @@ const first = (kind, length)=>{
  * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
  *     alone, or whatever the count
  * @property {boolean} [draws]
- * @property {(device: any, call: CommandArgs) => number} make
+ * @property {(arg: (index: number) => number) => number} [copiedObjects]
+ *     how many of the copy's first words name objects of the device's, given its
+ *     arguments: an array of interfaces a call binds, resolved after `objects`
+ * @property {(device: any, call: CommandArgs) => number | void} make
  */
 
 /**
@@ -195,6 +203,11 @@ export function commandSet(slots, table){
             {
                 objects.push(objectAt(all[at + ARGS + index]) ?? null);
             }
+            const copied = entry.copiedObjects?.(index=>all[at + ARGS + index]) ?? 0;
+            for (let index = 0; index < copied; index++)
+            {
+                objects.push(objectAt(all[at + ARGS + entry.args + index]) ?? null);
+            }
             at += length;
         }
         return objects;
@@ -263,9 +276,9 @@ export function commandSet(slots, table){
             floats,
             ints,
             first,
-            view: bytes=>{
+            view: (bytes, offset = 0)=>{
                 const from = records.byteOffset
-                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4 + offset;
                 return new Uint8Array(records.buffer, from, bytes);
             },
             copy: bytes=>{
@@ -309,7 +322,7 @@ export function commandSet(slots, table){
             }
             if ((hr ?? 0) !== 0)
             {
-                refused(/** @type {string} */ (names.get(entry)), hr >>> 0);
+                refused(/** @type {string} */ (names.get(entry)), /** @type {number} */ (hr) >>> 0);
             }
             at += length;
         }
@@ -347,6 +360,32 @@ const floatOf = word=>{
 const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
     x1: copy[i * 4], y1: copy[i * 4 + 1], x2: copy[i * 4 + 2], y2: copy[i * 4 + 3],
 }));
+
+/**
+ * The arguments of an indexed draw from the program's memory, and the most its two copies
+ * come to: the indices its primitives take, `format` saying their width, then from the
+ * first vertex up to `minIndex` and `vertices` past it, `stride` bytes each, which is
+ * what the indices may reach. The vertices start at the next whole dword (`indexedBytes`).
+ *
+ * @typedef {{ type: number, minIndex: number, vertices: number, count: number,
+ *     indices: number, format: number, data: number, stride: number, most: number }}
+ *     IndexedVertices
+ */
+
+/**
+ * An indexed draw's copies by its arguments: the indices' bytes, where the vertices start
+ * in the copy, and their bytes. The routine writes them so (`commandCode`) and the model
+ * of it reads them so (`shadow.js`).
+ *
+ * @param {number} type @param {number} count  primitives
+ * @param {number} format  D3DFMT_INDEX @param {number} reach  minIndex plus the vertices
+ * @param {number} stride
+ */
+export function indexedBytes(type, count, format, reach, stride){
+    const indices = vertexCountOf(type, count) * (format === D3DFMT_INDEX.INDEX32 ? 4 : 2);
+    const at = (indices + 3) & ~3;
+    return { indices, at, vertices: reach * stride };
+}
 
 /**
  * The most a draw from the program's own memory copies into a record: past
@@ -418,6 +457,18 @@ export const SHARED_COMMANDS = {
         needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
             c.view(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
+    // The occlusion boxes and the quads a game draws by the thousand a second: a crossing
+    // each held the drawing thread for the engine thread's answer.
+    DrawIndexedPrimitiveUP: { args: 8, kept: true, draws: true,
+        indexedVertices: { type: 0, minIndex: 1, vertices: 2, count: 3, indices: 4, format: 5,
+            data: 6, stride: 7, most: UP_BYTES },
+        needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
+        make: (d, c)=>{
+            const copied = indexedBytes(c.arg(0), c.arg(3), c.arg(5), c.arg(1) + c.arg(2),
+                c.arg(7));
+            return d.DrawIndexedPrimitiveUP(c.arg(0), c.arg(1), c.arg(2), c.arg(3),
+                c.view(copied.indices), c.arg(5), c.view(copied.vertices, copied.at), c.arg(7));
+        } },
 };
 
 /**
@@ -487,10 +538,12 @@ export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_S
     // Both targets: a surface made to be one, and a depth surface or none. The
     // block's viewport becomes the target's whole and Clear's checks learn the
     // depth surface (`renderTargetMirror`, `depthStencilMirror`); keeping the
-    // bound target, a null one, is the host's.
+    // bound target, a null one, is the host's, and so is a depth surface
+    // smaller than the target (Wine's d3d8 test_depth_stencil_size).
     SetRenderTarget: { args: 2, objects: [0, 1],
         surfaceUsage: [{ arg: 0, mask: D3DUSAGE.RENDERTARGET },
             { arg: 1, mask: D3DUSAGE.DEPTHSTENCIL, nullable: true }],
+        depthCovers: { target: 0, depth: 1 },
         make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
     // A format is always taken; a shader's handle only while the shader lives.
     SetVertexShader: { args: 1, validated: { arg: 0, when: D3DFVF_RESERVED0 },

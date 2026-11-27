@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPathFunctions } from './paths.js';
+import { createPathFunctions, fullPathName } from './paths.js';
 
 const DOS = 0x100;
 const NT = 0x300;
@@ -62,7 +62,7 @@ function fakeHost(){
     };
     const host = {
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.subarray(address, address + length),
+            bytes.slice(address, address + length),
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
             bytes.set(data, address),
         readWideString,
@@ -148,4 +148,78 @@ test('the scratch buffer the resolution used goes back to the heap', ()=>{
     putWide(DOS, 'C:\\x');
     fns.RtlDosPathNameToNtPathName_U.handler([DOS, NT, 0, 0]);
     assert.equal(freed.length, 1);
+});
+
+test('a full path: devices, device paths, the last name\'s dots, a directory\'s separator', ()=>{
+    // An ordinary name placed as the file calls place it: C:\windows current.
+    const resolve = (/** @type {string} */ given)=>{
+        const named = given.replace(/\//g, '\\');
+        const rooted = /^[A-Za-z]:\\/.test(named) || named.startsWith('\\\\') ? named
+            : named.startsWith('\\') ? `C:${named}` : `C:\\windows\\${named.replace(/^c:/i, '')}`;
+        const root = rooted.startsWith('\\\\') ? '\\\\' : rooted.slice(0, 3);
+        /** @type {string[]} */
+        const parts = [];
+        for (const part of rooted.slice(root.length).split('\\'))
+        {
+            if (part === '..')
+            {
+                parts.pop();
+            }
+            else if (part !== '' && part !== '.')
+            {
+                parts.push(part);
+            }
+        }
+        return root + parts.join('\\');
+    };
+    for (const [asked, path, part] of [
+        ['c:/test  ....   ..   ', 'c:\\test', 'test'],
+        ['c:/test/  ....   ..   ', 'c:\\test\\', null],
+        ['c:/test/.. ', 'c:\\test\\', null],
+        ['c:/test/..', 'c:\\', null],
+        ['c:\\test\\a*b*.', 'c:\\test\\a*b*', 'a*b*'],
+        ['c:.', 'C:\\windows', 'windows'],
+        ['...', 'C:\\windows\\', null],
+        ['\\windows\\nul', '\\\\.\\nul', null],
+        ['C:NUL.', '\\\\.\\NUL', null],
+        ['CONIN$', '\\\\.\\CONIN$', null],
+        ['\\\\foo', '\\\\foo', null],
+        ['//foo/', '\\\\foo\\', null],
+        ['//.', '\\\\.\\', null],
+        ['//./foo/bar', '\\\\.\\foo\\bar', 'bar'],
+        ['//./foo/', '\\\\.\\foo\\', null],
+        ['//./foo/..', '\\\\.\\', null],
+        ['//./foo. . ', '\\\\.\\foo', 'foo'],
+        ['//?', '\\\\?\\', null],
+        ['//?/foo/.', '\\\\?\\foo', 'foo'],
+    ])
+    {
+        const found = fullPathName(/** @type {string} */ (asked), resolve);
+        assert.equal(found.path, path, String(asked));
+        assert.equal(found.filePart === -1 ? null : found.path.slice(found.filePart), part,
+            `${asked}: its file part`);
+    }
+});
+
+test('an object name is taken as written, a device path is a \\??\\ name, a server no file', ()=>{
+    const { host, putWide, dword, counted } = fakeHost();
+    host.kernel32.GetFullPathNameW.handler = ([name, size, buffer])=>{
+        const asked = host.readWideString(name, 0x1000);
+        const full = asked === 'AUX' ? '\\\\.\\AUX' : asked === '//?/x' ? '\\\\?\\x' : asked;
+        if (buffer === 0 || full.length + 1 > size)
+        {
+            return full.length + 1;
+        }
+        putWide(buffer, full);
+        return full.length;
+    };
+    const fns = createPathFunctions(host);
+    for (const [dos, nt] of [['\\??\\foo/..', '\\??\\foo/..'], ['AUX', '\\??\\AUX'],
+        ['//?/x', '\\??\\x'], ['\\\\server', '\\??\\UNC\\server']])
+    {
+        putWide(DOS, dos);
+        assert.equal(fns.RtlDosPathNameToNtPathName_U.handler([DOS, NT, PART, 0]), 1, dos);
+        assert.equal(counted(NT).text, nt);
+    }
+    assert.equal(dword(PART), 0, 'a share\'s server alone is no file');
 });

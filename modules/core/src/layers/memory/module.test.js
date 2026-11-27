@@ -14,7 +14,7 @@ import { readTable } from '../log/internal/table.js';
 function fakeLog(){
     /** @type {string[]} */
     const words = [];
-    const metrics = createMetrics({ shared: false });
+    const metrics = createMetrics();
     return {
         words,
         metrics,
@@ -290,4 +290,156 @@ test('the reader and the charge slot are lent while the instance is open', async
     await memoryModule.dispose();
     assert.equal(memory.reader(), null);
     assert.equal(memory.chargeSlot(), null);
+});
+
+/**
+ * A machine whose RAM is sparse pages anywhere below 2^53, as a wide window's
+ * is past 4 GiB, and a small shared RAM whose view the fast paths take.
+ */
+function wideMachine(){
+    /** @type {Map<number, Uint8Array>} */
+    const pages = new Map();
+    const page = (/** @type {number} */ at)=>{
+        const key = Math.floor(at / 4096);
+        let bytes = pages.get(key);
+        if (!bytes)
+        {
+            bytes = new Uint8Array(4096);
+            pages.set(key, bytes);
+        }
+        return bytes;
+    };
+    const ram = new Uint8Array(new SharedArrayBuffer(0x4000));
+    return {
+        ram,
+        cpu: {
+            /** @param {number} address @param {number} length */
+            readPhysical: (address, length)=>Uint8Array.from({ length },
+                (_, i)=>(address + i < ram.length ? ram[address + i]
+                    : page(address + i)[(address + i) % 4096])),
+            /** @param {number} address @param {Uint8Array} data */
+            writePhysical: (address, data)=>data.forEach((byte, i)=>{
+                if (address + i < ram.length)
+                {
+                    ram[address + i] = byte;
+                    return;
+                }
+                page(address + i)[(address + i) % 4096] = byte;
+            }),
+            /** @param {number} address */
+            readU32: address=>new DataView(Uint8Array.from({ length: 4 },
+                (_, i)=>(address + i < ram.length ? ram[address + i]
+                    : page(address + i)[(address + i) % 4096])).buffer).getUint32(0, true),
+            ramView: ()=>ram,
+        },
+    };
+}
+
+test('a pointer is read and written whole, past 4 GiB too, its upper half never kept', async()=>{
+    const machine = wideMachine();
+    const memory = await open({}, machine.cpu);
+    const high = 2 ** 32 + 0x10000;
+    memory.register({ name: 'low', base: 0x1000, size: 0x1000, kind: 'thunk-data', access: 'rw' });
+    memory.register({ name: 'high', base: high, size: 0x1000, kind: 'thunk-data', access: 'rw' });
+    for (const at of [0x1000, high])
+    {
+        memory.writeU32(at + 4, 0xdeadbeef);
+        memory.writePointer(at, 0x1_2345_6788, 8);
+        assert.equal(memory.readPointer(at, 8), 0x1_2345_6788, `whole at ${at.toString(16)}`);
+        assert.equal(memory.readU32(at + 4), 1, 'the upper dword is the value\'s');
+        memory.writePointer(at, 0x40_0000, 8);
+        assert.equal(memory.readU32(at + 4), 0, 'below 4 GiB the upper dword is zero, written');
+        memory.writePointer(at + 8, -0x1000, 4);
+        assert.equal(memory.readPointer(at + 8, 4), 0xfffff000, 'a signed dword names its address');
+        memory.writeU32(at + 16, 0xcafe);
+        memory.writePointer(at + 12, 0x5555, 4);
+        assert.equal(memory.readU32(at + 16), 0xcafe, 'four bytes in a 32-bit process, no more');
+    }
+    assert.throws(()=>memory.writePointer(0x1000, 1, /** @type {any} */ (6)), /4 or 8 bytes/);
+    await memoryModule.dispose();
+});
+
+test('a word past 4 GiB is never taken from the shared word `>>>` wraps it onto', async()=>{
+    const machine = wideMachine();
+    const memory = await open({}, machine.cpu);
+    const high = 2 ** 32 + 0x10;
+    memory.register({ name: 'low', base: 0, size: 0x4000, kind: 'thunk-data', access: 'rw' });
+    memory.register({ name: 'high', base: 2 ** 32, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+    memory.writeU32(0x10, 0x11111111);
+    memory.writeU32(high, 0x22222222);
+    assert.equal(memory.wordsOver(high, 4), null, 'no view over the RAM reaches it');
+    // Twice: the second read finds the span validated and takes the fast path.
+    assert.equal(memory.readU32(high), 0x22222222);
+    assert.equal(memory.readU32(high), 0x22222222, 'the fast path keeps the whole address');
+    assert.equal(memory.loadU32(high), 0x22222222);
+    assert.equal(memory.compareExchangeU32(high, 0x22222222, 0x33333333), 0x22222222);
+    assert.equal(memory.readU32(high), 0x33333333);
+    assert.equal(memory.readU32(0x10), 0x11111111, 'the low word it aliases is untouched');
+    assert.equal(memory.compareExchangeU64(high, 0x33333333n, 0x44n), 0x33333333n);
+    assert.equal(memory.readU32(0x10), 0x11111111);
+    assert.equal(memory.readU32(high), 0x44);
+    await memoryModule.dispose();
+});
+
+test('a swap or a worker\'s write taken as the host\'s is not written again:'
+    + ' another thread\'s store between stays', async()=>{
+    // The words the guest and the host both swap (an event's, a mutex's) live
+    // in memory the program may execute, where a write is told to the
+    // translator. The swap's bytes are in the RAM already; were they read and
+    // written back to tell it, a guest's swap on another executor between
+    // the two was undone - a SetEvent lost, two threads each waiting on the
+    // other's event for ever. Here the other thread stores between any read
+    // of the word and the end of the call.
+    const ram = new Uint8Array(new SharedArrayBuffer(0x4000));
+    const words = new Int32Array(ram.buffer);
+    /** @type {(() => void) | null} */
+    let between = null;
+    /** @type {[number, number][]} */
+    const told = [];
+    const memory = await open({}, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            const bytes = ram.slice(address, address + length);
+            between?.();
+            between = null;
+            return bytes;
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>ram.set(data, address),
+        /** @param {number} address */
+        readU32: address=>Atomics.load(words, address / 4) >>> 0,
+        /** @param {number} address @param {number} length */
+        wrote: (address, length)=>told.push([address, length]),
+        ramView: ()=>ram,
+    });
+    memory.register({ name: 'heap', base: 0x1000, size: 0x3000, kind: 'heap', access: 'rwx' });
+    const cases = [
+        ['a dword swap', 0x1000, ()=>memory.compareExchangeU32(0x1000, 0, 0x82), 4],
+        ['a quadword swap', 0x1010, ()=>memory.compareExchangeU64(0x1010, 0n, 0x82n), 8],
+        ['a worker\'s write', 0x1020, ()=>{
+            Atomics.store(words, 0x1020 / 4, 0x82);
+            memory.adopt(0x1020, 4);
+        }, 4],
+    ];
+    for (const [name, at, call, length]
+        of /** @type {[string, number, () => void, number][]} */ (cases))
+    {
+        told.length = 0;
+        // Another executor's guest sets the word right after the call's own change.
+        let stored = false;
+        between = ()=>{
+            Atomics.store(words, at / 4, 3);
+            stored = true;
+        };
+        call();
+        if (!stored)
+        {
+            Atomics.store(words, at / 4, 3);
+        }
+        between = null;
+        assert.equal(Atomics.load(words, at / 4), 3, `${name}: the other thread's store stays`);
+        assert.deepEqual(told, [[at, length]], `${name}: the translator is told of the write`);
+    }
+    await memoryModule.dispose();
 });

@@ -27,16 +27,49 @@
  * what spelling" -- which is also what makes case-insensitive lookup with
  * case-preserving enumeration cheap: the folded name is the key, the node's own
  * name is what enumeration reports.
+ *
+ * The stores do not fold case, and two layers need not agree on a spelling:
+ * the machine makes `WINDOWS\TEMP` before a bundle that spells it `Windows`
+ * is mounted over it. A node therefore keeps each layer's own key -- `path`
+ * in the writable store, `sourcePath` in the source -- and a store is changed
+ * before the node records the change, so a store that refuses leaves the tree
+ * as it was. `verify` says where the two disagree.
  */
 
 import { ErrorCode, fsError } from './errors.js';
 import { foldName, matchName } from './paths.js';
-import { bytesOf } from './memory-store.js';
+import { PIECE_SIZE, bytesOf, readFromInto } from './memory-store.js';
+import { fromBase64, toBase64 } from '../../../system/base64.js';
+
+/**
+ * A directory's entries in the order NTFS keeps its index and FindNextFile
+ * reads it: by name upper-cased a character at a time, compared as UTF-16 code
+ * units - not in the order the names were created, nor the bundle's before the
+ * session's. A character whose capital is longer (ß) keeps itself, as NTFS's
+ * upcase table has it.
+ *
+ * @template {{ name: string }} T
+ * @param {T[]} entries
+ * @returns {T[]}
+ */
+function inIndexOrder(entries){
+    /** @param {string} name */
+    const key = name=>Array.from(name, one=>{
+        const upper = one.toUpperCase();
+        return upper.length === one.length ? upper : one;
+    }).join('');
+    return entries.map(entry=>({ entry, key: key(entry.name) }))
+        .sort((left, right)=>(left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
+        .map(one=>one.entry);
+}
 
 /**
  * @typedef {Object} Node
  * @property {string} name        As created; enumeration reports this.
- * @property {string} path        Backslash-separated path handed to the stores.
+ * @property {string} path        Its key in the writable store: where it is there,
+ *                                or where it will be made.
+ * @property {string} sourcePath  Its key in the source, which may spell a directory
+ *                                on the way to it otherwise.
  * @property {Node | null} parent
  * @property {boolean} directory
  * @property {boolean} inSource
@@ -45,6 +78,59 @@ import { bytesOf } from './memory-store.js';
  * @property {Map<string, Node>} children  Keyed by folded name.
  * @property {number} modified    Milliseconds since the epoch; when it was last written.
  * @property {boolean} hidden     The source records it as hidden.
+ * @property {Body | null} body   For a file with more than one name: what its names share.
+ * @property {string[] | null} junction  For a reparse point that names a place
+ *                                on this drive (a mount point, a symbolic
+ *                                link): what it stands for - a directory's
+ *                                contents are seen through it.
+ * @property {ReparsePoint | null} reparse  The reparse point set on it, as set.
+ * @property {number} id          Its number on the volume once anyone asked for it, 0
+ *                                before: every name of a file has the same one.
+ * @property {number | null} attributes  The attribute bits a program set on the file,
+ *                                null for none: every name of a file has the same.
+ */
+
+/**
+ * A reparse point as FSCTL_SET_REPARSE_POINT left it: its tag and the whole
+ * buffer it was set with, which FSCTL_GET_REPARSE_POINT hands back as it
+ * was. A junction a session recorded before buffers were kept has none.
+ *
+ * @typedef {Object} ReparsePoint
+ * @property {number} tag
+ * @property {Uint8Array | null} data
+ */
+
+/**
+ * What a session carries beside the files themselves: a file's further
+ * names (`owner` and `names`), a junction (`junction`: `owner` the directory
+ * it stands for), or any other reparse point (`owner` and its only name
+ * itself, `target` what it stands for when it names a place here). A
+ * reparse point's buffer travels as base64; a junction recorded before
+ * buffers were kept has none, and reads back as a mount point.
+ *
+ * @typedef {Object} LinkRecord
+ * @property {string} owner
+ * @property {string[]} names
+ * @property {boolean} [junction]
+ * @property {{ tag: number, data?: string }} [reparse]
+ * @property {string} [target]
+ * @property {number} [id]  A file's number on the volume (`owner`, no further names).
+ * @property {number} [attributes]  The attribute bits a program set on the file
+ *           (`owner`, no further names); a session saved before they were kept
+ *           has none, and its files read as never set.
+ */
+
+/**
+ * A file with more than one name -- a hard link made it one. Each name is a
+ * node of its own, in its own directory; the bytes are the writable store's
+ * once, at the path of the name that `owner` is, and every store operation
+ * on any of the names goes there. A name going away takes the bytes with it
+ * only when it is the last: the owner's leaving moves them to another name's
+ * path first, so the store never holds bytes under a name nobody sees.
+ *
+ * @typedef {Object} Body
+ * @property {Node} owner
+ * @property {Set<Node>} names  the owner among them
  */
 
 /**
@@ -56,6 +142,11 @@ import { bytesOf } from './memory-store.js';
  * @property {number} modified  Milliseconds since the epoch.
  * @property {boolean} hidden
  * @property {boolean} readOnly  On a volume nothing can be written to.
+ * @property {number} links  How many names the file has.
+ * @property {string} identity  What the file is known by under any of its names.
+ * @property {string | null} [junction]  For a junction, the directory it stands for.
+ * @property {number} [reparseTag]  The tag of the reparse point it is, 0 for none.
+ * @property {number | null} [attributes]  The attribute bits a program set, null for none.
  */
 
 /**
@@ -64,7 +155,20 @@ import { bytesOf } from './memory-store.js';
  * dates has to find it older than anything it writes itself. The start of
  * the DOS calendar is the oldest date every convention can still express.
  */
-export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
+const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
+
+/** A mount point's tag: the reparse point every junction is. */
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+
+/** A node's reparse tag: what it was set with, a junction recorded alone a mount point's. */
+const tagOf = (/** @type {Node} */ node)=>node.reparse?.tag
+    ?? (node.junction ? IO_REPARSE_TAG_MOUNT_POINT : 0);
+
+/** How many junctions a path may pass through before it is a loop. */
+const MAX_JUNCTIONS = 32;
+
+/** @param {string} directory @param {string} name */
+const joinPath = (directory, name)=>(directory.length === 0 ? name : `${directory}\\${name}`);
 
 /**
  * @param {Node | null} parent
@@ -72,10 +176,10 @@ export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
  * @returns {Node}
  */
 function makeNode(parent, name){
-    const path = !parent || parent.path.length === 0 ? name : `${parent.path}\\${name}`;
     return {
         name,
-        path,
+        path: joinPath(parent?.path ?? '', name),
+        sourcePath: joinPath(parent?.sourcePath ?? '', name),
         parent,
         directory: false,
         inSource: false,
@@ -84,12 +188,37 @@ function makeNode(parent, name){
         children: new Map(),
         modified: SOURCE_MODIFIED_MS,
         hidden: false,
+        body: null,
+        junction: null,
+        reparse: null,
+        id: 0,
+        attributes: null,
     };
 }
 
+/**
+ * The path the stores hold a file's bytes under: its own, or its owner's.
+ * Also what the file is known by under any of its names: always one of its
+ * live names, so no other file can have it.
+ *
+ * @param {Node} node
+ */
+const storePath = node=>(node.body?.owner ?? node).path;
+
+/** Every name a file has: itself alone, or its body's. @param {Node} node @returns {Node[]} */
+const namesOf = node=>(node.body ? [...node.body.names] : [node]);
+
+/**
+ * The root's number, as NTFS numbers its root directory. A file's number is
+ * handed out from FIRST_FILE_ID up, past the records NTFS keeps for itself.
+ */
+const ROOT_ID = 5;
+const FIRST_FILE_ID = 64;
+
 /** What changes a drive: everything else of it only reads. */
 const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
-    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory']);
+    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'link', 'setReparse',
+    'setAttributes', 'restoreLinks']);
 
 /**
  * @param {Object} options
@@ -115,15 +244,95 @@ export function createOverlay({
      * hundreds of small writes, and carrying the bytes on each of them would
      * mean copying the file once per write to deliver something already stale
      * by the next one. Whoever listens reads the file when it settles.
+     * 'named' is a change to what is recorded of the file - its number, its
+     * attributes - and not to its bytes.
      *
      * @param {string} path
-     * @param {'written' | 'removed'} kind
+     * @param {'written' | 'removed' | 'named'} kind
      */
     const changed = (path, kind)=>onChanged?.({ path, kind });
     const root = makeNode(null, '');
+    /**
+     * A copy up a miss stopped, and how far it had gone, at the writable path
+     * it was copying to.
+     *
+     * @type {WeakMap<Node, { path: string, at: number }>}
+     */
+    const copying = new WeakMap();
     root.directory = true;
     root.inSource = source !== null;
     root.inWritable = true;
+    root.id = ROOT_ID;
+    /**
+     * Each numbered file by its number: a file is numbered the first time
+     * anyone asks (FileInternalInformation, an open by id), and keeps its
+     * number across renames and under every name it is given. Numbering on
+     * asking keeps a bundle of a hundred thousand files from a map entry each.
+     *
+     * @type {Map<number, Node>}
+     */
+    const numbered = new Map([[ROOT_ID, root]]);
+    let nextId = FIRST_FILE_ID;
+
+    /**
+     * A file's number, given it now if it had none.
+     *
+     * @param {Node} node @returns {number}
+     */
+    const idOf = node=>{
+        if (node.id === 0)
+        {
+            const id = nextId++;
+            for (const name of namesOf(node))
+            {
+                name.id = id;
+            }
+            numbered.set(id, node);
+            // The number is the file's for good, a run after this one as well:
+            // the session saves it as it saves what was written ('named', no
+            // bytes changed).
+            changed(storePath(node), 'named');
+        }
+        return node.id;
+    };
+
+    /**
+     * Hands what a name holds of the file - its number and its attributes -
+     * to the name that takes its place (`to`: a rename, a recreated
+     * directory), or gives them up when the file has no other name left: a
+     * deleted file's number is never another file's.
+     *
+     * @param {Node} node @param {Node | null} to
+     */
+    const passFile = (node, to)=>{
+        if (to)
+        {
+            to.attributes = node.attributes;
+        }
+        node.attributes = null;
+        const id = node.id;
+        if (id === 0)
+        {
+            return;
+        }
+        node.id = 0;
+        const heir = to ?? (node.body ? [...node.body.names].find(name=>name !== node) : null);
+        if (to)
+        {
+            to.id = id;
+        }
+        if (numbered.get(id) === node)
+        {
+            if (heir)
+            {
+                numbered.set(id, heir);
+            }
+            else
+            {
+                numbered.delete(id);
+            }
+        }
+    };
 
     /**
      * @param {string} path
@@ -137,20 +346,24 @@ export function createOverlay({
     const index = (path, directory, layer, entry)=>{
         let node = root;
         const parts = path.split('\\').filter(part=>part.length > 0);
+        let key = '';
         parts.forEach((part, position)=>{
-            const key = foldName(part);
-            let child = node.children.get(key);
+            const folded = foldName(part);
+            key = joinPath(key, part);
+            let child = node.children.get(folded);
             if (!child)
             {
                 child = makeNode(node, part);
-                node.children.set(key, child);
+                node.children.set(folded, child);
             }
             // Anything with something under it is a directory, whether or not
             // the store bothered to list it as one.
             const leaf = position === parts.length - 1;
             child.directory = child.directory || !leaf || directory;
+            // The store's own spelling, whatever the other layer calls it.
             if (layer === 'source')
             {
+                child.sourcePath = key;
                 child.inSource = true;
                 if (leaf && typeof entry?.modified === 'number')
                 {
@@ -163,10 +376,35 @@ export function createOverlay({
             }
             else
             {
+                child.path = key;
                 child.inWritable = true;
             }
             node = child;
         });
+    };
+
+    /**
+     * What a layer does not hold of a node, it would hold under the node's
+     * parent as that layer spells it: a file made under `Windows` that the
+     * writable store holds as `WINDOWS` is made in `WINDOWS`. Settled after
+     * both layers are indexed, since the second may respell a directory the
+     * first already put children under.
+     *
+     * @param {Node} node
+     */
+    const settleKeys = node=>{
+        for (const child of node.children.values())
+        {
+            if (!child.inWritable)
+            {
+                child.path = joinPath(node.path, child.name);
+            }
+            if (!child.inSource)
+            {
+                child.sourcePath = joinPath(node.sourcePath, child.name);
+            }
+            settleKeys(child);
+        }
     };
 
     for (const entry of source?.list() ?? [])
@@ -177,6 +415,7 @@ export function createOverlay({
     {
         index(entry.path, entry.directory, 'writable');
     }
+    settleKeys(root);
 
     /**
      * @param {string[]} components
@@ -186,11 +425,12 @@ export function createOverlay({
         let node = root;
         for (const part of components)
         {
-            if (!node.directory)
+            const inside = follow(node);
+            if (!inside?.directory)
             {
                 return null;
             }
-            const child = node.children.get(foldName(part));
+            const child = inside.children.get(foldName(part));
             if (!child || child.tombstone)
             {
                 return null;
@@ -201,6 +441,27 @@ export function createOverlay({
     };
 
     /**
+     * The directory a junction stands for, followed to the end of a chain of
+     * them; any other node itself. A junction whose directory is gone, or a
+     * chain that loops, stands for nothing.
+     *
+     * @param {Node} node
+     * @returns {Node | null}
+     */
+    const follow = node=>{
+        let at = /** @type {Node | null} */ (node);
+        for (let depth = 0; at?.junction; depth++)
+        {
+            if (depth === MAX_JUNCTIONS)
+            {
+                return null;
+            }
+            at = find(at.junction);
+        }
+        return at;
+    };
+
+    /**
      * The parent a create or a delete has to act on. Missing it is a different
      * failure from missing the file itself, and Win32 reports it differently.
      *
@@ -208,7 +469,8 @@ export function createOverlay({
      * @returns {Node}
      */
     const parentOf = components=>{
-        const node = find(components.slice(0, -1));
+        const found = find(components.slice(0, -1));
+        const node = found && follow(found);
         if (!node)
         {
             throw fsError(ErrorCode.PATH_NOT_FOUND,
@@ -240,8 +502,37 @@ export function createOverlay({
         {
             return 0;
         }
-        const store = node.inWritable ? writable : node.inSource ? source : null;
-        return store?.stat(node.path)?.size ?? 0;
+        if (node.inWritable)
+        {
+            return writable.stat(storePath(node))?.size ?? 0;
+        }
+        return node.inSource ? source?.stat(node.sourcePath)?.size ?? 0 : 0;
+    };
+
+    /**
+     * Stamps a file's time on every name it has: the time is the file's,
+     * not a name's.
+     *
+     * @param {Node} node @param {number} time
+     */
+    const stamp = (node, time)=>{
+        for (const name of namesOf(node))
+        {
+            name.modified = time;
+        }
+    };
+
+    /**
+     * Announces a write to a file under every name it has: a reader watching
+     * any of them sees it change.
+     *
+     * @param {Node} node
+     */
+    const written = node=>{
+        for (const name of namesOf(node))
+        {
+            changed(name.path, 'written');
+        }
     };
 
     /**
@@ -260,28 +551,37 @@ export function createOverlay({
     };
 
     /**
-     * Gives a node somewhere in the writable layer to live, parents first. A
-     * store is never asked to invent a directory it was not told about.
+     * Makes a directory and every one above it in the writable layer, so that
+     * something can be put in it. A store is never asked to invent a
+     * directory it was not told about.
      *
-     * @param {Node} node
+     * @param {Node} directory
      */
-    const materialiseParents = node=>{
+    const materialise = directory=>{
         /** @type {Node[]} */
         const missing = [];
-        for (let at = node.parent; at && !at.inWritable; at = at.parent)
+        for (let at = /** @type {Node | null} */ (directory); at && !at.inWritable; at = at.parent)
         {
             missing.unshift(at);
         }
-        for (const directory of missing)
+        for (const made of missing)
         {
-            writable.mkdir(directory.path);
-            directory.inWritable = true;
+            writable.mkdir(made.path);
+            made.inWritable = true;
         }
     };
 
     /**
      * Copy-on-write: the moment a source file is first written to, its bytes
      * move into the writable layer and every later read comes from there.
+     * A piece at a time: a game's archive of a gigabyte read whole was the
+     * gigabyte held three times over at once -- read, decoded, written.
+     *
+     * A source that fetches what is not here stops the copy at the first
+     * piece it lacks (a miss), and the copy done again goes on where it
+     * stopped rather than from the start: a source that keeps what it read in
+     * a bounded cache (`session-source.js`) would otherwise have let go of the
+     * first pieces by the time it reached the last, and never finish.
      *
      * @param {Node} node
      */
@@ -290,9 +590,22 @@ export function createOverlay({
         {
             return;
         }
-        materialiseParents(node);
-        const size = source?.stat(node.path)?.size ?? 0;
-        writable.write(node.path, 0, source ? source.read(node.path, 0, size) : new Uint8Array(0));
+        materialise(/** @type {Node} */ (node.parent));
+        const size = source?.stat(node.sourcePath)?.size ?? 0;
+        const begun = copying.get(node);
+        let at = begun && begun.path === node.path
+            && (writable.stat(node.path)?.size ?? -1) >= begun.at ? begun.at : 0;
+        if (at === 0)
+        {
+            writable.write(node.path, 0, new Uint8Array(0));
+        }
+        for (; at < size; at += PIECE_SIZE)
+        {
+            copying.set(node, { path: node.path, at });
+            const part = source?.read(node.sourcePath, at, Math.min(PIECE_SIZE, size - at));
+            writable.write(node.path, at, part ?? new Uint8Array(0));
+        }
+        copying.delete(node);
         node.inWritable = true;
     };
 
@@ -314,12 +627,14 @@ export function createOverlay({
         {
             // Recreating a deleted name must not resurrect what used to live
             // under it, and takes the spelling it is being recreated with.
-            // `inSource` stays: the source still holds the name, so deleting
-            // this again has to leave a tombstone rather than uncover it.
+            // `inSource` stays, and `sourcePath` with it: the source still
+            // holds the name, so deleting this again has to leave a tombstone
+            // rather than uncover it.
             existing.children.clear();
             existing.tombstone = false;
+            existing.attributes = null;
             existing.name = name;
-            existing.path = parent.path.length === 0 ? name : `${parent.path}\\${name}`;
+            existing.path = joinPath(parent.path, name);
         }
         return existing;
     };
@@ -331,7 +646,13 @@ export function createOverlay({
      * @param {Node} node
      */
     const forget = node=>{
-        if (node.inWritable)
+        copying.delete(node);
+        passFile(node, null);
+        if (node.body)
+        {
+            unname(node);
+        }
+        else if (node.inWritable)
         {
             writable.remove(node.path);
             node.inWritable = false;
@@ -342,6 +663,128 @@ export function createOverlay({
             return;
         }
         node.parent?.children.delete(foldName(node.name));
+    };
+
+    /**
+     * Takes one name off a file with several: the bytes stay for the others,
+     * moved to one of their paths first when they lived at this one's, and a
+     * file left with one name is an ordinary file again.
+     *
+     * @param {Node} node
+     */
+    const unname = node=>{
+        const body = /** @type {Body} */ (node.body);
+        body.names.delete(node);
+        node.body = null;
+        node.inWritable = false;
+        const [heir] = body.names;
+        if (body.owner === node)
+        {
+            relocate(node.path, heir.path);
+            body.owner = heir;
+        }
+        if (body.names.size === 1)
+        {
+            heir.body = null;
+        }
+    };
+
+    /**
+     * Moves a file's bytes in the writable store from one path to another,
+     * by the store's own move where it has one.
+     *
+     * @param {string} from @param {string} to
+     */
+    const relocate = (from, to)=>{
+        if (writable.move)
+        {
+            writable.move(from, to);
+            return;
+        }
+        const size = writable.stat(from)?.size ?? 0;
+        writable.truncate(to, 0);
+        writable.write(to, 0, writable.read(from, 0, size));
+        writable.remove(from);
+    };
+
+    /**
+     * Gives an existing file one more name. The file is copied up first if
+     * the source holds it, as a write would: the names share bytes only the
+     * writable layer can keep.
+     *
+     * @param {Node} node @param {Node} parent @param {string} name
+     */
+    const addName = (node, parent, name)=>{
+        copyUp(node);
+        materialise(parent);
+        const body = node.body ?? { owner: node, names: new Set([node]) };
+        node.body = body;
+        const target = childFor(parent, name);
+        target.directory = false;
+        target.inWritable = true;
+        target.body = body;
+        target.modified = node.modified;
+        target.id = node.id;
+        target.attributes = node.attributes;
+        // A reparse point is the file's, so every name of it is one.
+        target.reparse = node.reparse;
+        target.junction = node.junction;
+        body.names.add(target);
+        return target;
+    };
+
+    /**
+     * Moves one name of a file with several to another place in the drive:
+     * the other names stay, and the bytes move only when they were kept at
+     * this name's path.
+     *
+     * @param {Node} node @param {string[]} to
+     * @returns {boolean}
+     */
+    const renameName = (node, to)=>{
+        const parent = parentOf(to);
+        const name = to[to.length - 1];
+        if (name === undefined)
+        {
+            throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+        }
+        const existing = parent.children.get(foldName(name));
+        if (existing && !existing.tombstone)
+        {
+            throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+        }
+        const body = /** @type {Body} */ (node.body);
+        // The store first: one that refuses leaves the names as they were.
+        materialise(parent);
+        if (body.owner === node)
+        {
+            relocate(node.path, joinPath(parent.path, name));
+        }
+        const target = childFor(parent, name);
+        target.directory = false;
+        target.inWritable = true;
+        target.modified = node.modified;
+        target.body = body;
+        body.names.add(target);
+        passFile(node, target);
+        if (body.owner === node)
+        {
+            body.owner = target;
+        }
+        body.names.delete(node);
+        node.body = null;
+        node.inWritable = false;
+        if (node.inSource)
+        {
+            node.tombstone = true;
+        }
+        else
+        {
+            node.parent?.children.delete(foldName(node.name));
+        }
+        changed(node.path, 'removed');
+        changed(target.path, 'written');
+        return true;
     };
 
     const overlay = {
@@ -359,8 +802,35 @@ export function createOverlay({
                     modified: node.modified,
                     hidden: node.hidden,
                     readOnly,
+                    links: node.body?.names.size ?? 1,
+                    identity: storePath(node),
+                    junction: node.junction ? node.junction.join('\\') : null,
+                    reparseTag: tagOf(node),
+                    attributes: node.attributes,
                 }
                 : null;
+        },
+
+        /**
+         * Sets the attribute bits of the file or directory at `components`,
+         * or forgets them with null, which leaves it as the volume reports
+         * it: every name of a file shows them, and the session keeps them.
+         *
+         * @param {string[]} components @param {number | null} attributes
+         */
+        setAttributes(components, attributes){
+            mustBeWritable(components);
+            const node = mustFind(components);
+            const bits = attributes === null ? null : attributes >>> 0;
+            if (node.attributes === bits)
+            {
+                return;
+            }
+            for (const name of namesOf(node))
+            {
+                name.attributes = bits;
+            }
+            changed(storePath(node), 'named');
         },
 
         /**
@@ -372,7 +842,7 @@ export function createOverlay({
          */
         setModified(components, modified){
             mustBeWritable(components);
-            mustFind(components).modified = modified;
+            stamp(mustFind(components), modified);
         },
 
         /**
@@ -385,7 +855,12 @@ export function createOverlay({
          * @returns {Entry[]}
          */
         list(components, pattern){
-            const node = mustFind(components);
+            const node = follow(mustFind(components));
+            if (!node)
+            {
+                throw fsError(ErrorCode.PATH_NOT_FOUND,
+                    `The junction "${components.join('\\')}" stands for nothing`);
+            }
             if (!node.directory)
             {
                 throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
@@ -405,9 +880,14 @@ export function createOverlay({
                     modified: child.modified,
                     hidden: child.hidden,
                     readOnly,
+                    links: child.body?.names.size ?? 1,
+                    identity: storePath(child),
+                    junction: child.junction ? child.junction.join('\\') : null,
+                    reparseTag: tagOf(child),
+                    attributes: child.attributes,
                 });
             }
-            return entries;
+            return inIndexOrder(entries);
         },
 
         /** @param {string[]} components @returns {number} */
@@ -425,8 +905,36 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            const store = node.inWritable ? writable : node.inSource ? source : null;
-            return store ? store.read(node.path, offset, length) : new Uint8Array(0);
+            if (node.inWritable)
+            {
+                return writable.read(storePath(node), offset, length);
+            }
+            return node.inSource && source
+                ? source.read(node.sourcePath, offset, length)
+                : new Uint8Array(0);
+        },
+
+        /**
+         * read, the bytes handed to `put` where the store holds them; how
+         * many there were.
+         *
+         * @param {string[]} components @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         * @returns {number}
+         */
+        readInto(components, offset, length, put){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (node.inWritable)
+            {
+                return readFromInto(writable, storePath(node), offset, length, put);
+            }
+            return node.inSource && source
+                ? readFromInto(source, node.sourcePath, offset, length, put)
+                : 0;
         },
 
         /**
@@ -443,7 +951,7 @@ export function createOverlay({
             }
             if (node.inWritable && writable.share)
             {
-                return writable.share(node.path);
+                return writable.share(storePath(node));
             }
             return this.read(components, 0, sizeOf(node));
         },
@@ -459,7 +967,7 @@ export function createOverlay({
         contentsOf(components){
             const node = mustFind(components);
             return !node.directory && node.inWritable && writable.contents
-                ? writable.contents(node.path)
+                ? writable.contents(storePath(node))
                 : null;
         },
 
@@ -481,28 +989,29 @@ export function createOverlay({
             }
             if (!node.inWritable)
             {
-                materialiseParents(node);
-                node.inWritable = true;
+                materialise(/** @type {Node} */ (node.parent));
             }
+            const at = storePath(node);
             if (contents && writable.adoptContents)
             {
-                writable.adoptContents(node.path, contents);
+                writable.adoptContents(at, contents);
             }
             else
             {
                 const whole = bytes ?? (contents ? bytesOf(contents) : new Uint8Array(0));
                 if (writable.adopt)
                 {
-                    writable.adopt(node.path, whole);
+                    writable.adopt(at, whole);
                 }
                 else
                 {
-                    writable.truncate(node.path, 0);
-                    writable.write(node.path, 0, whole);
+                    writable.truncate(at, 0);
+                    writable.write(at, 0, whole);
                 }
             }
-            node.modified = now();
-            changed(node.path, 'written');
+            node.inWritable = true;
+            stamp(node, now());
+            written(node);
         },
 
         /** @param {string[]} components @param {number} offset @param {Uint8Array} bytes */
@@ -514,9 +1023,9 @@ export function createOverlay({
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
             copyUp(node);
-            writable.write(node.path, offset, bytes);
-            node.modified = now();
-            changed(node.path, 'written');
+            writable.write(storePath(node), offset, bytes);
+            stamp(node, now());
+            written(node);
         },
 
         /** @param {string[]} components @param {number} size */
@@ -531,16 +1040,16 @@ export function createOverlay({
             {
                 // Nothing of the source file survives a truncation to nothing,
                 // so copying it up first would only be work.
-                materialiseParents(node);
-                node.inWritable = true;
+                materialise(/** @type {Node} */ (node.parent));
             }
             else
             {
                 copyUp(node);
             }
-            writable.truncate(node.path, size);
-            node.modified = now();
-            changed(node.path, 'written');
+            writable.truncate(storePath(node), size);
+            node.inWritable = true;
+            stamp(node, now());
+            written(node);
         },
 
         /**
@@ -562,15 +1071,15 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
             }
+            materialise(parent);
+            writable.truncate(joinPath(parent.path, name), 0);
             const node = childFor(parent, name);
             node.directory = false;
-            materialiseParents(node);
-            writable.truncate(node.path, 0);
             node.inWritable = true;
             node.modified = now();
             changed(node.path, 'written');
             return { name: node.name, path: node.path, directory: false, size: 0,
-                modified: node.modified, hidden: false, readOnly };
+                modified: node.modified, hidden: false, readOnly, links: 1, identity: node.path };
         },
 
         /**
@@ -599,25 +1108,24 @@ export function createOverlay({
                 {
                     return false;
                 }
-                materialiseParents(existing);
-                writable.mkdir(existing.path);
-                existing.inWritable = true;
+                materialise(existing);
                 return false;
             }
+            materialise(parent);
+            writable.mkdir(joinPath(parent.path, name));
             const node = childFor(parent, name);
             node.directory = true;
-            materialiseParents(node);
-            writable.mkdir(node.path);
             node.inWritable = true;
             return true;
         },
 
         /**
          * Gives a file another name with its bytes where they are: what a
-         * rename is for a file only the writable layer holds. False, with
-         * nothing done, for one the source holds too -- the source keeps its
-         * name whatever happens -- or a store that cannot move a file; the
-         * caller copies it then.
+         * rename is for a file the writable layer holds. One the source holds
+         * is copied up first, as a write would, and its old name left a
+         * tombstone - the source keeps the name whatever happens. False, with
+         * nothing done, for a directory or a store that cannot move a file;
+         * the caller copies it then.
          *
          * @param {string[]} from @param {string[]} to
          * @returns {boolean}
@@ -625,7 +1133,11 @@ export function createOverlay({
         moveFile(from, to){
             mustBeWritable(from);
             const node = mustFind(from);
-            if (node.directory || node.inSource || !node.inWritable || !writable.move)
+            if (node.body)
+            {
+                return renameName(node, to);
+            }
+            if (node.directory || !(node.inWritable || node.inSource) || !writable.move)
             {
                 return false;
             }
@@ -640,12 +1152,14 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
             }
+            copyUp(node);
+            materialise(parent);
+            writable.move(node.path, joinPath(parent.path, name));
             const target = childFor(parent, name);
             target.directory = false;
-            materialiseParents(target);
-            writable.move(node.path, target.path);
             target.inWritable = true;
             target.modified = node.modified;
+            passFile(node, target);
             node.inWritable = false;
             forget(node);
             changed(node.path, 'removed');
@@ -691,6 +1205,345 @@ export function createOverlay({
         },
 
         /**
+         * Gives the file at `from` the further name `to`, in this drive: the
+         * names share the file's bytes, times and identity from then on. A
+         * directory has no second name (ACCESS_DENIED), and a name taken is
+         * ALREADY_EXISTS.
+         *
+         * @param {string[]} from @param {string[]} to
+         * @returns {Entry}
+         */
+        link(from, to){
+            mustBeWritable(to);
+            const node = mustFind(from);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED, `"${node.path}" is a directory`);
+            }
+            const parent = parentOf(to);
+            const name = to[to.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+            }
+            const target = addName(node, parent, name);
+            changed(target.path, 'written');
+            return /** @type {Entry} */ (this.stat(to));
+        },
+
+        /**
+         * Sets the reparse point `point` on the file or directory at
+         * `components` - FSCTL_SET_REPARSE_POINT - or, with `point` null,
+         * takes its reparse point off. One that names a place on this drive
+         * (`target`: a mount point, a symbolic link) stands for it, a
+         * directory's contents seen through it; any other tag is kept for
+         * whoever reads it back. A directory with anything in it is
+         * DIRECTORY_NOT_EMPTY; a reparse point set again is replaced.
+         *
+         * @param {string[]} components
+         * @param {{ tag: number, data: Uint8Array | null, target: string[] | null } | null} point
+         */
+        setReparse(components, point){
+            mustBeWritable(components);
+            const node = mustFind(components);
+            if (point === null)
+            {
+                if (!node.reparse && !node.junction)
+                {
+                    throw fsError(ErrorCode.NOT_A_REPARSE_POINT,
+                        `"${node.path}" is not a reparse point`);
+                }
+                for (const name of namesOf(node))
+                {
+                    name.reparse = null;
+                    name.junction = null;
+                }
+                changed(node.path, 'written');
+                return;
+            }
+            if (node.directory && [...node.children.values()].some(child=>!child.tombstone))
+            {
+                throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
+            }
+            // The point is the file's: a file with several names is one under each.
+            const reparse = { tag: point.tag >>> 0, data: point.data ? point.data.slice() : null };
+            for (const name of namesOf(node))
+            {
+                name.reparse = reparse;
+                name.junction = point.target ? [...point.target] : null;
+            }
+            changed(node.path, 'written');
+        },
+
+        /**
+         * The reparse point at `components` as it was set, null for none: a
+         * junction recorded without its buffer has a tag and no data.
+         *
+         * @param {string[]} components @returns {ReparsePoint | null}
+         */
+        reparseOf(components){
+            const node = find(components);
+            if (!node || (!node.reparse && !node.junction))
+            {
+                return null;
+            }
+            return node.reparse ?? { tag: IO_REPARSE_TAG_MOUNT_POINT, data: null };
+        },
+
+        /**
+         * The number of the file or directory at `components` on this volume:
+         * the same under every name it has and across renames, never another
+         * file's while the volume stands (FileInternalInformation's).
+         *
+         * @param {string[]} components @returns {number}
+         */
+        fileId(components){
+            return idOf(mustFind(components));
+        },
+
+        /**
+         * The name `components` reaches, as the volume spells it, every
+         * junction on the way taken: what a handle opened by it is named
+         * (GetFinalPathNameByHandle). The last component is not followed.
+         *
+         * @param {string[]} components @returns {string[]}
+         */
+        finalPath(components){
+            return mustFind(components).path.split('\\').filter(part=>part.length > 0);
+        },
+
+        /**
+         * Where the file numbered `id` is, as components: one of its names,
+         * null for a number no file here has.
+         *
+         * @param {number} id @returns {string[] | null}
+         */
+        pathOfId(id){
+            const node = numbered.get(id);
+            if (!node)
+            {
+                return null;
+            }
+            /** @type {string[]} */
+            const components = [];
+            for (let at = node; at.parent; at = at.parent)
+            {
+                components.unshift(at.name);
+            }
+            return components;
+        },
+
+        /**
+         * Gives the directory at `to` the number and the attributes the one
+         * at `from` had: a directory is moved by making it anew and moving
+         * what it holds, and on NTFS it stays the same file.
+         *
+         * @param {string[]} from @param {string[]} to
+         */
+        carryFile(from, to){
+            const leaving = find(from);
+            const arriving = find(to);
+            if (leaving && arriving && arriving.id === 0)
+            {
+                passFile(leaving, arriving);
+            }
+        },
+
+        /**
+         * Every name the file at `components` has, as paths: itself alone
+         * unless it is linked.
+         *
+         * @param {string[]} components @returns {string[]}
+         */
+        namesOf(components){
+            return namesOf(mustFind(components)).map(name=>name.path);
+        },
+
+        /**
+         * The files with more than one name, each as the path its bytes are
+         * kept under and its other names: what a session carries besides the
+         * files themselves. Empty for a drive with no links.
+         *
+         * @returns {LinkRecord[]}
+         */
+        links(){
+            /** @type {Set<Body>} */
+            const bodies = new Set();
+            /** @type {LinkRecord[]} */
+            const junctions = [];
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.body)
+                    {
+                        bodies.add(child.body);
+                    }
+                    const reparse = child.tombstone ? null : child.reparse;
+                    const data = !reparse ? {} : { reparse: { tag: reparse.tag,
+                        ...reparse.data ? { data: toBase64(reparse.data) } : {} } };
+                    // A directory standing for another is a junction record, as
+                    // sessions have always carried it; any other reparse point
+                    // is its own owner, its target beside it.
+                    if (child.junction && !child.tombstone && child.directory)
+                    {
+                        junctions.push({ owner: child.junction.join('\\'), names: [child.path],
+                            junction: true, ...data });
+                    }
+                    else if (reparse)
+                    {
+                        junctions.push({ owner: child.path, names: [child.path], ...data,
+                            ...child.junction ? { target: child.junction.join('\\') } : {} });
+                    }
+                    // A file's attributes once, under the name its bytes are kept at.
+                    if (child.attributes !== null && !child.tombstone
+                        && (!child.body || child.body.owner === child))
+                    {
+                        marked.set(child, child.attributes);
+                    }
+                    if (child.directory)
+                    {
+                        walk(child);
+                    }
+                }
+            };
+            /** @type {Map<Node, number>} */
+            const marked = new Map();
+            walk(root);
+            // Numbers and attributes last: a restored file is given its names
+            // first. One record a file, whichever of the two it has.
+            /** @type {Map<Node, LinkRecord>} */
+            const files = new Map();
+            for (const [id, node] of numbered)
+            {
+                if (id !== ROOT_ID)
+                {
+                    files.set(node, { owner: storePath(node), names: [], id });
+                }
+            }
+            for (const [node, attributes] of marked)
+            {
+                const record = files.get(node);
+                if (record)
+                {
+                    record.attributes = attributes;
+                }
+                else
+                {
+                    files.set(node, { owner: storePath(node), names: [], attributes });
+                }
+            }
+            const numbers = [...files.values()];
+            return [...[...bodies].map(body=>({ owner: body.owner.path,
+                names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) })),
+            ...junctions, ...numbers];
+        },
+
+        /**
+         * Gives files back the further names a session recorded for them,
+         * once the files themselves are on the drive. A name that a file
+         * already holds is taken over: the session is what the program left.
+         *
+         * @param {LinkRecord[]} records
+         */
+        restoreLinks(records){
+            /** @param {LinkRecord} record @returns {ReparsePoint | null} */
+            const pointOf = record=>(record.reparse ? { tag: record.reparse.tag >>> 0,
+                data: record.reparse.data ? fromBase64(record.reparse.data) : null } : null);
+            for (const record of records)
+            {
+                if (typeof record.id === 'number' || typeof record.attributes === 'number')
+                {
+                    const node = find(record.owner.split('\\').filter(part=>part.length > 0));
+                    const id = (record.id ?? 0) >>> 0;
+                    if (node && node.id === 0 && id >= FIRST_FILE_ID && !numbered.has(id))
+                    {
+                        for (const name of namesOf(node))
+                        {
+                            name.id = id;
+                        }
+                        numbered.set(id, node);
+                        nextId = Math.max(nextId, id + 1);
+                    }
+                    if (node && typeof record.attributes === 'number')
+                    {
+                        for (const name of namesOf(node))
+                        {
+                            name.attributes = record.attributes >>> 0;
+                        }
+                    }
+                    continue;
+                }
+                if (record.reparse && !record.junction)
+                {
+                    const node = find(record.owner.split('\\').filter(part=>part.length > 0));
+                    if (node)
+                    {
+                        node.reparse = pointOf(record);
+                        node.junction = record.target
+                            ? record.target.split('\\').filter(part=>part.length > 0) : null;
+                    }
+                    continue;
+                }
+                if (record.junction)
+                {
+                    for (const path of record.names)
+                    {
+                        const components = path.split('\\').filter(part=>part.length > 0);
+                        for (let depth = 1; depth <= components.length; depth++)
+                        {
+                            if (!find(components.slice(0, depth)))
+                            {
+                                overlay.createDirectory(components.slice(0, depth));
+                            }
+                        }
+                        const node = find(components);
+                        if (node?.directory && !node.junction)
+                        {
+                            node.junction = record.owner.split('\\')
+                                .filter(part=>part.length > 0);
+                            node.reparse = pointOf(record);
+                        }
+                    }
+                    continue;
+                }
+                const owner = find(record.owner.split('\\').filter(part=>part.length > 0));
+                if (!owner || owner.directory)
+                {
+                    continue;
+                }
+                for (const path of record.names)
+                {
+                    const components = path.split('\\').filter(part=>part.length > 0);
+                    const present = find(components);
+                    if (present && (present.directory || present.body === owner.body
+                        && owner.body !== null))
+                    {
+                        continue;
+                    }
+                    if (present)
+                    {
+                        forget(present);
+                    }
+                    for (let depth = 1; depth < components.length; depth++)
+                    {
+                        if (!find(components.slice(0, depth)))
+                        {
+                            overlay.createDirectory(components.slice(0, depth));
+                        }
+                    }
+                    addName(owner, parentOf(components),
+                        /** @type {string} */ (components[components.length - 1]));
+                }
+            }
+        },
+
+        /**
          * Every file that lives in the writable layer: what the program itself
          * has produced, and therefore what a session is made of. Nothing from
          * the source is in it -- a bundle is fetched by digest, never uploaded.
@@ -712,12 +1565,51 @@ export function createOverlay({
                     {
                         walk(child);
                     }
-                    else if (child.inWritable)
+                    else if (child.inWritable && (!child.body || child.body.owner === child))
                     {
                         found.push({
                             path: child.path,
                             size: writable.stat(child.path)?.size ?? 0,
                         });
+                    }
+                }
+            };
+            walk(root);
+            return found;
+        },
+
+        /**
+         * The files the source keeps as its own (`SourceStore.kept`) that the
+         * program has neither written nor deleted, as the source keeps them:
+         * the rest of a session laid under the writable layer.
+         *
+         * @returns {object[]}
+         */
+        keptFiles(){
+            /** @type {object[]} */
+            const found = [];
+            if (!source?.kept)
+            {
+                return found;
+            }
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.tombstone)
+                    {
+                        continue;
+                    }
+                    if (child.directory)
+                    {
+                        walk(child);
+                        continue;
+                    }
+                    const kept = !child.inWritable && child.inSource
+                        ? source.kept?.(child.sourcePath) : null;
+                    if (kept)
+                    {
+                        found.push(kept);
                     }
                 }
             };
@@ -759,6 +1651,73 @@ export function createOverlay({
             return found;
         },
 
+        /**
+         * Where the tree and its stores disagree, one line each; empty when
+         * they agree. What the tree says is in a layer must be there under
+         * the node's key for that layer (a linked file's bytes under the name
+         * that owns them), every node must be in one layer or
+         * the other, and nothing may be in the writable store that the tree
+         * does not hold there under that same key -- a file the program can
+         * neither see nor, if the tree lists it, read.
+         *
+         * @returns {string[]}
+         */
+        verify(){
+            /** @type {string[]} */
+            const problems = [];
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    const kind = child.directory ? 'directory' : 'file';
+                    if (child.inWritable)
+                    {
+                        // A further name of a linked file holds nothing of
+                        // its own: the bytes are under the name that owns them.
+                        const at = child.directory ? child.path : storePath(child);
+                        const stored = writable.stat(at);
+                        if (!stored || stored.directory !== child.directory)
+                        {
+                            problems.push(`the writable layer has no ${kind} "${at}"`
+                                + (at === child.path ? '' : ` for "${child.path}"`));
+                        }
+                        if (child.tombstone)
+                        {
+                            problems.push(`"${child.path}" is deleted and still written`);
+                        }
+                    }
+                    else if (!child.inSource)
+                    {
+                        problems.push(`"${child.path}" is in neither layer`);
+                    }
+                    if (child.inSource && !child.tombstone && !child.directory)
+                    {
+                        const held = source?.stat(child.sourcePath);
+                        if (!held || held.directory)
+                        {
+                            problems.push(`the source has no file "${child.sourcePath}"`);
+                        }
+                    }
+                    walk(child);
+                }
+            };
+            walk(root);
+            for (const entry of writable.list())
+            {
+                let node = /** @type {Node | undefined} */ (root);
+                for (const part of entry.path.split('\\').filter(name=>name.length > 0))
+                {
+                    node = node?.children.get(foldName(part));
+                }
+                if (!node || !node.inWritable || node.path !== entry.path)
+                {
+                    problems.push(`the writable layer holds "${entry.path}", which the tree `
+                        + (node?.inWritable ? `holds as "${node.path}"` : 'does not hold there'));
+                }
+            }
+            return problems;
+        },
+
         diagnostics(){
             let files = 0;
             let directories = 0;
@@ -785,7 +1744,8 @@ export function createOverlay({
                 }
             };
             walk(root);
-            return { files, directories, tombstones, copied, layered: source !== null };
+            return { files, directories, tombstones, copied, layered: source !== null,
+                disagreements: overlay.verify().length };
         },
     };
     if (revision)

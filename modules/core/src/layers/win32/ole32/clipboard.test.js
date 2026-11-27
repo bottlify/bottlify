@@ -18,8 +18,6 @@ const E_NOTIMPL = 0x80004001 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const CLIPBRD_E_CANT_OPEN = 0x800401d0 | 0;
 const DV_E_FORMATETC = 0x80040064 | 0;
-const DV_E_LINDEX = 0x80040068 | 0;
-const DV_E_TYMED = 0x80040069 | 0;
 const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const OLE_E_ADVISENOTSUPPORTED = 0x80040003 | 0;
 const DATA_S_SAMEFORMATETC = 0x00040130;
@@ -134,6 +132,35 @@ test('OleSetClipboard needs OleInitialize, then puts the source and its text the
     assert.equal(await run('OleSetClipboard', [first.object.pointer]), CLIPBRD_E_CANT_OPEN);
 });
 
+test('OleSetClipboard adds the owner\'s window and the formats, as test_cf_dataobject reads them',
+    async()=>{
+        const { p, run, get } = setup();
+        const src = source(p, 'x');
+        await run('OleSetClipboard', [src.object.pointer]);
+        /** @param {string} name */
+        const registered = name=>/** @type {number} */ (p.env.system?.('USER32.dll',
+            'RegisterClipboardFormatW', [p.wide(name)]));
+        const owner = p.user32.clipboard.get(registered('DataObject')) ?? 0;
+        assert.equal(p.u32(owner), 0, 'opened with no window, the clipboard has no owner');
+        const listed = p.user32.clipboard.get(registered('Ole Private Data')) ?? 0;
+        const words = [...Array(6 + 2 * 8)].map((_, index)=>p.u32(listed + index * 4));
+        assert.deepEqual(words.slice(0, 6), [0, 24 + 2 * 32, 1, 2, 0, 0]);
+        assert.deepEqual(words.slice(6, 14), [CF_TEXT, 0, 1, 0xffffffff, TYMED_HGLOBAL, 1, 0, 0]);
+        assert.deepEqual(words.slice(14), [0xc100, 0, 1, 0xffffffff, TYMED_ISTREAM, 1, 0, 0]);
+
+        await run('OleFlushClipboard', []);
+        const data = await get();
+        const enumOut = p.out();
+        assert.equal(await p.callMethod(data, D.ENUM, [1, enumOut]), S_OK);
+        const formats = p.out(0, 60);
+        const fetched = p.out();
+        await p.callMethod(p.u32(enumOut), 3, [3, formats, fetched]);
+        assert.deepEqual([p.u32(fetched), p.u32(formats)], [1, CF_TEXT],
+            'after a flush, OLE\'s own two are not offered');
+        await p.callMethod(p.u32(enumOut), 2, []);
+        await p.callMethod(data, 2, []);
+    });
+
 test('OleGetClipboard hands one object per clipboard state, reaching the source while it is there',
     async()=>{
         // clipboard.c test_consumer_refs.
@@ -178,11 +205,18 @@ test('the clipboard\'s object checks a format as clipboard.c test_get_clipboard 
         /** @param {number} format */
         const query = format=>p.callMethod(data, D.QUERY, [format]);
         assert.equal(await query(formatEtc(CF_TEXT)), S_OK);
-        assert.equal(await query(formatEtc(CF_UNICODETEXT)), DV_E_FORMATETC);
+        assert.equal(await query(formatEtc(CF_UNICODETEXT)), DV_E_CLIPFORMAT, 'not offered');
         assert.equal(await query(formatEtc(0)), DV_E_CLIPFORMAT);
         assert.equal(await query(formatEtc(CF_TEXT, TYMED_HGLOBAL, 2)), DV_E_FORMATETC);
-        assert.equal(await query(formatEtc(CF_TEXT, TYMED_HGLOBAL, 1, 0)), DV_E_LINDEX);
-        assert.equal(await query(formatEtc(CF_TEXT, TYMED_ISTREAM)), DV_E_TYMED);
+        assert.equal(await query(formatEtc(CF_TEXT, TYMED_HGLOBAL, 1, 0)), DV_E_FORMATETC,
+            'an lindex');
+        assert.equal(await query(formatEtc(CF_TEXT, TYMED_ISTREAM)), S_OK,
+            'the medium is not asked');
+        const medium = p.out(0, 12);
+        const asked = src.counts.get;
+        assert.equal(await p.callMethod(data, D.GET, [formatEtc(CF_UNICODETEXT), medium]),
+            DV_E_FORMATETC, 'GetData of a format not offered');
+        assert.equal(src.counts.get, asked + 1, 'the source is asked first');
         assert.equal(await query(0), E_INVALIDARG);
 
         const enumOut = p.out();

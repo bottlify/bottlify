@@ -141,7 +141,7 @@ const putting = flags=>(flags & (DISPATCH_PROPERTYPUT | DISPATCH_PROPERTYPUTREF)
  *
  * @param {VBScriptEngine} engine @param {VBObject} object @returns {DispatchTarget}
  */
-export function classTarget(engine, object){
+function classTarget(engine, object){
     const interp = engine.interpreter;
     const cls = object.cls;
     const names = new Names();
@@ -218,7 +218,7 @@ export function classTarget(engine, object){
  *
  * @param {VBScriptEngine} engine @param {FunctionRef} ref @returns {DispatchTarget}
  */
-export function functionTarget(engine, ref){
+function functionTarget(engine, ref){
     const interp = engine.interpreter;
     return {
         dispId: ()=>DISPID_UNKNOWN,

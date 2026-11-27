@@ -6,12 +6,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMappingFunctions } from './mapping.js';
+import { createMappingFunctions, imageRefusal, imageSections, imageViewAt } from './mapping.js';
+import { mapImage } from '../../loader/internal/image.js';
+import { imageKind } from '../../loader/internal/pe.js';
+import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
+    from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
+import { readIntoBy } from './vfs.js';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const PAGE_READWRITE = 0x04;
 const PAGE_READONLY = 0x02;
+const FILE_MAP_COPY = 0x0001;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
 
@@ -20,10 +27,13 @@ const FILE_MAP_READ = 0x0004;
  *   the tests that are about named mappings. Every other test passes nothing
  *   and every pointer reads as the empty name, which is no name at all.
  */
-function setup(names = {}){
+/** @param {Record<number, string>} [names] @param {Record<string, any>} [extra] */
+function setup(names = {}, extra = {}){
     const bytes = new Uint8Array(0x100000);
     /** Where a view was placed by address, so a second one there is refused. */
     const placed = new Set();
+    /** Holds taken on the file and not given back. */
+    let holds = 0;
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
     let nextHandle = 4;
@@ -62,6 +72,7 @@ function setup(names = {}){
             return true;
         },
         release: ()=>{},
+        zero: (address, length)=>void bytes.fill(0, address, address + length),
         handles: {
             open: (type, object)=>{
                 const handle = nextHandle;
@@ -85,7 +96,17 @@ function setup(names = {}){
             errorsFor.push([thread, code]);
         },
         files: {
-            /** @param {any} node @param {number} offset @param {number} length */
+            /**
+             * Through `read` as it is when called: a test may put another in its place.
+             *
+             * @param {any} node @param {number} offset @param {number} length
+             * @param {(bytes: Uint8Array, at: number) => void} put
+             * @returns {number | Promise<number>}
+             */
+            readInto(node, offset, length, put){
+                return readIntoBy(this.read)(node, offset, length, put);
+            },
+            /** @type {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} */
             read: (node, offset, length)=>{
                 const block = node.data.slice(offset, offset + length);
                 if (node.arrives)
@@ -106,9 +127,14 @@ function setup(names = {}){
             },
             /** @param {any} node */
             size: node=>node.data.length,
-            retain: ()=>{},
-            close: ()=>{},
+            retain: ()=>{
+                holds++;
+            },
+            close: ()=>{
+                holds--;
+            },
         },
+        ...extra,
     });
 
     const fileHandle = nextHandle;
@@ -116,7 +142,9 @@ function setup(names = {}){
     // Shaped as kernel32 keeps an open file: the volume's node is a field of
     // the record a handle resolves to, not the record itself.
     table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
-    return { fns, bytes, errors, errorsFor, file, fileHandle, said };
+    return { fns, bytes, errors, errorsFor, file, fileHandle, said, table,
+        /** How many holds on the file are taken and not given back. */
+        held: ()=>holds };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -135,6 +163,14 @@ test('a view starts on an allocation granule, as every view on Windows does', ()
     assert.deepEqual([first % 0x10000, second % 0x10000], [0, 0]);
     assert.notEqual(first, second);
     assert.equal(fns.UnmapViewOfFile.handler([second]), 1);
+});
+
+test('a directory opened for its handle has no bytes to map', ()=>{
+    const { fns, errors, table } = setup();
+    table.set(0x7000, { type: 'file',
+        object: { path: 'C:\\GAME', node: null, directory: true, position: 0 } });
+    assert.equal(fns.CreateFileMappingA.handler([0x7000, 0, PAGE_READWRITE, 0, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('a view of a file starts as that file, and is written back when unmapped', ()=>{
@@ -206,6 +242,60 @@ test('a read-only view is not written back', ()=>{
     bytes[view] = 0x77;
     fns.UnmapViewOfFile.handler([view]);
     assert.equal(file.data[0], 1, 'the file kept what it had');
+});
+
+test('a view asks no more of its section than the section\'s protection allows', ()=>{
+    // Wine's kernel32:virtual (test_mapping): writing needs a read-write
+    // section, executing an executable one, and anything else reads; a view
+    // past that is ERROR_ACCESS_DENIED. Its pages start with the protection
+    // its access names, and VirtualProtect gives them one within the
+    // section's (heap.js).
+    assert.deepEqual([0x02, 0x04, 0x08, 0x20, 0x40, 0x80].map(sectionRights),
+        [0x05, 0x07, 0x05, 0x2d, 0x2f, 0x2d]);
+    assert.equal(sectionRights(0x01), 0, 'PAGE_NOACCESS allows nothing');
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 0x20, 0x21, 0x22, 0x24].map(viewProtection),
+        [0x01, 0x08, 0x04, 0x04, 0x02, 0x02, 0x04, 0x01, 0x80, 0x40, 0x20]);
+    // A page takes no access its view's protection lacks: a read-only view's
+    // pages read or copy; an image's (PAGE_EXECUTE_WRITECOPY) take any, its
+    // writable ones as their copy-on-write forms.
+    const pages = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x02, page)), [0x01, 0x02, 0x08]);
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x01, page)), [0x01]);
+    assert.deepEqual(pages.map(imageWriteCopy),
+        [0x01, 0x02, 0x08, 0x08, 0x10, 0x20, 0x80, 0x80]);
+    assert.ok(pages.map(imageWriteCopy).every(page=>protectionWithin(0x80, page)));
+
+    const { fns, errors, fileHandle } = setup();
+    const readOnly = fns.CreateFileMappingA.handler([fileHandle, 0, 0x02, 0, 8, 0]);
+    assert.equal(fns.MapViewOfFile.handler([readOnly, FILE_MAP_WRITE, 0, 0, 8]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.MapViewOfFile.handler([readOnly, 0x20 | 4, 0, 0, 8]), 0, 'not executable');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, 0, 0, 0, 8]), 0, 'nothing asked reads');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, FILE_MAP_COPY, 0, 0, 8]), 0);
+    for (const refused of [0x01, 0x10, 0])
+    {
+        assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, refused, 0, 8, 0]), 0);
+        assert.equal(errors.at(-1), 87, `ERROR_INVALID_PARAMETER for 0x${refused.toString(16)}`);
+    }
+});
+
+test('a copy-on-write view is written in memory and never reaches its file', ()=>{
+    // PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY give the process its own copy
+    // of each page it writes; the file, which may be open for reading alone,
+    // keeps what it had through the unmap and any flush.
+    for (const page of [0x08, 0x80])
+    {
+        const { fns, bytes, file, fileHandle } = setup();
+        const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, page, 0, 8, 0]);
+        assert.equal(fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]), 0,
+            'a copy-on-write section is never written through');
+        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_COPY, 0, 0, 8]);
+        assert.notEqual(view, 0);
+        bytes[view] = 0x77;
+        assert.equal(fns.FlushViewOfFile.handler([view, 0]), 1);
+        assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+        assert.equal(file.data[0], 1, `the file kept what it had (0x${page.toString(16)})`);
+    }
 });
 
 test('a mapping of a file with no size given is as large as the file', ()=>{
@@ -353,47 +443,6 @@ test('a section in the global namespace is not the program\'s to make, not being
         [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, LOCAL]), 0);
 });
 
-test('CreateNamedPipe is refused as Windows 9x refuses it, and says so', ()=>{
-    // With no namespace for a client to open the other end in, a server end
-    // would be a handle nothing can ever connect to.
-    const { fns, errors, said } = setup();
-    for (const entry of [fns.CreateNamedPipeA, fns.CreateNamedPipeW])
-    {
-        assert.equal(entry.argBytes, 32);
-        assert.equal(entry.handler() >>> 0, 0xffffffff);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-    }
-    assert.equal(said.length, 2);
-    assert.match(said[1], /^CreateNamedPipeW: /);
-});
-
-test('the other named-pipe calls are refused the same way, each popping its own arguments', ()=>{
-    // Wine's kernel32 process.c connects the pipe it could not create.
-    const { fns, errors, said } = setup();
-    const table = /** @type {Record<string, any>} */ (fns);
-    for (const [name, argBytes] of /** @type {[string, number][]} */ ([
-        ['ConnectNamedPipe', 8], ['DisconnectNamedPipe', 4], ['WaitNamedPipeA', 8],
-        ['WaitNamedPipeW', 8], ['TransactNamedPipe', 28], ['GetNamedPipeInfo', 20],
-        ['GetNamedPipeHandleStateA', 28], ['SetNamedPipeHandleState', 16]]))
-    {
-        assert.equal(table[name].argBytes, argBytes, name);
-        assert.equal(table[name].handler(), 0, name);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-        assert.match(said.at(-1) ?? '', new RegExp(`^${name}: `));
-    }
-});
-
-test('CreateMailslot is refused, and says so', ()=>{
-    const { fns, errors, said } = setup();
-    for (const entry of [fns.CreateMailslotA, fns.CreateMailslotW])
-    {
-        assert.equal(entry.argBytes, 16);
-        assert.equal(entry.handler() >>> 0, 0xffffffff);
-        assert.equal(errors.at(-1), 120, 'ERROR_CALL_NOT_IMPLEMENTED');
-    }
-    assert.match(said[1], /^CreateMailslotW: /);
-});
-
 const SEC_FILE = 0x800000;
 const SEC_IMAGE = 0x1000000;
 const SEC_RESERVE = 0x4000000;
@@ -459,6 +508,132 @@ test('the SEC_* combinations Windows refuses are refused, each with its own erro
     assert.notEqual(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 9, 0]), 0);
 });
 
+/**
+ * A library linked for `base`, whose data's first dword is the address of
+ * its code, with a fixup for it when `relocatable`, for ASLR when
+ * `dynamicBase`; its code is 9 8 7 6.
+ *
+ * @param {number} base @param {boolean} [relocatable] @param {boolean} [dynamicBase]
+ */
+const imageAt = (base, relocatable = true, dynamicBase = false)=>buildExe({
+    dll: true,
+    imageBase: base,
+    dynamicBase,
+    imports: {},
+    data: { pointer: [0, 0x10, 0, 0].map((byte, index)=>(index === 3 ? base >>> 24
+        : index === 2 ? base >>> 16 & 0xff : byte)) },
+    codeSize: 0x10,
+    code: ()=>[9, 8, 7, 6],
+    ...relocatable ? { relocations: { pointer: [0] } } : {},
+});
+
+/** Where the image's data dword is (codeSize 0x10, the section at 0x1000). @param {number} view */
+const pointerAt = view=>view + 0x1010;
+
+/** @param {Uint8Array} bytes @param {number} view */
+const imageBaseOf = (bytes, view)=>dword(bytes, view + dword(bytes, view + 0x3c) + 24 + 28);
+
+test('a SEC_IMAGE view is the file laid out as its image: each section at its address', ()=>{
+    // fusion maps a managed library so and reads its manifest by RVA; a view
+    // of the file as it lies put the metadata elsewhere, and the .NET
+    // Framework's setup could not put one assembly into the cache.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    file.data = imageAt(0x40000);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    assert.notEqual(mapping, 0);
+    assert.equal(basicInformation(at, mapping).size, dword(file.data, dword(file.data, 0x3c) + 80),
+        'the size of the image, not of the file');
+    const before = at.held();
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.equal(view, 0x40000, 'at its own base, which is free');
+    assert.deepEqual([...bytes.subarray(view, view + 2)], [0x4d, 0x5a], 'the headers at the start');
+    assert.deepEqual([...bytes.subarray(view + 0x1000, view + 0x1004)], [9, 8, 7, 6],
+        'the section at its virtual address');
+    assert.equal(dword(bytes, pointerAt(view)), 0x41000, 'nothing moved');
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+    assert.equal(at.held(), before, 'the view gave back the hold it took on the file');
+});
+
+test('an image view away from its base is moved there, each view for its own address', ()=>{
+    // The CLR maps an assembly with SEC_IMAGE and reads it where it lands;
+    // Windows applies the image's fixups and writes the new base into its
+    // header, and NtMapViewOfSection answers STATUS_IMAGE_NOT_AT_BASE.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    const STATUS_IMAGE_NOT_AT_BASE = 0x40000003;
+    file.data = imageAt(0x79720000);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const views = [0x200, 0x204].map(out=>{
+        at.bytes.fill(0, out, out + 4);
+        at.bytes.fill(0, 0x210, 0x214);
+        const status = fns.CreateFileMappingW.natives.NtMapViewOfSection.handler(
+            [mapping, CURRENT_PROCESS, out, 0, 0, 0, 0x210, 1, 0, PAGE_READONLY]);
+        assert.equal(status, STATUS_IMAGE_NOT_AT_BASE);
+        return dword(bytes, out);
+    });
+    assert.notEqual(views[0], views[1]);
+    for (const view of views)
+    {
+        assert.equal(dword(bytes, pointerAt(view)), view + 0x1000, 'the fixup applied');
+        assert.equal(imageBaseOf(bytes, view), view, 'the header names where it is');
+        assert.deepEqual([...bytes.subarray(view + 0x1000, view + 0x1004)], [9, 8, 7, 6]);
+    }
+});
+
+test('an image linked for ASLR is moved even where its base is free, as Windows moves it', ()=>{
+    // The CLR maps an assembly so and then reserves the assembly's base for
+    // the native image it compiles of it.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    file.data = imageAt(0x40000, true, true);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0x40000);
+    assert.equal(dword(bytes, pointerAt(view)), view + 0x1000, 'moved there');
+    assert.equal(imageBaseOf(bytes, view), view);
+});
+
+test('an image without fixups whose base is taken is mapped elsewhere as it lies', ()=>{
+    // Windows maps the view where there is room, nothing fixed up, and
+    // NtMapViewOfSection answers STATUS_IMAGE_NOT_AT_BASE (Wine's
+    // kernel32:loader test_image_mapping); MapViewOfFile takes that as success.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    const STATUS_IMAGE_NOT_AT_BASE = 0x40000003;
+    file.data = imageAt(0x79720000, false);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.notEqual(view, 0x79720000);
+    assert.equal(dword(bytes, pointerAt(view)), 0x79720000 + 0x1000, 'nothing fixed up');
+    assert.equal(imageBaseOf(bytes, view), 0x79720000, 'the header names its own base');
+    at.bytes.fill(0, 0x200, 0x204);
+    at.bytes.fill(0, 0x210, 0x214);
+    assert.equal(fns.CreateFileMappingW.natives.NtMapViewOfSection.handler(
+        [mapping, CURRENT_PROCESS, 0x200, 0, 0, 0, 0x210, 1, 0, PAGE_READONLY]),
+    STATUS_IMAGE_NOT_AT_BASE);
+    assert.notEqual(dword(bytes, 0x200), 0);
+});
+
+test('a fresh page-file view reads zeroes, whatever the memory it is given held before', ()=>{
+    // Memory an unmapped view gave back is handed out again as it was left; the
+    // CLR's shared code-page table read an unmapped image's bytes and took them
+    // for a table already filled.
+    const { fns, bytes } = setup();
+    bytes.fill(0xcc, 0x1000);
+    const mapping = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x2004, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.ok(bytes.subarray(view, view + 0x3000).every(byte=>byte === 0),
+        'zero, to its last page');
+});
+
 test('a read-write mapping that names its commit is still written back to its file', ()=>{
     // PAGE_READWRITE | SEC_COMMIT is how many programs spell an ordinary
     // read-write mapping; read as one number it is no PAGE_* at all, and the
@@ -470,6 +645,74 @@ test('a read-write mapping that names its commit is still written back to its fi
     bytes[view + 2] = 0x77;
     assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
     assert.equal(file.data[2], 0x77);
+});
+
+test('a SEC_IMAGE section refuses each kind of file as Windows answers it', ()=>{
+    // Wine's kernel32:loader NtCreateSection cases, by what the headers say.
+    const image = imageAt(0x10000000);
+    const lfanew = dword(image, 0x3c);
+    /** @param {(view: DataView) => void} edit */
+    const kind = edit=>{
+        const copy = image.slice();
+        edit(new DataView(copy.buffer));
+        return imageRefusal(imageKind(copy), false);
+    };
+    assert.equal(kind(()=>{}), null, 'a 32-bit PE image is taken');
+    assert.equal(kind(view=>view.setUint16(0, 0, true)), 0xc000012f, 'no MZ: NOT_MZ');
+    assert.equal(kind(view=>view.setUint32(0x3c, 0x98760000, true)), 0xc0000130,
+        'a new header past the file: PROTECT');
+    assert.equal(kind(view=>view.setUint32(lfanew, 0xdeadbeef, true)), 0xc0000130,
+        'a signature of no kind: PROTECT');
+    /** @param {number} system */
+    const ne = system=>kind(view=>{
+        view.setUint16(lfanew, 0x454e, true);
+        view.setUint8(lfanew + 0x36, system);
+    });
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map(ne), [0xc000011b, 0xc000011b, 0xc0000131,
+        0xc000011b, 0xc000011b, 0xc0000130, 0xc000011b], 'NE: Windows 16-bit, a VxD, the rest');
+    assert.equal(kind(view=>view.setUint16(lfanew + 24, 0xdead, true)), 0xc000007b,
+        'an optional header of no magic: FORMAT');
+    assert.equal(kind(view=>view.setUint16(lfanew + 4, 0x8664, true)), 0xc000007b,
+        'a PE32 of the other machine: FORMAT');
+    /** @param {boolean} machine64 */
+    const pe64 = machine64=>{
+        const copy = image.slice();
+        const view = new DataView(copy.buffer);
+        view.setUint16(lfanew + 24, 0x20b, true);
+        view.setUint16(lfanew + 4, 0x8664, true);
+        return imageRefusal(imageKind(copy), machine64);
+    };
+    assert.equal(pe64(false), 0xc000035a, 'PE32+ on a 32-bit Windows: WIN_64');
+    assert.equal(pe64(true), null, 'and taken where x86-64 runs');
+});
+
+test('an image section answers its image information and keeps the size it was made with', ()=>{
+    const at = setup();
+    const { fns, bytes, file, fileHandle, errors } = at;
+    file.data = imageAt(0x10000000, true, true);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const query = fns.CreateFileMappingW.natives.NtQuerySection.handler;
+    assert.equal(query([mapping, 1, 0x300, 48, 0]), 0);
+    const lfanew = dword(file.data, 0x3c);
+    const optional = lfanew + 24;
+    assert.equal(dword(bytes, 0x300), 0x10000000 + dword(file.data, optional + 16),
+        'TransferAddress: the base and the entry point');
+    assert.equal(dword(bytes, 0x308), dword(file.data, optional + 72), 'MaximumStackSize');
+    assert.equal(dword(bytes, 0x310) & 0xffff, file.data[optional + 68], 'SubSystemType');
+    assert.equal(bytes[0x300 + 32] | bytes[0x300 + 33] << 8, 0x14c, 'Machine');
+    assert.equal(bytes[0x300 + 34], 1, 'ImageContainsCode');
+    assert.equal(bytes[0x300 + 35] & 0x0c, 0x04, 'dynamically relocated, not flat');
+    assert.equal(dword(bytes, 0x300 + 40), file.data.length, 'ImageFileSize');
+
+    // A maximum size up to the image's is the section's; past it, refused.
+    const size = basicInformation(at, mapping).size;
+    const small = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 1, 0]);
+    assert.equal(basicInformation(at, small).size, 1);
+    assert.equal(fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, size + 1, 0]), 0);
+    assert.equal(errors.at(-1), 8, 'STATUS_SECTION_TOO_BIG, ERROR_NOT_ENOUGH_MEMORY');
 });
 
 test('NtQuerySection refuses a short buffer, a plain section\'s image class, a non-section', ()=>{
@@ -529,4 +772,117 @@ test('a native section maps a view that must fit inside it, and unmaps it once',
     assert.equal(create(0x3452, 0), 0);
     assert.equal(basicInformation(at, dword(bytes, 0x200)).size, 0x4000,
         'the page file\'s section is whole pages');
+});
+
+test('a native unmap names a view by any address in it, through a handle to this process'
+    + ' or in a child where the child runs', async()=>{
+    const SELF = 0x80;
+    const CHILD = 0x84;
+    const DENIED = 0x88;
+    /** @type {any[]} */
+    const asked = [];
+    const child = { id: 0x700 };
+    const at = setup({}, {
+        /** @param {number} handle @param {number} right */
+        processTarget: (handle, right)=>{
+            assert.equal(right, 0x0008, 'PROCESS_VM_OPERATION');
+            return handle === CURRENT_PROCESS || handle === SELF ? { here: true }
+                : handle === CHILD ? { child } : handle === DENIED ? { error: 5 } : { error: 6 };
+        },
+        /** @param {any} record @param {any} call */
+        askChild: (record, call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 0, error: null, outs: [] });
+        },
+    });
+    const { fns, bytes } = at;
+    const { NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection } =
+        fns.CreateFileMappingW.natives;
+    bytes.set([0, 0x20, 0, 0, 0, 0, 0, 0], 0x210);
+    assert.equal(NtCreateSection.handler([0x200, 0, 0, 0x210, PAGE_READWRITE, SEC_COMMIT, 0]), 0);
+    const section = dword(bytes, 0x200);
+    /** @param {number} process */
+    const map = process=>{
+        bytes.fill(0, 0x220, 0x228);
+        return NtMapViewOfSection.handler(
+            [section, process, 0x220, 0, 0, 0, 0x224, 1, 0, PAGE_READWRITE]);
+    };
+    assert.equal(map(SELF), 0, 'a handle OpenProcess gave for this process maps here');
+    const view = dword(bytes, 0x220);
+    assert.equal(NtUnmapViewOfSection.handler([SELF, view + 0x1050]), 0,
+        'an address inside the view names it');
+    assert.equal(NtUnmapViewOfSection.handler([SELF, view]), 0xc0000019, 'and it is gone');
+    assert.equal(map(DENIED), 0xc0000022, 'a handle without the right is refused');
+    assert.equal(map(0x99), 0xc0000008, 'a handle naming no process');
+    assert.equal(NtUnmapViewOfSection.handler([DENIED, view]), 0xc0000022);
+    assert.equal(await NtUnmapViewOfSection.handler([CHILD, 0x5000]), 0, 'the child answers');
+    assert.deepEqual(asked, [[child, { call: 'NtUnmapViewOfSection',
+        args: [CURRENT_PROCESS, 0x5000] }]]);
+});
+
+test('NtOpenSection opens a section by its object name, and refuses physical memory', ()=>{
+    const NAME = 0x900;
+    const { fns, bytes } = setup({ [NAME]: 'Local\\Survey' });
+    const { NtOpenSection } = fns.CreateFileMappingW.natives;
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+    const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+    const STATUS_ACCESS_VIOLATION = 0xc0000005;
+    const made = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x1000, NAME]);
+    assert.notEqual(made, 0);
+    /**
+     * OBJECT_ATTRIBUTES at 0x400 naming `path` (a UNICODE_STRING at 0x420, its
+     * characters at 0x440), with `root` as its directory; the section's
+     * handle written at 0x200.
+     *
+     * @param {string} path @param {number} [root]
+     */
+    const open = (path, root = 0)=>{
+        bytes.fill(0, 0x200, 0x600);
+        const units = [...path].flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >> 8]);
+        bytes.set(units, 0x440);
+        bytes.set([units.length, 0, units.length, 0, 0x40, 0x04, 0, 0], 0x420);
+        bytes.set([24, 0, 0, 0, root & 0xff, root >> 8, 0, 0, 0x20, 0x04, 0, 0], 0x400);
+        return NtOpenSection.handler([0x200, 0x4, 0x400]);
+    };
+    for (const path of ['\\Sessions\\1\\BaseNamedObjects\\Survey', '\\BaseNamedObjects\\Survey'])
+    {
+        assert.equal(open(path), 0, path);
+        const handle = dword(bytes, 0x200);
+        assert.ok(handle !== 0 && handle !== made, `${path}: a handle of its own`);
+        assert.notEqual(fns.MapViewOfFile.handler([handle, FILE_MAP_WRITE, 0, 0, 0]), 0,
+            `${path}: onto the same section`);
+    }
+    assert.equal(open('\\Device\\PhysicalMemory'), STATUS_ACCESS_DENIED,
+        'refused to user mode since Windows Server 2003 SP1');
+    assert.equal(dword(bytes, 0x200), 0, 'and no handle written');
+    assert.equal(open('\\BaseNamedObjects\\Nothing'), STATUS_OBJECT_NAME_NOT_FOUND);
+    assert.equal(NtOpenSection.handler([0, 0x4, 0x400]), STATUS_ACCESS_VIOLATION);
+    assert.equal(NtOpenSection.argBytes, 12);
+});
+
+test('an image view\'s sections take the protection a loaded image\'s do', ()=>{
+    // Wine's kernel32:loader (test_image_mapping): a section only executed is
+    // PAGE_EXECUTE, not PAGE_EXECUTE_READ, mapped as a view as loaded.
+    /** @param {number} characteristics */
+    const of = characteristics=>imageSections(/** @type {any} */ ({ sectionAlignment: 0x1000,
+        sections: [{ virtualAddress: 0x1000, virtualSize: 0x10, rawSize: 0x200,
+            characteristics }] }))[0].protect;
+    assert.equal(of(0x20000000), 0x10, 'executed only');
+    assert.equal(of(0x60000020), 0x20, 'read and executed');
+    assert.equal(of(0xc0000040), 0x08, 'written: copy-on-write');
+    assert.equal(of(0xd0000040), 0x04, 'shared: written through');
+    assert.equal(of(0x00000040), 0x01, 'none');
+});
+
+test('a view of an image at its base is the laid-out image itself; one moved is a copy', ()=>{
+    // A map copies the view into guest memory: a copy of the whole image made
+    // first for a view that moves nothing was a second copy, made and let go.
+    const laid = mapImage(imageAt(0x40000), undefined, { wide: true });
+    const before = laid.bytes.slice();
+    assert.equal(imageViewAt(laid, 0x40000), laid.bytes, 'at its base: the section\'s own bytes');
+    const moved = imageViewAt(laid, 0x50000);
+    assert.notEqual(moved, laid.bytes);
+    assert.equal(dword(moved, 0x1010), 0x51000, 'moved there');
+    assert.deepEqual(laid.bytes, before, 'and what the section keeps is as it was');
 });

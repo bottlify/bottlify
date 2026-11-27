@@ -18,9 +18,6 @@
 export async function measureOnce(createApp, executable, options){
     const app = await createApp({
         executable,
-        // Named rather than left to the default: a bundle may be built from a
-        // checkout whose default is another engine.
-        engine: 'cork',
         exitNotice: false,
         cork: { config: { ...options.store === 'local' ? {} : { store: null }, ...options.cork } },
         ...options.commandLine ? { commandLine: options.commandLine } : {},

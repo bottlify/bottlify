@@ -43,7 +43,11 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @property {number} [rows]
  * @property {number} [cols]
  * @property {string} [name]   The structure or typedef a `named` type names, or the keyword.
- * @property {'any' | '1d' | '2d' | '3d' | 'cube'} [dim]   For a sampler or a texture.
+ * @property {'any' | '1d' | '2d' | '3d' | 'cube' | '1darray' | '2darray' | 'cubearray' | '2dms'
+ *     | '2dmsarray' | 'buffer' | 'comparison'} [dim]   For a sampler or a texture.
+ * @property {TypeRef} [elem]   What a Shader Model 4 texel holds: `Texture2D<uint4>`.
+ * @property {number} [samples]   `Texture2DMS<float4, 4>`.
+ * @property {boolean} [comparison]   SamplerComparisonState.
  * @property {Position} pos
  */
 
@@ -130,8 +134,10 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  * @typedef {Object} CBufferDecl
  * @property {'cbuffer'} kind
  * @property {string} name
+ * @property {boolean} tbuffer
  * @property {Register | null} register
  * @property {Variable[]} members
+ * @property {Annotation[]} annotations
  * @property {Position} pos
  */
 
@@ -235,6 +241,10 @@ const OBJECT_TYPES = new Map(/** @type {[string, [TypeRef['cls'], TypeRef['dim']
     ['Texture1D', ['texture', '1d']], ['Texture2D', ['texture', '2d']],
     ['Texture3D', ['texture', '3d']], ['TextureCube', ['texture', 'cube']],
     ['SamplerState', ['sampler', 'any']], ['SamplerComparisonState', ['sampler', 'any']],
+    // Shader Model 4's alone.
+    ['Texture1DArray', ['texture', '1darray']], ['Texture2DArray', ['texture', '2darray']],
+    ['TextureCubeArray', ['texture', 'cubearray']], ['Texture2DMS', ['texture', '2dms']],
+    ['Texture2DMSArray', ['texture', '2dmsarray']], ['Buffer', ['texture', 'buffer']],
     // Effect files write the Direct3D 9 texture capitalised as often as not.
     ['Texture', ['texture', 'any']],
 ]));
@@ -284,7 +294,8 @@ function builtinType(word){
         ? OBJECT_TYPES.get(lower) : undefined);
     if (object)
     {
-        return { cls: object[0], dim: object[1], name: word, pos: none };
+        return { cls: object[0], dim: object[1], name: word, pos: none,
+            ...(word === 'SamplerComparisonState' ? { comparison: true } : {}) };
     }
     if (word === 'matrix')
     {
@@ -461,11 +472,21 @@ export function parse(source, file = 'memory'){
         if (built)
         {
             built.pos = token.pos;
-            // `Texture2D<float4>`: what a texel holds, which a model 2 or 3 read ignores.
-            if (built.cls === 'texture' && /^Texture/.test(token.text) && isPunct('<'))
+            // `Texture2D<float4>`: what a texel holds, which a model 2 or 3 read ignores;
+            // `Texture2DMS<float4, 4>` its samples too.
+            if (built.cls === 'texture' && /^(Texture|Buffer$)/.test(token.text) && isPunct('<'))
             {
                 next();
-                parseType();
+                built.elem = parseType();
+                if (acceptPunct(','))
+                {
+                    const samples = next();
+                    if (samples.type !== 'int')
+                    {
+                        throw unexpected(samples);
+                    }
+                    built.samples = samples.value;
+                }
                 expectPunct('>');
             }
             return built;
@@ -1432,7 +1453,7 @@ export function parse(source, file = 'memory'){
             next();
             const name = expectIdent();
             const semantics = parseSemantics();
-            parseAnnotations();
+            const annotations = parseAnnotations();
             expectPunct('{');
             /** @type {Variable[]} */
             const members = [];
@@ -1444,8 +1465,8 @@ export function parse(source, file = 'memory'){
             }
             next();
             acceptPunct(';');
-            decls.push({ kind: 'cbuffer', name: name.text, register: semantics.register, members,
-                pos: token.pos });
+            decls.push({ kind: 'cbuffer', name: name.text, tbuffer: token.text === 'tbuffer',
+                register: semantics.register, members, annotations, pos: token.pos });
             return;
         }
         if (token.text === 'typedef')

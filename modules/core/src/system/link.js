@@ -26,7 +26,7 @@
  */
 
 import { decodeValue, encodeValue } from './codec.js';
-import { createRingMemory, doorbellOf, openRing, waitDoorbell } from './ring.js';
+import { RingClosed, createRingMemory, openRing } from '@bottlify/cellar';
 
 /**
  * The records on a link: a call, an answer, and a part of one of them too
@@ -64,6 +64,16 @@ const failureOf = e=>{
     return told;
 };
 
+/**
+ * What a call on a closed link fails with: the other side is gone, or going,
+ * and will answer nothing. `closed` tells it apart from the other side's own
+ * failure.
+ *
+ * @param {string} target @param {string} method
+ */
+export const closedError = (target, method)=>Object.assign(
+    new Error(`link: ${target}.${method}: the link is closed`), { closed: true });
+
 /** @param {any} failure */
 const errorOf = failure=>(typeof failure === 'string' ? new Error(failure)
     : Object.assign(new Error(failure?.message ?? 'link: the call failed'),
@@ -81,8 +91,9 @@ export const SPIN_MS = 0.05;
 
 /**
  * @typedef {Object} LinkEnd
- * @property {import('./ring.js').RingMemory} out  what this side writes
- * @property {import('./ring.js').RingMemory} in   what this side reads; its doorbell this side's
+ * @property {import('@bottlify/cellar').RingMemory} out  what this side writes
+ * @property {import('@bottlify/cellar').RingMemory} in   what this side reads; its
+ *     doorbell this side's
  */
 
 /**
@@ -92,11 +103,11 @@ export const SPIN_MS = 0.05;
  *
  * @param {Object} [options]
  * @param {number} [options.capacity]
- * @param {{ buffer: SharedArrayBuffer, index: number } | null} [options.bellA]
- * @param {{ buffer: SharedArrayBuffer, index: number } | null} [options.bellB]
+ * @param {import('@bottlify/cellar').DoorbellMemory} [options.bellA]
+ * @param {import('@bottlify/cellar').DoorbellMemory} [options.bellB]
  * @returns {{ a: LinkEnd, b: LinkEnd }}
  */
-export function createLinkMemory({ capacity = LINK_BYTES, bellA = null, bellB = null } = {}){
+export function createLinkMemory({ capacity = LINK_BYTES, bellA, bellB } = {}){
     const toA = createRingMemory(capacity, bellA);
     const toB = createRingMemory(capacity, bellB);
     return { a: { out: toB, in: toA }, b: { out: toA, in: toB } };
@@ -117,7 +128,12 @@ export function openLink(end, handlers){
     let nextId = 1;
     /** Answers to calls this side waits on, by id. @type {Map<number, { ok: boolean, value: any }>} */
     const arrived = new Map();
-    /** Calls this side was handed a promise for. @type {Map<number, { resolve: (value: any) => void, reject: (error: Error) => void }>} */
+    /**
+     * Calls this side was handed a promise for.
+     *
+     * @type {Map<number, { resolve: (value: any) => void, reject: (error: Error) => void,
+     *     target: string, method: string }>}
+     */
     const promised = new Map();
     /** Calls answered whose answer did not fit the ring yet. @type {Uint8Array[]} */
     const unsent = [];
@@ -159,9 +175,20 @@ export function openLink(end, handlers){
         }
     };
     const flush = ()=>{
-        while (unsent.length > 0 && outbound.write(unsent[0]))
+        try
         {
-            unsent.shift();
+            while (unsent.length > 0 && outbound.write(unsent[0]))
+            {
+                unsent.shift();
+            }
+        }
+        catch (e){
+            // The other side closed the link: nobody will read them.
+            if (!(e instanceof RingClosed))
+            {
+                throw e;
+            }
+            unsent.length = 0;
         }
     };
 
@@ -181,7 +208,17 @@ export function openLink(end, handlers){
         catch (e){
             record = encodeValue([ANSWER, id, false, failureOf(e)]);
         }
-        send(record);
+        try
+        {
+            send(record);
+        }
+        catch (e){
+            // An answer to a side that closed the link goes to nobody.
+            if (!(e instanceof RingClosed))
+            {
+                throw e;
+            }
+        }
     };
 
     /** @param {number} id @param {string} target @param {string} method @param {any[]} args */
@@ -213,20 +250,36 @@ export function openLink(end, handlers){
     /** The parts of a record still coming. @type {Uint8Array[]} */
     const parts = [];
     /**
-     * Records taken off the ring and not handled yet, in the order they came.
-     * A handler that makes a call of its own and waits for it pumps again
-     * from inside its record, and goes on from here: the ring's head would
-     * hand it that record a second time.
+     * Records taken off the ring and not handled yet, in the order they came,
+     * decoded where they lay (what the decoder keeps of them it copies): a
+     * handler that makes a call of its own and waits for it pumps again from
+     * inside its record, and goes on from here, where the ring's head would
+     * hand it that record a second time. A record that does not decode is
+     * kept as its error, thrown where the record would have been handled.
      *
-     * @type {Uint8Array[]}
+     * @type {any[]}
      */
     const taken = [];
     /** @param {Uint8Array} bytes */
-    const handle = bytes=>{
-        let record = decodeValue(bytes);
+    const decoded = bytes=>{
+        try
+        {
+            return decodeValue(bytes);
+        }
+        catch (e){
+            return { unreadable: e };
+        }
+    };
+    /** @param {any} record */
+    const handle = record=>{
+        if (record.unreadable)
+        {
+            throw record.unreadable;
+        }
         if (record[0] === PART)
         {
-            parts.push(record[2].slice());
+            // The decoder's copy of the part, taken as it is.
+            parts.push(record[2]);
             if (!record[1])
             {
                 return;
@@ -268,10 +321,10 @@ export function openLink(end, handlers){
      */
     const pump = ()=>{
         flush();
-        const count = inbound.drain(bytes=>void taken.push(bytes.slice()));
+        const count = inbound.drain(bytes=>void taken.push(decoded(bytes)));
         while (taken.length > 0)
         {
-            handle(/** @type {Uint8Array} */ (taken.shift()));
+            handle(taken.shift());
         }
         return count;
     };
@@ -279,30 +332,6 @@ export function openLink(end, handlers){
     /** Whether this thread may block: never the page's own. */
     const canBlock = typeof Atomics.wait === 'function'
         && (typeof globalThis.window === 'undefined');
-
-    /**
-     * Whether the doorbell rang within `SPIN_MS`, looked at without sleeping.
-     * A thread put to sleep on a word is woken tens of microseconds after
-     * the word is raised -- on both sides of a call, so a call across that
-     * sleeps costs several times the work of answering it; the other side
-     * mostly answers within a few.
-     *
-     * @param {number} seen
-     */
-    const rang = seen=>{
-        const until = performance.now() + SPIN_MS;
-        for (;;)
-        {
-            if (doorbellOf(bell) !== seen)
-            {
-                return true;
-            }
-            if (performance.now() >= until)
-            {
-                return false;
-            }
-        }
-    };
 
     /**
      * What this side asked of the other, by target and method: how often,
@@ -321,8 +350,23 @@ export function openLink(end, handlers){
         asked.set(key, entry);
     };
 
-    /** Whether `serve` goes on: an object, so the loop reads what `close` wrote. */
-    const state = { serving: false };
+    /**
+     * Whether `serve` goes on, whether its loop runs, and whether the link is
+     * closed: an object, so the loop reads what `close` wrote.
+     */
+    const state = { serving: false, looping: false, closed: false };
+
+    /**
+     * Every call still waiting for an answer fails: nothing will answer it
+     * now, and a caller left waiting would hold whatever it holds for good.
+     */
+    const failWaiting = ()=>{
+        for (const [id, waiting] of [...promised])
+        {
+            promised.delete(id);
+            waiting.reject(closedError(waiting.target, waiting.method));
+        }
+    };
 
     return {
         bell,
@@ -336,11 +380,22 @@ export function openLink(end, handlers){
          * @returns {Promise<any>}
          */
         call(target, method, args = []){
+            if (state.closed)
+            {
+                return Promise.reject(closedError(target, method));
+            }
             note(target, method, 0);
             const id = nextId++;
             return new Promise((resolve, reject)=>{
-                promised.set(id, { resolve, reject });
-                send(encodeValue([CALL, id, target, method, args]));
+                promised.set(id, { resolve, reject, target, method });
+                try
+                {
+                    send(encodeValue([CALL, id, target, method, args]));
+                }
+                catch (e){
+                    promised.delete(id);
+                    reject(e instanceof RingClosed ? closedError(target, method) : e);
+                }
             });
         },
 
@@ -354,13 +409,23 @@ export function openLink(end, handlers){
          * @returns {any}
          */
         callWaiting(target, method, args = [], timeoutMs = Infinity){
+            if (state.closed)
+            {
+                throw closedError(target, method);
+            }
             const id = nextId++;
             const started = performance.now();
-            send(encodeValue([CALL, id, target, method, args]));
+            try
+            {
+                send(encodeValue([CALL, id, target, method, args]));
+            }
+            catch (e){
+                throw e instanceof RingClosed ? closedError(target, method) : e;
+            }
             const until = Date.now() + timeoutMs;
             for (;;)
             {
-                const seen = doorbellOf(bell);
+                const seen = bell.seen();
                 pump();
                 const got = arrived.get(id);
                 if (got)
@@ -373,16 +438,22 @@ export function openLink(end, handlers){
                     }
                     return got.value;
                 }
+                // Closed while it waited, by a call it answered meanwhile, or
+                // by the other side, which will answer nothing now.
+                if (state.closed || inbound.closed())
+                {
+                    throw closedError(target, method);
+                }
                 const left = until - Date.now();
                 if (left <= 0)
                 {
                     throw new Error(
                         `link: ${target}.${method} was not answered in ${timeoutMs} ms`);
                 }
-                if (!rang(seen))
-                {
-                    waitDoorbell(bell, seen, left);
-                }
+                // A look of SPIN_MS first: a thread put to sleep on a word is
+                // woken tens of microseconds after it is raised, on both sides
+                // of a call, and the other side mostly answers within a few.
+                bell.wait(seen, left, SPIN_MS);
             }
         },
 
@@ -392,31 +463,34 @@ export function openLink(end, handlers){
          * is called.
          */
         async serve(){
+            if (state.closed)
+            {
+                return;
+            }
             state.serving = true;
-            const words = new Int32Array(bell.buffer);
+            state.looping = true;
             while (state.serving)
             {
-                const seen = doorbellOf(bell);
+                const seen = bell.seen();
                 const handled = pump();
-                if (!state.serving)
+                // Closed here, or by the other side: it writes nothing more.
+                if (!state.serving || inbound.closed())
                 {
                     break;
                 }
                 // A process that asked one thing asks the next straight
                 // after; the page's own thread does not spin for it.
-                if (handled > 0 && canBlock && rang(seen))
+                if (handled > 0 && canBlock && bell.wait(seen, SPIN_MS, SPIN_MS) !== 'timed-out')
                 {
                     continue;
                 }
-                const waited = /** @type {any} */ (Atomics).waitAsync(words, bell.index, seen);
-                if (waited.async)
-                {
-                    await waited.value;
-                }
+                await bell.waitAsync(seen);
             }
             // What the other side wrote before it was closed is still its
             // word: the last things a process tells the run as it ends.
             pump();
+            state.looping = false;
+            failWaiting();
         },
 
         /**
@@ -435,11 +509,24 @@ export function openLink(end, handlers){
             };
         },
 
-        /** Stops `serve`. */
+        /**
+         * Stops `serve`, and fails every call still waiting for an answer -
+         * once `serve` has read what the other side wrote last, where it runs.
+         * A call made after this fails at once, and so does one the other side
+         * makes or waits on: the link is closed for both.
+         */
         close(){
             state.serving = false;
-            Atomics.add(new Int32Array(bell.buffer), bell.index, 1);
-            Atomics.notify(new Int32Array(bell.buffer), bell.index);
+            state.closed = true;
+            // Both rings: a side waiting for room to write to this one, or
+            // for its answer, ends now rather than at its own time. Closing
+            // what this side reads rings its own doorbell, so its `serve` ends.
+            outbound.close();
+            inbound.close();
+            if (!state.looping)
+            {
+                failWaiting();
+            }
         },
     };
 }

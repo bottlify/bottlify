@@ -51,7 +51,7 @@ function random(seed){
 test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', ()=>{
     const host = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(SETJMP, SETJMP_CODE.setjmp);
     host.writePhysical(SETJMP3, SETJMP_CODE.setjmp3);
@@ -65,7 +65,7 @@ test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', (
     let registers = /** @type {Record<string, number>} */ ({});
     const crt = createCrtSeh(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            host.readPhysical(at, length),
+            host.readPhysical(at, length).slice(),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             host.writePhysical(at, bytes),
         isMapped: ()=>true,

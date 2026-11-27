@@ -178,7 +178,7 @@ test('the second caps word is read from the offset the newer layout gave it', ()
 
 test('writing a descriptor fills the fields a reader will look at', ()=>{
     const memory = fakeMemory();
-    memory.fill(DESC, DDSURFACEDESC2.SIZE / 4);
+    memory.fill(DESC, DDSURFACEDESC2.SIZE / 4 + 1);
 
     writeSurfaceDesc(memory, DESC, DDSURFACEDESC2, {
         flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
@@ -209,7 +209,9 @@ test('writing a descriptor fills the fields a reader will look at', ()=>{
     assert.equal(readBack.caps2, DDSCAPS2_TEXTUREMANAGE);
     assert.equal(readBack.pixelFormat.flags, DDPF_PALETTEINDEXED8);
     assert.equal(readU32(memory, DESC + DDSURFACEDESC2.lpSurface), 0x40001000);
-    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwTextureStage), UNTOUCHED,
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwTextureStage), 0,
+        'the texture stage is written as the first one (test_surface_desc_size)');
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.SIZE), UNTOUCHED,
         'and it stops where the structure it was asked for stops');
 });
 
@@ -253,4 +255,20 @@ test('a format that names no bit count has no bytes per pixel to give', ()=>{
     assert.equal(bytesPerPixel(format(4)), 1, 'a sub-byte format still occupies one');
     assert.equal(bytesPerPixel(format(0)), 0,
         'and a compressed one says nothing rather than something plausible');
+});
+
+test('the older descriptor of a depth buffer names its depth in the mip count\'s place, the newer'
+    + ' one does not (test_d32_support)', ()=>{
+    const memory = fakeMemory();
+    const depth = { size: 0x20, flags: DDPF_ZBUFFER, fourCC: 0, bitCount: 32, redMask: 0,
+        greenMask: 0xffffffff, blueMask: 0, alphaMask: 0 };
+    const fields = { flags: DDSD_CAPS | DDSD_PIXELFORMAT, width: 64, height: 64, pitch: 256,
+        backBufferCount: 0, mipMapCount: 0, caps: 0x20000, caps2: 0, pixelFormat: depth };
+    writeSurfaceDesc(memory, DESC, DDSURFACEDESC, fields);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC.dwFlags),
+        DDSD_CAPS | DDSD_PIXELFORMAT | 0x40);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC.dwZBufferBitDepth), 32);
+    writeSurfaceDesc(memory, DESC, DDSURFACEDESC2, fields);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwFlags), DDSD_CAPS | DDSD_PIXELFORMAT);
+    assert.equal(readU32(memory, DESC + DDSURFACEDESC2.dwMipMapCount), 0);
 });

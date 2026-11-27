@@ -141,6 +141,41 @@ const zeros = (count, stride)=>new Uint8Array(count * stride);
 
 // --- the object ---
 
+test('material and matrix handles are the process\'s: one DirectDraw object\'s name the same'
+    + ' through another\'s (ddraw1 test_multiple_devices)', ()=>{
+    const f = fixture(1);
+    const root = createDirectDraw({ version: 4, screenWidth: 64, screenHeight: 48 });
+    root.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const other = createLegacyDirect3D(createDirect3D7(root), f.textures);
+    const material = f.legacy.createMaterial();
+    const handle = material.getHandle(f.device);
+    assert.equal(other.createViewport().setBackground(handle), D3D_OK);
+    const matrix = f.device.createMatrix();
+    assert.equal(f.device.setMatrix(matrix, [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]),
+        D3D_OK);
+    const target = surface(root);
+    const second = other.createDevice(DEVICE_IDS.HAL, target, 1).device;
+    assert.deepEqual([...second.getMatrix(matrix)],
+        [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1]);
+    assert.equal(second.release(), 0);
+    assert.equal(target.release(), 0);
+    assert.equal(material.release(), 0);
+    assert.equal(root.release('IDirectDraw4'), 0);
+    f.done();
+});
+
+test('colour keying starts on through the first version and off after it (test_ck_default)', ()=>{
+    for (const [version, keyed] of /** @type {const} */ ([[1, 1], [2, 0], [3, 0]]))
+    {
+        const f = fixture(version);
+        /** @type {{ value?: number }} */
+        const out = {};
+        assert.equal(f.device.getRenderState(41, out), D3D_OK);
+        assert.equal(out.value, keyed, `version ${version}`);
+        f.done();
+    }
+});
+
 test('the older versions make the software and hardware devices, and no T&L one', ()=>{
     const f = fixture();
     assert.deepEqual(f.legacy.devices().map((/** @type {any} */ device)=>device.id),
@@ -336,6 +371,11 @@ test('a viewport clears to its background material\'s diffuse colour, or black',
         texture: 0, rampSize: 0 });
     const handle = material.getHandle();
     assert.equal(material.getHandle(), handle, 'one material, one handle');
+    // A handle a device (Wine's ddraw2 and ddraw4 test_multiple_devices),
+    // each naming the material.
+    const other = material.getHandle({});
+    assert.notEqual(other, handle);
+    assert.equal(f.legacy.materialOf(other), material);
     const rect = [{ x1: 0, y1: 0, x2: 64, y2: 48 }];
 
     assert.deepEqual(viewport.getBackground(), { handle: 0, valid: false });
@@ -445,6 +485,24 @@ test('a light belongs to one viewport, and only an active one lights a draw', ()
     assert.equal(light.setLight({ ...directional, flags: 0 }, false), D3D_OK);
     assert.equal(light.getLight()?.flags, D3DLIGHT_ACTIVE, 'a D3DLIGHT has no flags: it is on');
 
+    // Black lights take none of Direct3D 7's eight before the one that lights
+    // (Wine's ddraw4 test_specular_lighting adds 64 ahead of its own).
+    assert.equal(viewport.deleteLight(light), D3D_OK);
+    const dark = Array.from({ length: 9 }, ()=>{
+        const one = f.legacy.createLight();
+        assert.equal(one.setLight({ ...directional, flags: D3DLIGHT_ACTIVE,
+            color: { r: 0, g: 0, b: 0, a: 0 } }, true), D3D_OK);
+        assert.equal(viewport.addLight(one), D3D_OK);
+        return one;
+    });
+    assert.equal(viewport.addLight(light), D3D_OK);
+    assert.equal(enabledFor().length, 1, 'only the coloured light');
+    for (const one of dark)
+    {
+        assert.equal(viewport.deleteLight(one), D3D_OK);
+        assert.equal(one.release(), 0);
+    }
+
     const walked = viewport.nextLight(null, D3DNEXT_HEAD);
     assert.equal(walked.found, light);
     assert.equal(light.refCount, 3, 'the walk hands back a reference (Wine\'s d3d.c)');
@@ -458,6 +516,47 @@ test('a light belongs to one viewport, and only an active one lights a draw', ()
     assert.equal(light.release(), 0);
     assert.equal(material.release(), 0);
     assert.equal(other.release(), 0);
+    viewport.release();
+    f.done();
+});
+
+test('these versions light as Direct3D 1-6: lights by the range left, no LOCALVIEWER, a'
+    + ' material of no power without a highlight', ()=>{
+    // Wine's ddraw2 and ddraw4 test_specular_lighting.
+    const f = fixture();
+    const viewport = f.viewport();
+    const light = f.legacy.createLight();
+    assert.equal(light.setLight({
+        type: 1, color: { r: 1, g: 1, b: 1, a: 0 }, position: { x: 0, y: 0, z: 0 },
+        direction: { x: 0, y: 0, z: 0 }, range: 100, falloff: 0, attenuation0: 0,
+        attenuation1: 0, attenuation2: 1, theta: 0, phi: 0, flags: D3DLIGHT_ACTIVE,
+    }, true), D3D_OK);
+    assert.equal(viewport.addLight(light), D3D_OK);
+    const material = f.legacy.createMaterial();
+    const white = { r: 1, g: 1, b: 1, a: 0.5 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    /** @param {number} power @returns {any} the material the Direct3D 7 device was given */
+    const given = power=>{
+        material.setMaterial({ diffuse: black, ambient: black, specular: white, emissive: black,
+            power, texture: 0, rampSize: 0 });
+        assert.equal(f.device.setLightState(D3DLIGHTSTATE.MATERIAL, material.getHandle()), D3D_OK);
+        const mark = f.calls.length;
+        f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_VERTEX, zeros(4, 32), 4, 0);
+        return f.since('SetMaterial', mark).at(-1)?.[1];
+    };
+    f.device.BeginScene();
+    assert.deepEqual(given(30).Specular, { r: 1, g: 1, b: 1, a: 0 },
+        'the highlight\'s alpha is none of the material\'s');
+    assert.deepEqual(given(0).Specular, black, 'no power, no highlight');
+    assert.equal(f.since('SetLight').at(-1)?.[2].Legacy, true, 'lit as these versions light');
+    const mark = f.calls.length;
+    assert.equal(f.device.setRenderState(142, 0), D3D_OK, 'LOCALVIEWER is taken');
+    assert.equal(f.since('SetRenderState', mark).length, 0, 'and changes nothing');
+    assert.ok(f.device.answersFor(142), 'nor reaches the device through a guest ring');
+    f.device.EndScene();
+    assert.equal(viewport.deleteLight(light), D3D_OK);
+    assert.equal(light.release(), 0);
+    assert.equal(material.release(), 0);
     viewport.release();
     f.done();
 });
@@ -476,35 +575,37 @@ test('TEXTUREMAPBLEND sets stage zero, until a stage state set to something else
 
     const plain = surface(f.root, { caps: DDSCAPS_TEXTURE, pixelFormat: XRGB32 });
     const alpha = surface(f.root, { caps: DDSCAPS_TEXTURE, pixelFormat: ARGB32 });
-    f.device.BeginScene();
-    /** @returns {number[]} the stage-zero alpha operations a draw set, in order */
-    const alphaOpsOfDraw = ()=>{
-        const mark = f.calls.length;
-        f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TLVERTEX, zeros(4, 24), 4, 0);
-        return f.since('SetTextureStageState', mark)
-            .filter(call=>call[1] === 0 && call[2] === D3DTSS.ALPHAOP).map(call=>call[3]);
+    /** @returns {number} stage zero's alpha operation, as the program reads it */
+    const alphaOp = ()=>{
+        /** @type {{ value?: number }} */
+        const value = {};
+        assert.equal(f.device.inner.GetTextureStageState(0, D3DTSS.ALPHAOP, value), D3D_OK);
+        return /** @type {number} */ (value.value);
     };
 
     assert.equal(f.device.setTexture(0, plain), D3D_OK);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
-        'MODULATE takes the vertex alpha for a texture that has none, for that draw only');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2,
+        'MODULATE takes the vertex alpha for a texture that has none, and reads so');
     f.device.setTexture(0, alpha);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'and the texture\'s for one that has it');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'and the texture\'s for one that has it');
     f.device.setTexture(0, plain);
 
-    assert.equal(f.device.setTextureStageState(0, D3DTSS.COLOROP, D3DTOP.MODULATE), D3D_OK);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
+    assert.equal(f.device.setTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2), D3D_OK);
+    f.device.setTexture(0, alpha);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1,
         'a stage state set to what the blend already put there leaves the blend on');
     f.device.setTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG2);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'set to anything else, the program owns the stage');
+    f.device.setTexture(0, plain);
+    f.device.setTexture(0, alpha);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'set to anything else, the program owns the stage');
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.MODULATE);
-    assert.deepEqual(alphaOpsOfDraw(), [], 'the same mode again does not take it back');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG2, 'the same mode again does not take it back');
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.ADD);
     f.device.setRenderState(RS_TEXTUREMAPBLEND, D3DTBLEND.MODULATE);
-    assert.deepEqual(alphaOpsOfDraw(), [D3DTOP.SELECTARG2, D3DTOP.SELECTARG1],
-        'a different mode does');
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'a different mode does');
+    f.device.setTexture(0, null);
+    assert.equal(alphaOp(), D3DTOP.SELECTARG1, 'no texture leaves it as it was');
 
-    f.device.EndScene();
     f.device.setTexture(0, null);
     assert.equal(plain.release(), 0);
     assert.equal(alpha.release(), 0);
@@ -537,6 +638,7 @@ test('a texture handle names a surface, looked up at the draw so a swap is seen'
     f.device.drawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TLVERTEX, zeros(4, 24), 4, 0);
     assert.equal(f.since('SetTexture', mark).at(-1)?.[2], second,
         'the draw textures with the surface the handle names now');
+    assert.equal(second.refCount, 1, 'and holds no reference on it (test_texturemapblend)');
     f.device.EndScene();
 
     f.device.setRenderState(RS_TEXTUREHANDLE, 0);

@@ -333,3 +333,21 @@ test('_ctype is the classification array itself, EOF\'s slot first', ()=>{
     assert.equal(maskOf('!'.charCodeAt(0)), 0x0010, '_PUNCT');
     assert.equal(maskOf(0xe9), 0, 'nothing above 0x7f under the C locale');
 });
+
+test('isleadbyte: the "C" locale has no lead bytes', ()=>{
+    const { table } = build();
+    for (const code of [0x41, 0x81, 0xe0, 0xff, -1])
+    {
+        assert.equal(table.isleadbyte.handler([code]), 0);
+    }
+    assert.equal(table.isleadbyte.argBytes, 4);
+});
+
+test('_tolower and _toupper move the case without asking whether it is a letter', ()=>{
+    const { table } = build();
+    assert.equal(table._tolower.handler(['A'.charCodeAt(0)]), 'a'.charCodeAt(0));
+    assert.equal(table._toupper.handler(['a'.charCodeAt(0)]), 'A'.charCodeAt(0));
+    // Not a letter, moved all the same: the caller was meant to have checked.
+    assert.equal(table._tolower.handler([0]), 0x20);
+    assert.equal(table._toupper.handler([0]), -0x20);
+});

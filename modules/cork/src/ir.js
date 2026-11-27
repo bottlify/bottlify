@@ -20,7 +20,7 @@
  * Integer instructions in this step; x87 and SIMD follow with their own.
  */
 
-import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
+import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaf, topologyOf } from './cpuid.js';
 import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
@@ -75,7 +75,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {boolean} halted
  * @property {number} retired
  * @property {number[]} trapped    the values written to the trap port, in order
- * @property {() => bigint} [rdtsc]  the host's time-stamp counter; absent, it reads zero
+ * @property {() => number} [rdtsc]  the host's time-stamp counter, a whole count below 2^53;
+ *     absent, it reads zero
  * @property {{ trapPort: number, read: (port: number, size: number) => number,
  *     write: (port: number, size: number, value: number) => void }} [ports]
  *     the machine's I/O ports; absent, every `out` is a trap-port write
@@ -85,6 +86,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} control      the x87 control word
  * @property {Float64Array} f80    the eight physical x87 registers, as doubles
  * @property {BigInt64Array} f80bits  the same bytes, for an MMX read or write
+ * @property {Uint32Array} f80words  the same bytes, two words a register, low first: what an
+ *     x87 move, store or class test reads (`regWords` in `ir-x87.js`)
  * @property {number} x87Exact     the physical registers holding what a quadword `fild`
  *     loaded, unwritten since (`exactWrites` in `ir-x87.js`): the quadword is in `x87Shadow`
  * @property {BigInt64Array} x87Shadow
@@ -114,6 +117,7 @@ export function createState(memory, { eip = 0, esp = 0, fsBase = 0 } = {}){
         top: 0, empty: 0xff, status: 0, control: 0x37f,
         f80: new Float64Array(f80Bytes),
         f80bits: new BigInt64Array(f80Bytes),
+        f80words: new Uint32Array(f80Bytes),
         x87Exact: 0,
         x87Shadow: new BigInt64Array(8),
         xmm: new Uint32Array(32),
@@ -380,13 +384,12 @@ export function evaluate(instruction, state){
     {
         case 'nop': case 'fwait': case 'prefetch': case 'prefetchw': case 'prefetchnta':
         case 'prefetcht0': case 'prefetcht1': case 'prefetcht2': case 'lfence': case 'mfence':
-        case 'sfence': case 'pause':
+        case 'sfence': case 'pause': case 'clflush':
             return;
-        // BOUND is a no-op here because it is one to the emulator: its
-        // decoder consumes the instruction and neither reads the memory
-        // operand nor raises #BR, so a guest that runs data containing 0x62
-        // continues under the emulator and must continue here. A program
-        // returned to the entry vector is the shape that reached it.
+        // BOUND is a no-op: it neither reads the memory operand nor raises
+        // #BR, so a guest that runs data containing 0x62 goes on. A program
+        // returned to the entry vector is the shape that reaches it, and
+        // translated code makes the same no-op of it.
         case 'bound':
             return;
         case 'hlt':
@@ -703,11 +706,25 @@ export function evaluate(instruction, state){
             return;
         case 'enter':
         {
+            // The SDM's ENTER: a nesting level past zero copies the frame
+            // pointers of the enclosing levels from the old frame, then pushes
+            // the new frame's own.
             const frame = /** @type {number} */ (operands[0].value);
+            const level = /** @type {number} */ (operands[1].value) & 31;
             const width = instruction.prefixes.operand ? 2 : 4;
             push(state.reg[5], width);
+            const frameTemp = state.reg[4];
+            for (let i = 1; i < level; i++)
+            {
+                state.reg[5] = (state.reg[5] - width) >>> 0;
+                push(state.memory.read(state.reg[5], width), width);
+            }
+            if (level > 0)
+            {
+                push(frameTemp, width);
+            }
             state.reg[5] = width === 2
-                ? (state.reg[5] & 0xffff0000 | state.reg[4] & 0xffff) >>> 0 : state.reg[4];
+                ? (state.reg[5] & 0xffff0000 | frameTemp & 0xffff) >>> 0 : frameTemp;
             state.reg[4] = (state.reg[4] - frame) >>> 0;
             return;
         }
@@ -715,7 +732,10 @@ export function evaluate(instruction, state){
         {
             if (op !== 'jecxz')
             {
-                state.reg[1] = (state.reg[1] - 1) >>> 0;
+                // Under the address-size prefix the count is CX: ECX's high half stays.
+                state.reg[1] = instruction.prefixes.address
+                    ? (state.reg[1] & 0xffff0000 | state.reg[1] - 1 & 0xffff) >>> 0
+                    : (state.reg[1] - 1) >>> 0;
             }
             const count = instruction.prefixes.address ? state.reg[1] & 0xffff : state.reg[1];
             const zf = (state.eflags & ZF) !== 0;
@@ -745,6 +765,33 @@ export function evaluate(instruction, state){
             }
             write(operands[0], index);
             setFlags(0);
+            return;
+        }
+        case 'crc32':
+        {
+            // CRC-32C (the Castagnoli polynomial, reflected: 0x82F63B78) of the
+            // source's bytes, low first, into the destination as it stands: no
+            // inversion before or after (the SDM's CRC32).
+            let crc = state.reg[/** @type {number} */ (operands[0].reg)] >>> 0;
+            const value = read(operands[1]) >>> 0;
+            for (let i = 0; i < operands[1].size; i++)
+            {
+                crc ^= value >>> (i * 8) & 0xff;
+                for (let bit = 0; bit < 8; bit++)
+                {
+                    crc = (crc >>> 1 ^ (crc & 1 ? 0x82f63b78 : 0)) >>> 0;
+                }
+            }
+            write(operands[0], crc);
+            return;
+        }
+        case 'movbe':
+        {
+            // A load or a store with its bytes reversed.
+            const value = read(operands[1]) >>> 0;
+            write(operands[0], size === 2 ? (value >>> 8 & 0xff | value << 8 & 0xff00)
+                : ((value >>> 24) | (value >>> 8 & 0xff00) | (value << 8 & 0xff0000)
+                    | (value << 24)) >>> 0);
             return;
         }
         case 'bswap':
@@ -875,7 +922,9 @@ export function evaluate(instruction, state){
             }
             const result = value & 0xff;
             state.reg[0] = (state.reg[0] & 0xffffff00 | result) >>> 0;
-            state.eflags = logicFlags(result, 1) | (carry ? CF : 0) | (aux ? AF : 0);
+            // The arithmetic flags only: DF, IF and the rest stay.
+            state.eflags = (state.eflags & ~ARITH | logicFlags(result, 1) | (carry ? CF : 0)
+                | (aux ? AF : 0)) >>> 0;
             return;
         }
         case 'aaa': case 'aas':
@@ -890,8 +939,8 @@ export function evaluate(instruction, state){
             }
             value &= 0xff0f;
             state.reg[0] = (state.reg[0] & 0xffff0000 | value) >>> 0;
-            state.eflags = logicFlags(value & 0xff, 1)
-                | (adjusted ? CF | AF : 0);
+            state.eflags = (state.eflags & ~ARITH | logicFlags(value & 0xff, 1)
+                | (adjusted ? CF | AF : 0)) >>> 0;
             return;
         }
         case 'aam': case 'aad':
@@ -915,7 +964,7 @@ export function evaluate(instruction, state){
                 // AH is cleared: the whole low word is the new AL.
                 state.reg[0] = (state.reg[0] & 0xffff0000 | result) >>> 0;
             }
-            state.eflags = logicFlags(result & 0xff, 1);
+            state.eflags = (state.eflags & ~ARITH | logicFlags(result & 0xff, 1)) >>> 0;
             return;
         }
         case 'xlat':
@@ -978,12 +1027,11 @@ export function evaluate(instruction, state){
         }
         case 'rdtsc':
         {
-            // The time-stamp counter is the host's (the emulator's own under
-            // hybrid, cork's clock under cork): the low word to eax, the high
-            // word to edx.
-            const value = state.rdtsc ? state.rdtsc() : 0n;
-            state.reg[0] = Number(value & 0xffffffffn);
-            state.reg[2] = Number((value >> 32n) & 0xffffffffn);
+            // The time-stamp counter is the host's clock: the low word to eax,
+            // the high word to edx.
+            const value = state.rdtsc ? state.rdtsc() : 0;
+            state.reg[0] = value % 2 ** 32 >>> 0;
+            state.reg[2] = Math.floor(value / 2 ** 32) >>> 0;
             return;
         }
         default:
@@ -1406,4 +1454,4 @@ function stringInstruction(op, instruction, state, read, write, setFlags, addres
     }
 }
 
-export { REGISTERS, MASK, conditionReads };
+export { REGISTERS, MASK };

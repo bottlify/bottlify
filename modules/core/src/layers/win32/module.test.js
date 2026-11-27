@@ -23,6 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
+import { noCache } from '../cache/module.js';
 
 /** SM_CXSCREEN and SM_CYSCREEN, the two a program sizes itself from. */
 const SM_CXSCREEN = 0;
@@ -92,6 +93,8 @@ function stubHost(){
             drives: ()=>[],
             stat: ()=>null,
         },
+        // No run's cache: every read is a miss.
+        cache: noCache,
     };
     return /** @type {any} */ ({
         /** @param {string} name */
@@ -128,6 +131,19 @@ test('WINMM\'s ordinal 2 is PlaySoundA, as winmm.spec numbers it', async()=>{
     await win32Module.dispose();
 });
 
+test('cabinet.dll\'s numbered exports are its FCI and FDI entries, every one of them served',
+    async()=>{
+        // A setup engine imports FDICreate, FDICopy and FDIDestroy as #20, #22
+        // and #23 and nothing else; an unresolved number ends it before its UI.
+        const api = await win32Module.create({ screen: SCREEN }, stubHost());
+        const ordinals = api.ordinals()['CABINET.dll'];
+        assert.deepEqual([20, 22, 23].map(number=>ordinals[number]),
+            ['FDICreate', 'FDICopy', 'FDIDestroy']);
+        const cabinet = api.libraries()['CABINET.dll'];
+        assert.deepEqual(Object.values(ordinals).filter(name=>!cabinet[name]), []);
+        await win32Module.dispose();
+    });
+
 test('dsetup is a library here, so an autorun that loads it by name finds DirectX', async()=>{
     // An autorun that cannot load it reads the installed DirectX as none and
     // refuses to install, whatever the registry says.
@@ -138,16 +154,6 @@ test('dsetup is a library here, so an autorun that loads it by name finds Direct
         .map(name=>dsetup[name]?.argBytes), [12, 8]);
     await win32Module.dispose();
 });
-
-test('a child runs beside a parent that has not exited, however the parent waits for it',
-    async()=>{
-        const api = await win32Module.create({ screen: SCREEN }, stubHost());
-        assert.equal(api.childWaitedOn({ waiters: [{}] }), true, 'blocked on its handle');
-        assert.equal(api.childWaitedOn({}), true, 'polling it, or idle in its message loop');
-        assert.equal(api.childWaitedOn({ handsOver: true }), false,
-            'blocked on a wait for all of a set the child cannot answer alone');
-        await win32Module.dispose();
-    });
 
 test('a DC taken through user32 is one GDI answers for', async()=>{
     // A program asks the display about itself through a context user32
@@ -279,7 +285,7 @@ test('DirectX\'s setup library is answered here even where the program brought i
     // a restart a game's installer stops at; the table answers it is in place.
     const api = await win32Module.create({}, stubHost());
     assert.deepEqual(api.runtimes(),
-        ['DSETUP.dll', 'MSVCR80.dll']);
+        ['DSETUP.dll', 'MSVCR80.dll', 'libcef.dll', 'steamclient.dll']);
     assert.ok('DSETUP.dll' in api.libraries(), 'with a table');
     // The Visual C++ 2005 runtime likewise: a program built with it reads
     // _acmdln through its import first thing, and a stub there is a pointer
@@ -305,8 +311,12 @@ test('the D3DX helpers are the redistributables, and Windows\' own libraries are
     // setup installs, whose table is only the fallback.
     const api = await win32Module.create({}, stubHost());
     const redistributable = api.redistributables();
-    assert.equal(redistributable.length, 20);
+    assert.equal(redistributable.length, 33);
     assert.ok(redistributable.includes('d3dx9_24.dll') && redistributable.includes('d3dx9_43.dll'));
+    assert.ok(redistributable.includes('d3dx10_33.dll')
+        && redistributable.includes('d3dx10_43.dll'));
+    assert.ok(redistributable.includes('d3dx11_42.dll')
+        && redistributable.includes('d3dx11_43.dll'));
     for (const name of redistributable)
     {
         assert.ok(name in api.libraries(), `${name} has a table`);
@@ -332,6 +342,16 @@ test('shfolder is the shell folder call under the name a program linked against'
     await win32Module.dispose();
 });
 
+test('advapi32 walks the time zones with kernel32\'s one entry', async()=>{
+    // Windows exports EnumDynamicTimeZoneInformation from advapi32; Wine's
+    // kernel32:time imports it from there and stopped on a missing import.
+    const api = await win32Module.create({}, stubHost());
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+    assert.ok(libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation);
+    assert.equal(libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation,
+        libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation);
+});
+
 test('msimg32 is gdi32\'s blending under the name a program linked against', async()=>{
     // Windows' msimg32 forwards its drawing exports to gdi32: a program that
     // imported AlphaBlend from it gets gdi32's implementation, not a missing
@@ -344,6 +364,15 @@ test('msimg32 is gdi32\'s blending under the name a program linked against', asy
     {
         assert.ok(libraries['GDI32.dll'][target], `gdi32 has ${target}`);
         assert.equal(libraries['MSIMG32.dll'][name], libraries['GDI32.dll'][target], name);
+    }
+    // olepro32 likewise, oleaut32's under its own numbers (Wine's olepro32.spec).
+    const numbers = api.ordinals()['OLEPRO32.dll'];
+    assert.deepEqual(numbers, { 250: 'OleCreatePropertyFrame', 251: 'OleLoadPicture',
+        252: 'OleCreatePictureIndirect', 253: 'OleCreateFontIndirect', 254: 'OleTranslateColor' });
+    for (const name of Object.values(numbers))
+    {
+        assert.ok(libraries['OLEAUT32.dll'][name], `oleaut32 has ${name}`);
+        assert.equal(libraries['OLEPRO32.dll'][name], libraries['OLEAUT32.dll'][name], name);
     }
 
     await win32Module.dispose();

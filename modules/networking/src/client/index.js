@@ -39,8 +39,8 @@
 
 import {
     BROADCAST, FLAG_HALF, FLAG_STREAM, Op, PROTOCOL_VERSION, Wsa,
-    decodeControl, decodeFrame, encodeControl, encodeFrame, parseIp, unpackAddresses,
-    unpackError,
+    decodeControl, decodeFrame, encodeControl, encodeFrame, parseIp, streamPieces,
+    unpackAddresses, unpackError,
 } from '../protocol.js';
 
 /** How long the join may take before it is given up on. */
@@ -554,7 +554,10 @@ function makeTransport(first, welcome, options){
 
         /** @param {number} streamId @param {Uint8Array} bytes */
         send(streamId, bytes){
-            write({ op: Op.STREAM, tag: streamId, payload: bytes });
+            for (const payload of streamPieces(bytes))
+            {
+                write({ op: Op.STREAM, tag: streamId, payload });
+            }
         },
 
         /** @param {number} streamId @param {boolean} half */

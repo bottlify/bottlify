@@ -7,8 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
-import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
-import { createWindowFunctions, endEllipsis, watchDispatch } from './windows.js';
+import {
+    DEVMODEA, DM_PELSHEIGHT, DM_PELSWIDTH, MSG, RECT, WNDCLASSA, WNDCLASSEXA,
+} from './structs.js';
+import { createWindowFunctions, endEllipsis, lowLevelLayout, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { intersectAreas } from './paint.js';
@@ -260,14 +262,23 @@ function paintedHost(fills, presents, clips, scrolls = []){
  *        the run is told.
  * @param {number} [options.processId] The process this user32 is, beside another on the
  *        same directory.
+ * @param {4 | 8} [options.pointerSize] 8: a 64-bit process's user32.
+ * @param {(args: number[], thread: number) => any} [options.waitForObjectsOrInput]
+ * @param {(thread: number) => void} [options.inputArrived]
+ * @param {number} [options.memorySize] The fake memory's size, for a test that makes many windows.
+ * @param {(name: string) => ({ versioned: string, major: number } | null)} [options.windowClass]
+ *        The activation context's class redirection.
+ * @param {(name: string, handler: any) => number} [options.registerProcedure]
+ *        Addresses for host procedures, as the bridge hands them out.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
-    processId,
+    processId, pointerSize, waitForObjectsOrInput, inputArrived, memorySize, windowClass,
+    registerProcedure,
 } = {})
 {
-    const memory = fakeMemory();
+    const memory = fakeMemory(memorySize);
     const handles = fakeHandles();
     const queue = createMessageQueue(queueNow ? { now: queueNow } : {});
     /** @type {any[]} */
@@ -301,6 +312,8 @@ function setup({
     const clips = [];
     /** What GetKeyState answers for a key, as a test holds it. @type {Map<number, number>} */
     const keys = new Map();
+    /** Every event SendInput and its spellings handed the input layer. @type {any[]} */
+    const inputs = [];
 
     /** @type {import('./windows.js').WindowService | null} */
     /** @type {import('./windows.js').WindowService | null} */
@@ -326,6 +339,10 @@ function setup({
             return hookReply ? hookReply(entry, args) : 0;
         },
         callerThread: ()=>caller.current,
+        // What a program puts into the input stream itself, and where the
+        // cursor is for it to move from.
+        sendInput: event=>inputs.push(event),
+        cursor: ()=>({ x: 10, y: 20 }),
         // As the bridge answers: the thread named is the caller for what
         // `fn` runs before it awaits.
         answering: (thread, fn)=>{
@@ -352,6 +369,8 @@ function setup({
         },
         idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
         waitForObjects,
+        waitForObjectsOrInput,
+        inputArrived,
         now,
         allocate: heap ? (/** @type {number} */ bytes)=>{
             const at = heapNext;
@@ -364,6 +383,9 @@ function setup({
         later,
         directory,
         processId,
+        windowClass,
+        registerProcedure,
+        ...pointerSize ? { pointerSize } : {},
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
 
@@ -378,7 +400,7 @@ function setup({
     };
 
     return { memory, handles, queue, keys, fns, dispatched, parked, tick, idlers, released,
-        called, divergences, errors, fills, presents, clips,
+        called, divergences, errors, fills, presents, clips, inputs,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -409,16 +431,16 @@ function putClass(memory, options = {}){
  * @param {any} fns
  * @param {ReturnType<typeof fakeMemory>} memory
  * @param {{ className?: number, style?: number, parent?: number, menu?: number,
- *   x?: number, y?: number, width?: number, height?: number }} [options]
+ *   x?: number, y?: number, width?: number, height?: number, instance?: number }} [options]
  */
 function createWindow(fns, memory, options = {}){
     const {
         className = CLASS_NAME, style = 0, parent = 0, menu = 0,
-        x = 10, y = 20, width = 300, height = 200,
+        x = 10, y = 20, width = 300, height = 200, instance = HINSTANCE,
     } = options;
     memory.putString(TITLE, 'Main');
     return fns.CreateWindowExA.handler(
-        [0, className, TITLE, style, x, y, width, height, parent, menu, HINSTANCE, 0]);
+        [0, className, TITLE, style, x, y, width, height, parent, menu, instance, 0]);
 }
 
 /**
@@ -479,7 +501,7 @@ test('RegisterClassExA reads the shifted offsets, and checks cbSize', ()=>{
     // Read it back through the classic structure: if the Ex offsets were wrong,
     // the window procedure would come back as the style or the extra count.
     memory.fill(TEXT_BUFFER, WNDCLASSA.SIZE / 4);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.lpfnWndProc), WNDPROC);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.cbWndExtra), 16);
 
@@ -495,7 +517,7 @@ test('GetClassInfoA fills WNDCLASSA at the documented offsets', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
     memory.fill(TEXT_BUFFER, WNDCLASSA.SIZE / 4);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
 
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.style), 0x0003);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.lpfnWndProc), WNDPROC);
@@ -518,7 +540,7 @@ test('GetClassInfoExA fills the extended structure behind the caller\'s cbSize',
 
     memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
     memory.putU32s(TEXT_BUFFER + WNDCLASSEXA.cbSize, [WNDCLASSEXA.SIZE]);
-    assert.equal(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbSize), WNDCLASSEXA.SIZE, 'left alone');
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), WNDPROC);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbWndExtra), 8);
@@ -536,12 +558,174 @@ test('a class Windows\' own libraries register is there though no control draws 
     {
         memory.putString(CLASS_NAME, name);
         memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
-        assert.equal(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1, name);
+        assert.notEqual(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
         assert.notEqual(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), 0,
             `${name}: a procedure to subclass`);
         assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0,
             `${name}: a window of it is made`);
     }
+});
+
+test('under a context holding Common Controls 6 a class name makes version 6\'s class', ()=>{
+    // Wine's comctl32 tests: Button under the manifest is comctl32's own,
+    // reported as Button; SysLink is there only in version 6.
+    const context = { active: false };
+    const VERSIONED = '6.0.2600.2180!';
+    // Each host procedure at an address of its own, as the bridge hands them out.
+    let stubs = 0x7f000000;
+    /** @type {Record<string, string>} */
+    const redirected = { button: 'Button', syslink: 'SysLink' };
+    const { memory, fns } = setup({ registerProcedure: ()=>(stubs += 16),
+        windowClass: (/** @type {string} */ name)=>{
+            const own = redirected[name.toLowerCase()];
+            return context.active && own ? { versioned: `${VERSIONED}${own}`, major: 6 } : null;
+        } });
+    /** @param {string} name */
+    const procedureOf = name=>{
+        memory.putString(CLASS_NAME, name);
+        memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
+        assert.notEqual(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
+        return memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc);
+    };
+    /** @param {string} name */
+    const make = name=>{
+        memory.putString(CLASS_NAME, name);
+        return createWindow(fns, memory, { className: CLASS_NAME });
+    };
+    /** @param {number} hwnd */
+    const nameOf = hwnd=>{
+        assert.ok(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]) > 0);
+        return memory.readCString(TEXT_BUFFER, 64);
+    };
+
+    const user32 = procedureOf('Button');
+    assert.equal(make('SysLink'), 0, 'no SysLink without version 6');
+
+    context.active = true;
+    const own = procedureOf('Button');
+    assert.notEqual(own, user32, 'version 6\'s Button has a procedure of its own');
+    assert.equal(procedureOf(`${VERSIONED}Button`), own,
+        'and its versioned name is the same class');
+    const button = make('Button');
+    assert.equal(nameOf(button), 'Button', 'reported by its plain name');
+    assert.equal(fns.GetWindowLongA.handler([button, GWL_WNDPROC]), own);
+    const link = make('SysLink');
+    assert.notEqual(link, 0);
+    assert.equal(nameOf(link), 'SysLink');
+
+    context.active = false;
+    assert.equal(procedureOf('Button'), user32, 'the context gone, user32\'s again');
+    assert.equal(fns.GetWindowLongA.handler([make(`${VERSIONED}Button`), GWL_WNDPROC]), own,
+        'the versioned name still makes version 6\'s');
+    assert.equal(make('SysLink'), 0);
+});
+
+test('RealGetWindowClass names the built-in class whose procedure made the window', ()=>{
+    // Wine's class test (test_RealGetWindowClass): a program's class built
+    // on Button's procedure reports Button once that procedure has seen
+    // WM_NCCREATE; its own class otherwise, and no room is refused.
+    let stubs = 0x7f000000;
+    const { memory, fns, errors } = setup({ registerProcedure: ()=>(stubs += 16) });
+    memory.putString(CLASS_NAME, 'Button');
+    assert.notEqual(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0);
+    const button = memory.u32(TEXT_BUFFER + 4);
+    putClass(memory, { name: 'WineTest Class', wndProc: button });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.notEqual(hwnd, 0);
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 64]), 6);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Button');
+    assert.equal(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]), 14);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTest Class');
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 0]), 0);
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+
+    putClass(memory, { name: 'Own' });
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const own = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.equal(fns.RealGetWindowClassA.handler([own, TEXT_BUFFER, 64]), 3);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Own');
+});
+
+test('a class\'s atom is its name in the table clipboard formats share, freed with the class', ()=>{
+    // Wine's class test (test_actctx_classes' check_atom_name): two
+    // registrations of a name have one atom, and the last unregistered
+    // frees it.
+    const { memory, fns } = setup();
+    putClass(memory, { name: 'WineTestClass' });
+    const atom = fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.ok(atom >= 0xc000);
+    assert.equal(fns.GetClipboardFormatNameA.handler([atom, TEXT_BUFFER, 64]), 13);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTestClass');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, HINSTANCE]), 1);
+    assert.equal(fns.GetClipboardFormatNameA.handler([atom, TEXT_BUFFER, 64]), 0, 'freed');
+    const message = fns.RegisterWindowMessageA.handler([CLASS_NAME]);
+    assert.notEqual(message, atom, 'a freed number is not given again');
+});
+
+test('a local class is its module\'s: two modules may each have one of a name', ()=>{
+    // Wine's class test (test_instances), as Windows answers it.
+    const OTHER = 0x10000000;
+    const GCLP_HMODULE = -16;
+    const { memory, fns, errors } = setup();
+    putClass(memory, { name: '__test__' });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    assert.equal(fns.RegisterClassA.handler([CLASS_STRUCT]), 0, 'the same module twice');
+    assert.equal(errors.at(-1), 1410, 'ERROR_CLASS_ALREADY_EXISTS');
+    memory.putU32s(CLASS_STRUCT + 16, [OTHER]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0, 'another module may');
+
+    /** @param {number} instance */
+    const made = instance=>createWindow(fns, memory, { className: CLASS_NAME, instance });
+    assert.equal(fns.GetClassLongA.handler([made(OTHER | 0x1234), GCLP_HMODULE]), OTHER,
+        'a module is its handle\'s high word');
+    assert.equal(fns.GetClassLongA.handler([made(HINSTANCE), GCLP_HMODULE]), HINSTANCE);
+    assert.equal(fns.GetClassLongA.handler([made(0), GCLP_HMODULE]), OTHER,
+        'none takes the newest');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, OTHER]), 0, 'its windows still stand');
+    assert.equal(errors.at(-1), 1412, 'ERROR_CLASS_HAS_WINDOWS');
+    assert.equal(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0,
+        'no module is user32\'s, which has none of them');
+    assert.equal(errors.at(-1), 1411, 'ERROR_CLASS_DOES_NOT_EXIST');
+});
+
+test('a class registered under a context that names it is its versioned class', ()=>{
+    // Wine's class test (test_actctx_classes): registered while the context
+    // is active, the class is "4.3.2.1!WineTestClass", found by its base
+    // name only while the context holds it, by its versioned name always,
+    // and known by the name it was registered by.
+    const context = { active: true };
+    const { memory, fns } = setup({ windowClass: (/** @type {string} */ name)=>(context.active
+        && name.toLowerCase() === 'winetestclass'
+        ? { versioned: '4.3.2.1!WineTestClass', major: 4 } : null) });
+    putClass(memory, { name: 'WineTestClass' });
+    const atom = fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.notEqual(atom, 0);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), atom);
+    const hwnd = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.equal(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]), 13);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTestClass');
+    fns.DestroyWindow.handler([hwnd]);
+
+    context.active = false;
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0,
+        'the base name finds nothing without the context');
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), 0, 'nor its atom');
+    memory.putString(CLASS_NAME, '4.3.2.1!WineTestClass');
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), atom,
+        'the versioned name does');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, HINSTANCE]), 1);
+});
+
+test('a program\'s class registered by a versioned name is found by it', ()=>{
+    // Wine's user32 class test (test_actctx_classes): a manifest's own
+    // window class, registered by its versioned name outside the context.
+    const { memory, fns } = setup();
+    putClass(memory, { name: '1.2.3.4!wndClass' });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
+    assert.equal(memory.u32(TEXT_BUFFER + 4), WNDPROC);
+    assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0);
 });
 
 test('GetClassInfoA on a class nobody registered writes nothing', ()=>{
@@ -562,7 +746,8 @@ test('a class is also known by the atom registration returned', ()=>{
     // Programs pass the atom straight back where a name is declared.
     const hwnd = createWindow(fns, memory, { className: atom });
     assert.ok(hwnd > 0);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), 1);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), atom,
+        'GetClassInfo answers the class atom');
 });
 
 test('UnregisterClassA waits until the last window of the class is gone', ()=>{
@@ -757,6 +942,17 @@ test('the service measures a client area where it is on the screen, as ClientToS
     assert.equal(service.clientRect(0x9999), null);
 });
 
+test('the service says a window is shown only when it and every ancestor is', ()=>{
+    // What decides whether a Direct3D present into the window is shown.
+    const { fns, memory, hwnd, service } = withWindow({ style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    assert.deepEqual([service.shownWindow(hwnd), service.shownWindow(child)], [true, true]);
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    assert.deepEqual([service.shownWindow(hwnd), service.shownWindow(child)], [false, false],
+        'a shown child of a hidden window is not seen');
+    assert.equal(service.shownWindow(0x9999), false, 'nor is a window that is not there');
+});
+
 test('MoveWindow changes both rectangles', ()=>{
     const { fns, memory, hwnd } = withWindow({ style: 0x80000000 });
 
@@ -768,6 +964,23 @@ test('MoveWindow changes both rectangles', ()=>{
 
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 120);
+});
+
+test('DefWindowProc carries out the window menu\'s minimise, maximise and restore', ()=>{
+    // Wine's d3d9 test_wndproc sends them to its window and expects the
+    // placement messages ShowWindow makes.
+    const { fns, hwnd } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const WM_SYSCOMMAND = 0x0112;
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf020, 0]), 0);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1, 'SC_MINIMIZE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf120, 0]), 0);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0, 'SC_RESTORE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf030, 0]), 0);
+    assert.equal(fns.IsZoomed.handler([hwnd]), 1, 'SC_MAXIMIZE');
+    assert.equal(fns.DefWindowProcA.handler([hwnd, WM_SYSCOMMAND, 0xf122, 0]), 0,
+        'the low four bits are the system\'s');
+    assert.equal(fns.IsZoomed.handler([hwnd]), 0);
 });
 
 test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
@@ -788,7 +1001,6 @@ test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
 
 test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINMAXINFO '
     + 'proposes, and a restore puts the window back', ()=>{
-    const WM_GETMINMAXINFO = 0x0024;
     const SIZE_MAXIMIZED = 2;
     const SW_SHOWMAXIMIZED = 3;
     const SW_RESTORE = 9;
@@ -831,8 +1043,9 @@ test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINM
     };
 
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 0);
-    assert.deepEqual(proposals, [[646, 486, -3, -3]],
-        'the procedure is offered the screen and the sizing edges beyond it');
+    assert.deepEqual(proposals, [[646, 486, -3, -3], [646, 486, -3, -3]],
+        'the procedure is offered the screen and the sizing edges beyond it, when the window'
+            + ' is made (it has a sizing frame) and when it is maximised');
     assert.deepEqual(rectOf('GetWindowRect'), [-3, -3, 643, 483]);
     assert.deepEqual(rectOf('GetClientRect'), [0, 0, 640, 480], 'the client area is the screen');
     assert.equal(fns.IsZoomed.handler([hwnd]), 1);
@@ -843,7 +1056,7 @@ test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINM
         [10, 20, 310, 220], 'the normal place is where it was');
 
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 1);
-    assert.equal(proposals.length, 1, 'maximised already, nothing is asked');
+    assert.equal(proposals.length, 2, 'maximised already, nothing more is asked');
 
     fns.ShowWindow.handler([hwnd, SW_RESTORE]);
     assert.deepEqual(rectOf('GetWindowRect'), [10, 20, 310, 220], 'restored to where it was');
@@ -1098,21 +1311,145 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
         'code that restores what it changed needs the old value back');
 });
 
-test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', ()=>{
-    const { fns, memory, hwnd } = withWindow();
-    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+test('SetWindowLong of a style asks WM_STYLECHANGING, which may change it, then tells'
+    + ' WM_STYLECHANGED', ()=>{
+    // MSDN, WM_STYLECHANGING: sent when SetWindowLong is about to change
+    // a style, with a STYLESTRUCT whose styleNew the window may change;
+    // WM_STYLECHANGED after, with the old and the new.
+    const [WM_STYLECHANGING, WM_STYLECHANGED, GWL_EXSTYLE] = [0x7c, 0x7d, -20];
+    const WS_BORDER = 0x00800000;
+    /** @type {{ message: number, wParam: number, old: number, asked: number }[]} */
+    const seen = [];
+    const { fns, memory, hwnd, released } = withWindow({
+        heap: true,
+        reply: (/** @type {any} */ message)=>{
+            if (message.message === WM_STYLECHANGING || message.message === WM_STYLECHANGED)
+            {
+                seen.push({ message: message.message, wParam: message.wParam,
+                    old: memory.u32(message.lParam), asked: memory.u32(message.lParam + 4) });
+                if (message.message === WM_STYLECHANGING && message.wParam === GWL_STYLE >>> 0)
+                {
+                    // The procedure takes the border off whatever it is given.
+                    memory.putU32s(message.lParam + 4,
+                        [(memory.u32(message.lParam + 4) & ~WS_BORDER) >>> 0]);
+                }
+                return 0;
+            }
+            // WM_NCCREATE answered nonzero, so the window is made.
+            return 1;
+        },
+    });
+    const before = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
 
-    const KEY = 0x5000;
-    const ALPHA = 0x5004;
-    const FLAGS = 0x5008;
+    assert.equal(fns.SetWindowLongA.handler([hwnd, GWL_STYLE, before | WS_BORDER | 0x4]) >>> 0,
+        before, 'answers the style it replaced');
+    const after = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+    assert.equal(after, ((before | 0x4) & ~WS_BORDER) >>> 0,
+        'what WM_STYLECHANGING left is what it gets');
+    assert.deepEqual(seen, [
+        { message: WM_STYLECHANGING, wParam: GWL_STYLE >>> 0, old: before,
+            asked: (before | WS_BORDER | 0x4) >>> 0 },
+        { message: WM_STYLECHANGED, wParam: GWL_STYLE >>> 0, old: before, asked: after },
+    ]);
+    assert.ok(released.length > 0, 'the STYLESTRUCT is given back');
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, 0x200]);
+    assert.deepEqual(seen.map(s=>[s.message, s.wParam]),
+        [[WM_STYLECHANGING, GWL_EXSTYLE >>> 0], [WM_STYLECHANGED, GWL_EXSTYLE >>> 0]]);
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_USERDATA, 7]);
+    assert.equal(seen.length, 0, 'only a style is asked about');
+
+    // A minimized window stays so whatever style it is given, and is told so.
+    const WS_MINIMIZE = 0x20000000;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after | WS_MINIMIZE]);
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after]);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0,
+        (after | WS_MINIMIZE) >>> 0);
+    assert.equal(seen.at(-1)?.asked, (after | WS_MINIMIZE) >>> 0);
+});
+
+test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', async()=>{
+    const { fns, memory, hwnd, errors } = withWindow();
+    const GWL_EXSTYLE = -20;
+    const WS_EX_LAYERED = 0x00080000;
+    const [KEY, ALPHA, FLAGS, SIZE] = [0x5000, 0x5004, 0x5008, 0x5010];
+    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0, 0, 0x2]), 0,
+        'a window not layered has none');
+    assert.equal(errors.at(-1), 87);
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, WS_EX_LAYERED]);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0,
+        'layered, none set yet');
+
+    // UpdateLayeredWindow gives it a picture of its own: still no attributes.
+    memory.putU32s(SIZE, [10, 10]);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4]), 1);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4 | 0x8]),
+        0, 'ULW_EX_NORESIZE is the Indirect call\'s');
+
+    assert.equal(await fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4]), 0,
+        'drawn by its attributes, it takes no picture');
     assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 1);
     assert.equal(memory.u32(KEY), 0x00ff00);
     assert.equal(memory.u32(ALPHA) & 0xff, 0x80);
     assert.equal(memory.u32(FLAGS), 0x2);
 
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, 0]);
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, WS_EX_LAYERED]);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0,
+        'no longer layered, then layered again: forgotten');
+
     assert.equal(fns.SetLayeredWindowAttributes.handler([0x1234, 0, 0, 0]), 0, 'not a window');
     assert.deepEqual([fns.SetLayeredWindowAttributes.argBytes,
         fns.GetLayeredWindowAttributes.argBytes], [16, 16]);
+});
+
+test('a window registers for touch that never comes; its display affinity round-trips', ()=>{
+    const { fns, memory, hwnd } = withWindow();
+    assert.equal(fns.RegisterTouchWindow.handler([hwnd, 0]), 1);
+    assert.equal(fns.RegisterTouchWindow.handler([0x1234, 0]), 0, 'not a window');
+    assert.equal(fns.IsTouchWindow.handler(), 0);
+    assert.equal(fns.GetTouchInputInfo.handler(), 0,
+        'no touch input handle was ever given');
+    assert.equal(fns.CloseTouchInputHandle.handler(), 0);
+    assert.equal(fns.UnregisterTouchWindow.handler([hwnd]), 1);
+
+    assert.equal(fns.GetWindowDisplayAffinity.handler([hwnd, 0x5000]), 1);
+    assert.equal(memory.u32(0x5000), 0, 'WDA_NONE');
+    assert.equal(fns.SetWindowDisplayAffinity.handler([hwnd, 0x11]), 1);
+    assert.equal(fns.GetWindowDisplayAffinity.handler([hwnd, 0x5000]), 1);
+    assert.equal(memory.u32(0x5000), 0x11, 'WDA_EXCLUDEFROMCAPTURE');
+    assert.equal(fns.SetWindowDisplayAffinity.handler([hwnd, 7]), 0, 'no such affinity');
+});
+
+test('UpdateLayeredWindow places a layered window and refuses one that is not', ()=>{
+    const { fns, memory, hwnd, errors, divergences } = withWindow();
+    const WS_EX_LAYERED = 0x00080000;
+    const [AT, SIZE, ULW_ALPHA] = [0x5100, 0x5108, 0x2];
+    memory.putU32s(AT, [40, 50]);
+    memory.putU32s(SIZE, [120, 90]);
+    assert.equal(fns.UpdateLayeredWindow.handler([hwnd, 0, AT, SIZE, 0, 0, 0, 0, ULW_ALPHA]), 0,
+        'a window made without WS_EX_LAYERED');
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+
+    memory.putString(TITLE, 'Splash');
+    const layered = fns.CreateWindowExA.handler([WS_EX_LAYERED, CLASS_NAME, TITLE, 0, 0, 0, 10, 10,
+        0, 0, HINSTANCE, 0]);
+    assert.equal(fns.UpdateLayeredWindow.handler([layered, 0, AT, SIZE, 0, 0, 0, 0, ULW_ALPHA]),
+        1);
+    fns.GetWindowRect.handler([layered, RECT_BUFFER]);
+    assert.deepEqual([RECT.left, RECT.top, RECT.right, RECT.bottom]
+        .map(field=>memory.u32(RECT_BUFFER + field)), [40, 50, 160, 140], 'moved and sized');
+    assert.equal(divergences.filter(one=>one.startsWith('UpdateLayeredWindow')).length, 1,
+        'its alpha, drawn opaque, said');
+    assert.equal(fns.UpdateLayeredWindow.handler([layered, 0, 0, 0, 0, 0, 0, 0, 0]), 1,
+        'nothing given: left as it is');
+    assert.equal(fns.UpdateLayeredWindow.argBytes, 36);
 });
 
 test('the extra bytes a class asked for are the window\'s own storage', ()=>{
@@ -1161,7 +1498,9 @@ test('the first window shown makes the application active before the call return
     // WM_SHOWWINDOW(1) with WM_ACTIVATEAPP(1), WM_NCACTIVATE(1),
     // WM_ACTIVATE(WA_ACTIVE) and WM_SETFOCUS, all sent. WM_ACTIVATEAPP goes
     // to every top-level window of the application, a hidden one too; a
-    // window made hidden is activated by nothing until it is shown.
+    // window made hidden is activated by nothing until it is shown. Between
+    // the two, the activation brings the window to the top: a
+    // WM_WINDOWPOSCHANGING, and no WM_WINDOWPOSCHANGED as nothing moved.
     const WM_ACTIVATEAPP = 0x001c;
     const WM_ACTIVATE = 0x0006;
     const WM_SETFOCUS = 0x0007;
@@ -1169,20 +1508,24 @@ test('the first window shown makes the application active before the call return
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hidden = createWindow(fns, memory);
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
     assert.equal(fns.GetActiveWindow.handler(), 0, 'a window made hidden is not activated');
     dispatched.length = 0;
 
     const shown = createWindow(fns, memory, { style: WS_VISIBLE });
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
-        [shown, WM_NCCREATE, 0], [shown, WM_NCCALCSIZE, 0], [shown, WM_CREATE, 0],
+        [shown, WM_GETMINMAXINFO, 0], [shown, WM_NCCREATE, 0], [shown, WM_NCCALCSIZE, 0],
+        [shown, WM_CREATE, 0],
         [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
-        [shown, WM_SHOWWINDOW, 1], [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
+        [shown, WM_SHOWWINDOW, 1], [shown, WM_WINDOWPOSCHANGING, 0],
+        [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
         [shown, WM_NCACTIVATE, 1], [shown, WM_ACTIVATE, 1], [shown, WM_SETFOCUS, 0],
         [shown, WM_NCPAINT, 1],
     ]);
-    assert.deepEqual(dispatched.slice(5, 10).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
-        'no thread of this program had the activation, and no window');
+    assert.deepEqual(dispatched.filter(entry=>entry.message !== WM_WINDOWPOSCHANGING)
+        .slice(6, 11).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+    'no thread of this program had the activation, and no window');
     assert.equal(queue.depth(), 0, 'nothing of it was posted');
     assert.equal(fns.GetActiveWindow.handler(), shown);
     assert.equal(fns.GetFocus.handler(), shown);
@@ -1197,7 +1540,8 @@ test('the first window shown makes the application active before the call return
     // not told when it was made after it.
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
         [hidden, WM_SHOWWINDOW, 1], [hidden, WM_WINDOWPOSCHANGING, 0], [hidden, WM_NCPAINT, 1],
-        [hidden, WM_ACTIVATEAPP, 1], [hidden, WM_NCACTIVATE, 1], [hidden, WM_ACTIVATE, 1],
+        [hidden, WM_WINDOWPOSCHANGING, 0], [hidden, WM_ACTIVATEAPP, 1],
+        [hidden, WM_NCACTIVATE, 1], [hidden, WM_ACTIVATE, 1],
         [hidden, WM_SETFOCUS, 0], [hidden, WM_WINDOWPOSCHANGED, 0], [hidden, WM_SIZE, 0],
         [hidden, WM_MOVE, 0],
     ], 'with no window active, the application is activated again');
@@ -1813,6 +2157,41 @@ test('MsgWaitForMultipleObjects on an event ends when a message arrives while it
         await tick();
         assert.equal(await third, WAIT_OBJECT_0 + 1);
     });
+
+test('MsgWaitForMultipleObjects on a process waits for the thread\'s input beside it, '
+    + 'which a message of its classes sets', ()=>{
+    // opengl32's test_other_process_parent: the child process sends to the
+    // parent's window while the parent waits for the child to end.
+    const HANDLES = 0x11800;
+    /** @type {any[]} */
+    const held = [];
+    /** @type {number[]} */
+    const woken = [];
+    const { fns, handles, memory, queue } = setup({
+        waitForObjectsOrInput: (/** @type {number[]} */ args, /** @type {number} */ thread)=>{
+            held.push([args, thread]);
+            return PARKED;
+        },
+        inputArrived: (/** @type {number} */ thread)=>woken.push(thread),
+        waitForObjects: ()=>/** @type {any} */ (WAIT_TIMEOUT),
+        caller: { current: { name: 'main', id: 0x104 } },
+    });
+    memory.putU32s(HANDLES, [handles.open('process', {})]);
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, 5000, QS_SENDMESSAGE]),
+        PARKED);
+    assert.deepEqual(held, [[[1, HANDLES, 5000], 0x104]], 'the handles and the wait, by thread');
+    queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+    assert.deepEqual(woken, [], 'a posted message is not one sent');
+    queue.sent(0x108);
+    assert.deepEqual(woken, [], 'another thread\'s');
+    queue.sent(0x104);
+    assert.deepEqual(woken, [0x104], 'a message sent to the thread wakes it');
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 0, INFINITE, QS_ALLINPUT]),
+        WAIT_OBJECT_0 + 1, 'input already there answers without a wait');
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([1, HANDLES, 1, INFINITE, QS_ALLINPUT]),
+        WAIT_TIMEOUT, 'waiting for all and the input is kernel32\'s whole');
+    assert.equal(held.length, 1);
+});
 
 test('with fWaitAll the handles and the input together end the wait, and neither alone',
     async()=>{
@@ -3384,6 +3763,8 @@ const CREATESTRUCT = Object.freeze({
 
 const WM_CREATE = 0x0001;
 const WM_NCCREATE = 0x0081;
+/** Sent first to an overlapped or sizable window being made (WmCreateOverlappedSeq). */
+const WM_GETMINMAXINFO = 0x0024;
 const WM_NCCALCSIZE = 0x0083;
 
 test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
@@ -3405,13 +3786,14 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // a program that never calls ShowWindow measures the screen it lays itself
     // out and rasterises its text for from what it is told here.
     // And, the application's first window shown, that the application is
-    // the active one: WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
+    // the active one: brought to the top (WM_WINDOWPOSCHANGING), then
+    // WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x001c,
-            WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT]);
-    assert.equal(dispatched[0].lParam, dispatched[2].lParam,
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW,
+            0x0046, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT]);
+    assert.equal(dispatched[1].lParam, dispatched[3].lParam,
         'WM_NCCREATE carries the same structure');
-    const message = dispatched[2];
+    const message = dispatched[3];
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
     assert.equal(message.hwnd, hwnd);
@@ -3433,7 +3815,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
 
-    const size = dispatched[3];
+    const size = dispatched[4];
     assert.equal(size.message, WM_SIZE);
     assert.equal(size.hwnd, hwnd);
     assert.equal(size.wParam, 0, 'SIZE_RESTORED');
@@ -3444,12 +3826,44 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
         - memory.u32(RECT_BUFFER + RECT.top);
     assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
     assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
-    const place = dispatched[4];
+    const place = dispatched[5];
     assert.equal(place.hwnd, hwnd);
     assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
     assert.equal(place.lParam & 0xffff, 10, 'and the x');
-    assert.deepEqual([dispatched[5].wParam, dispatched[5].lParam], [1, 0], 'shown');
+    assert.deepEqual([dispatched[6].wParam, dispatched[6].lParam], [1, 0], 'shown');
 });
+
+test('CreateWindowEx asks an overlapped or sizable window its limits first, and keeps to them',
+    ()=>{
+        // msg.c WmCreateOverlappedSeq: WM_GETMINMAXINFO before WM_NCCREATE, for
+        // a window with WS_THICKFRAME or neither WS_POPUP nor WS_CHILD; the size
+        // is held between the smallest and largest tracking sizes.
+        const WS_POPUP = 0x80000000;
+        const SM_CXMINTRACK = 34;
+        const SM_CYMINTRACK = 35;
+        const { memory, fns, dispatched } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        /** @param {number} hwnd */
+        const sizeOf = hwnd=>{
+            fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+            return [memory.u32(RECT_BUFFER + 8) - memory.u32(RECT_BUFFER),
+                memory.u32(RECT_BUFFER + 12) - memory.u32(RECT_BUFFER + 4)];
+        };
+        memory.putString(TITLE, 'Tiny');
+        const overlapped = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, 0, 0, 0, 1, 1, 0, 0,
+            HINSTANCE, 0]);
+        assert.equal(dispatched[0].message, WM_GETMINMAXINFO);
+        assert.deepEqual(sizeOf(overlapped), [fns.GetSystemMetrics.handler([SM_CXMINTRACK]),
+            fns.GetSystemMetrics.handler([SM_CYMINTRACK])], 'no smaller than the tracking size');
+
+        dispatched.length = 0;
+        const popup = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP, 0, 0, 1, 1, 0, 0,
+            HINSTANCE, 0]);
+        assert.equal(dispatched[0].message, WM_NCCREATE,
+            'a popup without a sizing frame is not asked');
+        assert.deepEqual(sizeOf(popup), [1, 1]);
+    });
 
 test('a window created hidden hears only that it is being created', ()=>{
     // A hidden window is told nothing about a size or a place it does not
@@ -3459,8 +3873,9 @@ test('a window created hidden hears only that it is being created', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE],
-        'hidden: the two creates only');
+    assert.deepEqual(dispatched.map(m=>m.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE],
+        'hidden: its limits asked, then the two creates only');
 });
 
 test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
@@ -3469,9 +3884,12 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     // does not send (WM_GETMINMAXINFO, the WM_WINDOWPOS pair, the painting):
     // HCBT_CREATEWND, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE, WM_SIZE
     // (SIZE_RESTORED) and WM_MOVE, shown or not; and for a window created
-    // visible WM_SHOWWINDOW(1) and the activation -- HCBT_ACTIVATE,
-    // WM_ACTIVATEAPP to each of the application's top-level windows, the
-    // hidden one too, and HCBT_SETFOCUS before the focus follows.
+    // visible WM_SHOWWINDOW(1) and the activation -- HCBT_ACTIVATE, the
+    // WM_WINDOWPOSCHANGING that brings it to the top, WM_ACTIVATEAPP to each
+    // of the application's top-level windows, the hidden one too. This
+    // procedure answers WM_ACTIVATE itself, so no DefWindowProc calls
+    // SetFocus and no HCBT_SETFOCUS is heard: the activation puts the focus
+    // in the window without one (win32u set_active_window).
     /** @type {string[]} */
     const log = [];
     const { memory, fns } = setup({
@@ -3485,7 +3903,7 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
             return 0;
         },
     });
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
@@ -3496,8 +3914,8 @@ test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s 
     log.length = 0;
     createWindow(fns, memory, { style: 0x80000000 | WS_VISIBLE });
     assert.deepEqual(log, [`hook:${HCBT_CREATEWND}`, '0x81:0', '0x83:0', '0x1:0', '0x5:0', '0x3:0',
-        '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
-        `hook:${HCBT_SETFOCUS}`, '0x7:0', '0x85:1'], 'visible');
+        '0x18:1', `hook:${HCBT_ACTIVATE}`, '0x46:0', '0x1c:1', '0x1c:1', '0x86:1', '0x6:1',
+        '0x7:0', '0x85:1'], 'visible');
 });
 
 test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY alone', ()=>{
@@ -3510,7 +3928,7 @@ test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY al
 
     const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
     assert.equal(hwnd, 0);
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCDESTROY]);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY]);
     assert.equal(fns.IsWindow.handler([dispatched[0].hwnd]), 0, 'and nothing is left behind');
 });
 
@@ -3520,9 +3938,10 @@ test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.ok(released.includes(dispatched[0].lParam), 'the CREATESTRUCT is freed');
-    assert.ok(released.includes(dispatched[1].lParam), 'and the RECT WM_NCCALCSIZE was handed');
-    assert.equal(released.length, 2, 'and nothing else was allocated');
+    assert.ok(released.includes(dispatched[1].lParam), 'the CREATESTRUCT is freed');
+    assert.ok(released.includes(dispatched[2].lParam), 'and the RECT WM_NCCALCSIZE was handed');
+    assert.ok(released.includes(dispatched[0].lParam), 'and the MINMAXINFO it was asked with');
+    assert.equal(released.length, 3, 'and nothing else was allocated');
 });
 
 test('a procedure answering -1 refuses the window', ()=>{
@@ -3781,11 +4200,590 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     assert.equal(thread, THREAD, 'named, because the send after it is made after an await');
     // lParam is a CBT_CREATEWND whose first word is the CREATESTRUCT the
     // procedure is then handed.
-    assert.equal(memory.u32(args[2]), dispatched[0].lParam);
-    assert.equal(memory.u32(dispatched[0].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
-    assert.equal(dispatched[2].lParam, dispatched[0].lParam);
-    assert.equal(dispatched[2].thread, THREAD);
+    assert.equal(memory.u32(args[2]), dispatched[1].lParam);
+    assert.equal(memory.u32(dispatched[1].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
+    assert.deepEqual(dispatched.map(m=>m.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+    assert.equal(dispatched[3].lParam, dispatched[1].lParam);
+    assert.equal(dispatched[3].thread, THREAD);
+});
+
+test('SetWindowsHookEx refuses what Windows refuses whatever the type, each with its reason', ()=>{
+    // user32:msg's test_set_hook. Every type is accepted for what it is,
+    // journal hooks too (decided in SetWindowsHookExA's own comment).
+    const { fns, errors } = setup({ threadExists: ()=>true });
+    const set = (/** @type {number[]} */ ...args)=>fns.SetWindowsHookExA.handler(args);
+    const WH_JOURNALRECORD = 0;
+    const WH_SYSMSGFILTER = 6;
+    const WH_KEYBOARD_LL = 13;
+    const WH_MOUSE_LL = 14;
+    assert.equal(set(WH_CBT, HOOK_PROC, 0, 0), 0, 'a hook for every thread names its module');
+    assert.equal(set(WH_CBT, 0, HINSTANCE, 1), 0);
+    assert.equal(set(15, HOOK_PROC, HINSTANCE, 0), 0);
+    assert.equal(set(-2, HOOK_PROC, HINSTANCE, 0), 0);
+    for (const type of [WH_JOURNALRECORD, WH_SYSMSGFILTER, WH_KEYBOARD_LL, WH_MOUSE_LL])
+    {
+        assert.equal(set(type, HOOK_PROC, HINSTANCE, 1), 0, `type ${type} hears every thread`);
+    }
+    assert.equal(fns.UnhookWindowsHookEx.handler([0xdeadbeef]), 0);
+    assert.deepEqual(errors, [1428, 1427, 1426, 1426, 1429, 1429, 1429, 1429, 1404]);
+
+    errors.length = 0;
+    for (const hook of [set(WH_CBT, HOOK_PROC, HINSTANCE, 1), set(WH_CBT, HOOK_PROC, 0, 1),
+        set(WH_MOUSE_LL, HOOK_PROC, 0, 0), set(WH_KEYBOARD_LL, HOOK_PROC, HINSTANCE, 0),
+        set(-1, HOOK_PROC, HINSTANCE, 0)])
+    {
+        assert.notEqual(hook, 0);
+        assert.equal(fns.UnhookWindowsHookEx.handler([hook]), 1);
+    }
+    assert.deepEqual(errors, [], 'a thread\'s own hook needs no module, nor a low-level one');
+});
+
+test('SetWindowsHookA hooks the calling thread; UnhookWindowsHook takes it off by its procedure',
+    ()=>{
+        // The form from before SetWindowsHookEx: comctl32's toolbar test
+        // subclasses the toolbar from a CBT hook installed so.
+        const caller = { current: /** @type {any} */ ({ id: 7 }) };
+        const { memory, fns, called } = setup({ heap: true, caller, threadExists: ()=>true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        assert.equal(fns.SetWindowsHookA.argBytes, 8);
+        assert.equal(fns.UnhookWindowsHook.argBytes, 8);
+        const hook = fns.SetWindowsHookA.handler([WH_CBT, HOOK_PROC]);
+        assert.notEqual(hook, 0);
+
+        const hwnd = createWindow(fns, memory);
+        assert.deepEqual(called.map(c=>[c.entry, c.args[0], c.args[1]]),
+            [[HOOK_PROC, HCBT_CREATEWND, hwnd]]);
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC + 1]), 0,
+            'another procedure is not this hook');
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC]), 1);
+        assert.equal(fns.UnhookWindowsHook.handler([WH_CBT, HOOK_PROC]), 0, 'gone already');
+        assert.equal(fns.UnhookWindowsHookEx.handler([hook]), 0);
+        createWindow(fns, memory);
+        assert.equal(called.length, 1, 'nobody hooks the second window');
+    });
+
+test('a hook SetWindowsHookA installs is not heard by another thread', ()=>{
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    const { memory, fns, called } = setup({ heap: true, caller, threadExists: ()=>true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookW.handler([WH_CBT, HOOK_PROC]);
+    caller.current = { id: 8 };
+    createWindow(fns, memory);
+    assert.equal(called.length, 0);
+});
+
+test('an out-of-context WinEvent hook is called at its thread\'s next look at its messages', ()=>{
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    const { fns, called } = setup({ caller, threadExists: ()=>true });
+    const WINEVENT_OUTOFCONTEXT = 0;
+    const EVENT_OBJECT_SHOW = 0x8002;
+    const hook = fns.SetWinEventHook.handler([1, 0x7fffffff, 0, HOOK_PROC, 0, 0,
+        WINEVENT_OUTOFCONTEXT]);
+    assert.notEqual(hook, 0);
+    assert.equal(fns.NotifyWinEvent.handler([EVENT_OBJECT_SHOW, 0, -8, 0]), 0);
+    assert.equal(called.length, 0, 'not yet: it waits for the queue to be looked at');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 0,
+        'and is no message');
+    assert.deepEqual(called.map(c=>[c.entry, c.args.slice(0, 6), c.thread]),
+        [[HOOK_PROC, [hook, EVENT_OBJECT_SHOW, 0, -8 >>> 0, 0, 7], caller.current]]);
+});
+
+test('a WH_MOUSE_LL hook of the calling thread is shown each piece of injected mouse input '
+    + 'before it is queued, and can take it away', ()=>{
+    // user32:msg's MOUSE_LL test: mouse_event's move, button and move are
+    // heard as WM_MOUSEMOVE, WM_LBUTTONUP, WM_MOUSEMOVE, flagged injected.
+    const WH_MOUSE_LL = 14;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {number[][]} */
+    const shown = [];
+    let refuse = 0;
+    const context = setup({ heap: true, caller, threadExists: ()=>true,
+        hookReply: (_entry, args)=>{
+            const at = args[2];
+            shown.push([args[0], args[1],
+                ...[0, 4, 8, 12, 20].map(offset=>context.memory.u32(at + offset))]);
+            return refuse;
+        } });
+    const { fns, inputs } = context;
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]), 0);
+    const MOUSEEVENTF_MOVE = 0x0001;
+    const MOUSEEVENTF_LEFTUP = 0x0004;
+    fns.mouse_event.handler([MOUSEEVENTF_MOVE, -1, 0, 0, 0x55]);
+    fns.mouse_event.handler([MOUSEEVENTF_LEFTUP, 0, 0, 0, 0]);
+    // [code, message, x, y, mouseData, flags, extra]
+    assert.deepEqual(shown, [[0, 0x0200, 9, 20, 0, 1, 0x55], [0, 0x0202, 10, 20, 0, 1, 0]]);
+    assert.equal(inputs.length, 2);
+    refuse = 1;
+    fns.mouse_event.handler([MOUSEEVENTF_LEFTUP, 0, 0, 0, 0]);
+    assert.equal(inputs.length, 2, 'taken away');
+});
+
+test('device input is shown to a low-level hook on the hook\'s own thread, and a thread that '
+    + 'never looks at its queue holds it for LowLevelHooksTimeout at most', async()=>{
+    // The input layer asks through the queue's seam. No hook: nothing is
+    // asked. A hook is called as its thread next looks at its queue, with
+    // the device's MSLLHOOKSTRUCT -- where the cursor is, not injected -- and
+    // what it answers decides; unanswered, the timeout lets the input in.
+    const WH_MOUSE_LL = 14;
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    /** @type {(() => void)[]} */
+    const timers = [];
+    /** @type {number[][]} */
+    const shown = [];
+    let refuse = 1;
+    const context = setup({ heap: true, caller, threadExists: id=>id === 2,
+        later: (/** @type {number} */ _ms, /** @type {() => void} */ fn)=>{
+            timers.push(fn);
+            return true;
+        },
+        hookReply: (_entry, args)=>{
+            shown.push([args[1], ...[0, 4, 8, 12, 16].map(at=>context.memory.u32(args[2] + at))]);
+            return refuse;
+        } });
+    const { fns, queue } = context;
+    const seam = /** @type {any} */ (queue).lowLevel;
+    assert.equal(seam.hooked('mouse'), false, 'no hook installed');
+    const hook = fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    assert.equal(seam.hooked('mouse'), true);
+    assert.equal(seam.hooked('keyboard'), false);
+
+    caller.current = null;
+    const move = { hwnd: 0, message: 0x0203, wParam: 0, lParam: 0, x: 5, y: 6, time: 9 };
+    const answer = seam.show('mouse', move);
+    assert.equal(typeof answer?.then, 'function', 'waits for the hook\'s thread');
+    assert.deepEqual(shown, [], 'not called on nobody\'s thread');
+    caller.current = worker;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(await answer, 1);
+    // [message, x, y, mouseData, flags, time]: a double-click is a click to it.
+    assert.deepEqual(shown, [[0x0201, 5, 6, 0, 0, 9]]);
+
+    caller.current = null;
+    const unanswered = seam.show('mouse', move);
+    timers.forEach(fire=>fire());
+    assert.equal(await unanswered, 0, 'in after the timeout');
+
+    caller.current = worker;
+    fns.UnhookWindowsHookEx.handler([hook]);
+    assert.equal(seam.hooked('mouse'), false);
+    refuse = 0;
+});
+
+test('a device key is shown to a low-level keyboard hook with its side and flags', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, hookReply: (_entry, args)=>{
+        shown.push([args[1], ...[0, 4, 8, 12].map(at=>context.memory.u32(args[2] + at))]);
+        return 0;
+    } });
+    const { fns, queue } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const seam = /** @type {any} */ (queue).lowLevel;
+    // A right control let go: extended, released.
+    await seam.show('keyboard', { hwnd: 0, message: 0x0101, wParam: 0x11,
+        lParam: (0xc0000001 | 1 << 24 | 0x1d << 16) >>> 0, time: 4 });
+    // A right shift pressed with Alt down, as a system key.
+    await seam.show('keyboard', { hwnd: 0, message: 0x0104, wParam: 0x10,
+        lParam: (0x20000001 | 0x36 << 16) >>> 0, time: 5 });
+    // [message, vkCode, scanCode, flags, time]
+    assert.deepEqual(shown, [[0x0101, 0xa3, 0x1d, 0x81, 4], [0x0104, 0xa1, 0x36, 0x20, 5]]);
+});
+
+test('a WH_KEYBOARD_LL hook is shown an injected key with its KBDLLHOOKSTRUCT', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, caller, threadExists: ()=>true,
+        hookReply: (_entry, args)=>{
+            shown.push([args[1], ...[0, 4, 8, 16].map(at=>context.memory.u32(args[2] + at))]);
+            return 0;
+        } });
+    const { fns, memory, inputs } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const INPUT = 0x10000;
+    const INPUT_KEYBOARD = 1;
+    const KEYEVENTF_KEYUP = 0x0002;
+    memory.writeMemory(INPUT, new Uint8Array(new Uint32Array([
+        INPUT_KEYBOARD, 0x41 | 0x1e << 16, 0, 0, 0x99, 0, 0,
+        INPUT_KEYBOARD, 0x41 | 0x1e << 16, KEYEVENTF_KEYUP, 0, 0, 0, 0]).buffer));
+    assert.equal(await fns.SendInput.handler([2, INPUT, 28]), 2);
+    // [message, vkCode, scanCode, flags, extra]: LLKHF_INJECTED, and LLKHF_UP on the release.
+    assert.deepEqual(shown, [[0x0100, 0x41, 0x1e, 0x10, 0x99], [0x0101, 0x41, 0x1e, 0x90, 0]]);
+    assert.equal(inputs.length, 2);
+});
+
+test('a low-level keyboard hook hears the key a press names and the message the keys make',
+    ()=>{
+        // user32:input's keyboard sequences: sides for shift, control and alt
+        // named without one, a scan code's key (the keypad's arrows with
+        // NumLock off), VK_PACKET for a character alone, and with Alt down a
+        // system key flagged LLKHF_ALTDOWN unless Control is down too.
+        const WH_KEYBOARD_LL = 13;
+        /** @type {number[][]} */
+        const shown = [];
+        const context = setup({ heap: true, hookReply: (_entry, args)=>{
+            shown.push([args[1], context.memory.u32(args[2]), context.memory.u32(args[2] + 4),
+                context.memory.u32(args[2] + 8)]);
+            return 0;
+        } });
+        const { fns, keys } = context;
+        fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+        /** @param {number} vk @param {number} scan @param {number} flags */
+        const press = (vk, scan, flags)=>{
+            shown.length = 0;
+            fns.keybd_event.handler([vk, scan, flags, 0]);
+            return shown[0];
+        };
+        const [UP, EXTENDED, SCANCODE] = [0x0002, 0x0001, 0x0008];
+        assert.deepEqual(press(0x10, 1, 0), [0x0100, 0xa0, 1, 0x10], 'VK_SHIFT is the left one');
+        assert.deepEqual(press(0x11, 1, EXTENDED), [0x0100, 0xa3, 1, 0x11],
+            'an extended VK_CONTROL the right one');
+        assert.deepEqual(press(0xa1, 1, 0), [0x0100, 0xa1, 1, 0x11], 'the right shift is extended');
+        assert.deepEqual(press(0, 0x36, SCANCODE), [0x0100, 0xa1, 0x36, 0x10]);
+        assert.deepEqual(press(0, 0x4b, SCANCODE), [0x0100, 0x25, 0x4b, 0x10], 'NumLock off: left');
+        keys.set(0x90, 0x01);
+        assert.deepEqual(press(0, 0x4b, SCANCODE), [0x0100, 0x64, 0x4b, 0x10], 'NumLock on: 4');
+        keys.delete(0x90);
+
+        assert.deepEqual(press(0xa4, 1, 0), [0x0104, 0xa4, 1, 0x30], 'Alt itself: a system key');
+        keys.set(0x12, 0x8000);
+        assert.deepEqual(press(0x46, 2, 0), [0x0104, 0x46, 2, 0x30]);
+        assert.deepEqual(press(0xa4, 3, UP), [0x0101, 0xa4, 3, 0x90], 'Alt let go: a plain key up');
+        keys.set(0x11, 0x8000);
+        assert.deepEqual(press(0x46, 4, 0), [0x0100, 0x46, 4, 0x10], 'Alt with Control: plain');
+    });
+
+test('a character put in alone is VK_PACKET, its whole code the scan code', async()=>{
+    const WH_KEYBOARD_LL = 13;
+    /** @type {number[][]} */
+    const shown = [];
+    const context = setup({ heap: true, hookReply: (_entry, args)=>{
+        shown.push([context.memory.u32(args[2]), context.memory.u32(args[2] + 4)]);
+        return 0;
+    } });
+    const { fns, memory } = context;
+    fns.SetWindowsHookExA.handler([WH_KEYBOARD_LL, HOOK_PROC, 0, 0]);
+    const INPUT = 0x10000;
+    const KEYEVENTF_UNICODE = 0x0004;
+    memory.writeMemory(INPUT, new Uint8Array(new Uint32Array([
+        1, 0x3c0 << 16, KEYEVENTF_UNICODE, 0, 0, 0, 0,
+        1, 0x11 | 0x3c0 << 16, KEYEVENTF_UNICODE, 0, 0, 0, 0]).buffer));
+    assert.equal(await fns.SendInput.handler([2, INPUT, 28]), 2);
+    assert.deepEqual(shown, [[0xe7, 0x3c0], [0xa2, 0xc0]],
+        'with a key named, the key (sided) and the low byte');
+});
+
+test('a move of nothing is not shown to a low-level mouse hook', ()=>{
+    const WH_MOUSE_LL = 14;
+    const { fns, called, inputs } = setup({ heap: true });
+    fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    fns.mouse_event.handler([0x0001, 0, 0, 0, 0]);
+    assert.equal(called.length, 0);
+    assert.equal(inputs.length, 1, 'and still goes in');
+    fns.mouse_event.handler([0x0001, 1, -1, 0, 0]);
+    assert.equal(called.length, 1);
+});
+
+test('input waits for a low-level hook of another thread until that thread looks at its queue, '
+    + 'or LowLevelHooksTimeout passes', async()=>{
+    // user32:msg's MOUSE_LL test from another thread: the main thread's hook
+    // hears the worker's mouse_event while the main thread pumps, because
+    // the worker is held in mouse_event until it has.
+    const WH_MOUSE_LL = 14;
+    const caller = { current: /** @type {any} */ ({ id: 7 }) };
+    /** @type {{ delay: number, fire: () => void }[]} */
+    const timers = [];
+    const { fns, called, inputs } = setup({ heap: true, caller, threadExists: ()=>true,
+        later: (delay, fire)=>{
+            timers.push({ delay, fire });
+            return true;
+        } });
+    fns.SetWindowsHookExA.handler([WH_MOUSE_LL, HOOK_PROC, HINSTANCE, 0]);
+    caller.current = { id: 8 };
+    const held = fns.mouse_event.handler([0x0001, 1, 0, 0, 0]);
+    assert.equal(called.length, 0, 'not on the thread putting it in');
+    assert.equal(inputs.length, 0, 'which waits for it');
+    assert.equal(timers[0].delay, 300);
+    caller.current = { id: 7 };
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]);
+    assert.deepEqual(called.map(c=>[c.entry, c.args[0], c.args[1],
+        /** @type {any} */ (c.thread).id]), [[HOOK_PROC, 0, 0x0200, 7]]);
+    assert.equal(await held, 0);
+    assert.equal(inputs.length, 1);
+
+    caller.current = { id: 8 };
+    const late = fns.mouse_event.handler([0x0001, 1, 0, 0, 0]);
+    timers[1].fire();
+    assert.equal(await late, 0);
+    assert.equal(inputs.length, 2, 'in after the timeout, the hook still to hear it');
+    assert.equal(called.length, 1);
+});
+
+test('the window manager raises its WinEvents among the messages where Windows does', ()=>{
+    // user32:msg's sequences: EVENT_OBJECT_CREATE after WM_CREATE, _SHOW after
+    // WM_WINDOWPOSCHANGING, _LOCATIONCHANGE after WM_WINDOWPOSCHANGED,
+    // _FOCUS between WM_KILLFOCUS and WM_SETFOCUS, _NAMECHANGE with
+    // WM_SETTEXT, _HIDE before WM_WINDOWPOSCHANGED, _DESTROY before WM_DESTROY.
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    const WM_SETTEXT_ = 0x000c;
+    const WM_CREATE_ = 0x0001;
+    /**
+     * Messages and events in the order they came: a message by its number,
+     * an event as 'e' and its number.
+     *
+     * @type {(number | string)[]}
+     */
+    const order = [];
+    const context = setup({ heap: true,
+        reply: message=>{
+            order.push(message.message);
+            return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+                message.wParam, message.lParam]);
+        },
+        hookReply: (_entry, args)=>{
+            order.push(`e${args[1].toString(16)}`);
+            return 0;
+        } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.notEqual(fns.SetWinEventHook.handler([1, 0x7fffffff, HINSTANCE, HOOK_PROC, 0, 0, 4]),
+        0);
+    const hwnd = createWindow(fns, memory);
+    const created = order.indexOf(WM_CREATE_);
+    assert.equal(order[created + 1], 'e8000', 'CREATE right after WM_CREATE');
+
+    order.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const shown = order.indexOf('e8002');
+    assert.ok(shown > order.indexOf(WM_WINDOWPOSCHANGING)
+        && shown < order.indexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+    assert.ok(order.indexOf('e3') > shown, 'EVENT_SYSTEM_FOREGROUND as it is activated');
+
+    const other = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([hwnd]);
+    order.length = 0;
+    fns.SetFocus.handler([other]);
+    assert.deepEqual(order.filter(item=>item === WM_KILLFOCUS || item === WM_SETFOCUS
+        || item === 'e8005'), [WM_KILLFOCUS, 'e8005', WM_SETFOCUS]);
+
+    order.length = 0;
+    fns.MoveWindow.handler([hwnd, 30, 40, 300, 200, 0]);
+    assert.ok(order.lastIndexOf('e800b') > order.lastIndexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+
+    order.length = 0;
+    memory.putString(TITLE, 'Renamed');
+    fns.SetWindowTextA.handler([hwnd, TITLE]);
+    assert.deepEqual(order, [WM_SETTEXT_, 'e800c']);
+
+    order.length = 0;
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    const hidden = order.indexOf('e8003');
+    assert.ok(hidden > order.indexOf(WM_WINDOWPOSCHANGING)
+        && hidden < order.indexOf(WM_WINDOWPOSCHANGED), order.join(' '));
+
+    order.length = 0;
+    fns.DestroyWindow.handler([hwnd]);
+    assert.ok(order.indexOf('e8001') >= 0 && order.indexOf('e8001') < order.indexOf(WM_DESTROY),
+        order.join(' '));
+});
+
+test('a child tells its parents WM_PARENTNOTIFY when it is made and before it is destroyed, '
+    + 'is hidden first, and hands its focus to its parent', ()=>{
+    // msg.c WmCreateChildSeq and WmDestroyChildSeq.
+    const WM_PARENTNOTIFY = 0x0210;
+    const WM_SETFOCUS = 0x0007;
+    const WM_KILLFOCUS = 0x0008;
+    /** @type {[number, number, number, number][]} */
+    const log = [];
+    const context = setup({ heap: true, reply: message=>{
+        log.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    log.length = 0;
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent, menu: 7 });
+    const notes = log.filter(([, message])=>message === WM_PARENTNOTIFY);
+    assert.deepEqual(notes, [[parent, WM_PARENTNOTIFY, 7 << 16 | WM_CREATE, child]]);
+    const created = log.findIndex(([, message])=>message === WM_PARENTNOTIFY);
+    assert.ok(created > log.findIndex(([, message])=>message === WM_MOVE), 'after WM_MOVE');
+
+    fns.SetFocus.handler([child]);
+    log.length = 0;
+    fns.DestroyWindow.handler([child]);
+    const order = log.map(([hwnd, message])=>`${hwnd === parent ? 'p' : 'c'}${message}`);
+    const at = (/** @type {string} */ what)=>order.indexOf(what);
+    assert.ok(at(`p${WM_PARENTNOTIFY}`) === 0, order.join(' '));
+    assert.equal(log[0][2], 7 << 16 | WM_DESTROY);
+    assert.ok(at(`c${WM_SHOWWINDOW}`) < at(`c${WM_WINDOWPOSCHANGING}`), order.join(' '));
+    assert.ok(at(`c${WM_WINDOWPOSCHANGED}`) < at(`c${WM_KILLFOCUS}`), order.join(' '));
+    assert.ok(at(`c${WM_KILLFOCUS}`) < at(`p${WM_SETFOCUS}`), order.join(' '));
+    assert.ok(at(`p${WM_SETFOCUS}`) < at(`c${WM_DESTROY}`), order.join(' '));
+    assert.equal(fns.GetFocus.handler(), parent);
+});
+
+test('a child made with WS_EX_NOPARENTNOTIFY tells its parent nothing', ()=>{
+    const WM_PARENTNOTIFY = 0x0210;
+    const WS_EX_NOPARENTNOTIFY = 0x00000004;
+    /** @type {number[]} */
+    const seen = [];
+    const context = setup({ heap: true, reply: message=>{
+        seen.push(message.message);
+        return 0;
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory);
+    memory.putString(TITLE, 'child');
+    const child = fns.CreateWindowExA.handler([WS_EX_NOPARENTNOTIFY, CLASS_NAME, TITLE, WS_CHILD,
+        0, 0, 10, 10, parent, 1, HINSTANCE, 0]);
+    fns.DestroyWindow.handler([child]);
+    assert.equal(seen.includes(WM_PARENTNOTIFY), false);
+});
+
+test('DefWindowProc answers WM_RBUTTONUP with WM_CONTEXTMENU at the point on the screen, and a '
+    + 'child passes WM_CONTEXTMENU to its parent', ()=>{
+    const WM_RBUTTONUP = 0x0205;
+    const WM_CONTEXTMENU = 0x007b;
+    /** @type {[number, number, number, number][]} */
+    const log = [];
+    const context = setup({ heap: true, reply: message=>{
+        log.push([message.hwnd, message.message, message.wParam, message.lParam]);
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent, x: 5, y: 6 });
+    fns.ClientToScreen.handler([child, MSG_BUFFER]);
+    const origin = { x: memory.u32(MSG_BUFFER) | 0, y: memory.u32(MSG_BUFFER + 4) | 0 };
+    log.length = 0;
+    fns.SendMessageA.handler([child, WM_RBUTTONUP, 0, 3 << 16 | 2]);
+    const point = ((origin.y + 3) << 16 | (origin.x + 2)) >>> 0;
+    assert.deepEqual(log.filter(([, message])=>message === WM_CONTEXTMENU),
+        [[child, WM_CONTEXTMENU, child, point], [parent, WM_CONTEXTMENU, child, point]]);
+});
+
+test('a window SetWindowPos only resizes hears no WM_NCPAINT before WM_WINDOWPOSCHANGED', ()=>{
+    // comctl32's updown test, add_updown_with_edit_seq: its frame waits for
+    // its next paint.
+    /** What the child heard. @type {number[]} */
+    const seen = [];
+    let child = 0;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.hwnd === child)
+        {
+            seen.push(message.message);
+        }
+        return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+            message.wParam, message.lParam]);
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    // No CS_HREDRAW or CS_VREDRAW, which repaint the whole window as it is sized.
+    memory.putU32s(CLASS_STRUCT, [0]);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE | 0x00800000,
+        parent, width: 80, height: 30 });
+    seen.length = 0;
+    fns.MoveWindow.handler([child, 10, 20, 60, 30, 1]);
+    const changed = seen.indexOf(WM_WINDOWPOSCHANGED);
+    assert.ok(changed > 0);
+    assert.equal(seen.slice(0, changed).includes(WM_NCPAINT), false, seen.join(' '));
+});
+
+test('GWLP_HWNDPARENT moves a child, gives a window on the desktop its owner, and never closes a '
+    + 'loop', ()=>{
+    // win.c test_parent_owner. Setting a desktop child's owner to itself once
+    // made it its own parent, and the window manager walked up for ever.
+    const GWLP_HWNDPARENT = -8;
+    const GA_PARENT = 1;
+    const GW_OWNER = 4;
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const main = createWindow(fns, memory);
+    const main2 = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent: main });
+    const moved = createWindow(fns, memory, { style: WS_CHILD, parent: main });
+    const desktop = fns.GetDesktopWindow.handler();
+    /** @param {number} value */
+    const set = value=>fns.SetWindowLongA.handler([moved, GWLP_HWNDPARENT, value]);
+    const parentOf = ()=>fns.GetAncestor.handler([moved, GA_PARENT]);
+    assert.equal(set(main2), main);
+    assert.equal(parentOf(), main2);
+    assert.equal(set(child), main2);
+    assert.equal(parentOf(), child);
+    assert.equal(set(desktop), child);
+    assert.equal(parentOf(), desktop);
+    assert.equal(fns.GetWindowLongA.handler([moved, GWLP_HWNDPARENT]), 0);
+    // A child of the desktop now: its owner from here on, never itself.
+    assert.equal(set(moved), 0);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), 0);
+    assert.equal(parentOf(), desktop);
+    assert.equal(set(child), 0);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), child);
+    assert.equal(set(0), child);
+    assert.equal(fns.GetWindow.handler([moved, GW_OWNER]), 0);
+    assert.equal(fns.SetWindowLongA.handler([desktop, GWLP_HWNDPARENT, main2]), 0,
+        'not on the desktop');
+    // A child cannot be put under its own child.
+    const inner = createWindow(fns, memory, { style: WS_CHILD, parent: child });
+    assert.equal(fns.SetWindowLongA.handler([child, GWLP_HWNDPARENT, inner]), 0);
+    assert.equal(fns.GetAncestor.handler([child, GA_PARENT]), main);
+});
+
+test('TileWindows places the windows one after the other, each once the one before has '
+    + 'returned', async()=>{
+    // win.c test_tile_windows: tiling a parent's children all at once had
+    // their procedures running side by side, and the program crashed.
+    let running = 0;
+    let most = 0;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.message !== WM_WINDOWPOSCHANGING)
+        {
+            return context.fns.DefWindowProcA.handler([message.hwnd, message.message,
+                message.wParam, message.lParam]);
+        }
+        running++;
+        most = Math.max(most, running);
+        return Promise.resolve().then(()=>{
+            running--;
+            return 0;
+        });
+    } });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const WS_CAPTION = 0x00c00000;
+    const WS_THICKFRAME = 0x00040000;
+    const parent = await createWindow(fns, memory, { style: WS_VISIBLE });
+    for (let at = 0; at < 3; at++)
+    {
+        await createWindow(fns, memory, {
+            style: WS_CHILD | WS_VISIBLE | WS_CAPTION | WS_THICKFRAME, parent });
+    }
+    most = 0;
+    assert.equal(await fns.TileWindows.handler([parent, 0, 0, 0, 0]), 3);
+    assert.equal(most, 1);
+    most = 0;
+    assert.equal(await fns.CascadeWindows.handler([parent, 0, 0, 0, 0]), 3);
+    assert.equal(most, 1);
 });
 
 test('a keyboard hook is shown every key message taken, and can discard it', ()=>{
@@ -3878,6 +4876,43 @@ test('a mouse hook is shown every mouse message taken, with where it is, and can
         assert.equal(shown.length, before, 'a key is not the mouse hook\'s');
     });
 
+test('a hook that sets off what it hooks is passed over past a depth, and that goes on', ()=>{
+    // Wine's dialog.c msgbox_hook_proc clicks a button from HCBT_ACTIVATE, and
+    // the button's focus activates the window again: without a floor the
+    // thread recurses until its stack is gone.
+    /** @type {any} */
+    let fns = null;
+    /** @type {any} */
+    let memory = null;
+    let entered = 0;
+    /** @type {number[]} */
+    const made = [];
+    // Fifty windows made, each with its structures on a heap that never reuses.
+    /** @param {number} _entry @param {number[]} args */
+    const hookReply = (_entry, args)=>{
+        if (args[0] === HCBT_CREATEWND && entered < 100)
+        {
+            entered++;
+            made.push(createWindow(fns, memory));
+        }
+        return 0;
+    };
+    const built = setup({ heap: true, memorySize: 0x20000, hookReply });
+    ({ fns, memory } = built);
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+
+    assert.notEqual(createWindow(fns, memory), 0, 'the window is made');
+    assert.equal(entered, 25, 'the hook ran 25 deep and no deeper');
+    assert.ok(made.every(hwnd=>hwnd !== 0), 'every window it set off was made');
+
+    entered = 0;
+    made.length = 0;
+    createWindow(fns, memory);
+    assert.equal(entered, 25, 'and the depth is given back once the calls return');
+});
+
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>1 });
     putClass(memory);
@@ -3906,7 +4941,7 @@ test('a hook that answers late leaves a promise, and the creation follows it', a
     answer(0);
     assert.notEqual(await result, 0);
     assert.deepEqual(/** @type {any[]} */ (dispatched).map(m=>m.message),
-        [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
 });
 
 test('the newest hook is called first and reaches the older through CallNextHookEx', ()=>{
@@ -3984,7 +5019,7 @@ test('a window its CBT hook hears of is not yet among its siblings', ()=>{
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const first = createWindow(fns, memory);
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     const second = createWindow(fns, memory);
     const child = createWindow(fns, memory, { style: WS_CHILD, parent: first });
     createWindow(fns, memory, { style: WS_CHILD, parent: first });
@@ -3995,18 +5030,29 @@ test('a window its CBT hook hears of is not yet among its siblings', ()=>{
 
 test('a CBT hook hears a window activated, focused, commanded and destroyed, and can forbid '
     + 'each', ()=>{
+    const WM_ACTIVATE = 0x0006;
+    /** @type {any} */
+    let table = null;
     const { memory, fns, called, dispatched } = setup({
         heap: true,
         hookReply: (entry, args)=>(args[0] === HCBT_DESTROYWND || args[0] === HCBT_SYSCOMMAND
             ? 1 : 0),
+        // The procedure leaves WM_ACTIVATE to DefWindowProc, which focuses
+        // the window activated.
+        reply: message=>(message.message === WM_ACTIVATE ? table.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]) : 0x1234),
     });
+    table = fns;
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(fns, memory);
-    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
 
+    // The focus asked for, the activation that comes first, and the focus
+    // DefWindowProc's WM_ACTIVATE gives the window on its way (msg.c
+    // WmSetFocus_1).
     fns.SetFocus.handler([hwnd]);
-    assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS, HCBT_ACTIVATE]);
+    assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS, HCBT_ACTIVATE, HCBT_SETFOCUS]);
     assert.equal(called[0].args[1], hwnd);
     assert.equal(called[1].args[1], hwnd);
     assert.equal(memory.u32(called[1].args[2] + 4), 0, 'nothing was active before it');
@@ -4075,6 +5121,23 @@ test('GetQueueStatus answers only about the classes it was asked about', ()=>{
     assert.equal(input >>> 16, QS_KEY);
     const posts = fns.GetQueueStatus.handler([QS_POSTMESSAGE]) >>> 0;
     assert.equal(posts >>> 16, QS_POSTMESSAGE);
+});
+
+test('GetInputState says whether a key or a click is waiting, and is not a look', ()=>{
+    const { fns, queue } = setup();
+    assert.equal(fns.GetInputState.argBytes, 0);
+    assert.equal(fns.GetInputState.handler(), 0, 'an empty queue');
+    queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0 });
+    assert.equal(fns.GetInputState.handler(), 0, 'a posted message is not input');
+
+    queue.post({ hwnd: 0x40, message: WM_LBUTTONDOWN, wParam: 0, lParam: 0 });
+    assert.equal(fns.GetInputState.handler(), 1, 'a click is');
+    assert.equal(fns.GetQueueStatus.handler([QS_MOUSEBUTTON]) & QS_MOUSEBUTTON, QS_MOUSEBUTTON,
+        'and it is still news to GetQueueStatus');
+
+    const keys = setup();
+    keys.queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
+    assert.equal(keys.fns.GetInputState.handler(), 1, 'so is a key');
 });
 
 test('GetQueueStatus and the thread post pop the stack they were pushed', ()=>{
@@ -4349,7 +5412,7 @@ test('activation and the focus moved off another thread\'s window are told on th
     const worker = { id: 2, name: 'thread-2', state: 'running' };
     const caller = { current: /** @type {unknown} */ (worker) };
     const WM_SETFOCUS = 0x0007, WM_KILLFOCUS = 0x0008, WM_ACTIVATE = 0x0006;
-    const { fns, memory, dispatched, divergences } = setup({ caller });
+    const { fns, memory, dispatched, divergences } = setup({ caller, heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const theirs = createWindow(fns, memory, { style: WS_VISIBLE });
@@ -4375,6 +5438,16 @@ test('activation and the focus moved off another thread\'s window are told on th
     assert.deepEqual([...new Set(taken.map(m=>m.thread))], [worker], 'on its own thread');
     assert.ok(!divergences.some(text=>text.startsWith('SendMessage:')),
         'nothing ran on a thread that is not the window\'s');
+
+    // Made the foreground window from the other thread, it is not brought
+    // to the top by a SetWindowPos run on the mover: that would wait for its
+    // thread, which may be waiting for the mover (win.c
+    // test_SetForegroundWindow's set_foreground_thread).
+    caller.current = main;
+    const before = dispatched.length;
+    assert.equal(fns.SetForegroundWindow.handler([theirs]), 1);
+    assert.ok(!dispatched.slice(before).some(m=>m.hwnd === theirs),
+        'none of its procedure ran on the mover');
 });
 
 test('SendNotifyMessage leaves another thread\'s window a message and does not wait', ()=>{
@@ -4421,6 +5494,57 @@ test('AttachThreadInput joins two threads with queues, and refuses one without',
     assert.equal(fns.AttachThreadInput.handler([2, 7, 1]), 0, 'nor to nobody');
 });
 
+test('DefWindowProc(WM_ACTIVATE) focuses a window still active, and nothing once activation '
+    + 'moved on', ()=>{
+    // A window activated takes the focus from its default procedure. One
+    // that hears it late, from its thread's queue after another was
+    // activated, takes nothing back.
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(fns, memory, { style: WS_VISIBLE });
+    const second = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([0]);
+    fns.DefWindowProcA.handler([second, 0x0006, 1, 0]);
+    assert.equal(fns.GetFocus.handler(), second, 'the active one takes the focus');
+    fns.DefWindowProcA.handler([first, 0x0006, 1, 0]);
+    assert.equal(fns.GetActiveWindow.handler(), second, 'the stale one changes nothing');
+    assert.equal(fns.GetFocus.handler(), second);
+});
+
+test('threads attached through a third share their active window', ()=>{
+    // input.c test_AttachThreadInput: main attached to thread 1 and thread 1
+    // to thread 2 share one input state, so main may activate thread 2's
+    // window and reads it back.
+    const threads = [1, 2, 3].map(id=>({ id, name: `thread-${id}`, state: 'running' }));
+    const caller = { current: /** @type {unknown} */ (threads[2]) };
+    const { fns, memory } = setup({ caller, threadExists: id=>id >= 1 && id <= 3 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const theirs = createWindow(fns, memory, { style: WS_VISIBLE });
+    caller.current = threads[1];
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    caller.current = threads[0];
+    createWindow(fns, memory, { style: WS_VISIBLE });
+    assert.equal(fns.SetActiveWindow.handler([theirs]), 0, 'not attached: refused');
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 1);
+    assert.equal(fns.AttachThreadInput.handler([2, 3, 1]), 1);
+    fns.SetActiveWindow.handler([theirs]);
+    assert.equal(fns.GetActiveWindow.handler(), theirs);
+});
+
+test('a thread calling AttachThreadInput has a queue by calling it', ()=>{
+    // input.c test_AttachThreadInput_thread: the thread attaches the main
+    // thread to itself before it makes any window.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (main) };
+    const { fns } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    caller.current = worker;
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 1);
+});
+
 test('the active window and the focus are the thread\'s: another thread reads NULL until '
     + 'AttachThreadInput joins them', async()=>{
     // input.c's test_attach_input. A setup's main thread made its wizard
@@ -4448,6 +5572,44 @@ test('the active window and the focus are the thread\'s: another thread reads NU
     assert.equal(fns.GetFocus.handler(), dialog);
     assert.equal(fns.AttachThreadInput.handler([1, 2, 0]), 1);
     assert.equal(fns.GetActiveWindow.handler(), 0, 'parted, it is not again');
+});
+
+test('a thread without the activation makes its own window active and leaves the foreground'
+    + ' (ddraw test_window_style)', async()=>{
+    // The test's second thread has the foreground window; the main thread's
+    // SetActiveWindow makes its window active to it alone, which hears so as
+    // a window that is not the foreground one.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory, dispatched } = setup({ caller,
+        threadExists: id=>id === 1 || id === 2 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const foreground = createWindow(fns, memory, { style: WS_VISIBLE });
+    await fns.SetActiveWindow.handler([foreground]);
+    caller.current = main;
+    // Hidden: a window made visible would take the activation as it appears.
+    const mine = createWindow(fns, memory);
+    const other = createWindow(fns, memory);
+    dispatched.length = 0;
+    assert.equal(await fns.SetActiveWindow.handler([mine]), 0, 'no window of its own before');
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam, lParam })=>
+        [hwnd, message, wParam & 0xffff, lParam]), [[mine, 0x0086, 0, 0], [mine, 0x0006, 1, 0]],
+    'WM_NCACTIVATE as not the foreground window, then WM_ACTIVATE');
+    assert.equal(fns.GetActiveWindow.handler(), mine, 'active to its thread');
+    assert.equal(fns.GetForegroundWindow.handler(), foreground, 'the foreground stays');
+    dispatched.length = 0;
+    assert.equal(await fns.SetActiveWindow.handler([other]), mine, 'the one before answered');
+    assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam & 0xffff]),
+        [[mine, 0x0086, 0], [mine, 0x0006, 0], [other, 0x0086, 0], [other, 0x0006, 1]]);
+    caller.current = worker;
+    assert.equal(fns.GetActiveWindow.handler(), foreground, 'the other thread keeps its own');
+
+    caller.current = main;
+    await fns.SetForegroundWindow.handler([mine]);
+    assert.equal(fns.GetActiveWindow.handler(), mine, 'with the activation, the run\'s');
+    assert.equal(fns.GetForegroundWindow.handler(), mine);
 });
 
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
@@ -4545,6 +5707,17 @@ test('RegisterRawInputDevices checks its devices, and the registered list is ord
     assert.equal(memory.u32(COUNT), 0, 'both removed');
 });
 
+test('DefRawInputProc answers 0 for a RAWINPUTHEADER\'s size and -1 for another, leaving the '
+    + 'last error', ()=>{
+    // input.c test_DefRawInputProc.
+    const { fns, errors } = setup();
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(fns.DefRawInputProc.handler([0xcafe, 0xbeef, RAWINPUTHEADER_SIZE]), 0);
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE - 1]), 0xffffffff);
+    assert.equal(fns.DefRawInputProc.handler([0, 0, RAWINPUTHEADER_SIZE + 1]), 0xffffffff);
+    assert.deepEqual(errors, []);
+});
+
 test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()=>{
     const RAWINPUT_MOUSE_SIZE = 40;
     const { fns, memory, hwnd, queue, service, errors } = withWindow({ style: WS_VISIBLE });
@@ -4571,6 +5744,45 @@ test('GetRawInputBuffer takes the queued reports end to end, as many as fit', ()
     memory.putU32s(COUNT, [8]);
     assert.equal(fns.GetRawInputBuffer.handler([RAW, COUNT, RAWINPUTHEADER_SIZE]), 0xffffffff);
     assert.equal(memory.u32(COUNT), RAWINPUT_MOUSE_SIZE, 'too small even for one');
+});
+
+test('the raw input devices are a mouse and a keyboard, each with its name and its info', ()=>{
+    // As documented for GetRawInputDeviceList and GetRawInputDeviceInfo: a
+    // null list or buffer asks the count or size, too little room is -1 and
+    // ERROR_INSUFFICIENT_BUFFER with the size, the name's size is in characters.
+    const RIDI_DEVICENAME = 0x20000007;
+    const RIDI_DEVICEINFO = 0x2000000b;
+    const RIDI_PREPARSEDDATA = 0x20000005;
+    const { fns, memory, errors } = setup();
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputDeviceList.handler([0, COUNT, 8]), 0);
+    assert.equal(memory.u32(COUNT), 2);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 4]), 0xffffffff);
+    memory.putU32s(COUNT, [1]);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 8]), 0xffffffff);
+    assert.equal(memory.u32(COUNT), 2);
+    assert.equal(fns.GetRawInputDeviceList.handler([RAW, COUNT, 8]), 2);
+    const [mouse, mouseType, keyboard, keyboardType] = [0, 4, 8, 12].map(at=>memory.u32(RAW + at));
+    assert.deepEqual([mouseType, keyboardType], [0, 1], 'RIM_TYPEMOUSE, RIM_TYPEKEYBOARD');
+
+    memory.putU32s(COUNT, [0]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_DEVICENAME, 0, COUNT]), 0);
+    const characters = memory.u32(COUNT);
+    assert.equal(fns.GetRawInputDeviceInfoW.handler([mouse, RIDI_DEVICENAME, RAW, COUNT]),
+        characters, 'the same count of characters, twice the bytes');
+    assert.equal(memory.u32(RAW) & 0xffff, '\\'.charCodeAt(0));
+    memory.putU32s(COUNT, [32]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([keyboard, RIDI_DEVICEINFO, RAW, COUNT]), 32);
+    assert.deepEqual([0, 4, 8, 20, 24, 28].map(at=>memory.u32(RAW + at)), [32, 1, 4, 12, 3, 101]);
+    memory.putU32s(COUNT, [8]);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_DEVICEINFO, RAW, COUNT]),
+        0xffffffff);
+    assert.equal(memory.u32(COUNT), 32);
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([mouse, RIDI_PREPARSEDDATA, 0, COUNT]), 0);
+    assert.equal(memory.u32(COUNT), 0, 'a mouse has no preparsed data');
+    assert.equal(fns.GetRawInputDeviceInfoA.handler([0x1234, RIDI_DEVICEINFO, RAW, COUNT]),
+        0xffffffff);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
 
 test('GetRawInputData refuses a handle that names no input', ()=>{
@@ -4612,7 +5824,8 @@ test('a registered mouse is posted WM_INPUT, and GetRawInputData reads the repor
     assert.equal(fns.GetRawInputData.handler([handle, RID_INPUT, RAW, COUNT, RAWINPUTHEADER_SIZE]),
         RAWINPUT_MOUSE_SIZE);
     assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RAW + at)),
-        [0, RAWINPUT_MOUSE_SIZE, 0, 0], 'RIM_TYPEMOUSE, its size, no device, RIM_INPUT');
+        [0, RAWINPUT_MOUSE_SIZE, 0x00010041, 0],
+        'RIM_TYPEMOUSE, its size, the listed mouse, RIM_INPUT');
     assert.deepEqual([16, 20, 24, 28, 32, 36].map(at=>memory.u32(RAW + at)),
         [0, 0, 0, 5, 0xfffffffd, 0], 'relative motion, no buttons');
 
@@ -5039,6 +6252,76 @@ test('a procedure set through SetWindowLongW reads wide text, one set through A 
     assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0);
 });
 
+test('GetWindowLongPtrW and GetClassLongPtrW read a procedure as the wide calls do', ()=>{
+    // A 64-bit SDL keeps the procedure GetWindowLongPtrW answers and calls
+    // it through CallWindowProcW for every message its own one does not
+    // take. Read as the ANSI side reads it, its own wide procedure came back
+    // as a handle, which it took for another's, subclassed over, and called
+    // itself through without end.
+    const GWLP_WNDPROC = -4;
+    const GCLP_WNDPROC = -24;
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    // WNDCLASSA at 64 bits: the style, then every pointer and handle eight bytes.
+    memory.putString(CLASS_NAME, 'MainWnd');
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 0]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory);
+    assert.notEqual(hwnd, 0);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC]), BigInt(WNDPROC));
+    assert.equal(Number(fns.GetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC]) & 0xffff0000n),
+        0xffff0000, 'an ANSI procedure, read wide: a handle, as GetWindowLongW answers');
+    fns.SetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC, 0x402000, 0]);
+    assert.equal(fns.GetWindowLongPtrW.handler([hwnd, GWLP_WNDPROC]), 0x402000n,
+        'set wide, read wide: its address');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWLP_WNDPROC]), 0x402000);
+
+    fns.SetClassLongPtrW.handler([hwnd, GCLP_WNDPROC, 0x403000, 0]);
+    assert.equal(fns.GetClassLongPtrW.handler([hwnd, GCLP_WNDPROC]), 0x403000n);
+    assert.equal(fns.GetClassLongW.handler([hwnd, GCLP_WNDPROC]), 0x403000);
+});
+
+test('a 64-bit window\'s GWLP_ longs: an address zero-extended, USERDATA and ID whole', ()=>{
+    // A program linked /LARGEADDRESSAWARE keeps addresses past 2 GiB in a window: its procedure
+    // and its module, read back as themselves, not as 0xFFFFFFFF_9...; and GWLP_USERDATA, where a
+    // framework keeps its object, and GWLP_ID are LONG_PTRs kept whole by SetWindowLongPtr. One
+    // set through SetWindowLong is a LONG, read back sign-extended (Wine's set_window_long).
+    const GWLP_WNDPROC = -4;
+    const GWLP_HINSTANCE = -6;
+    const GWLP_ID = -12;
+    const GWLP_USERDATA = -21;
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    memory.putString(CLASS_NAME, 'MainWnd');
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 0]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory);
+    const high = 0x9000_2000;
+    fns.SetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC, high, 0]);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC]), BigInt(high));
+    fns.SetWindowLongPtrA.handler([hwnd, GWLP_HINSTANCE, high, 0]);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_HINSTANCE]), BigInt(high));
+    for (const index of [GWLP_USERDATA, GWLP_ID])
+    {
+        assert.equal(fns.SetWindowLongPtrA.handler([hwnd, index, 0x89abcdef, 0x01234567]), 0n);
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), 0x0123456789abcdefn,
+            'all eight bytes');
+        assert.equal(fns.SetWindowLongPtrA.handler([hwnd, index, high, 0]),
+            0x0123456789abcdefn, 'answers the long it replaced, whole');
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), BigInt(high),
+            'an address past 2 GiB is itself');
+        fns.SetWindowLongA.handler([hwnd, index, -2]);
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), 0xfffffffffffffffen,
+            'a LONG set through SetWindowLong, sign-extended');
+    }
+});
+
 test('a class is unregistered by its wide name, and not while a window of it is left', ()=>{
     const { fns, memory, hwnd } = withWindow();
     putWide(memory, WIDE_CLASS, 'MainWnd');
@@ -5051,9 +6334,13 @@ test('a class is unregistered by its wide name, and not while a window of it is 
 test('GetClassInfoW reports the class by the wide name it was asked by', ()=>{
     const { fns, memory } = withWindow();
     putWide(memory, WIDE_CLASS, 'MAINWND');
-    assert.equal(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 1);
-    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
+    assert.notEqual(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 0);
+    // Registered through the ANSI form, its procedure reads ANSI: the wide
+    // call answers its handle, the ANSI one its address.
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc) >>> 16, 0xffff);
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpszClassName), WIDE_CLASS);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, 0x10800]), 0);
+    assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
 });
 
 test('GetMessage on a window already destroyed fails at once rather than waiting for ever', ()=>{
@@ -5102,7 +6389,7 @@ test('a window CreateWindowEx makes visible is hidden while it is made -- to its
         },
     });
     calls = context.fns;
-    calls.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    calls.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(context.memory);
     calls.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = await createWindow(calls, context.memory, { style: WS_VISIBLE | 0x80000000 });
@@ -5360,6 +6647,38 @@ test('under MDIS_ALLCHILDSTYLES an MDI child has the style it asks for, and one 
         'a disabled child is never activated');
 });
 
+test('DefMDIChildProc answers WM_GETMINMAXINFO with the client filled and the frame beyond it',
+    async()=>{
+        // MSDN DefMDIChildProc: WM_GETMINMAXINFO "calculates the size of a
+        // maximized MDI child window, based on the current size of the MDI
+        // client window" - its client area the client's, AdjustWindowRectEx's
+        // frame (no menu) outside it, whatever was proposed.
+        const CLIENT_CLASS = 0x10400;
+        const CLIENT_CREATE = 0x10500;
+        const MINMAX = 0x10700;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const frame = await createWindow(fns, memory);
+        memory.putString(CLIENT_CLASS, 'mdiclient');
+        memory.putU32s(CLIENT_CREATE, [0, 0x100]);
+        const client = await fns.CreateWindowExA.handler([0, CLIENT_CLASS, 0,
+            WS_CHILD | WS_VISIBLE, 0, 0, 200, 160, frame, 1, HINSTANCE, CLIENT_CREATE]);
+        const child = await fns.CreateMDIWindowA.handler([CLASS_NAME, TITLE, 0, 0, 0, 50, 40,
+            client, HINSTANCE, 0]);
+        fns.GetClientRect.handler([client, RECT_BUFFER]);
+        const [width, height] = [memory.u32(RECT_BUFFER + 8), memory.u32(RECT_BUFFER + 12)];
+        memory.putU32s(RECT_BUFFER, [0, 0, width, height]);
+        fns.AdjustWindowRectEx.handler([RECT_BUFFER,
+            fns.GetWindowLongA.handler([child, GWL_STYLE]), 0,
+            fns.GetWindowLongA.handler([child, -20])]);
+        const adjusted = [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+        memory.putU32s(MINMAX, new Array(10).fill(0));
+        await fns.DefMDIChildProcA.handler([child, 0x0024, 0, MINMAX]);
+        assert.deepEqual([2, 3, 4, 5].map(at=>memory.u32(MINMAX + at * 4) | 0),
+            [adjusted[2] - adjusted[0], adjusted[3] - adjusted[1], adjusted[0], adjusted[1]]);
+    });
+
 test('the CBT hook sees the styles asked for, the window edge following the frame, and '
     + 'WM_NCCREATE the ones the window manager settled', ()=>{
     // user32's window tests (test_window_styles): a top-level window always
@@ -5405,7 +6724,7 @@ test('the CBT hook sees the styles asked for, the window edge following the fram
         },
     });
     table = fns;
-    const hook = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, 0, 0]);
+    const hook = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     memory.putString(TITLE, 'Main');
@@ -5569,8 +6888,9 @@ test('ArrangeIconicWindows lines minimised children up as SPI_SETMINIMIZEDMETRIC
     fns.ShowWindow.handler([children[0], 6]);
     fns.ShowWindow.handler([children[2], 6]);
     assert.equal(fns.ArrangeIconicWindows.handler([hwnd]), 2);
+    // SM_CXMINIMIZED is the width set and a three-pixel frame either side.
     assert.deepEqual([rect(children[0]).slice(0, 2), rect(children[2]).slice(0, 2)],
-        [[40, 3], [40 + 160 + 40, 3]]);
+        [[40, 3], [40 + 106 + 40, 3]]);
     assert.deepEqual(rect(children[1]), [100, 200, 300, 400], 'the one not minimised stays');
 
     memory.putU32s(TEXT_BUFFER, [20, 0, 0, 0, 0]);
@@ -5803,6 +7123,122 @@ test('SetWindowPos asks the window first, applies what it answers, and tells it 
         ], 'a move alone is no size');
     });
 
+test('a window minimised goes off the screen with no client area, and comes back restored',
+    async()=>{
+        // WM_SIZE tells the state whatever the size did: SWP_STATECHANGED in
+        // WM_WINDOWPOSCHANGED (msg.c WmShowMinOverlappedSeq; d3d9 test_wndproc's
+        // sc_restore_messages, sc_minimize_messages).
+        const SW_MINIMIZE = 6;
+        const SW_RESTORE = 9;
+        const SWP_STATECHANGED = 0x8000;
+        const WS_POPUP = 0x80000000;
+        /** @type {any} */
+        let table = null;
+        /** @type {any[]} */
+        const heard = [];
+        const { fns, memory } = setup({ heap: true, reply: message=>{
+            if (message.message === WM_WINDOWPOSCHANGED)
+            {
+                heard.push(['changed', ...[2, 3, 4, 5].map(at=>memory.u32(message.lParam + at * 4)
+                    | 0), (memory.u32(message.lParam + 24) & SWP_STATECHANGED) !== 0]);
+                return table.DefWindowProcA.handler([message.hwnd, message.message,
+                    message.wParam, message.lParam]);
+            }
+            if (message.message === WM_SIZE)
+            {
+                heard.push(['size', message.wParam, message.lParam & 0xffff,
+                    message.lParam >>> 16]);
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        } });
+        table = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = await createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE });
+        await fns.SetWindowPos.handler([hwnd, 0, 30, 40, 100, 50, 0x14]);
+        heard.length = 0;
+
+        await fns.ShowWindow.handler([hwnd, SW_MINIMIZE]);
+        assert.equal(fns.IsIconic.handler([hwnd]), 1);
+        const changed = heard.find(([what])=>what === 'changed');
+        assert.deepEqual(changed?.slice(1, 3), [-32000, -32000], 'where Windows keeps icons');
+        assert.equal(changed?.[5], true, 'a change of state');
+        assert.deepEqual(heard.find(([what])=>what === 'size'), ['size', 1, 0, 0],
+            'SIZE_MINIMIZED, and no client area');
+        heard.length = 0;
+
+        await fns.ShowWindow.handler([hwnd, SW_RESTORE]);
+        assert.deepEqual(heard.find(([what])=>what === 'changed')?.slice(1),
+            [30, 40, 100, 50, true], 'back where it was');
+        assert.deepEqual(heard.find(([what])=>what === 'size'), ['size', 0, 100, 50]);
+        await fns.GetWindowRect.handler([hwnd, 0x900]);
+        assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [30, 40, 130, 90]);
+    });
+
+test('a window made maximised or minimised is made in its place, then put in that state',
+    async()=>{
+        // msg.c WmCreateMaxPopupSeq: WM_SIZE (SIZE_RESTORED) and WM_MOVE for
+        // the place it was made in, then the state: WM_WINDOWPOSCHANGED with
+        // SWP_STATECHANGED and the default procedure's WM_SIZE for it.
+        const WS_MAXIMIZE = 0x01000000;
+        const WS_MINIMIZE = 0x20000000;
+        const WS_POPUP = 0x80000000;
+        const SWP_STATECHANGED = 0x8000;
+        /** @type {any} */
+        let table = null;
+        /** @type {any[]} */
+        const heard = [];
+        const { fns, memory } = setup({ heap: true, reply: message=>{
+            if (message.message === WM_WINDOWPOSCHANGED)
+            {
+                heard.push(['changed', (memory.u32(message.lParam + 24) & SWP_STATECHANGED) !== 0]);
+                return table.DefWindowProcA.handler([message.hwnd, message.message,
+                    message.wParam, message.lParam]);
+            }
+            if (message.message === WM_SIZE)
+            {
+                heard.push(['size', message.wParam]);
+            }
+            return message.message === WM_NCCREATE ? 1 : 0;
+        } });
+        table = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const zoomed = await createWindow(fns, memory, { style: WS_POPUP | WS_MAXIMIZE });
+        assert.deepEqual(heard.splice(0), [['size', 0], ['changed', true], ['size', 2]],
+            'made restored, then maximised');
+        assert.equal(fns.IsZoomed.handler([zoomed]), 1);
+        await fns.GetWindowRect.handler([zoomed, 0x900]);
+        assert.deepEqual([0, 1].map(at=>memory.u32(0x900 + at * 4)), [0, 0],
+            'over the screen, a popup having no edges');
+
+        const iconic = await createWindow(fns, memory, { style: WS_POPUP | WS_MINIMIZE });
+        assert.deepEqual(heard.splice(0), [['size', 0], ['changed', true], ['size', 1]]);
+        assert.equal(fns.IsIconic.handler([iconic]), 1);
+        await fns.GetWindowRect.handler([iconic, 0x900]);
+        assert.equal(memory.u32(0x900) | 0, -32000);
+        await fns.ShowWindow.handler([iconic, 9]);
+        await fns.GetWindowRect.handler([iconic, 0x900]);
+        assert.deepEqual([0, 1, 2, 3].map(at=>memory.u32(0x900 + at * 4)), [10, 20, 310, 220],
+            'restored, where it was made');
+    });
+
+test('SetWindowPos with HWND_TOPMOST puts a window in the topmost band, HWND_NOTOPMOST out of it',
+    async()=>{
+        const GWL_EXSTYLE = -20;
+        const WS_EX_TOPMOST = 0x8;
+        const SWP_NOSIZE_NOMOVE = 0x3;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = await createWindow(fns, memory, { style: WS_VISIBLE });
+        await fns.SetWindowPos.handler([hwnd, 0xffffffff, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
+        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST,
+            WS_EX_TOPMOST);
+        await fns.SetWindowPos.handler([hwnd, 0xfffffffe, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE]);
+        assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_EXSTYLE]) & WS_EX_TOPMOST, 0);
+    });
+
 // --- what the run's window manager is told ---
 
 /**
@@ -6014,7 +7450,9 @@ test('ShowWindow is WM_SHOWWINDOW and a SetWindowPos with the command\'s flags',
     // it: the show message, then WM_WINDOWPOSCHANGING and _CHANGED with what
     // the command asks -- SWP_NOACTIVATE where it does not activate, the
     // flag a check masks out left out here -- and nothing at all for a
-    // command that finds the window as it asks.
+    // command that finds the window as it asks. A command that activates has
+    // the activation bring the window to the top between the two: a
+    // WM_WINDOWPOSCHANGING of its own (WmShowNormal).
     const WS_POPUP = 0x80000000;
     const SW_SHOWNORMAL = 1;
     const SW_SHOWNA = 8;
@@ -6055,7 +7493,7 @@ test('ShowWindow is WM_SHOWWINDOW and a SetWindowPos with the command\'s flags',
         assert.deepEqual(seen, sequence, `ShowWindow(${cmd})`);
     };
     step(SW_SHOWNORMAL, 0, [[WM_SHOWWINDOW, 1], [WM_WINDOWPOSCHANGING, SWP_SHOWWINDOW | placed],
-        [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
+        [WM_WINDOWPOSCHANGING, placed], [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
     assert.equal(fns.GetActiveWindow.handler(), hwnd, 'activated inside the SetWindowPos');
     step(SW_SHOWNORMAL, 1, []);
     step(SW_HIDE, 1, [[WM_SHOWWINDOW, 0], [WM_WINDOWPOSCHANGING, SWP_HIDEWINDOW | placed],
@@ -6063,7 +7501,7 @@ test('ShowWindow is WM_SHOWWINDOW and a SetWindowPos with the command\'s flags',
     assert.equal(fns.GetActiveWindow.handler(), 0, 'hidden, it handed the activation on');
     step(SW_HIDE, 0, []);
     step(SW_SHOW, 0, [[WM_SHOWWINDOW, 1], [WM_WINDOWPOSCHANGING, SWP_SHOWWINDOW | placed],
-        [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
+        [WM_WINDOWPOSCHANGING, placed], [WM_WINDOWPOSCHANGED, SWP_SHOWWINDOW | told]]);
     step(SW_SHOW, 1, []);
     step(SW_HIDE, 1, [[WM_SHOWWINDOW, 0], [WM_WINDOWPOSCHANGING, SWP_HIDEWINDOW | placed],
         [WM_WINDOWPOSCHANGED, SWP_HIDEWINDOW | told]]);
@@ -6173,8 +7611,9 @@ test('WM_NCCALCSIZE places the client area where the procedure says', ()=>{
         heap: true, reply: message=>(message.message === WM_NCCALCSIZE && skinned ? 0
             : message.message === WM_NCCALCSIZE ? fns.DefWindowProcA.handler([message.hwnd,
                 message.message, message.wParam, message.lParam]) : 1) });
-    const order = dispatched.map(entry=>[entry.message, entry.wParam]).slice(0, 3);
-    assert.deepEqual(order, [[WM_NCCREATE, 0], [WM_NCCALCSIZE, 0], [WM_CREATE, 0]]);
+    const order = dispatched.map(entry=>[entry.message, entry.wParam]).slice(0, 4);
+    assert.deepEqual(order,
+        [[WM_GETMINMAXINFO, 0], [WM_NCCREATE, 0], [WM_NCCALCSIZE, 0], [WM_CREATE, 0]]);
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual([8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [300, 200],
         'the whole window is its client area');
@@ -6409,3 +7848,415 @@ test('a window made the foreground one and destroyed hands the run\'s foreground
         assert.equal(directory.foreground(), main, 'and the run\'s foreground');
         assert.equal(directory.focus(), main, 'and has the focus');
     });
+
+test('SetFocus of a child of the desktop is refused after the CBT hook hears it', ()=>{
+    // msg.c test_SetFocus, WmSetFocus_3: HCBT_SETFOCUS and nothing else, the
+    // call answering NULL with ERROR_INVALID_PARAMETER (Vista and later).
+    const { memory, fns, called, errors } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD, parent });
+    fns.SetParent.handler([child, fns.GetDesktopWindow.handler()]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 0]);
+    called.length = 0;
+
+    assert.equal(fns.SetFocus.handler([child]), 0);
+    assert.deepEqual(called.map(call=>call.args[0]), [HCBT_SETFOCUS]);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.GetFocus.handler(), parent, 'the focus stays');
+});
+
+test('activation brings a window with children that is already on top to the top unchanged',
+    ()=>{
+    // msg.c WmSetFocus_1: the parent of the child given the focus hears
+    // WM_WINDOWPOSCHANGING and, nothing having moved, no
+    // WM_WINDOWPOSCHANGED. Its children follow it in the stacking and do not
+    // make it any less the top window.
+        const WM_SETFOCUS = 0x0007;
+        const { fns, memory, dispatched } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        createWindow(fns, memory, { style: WS_VISIBLE });
+        const parent = createWindow(fns, memory, { style: 0x00cf0000 });
+        const child = createWindow(fns, memory, { style: WS_CHILD, parent });
+        fns.SetFocus.handler([0]);
+        const before = dispatched.length;
+        fns.SetFocus.handler([child]);
+        const seen = dispatched.slice(before).map(m=>[m.hwnd, m.message]);
+        assert.ok(seen.some(([hwnd, message])=>hwnd === parent
+            && message === WM_WINDOWPOSCHANGING));
+        assert.ok(!seen.some(([, message])=>message === WM_WINDOWPOSCHANGED));
+        assert.ok(seen.some(([hwnd, message])=>hwnd === child && message === WM_SETFOCUS));
+    });
+
+test('a procedure read through the other encoding is a handle, which sets and calls it as '
+    + 'what it reads', ()=>{
+    // class.c test_wndproc_handles, win.c test_set_window_long: a window
+    // whose procedure reads ANSI answers GetWindowLongW with a handle -- its
+    // high word 0xffff -- and its address to GetWindowLongA; set back through
+    // either form, the handle restores the procedure and its encoding;
+    // CallWindowProcW through it hands the procedure ANSI text; and NULL
+    // keeps the procedure, switching only the encoding.
+    const OTHER = 0x402000;
+    const { fns, memory, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const wide = fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]), WNDPROC);
+    assert.equal(wide >>> 16, 0xffff, 'the wide read is a handle');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), wide, 'the same one each time');
+
+    assert.equal(fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, OTHER]), wide);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1);
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), OTHER);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]) >>> 16, 0xffff);
+
+    fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, wide]);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 0, 'the handle sets an ANSI procedure');
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_WNDPROC]), WNDPROC);
+
+    putWide(memory, TITLE, 'caption');
+    dispatched.length = 0;
+    fns.CallWindowProcW.handler([wide, hwnd, WM_SETTEXT, 0, TITLE]);
+    const told = dispatched.at(-1);
+    assert.equal(told.wndProc, WNDPROC);
+    assert.equal(memory.readCString(told.lParam, 32), 'caption', 'converted to ANSI');
+    dispatched.length = 0;
+    fns.CallWindowProcW.handler([WNDPROC, hwnd, WM_SETTEXT, 0, TITLE]);
+    assert.equal(dispatched.at(-1).lParam, TITLE, 'an address is called as the call reads');
+
+    assert.equal(fns.SetWindowLongW.handler([hwnd, GWL_WNDPROC, 0]), wide);
+    assert.equal(fns.IsWindowUnicode.handler([hwnd]), 1, 'NULL switches the encoding');
+    assert.equal(fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]), wide,
+        'and keeps the procedure, which still reads ANSI');
+});
+
+test('SetClassLongW of the procedure makes the class\'s next windows wide, not those it has',
+    ()=>{
+    // win.c test_IsWindowUnicode: a class procedure set through one form
+    // decides the encoding of windows made after; a window made before keeps
+    // its own.
+        const GCL_WNDPROC = -24;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const before = createWindow(fns, memory);
+        fns.SetClassLongW.handler([before, GCL_WNDPROC, WNDPROC]);
+        assert.equal(fns.IsWindowUnicode.handler([before]), 0);
+        assert.equal(fns.GetClassLongW.handler([before, GCL_WNDPROC]), WNDPROC);
+        assert.equal(fns.GetClassLongA.handler([before, GCL_WNDPROC]) >>> 16, 0xffff);
+        const after = createWindow(fns, memory);
+        assert.equal(fns.IsWindowUnicode.handler([after]), 1);
+    });
+
+test('once the procedure handles run out, a procedure is read as its address', ()=>{
+    // win.c test_winproc_limit: setting ever new ANSI procedures and reading
+    // them wide runs out of handles before 0xffff of them.
+    const { fns, memory } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    let proc = 2;
+    for (; proc < 0xffff; proc++)
+    {
+        fns.SetWindowLongA.handler([hwnd, GWL_WNDPROC, proc]);
+        if (fns.GetWindowLongW.handler([hwnd, GWL_WNDPROC]) === proc)
+        {
+            break;
+        }
+    }
+    assert.notEqual(proc, 0xffff);
+});
+
+test('the window long and word calls on a handle that is no window fail with its error', ()=>{
+    // Wine's shlwapi test_SHSetWindowBits reads it back through GetWindowLong.
+    const { fns, errors, hwnd } = withWindow();
+    const calls = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (fns));
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['GetWindowLongA', [0, GWL_STYLE]], ['GetWindowLongW', [0xdead, GWL_STYLE]],
+        ['SetWindowLongA', [0, GWL_STYLE, 1]], ['SetWindowLongW', [0, GWL_STYLE, 1]],
+        ['GetWindowWord', [0, 0]], ['SetWindowWord', [0, 0, 1]]]))
+    {
+        errors.length = 0;
+        assert.equal(calls[name].handler(args), 0, name);
+        assert.deepEqual(errors, [1400], `${name}: ERROR_INVALID_WINDOW_HANDLE`);
+    }
+    errors.length = 0;
+    fns.GetWindowLongA.handler([hwnd, GWL_STYLE]);
+    assert.deepEqual(errors, [], 'a window there sets nothing');
+});
+
+test('the activation going to another thread\'s window tells each thread\'s top-level windows'
+    + ' WM_ACTIVATEAPP, naming the other thread (ddraw test_coop_level_activateapp)', ()=>{
+    const WM_ACTIVATEAPP = 0x001c;
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory, dispatched } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const mine = createWindow(fns, memory, { style: WS_VISIBLE });
+    const hidden = createWindow(fns, memory);
+    caller.current = another;
+    const theirs = createWindow(fns, memory, { style: WS_VISIBLE });
+    caller.current = maker;
+    fns.SetForegroundWindow.handler([mine]);
+    dispatched.length = 0;
+
+    fns.SetForegroundWindow.handler([theirs]);
+    const told = dispatched.filter(entry=>entry.message === WM_ACTIVATEAPP)
+        .map(({ hwnd, wParam, lParam })=>[hwnd, wParam, lParam]);
+    assert.deepEqual(told.filter(([hwnd])=>hwnd !== theirs).sort((a, b)=>a[0] - b[0]),
+        [[mine, 0, another.id], [hidden, 0, another.id]].sort((a, b)=>a[0] - b[0]),
+        'each of the losing thread\'s windows hears it, the gaining thread named');
+    assert.ok(told.every(([hwnd, wParam, lParam])=>hwnd !== theirs
+        || (wParam === 1 && lParam === maker.id)));
+});
+
+test('a top-level window minimised with the focus in it lets it go before it moves'
+    + ' (ddraw test_coop_level_mode_set)', async()=>{
+    const WM_KILLFOCUS = 0x0008;
+    const SW_MINIMIZE = 6;
+    const { fns, memory, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = await createWindow(fns, memory, { style: WS_VISIBLE });
+    await fns.SetForegroundWindow.handler([hwnd]);
+    assert.equal(fns.GetFocus.handler(), hwnd);
+    dispatched.length = 0;
+    await fns.ShowWindow.handler([hwnd, SW_MINIMIZE]);
+    const order = dispatched.filter(({ message })=>message === WM_KILLFOCUS
+        || message === WM_WINDOWPOSCHANGING).map(({ message })=>message);
+    assert.deepEqual(order.slice(0, 2), [WM_KILLFOCUS, WM_WINDOWPOSCHANGING]);
+    assert.equal(fns.GetFocus.handler(), 0);
+});
+
+test('a window goes inside another process\'s window, and both ask the tree across them', ()=>{
+    // opengl32's test_other_process_parent: a program reparents its window
+    // into a child another process made, and back out.
+    const GA_PARENT = 1;
+    const GA_ROOT = 2;
+    const directory = createWindowDirectory();
+    const first = setup({ directory, processId: 0x100,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const toplevel = createWindow(first.fns, first.memory);
+    const child = createWindow(first.fns, first.memory, { style: WS_CHILD, parent: toplevel });
+    const mine = createWindow(second.fns, second.memory);
+    const desktop = second.fns.GetDesktopWindow.handler();
+    second.fns.SetWindowLongA.handler([mine, -16, WS_CHILD | WS_VISIBLE]);
+    assert.equal(second.fns.SetParent.handler([mine, child]), desktop);
+    assert.equal(second.fns.GetParent.handler([mine]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_PARENT]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), toplevel,
+        'the root is found through the other process\'s windows');
+    assert.equal(second.fns.GetParent.handler([child]), toplevel,
+        'another process\'s window, as it describes itself');
+    assert.equal(second.fns.GetAncestor.handler([child, GA_ROOT]), toplevel);
+    // Nor can another process's window go inside one inside it.
+    assert.equal(first.fns.SetParent.handler([child, mine]), 0);
+    assert.equal(second.fns.SetParent.handler([mine, 0]), child);
+    assert.equal(second.fns.GetAncestor.handler([mine, GA_ROOT]), mine);
+});
+
+test('a mode change does not wait for ever on a window whose thread takes no messages', async()=>{
+    // The system's WM_DISPLAYCHANGE broadcast waits two seconds for each
+    // window, as a send with SMTO_ABORTIFHUNG: a COM server's apartment
+    // window, its thread blocked outside any message loop, held a full-screen
+    // device's creation for good.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    let clock = 0;
+    const { fns, memory, tick } = setup({ caller, now: ()=>clock });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+    // A thread that has looked at its queue takes what is sent to it there.
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+
+    caller.current = main;
+    memory.putU32s(TEXT_BUFFER, new Array(40).fill(0));
+    memory.putU32s(TEXT_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    memory.putU32s(TEXT_BUFFER + DEVMODEA.dmPelsWidth, [800, 600]);
+    const answer = fns.ChangeDisplaySettingsA.handler([TEXT_BUFFER, 0]);
+    assert.ok(answer instanceof Promise, 'the worker\'s window is waited for');
+    let done = false;
+    answer.then(()=>{
+        done = true;
+    });
+    await tick();
+    clock = 1999;
+    await tick();
+    assert.equal(done, false, 'for two seconds');
+    clock = 2000;
+    await tick();
+    await tick();
+    assert.equal(await answer, 0, 'DISP_CHANGE_SUCCESSFUL, then');
+});
+
+test('CallMsgFilter shows the message to the thread\'s WH_MSGFILTER hooks; nonzero takes it', ()=>{
+    /** @type {number[][]} */
+    const heard = [];
+    let answer = 0;
+    const { fns } = setup({ hookReply: (entry, args)=>{
+        heard.push([entry, ...args]);
+        return answer;
+    } });
+    const WH_MSGFILTER = -1;
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 0]), 0, 'no hook: not taken');
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MSGFILTER, HOOK_PROC, HINSTANCE, 0]), 0);
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 2]), 0);
+    assert.deepEqual(heard, [[HOOK_PROC, 2, 0, MSG_BUFFER]], 'code, 0 and the MSG');
+    answer = 1;
+    assert.equal(fns.CallMsgFilterW.handler([MSG_BUFFER, 0]), 1, 'a hook took it');
+});
+
+test('a window disabled while it has the focus leaves the focus nowhere', ()=>{
+    const { fns, hwnd, memory } = withWindow();
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([child]);
+    assert.equal(fns.GetFocus.handler(), child);
+    fns.EnableWindow.handler([child, 0]);
+    assert.equal(fns.GetFocus.handler(), 0, 'Wine\'s dialog.c test_DisabledDialogTest');
+    fns.EnableWindow.handler([child, 1]);
+    assert.equal(fns.GetFocus.handler(), 0, 'and enabling gives nothing back');
+});
+
+test('the system classes carry the styles Windows registers them with', ()=>{
+    // Wine's class test, test_styles: GetClassInfo of each built-in class,
+    // and the atom-named ones a program can ask about by name.
+    const { memory, fns } = setup();
+    /** @param {string} name */
+    const styleOf = name=>{
+        memory.putString(CLASS_NAME, name);
+        assert.notEqual(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
+        return memory.u32(TEXT_BUFFER);
+    };
+    assert.equal(styleOf('Button'), 0x8b, 'CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW');
+    assert.equal(styleOf('Edit'), 0x88, 'CS_PARENTDC | CS_DBLCLKS');
+    assert.equal(styleOf('ComboLBox'), 0x808, 'CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('MDIClient'), 0);
+    assert.equal(styleOf('#32768'), 0x20808, 'the menu: CS_DROPSHADOW | CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('#32769'), 0x8, 'the desktop');
+    assert.equal(styleOf('#32770'), 0x808, 'the dialog');
+    assert.equal(styleOf('#32772'), 0, 'the icon title');
+});
+
+test('a built-in procedure has an ANSI and a wide entry, each run in its own encoding', ()=>{
+    // Wine's class test, test_builtinproc: a procedure GetWindowLongPtrA and
+    // W answer is called directly by either CallWindowProc, so each entry
+    // writes its own encoding whichever call named it.
+    let stubs = 0x7f000000;
+    const { memory, fns } = setup({ registerProcedure: ()=>(stubs += 16), heap: true });
+    const GWLP_WNDPROC = -4;
+    /** @param {number} address */
+    const isHandle = address=>((address >>> 0) & 0xffff0000) >>> 0 === 0xffff0000;
+    const wide = [0x4d, 0, 0x61, 0, 0x69, 0, 0x6e, 0, 0, 0];
+    const ansi = [0x4d, 0x61, 0x69, 0x6e, 0];
+    /** @param {number} length */
+    const text = length=>[...memory.readMemory(TEXT_BUFFER, length)];
+
+    memory.putString(CLASS_NAME, 'Button');
+    const button = createWindow(fns, memory, { className: CLASS_NAME });
+    const procA = fns.GetWindowLongA.handler([button, GWLP_WNDPROC]);
+    const procW = fns.GetWindowLongW.handler([button, GWLP_WNDPROC]);
+    assert.notEqual(procA, procW, 'two entries');
+    assert.ok(!isHandle(procA) && !isHandle(procW), 'neither a handle');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([procW, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(10), wide, 'the wide entry writes wide text to an ANSI call');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcW.handler([procA, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi, 'the ANSI entry writes ANSI text to a wide call');
+
+    // An edit keeps its window's encoding: the other call's read is a handle.
+    memory.putString(CLASS_NAME, 'Edit');
+    const edit = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.ok(!isHandle(fns.GetWindowLongA.handler([edit, GWLP_WNDPROC])));
+    const handle = fns.GetWindowLongW.handler([edit, GWLP_WNDPROC]);
+    assert.ok(isHandle(handle), 'an ANSI edit read through GetWindowLongW');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([handle, edit, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi);
+    assert.ok(!isHandle(fns.GetClassLongW.handler([edit, -24])),
+        'its class answers the entry itself');
+});
+
+test('another thread disabling a window leaves its focus where it was', ()=>{
+    // The focus is the input state's: a thread not sharing it does not take
+    // it away (Wine's win.c test_enablewindow, enablewindow_thread).
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    assert.equal(fns.GetFocus.handler(), hwnd);
+    caller.current = another;
+    fns.EnableWindow.handler([hwnd, 0]);
+    caller.current = maker;
+    assert.equal(fns.GetFocus.handler(), hwnd);
+});
+
+test('a 64-bit process\'s low-level hook structures hold dwExtraInfo on an eight-byte boundary',
+    ()=>{
+        // winuser.h under _WIN64: MSLLHOOKSTRUCT is 32 bytes with dwExtraInfo at
+        // 24, KBDLLHOOKSTRUCT 24 bytes with it at 16; a 32-bit process's are 24
+        // and 20 bytes, the fields one after another.
+        const mouse = new Uint8Array(new Uint32Array([10, 20, 0x780000, 1, 99, 0xfeed]).buffer);
+        const keys = new Uint8Array(new Uint32Array([0x41, 0x1e, 0x10, 99, 0xfeed]).buffer);
+        assert.equal(lowLevelLayout(14, mouse, false), mouse);
+        assert.equal(lowLevelLayout(13, keys, false), keys);
+        /** @param {Uint8Array} bytes */
+        const dwords = bytes=>[...new Uint32Array(bytes.slice().buffer)];
+        assert.deepEqual(dwords(lowLevelLayout(14, mouse, true)),
+            [10, 20, 0x780000, 1, 99, 0, 0xfeed, 0]);
+        assert.deepEqual(dwords(lowLevelLayout(13, keys, true)), [0x41, 0x1e, 0x10, 99, 0xfeed, 0]);
+    });
+
+test('SetWindowPlacement keeps the normal place and shows the window as its showCmd says', ()=>{
+    // Windows places a window that is neither minimised nor maximised at the
+    // normal rectangle, keeps it as where a minimised one is restored to, and
+    // then shows the window with showCmd (Wine's WINPOS_SetPlacement): a game
+    // that took WS_VISIBLE out of its style and set a placement saying
+    // SW_SHOWNORMAL was left hidden, and its film unseen.
+    const SW_SHOWNORMAL = 1;
+    const SW_SHOWMINIMIZED = 2;
+    const PLACEMENT = 0x11200;
+    const { fns, memory, hwnd } = withWindow({ heap: true, style: 0x00cf0000 });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const style = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, (style & ~WS_VISIBLE) >>> 0]);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    const place = (/** @type {number} */ show, /** @type {number[]} */ rect)=>{
+        memory.putU32s(PLACEMENT, [44, 0, show, 0, 0, 0, 0, ...rect]);
+        return fns.SetWindowPlacement.handler([hwnd, PLACEMENT]);
+    };
+    /** @returns {number[]} */
+    const rect = ()=>{
+        fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+        return [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    };
+    assert.equal(place(SW_SHOWNORMAL, [30, 40, 330, 240]), 1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1, 'shown, as SW_SHOWNORMAL says');
+    assert.deepEqual(rect(), [30, 40, 330, 240], 'at the normal place');
+
+    place(SW_SHOWMINIMIZED, [50, 60, 350, 260]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1, 'minimised, as SW_SHOWMINIMIZED says');
+    place(SW_SHOWMINIMIZED, [70, 80, 370, 280]);
+    place(SW_SHOWNORMAL, [70, 80, 370, 280]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0);
+    assert.deepEqual(rect(), [70, 80, 370, 280], 'restored to the normal place it was given');
+});

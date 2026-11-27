@@ -6,11 +6,13 @@
 
 /*
  * Runs the benchmark's own bytes on the processor, as the reference the
- * engine is judged against: a 32-bit Linux program with no C library that
- * maps a fixed-base PE at its preferred address, binds each import the
- * benchmark names to a function here, and calls the entry point. The
- * program's checksum then comes from the hardware running the very
- * instructions the engine translates, x87 spills and all.
+ * engine is judged against: a Linux program with no C library that maps a
+ * fixed-base PE at its preferred address, binds each import the benchmark
+ * names to a function here, and calls the entry point. The program's checksum
+ * then comes from the hardware running the very instructions the engine
+ * translates, x87 spills and all. Built twice: as a 32-bit program for the
+ * x86 builds (`peload`, stdcall bindings) and as a 64-bit one for the x64
+ * build (`peload64`, a PE32+ and Microsoft's x64 convention).
  *
  *     peload <bench.exe> <workload> [iterations]
  *
@@ -23,26 +25,61 @@ typedef unsigned short u16;
 typedef unsigned int u32;
 typedef int i32;
 typedef long long i64;
+/* A register's width: an address, a system call's argument and answer. */
+typedef long word;
 
-#define STDCALL __attribute__((stdcall))
+#if defined(__x86_64__)
+#define STDCALL __attribute__((ms_abi))
+#define CDECL __attribute__((ms_abi))
+#define WIDE 1
+enum { SYS_READ = 0, SYS_WRITE = 1, SYS_OPEN = 2, SYS_CLOSE = 3, SYS_EXIT = 60,
+    SYS_EXIT_GROUP = 231, SYS_CLOCK_GETTIME = 228 };
 
-static i32 sys(i32 n, i32 a, i32 b, i32 c)
+static word sys(word n, word a, word b, word c)
 {
-    i32 r;
+    word r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+    return r;
+}
+
+static void *mapFixed(word address, word size)
+{
+    // mmap(address, size, RWX, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0)
+    word r;
+    register word flags __asm__("r10") = 0x32;
+    register word fd __asm__("r8") = -1;
+    register word offset __asm__("r9") = 0;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(9), "D"(address), "S"(size), "d"(7), "r"(flags), "r"(fd), "r"(offset)
+                     : "rcx", "r11", "memory");
+    return (void *)r;
+}
+#else
+#define STDCALL __attribute__((stdcall))
+#define CDECL
+#define WIDE 0
+enum { SYS_READ = 3, SYS_WRITE = 4, SYS_OPEN = 5, SYS_CLOSE = 6, SYS_EXIT = 1,
+    SYS_EXIT_GROUP = 252, SYS_CLOCK_GETTIME = 265 };
+
+static word sys(word n, word a, word b, word c)
+{
+    word r;
     __asm__ volatile("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(c) : "memory");
     return r;
 }
 
-static void *mapFixed(u32 address, u32 size)
+static void *mapFixed(word address, word size)
 {
     // mmap2(address, size, RWX, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0)
-    i32 r;
+    word r;
     __asm__ volatile("push %%ebp\n\txor %%ebp, %%ebp\n\tint $0x80\n\tpop %%ebp"
                      : "=a"(r)
                      : "a"(192), "b"(address), "c"(size), "d"(7), "S"(0x32), "D"(-1)
                      : "memory");
     return (void *)r;
 }
+#endif
 
 static u32 length(const char *s)
 {
@@ -56,7 +93,7 @@ static u32 length(const char *s)
 
 static void put(int fd, const char *s)
 {
-    sys(4, fd, (i32)s, (i32)length(s));
+    sys(SYS_WRITE, fd, (word)s, (word)length(s));
 }
 
 static void putNumber(int fd, u32 v)
@@ -78,17 +115,17 @@ static void die(const char *why, const char *what)
     put(2, why);
     put(2, what);
     put(2, "\n");
-    sys(1, 127, 0, 0);
+    sys(SYS_EXIT, 127, 0, 0);
 }
 
 struct Time {
-    i32 sec, nsec;
+    word sec, nsec;
 };
 
 static struct Time now(void)
 {
     struct Time t;
-    sys(265, 1, (i32)&t, 0); // clock_gettime(CLOCK_MONOTONIC)
+    sys(SYS_CLOCK_GETTIME, 1, (word)&t, 0); // CLOCK_MONOTONIC
     return t;
 }
 
@@ -100,7 +137,7 @@ static char commandLine[512];
 static STDCALL void ExitProcess(u32 code)
 {
     struct Time t = now();
-    i32 sec = t.sec - started.sec, nsec = t.nsec - started.nsec;
+    word sec = t.sec - started.sec, nsec = t.nsec - started.nsec;
     if (nsec < 0)
     {
         sec--;
@@ -128,18 +165,18 @@ static STDCALL void ExitProcess(u32 code)
     put(2, "native-exit ");
     putNumber(2, code);
     put(2, "\n");
-    sys(252, (i32)code, 0, 0); // exit_group
+    sys(SYS_EXIT_GROUP, (word)code, 0, 0);
 }
 
 static STDCALL void *GetStdHandle(u32 which)
 {
-    return (void *)(which == (u32)-12 ? 2 : 1);
+    return (void *)(word)(which == (u32)-12 ? 2 : 1);
 }
 
 static STDCALL int WriteFile(void *file, const void *bytes, u32 count, u32 *written, void *overlapped)
 {
     (void)overlapped;
-    sys(4, (i32)file, (i32)bytes, (i32)count);
+    sys(SYS_WRITE, (word)file, (word)bytes, (word)count);
     if (written)
     {
         *written = count;
@@ -297,12 +334,12 @@ static STDCALL int MultiByteToWideChar(u32 codePage, u32 flags, const char *text
 
 /* ---- msvcrt ---- */
 
-static u32 crtStrlen(const char *text)
+static CDECL u32 crtStrlen(const char *text)
 {
     return length(text);
 }
 
-static int crtStrcmp(const char *a, const char *b)
+static CDECL int crtStrcmp(const char *a, const char *b)
 {
     while (*a && *a == *b)
     {
@@ -314,7 +351,7 @@ static int crtStrcmp(const char *a, const char *b)
     return d < 0 ? -1 : d > 0;
 }
 
-static char *crtStrcpy(char *to, const char *from)
+static CDECL char *crtStrcpy(char *to, const char *from)
 {
     char *d = to;
     while ((*d++ = *from++))
@@ -323,10 +360,20 @@ static char *crtStrcpy(char *to, const char *from)
     return to;
 }
 
-static int crtSprintf(char *to, const char *format, ...)
+#if WIDE
+#define VA_LIST __builtin_ms_va_list
+#define VA_START __builtin_ms_va_start
+#define VA_END __builtin_ms_va_end
+#else
+#define VA_LIST __builtin_va_list
+#define VA_START __builtin_va_start
+#define VA_END __builtin_va_end
+#endif
+
+static CDECL int crtSprintf(char *to, const char *format, ...)
 {
-    __builtin_va_list args;
-    __builtin_va_start(args, format);
+    VA_LIST args;
+    VA_START(args, format);
     char *o = to;
     for (const char *f = format; *f; f++)
     {
@@ -376,22 +423,22 @@ static int crtSprintf(char *to, const char *format, ...)
         }
     }
     *o = 0;
-    __builtin_va_end(args);
+    VA_END(args);
     return (int)(o - to);
 }
 
-static void *crtMalloc(u32 bytes)
+static CDECL void *crtMalloc(u32 bytes)
 {
     return allocate(bytes);
 }
 
-static void crtFree(void *block)
+static CDECL void crtFree(void *block)
 {
     (void)block;
 }
 
-typedef int (*Compare)(const void *, const void *);
-static void crtQsort(void *base, u32 count, u32 size, Compare compare)
+typedef int (CDECL *Compare)(const void *, const void *);
+static CDECL void crtQsort(void *base, u32 count, u32 size, Compare compare)
 {
     u8 *a = (u8 *)base;
     u8 t[64];
@@ -482,7 +529,7 @@ __attribute__((used)) static void run(int argc, char **argv)
     {
         die("usage: peload <bench.exe> <workload> [iterations]", "");
     }
-    i32 fd = sys(5, (i32)argv[1], 0, 0);
+    word fd = sys(SYS_OPEN, (word)argv[1], 0, 0);
     if (fd < 0)
     {
         die("cannot open ", argv[1]);
@@ -490,14 +537,14 @@ __attribute__((used)) static void run(int argc, char **argv)
     u32 size = 0;
     for (;;)
     {
-        i32 n = sys(3, fd, (i32)(file + size), (i32)(sizeof file - size));
+        word n = sys(SYS_READ, fd, (word)(file + size), (word)(sizeof file - size));
         if (n <= 0)
         {
             break;
         }
         size += (u32)n;
     }
-    sys(6, fd, 0, 0);
+    sys(SYS_CLOSE, fd, 0, 0);
 
     const u8 *pe = file + rd32(file + 0x3c);
     if (rd32(pe) != 0x4550)
@@ -507,14 +554,21 @@ __attribute__((used)) static void run(int argc, char **argv)
     u32 sections = rd16(pe + 6);
     u32 optionalSize = rd16(pe + 20);
     const u8 *opt = pe + 24;
+    // A PE32+ (magic 0x20b) keeps an 8-byte base and its directories 16 bytes later.
+    int plus = rd16(opt) == 0x20b;
+    if (plus != WIDE)
+    {
+        die(WIDE ? "not a PE32+ (peload64 runs the x64 build): " : "a PE32+ (run peload64): ",
+            argv[1]);
+    }
     u32 entry = rd32(opt + 16);
-    u32 base = rd32(opt + 28);
+    word base = (word)rd32(opt + (plus ? 24 : 28));
     u32 imageSize = rd32(opt + 56);
     u32 headersSize = rd32(opt + 60);
-    u32 importRva = rd32(opt + 96 + 8);
+    u32 importRva = rd32(opt + (plus ? 112 : 96) + 8);
 
     u8 *image = (u8 *)mapFixed(base, (imageSize + 0xfff) & ~0xfffu);
-    if ((u32)image != base)
+    if ((word)image != base)
     {
         die("cannot map the image at its base", "");
     }
@@ -534,10 +588,11 @@ __attribute__((used)) static void run(int argc, char **argv)
     for (const u8 *d = image + importRva; rd32(d + 12); d += 20)
     {
         u32 names = rd32(d) ? rd32(d) : rd32(d + 16);
-        u32 *iat = (u32 *)(image + rd32(d + 16));
-        for (const u32 *thunk = (const u32 *)(image + names); *thunk; thunk++, iat++)
+        // A thunk is a pointer's width: the low half names the import by its hint and name.
+        word *iat = (word *)(image + rd32(d + 16));
+        for (const word *thunk = (const word *)(image + names); *thunk; thunk++, iat++)
         {
-            const char *name = (const char *)(image + *thunk + 2);
+            const char *name = (const char *)(image + (u32)*thunk + 2);
             void *bound = 0;
             for (u32 b = 0; b < sizeof BINDINGS / sizeof *BINDINGS; b++)
             {
@@ -550,7 +605,7 @@ __attribute__((used)) static void run(int argc, char **argv)
             {
                 die("no native binding for ", name);
             }
-            *iat = (u32)bound;
+            *iat = (word)bound;
         }
     }
 
@@ -571,10 +626,20 @@ __attribute__((used)) static void run(int argc, char **argv)
     *o = 0;
 
     started = now();
-    ((void (*)(void))(image + entry))();
+    // Called as Windows calls an entry point: under x64, with the home space its convention gives.
+    ((void (STDCALL *)(void))(image + entry))();
     die("the entry point returned", "");
 }
 
+#if WIDE
+__asm__(".globl _start\n"
+        "_start:\n"
+        "  mov (%rsp), %rdi\n"
+        "  lea 8(%rsp), %rsi\n"
+        "  and $-16, %rsp\n"
+        "  call run\n"
+        "  hlt\n");
+#else
 __asm__(".globl _start\n"
         "_start:\n"
         "  mov (%esp), %eax\n"
@@ -584,3 +649,4 @@ __asm__(".globl _start\n"
         "  push %eax\n"
         "  call run\n"
         "  hlt\n");
+#endif

@@ -13,6 +13,7 @@
  */
 
 import { EINVAL } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ErrorHost
@@ -38,6 +39,9 @@ const MESSAGES = [
     'Resource deadlock avoided', 'Unknown error', 'Filename too long', 'No locks available',
     'Function not implemented', 'Directory not empty', 'Illegal byte sequence',
 ];
+
+/** How many messages there are: `_sys_nerr`. */
+export const SYSTEM_ERRORS = MESSAGES.length;
 
 /** What an errno says. @param {number} code */
 export const messageOf = code=>MESSAGES[code] ?? 'Unknown error';
@@ -112,6 +116,7 @@ export function createErrorFunctions(host){
 
         /** char *strerror(int errnum) */
         strerror: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -137,10 +142,11 @@ export function createErrorFunctions(host){
         strerror_s: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, code])=>{
                 const room = size >>> 0;
-                if ((buffer >>> 0) === 0 || room === 0)
+                if (wholeAddress(buffer) === 0 || room === 0)
                 {
                     host.setErrno(EINVAL);
                     return EINVAL;

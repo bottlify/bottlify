@@ -21,14 +21,12 @@
  * count among its outputs too: that is what Windows answers for one that
  * writes oC# from v#.
  *
- * The token layout is the documented one (shader-asm.js says it in full): an
- * instruction token has bit 31 clear, its parameters set; from model 2 bits 24
- * to 27 count the tokens that follow. Before model 2 the count is the run of
- * parameter tokens, but for `def`, `defi` and `defb`, whose literals are bare.
+ * The function is walked an instruction at a time (`common/shader-tokens.js`).
  */
 
-const END_TOKEN = 0x0000ffff;
-const COMMENT_OP = 0xfffe;
+import { COMMENT_OPCODE, END_TOKEN, MOST_TOKENS, tokensAfter } from '../common/shader-tokens.js';
+import { wholeAddress } from '../common/pointers.js';
+
 const OP_DCL = 31;
 const OP_DEFB = 47;
 const OP_DEFI = 48;
@@ -38,48 +36,13 @@ const OP_DEF = 81;
 const REG = { TEMP: 0, INPUT: 1, TEXTURE: 3, RASTOUT: 4, ATTROUT: 5, OUTPUT: 6, DEPTHOUT: 9 };
 
 /** D3DDECLUSAGE. */
-export const USAGE = { POSITION: 0, PSIZE: 4, TEXCOORD: 5, COLOR: 10, FOG: 11, DEPTH: 12 };
+const USAGE = { POSITION: 0, PSIZE: 4, TEXCOORD: 5, COLOR: 10, FOG: 11, DEPTH: 12 };
 
 /** oPos, oFog, oPts: the RASTOUT registers by number. */
 const RASTOUT_USAGE = [USAGE.POSITION, USAGE.FOG, USAGE.PSIZE];
 
-/** The most tokens a walk reads: a pointer to anything but a shader ends here. */
-const MOST_TOKENS = 1 << 18;
-
 /** @param {number} token */
 const registerType = token=>((token >>> 28) & 7) | ((token >>> 8) & 0x18);
-
-/**
- * The tokens after an instruction token.
- *
- * @param {(index: number) => number} token @param {number} at @param {number} major
- */
-function lengthAt(token, at, major){
-    const instruction = token(at);
-    const opcode = instruction & 0xffff;
-    if (opcode === COMMENT_OP)
-    {
-        return (instruction >>> 16) & 0x7fff;
-    }
-    if (major >= 2)
-    {
-        return (instruction >>> 24) & 0xf;
-    }
-    if (opcode === OP_DEF || opcode === OP_DEFI)
-    {
-        return 5;
-    }
-    if (opcode === OP_DEFB)
-    {
-        return 2;
-    }
-    let length = 0;
-    while (at + 1 + length < MOST_TOKENS && (token(at + 1 + length) & 0x80000000) !== 0)
-    {
-        length++;
-    }
-    return length;
-}
 
 /**
  * The semantics of a shader's bytecode, in the order Windows gives them.
@@ -88,7 +51,7 @@ function lengthAt(token, at, major){
  * @param {boolean} output  the semantics it writes, rather than those it reads
  * @returns {{ usage: number, index: number }[] | null}  null for a stream that is no shader
  */
-export function shaderSemantics(token, output){
+function shaderSemantics(token, output){
     const version = token(0);
     const kind = version >>> 16;
     if (kind !== 0xfffe && kind !== 0xffff)
@@ -131,8 +94,8 @@ export function shaderSemantics(token, output){
             at += 3;
             continue;
         }
-        const length = lengthAt(token, at, major);
-        const defines = opcode === COMMENT_OP || opcode === OP_DEF || opcode === OP_DEFI
+        const length = tokensAfter(token, at, major);
+        const defines = opcode === COMMENT_OPCODE || opcode === OP_DEF || opcode === OP_DEFI
             || opcode === OP_DEFB;
         for (let p = 1; p <= (declared || defines ? 0 : length); p++)
         {
@@ -195,7 +158,7 @@ export function createShaderSemantics(host){
     const D3DXERR_INVALIDDATA = 0x88760b59;
     /** @param {number} at */
     const readU32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /**
@@ -209,7 +172,7 @@ export function createShaderSemantics(host){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const found = shaderSemantics(index=>readU32((code >>> 0) + index * 4), output);
+            const found = shaderSemantics(index=>readU32(wholeAddress(code) + index * 4), output);
             if (found === null)
             {
                 return D3DXERR_INVALIDDATA;
@@ -222,11 +185,11 @@ export function createShaderSemantics(host){
                     view.setUint32(i * 8, usage, true);
                     view.setUint32(i * 8 + 4, index, true);
                 });
-                host.writeMemory(semantics >>> 0, bytes);
+                host.writeMemory(wholeAddress(semantics), bytes);
             }
             if ((count >>> 0) !== 0)
             {
-                host.writeMemory(count >>> 0, Uint8Array.of(found.length, 0, 0, 0));
+                host.writeMemory(wholeAddress(count), Uint8Array.of(found.length, 0, 0, 0));
             }
             return D3D_OK;
         },
@@ -251,7 +214,7 @@ export function createShaderSemantics(host){
         D3DXGetShaderVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code])=>((code >>> 0) === 0 ? 0 : readU32(code >>> 0)),
+            handler: ([code])=>(wholeAddress(code) === 0 ? 0 : readU32(wholeAddress(code))),
         },
     };
 }

@@ -21,8 +21,9 @@
  */
 
 import { D3D_OK, DDERR_INVALIDPARAMS } from './constants.js';
-import { D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS } from '../d3d8/constants.js';
+import { D3DFOG, D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { bitsFloat } from '../../../system/floats.js';
 
 /** D3DVOP: what ProcessVertices is asked to do. */
 export const D3DVOP = Object.freeze({
@@ -48,6 +49,8 @@ const DEGENERATE_DEPTH = 0.001;
  * @property {{ x: number, y: number, width: number, height: number,
  *   minDepth: number, maxDepth: number }} viewport
  * @property {(state: number) => number} renderState
+ * @property {boolean} [normalsByWorld]  A device of Direct3D 1 to 6: a normal moves
+ *           by the world and view matrices themselves, not their inverse transpose.
  * @property {any[]} lights    The enabled ones, as D3DLIGHT7.
  * @property {any} material
  *
@@ -164,7 +167,13 @@ function reach(light, position){
     const distance = Math.sqrt(dot(offset, offset));
     const toLight = unit(offset);
     let scale = 0;
-    if (distance <= light.Range)
+    if (distance <= light.Range && light.Legacy === true)
+    {
+        // A Direct3D 1-6 light falls off over the share of its range left.
+        const left = (light.Range - distance) / light.Range;
+        scale = light.Attenuation0 + light.Attenuation1 * left + light.Attenuation2 * left * left;
+    }
+    else if (distance <= light.Range)
     {
         const denominator = light.Attenuation0 + light.Attenuation1 * distance
             + light.Attenuation2 * distance * distance;
@@ -191,15 +200,17 @@ function reach(light, position){
  *
  * @param {ProcessMemory} memory @param {VertexSource} source @param {string} name
  * @param {number} count @param {number} bytes  what is read of each vertex's
+ * @param {number} [skip]  bytes past the attribute's start where the read begins
  * @returns {{ view: DataView, step: number } | null}
  */
-function streamOf(memory, source, name, count, bytes){
-    const first = count > 0 ? source.addressOf(name, 0) : null;
-    if (first === null)
+function streamOf(memory, source, name, count, bytes, skip = 0){
+    const at = count > 0 ? source.addressOf(name, 0) : null;
+    if (at === null)
     {
         return null;
     }
-    const step = count > 1 ? /** @type {number} */ (source.addressOf(name, 1)) - first : 0;
+    const first = at + skip;
+    const step = count > 1 ? /** @type {number} */ (source.addressOf(name, 1)) - at : 0;
     const span = memory.readMemory(first, (count - 1) * step + bytes);
     return { view: new DataView(span.buffer, span.byteOffset, span.byteLength), step };
 }
@@ -257,9 +268,13 @@ export function processVertices(request){
     const view = state.transform(D3DTS.VIEW);
     const projection = state.transform(D3DTS.PROJECTION);
     const blend = state.renderState(D3DRS.VERTEXBLEND);
-    // The weights a vertex carries, up to as many as the state blends by; a
-    // vertex without them is carried by the world matrix alone.
-    const weights = blend >= 1 && blend <= 3 ? Math.min(blend, from.blendWeights) : 0;
+    // The weights a vertex carries, up to as many as the state blends by. A
+    // format with none is read as if it had them right after the position,
+    // whatever bytes are there (Wine's test_process_vertices, as Windows
+    // answers it).
+    const carriedWeights = from.blendWeights;
+    const weights = blend >= 1 && blend <= 3
+        ? (carriedWeights > 0 ? Math.min(blend, carriedWeights) : blend) : 0;
     const worldViews = Array.from({ length: weights + 1 },
         (_, index)=>multiply(state.transform(D3DTS.WORLD + index), view));
 
@@ -271,7 +286,13 @@ export function processVertices(request){
     // What only lighting reads, made only for a lit draw: inverting matrices
     // and carrying lights into camera space for an unlit one was work nothing
     // saw, every call.
-    const normalMatrices = lighting ? worldViews.map(matrix=>invert(matrix)) : [];
+    // A matrix laid out as the inverse is read below: for Direct3D 1 to 6
+    // the transpose of the matrix itself, which moves a row vector as the
+    // matrix moves a direction (`normalMatrixFor`).
+    const normalMatrices = !lighting ? [] : state.normalsByWorld
+        ? worldViews.map(matrix=>Array.from({ length: 16 },
+            (_, at)=>matrix[(at % 4) * 4 + Math.floor(at / 4)]))
+        : worldViews.map(matrix=>invert(matrix));
     const lights = lighting ? state.lights.map(light=>({
         ...light,
         cameraDirection: transform([light.Direction.x, light.Direction.y, light.Direction.z, 0],
@@ -280,6 +301,28 @@ export function processVertices(request){
             view).slice(0, 3),
     })) : [];
     const specularOn = state.renderState(D3DRS.SPECULARENABLE) !== 0;
+    // The vertex fog factor, which Direct3D writes as the specular colour's
+    // alpha, by the camera-space depth -- or the distance, with range fog --
+    // under the vertex fog mode; the table mode plays no part (Wine's
+    // test_fog_process_vertices). Without vertex fog the alpha is the
+    // material's.
+    const fogMode = state.renderState(D3DRS.FOGENABLE) !== 0
+        ? state.renderState(D3DRS.FOGVERTEXMODE) : D3DFOG.NONE;
+    const fogStart = bitsFloat(state.renderState(D3DRS.FOGSTART));
+    const fogEnd = bitsFloat(state.renderState(D3DRS.FOGEND));
+    const fogDensity = bitsFloat(state.renderState(D3DRS.FOGDENSITY));
+    const rangeFog = state.renderState(D3DRS.RANGEFOGENABLE) !== 0;
+    /** @param {number} x @param {number} y @param {number} z @returns {number} 0 to 1 */
+    const fogOf = (x, y, z)=>{
+        const d = rangeFog ? Math.hypot(x, y, z) : z;
+        const f = fogMode === D3DFOG.LINEAR
+            ? (fogEnd === fogStart ? (d < fogEnd ? 1 : 0) : (fogEnd - d) / (fogEnd - fogStart))
+            : fogMode === D3DFOG.EXP ? Math.exp(-fogDensity * d)
+                : Math.exp(-((fogDensity * d) ** 2));
+        return Math.min(1, Math.max(0, f));
+    };
+    const vertexFog = fogMode === D3DFOG.LINEAR || fogMode === D3DFOG.EXP
+        || fogMode === D3DFOG.EXP2;
     const normalize = state.renderState(D3DRS.NORMALIZENORMALS) !== 0;
     const localViewer = state.renderState(D3DRS.LOCALVIEWER) !== 0;
     const colorVertex = state.renderState(D3DRS.COLORVERTEX) !== 0;
@@ -294,8 +337,9 @@ export function processVertices(request){
     // bytes a vertex at a time.
     const positions = /** @type {{ view: DataView, step: number }} */ (
         streamOf(memory, source, 'position', count, 12));
-    const weighting = weights > 0
-        ? streamOf(memory, source, 'blendWeight', count, weights * 4) : null;
+    const weighting = weights === 0 ? null : carriedWeights > 0
+        ? streamOf(memory, source, 'blendWeight', count, weights * 4)
+        : streamOf(memory, source, 'position', count, weights * 4, 12);
     const diffuses = streamOf(memory, source, 'diffuse', count, 4);
     const speculars = streamOf(memory, source, 'specular', count, 4);
     const normals = lighting || (copying && destNormal)
@@ -472,7 +516,8 @@ export function processVertices(request){
             {
                 const high = channels.map((channel, index)=>cs[channel] * specular[index]);
                 written.setUint32(at + destSpecular.offset,
-                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2], a: 0 }) : 0, true);
+                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2],
+                        a: vertexFog ? fogOf(c0, c1, c2) : cs.a }) : 0, true);
             }
         }
         else if (copying)

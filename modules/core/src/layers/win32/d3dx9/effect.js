@@ -29,7 +29,7 @@
  * them is seen by all.
  *
  * What differs from D3DX, and is said where it happens:
- * - A compiled effect (fx_2_0 bytecode) is read by `effect-binary.js`, less the
+ * - A compiled effect (fx_2_0 bytecode) is read by `effect-binary.js`, with the
  *   expressions fxc left to evaluate (a state's FXLC, a shader's preshader). The
  *   effect compiler reads only source, and its CompileEffect hands back this
  *   layer's own container -- the source, its macros and the files it included --
@@ -49,7 +49,10 @@ import { compileShader } from './hlsl-compile.js';
 import { PARAMETER, PC, PT, buildEffect, isSampler, isShader, isTexture } from './effect-model.js';
 import { FX_2_0, readCompiledEffect } from './effect-binary.js';
 import { COMPILED as SETTERS_IN_GUEST } from './effect-setters.x86.js';
+import { COMPILED as SETTERS_LONG } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
+import { wholeAddress } from '../common/pointers.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -81,7 +84,7 @@ class HeapFull extends RangeError {}
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /** D3DXFX_* flags. */
-export const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
+const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
     DONOTSAVESAMPLERSTATE: 4, NOT_CLONEABLE: 1 << 11, LARGEADDRESSAWARE: 1 << 17 });
 
 /**
@@ -139,7 +142,7 @@ export function nameHash(name){
  * Begin flags that choose one (D3DXFX_DONOTSAVESHADERSTATE and
  * D3DXFX_DONOTSAVESAMPLERSTATE, as a number of words).
  */
-export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
+const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
 
 /**
  * A pass's commit table, which CommitChanges in the guest walks
@@ -153,7 +156,7 @@ export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
  * a kind (`COMMIT_KIND`), the version that says it changed, the device
  * setter's slot, two arguments, the data, a mode and the setter's arity.
  */
-export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
+const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
     TRIGGERS: 16, STALE: 20, HEADER: 24, ENTRY: 32 });
 /**
  * A state expression's cell in guest memory: the word the state was last set
@@ -161,7 +164,7 @@ export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH
  * written since is dated later -- and the expression as a program the guest
  * works out again itself (`EXPRESSION`), zero for one that is the host's.
  */
-export const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
+const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
 /**
  * A state expression as the guest's Evaluate runs it (`effect-commit.js`): how
  * many inputs and instructions, where its registers are (doubles: the
@@ -173,14 +176,14 @@ export const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
  * instruction: opcode, inputs, components, whether the first input is one
  * component, the three inputs' registers and the output's.
  */
-export const EXPRESSION = Object.freeze({ INPUTS: 0, INSTRUCTIONS: 4, REGISTERS: 8, SLOTS: 12,
+const EXPRESSION = Object.freeze({ INPUTS: 0, INSTRUCTIONS: 4, REGISTERS: 8, SLOTS: 12,
     FIRST: 16, RESULT: 20, MODE: 24, HEADER: 28, INPUT: 20, INSTRUCTION: 32 });
 /**
  * How an expression's first output becomes the state's word, as `valueOf`
  * makes it: a float's bits, a bool's as a float, an int's as a float, a bool,
  * an int, a float truncated into a dword.
  */
-export const RESULT = Object.freeze({ FLOAT: 0, BOOL_FLOAT: 1, INT_FLOAT: 2, BOOL: 3, INT: 4,
+const RESULT = Object.freeze({ FLOAT: 0, BOOL_FLOAT: 1, INT_FLOAT: 2, BOOL: 3, INT: 4,
     FLOAT_DWORD: 5 });
 /**
  * The preshader operations the guest works out to the bit, by opcode, and
@@ -198,7 +201,7 @@ const EVALUATED = new Map([[256, 1], [257, 1], [259, 1], [260, 1], [262, 1], [26
  * from an int or bool parameter, or from a float one (mode bit 0 the state a
  * bool, bit 1 the parameter a bool).
  */
-export const COMMIT_KIND = Object.freeze({ WORDS: 1, BOOLS: 2, FLOAT_BOOLS: 3, INT_FLOATS: 4,
+const COMMIT_KIND = Object.freeze({ WORDS: 1, BOOLS: 2, FLOAT_BOOLS: 3, INT_FLOATS: 4,
     BOOL_FLOATS: 5, FLOAT_INTS: 6, STATE: 7, COPIED: 8, COPIED_FLOAT: 9 });
 
 /** The tag of this layer's own compiled effect: 'BTFX'. */
@@ -274,6 +277,7 @@ const COLOR_SCALE = 255;
  * @typedef {Object} EffectHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, which places the setters' x86-64.
  * @property {(address: number) => number} [readU32]  A word read in place.
  * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -352,6 +356,8 @@ const COLOR_SCALE = 255;
  * @property {boolean} ok
  * @property {number} tokensAt   A copy of the bytecode, for GetPassDesc.
  * @property {{ constant: Constant, param: Param }[]} bindings
+ * @property {import('./preshader.js').Preshader | null} preshader  Its constants
+ *     computed from parameters, set after the bindings.
  */
 
 /**
@@ -436,6 +442,10 @@ const COLOR_SCALE = 255;
  */
 export function createEffects(host, helpers, options = {}){
     const version = options.version ?? 43;
+    /** A 64-bit process, whose setters are their x86-64 (`effect-setters.js`). */
+    const long = host.pointerSize === 8;
+    /** @type {Record<string, any>} */
+    const setters = long ? SETTERS_LONG : SETTERS_IN_GUEST;
     /** Every handle any effect of this process handed out, to what it names. @type {Map<number, any>} */
     const handles = new Map();
     const { u32, putU32s, method, string } = createDeviceCalls(host);
@@ -528,19 +538,6 @@ export function createEffects(host, helpers, options = {}){
         const now = u32(clockAt);
         putU32(clockAt, now + 1);
         return now;
-    };
-    // One word seen both ways, so a conversion allocates nothing.
-    const bitsWord = new Uint32Array(1);
-    const floatWord = new Float32Array(bitsWord.buffer);
-    /** @param {number} value */
-    const asFloat = value=>{
-        bitsWord[0] = value >>> 0;
-        return floatWord[0];
-    };
-    /** @param {number} value */
-    const floatBits = value=>{
-        floatWord[0] = value;
-        return bitsWord[0];
     };
     /** A NUL-ended string, at most 4 KB. @param {number} at */
     const cString = at=>string(at);
@@ -776,7 +773,7 @@ export function createEffects(host, helpers, options = {}){
         {
             return word !== 0 ? 1 : 0;
         }
-        const value = from === PT.FLOAT ? asFloat(word) : from === PT.BOOL
+        const value = from === PT.FLOAT ? bitsFloat(word) : from === PT.BOOL
             ? (word !== 0 ? 1 : 0) : word | 0;
         if (to === PT.FLOAT)
         {
@@ -929,7 +926,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} count */
     const words = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, count * 4);
+        const bytes = host.readMemory(wholeAddress(at), count * 4);
         // One copy of the words in place of a call a word: every value an
         // effect is set comes through here, bone palettes of hundreds of words
         // among them, many times a frame. The guest's words are little-endian
@@ -1161,7 +1158,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 if (isColorVector(p))
                 {
-                    const [r, g, b, a] = wordsOf(p).map(asFloat);
+                    const [r, g, b, a] = wordsOf(p).map(bitsFloat);
                     let n = colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16);
                     if (p.model.rows * p.model.columns > 3)
                     {
@@ -1175,7 +1172,7 @@ export function createEffects(host, helpers, options = {}){
             arraySetter('SetIntArray', PT.INT),
             arrayGetter('GetIntArray', PT.INT),
             /** HRESULT SetFloat(D3DXHANDLE, FLOAT) */
-            { name: 'SetFloat', argBytes: 12, invoke: (object, [h, f])=>{
+            { name: 'SetFloat', argBytes: 12, floats: { 2: 'f32' }, invoke: (object, [h, f])=>{
                 const p = paramOf(of(object), h);
                 if (!p || p.model.elements || p.model.rows !== 1 || p.model.columns !== 1)
                 {
@@ -1209,7 +1206,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p.model.type === PT.INT && p.model.bytes === 4)
                 {
                     // A vector given to an int: a colour, packed ARGB.
-                    const [r, g, b, a] = v.map(asFloat);
+                    const [r, g, b, a] = v.map(bitsFloat);
                     writeWords(p, [(colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16)
                         + (colorByte(a) << 24)) >>> 0]);
                     return D3D_OK;
@@ -1231,7 +1228,7 @@ export function createEffects(host, helpers, options = {}){
                     putU32s(out, unpackColor(wordsOf(p)[0]).map(floatBits));
                     return D3D_OK;
                 }
-                host.writeMemory(out >>> 0, vectorBytes(p, 0));
+                host.writeMemory(wholeAddress(out), vectorBytes(p, 0));
                 return D3D_OK;
             } },
             /** HRESULT SetVectorArray(D3DXHANDLE, CONST D3DXVECTOR4 *, UINT Count) */
@@ -1413,7 +1410,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p && (out >>> 0) !== 0 && !p.model.elements && transpose
                     && (p.model.cls === PC.SCALAR || p.model.cls === PC.VECTOR))
                 {
-                    host.writeMemory(out >>> 0, matrixBytes(p, 0, false));
+                    host.writeMemory(wholeAddress(out), matrixBytes(p, 0, false));
                     return D3D_OK;
                 }
                 return p && (out >>> 0) !== 0 && !p.model.elements && isMatrix(p)
@@ -2022,7 +2019,7 @@ export function createEffects(host, helpers, options = {}){
      *
      * @param {Param} p @param {number[]} held @returns {number[]}
      */
-    const numbersIn = (p, held)=>held.map(word=>(p.model.type === PT.FLOAT ? asFloat(word)
+    const numbersIn = (p, held)=>held.map(word=>(p.model.type === PT.FLOAT ? bitsFloat(word)
         : p.model.type === PT.BOOL ? (word !== 0 ? 1 : 0) : word | 0));
 
     /** A parameter's numbers in its own type. @param {Param} p @returns {number[]} */
@@ -2228,6 +2225,79 @@ export function createEffects(host, helpers, options = {}){
             const result = yield* storeConstant(effect, shader, constant, param, thread);
             answer = result !== D3D_OK ? result : answer;
         }
+        const result = yield* applyPreshader(effect, pass, shader, all, thread);
+        return result !== D3D_OK ? result : answer;
+    };
+
+    /**
+     * The constants a shader's preshader computes from the parameters it
+     * reads, run when one of them changed: each register it wrote set, in runs
+     * of neighbours, after the constants set from parameters directly. An
+     * output register is the shader's constant register of that number, as
+     * Wine's d3dx9 sets them (its preshader evaluation informed this; nothing
+     * of it is copied).
+     *
+     * @param {EffectState} effect @param {Pass | null} pass @param {Shader} shader
+     * @param {boolean} all @param {any} thread
+     * @returns {Steps}
+     */
+    const applyPreshader = function*(effect, pass, shader, all, thread){
+        const program = shader.preshader;
+        if (!program || !(all || !pass || program.inputs.some(constant=>{
+            const p = effect.byName.get(constant.name);
+            return !!p && versionOf(p.store) > appliedOf(pass);
+        })))
+        {
+            return D3D_OK;
+        }
+        const out = program.outputs(constant=>{
+            const p = effect.byName.get(constant.name);
+            return p ? numbersOf(p) : null;
+        });
+        let answer = D3D_OK;
+        // D3DXREGISTER_SET: bool 0, int 1, float 2; a bool register one unit, the others four.
+        for (const [registerSet, table] of /** @type {[number, number[]][]} */ ([[2, out.float],
+            [1, out.int], [0, out.bool]]))
+        {
+            const per = registerSet === 0 ? 1 : 4;
+            /** @param {number} r */
+            const written = r=>{
+                for (let c = 0; c < per; c++)
+                {
+                    if (table[r * per + c] !== undefined)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const registers = Math.ceil(table.length / per);
+            for (let r = 0; r < registers;)
+            {
+                if (!written(r))
+                {
+                    r++;
+                    continue;
+                }
+                let end = r;
+                while (end < registers && written(end))
+                {
+                    end++;
+                }
+                const units = new Uint32Array((end - r) * per);
+                for (let i = 0; i < units.length; i++)
+                {
+                    const x = table[r * per + i] ?? 0;
+                    units[i] = registerSet === 2 ? floatBits(x) : x | 0;
+                }
+                const setter = CONSTANT_SETTERS[registerSet][shader.pixel ? 1 : 0];
+                const first = r;
+                const result = yield* withBytesStep(new Uint8Array(units.buffer), at=>set(effect,
+                    thread, setter, [first, at, end - first]));
+                answer = result !== D3D_OK ? result : answer;
+                r = end;
+            }
+        }
         return answer;
     };
 
@@ -2290,9 +2360,9 @@ export function createEffects(host, helpers, options = {}){
                 ? (type === PT.FLOAT ? word : floatBits(type === PT.BOOL ? (word !== 0 ? 1 : 0)
                     : word | 0))
                 : constant.set === 1
-                    ? (type === PT.FLOAT ? Math.trunc(asFloat(word)) | 0 : type === PT.BOOL
+                    ? (type === PT.FLOAT ? Math.trunc(bitsFloat(word)) | 0 : type === PT.BOOL
                         ? (word !== 0 ? 1 : 0) : word | 0)
-                    : ((type === PT.FLOAT ? asFloat(word) : word) !== 0 ? 1 : 0);
+                    : ((type === PT.FLOAT ? bitsFloat(word) : word) !== 0 ? 1 : 0);
         }
         const setter = CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0];
         return yield* withBytesStep(new Uint8Array(out.buffer, 0, units * 4), at=>set(effect,
@@ -2470,7 +2540,15 @@ export function createEffects(host, helpers, options = {}){
         if (walkAt < 0)
         {
             const code = /** @type {Uint8Array} */ (/** @type {any} */ (COMMIT_IN_GUEST).Walk.code);
-            walkAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
+            // A 64-bit process commits on the host: no Walk to call. The
+            // methods' x86-64 is built and held to their JavaScript
+            // (effect-commit.x64.js, effect-commit.test.js); it is bound once
+            // the gate against the host's commit runs over a 64-bit layout
+            // too, with a table refused there for SetNPatchMode (its FLOAT
+            // travels in XMM1, which Walk's integer call does not fill) and
+            // for a state manager, the one address in a table the program
+            // chose, which may lie past 4 GiB.
+            walkAt = host.heap && !long ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (walkAt !== 0)
             {
                 host.writeMemory(walkAt, code);
@@ -2483,8 +2561,7 @@ export function createEffects(host, helpers, options = {}){
     const placeResolve = ()=>{
         if (resolveAt < 0)
         {
-            const code = /** @type {Uint8Array} */ (/** @type {any} */ (SETTERS_IN_GUEST)
-                .Resolve.code);
+            const code = /** @type {Uint8Array} */ (/** @type {any} */ (setters).Resolve.code);
             resolveAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (resolveAt !== 0)
             {
@@ -2558,7 +2635,7 @@ export function createEffects(host, helpers, options = {}){
      * set, entry by entry in its order, for the entries the guest's walk can
      * say -- constants copied or made bools, states from an int's or a bool's
      * word, states an expression copies from a scalar -- or 0 for a pass with
-     * any other: a shader a parameter names, a structure's constants, a
+     * any other: a shader a parameter names or one with a preshader, a structure's constants, a
      * conversion through a float, a light or a material, an expression of more.
      *
      * @param {EffectState} effect @param {Pass} pass
@@ -2882,6 +2959,12 @@ export function createEffects(host, helpers, options = {}){
                 {
                     continue;
                 }
+                if (shader.preshader)
+                {
+                    // ponytail: the preshader runs on the host; its commits cross. A guest
+                    // run of it (the state expressions' interpreter here) when one is hot.
+                    return `${state.name}: a shader with a preshader`;
+                }
                 for (const { constant, param } of shader.bindings)
                 {
                     if (effect.skip.has(param.model.name))
@@ -3002,8 +3085,10 @@ export function createEffects(host, helpers, options = {}){
             }
             const shader = state.kind === 'vs' || state.kind === 'ps' ? shaderFor(effect, state)
                 : null;
-            return !!shader && shader.bindings.some(b=>b.param === root || (isSampler(
-                b.param.model.type) && b.param.model.samplers.some(list=>list && inStates(list))));
+            return !!shader && (shader.bindings.some(b=>b.param === root || (isSampler(
+                b.param.model.type) && b.param.model.samplers.some(list=>list && inStates(list))))
+                || (shader.preshader?.inputs.some(c=>effect.byName.get(c.name) === root)
+                    ?? false));
         });
         return t.passes.some(pass=>inStates(pass.model.states));
     };
@@ -3494,14 +3579,16 @@ export function createEffects(host, helpers, options = {}){
      * The setters with code in the guest given it: each slot holds the
      * compiled setter, whose cases it does not take jump to the method's own
      * trap, the host's setter. Placed once per slot. A setter left to the
-     * host says why, once each (`whyHost`).
+     * host says why, once each (`whyHost`). A 64-bit process places the
+     * setters' x86-64 (`wide`); CommitChanges and the passes have none and are
+     * traps there, as is a setter the build refused for 64 bits.
      *
      * @param {ComMethod[]} methods @returns {ComMethod[]}
      */
     function inGuest(methods){
         return methods.map(given=>{
-            const compiled = /** @type {Record<string, any>} */ ({ ...SETTERS_IN_GUEST,
-                ...COMMIT_IN_GUEST })[given.name];
+            const compiled = /** @type {Record<string, any>} */ (long ? setters
+                : { ...SETTERS_IN_GUEST, ...COMMIT_IN_GUEST })[given.name];
             if (!compiled || !host.heap)
             {
                 return given;
@@ -3522,7 +3609,7 @@ export function createEffects(host, helpers, options = {}){
             /** @type {Map<number, number>} */
             const placed = new Map();
             return /** @type {ComMethod} */ (/** @type {unknown} */ ({ ...m,
-                guest: (/** @type {{ trap: number }} */ { trap })=>{
+                guest: Object.assign((/** @type {{ trap: number }} */ { trap })=>{
                     const known = placed.get(trap);
                     if (known !== undefined)
                     {
@@ -3543,7 +3630,7 @@ export function createEffects(host, helpers, options = {}){
                     host.writeMemory(at, bytes);
                     placed.set(trap, at);
                     return at;
-                } }));
+                }, { wide: true }) }));
         });
     }
 
@@ -3869,7 +3956,8 @@ export function createEffects(host, helpers, options = {}){
      */
     const makeShader = async(effect, model, thread)=>{
         /** @type {Shader} */
-        const shader = { pointer: 0, pixel: model.pixel, ok: false, tokensAt: 0, bindings: [] };
+        const shader = { pointer: 0, pixel: model.pixel, ok: false, tokensAt: 0, bindings: [],
+            preshader: model.preshader ?? null };
         if (!model.tokens)
         {
             // Said with the compiler's own first error: a technique left
@@ -4377,7 +4465,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} size */
     const bytesAt = (at, size)=>((at >>> 0) === 0 ? null
-        : host.readMemory(at >>> 0, size >>> 0).slice());
+        : host.readMemory(wholeAddress(at), size >>> 0).slice());
 
     const exports = {
         /**
@@ -4454,7 +4542,7 @@ export function createEffects(host, helpers, options = {}){
         })),
         /** HRESULT D3DXCreateEffectPool(LPD3DXEFFECTPOOL *ppPool) */
         D3DXCreateEffectPool: { argBytes: 4, handler: (/** @type {number[]} */ [out])=>{
-            if ((out >>> 0) === 0 || !host.vtables)
+            if (wholeAddress(out) === 0 || !host.vtables)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4482,7 +4570,7 @@ export function createEffects(host, helpers, options = {}){
             bytes: bytesAt(data, size), defines, include, flags, out, errors }) },
         /** HRESULT D3DXDisassembleEffect(LPD3DXEFFECT, BOOL EnableColorCode, LPD3DXBUFFER *) */
         D3DXDisassembleEffect: { argBytes: 12, handler: (/** @type {number[]} */ [, , out])=>{
-            if ((out >>> 0) !== 0)
+            if (wholeAddress(out) !== 0)
             {
                 putU32(out, 0);
             }

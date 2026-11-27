@@ -94,13 +94,16 @@ test('the unsigned remainder is not the signed one', ()=>{
     assert.equal(answered(host, fns._aullrem.handler(pushed(-1n, 10n))), 5n);
 });
 
-test('dividing by zero is reported, not answered', ()=>{
-    // The processor would have trapped. There is no divisor to substitute that
-    // would not be an answer the program never computed.
+test('dividing by zero raises STATUS_INTEGER_DIVIDE_BY_ZERO in the guest, not an answer', ()=>{
+    // The processor would have trapped in the routine. There is no divisor to
+    // substitute that would not be an answer the program never computed.
     const fns = createIntegerFunctions(fakeHost());
-
-    assert.throws(()=>fns._alldiv.handler(pushed(1n, 0n)), /_alldiv/);
-    assert.throws(()=>fns._aullrem.handler(pushed(1n, 0n)), /_aullrem/);
+    for (const name of /** @type {const} */ (
+        ['_alldiv', '_allrem', '_aulldiv', '_aullrem', '_alldvrm', '_aulldvrm']))
+    {
+        assert.throws(()=>fns[name].handler(pushed(1n, 0n)),
+            (/** @type {any} */ e)=>e.code === 'GUEST_EXCEPTION' && e.status === 0xc0000094, name);
+    }
 });
 
 test('each helper pops both operands, sixteen bytes of them', ()=>{
@@ -215,7 +218,8 @@ test('the shifts take EDX:EAX and CL, and a count of 64 or more leaves the sign'
 });
 
 test('a division by zero faults in the guest, as the processor\'s div does', ()=>{
-    for (const name of ['_alldiv', '_allrem', '_aulldiv', '_aullrem', '_alldvrm', '_aulldvrm'])
+    for (const name of /** @type {const} */ (
+        ['_alldiv', '_allrem', '_aulldiv', '_aullrem', '_alldvrm', '_aulldvrm']))
     {
         const run = runCode(INTEGER_CODE[name], { stack: [...halves(12345n), ...halves(0n)] });
         assert.equal(run.halted, false, `${name} of 0 does not return`);

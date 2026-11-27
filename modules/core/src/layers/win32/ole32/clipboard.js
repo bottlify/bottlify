@@ -24,6 +24,7 @@ import { publishEnumerator } from './enumerator.js';
 import {
     DATADIR_GET, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, STGMEDIUM_SIZE, TYMED, createOleUtil,
 } from './oleutil.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -36,7 +37,6 @@ const CLIPBRD_E_CANT_OPEN = 0x800401d0 | 0;
 const CLIPBRD_E_CANT_EMPTY = 0x800401d1 | 0;
 const CLIPBRD_E_CANT_CLOSE = 0x800401d4 | 0;
 const DV_E_FORMATETC = 0x80040064 | 0;
-const DV_E_LINDEX = 0x80040068 | 0;
 const DV_E_TYMED = 0x80040069 | 0;
 const DV_E_CLIPFORMAT = 0x8004006a | 0;
 const OLE_E_ADVISENOTSUPPORTED = 0x80040003 | 0;
@@ -51,6 +51,17 @@ const CLSID_FORMAT_ENUMERATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0034}';
 
 /** How many formats user32's clipboard is read for, at most. */
 const MAX_FORMATS = 256;
+/**
+ * The two formats OLE adds to user32's clipboard beside the rendered ones:
+ * the window of the clipboard's owner, and the source's format list, which
+ * clipboard.c test_cf_dataobject lays out -- a header of six DWORDs (0, the
+ * block's size, 1, the count, 0, 0), then per format its FORMATETC, whether
+ * it is the first with its clipboard format, and two zeros.
+ */
+const CF_NAME_DATA_OBJECT = 'DataObject';
+const CF_NAME_PRIVATE_DATA = 'Ole Private Data';
+const PRIVATE_HEADER = 24;
+const PRIVATE_ENTRY = 32;
 
 /** @typedef {import('./oleutil.js').FormatEtc} FormatEtc */
 
@@ -88,6 +99,9 @@ export function createClipboardFunctions(env){
         {
             return [];
         }
+        // OLE's own formats describe the others, and are not offered.
+        const own = [await util.registerFormat(CF_NAME_DATA_OBJECT, thread),
+            await util.registerFormat(CF_NAME_PRIVATE_DATA, thread)];
         /** @type {FormatEtc[]} */
         const formats = [];
         let format = 0;
@@ -97,6 +111,10 @@ export function createClipboardFunctions(env){
             if (format === 0)
             {
                 break;
+            }
+            if (own.includes(format))
+            {
+                continue;
             }
             formats.push({ format, aspect: DVASPECT_CONTENT, lindex: -1,
                 tymed: util.tymedOf(format) });
@@ -151,6 +169,42 @@ export function createClipboardFunctions(env){
     };
 
     /**
+     * Puts OLE's own formats on the open clipboard: the owner's window --
+     * none, the clipboard being opened without one -- and the list of the
+     * source's formats.
+     *
+     * @param {FormatEtc[]} formats @param {unknown} thread
+     */
+    const publishOwn = async(formats, thread)=>{
+        const owner = await util.registerFormat(CF_NAME_DATA_OBJECT, thread);
+        const listed = await util.registerFormat(CF_NAME_PRIVATE_DATA, thread);
+        const size = PRIVATE_HEADER + formats.length * PRIVATE_ENTRY;
+        /** @type {[number, Uint8Array][]} */
+        const blocks = [[owner, new Uint8Array(4)], [listed, new Uint8Array(size)]];
+        const words = new DataView(blocks[1][1].buffer);
+        [0, size, 1, formats.length, 0, 0].forEach((value, index)=>
+            words.setUint32(index * 4, value, true));
+        formats.forEach((format, index)=>{
+            const at = PRIVATE_HEADER + index * PRIVATE_ENTRY;
+            words.setUint32(at, format.format & 0xffff, true);
+            words.setUint32(at + 8, format.aspect, true);
+            words.setInt32(at + 12, format.lindex, true);
+            words.setUint32(at + 16, format.tymed, true);
+            const first = formats.findIndex(other=>other.format === format.format) === index;
+            words.setUint32(at + 20, first ? 1 : 0, true);
+        });
+        for (const [format, bytes] of blocks)
+        {
+            const handle = format === 0 ? 0 : util.lend(bytes);
+            if (handle !== 0
+                && ((await user32('SetClipboardData', [format, handle], thread)) ?? 0) === 0)
+            {
+                env.heap.free(handle);
+            }
+        }
+    };
+
+    /**
      * Lets go of the source, as a flush or a new clipboard does; the reader
      * of the old state keeps what it took.
      *
@@ -192,29 +246,37 @@ export function createClipboardFunctions(env){
         };
         /**
          * A format checked as QueryGetData checks it, against what this state
-         * offers: the answer, and the format found.
+         * offers: the answer, and the format found. The medium is not
+         * looked at (clipboard.c test_get_clipboard: TYMED_FILE of a global
+         * format is S_OK); GetData looks at it.
          *
          * @param {number} at
-         * @returns {{ hr: number, wanted: FormatEtc }}
+         * @returns {{ hr: number, wanted: FormatEtc, offered?: FormatEtc }}
          */
         const check = at=>{
             const wanted = util.readFormat(at);
-            if (wanted.format === 0)
+            const offered = formats.find(format=>format.format === wanted.format);
+            if (wanted.lindex !== -1 || wanted.aspect !== DVASPECT_CONTENT)
+            {
+                return { hr: DV_E_FORMATETC, wanted };
+            }
+            if (wanted.format === 0 || !offered)
             {
                 return { hr: DV_E_CLIPFORMAT, wanted };
             }
-            if (wanted.lindex !== -1)
+            return { hr: S_OK, wanted, offered };
+        };
+        /**
+         * GetData's and GetDataHere's check: QueryGetData's, a format not
+         * offered being DV_E_FORMATETC, then the medium.
+         *
+         * @param {number} at
+         */
+        const checkMedium = at=>{
+            const { hr, wanted, offered } = check(at);
+            if (hr < 0 || !offered)
             {
-                return { hr: DV_E_LINDEX, wanted };
-            }
-            if (wanted.aspect !== DVASPECT_CONTENT)
-            {
-                return { hr: DV_E_FORMATETC, wanted };
-            }
-            const offered = formats.find(format=>format.format === wanted.format);
-            if (!offered)
-            {
-                return { hr: DV_E_FORMATETC, wanted };
+                return { hr: hr === DV_E_CLIPFORMAT ? DV_E_FORMATETC : hr, wanted };
             }
             return { hr: (offered.tymed & wanted.tymed) === 0 ? DV_E_TYMED : S_OK, wanted };
         };
@@ -254,13 +316,19 @@ export function createClipboardFunctions(env){
                             const source_ = await delegate(thread);
                             if (source_ !== 0)
                             {
-                                return (await env.callMethod(source_, SLOT.DATA_GET,
+                                // The source is asked whatever the format; what
+                                // it refuses is answered as the formats it
+                                // offered say (clipboard.c test_get_clipboard:
+                                // CF_RIFF, TYMED_FILE), and otherwise as it did.
+                                const hr = (await env.callMethod(source_, SLOT.DATA_GET,
                                     [format, medium], thread)) | 0;
+                                const offered = hr < 0 ? checkMedium(format >>> 0).hr : S_OK;
+                                return offered < 0 ? offered : hr;
                             }
-                            const { hr, wanted } = check(format >>> 0);
+                            const { hr, wanted } = checkMedium(format >>> 0);
                             if (hr < 0)
                             {
-                                return hr === DV_E_CLIPFORMAT ? DV_E_FORMATETC : hr;
+                                return hr;
                             }
                             const handle = await clipboardHandle(wanted.format, thread);
                             if (handle < 0)
@@ -291,10 +359,10 @@ export function createClipboardFunctions(env){
                                 return (await env.callMethod(source_, SLOT.DATA_GET_HERE,
                                     [format, medium], thread)) | 0;
                             }
-                            const { hr, wanted } = check(format >>> 0);
+                            const { hr, wanted } = checkMedium(format >>> 0);
                             if (hr < 0)
                             {
-                                return hr === DV_E_CLIPFORMAT ? DV_E_FORMATETC : hr;
+                                return hr;
                             }
                             const target = readU32(medium + 4);
                             if (readU32(medium) !== TYMED.HGLOBAL
@@ -307,13 +375,16 @@ export function createClipboardFunctions(env){
                             {
                                 return handle;
                             }
-                            const from = env.heap.block(handle)?.size ?? 0;
-                            const room = env.heap.block(target)?.size ?? 0;
-                            if (from > room)
+                            const from = util.globalBytes(handle);
+                            const to = util.globalBytes(target);
+                            if ((from?.size ?? 0) > (to?.size ?? 0))
                             {
                                 return STG_E_MEDIUMFULL;
                             }
-                            env.writeMemory(target, env.readMemory(handle, from).slice());
+                            if (from && to && from.size !== 0)
+                            {
+                                env.writeMemory(to.at, env.readMemory(from.at, from.size).slice());
+                            }
                             return S_OK;
                         },
                     },
@@ -329,9 +400,10 @@ export function createClipboardFunctions(env){
                             {
                                 return E_INVALIDARG;
                             }
-                            const copy = env.readMemory(format >>> 0, FORMATETC_SIZE).slice();
+                            const copy = env.readMemory(wholeAddress(format),
+                                FORMATETC_SIZE).slice();
                             copy.fill(0, 4, 8);
-                            env.writeMemory(out >>> 0, copy);
+                            env.writeMemory(wholeAddress(out), copy);
                             return DATA_S_SAMEFORMATETC;
                         },
                     },
@@ -363,6 +435,15 @@ export function createClipboardFunctions(env){
                     { name: 'EnumDAdvise', argBytes: 8, invoke: ()=>OLE_E_ADVISENOTSUPPORTED },
                 ],
             }],
+            // The source is let go of inside the last Release, waited for.
+            lastRelease: async()=>{
+                const held = state.held;
+                state.held = 0;
+                if (held !== 0)
+                {
+                    await release(held, env.callerThread());
+                }
+            },
             destroy: ()=>{
                 if (state.held !== 0)
                 {
@@ -405,15 +486,16 @@ export function createClipboardFunctions(env){
                     return CLIPBRD_E_CANT_EMPTY;
                 }
                 await drop(thread);
-                if ((data >>> 0) !== 0)
+                if (wholeAddress(data) !== 0)
                 {
-                    await env.callMethod(data >>> 0, SLOT.ADD_REF, [], thread);
-                    board.source = data >>> 0;
+                    await env.callMethod(wholeAddress(data), SLOT.ADD_REF, [], thread);
+                    board.source = wholeAddress(data);
                     board.owner = thread;
-                    board.formats = await util.formatsOf(data >>> 0, thread);
+                    board.formats = await util.formatsOf(wholeAddress(data), thread);
                     if (opened !== null)
                     {
-                        await render(data >>> 0, board.formats, thread);
+                        await render(wholeAddress(data), board.formats, thread);
+                        await publishOwn(board.formats, thread);
                     }
                 }
                 if (opened !== null && ((await user32('CloseClipboard', [], thread)) ?? 0) === 0)
@@ -435,7 +517,7 @@ export function createClipboardFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -494,7 +576,7 @@ export function createClipboardFunctions(env){
         OleIsCurrentClipboard: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([data])=>((data >>> 0) !== 0 && (data >>> 0) === board.source
+            handler: ([data])=>(wholeAddress(data) !== 0 && wholeAddress(data) === board.source
                 ? S_OK : S_FALSE),
         },
     };

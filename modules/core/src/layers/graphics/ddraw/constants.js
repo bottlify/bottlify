@@ -47,7 +47,13 @@ export const DDERR_SURFACEBUSY = dderr(430);
 export const DDERR_SURFACELOST = dderr(450);
 export const DDERR_SURFACENOTATTACHED = dderr(460);
 export const DDERR_NOCLIPPERATTACHED = dderr(568);
+/** DDERR_NOCLIPLIST: a clipper with neither a window nor a list of its own. */
+export const DDERR_NOCLIPLIST = dderr(205);
+/** E_FAIL: a clipper whose window is gone. */
+export const E_FAIL = 0x80004005 | 0;
 export const DDERR_HWNDALREADYSET = dderr(571);
+export const DDERR_NOHWND = dderr(569);
+export const DDERR_NOFOCUSWINDOW = dderr(602);
 export const DDERR_CLIPPERISUSINGHWND = dderr(567);
 export const DDERR_NOPALETTEATTACHED = dderr(572);
 export const DDERR_EXCLUSIVEMODEALREADYSET = dderr(581);
@@ -77,6 +83,24 @@ export const DDBLT_KEYSRCOVERRIDE = 0x00010000;
 export const DDBLT_COLORFILL = 0x00000400;
 export const DDBLT_DEPTHFILL = 0x02000000;
 export const DDBLT_WAIT = 0x01000000;
+/** DDBLT_ROP and DDBLT_DDFX: a raster operation and effects from the DDBLTFX. */
+export const DDBLT_ROP = 0x00020000;
+export const DDBLT_DDFX = 0x00000800;
+/** DDBLTFX_MIRRORLEFTRIGHT and DDBLTFX_MIRRORUPDOWN, the effects a blit makes. */
+export const DDBLTFX_MIRRORLEFTRIGHT = 0x00000002;
+export const DDBLTFX_MIRRORUPDOWN = 0x00000004;
+/** The raster operations a blit makes: BLACKNESS, WHITENESS and SRCCOPY. */
+export const ROP = Object.freeze({ BLACKNESS: 0x00000042, WHITENESS: 0x00ff0062,
+    SRCCOPY: 0x00cc0020 });
+/** DDFXCAPS_BLTMIRRORLEFTRIGHT and DDFXCAPS_BLTMIRRORUPDOWN. */
+export const DDFXCAPS_BLTMIRRORLEFTRIGHT = 0x00000020;
+export const DDFXCAPS_BLTMIRRORUPDOWN = 0x00000040;
+/** DDERR_NORASTEROPHW: a raster operation the device does not make. */
+export const DDERR_NORASTEROPHW = dderr(280);
+/** DDERR_BLTFASTCANTCLIP: BltFast to a surface with a clipper. */
+export const DDERR_BLTFASTCANTCLIP = dderr(574);
+/** DDERR_INVALIDPIXELFORMAT: a format the device does not make surfaces of. */
+export const DDERR_INVALIDPIXELFORMAT = dderr(145);
 
 /** BltFast flags. */
 export const DDBLTFAST_NOCOLORKEY = 0x00000000;
@@ -167,15 +191,18 @@ export const DDSD_DEPTH = 0x00800000;
 export const DDPF_ALPHAPIXELS = 0x00000001;
 export const DDPF_ALPHA = 0x00000002;
 export const DDPF_FOURCC = 0x00000004;
-export const DDPF_PALETTEINDEXED4 = 0x00000008;
+/** The compressed formats a surface may be, by FOURCC: DXT1 to DXT5, 'DXT1' little-endian. */
+export const DXT_CODES = Object.freeze([0x31545844, 0x32545844, 0x33545844, 0x34545844,
+    0x35545844]);
+const DDPF_PALETTEINDEXED4 = 0x00000008;
 export const DDPF_PALETTEINDEXEDTO8 = 0x00000010;
 export const DDPF_PALETTEINDEXED8 = 0x00000020;
 export const DDPF_RGB = 0x00000040;
 export const DDPF_COMPRESSED = 0x00000080;
 export const DDPF_YUV = 0x00000200;
 export const DDPF_ZBUFFER = 0x00000400;
-export const DDPF_PALETTEINDEXED1 = 0x00000800;
-export const DDPF_PALETTEINDEXED2 = 0x00001000;
+const DDPF_PALETTEINDEXED1 = 0x00000800;
+const DDPF_PALETTEINDEXED2 = 0x00001000;
 export const DDPF_STENCILBUFFER = 0x00004000;
 export const DDPF_LUMINANCE = 0x00020000;
 
@@ -190,16 +217,24 @@ export const DDPCAPS_8BIT = 0x00000004;
 export const DDPCAPS_INITIALIZE = 0x00000008;
 export const DDPCAPS_PRIMARYSURFACE = 0x00000010;
 export const DDPCAPS_ALLOW256 = 0x00000040;
+/** A palette whose entries' flags are each texel's alpha: a texture's alone. */
+export const DDPCAPS_ALPHA = 0x00000400;
 export const DDPCAPS_1BIT = 0x00000100;
 export const DDPCAPS_2BIT = 0x00000200;
 
 /** SetCooperativeLevel flags. */
 export const DDSCL_FULLSCREEN = 0x00000001;
+export const DDSCL_ALLOWREBOOT = 0x00000002;
 export const DDSCL_NORMAL = 0x00000008;
+export const DDSCL_NOWINDOWCHANGES = 0x00000004;
 export const DDSCL_EXCLUSIVE = 0x00000010;
 export const DDSCL_SETFOCUSWINDOW = 0x00000080;
+export const DDSCL_SETDEVICEWINDOW = 0x00000100;
+export const DDSCL_CREATEDEVICEWINDOW = 0x00000200;
 export const DDSCL_ALLOWMODEX = 0x00000040;
 export const DDSCL_MULTITHREADED = 0x00000400;
+export const DDSCL_FPUSETUP = 0x00000800;
+export const DDSCL_FPUPRESERVE = 0x00001000;
 
 /** Lock and Flip flags this layer has an opinion about. */
 export const DDLOCK_READONLY = 0x00000010;

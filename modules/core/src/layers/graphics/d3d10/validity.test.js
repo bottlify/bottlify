@@ -7,13 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_USAGE, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE,
-    E_INVALIDARG, S_OK,
+    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_RESOURCE_MISC, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS,
+    DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, S_OK,
 } from './constants.js';
 import {
     RESOURCE_ACCESS, backBufferUsage, bindFlagsForUsage, bufferCreateResult,
     formatAllowsBind, fullMipChainLength, highestAccessibleBuffer, resolveViewFormat,
-    resourceAccessResult, swapChainDescResult, usageRequiresCpuAccess,
+    resourceAccessResult, swapChainDescResult, textureCreateResult, usageRequiresCpuAccess,
 } from './validity.js';
 
 const CPU_ACCESS_CASES = [
@@ -135,6 +135,26 @@ test('a format decides which bind flags a texture may carry', ()=>{
     }
 });
 
+test('a texture GDI draws into is a default BGRA render target (test_getdc, d3d11.c)', ()=>{
+    const caps = { multisampleQualityLevels: ()=>1 };
+    /** @param {any} change */
+    const created = change=>textureCreateResult({ Width: 64, Height: 64, MipLevels: 1,
+        ArraySize: 1, Format: DXGI_FORMAT.B8G8R8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 },
+        Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE,
+        CPUAccessFlags: 0, MiscFlags: D3D10_RESOURCE_MISC.GDI_COMPATIBLE, ...change }, 2, caps,
+    false);
+    assert.equal(created({}), S_OK);
+    assert.equal(created({ Format: DXGI_FORMAT.B8G8R8A8_TYPELESS }), S_OK);
+    assert.equal(created({ Format: DXGI_FORMAT.B8G8R8A8_UNORM_SRGB }), S_OK);
+    assert.equal(created({ Format: DXGI_FORMAT.R8G8B8A8_UNORM }), E_INVALIDARG);
+    assert.equal(created({ Format: DXGI_FORMAT.B8G8R8X8_UNORM }), E_INVALIDARG);
+    assert.equal(created({ BindFlags: D3D10_BIND.SHADER_RESOURCE }), E_INVALIDARG);
+    assert.equal(created({ Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ }), E_INVALIDARG);
+    assert.equal(created({ MiscFlags: 0, Format: DXGI_FORMAT.R8G8B8A8_UNORM }), S_OK);
+});
+
 test('a view names a type, and only one its resource can be cast to', ()=>{
     // A typed resource inherits its own format when the view names none.
     assert.equal(
@@ -154,10 +174,17 @@ test('a view names a type, and only one its resource can be cast to', ()=>{
     // A typeless view format names no type either way round.
     assert.equal(
         resolveViewFormat(DXGI_FORMAT.D24_UNORM_S8_UINT, DXGI_FORMAT.R24G8_TYPELESS), null);
-    // A typed resource may not be reinterpreted, even within its family.
+    // A typed resource may not be reinterpreted, even within its family
+    // (test_create_shader_resource_view's invalid descriptions)...
     assert.equal(
-        resolveViewFormat(DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UINT),
-        DXGI_FORMAT.R8G8B8A8_UINT);
+        resolveViewFormat(DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UINT), null);
+    assert.equal(
+        resolveViewFormat(DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB), null);
+    // ...but for a swap chain's buffer, as its sRGB twin.
+    assert.equal(resolveViewFormat(DXGI_FORMAT.R8G8B8A8_UNORM,
+        DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, true), DXGI_FORMAT.R8G8B8A8_UNORM_SRGB);
+    assert.equal(resolveViewFormat(DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UINT,
+        true), null);
 });
 
 test('a full mip chain is as long as the largest extent takes to reach one', ()=>{
@@ -276,6 +303,7 @@ test('a swap chain usage word and a bind flag word are the same idea', ()=>{
     assert.equal(bindFlagsForUsage(0), 0);
     assert.equal(bindFlagsForUsage(DXGI_USAGE.RENDER_TARGET_OUTPUT), D3D10_BIND.RENDER_TARGET);
     assert.equal(bindFlagsForUsage(DXGI_USAGE.SHADER_INPUT), D3D10_BIND.SHADER_RESOURCE);
+    assert.equal(bindFlagsForUsage(DXGI_USAGE.UNORDERED_ACCESS), D3D11_BIND_UNORDERED_ACCESS);
     assert.equal(
         bindFlagsForUsage(DXGI_USAGE.SHADER_INPUT | DXGI_USAGE.RENDER_TARGET_OUTPUT),
         D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET);

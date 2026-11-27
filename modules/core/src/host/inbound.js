@@ -23,7 +23,7 @@
  * posted message, so the two channels keep the page's order.
  */
 
-import { openRing } from '../system/ring.js';
+import { RingClosed, openRing } from '@bottlify/cellar';
 import { textOf } from '../system/codec.js';
 
 /** The inbound ring's size: input arrives in bursts of a few hundred bytes a message. */
@@ -37,19 +37,32 @@ const encoder = new TextEncoder();
  *
  * A message the ring refuses waits, and so does anything posted after it,
  * until room appears: a post that overtook a queued record would reach the
- * engine before what the page sent first.
+ * engine before what the page sent first. The wait is the ring's own on the
+ * event loop (`writeWaitingAsync`), woken when the engine reads.
  *
- * @param {import('../system/ring.js').RingMemory} memory
- * @param {(retry: () => void) => void} [later]  how a full ring is looked at again
+ * @param {import('@bottlify/cellar').RingMemory} memory
  */
-export function createInboundWriter(memory, later = retry=>setTimeout(retry, 1)){
+export function createInboundWriter(memory){
     const ring = openRing(memory);
     /** @type {(Uint8Array | (() => void))[]} */
     const queued = [];
-    let retrying = false;
+    let waiting = false;
     const flush = ()=>{
-        retrying = false;
-        while (queued.length > 0)
+        try
+        {
+            write();
+        }
+        catch (e){
+            // The engine closed the ring: what it would have read goes nowhere.
+            if (!(e instanceof RingClosed))
+            {
+                throw e;
+            }
+            queued.length = 0;
+        }
+    };
+    const write = ()=>{
+        while (queued.length > 0 && !waiting)
         {
             const next = queued[0];
             if (typeof next === 'function')
@@ -58,14 +71,21 @@ export function createInboundWriter(memory, later = retry=>setTimeout(retry, 1))
             }
             else if (!ring.write(next))
             {
-                break;
+                waiting = true;
+                ring.writeWaitingAsync(next).then(written=>{
+                    waiting = false;
+                    if (written)
+                    {
+                        queued.shift();
+                    }
+                    flush();
+                }, ()=>{
+                    // The engine closed the ring: what it would have read goes nowhere.
+                    queued.length = 0;
+                });
+                return;
             }
             queued.shift();
-        }
-        if (queued.length > 0 && !retrying)
-        {
-            retrying = true;
-            later(flush);
         }
     };
     return {
@@ -87,13 +107,15 @@ export function createInboundWriter(memory, later = retry=>setTimeout(retry, 1))
 /**
  * The engine's side: every message in the ring, handed on in order.
  *
- * @param {import('../system/ring.js').RingMemory} memory
+ * @param {import('@bottlify/cellar').RingMemory} memory
  * @param {(message: any) => void} receive
  */
 export function createInboundReader(memory, receive){
     const ring = openRing(memory);
     return {
         bell: ring.bell,
+        /** Ends the ring: the page's writes after it go nowhere, and its reader is rung. */
+        close: ()=>ring.close(),
         /** @returns {number} how many messages there were */
         drain: ()=>ring.drain(bytes=>receive(JSON.parse(textOf(bytes)))),
     };

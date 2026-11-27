@@ -68,8 +68,7 @@ async function bundleOf(files, emptyDirectories = [], options = {}){
 
 test('a block is compressed only when that is worth doing', ()=>{
     const packed = packBlock(compressible(1 << 16));
-    assert.ok(packed.codec === Codec.DEFLATE_RAW || packed.codec === Codec.ZSTD,
-        'both are tried and the smaller is kept');
+    assert.equal(packed.codec, Codec.DEFLATE_RAW, 'deflate is the one codec written');
     assert.ok(packed.bytes.length < 1000, 'a run of one byte should collapse');
 
     // Random data cannot be compressed, and deflate makes it very slightly
@@ -158,7 +157,8 @@ test('a bundle verifies against the digests it was written with', async()=>{
     });
 
     const clean = await verifyBundle(output);
-    assert.deepEqual(clean, { checked: 2, bad: [] });
+    assert.deepEqual({ ...clean, blocksChecked: clean.blocksChecked > 0 },
+        { checked: 2, blocksChecked: true, badBlocks: [], bad: [] });
 
     // A byte flipped inside the data has to be found. The offset is past the
     // header and inside the first block, which is stored, so the change lands
@@ -168,7 +168,10 @@ test('a bundle verifies against the digests it was written with', async()=>{
     await writeFile(output, bytes);
 
     const damaged = await verifyBundle(output);
-    assert.equal(damaged.bad.length, 1, 'the corrupt file is named');
+    assert.equal(damaged.bad.length, 1, 'the corrupt file is named, once');
+    // Found by its block's checksum too, which is all a bundle written in
+    // place records: its files carry no digest.
+    assert.deepEqual(damaged.badBlocks, [0]);
     await cleanup();
 });
 
@@ -212,7 +215,9 @@ test('a bundle carries a translation seed beside its files, out of the volume', 
         plain.bundle.list().map((/** @type {any} */ file)=>file.path), 'not a file');
     assert.equal(carrying.summary.sha256, plain.summary.sha256,
         'the game\'s digest is the game\'s');
-    assert.deepEqual(await verifyBundle(carrying.output), { checked: 2, bad: [] });
+    const verified = await verifyBundle(carrying.output);
+    assert.deepEqual({ ...verified, blocksChecked: verified.blocksChecked > 0 },
+        { checked: 2, blocksChecked: true, badBlocks: [], bad: [] });
 
     // The engine's own reader: the entry, and each block's decoded length.
     const bytes = await readFile(carrying.output);

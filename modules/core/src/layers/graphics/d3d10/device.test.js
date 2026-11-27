@@ -14,13 +14,13 @@ import {
     D3D10_MAP, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_SRV_DIMENSION, D3D10_STENCIL_OP,
     D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
-    E_INVALIDARG, IID, S_FALSE, S_OK,
+    E_INVALIDARG, IID, S_FALSE, S_OK, D3D11_DSV_FLAG,
 } from './constants.js';
-import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from './device.js';
+import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain, D3D11CreateDevice } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
 import {
-    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret, solidPixelShader, utof,
-    v,
+    assemble, dclInputSiv, dclOutput, dclOutputSiv, dclResourceRaw, ldRaw, l, o,
+    passThroughVertexShader, quadDomainShader, ret, solidPixelShader, t, utof, v,
 } from './shader-fixtures.js';
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 
@@ -1800,7 +1800,7 @@ test('private data is kept per object and an interface entry holds a reference',
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.deepEqual(device.GetPrivateData(guid, { size: 8, wantsData: true }),
-        { hr: S_OK, size: 4, object: null });
+        { hr: S_OK, size: 4, object: null, pointer: 0 });
 
     const other = createDevice();
     const before = other.refCount;
@@ -1817,11 +1817,12 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(device.SetPrivateData(guid, 42, null), S_OK);
     assert.equal(device.SetPrivateData(guid, 42, null), S_FALSE);
 
-    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    assert.equal(device.SetPrivateDataInterface(guid, other, 0x1234), S_OK);
     const answered = device.GetPrivateData(guid, { size: 8, wantsData: true });
     assert.equal(answered.hr, S_OK);
     assert.equal(answered.size, 4);
     assert.equal(answered.object, other);
+    assert.equal(answered.pointer, 0x1234, 'the pointer it was given, through its interface');
     assert.equal(other.refCount, before + 2, 'reading takes a reference for the caller');
     other.release();
 
@@ -1840,7 +1841,13 @@ test('private data is kept per object and an interface entry holds a reference',
     assert.equal(texture.SetPrivateData(guid, 2, Uint8Array.from([7, 8])), S_OK);
     assert.deepEqual(texture.GetPrivateData(guid, { size: 2, wantsData: true }),
         { hr: S_OK, size: 2, data: Uint8Array.from([7, 8]) });
+    // An object gone lets go of the interfaces it held (test_private_data).
+    const kept = other.refCount;
+    assert.equal(texture.SetPrivateDataInterface('{87654321-1234-1234-1234-123456789ABC}',
+        other), S_OK);
+    assert.equal(other.refCount, kept + 1);
     texture.release();
+    assert.equal(other.refCount, kept, 'the texture gone, its reference with it');
 
     assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
     assert.equal(other.refCount, before);
@@ -1871,6 +1878,92 @@ test('a format reports what it can be used for, and an unknown one fails', ()=>{
     assert.equal(device.CheckFormatSupport(DXGI_FORMAT.D24_UNORM_S8_UINT, out), S_OK);
     assert.ok(/** @type {number} */ (out.support) & 0x10000, 'a depth stencil');
     assertFullyReleased(device);
+});
+
+test('a GPU without texture-formats-tier1 is claimed no 8-bit snorm target, and has the 16-bit'
+    + ' normalised textures and targets in floats; with it, all of them', ()=>{
+    /** @param {any} device @param {number} format */
+    const support = (device, format)=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK);
+        return /** @type {number} */ (out.support);
+    };
+    const [TEXTURE2D, RENDER_TARGET] = [0x20, 0x4000];
+    const core = createDevice({ formatsTier1: false, rg11b10Renderable: false });
+    assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & TEXTURE2D, 'sampled still');
+    assert.equal(support(core, DXGI_FORMAT.R8G8B8A8_SNORM) & RENDER_TARGET, 0);
+    for (const format of [DXGI_FORMAT.R16G16B16A16_UNORM, DXGI_FORMAT.R16_UNORM,
+        DXGI_FORMAT.R16G16_SNORM])
+    {
+        assert.equal(support(core, format) & (TEXTURE2D | RENDER_TARGET),
+            TEXTURE2D | RENDER_TARGET, `${format} kept in floats`);
+    }
+    assert.equal(support(core, DXGI_FORMAT.R11G11B10_FLOAT) & RENDER_TARGET, 0);
+    assert.ok(support(core, DXGI_FORMAT.R8G8B8A8_UNORM) & RENDER_TARGET);
+    assertFullyReleased(core);
+    const tier1 = createDevice({ formatsTier1: true });
+    for (const format of [DXGI_FORMAT.R8G8B8A8_SNORM, DXGI_FORMAT.R16G16B16A16_UNORM,
+        DXGI_FORMAT.R16G16B16A16_SNORM, DXGI_FORMAT.R11G11B10_FLOAT])
+    {
+        assert.equal(support(tier1, format) & (TEXTURE2D | RENDER_TARGET),
+            TEXTURE2D | RENDER_TARGET, `${format}`);
+    }
+    assertFullyReleased(tier1);
+});
+
+test('a level 11 device answers support for a format as Wine test_format_support sees Windows'
+    + ' do: no format is E_FAIL with none written, and snorm blends from 10.1', ()=>{
+    /** @param {number} level */
+    const device11 = level=>{
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: false };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        return out.device;
+    };
+    /** @param {any} device @param {number} format */
+    const asked = (device, format)=>device.CheckFeatureSupport(2,
+        new Uint8Array(Uint32Array.of(format, 0xdeadbeef).buffer));
+    const BLENDABLE = 0x8000;
+    const ten = device11(D3D_FEATURE_LEVEL.LEVEL_10_0);
+    const none = asked(ten, 0xffffffff);
+    assert.equal(none.hr, E_FAIL);
+    assert.equal(new Uint32Array(none.data.buffer)[1], 0, 'none written as none');
+    const rgba = asked(ten, DXGI_FORMAT.R8G8B8A8_UNORM);
+    assert.equal(rgba.hr, S_OK);
+    /** @type {{ support?: number }} */
+    const held = {};
+    ten.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_UNORM, held);
+    assert.equal(new Uint32Array(rgba.data.buffer)[1], held.support,
+        'the same as CheckFormatSupport');
+    ten.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_SNORM, held);
+    assert.equal(/** @type {number} */ (held.support) & BLENDABLE, 0, 'not blended at 10.0');
+    const eleven = device11(D3D_FEATURE_LEVEL.LEVEL_11_0);
+    eleven.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_SNORM, held);
+    assert.ok(/** @type {number} */ (held.support) & BLENDABLE, 'blended at 11.0');
+});
+
+test('a multisampled texture may name the standard or centre pattern for its quality from'
+    + ' level 10.1, as Wine\'s test_standard_pattern makes one', ()=>{
+    /** @param {number} level @param {number} quality */
+    const made = (level, quality)=>{
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: false };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        /** @type {{ resource?: any }} */
+        const texture = {};
+        const hr = out.device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+            Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 4, Quality: quality },
+            Usage: 0, BindFlags: 0x20 | 0x8, CPUAccessFlags: 0, MiscFlags: 0 }, null, texture);
+        texture.resource?.release();
+        out.device.release();
+        return hr;
+    };
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_11_0, 0xffffffff), S_OK, 'the standard pattern');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_10_1, 0xfffffffe), S_OK, 'the centre pattern');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_10_0, 0xffffffff), E_INVALIDARG, 'not at 10.0');
+    assert.equal(made(D3D_FEATURE_LEVEL.LEVEL_11_0, 7), E_INVALIDARG,
+        'a level past the ones it has');
 });
 
 test('the compressed, packed and typeless formats report what this device does with them', ()=>{
@@ -2107,6 +2200,59 @@ test('a layout of no elements feeds a vertex shader that reads only system value
     assertFullyReleased(device);
 });
 
+test('Direct3D 11 refuses a null element array, and a slot fed both per vertex and per'
+    + ' instance (test_create_input_layout)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const device = out.device;
+    const vertexId = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    });
+    /** @type {{ layout?: any }} */
+    const made = {};
+    assert.equal(device.CreateInputLayout(null, vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([], vertexId, made), S_OK);
+    made.layout.release();
+    const element = { SemanticName: 'TEXCOORD', SemanticIndex: 0, Format: 6, InputSlot: 0,
+        AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 };
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        AlignedByteOffset: 12, InputSlotClass: 1 }], vertexId, made), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([element, { ...element, SemanticIndex: 1,
+        InputSlot: 1, InputSlotClass: 1 }], vertexId, made), S_OK, 'each slot its own');
+    made.layout.release();
+    device.release();
+});
+
+test('a layout made against a pixel shader feeds its position too: the vertex and instance'
+    + ' ids alone are made by the input assembler', ()=>{
+    const device = createDevice();
+    const pixel = solidPixelShaderReadingPosition();
+    /** @type {{ layout?: any }} */
+    const out = {};
+    assert.equal(device.CreateInputLayout([], pixel, out), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([{ SemanticName: 'SV_Position', SemanticIndex: 0,
+        Format: DXGI_FORMAT.R32G32B32A32_FLOAT, InputSlot: 0, AlignedByteOffset: 0,
+        InputSlotClass: 0, InstanceDataStepRate: 0 }], pixel, out), S_OK);
+    out.layout.release();
+    assertFullyReleased(device);
+});
+
+/** A pixel shader whose signature reads SV_POSITION. */
+function solidPixelShaderReadingPosition(){
+    return assemble({
+        kind: SHADER_KIND.PIXEL,
+        inputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [dclOutputSiv(o(0), SYSTEM_VALUE.TARGET), ret()],
+    });
+}
+
 test('multisample quality levels answer as Windows does at the edges'
     + ' (test_check_multisample_quality_levels, d3d10core.c:10613-10679)', ()=>{
     const device = createDevice();
@@ -2293,4 +2439,609 @@ test('the multisample bits follow the quality levels: a four-sample target, reso
         RENDERTARGET, 'depth is drawn at four samples and never resolved');
     assert.equal(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & (RESOLVE | RENDERTARGET | LOAD), 0);
     assertFullyReleased(device);
+});
+
+test('a Direct3D 10 device keeps the rasterizer state it binds past the last release, and'
+    + ' nothing else', ()=>{
+    const device = createDevice();
+    /** @type {{ state?: any }} */
+    const rasterizer = {};
+    assert.equal(device.CreateRasterizerState(RASTERIZER_DESC, rasterizer), S_OK);
+    device.RSSetState(rasterizer.state);
+    assert.equal(rasterizer.state.release(), 0);
+    /** @type {{ state?: any }} */
+    const got = {};
+    device.RSGetState(got);
+    assert.equal(got.state, rasterizer.state, 'the same object, still alive');
+    assert.equal(got.state.release(), 0);
+    /** @type {{ state?: any }} */
+    const sampler = {};
+    assert.equal(device.CreateSamplerState(SAMPLER_DESC, sampler), S_OK);
+    device.PSSetSamplers(0, [sampler.state]);
+    assert.equal(sampler.state.release(), 0);
+    /** @type {{ samplers?: any[] }} */
+    const samplers = {};
+    device.PSGetSamplers(0, 1, samplers);
+    assert.deepEqual(samplers.samplers, [null], 'a sampler goes with its last release');
+    device.ClearState();
+    assertFullyReleased(device);
+});
+
+test('a device asked for video support is refused as one without it: no video device stands'
+    + ' behind it yet (decision A80, temporary; test_video_support, d3d11.c:37722)', ()=>{
+    for (const [adapter, driverType] of /** @type {[any, number][]} */ ([[null, 1], [{}, 0]]))
+    {
+        /** @type {any} */
+        const out = { wantDevice: true, wantContext: true };
+        assert.equal(D3D11CreateDevice(adapter, driverType, null, 0x800, null, out, {}),
+            0x887a0004);
+        assert.equal(out.device, null);
+    }
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 0, null, 0x800, null, out, {}), 0x80070057,
+        'an unknown driver with no adapter is a bad argument before anything else');
+});
+
+test('from level 11 stream output may follow the domain shader: a stage of no shader of its own,'
+    + ' as a vertex shader\'s is', ()=>{
+    const entries = [{ Stream: 0, SemanticName: 'SV_POSITION', SemanticIndex: 0,
+        StartComponent: 0, ComponentCount: 4, OutputSlot: 0 }];
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    /** @type {{ shader?: any }} */
+    const made = {};
+    assert.equal(eleven.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
+        [16], 0, made), S_OK);
+    assert.equal(made.shader.passThrough, true);
+    made.shader.release();
+    eleven.device.release();
+    /** @type {any} */
+    const ten = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    assert.equal(ten.device.CreateGeometryShaderWithStreamOutput(quadDomainShader(), entries,
+        [16], 0, made), 0x80070057, 'level 10 has no domain shader');
+    ten.device.release();
+});
+
+test('an update of a subresource the resource does not have, or of a box past it, is ignored'
+    + ' and says so', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
+    const texture = createTexture2D(device, { Width: 4, Height: 4 });
+    device.UpdateSubresource(texture, 9, null, new Uint8Array(64), 16, 0);
+    device.UpdateSubresource(texture, 0, { left: 0, top: 0, front: 0, right: 8, bottom: 1,
+        back: 1 }, new Uint8Array(64), 32, 0);
+    assert.ok(divergences.some(line=>line.includes('a subresource the resource does not have')),
+        divergences.join('\n'));
+    assert.ok(divergences.some(line=>line.includes('a box past its subresource')),
+        divergences.join('\n'));
+    texture.release();
+});
+
+test('an update\'s pitch of zero reads every row from the same bytes'
+    + ' (test_copy_subresource_region)', async()=>{
+    const device = createDevice();
+    const texture = createTexture2D(device, { Width: 4, Height: 4 });
+    device.UpdateSubresource(texture, 0, null, new Uint8Array(16).fill(0x45), 0, 0);
+    const staging = createTexture2D(device, { Width: 4, Height: 4,
+        Usage: D3D10_USAGE.STAGING, BindFlags: 0, CPUAccessFlags: D3D10_CPU_ACCESS.READ });
+    device.CopyResource(staging, texture);
+    /** @type {{ data?: Uint8Array }} */
+    const mapped = {};
+    assert.equal(await staging.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+    assert.deepEqual([...(mapped.data ?? new Uint8Array(0)).subarray(0, 64)],
+        new Array(64).fill(0x45), 'all four rows the one row given');
+    staging.Unmap(0);
+    staging.release();
+    texture.release();
+});
+
+test('a device asked for with the debug layer is refused as on a Windows without its Graphics'
+    + ' Tools (decision A81)', ()=>{
+    /** @type {any} */
+    const eleven = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0x2, null, eleven, {}), 0x887a002d);
+    assert.equal(eleven.device, null);
+    /** @type {any} */
+    const ten = {};
+    assert.equal(D3D10CreateDevice(null, 0, null, 0x2, 29, ten, {}), 0x887a002d);
+    assert.equal(ten.device, null);
+});
+
+test('from level 10.1 a copy moves compressed blocks into texels as big, and back, each counted'
+    + ' in its own format (test_compressed_format_compatibility, d3d11.c:29631)', ()=>{
+    /** @type {any} */
+    const made = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], made, {}), S_OK);
+    const device = made.device;
+    /**
+     * @param {number} format @param {number} width @param {number} height
+     * @param {Uint8Array} bytes
+     */
+    const texture = (format, width, height, bytes)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D, Width: width, Height: height, Format: format,
+            Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        }, [{ pSysMem: bytes }], out), S_OK);
+        return out.resource;
+    };
+    /** @param {any} resource */
+    const contents = resource=>{
+        /** @type {{ data?: Uint8Array | null }} */
+        const mapped = {};
+        assert.equal(resource.Map(0, D3D10_MAP.READ, 0, mapped), S_OK);
+        const bytes = [.../** @type {Uint8Array} */ (mapped.data)];
+        resource.Unmap(0);
+        return bytes;
+    };
+    const texels = Uint8Array.from({ length: 32 }, (_, at)=>at + 1);
+    const zeros = new Uint8Array(32);
+    // 8x8 texels of BC1 are 2x2 blocks of 8 bytes, as 2x2 texels of R16G16B16A16 are.
+    const blocks = texture(DXGI_FORMAT.BC1_UNORM, 8, 8, texels);
+    const plain = texture(DXGI_FORMAT.R16G16B16A16_UINT, 2, 2, zeros);
+    device.CopyResource(plain, blocks);
+    assert.deepEqual(contents(plain), [...texels], 'the whole resource, block for texel');
+    const back = texture(DXGI_FORMAT.BC1_TYPELESS, 8, 8, zeros);
+    device.CopySubresourceRegion(back, 0, 4, 4, 0, plain, 0,
+        { left: 0, top: 0, front: 0, right: 1, bottom: 1, back: 1 });
+    assert.deepEqual(contents(back), [...zeros.subarray(0, 24), ...texels.subarray(0, 8)],
+        'one texel into the last block, at (4, 4) in the target\'s texels');
+    const narrow = texture(DXGI_FORMAT.R8G8B8A8_UINT, 4, 2, zeros);
+    device.CopyResource(narrow, blocks);
+    assert.deepEqual(contents(narrow), [...zeros], 'a texel smaller than a block takes none');
+    for (const resource of [blocks, plain, back, narrow])
+    {
+        resource.release();
+    }
+});
+
+test('a shader resource view over a subresource bound as a target is set as none and unbound'
+    + ' when the target is bound; another level of the texture, or a depth aspect the depth view'
+    + ' keeps read-only, stays (test_sample_attached_rtv, d3d11.c:32684)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true, wantContext: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    const { device, context } = out;
+    /** @type {any} */
+    const made = {};
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 2, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.RENDER_TARGET, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const texture = made.resource;
+    assert.equal(device.CreateRenderTargetView(texture, { Format: DXGI_FORMAT.R8G8B8A8_UNORM,
+        ViewDimension: 4, MipSlice: 0 }, made), S_OK);
+    const target = made.view;
+    /** @param {number} mip */
+    const levelView = mip=>{
+        assert.equal(device.CreateShaderResourceView(texture, { Format:
+            DXGI_FORMAT.R8G8B8A8_UNORM, ViewDimension: 4, MostDetailedMip: mip, MipLevels: 1 },
+        made), S_OK);
+        return made.view;
+    };
+    const top = levelView(0);
+    const second = levelView(1);
+    /** @returns {any[]} */
+    const bound = ()=>{
+        /** @type {any} */
+        const got = {};
+        context.PSGetShaderResources(0, 2, got);
+        const views = got.views;
+        views.forEach((/** @type {any} */ view)=>view?.Release?.());
+        return views;
+    };
+    context.PSSetShaderResources(0, [top, second]);
+    context.OMSetRenderTargets([target], null);
+    assert.deepEqual(bound(), [null, second], 'level 0 unbound with its target; level 1 kept');
+    context.PSSetShaderResources(0, [top, second]);
+    assert.deepEqual(bound(), [null, second], 'set while a target, set as none');
+    context.OMSetRenderTargets([], null);
+    context.PSSetShaderResources(0, [top]);
+    assert.deepEqual(bound(), [top, second]);
+
+    assert.equal(device.CreateTexture2D({ Width: 8, Height: 8, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R24G8_TYPELESS, SampleDesc: { Count: 1, Quality: 0 }, Usage: 0,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE | D3D10_BIND.DEPTH_STENCIL, CPUAccessFlags: 0,
+        MiscFlags: 0 }, null, made), S_OK);
+    const depthTexture = made.resource;
+    /** @param {number} format */
+    const aspectView = format=>{
+        assert.equal(device.CreateShaderResourceView(depthTexture, { Format: format,
+            ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 }, made), S_OK);
+        return made.view;
+    };
+    const depthRead = aspectView(DXGI_FORMAT.R24_UNORM_X8_TYPELESS);
+    const stencilRead = aspectView(DXGI_FORMAT.X24_TYPELESS_G8_UINT);
+    for (const [flags, kept] of /** @type {[number, any[]][]} */ ([
+        [0, [null, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH, [depthRead, null]],
+        [D3D11_DSV_FLAG.READ_ONLY_STENCIL, [null, stencilRead]],
+        [D3D11_DSV_FLAG.READ_ONLY_DEPTH | D3D11_DSV_FLAG.READ_ONLY_STENCIL,
+            [depthRead, stencilRead]],
+    ]))
+    {
+        assert.equal(device.CreateDepthStencilView(depthTexture, { Format:
+            DXGI_FORMAT.D24_UNORM_S8_UINT, ViewDimension: 3, Flags: flags, MipSlice: 0 },
+        made), S_OK);
+        context.OMSetRenderTargets([], null);
+        context.PSSetShaderResources(0, [depthRead, stencilRead]);
+        context.OMSetRenderTargets([], made.view);
+        assert.deepEqual(bound(), kept, `flags ${flags}`);
+    }
+});
+
+test('an input element\'s offset is a whole number of its channels, up to a word'
+    + ' (test_input_layout_alignment, d3d11.c:19406)', ()=>{
+    /** @type {any} */
+    const out = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, {}), S_OK);
+    /** @param {number} first @param {number} second @param {number} offset */
+    const made = (first, second, offset)=>out.device.CreateInputLayout([
+        { SemanticName: 'POSITION', SemanticIndex: 0, Format: first, InputSlot: 0,
+            AlignedByteOffset: 0, InputSlotClass: 0, InstanceDataStepRate: 0 },
+        { SemanticName: 'COLOR', SemanticIndex: 0, Format: second, InputSlot: 0,
+            AlignedByteOffset: offset, InputSlotClass: 0, InstanceDataStepRate: 0 },
+    ], passThroughVertexShader(), {});
+    const F = DXGI_FORMAT;
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 2), S_OK);
+    assert.equal(made(F.R8_UINT, F.R16_UINT, 1), E_INVALIDARG);
+    assert.equal(made(F.R8_UINT, F.R8_UINT, 1), S_OK);
+    assert.equal(made(F.R16_UINT, F.R32_UINT, 2), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 17), E_INVALIDARG);
+    assert.equal(made(F.R32G32B32_FLOAT, F.R32G32B32A32_FLOAT, 20), S_OK);
+});
+
+test('a shader model 4 program that reads raw memory is refused below level 11, where no'
+    + ' device here computes through shader model 4 (test_unaligned_raw_buffer_access)', ()=>{
+    const raw = assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResourceRaw(0),
+            dclOutput(o(0)),
+            ldRaw(o(0, 'x'), l(0), t(0)),
+            ret(),
+        ],
+    });
+    /** @param {number} level @param {Uint8Array} code */
+    const made = (level, code)=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+        /** @type {{ shader?: any }} */
+        const shader = {};
+        const hr = out.device.CreatePixelShader(code, shader);
+        shader.shader?.release();
+        out.device.release();
+        return hr;
+    };
+    /** @type {any} */
+    const ten = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xa000], ten, {}), S_OK);
+    const answer = ten.device.CheckFeatureSupport(4, new Uint8Array(4));
+    ten.device.release();
+    assert.deepEqual([answer.hr, ...answer.data], [S_OK, 0, 0, 0, 0],
+        'no compute through shader model 4');
+    assert.equal(made(0xa000, raw), E_INVALIDARG);
+    assert.equal(made(0xa100, raw), E_INVALIDARG);
+    assert.equal(made(0xb000, raw), S_OK);
+    assert.equal(made(0xa000, solidPixelShader([1, 0, 0, 1])), S_OK);
+});
+
+test('doubles are there at shader model 5: D3D11_FEATURE_DOUBLES is true at 11.0, not at 10.x',
+    ()=>{
+        /** @param {number} level */
+        const doubles = level=>{
+            /** @type {any} */
+            const out = { wantDevice: true };
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            const answer = out.device.CheckFeatureSupport(1, new Uint8Array(4));
+            out.device.release();
+            return [answer.hr, answer.data[0]];
+        };
+        assert.deepEqual(doubles(0xb000), [S_OK, 1]);
+        assert.deepEqual(doubles(0xa100), [S_OK, 0]);
+        /** D3D11_OPTIONS' ExtendedDoublesShaderInstructions, its thirteenth word. @param {number} level */
+        const extended = level=>{
+            /** @type {any} */
+            const out = { wantDevice: true };
+            assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, {}), S_OK);
+            const answer = out.device.CheckFeatureSupport(5, new Uint8Array(14 * 4));
+            out.device.release();
+            /** @type {number[]} */
+            const words = [...answer.data];
+            return [answer.hr, words[12 * 4], words.reduce((sum, one)=>sum + one, 0)];
+        };
+        assert.deepEqual(extended(0xb000), [S_OK, 1, 1], 'the extended doubles, and nothing else');
+        assert.deepEqual(extended(0xa100), [S_OK, 0, 0]);
+    });
+
+test('a texture made shared is opened by another device of the same root over the same'
+    + ' bytes, by the kind of handle it was made for (test_shared_resource)', async()=>{
+    const options = {};
+    /** @param {number} [level] */
+    const device11 = (level = 0xb000)=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, options), S_OK);
+        return out.device;
+    };
+    const one = device11();
+    const two = device11(0xa000);
+    /** @param {number} misc @param {number} misc11 */
+    const made = (misc, misc11)=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = one.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            MiscFlags: misc, MiscFlags11: misc11 }, null, out);
+        return { hr, resource: out.resource ?? null };
+    };
+    const SHARED = 0x2;
+    const KEYED = 0x10;
+    const NT = 0x800;
+    assert.equal(made(SHARED | KEYED, 0).hr, E_INVALIDARG, 'one way of sharing');
+    assert.equal(made(0, NT).hr, E_INVALIDARG, 'an NT handle names a share');
+    assert.equal(made(SHARED | KEYED, NT).hr, E_INVALIDARG);
+
+    const plain = made(0, 0).resource;
+    /** @type {{ handle?: number }} */
+    const none = {};
+    assert.equal(plain.GetSharedHandle(none), S_OK);
+    assert.equal(none.handle, 0, 'no handle for a texture not shared');
+    assert.ok(plain.supports(IID.IDXGIResource1) && !plain.supports(IID.IDXGIKeyedMutex));
+
+    const shared = made(SHARED, 0).resource;
+    /** @type {{ handle?: number }} */
+    const legacy = {};
+    assert.equal(shared.GetSharedHandle(legacy), S_OK);
+    assert.ok(((legacy.handle ?? 0) & 0xc0000000) !== 0, 'a legacy handle');
+    assert.equal(shared.ntShareKey(), null, 'no NT handle for it');
+    /** @type {{ resource?: any }} */
+    const opened = {};
+    assert.equal(two.OpenSharedResource1(legacy.handle, opened), E_INVALIDARG);
+    assert.equal(two.OpenSharedResource(legacy.handle, opened), S_OK);
+    assert.equal(two.OpenSharedResource(0x1234, {}), E_INVALIDARG, 'a handle naming nothing');
+
+    // What one device writes the other reads.
+    const texels = new Uint8Array(64).map((_, index)=>index);
+    one.UpdateSubresource(shared, 0, null, texels, 16, 64);
+    const staging = createTexture2D(two, { Width: 4, Height: 4, Usage: D3D10_USAGE.STAGING,
+        BindFlags: 0, CPUAccessFlags: 0x20000 });
+    two.CopyResource(staging, opened.resource);
+    /** @type {{ data?: Uint8Array }} */
+    const mapped = {};
+    assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+    assert.deepEqual([...(mapped.data ?? []).slice(0, 64)], [...texels]);
+    staging.Unmap(0);
+
+    const nt = made(SHARED, NT).resource;
+    assert.equal(nt.GetSharedHandle({}), E_INVALIDARG, 'named by an NT handle only');
+    const key = nt.ntShareKey();
+    assert.notEqual(key, null);
+    assert.equal(two.OpenSharedResource(key, {}), E_INVALIDARG);
+    /** @type {{ resource?: any }} */
+    const byNt = {};
+    assert.equal(two.OpenSharedResource1(key, byNt), S_OK);
+
+    // The share outlives the object it was made as while another holds it.
+    shared.release();
+    /** @type {{ resource?: any }} */
+    const again = {};
+    assert.equal(two.OpenSharedResource(legacy.handle, again), S_OK, 'still opened by its handle');
+    again.resource.release();
+    opened.resource.release();
+    assert.equal(two.OpenSharedResource(legacy.handle, {}), E_INVALIDARG, 'gone with the last');
+    byNt.resource.release();
+    nt.release();
+    plain.release();
+});
+
+test('a keyed mutex is held by one device at a time, taken with the key it was let go with,'
+    + ' and abandoned with the object that held it (test_keyed_mutex)', async()=>{
+    const options = {};
+    const device11 = ()=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], out, options), S_OK);
+        return out.device;
+    };
+    const one = device11();
+    const two = device11();
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(one.CreateTexture2D({ ...TEXTURE_2D, MiscFlags: 0x10 }, null, made), S_OK);
+    const texture = made.resource;
+    assert.ok(texture.supports(IID.IDXGIKeyedMutex));
+    const INVALID_CALL = DXGI_ERROR_INVALID_CALL;
+    const TIMEOUT = 0x102;
+    const ABANDONED = 0x80;
+    assert.deepEqual([texture.ReleaseSync(0), texture.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL],
+        'not held');
+    assert.equal(texture.AcquireSync(1, 0), TIMEOUT, 'zero at first');
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+    assert.deepEqual([texture.AcquireSync(0, 0), texture.AcquireSync(1, 0)],
+        [INVALID_CALL, INVALID_CALL], 'held by this device already');
+    assert.equal(texture.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+    assert.equal(texture.ReleaseSync(1), S_OK, 'let go with any key');
+    assert.deepEqual([texture.AcquireSync(0, 0), texture.AcquireSync(2, 0)], [TIMEOUT, TIMEOUT]);
+    assert.equal(texture.AcquireSync(1, 0), S_OK);
+    assert.equal(texture.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+
+    /** @type {{ handle?: number }} */
+    const handle = {};
+    texture.GetSharedHandle(handle);
+    /** @type {{ resource?: any }} */
+    const opened = {};
+    assert.equal(two.OpenSharedResource(handle.handle, opened), S_OK);
+    const other = opened.resource;
+    assert.ok(other.supports(IID.IDXGIKeyedMutex));
+    assert.deepEqual([other.AcquireSync(0, 0), other.AcquireSync(1, 0)], [TIMEOUT, TIMEOUT],
+        'held by the other device');
+    assert.deepEqual([other.ReleaseSync(0), other.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL]);
+
+    // A wait is answered when the holder lets go, or when it runs out.
+    const waited = other.AcquireSync(5, 10000);
+    assert.ok(waited instanceof Promise);
+    assert.equal(texture.ReleaseSync(5), S_OK);
+    assert.equal(await waited, S_OK);
+    assert.equal(await texture.AcquireSync(0, 5), TIMEOUT, 'a wait that runs out');
+    assert.equal(other.ReleaseSync(0), S_OK);
+    assert.equal(texture.AcquireSync(0, 0), S_OK);
+
+    texture.release();
+    assert.deepEqual([other.AcquireSync(0, 0), other.AcquireSync(0, 0)], [ABANDONED, ABANDONED]);
+    assert.deepEqual([other.ReleaseSync(0), other.ReleaseSync(1)], [INVALID_CALL, INVALID_CALL]);
+    other.release();
+});
+
+test('a shared-exponent texture copies into a 32-bit family on Direct3D 11 and not on'
+    + ' Direct3D 10 (test_format_compatibility in d3d11.c and d3d10core.c)', async()=>{
+    /** @param {any} device */
+    const copied = async device=>{
+        const texels = new Uint8Array(64).map((_, index)=>index + 1);
+        /** @type {{ resource?: any }} */
+        const source = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R9G9B9E5_SHAREDEXP, Usage: D3D10_USAGE.IMMUTABLE,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE }, [{ pSysMem: texels, SysMemPitch: 16,
+            SysMemSlicePitch: 0 }], source), S_OK);
+        const staging = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R32_UINT, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: 0x20000 });
+        device.CopyResource(staging, source.resource);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+        const bytes = [...(mapped.data ?? []).slice(0, 64)];
+        staging.Unmap(0);
+        return bytes.every((byte, index)=>byte === texels[index]) ? 'copied'
+            : bytes.every(byte=>byte === 0) ? 'left' : 'mixed';
+    };
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(await copied(eleven.device), 'copied');
+    assert.equal(await copied(createDevice()), 'left');
+});
+
+test('SOGetTargets answers ~0 as the offset of every bound buffer and zero for an empty slot'
+    + ' (d3d10core.c test_clear_state)', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 64, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.STREAM_OUTPUT, CPUAccessFlags: 0, MiscFlags: 0 }, null, made), S_OK);
+    device.SOSetTargets([made.resource, null], [16, 32]);
+    /** @type {{ buffers?: any[], offsets?: number[] }} */
+    const out = {};
+    device.SOGetTargets(4, out);
+    assert.deepEqual(out.offsets, [0xffffffff, 0, 0, 0]);
+    assert.equal(out.buffers?.[0], made.resource);
+    out.buffers?.[0]?.release();
+    device.ClearState();
+    device.SOGetTargets(4, out);
+    assert.deepEqual(out.offsets, [0, 0, 0, 0], 'cleared');
+});
+
+test('one blend state for the same blending, whether Direct3D 10\'s or 10.1\'s description made'
+    + ' it (test_create_blend_state)', ()=>{
+    const device = createDevice();
+    const blend = { AlphaToCoverageEnable: false, BlendEnable: [true, false, false, false,
+        false, false, false, false], SrcBlend: 2, DestBlend: 1, BlendOp: 1, SrcBlendAlpha: 2,
+    DestBlendAlpha: 1, BlendOpAlpha: 1, RenderTargetWriteMask: [0xf, 1, 2, 4, 0xf, 0xf, 0xf, 0xf] };
+    /** @type {{ state?: any }} */
+    const ten = {};
+    assert.equal(device.CreateBlendState(blend, ten), S_OK);
+    /** @type {{ desc?: any }} */
+    const read = {};
+    ten.state.GetDesc1(read);
+    assert.equal(read.desc.IndependentBlendEnable, true, 'the targets differ');
+    /** @type {{ state?: any }} */
+    const one = {};
+    assert.equal(device.CreateBlendState1(read.desc, one), S_OK);
+    assert.equal(one.state, ten.state);
+
+    const same = { ...blend, BlendEnable: new Array(8).fill(false),
+        RenderTargetWriteMask: new Array(8).fill(0xf) };
+    /** @type {{ state?: any }} */
+    const plain = {};
+    assert.equal(device.CreateBlendState(same, plain), S_OK);
+    plain.state.GetDesc1(read);
+    /** @type {{ state?: any }} */
+    const independent = {};
+    assert.equal(device.CreateBlendState1({ ...read.desc, IndependentBlendEnable: true },
+        independent), S_OK);
+    assert.equal(independent.state, plain.state, 'independent targets that are all alike');
+    assert.notEqual(plain.state, ten.state);
+});
+
+test('a buffer is refused with a texture\'s misc flags: faces, GDI, levels to generate'
+    + ' (d3d10core.c test_create_buffer)', ()=>{
+    const device = createDevice();
+    /** @param {number} misc */
+    const made = misc=>{
+        /** @type {{ resource?: any }} */
+        const out = {};
+        const hr = device.CreateBuffer({ ByteWidth: 1024, Usage: D3D10_USAGE.DEFAULT,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: misc }, null, out);
+        out.resource?.release();
+        return hr;
+    };
+    assert.equal(made(0), S_OK);
+    assert.equal(made(0x2), S_OK, 'shared');
+    for (const misc of [0x1, 0x4, 0x20])
+    {
+        assert.equal(made(misc), E_INVALIDARG, `misc ${misc}`);
+    }
+});
+
+test('R11G11B10_FLOAT is a vertex buffer format, read by the vertex stage itself'
+    + ' (d3d10core.c test_required_format_support)', ()=>{
+    const device = createDevice();
+    /** @type {{ support?: number }} */
+    const out = {};
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R11G11B10_FLOAT, out), S_OK);
+    assert.ok(((out.support ?? 0) & 0x2) !== 0, 'IA_VERTEX_BUFFER');
+});
+
+test('Direct3D 10 copies into a depth-stencil texture only from another; 11 from a colour one'
+    + ' too (test_format_compatibility)', async()=>{
+    /** @param {any} device */
+    const copied = async device=>{
+        const texels = new Uint8Array(32).map((_, index)=>index + 1);
+        /** @type {{ resource?: any }} */
+        const colour = {};
+        assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R16_UNORM, Usage: D3D10_USAGE.IMMUTABLE,
+            BindFlags: D3D10_BIND.SHADER_RESOURCE }, [{ pSysMem: texels, SysMemPitch: 8,
+            SysMemSlicePitch: 0 }], colour), S_OK);
+        const depth = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.D16_UNORM, BindFlags: D3D10_BIND.DEPTH_STENCIL });
+        device.CopyResource(depth, colour.resource);
+        const staging = createTexture2D(device, { Width: 4, Height: 4,
+            Format: DXGI_FORMAT.R16_UNORM, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: 0x20000 });
+        device.CopyResource(staging, depth);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.Map(0, 1, 0, mapped), S_OK);
+        const bytes = [...(mapped.data ?? []).slice(0, 32)];
+        staging.Unmap(0);
+        return bytes.every((byte, index)=>byte === texels[index]) ? 'copied'
+            : bytes.every(byte=>byte === 0) ? 'left' : 'mixed';
+    };
+    /** @type {any} */
+    const eleven = { wantDevice: true };
+    assert.equal(D3D11CreateDevice(null, 1, null, 0, [0xb000], eleven, {}), S_OK);
+    assert.equal(await copied(eleven.device), 'copied');
+    assert.equal(await copied(createDevice()), 'left');
 });

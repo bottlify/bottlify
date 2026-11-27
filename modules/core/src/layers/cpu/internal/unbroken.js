@@ -17,7 +17,7 @@
  */
 
 /** Ranges the table holds: a routine block per device and per library, and room to spare. */
-export const UNBROKEN_RANGES = 4096;
+const UNBROKEN_RANGES = 4096;
 
 /**
  * How a run that ended inside one goes on: a step at a time, each ending at the
@@ -35,16 +35,12 @@ export const UNBROKEN_STEPS = 4096;
  * The table over `buffer`, or over a new one: shared where the executors can
  * be handed it.
  *
- * @param {SharedArrayBuffer | ArrayBuffer} [buffer]
+ * @param {SharedArrayBuffer} [buffer]
  */
-export function unbrokenTable(buffer = typeof SharedArrayBuffer === 'function'
-    ? new SharedArrayBuffer((1 + UNBROKEN_RANGES * 2) * 4)
-    : new ArrayBuffer((1 + UNBROKEN_RANGES * 2) * 4))
-{
+export function unbrokenTable(buffer = new SharedArrayBuffer((1 + UNBROKEN_RANGES * 2) * 4)){
     // [count, start, end, start, end, ...], unsigned addresses.
     const words = new Uint32Array(buffer);
-    const shared = typeof SharedArrayBuffer === 'function' && buffer instanceof SharedArrayBuffer;
-    const count = ()=>(shared ? Atomics.load(words, 0) : words[0]);
+    const count = ()=>Atomics.load(words, 0);
     return {
         buffer,
         /**
@@ -60,14 +56,7 @@ export function unbrokenTable(buffer = typeof SharedArrayBuffer === 'function'
             }
             words[1 + at * 2] = address >>> 0;
             words[2 + at * 2] = (address >>> 0) + (length >>> 0);
-            if (shared)
-            {
-                Atomics.store(words, 0, at + 1);
-            }
-            else
-            {
-                words[0] = at + 1;
-            }
+            Atomics.store(words, 0, at + 1);
             return true;
         },
         /** @param {number} address */

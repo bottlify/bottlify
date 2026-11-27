@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    arcPoints, bezierPoints, isPolyDrawable, lineDdaPoints, roundRectPoints,
+    arcPoints, bezierPoints, lineDdaPoints, roundRectPoints,
 } from './drawing.js';
 import { createGdiFunctions } from './functions.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -251,9 +251,10 @@ function fakeDrawing(){
 }
 
 /** @param {any} [graphics] */
-function setup(graphics){
+function setup(graphics, more = {}){
     const memory = fakeMemory();
     const fns = createGdiFunctions({
+        ...more,
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
             memory.writeMemory(a, d),
@@ -329,7 +330,7 @@ test('a memory context is bound to the bitmap selected into it, and rebound on a
 });
 
 test('a surface whose bytes the guest outgrew is taken again, not drawn into nowhere', ()=>{
-    // The emulator grows its memory in place, which detaches every view of it
+    // Guest memory can grow in place, which detaches every view of it
     // taken before the growth. A context holds one such view for as long as its
     // selected bitmap does, so after a growth every draw through it reads
     // zeroes and writes nowhere -- an installer that copied for ten minutes and
@@ -352,7 +353,7 @@ test('a surface whose bytes the guest outgrew is taken again, not drawn into now
     assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
     assert.equal(surfaces.length, 1, 'bound while the bytes are there');
 
-    // The emulator's buffer is replaced: the bound view goes empty.
+    // The memory's buffer is replaced: the bound view goes empty.
     surfaces[0].bytes = new Uint8Array(0);
     assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
     assert.equal(surfaces.length, 2, 'the next draw takes the view again');
@@ -733,6 +734,32 @@ test('GetObject gives a bitmap the stride its rows have, and a DIB section its p
     assert.deepEqual(bitmapOf(section), { type: 0, width: 10, height: 4, widthBytes: 32,
         planes: 1, bitsPixel: 24, bits: pointer });
 });
+
+test('a 64-bit process\'s GetObject has bmBits, dshSection and a brush\'s hatch a quadword wide',
+    ()=>{
+        // wingdi.h under _WIN64: the pointer-sized field on an eight-byte
+        // boundary, the structure padded to eight.
+        const { memory, fns, hdc } = setup(undefined, { pointerSize: 8 });
+        const brush = fns.CreateSolidBrush.handler([0x00112233]);
+        assert.equal(fns.GetObjectA.handler([brush, 0, 0]), 16, 'LOGBRUSH');
+        assert.equal(fns.GetObjectA.handler([brush, 16, OUT]), 16);
+        assert.equal(memory.u32(OUT + 4), 0x00112233);
+
+        putInfo(memory, { width: 16, height: 8, bitCount: 32 });
+        const section = fns.CreateDIBSection.handler([hdc, STRUCT, 0, OUT + 0x100, 0, 0]);
+        const pointer = memory.u32(OUT + 0x100);
+        assert.equal(fns.GetObjectA.handler([section, 0, 0]), 32, 'BITMAP');
+        memory.bytes.fill(0xaa, OUT, OUT + 104);
+        assert.equal(fns.GetObjectA.handler([section, 32, OUT]), 32);
+        assert.deepEqual([memory.u32(OUT + 24), memory.u32(OUT + 28)], [pointer, 0],
+            'bmBits at 24, both halves');
+        assert.equal(fns.GetObjectA.handler([section, 103, OUT]), 32, 'short of 104 a BITMAP');
+        assert.equal(fns.GetObjectA.handler([section, 104, OUT]), 104, 'DIBSECTION');
+        assert.deepEqual([0, 4, 8].map(at=>memory.u32(OUT + 32 + at)), [40, 16, 8],
+            'dsBmih at 32');
+        assert.deepEqual([88, 92, 96].map(at=>memory.u32(OUT + at)), [0, 0, 0],
+            'dshSection a quadword at 88, dsOffset at 96');
+    });
 
 test('GetObject fills a DIBSECTION for a DIB section when there is room for one', ()=>{
     const { memory, fns, hdc } = setup();
@@ -1426,6 +1453,11 @@ test('Arc draws with the pen and puts the current position back', ()=>{
         ['moveToEx', hdc, 1, 2]);
     assert.ok(graphics.calls.filter(call=>call[0] === 'lineTo').length >= 8);
     assert.equal(fns.Arc.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
+    // Wine's test_arcs, "0-pixel arc": a box with no height has no ellipse.
+    const before = graphics.calls.length;
+    assert.equal(fns.Arc.handler([hdc, 10, 10, 40, 10, 0, 1, 1, 0]), 1);
+    assert.deepEqual(graphics.calls.slice(before).filter(call=>call[0] === 'lineTo'), [],
+        'and nothing of it is drawn');
 });
 
 test('Polyline draws through its points and keeps the position, PolylineTo moves it', ()=>{
@@ -1585,19 +1617,11 @@ test('PolyBezierTo draws whole curves from the current position and moves it', (
         'nothing to draw with');
 });
 
-test('PolyDraw moves, lines, curves and closes, and refuses a type array Windows would', ()=>{
+test('PolyDraw moves, lines, curves and closes, and stops where an entry is not one it draws', ()=>{
     const PT_CLOSEFIGURE = 1;
     const PT_LINETO = 2;
     const PT_BEZIERTO = 4;
     const PT_MOVETO = 6;
-    assert.ok(isPolyDrawable(Uint8Array.of(PT_MOVETO, PT_LINETO, PT_LINETO | PT_CLOSEFIGURE)));
-    assert.ok(isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO,
-        PT_BEZIERTO | PT_CLOSEFIGURE)));
-    assert.ok(!isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO)), 'a curve cut short');
-    assert.ok(!isPolyDrawable(Uint8Array.of(PT_BEZIERTO, PT_BEZIERTO | PT_CLOSEFIGURE,
-        PT_BEZIERTO)), 'a close inside a curve');
-    assert.ok(!isPolyDrawable(Uint8Array.of(PT_MOVETO | PT_CLOSEFIGURE)), 'a closing move');
-    assert.ok(!isPolyDrawable(Uint8Array.of(0)), 'no type');
 
     const graphics = positionedDrawing();
     const context = setup(graphics.services);
@@ -1611,27 +1635,32 @@ test('PolyDraw moves, lines, curves and closes, and refuses a type array Windows
     memory.writeMemory(types, Uint8Array.of(PT_MOVETO, PT_LINETO, PT_LINETO | PT_CLOSEFIGURE,
         PT_MOVETO, PT_BEZIERTO, PT_BEZIERTO, PT_BEZIERTO | PT_CLOSEFIGURE));
     assert.equal(fns.PolyDraw.argBytes, 16);
+    const started = positionOf(context);
     assert.equal(fns.PolyDraw.handler([hdc, points, types, 6]), 0,
         'the curve is cut short by the count');
-    assert.equal(linesIn(graphics.calls).length, 0, 'and nothing is drawn of what came before');
-
-    assert.equal(fns.PolyDraw.handler([hdc, points, types, 7]), 1);
-    const drawn = linesIn(graphics.calls);
-    assert.deepEqual(drawn.slice(0, 5), [
+    assert.deepEqual(linesIn(graphics.calls).slice(0, 4), [
         ['moveToEx', 10, 10], ['lineTo', 30, 10], ['lineTo', 30, 30], ['lineTo', 10, 10],
-        ['moveToEx', 100, 100],
-    ], 'the triangle closed back to its move');
-    assert.deepEqual(drawn.at(-2), ['lineTo', 120, 100], 'the curve to its end');
-    assert.deepEqual(drawn.at(-1), ['lineTo', 100, 100], 'and closed back to the second move');
-    assert.deepEqual(positionOf(context), { x: 100, y: 100 });
+    ], 'what came before it is drawn');
+    assert.deepEqual(positionOf(context), started, 'and the position is back where it began');
+
+    const before = graphics.calls.length;
+    assert.equal(fns.PolyDraw.handler([hdc, points, types, 7]), 1);
+    const drawn = linesIn(graphics.calls.slice(before));
+    assert.deepEqual(drawn.slice(0, 6), [
+        ['moveToEx', 10, 10], ['lineTo', 30, 10], ['lineTo', 30, 30], ['lineTo', 10, 10],
+        ['moveToEx', 30, 30], ['moveToEx', 100, 100],
+    ], 'the triangle closed back to its move, the position left at its last point');
+    assert.deepEqual(drawn.at(-3), ['lineTo', 120, 100], 'the curve to its end');
+    assert.deepEqual(drawn.at(-2), ['lineTo', 100, 100], 'closed back to the second move');
+    assert.deepEqual(positionOf(context), { x: 120, y: 100 });
 
     // With no move, the figure starts at the position the call found.
     fns.MoveToEx.handler([hdc, 5, 6, 0]);
     memory.writeMemory(types, Uint8Array.of(PT_LINETO | PT_CLOSEFIGURE));
-    const before = graphics.calls.length;
+    const single = graphics.calls.length;
     assert.equal(fns.PolyDraw.handler([hdc, points, types, 1]), 1);
-    assert.deepEqual(linesIn(graphics.calls.slice(before)),
-        [['lineTo', 10, 10], ['lineTo', 5, 6]]);
+    assert.deepEqual(linesIn(graphics.calls.slice(single)),
+        [['lineTo', 10, 10], ['lineTo', 5, 6], ['moveToEx', 10, 10]]);
     assert.equal(fns.PolyDraw.handler([hdc, points, types, 0]), 1, 'nothing to draw is drawn');
     assert.equal(fns.PolyDraw.handler([hdc, points, types, -1]), 0);
     assert.equal(fns.PolyDraw.handler([0x7777, points, types, 1]), 0, 'not a DC');

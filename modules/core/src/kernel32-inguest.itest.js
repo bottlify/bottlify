@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -117,10 +117,10 @@ const KEPT = { esi: 0x51515151, edi: 0x7e7e7e7e, ebp: 0x3c3c3c3c };
  */
 function buildInterlockedExe(){
     const names = ['InterlockedIncrement', 'InterlockedDecrement', 'InterlockedExchange',
-        'InterlockedExchangeAdd', 'InterlockedCompareExchange'];
+        'InterlockedExchangeAdd', 'InterlockedCompareExchange', 'InterlockedCompareExchange64'];
     return buildExe({
         imports: { 'KERNEL32.dll': [...names, 'ExitProcess'] },
-        data: { counter: [0, 0, 0, 0], stack: [0, 0, 0, 0] },
+        data: { counter: [0, 0, 0, 0], stack: [0, 0, 0, 0], wide: [0, 0, 0, 0, 0, 0, 0, 0] },
         codeSize: 0x600,
         code: context=>{
             const { call, push, pushValue, store, compare, check, exit, fail } = toolkit(context);
@@ -157,6 +157,25 @@ function buildInterlockedExe(){
                 ...step([...pushValue(42), ...pushValue(9)], 'InterlockedCompareExchange', 7, 7),
                 ...step(pushValue(10), 'InterlockedExchangeAdd', 7, 17),
                 ...step(pushValue(-20 >>> 0), 'InterlockedExchangeAdd', 17, -3 >>> 0),
+                // The quadword: 0x00000001_00000002 in it, compared with that
+                // and exchanged for 0x00000003_00000004; then compared with what
+                // it no longer holds, and left. EDX:EAX the value before.
+                store('wide', 2), [0xc7, 0x05, ...u32(context.at('wide') + 4), ...u32(1)],
+                ...[[1, 2, 3, 4, 3, 4], [1, 2, 9, 9, 3, 4]].flatMap(([compareHigh, compareLow,
+                    exchangeHigh, exchangeLow, leftHigh, leftLow], index)=>[
+                    check(++number),
+                    [0x89, 0x25, ...u32(context.at('stack'))],          // mov [stack], esp
+                    pushValue(compareHigh), pushValue(compareLow),
+                    pushValue(exchangeHigh), pushValue(exchangeLow), push('wide'),
+                    call('InterlockedCompareExchange64'),
+                    [0x3b, 0x25, ...u32(context.at('stack'))], { jump: JNE, to: 'fail' },
+                    [0x3d, ...u32(index === 0 ? 2 : 4)], { jump: JNE, to: 'fail' },
+                    [0x81, 0xfa, ...u32(index === 0 ? 1 : 3)], { jump: JNE, to: 'fail' },
+                    compare('wide', leftLow), { jump: JNE, to: 'fail' },
+                    [0x81, 0x3d, ...u32(context.at('wide') + 4), ...u32(leftHigh)],
+                    { jump: JNE, to: 'fail' },
+                    [0x81, 0xfe, ...u32(KEPT.esi)], { jump: JNE, to: 'fail' },
+                ]),
                 exit(),
                 ...fail(),
             ]);
@@ -226,6 +245,7 @@ function buildTlsExe(){
             const worker = context.code(0x300);
             /** cmp eax, value; jne fail @param {number} value */
             const expect = value=>[[0x3d, ...u32(value)], { jump: JNE, to: 'fail' }];
+            const slotOf = [0x64, 0x8b, 0x04, 0x85, ...u32(0xe10)];     // mov eax, fs:[0xe10+eax*4]
             /** @param {number} code */
             const errorIs = code=>[call('GetLastError'), ...expect(code)];
             const main = assemble([
@@ -236,10 +256,9 @@ function buildTlsExe(){
                 check(3), ...errorIs(5),
                 check(4), pushFrom('index'), call('TlsGetValue'), ...expect(0x1234),
                 check(5), ...errorIs(0),
-                // __declspec(thread) as the compiler reads it.
-                check(6), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],             // mov ecx, fs:[0x2c]
-                [0xa1, ...u32(context.at('index'))],                     // mov eax, [index]
-                [0x8b, 0x04, 0x81], ...expect(0x1234),                   // mov eax, [ecx+eax*4]
+                // TlsSlots in the thread's block, where a program may read them.
+                check(6), [0xa1, ...u32(context.at('index'))],          // mov eax, [index]
+                slotOf, ...expect(0x1234),
                 spawn(worker, 'handles', 0),
                 [0x6a, 0xff], pushFrom('handles'), call('WaitForSingleObject'),
                 check(7), compare('seen', 0), { jump: JNE, to: 'fail' },
@@ -260,8 +279,7 @@ function buildTlsExe(){
                 check(14), pushValue(1), pushValue(5000), call('TlsSetValue'), ...expect(0),
                 check(15), ...errorIs(ERROR_INVALID_PARAMETER),
                 check(16), pushFrom('index'), call('TlsFree'), ...expect(1),
-                check(17), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
-                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                check(17), [0xa1, ...u32(context.at('index'))], slotOf, ...expect(0),
                 // A freed slot is still written, as on Windows, and its next
                 // owner reads zero all the same.
                 check(18), pushValue(0x4321), pushFrom('index'), call('TlsSetValue'), ...expect(1),
@@ -269,8 +287,7 @@ function buildTlsExe(){
                 [0x3b, 0x05, ...u32(context.at('index'))],               // cmp eax, [index]
                 { jump: JNE, to: 'fail' },
                 check(20), pushFrom('index'), call('TlsGetValue'), ...expect(0),
-                check(21), [0x64, 0x8b, 0x0d, 0x2c, 0, 0, 0],
-                [0xa1, ...u32(context.at('index'))], [0x8b, 0x04, 0x81], ...expect(0),
+                check(21), [0xa1, ...u32(context.at('index'))], slotOf, ...expect(0),
                 exit(),
                 ...fail(),
             ]);

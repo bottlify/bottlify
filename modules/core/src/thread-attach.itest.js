@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -241,7 +241,7 @@ async function run(executable, cores){
     const app = await createApp({
         executable,
         imagePath: 'C:\\App\\attach.exe',
-        cpu: { cores, eager: true },
+        cpu: { cores },
         bundle: {
             prefix: 'App',
             fetch: async(/** @type {number} */ offset, /** @type {number} */ length)=>{
@@ -429,3 +429,57 @@ for (const cores of [1, 2])
             || shapes === [notLast, notLast].join(' | '), `${shapes}: ${text}`);
     });
 }
+
+/**
+ * A thread made by NtCreateThreadEx with THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH:
+ * it reports its block's SameTebFlags (as the reason) and its thread-local
+ * storage array pointer (as lpvReserved), and returns.
+ */
+function skippingProgram(){
+    return buildExe({
+        imports: {
+            'ntdll.dll': ['NtCreateThreadEx'],
+            'KERNEL32.dll': ['WaitForSingleObject', 'ExitProcess'],
+            'log.dll': ['note'],
+            'told.dll': ['told'],
+        },
+        codeSize: 0x100,
+        data: { handle: u32(0) },
+        code: ({ iat, at, code })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            const main = [
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, // list, sizes, zero bits
+                0x6a, 0x02, //                                      SKIP_THREAD_ATTACH
+                0x6a, 0x00, 0x68, ...u32(code(0x80)), //           argument, start
+                0x6a, 0xff, 0x6a, 0x00, //                         this process, no attributes
+                0x68, ...u32(0x1fffff), 0x68, ...u32(at('handle')),
+                ...call('NtCreateThreadEx'),
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('handle')), ...call('WaitForSingleObject'),
+                0x6a, 0x00, ...call('ExitProcess'),
+            ];
+            const routine = [
+                0x64, 0xa1, ...u32(0x18), //                 mov eax, fs:[0x18]
+                0x0f, 0xb7, 0x88, ...u32(0xfca), //          movzx ecx, word [eax+0xfca]
+                0xff, 0x70, 0x2c, //                         push dword [eax+0x2c]
+                0x51, 0x6a, TAG.ROUTINE, ...call('note'), // push ecx; push tag; note
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //             xor eax, eax; ret 4
+            ];
+            return [...main, ...new Array(0x80 - main.length).fill(0xcc), ...routine];
+        },
+    });
+}
+
+test('a thread made to skip the attach is told of by no library and has no TLS array',
+    { timeout: 120_000 }, async()=>{
+        const { code, entries } = await run(skippingProgram(), 1);
+        const text = entries.map(each=>`${each.thread}:${each.tag}/${each.reason}/${each.reserved}`)
+            .join(' ');
+        assert.equal(code, 0, text);
+        const main = entries[0].thread;
+        const own = entries.filter(each=>each.thread !== main);
+        assert.equal(own.length, 1, `its routine alone, no attach or detach: ${text}`);
+        assert.equal(own[0].tag, TAG.ROUTINE, text);
+        assert.equal(own[0].reason & 0x8, 0x8, `SameTebFlags says SkipThreadAttach: ${text}`);
+        assert.equal(own[0].reserved, 0, `ThreadLocalStoragePointer is null: ${text}`);
+    });

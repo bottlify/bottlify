@@ -189,7 +189,7 @@ function* imageSteps(read, head, size, index, side){
         sizeOfHeaders: 0,
         sections: [{ name: '.rsrc', virtualAddress: directory.address,
             virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
-            readable: true, writable: false, executable: false }],
+            readable: true, writable: false, executable: false, characteristics: 0x40000040 }],
     };
     // A group in several languages is one group.
     const groups = [...new Set(listResources(tree, local)

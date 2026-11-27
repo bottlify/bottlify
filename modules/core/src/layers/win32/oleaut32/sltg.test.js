@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { parseTypeLibrary } from './sltg.js';
 
 const LIBRARY_GUID = '{91814EB1-B5F0-11D2-80B9-00104B1F6CEA}';

@@ -23,6 +23,14 @@
 
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
+/** The last errors DeleteFile and RemoveDirectory leave. */
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_DIR_NOT_EMPTY = 145;
 
 const MAX_STRING = 1 << 20;
 
@@ -80,6 +88,10 @@ const A_ARCH = 0x20;
 
 /** The fixed part of a tmpnam name, as the runtime spells it from its process. */
 const TMPNAM_STEM = '1c';
+/** What `_mktemp`'s template ends in, and the number its digits come from. */
+const MKTEMP_X = 'XXXXXX';
+const MKTEMP_PROCESS = 0x1c;
+
 const TMPNAM_BUFFER = 260;
 
 /**
@@ -164,6 +176,29 @@ export function fullPath(path, current){
 }
 
 /**
+ * A search specification as the directory to look in and the pattern its
+ * last component is. A root keeps its separator, so "C:\*.*" looks in
+ * "C:\" and not in wherever "C:" alone would mean.
+ *
+ * @param {string} spec
+ */
+export const splitSearch = spec=>{
+    const cut = Math.max(spec.lastIndexOf('\\'), spec.lastIndexOf('/'));
+    if (cut < 0)
+    {
+        const drive = /^[A-Za-z]:/.test(spec) ? spec.slice(0, 2) : '.';
+        return { directory: drive, pattern: drive === '.' ? spec : spec.slice(2) };
+    }
+    const parent = spec.slice(0, cut);
+    const rooted = parent === '' || parent.endsWith(':');
+    return {
+        directory: rooted ? spec.slice(0, cut + 1) : parent,
+        pattern: spec.slice(cut + 1),
+    };
+};
+
+
+/**
  * @typedef {Object} PathHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -172,6 +207,10 @@ export function fullPath(path, current){
  * @property {any} files  The volume: stat, list, remove, rename, mkdir and the
  *           current directory.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {(code: number) => void} [setLastError]
+ *           kernel32's last error, which a removal leaves as DeleteFile and
+ *           RemoveDirectory, which the runtime calls, leave it: a C++ library
+ *           over the runtime reads its error code there.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For a wide pattern. Absent, the wide finds stay unexported.
  * @property {(name: string) => string | null} [getenv]
@@ -232,13 +271,7 @@ export function createPathFunctions(host){
         {
             return;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /**
@@ -421,7 +454,7 @@ export function createPathFunctions(host){
      */
     const readWide = pointer=>{
         let text = '';
-        for (let at = pointer >>> 0; text.length < MAX_STRING; at += 2)
+        for (let at = wholeAddress(pointer); text.length < MAX_STRING; at += 2)
         {
             const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
             const code = unit[0] | unit[1] << 8;
@@ -477,7 +510,7 @@ export function createPathFunctions(host){
         {
             bytes.set(encodeAnsi(name), layout.NAME);
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -545,35 +578,92 @@ export function createPathFunctions(host){
     });
 
     /**
-     * A search specification as the directory to look in and the pattern its
-     * last component is. A root keeps its separator, so "C:\*.*" looks in
-     * "C:\" and not in wherever "C:" alone would mean.
-     *
-     * @param {string} spec
-     */
-    const splitSearch = spec=>{
-        const cut = Math.max(spec.lastIndexOf('\\'), spec.lastIndexOf('/'));
-        if (cut < 0)
-        {
-            const drive = /^[A-Za-z]:/.test(spec) ? spec.slice(0, 2) : '.';
-            return { directory: drive, pattern: drive === '.' ? spec : spec.slice(2) };
-        }
-        const parent = spec.slice(0, cut);
-        const rooted = parent === '' || parent.endsWith(':');
-        return {
-            directory: rooted ? spec.slice(0, cut + 1) : parent,
-            pattern: spec.slice(cut + 1),
-        };
-    };
-
-    /**
      * Why a removal the volume refused failed: the name is not there, or it
-     * is and is not the volume's to remove.
+     * is and is not the volume's to remove. The last error is the one
+     * DeleteFile or RemoveDirectory leaves: no file, no folder on the way to
+     * it, a file the call may not remove (a folder, to DeleteFile) or a folder
+     * not empty.
      *
      * @param {string} path @param {number} refused
      */
-    const removal = (path, refused)=>
-        (host.files.remove(path) === true ? 0 : (exists(path) ? refused : ENOENT));
+    const removal = (path, refused)=>{
+        if (host.files.remove(path) === true)
+        {
+            return 0;
+        }
+        if (exists(path))
+        {
+            host.setLastError?.(refused === ENOTEMPTY ? ERROR_DIR_NOT_EMPTY : ERROR_ACCESS_DENIED);
+            return refused;
+        }
+        const parent = path.replace(/[\\/][^\\/]*$/, '');
+        host.setLastError?.(parent !== path && parent !== '' && !/^[A-Za-z]:$/.test(parent)
+            && !exists(parent) ? ERROR_PATH_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+        return ENOENT;
+    };
+
+    /**
+     * `_mktemp`'s name of a template: null for one without six closing X's,
+     * or with every letter taken.
+     *
+     * @param {string} template
+     * @returns {string | null}
+     */
+    const uniqueName = template=>{
+        if (!template.endsWith(MKTEMP_X))
+        {
+            fail(EINVAL);
+            return null;
+        }
+        const stem = template.slice(0, -MKTEMP_X.length);
+        const digits = String(MKTEMP_PROCESS % 100000).padStart(5, '0');
+        for (let letter = 0x61; letter <= 0x7a; letter++)
+        {
+            const name = `${stem}${String.fromCharCode(letter)}${digits}`;
+            if (!exists(name))
+            {
+                return name;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * `_splitpath_s` and its wide twin: each part into its buffer, a buffer
+     * and its size both given or both not. A path that is none, a buffer of
+     * no size, or a size with no buffer is EINVAL; a part longer than its
+     * buffer is ERANGE, and every buffer is then left empty.
+     *
+     * @param {(pointer: number) => string} read
+     * @param {(pointer: number, text: string) => void} write
+     * @param {boolean} wide
+     */
+    const splitSecure = (read, write, wide)=>({
+        convention: 'cdecl',
+        argBytes: 36,
+        /** @param {number[]} args */
+        handler: ([path, ...buffers])=>{
+            const pairs = [0, 2, 4, 6].map(at=>[buffers[at] >>> 0, buffers[at + 1] >>> 0]);
+            if ((path >>> 0) === 0 || pairs.some(([at, size])=>(at === 0) !== (size === 0)))
+            {
+                fail(EINVAL);
+                return EINVAL;
+            }
+            const parts = wide ? splitPath(read(path), undefined, true)
+                : splitPath(read(path), host.isLead);
+            const texts = [parts.drive, parts.directory, parts.name, parts.extension];
+            const length = (/** @type {string} */ text)=>(wide ? text.length
+                : encodeAnsi(text).length);
+            if (pairs.some(([at, size], index)=>at !== 0 && length(texts[index]) >= size))
+            {
+                pairs.forEach(([at])=>write(at, ''));
+                fail(ERANGE);
+                return ERANGE;
+            }
+            pairs.forEach(([at], index)=>write(at, texts[index]));
+            return 0;
+        },
+    });
 
     return {
         /**
@@ -593,6 +683,13 @@ export function createPathFunctions(host){
                 return 0;
             },
         },
+
+        /**
+         * errno_t _splitpath_s(const char *path, char *drive, size_t driveSize,
+         *     char *dir, size_t dirSize, char *fname, size_t nameSize, char *ext,
+         *     size_t extSize)
+         */
+        _splitpath_s: splitSecure(readString, writeString, false),
 
         /**
          * void _makepath(char *path, const char *drive, const char *dir,
@@ -618,11 +715,12 @@ export function createPathFunctions(host){
         _makepath_s: {
             convention: 'cdecl',
             argBytes: 24,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([path, size, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
                     (pointer >>> 0) === 0 ? '' : readString(pointer));
-                const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
                     : makePath(read(drive), read(directory), read(name), read(extension));
                 return writeSecure(path, size, text, false);
             },
@@ -666,6 +764,47 @@ export function createPathFunctions(host){
                 },
             },
 
+            /** errno_t _wsplitpath_s(...): `_splitpath_s` in UTF-16. */
+            _wsplitpath_s: splitSecure(readWide, writeWide, true),
+
+            /**
+             * wchar_t *_wgetcwd(wchar_t *buffer, int size): `_getcwd` in
+             * UTF-16, `size` counted in characters.
+             */
+            _wgetcwd: {
+                returns: 'pointer',
+                convention: 'cdecl',
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([buffer, size])=>{
+                    const text = host.files.currentDirectory();
+                    if (wholeAddress(buffer) === 0)
+                    {
+                        const allocated = host.allocate(Math.max(text.length + 1, size | 0) * 2);
+                        writeWide(allocated, text);
+                        return allocated;
+                    }
+                    if (text.length + 1 > (size | 0))
+                    {
+                        fail(ERANGE);
+                        return 0;
+                    }
+                    writeWide(buffer, text);
+                    return buffer;
+                },
+            },
+
+            /** int _wchdir(const wchar_t *path) */
+            _wchdir: operation(4, ([path])=>{
+                const text = readWide(path);
+                if (!exists(text))
+                {
+                    return ENOENT;
+                }
+                host.files.setCurrentDirectory(text);
+                return 0;
+            }),
+
             /**
              * wchar_t *_wfullpath(wchar_t *absolute, const wchar_t *relative, size_t max)
              *
@@ -673,12 +812,14 @@ export function createPathFunctions(host){
              * destination is one allocated for the caller to free.
              */
             _wfullpath: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
+                sizes: [2],
                 /** @param {number[]} args */
                 handler: ([destination, relative, max])=>{
                     const text = fullPath(readWide(relative), host.files.currentDirectory());
-                    if ((destination >>> 0) === 0)
+                    if (wholeAddress(destination) === 0)
                     {
                         const allocated = host.allocate((text.length + 1) * 2);
                         writeWide(allocated, text);
@@ -712,11 +853,12 @@ export function createPathFunctions(host){
             _wmakepath_s: {
                 convention: 'cdecl',
                 argBytes: 24,
+                sizes: [1],
                 /** @param {number[]} args */
                 handler: ([path, size, drive, directory, name, extension])=>{
                     const read = (/** @type {number} */ pointer)=>(
                         (pointer >>> 0) === 0 ? '' : readWide(pointer));
-                    const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                    const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
                         : makePath(read(drive), read(directory), read(name), read(extension));
                     return writeSecure(path, size, text, true);
                 },
@@ -759,12 +901,14 @@ export function createPathFunctions(host){
          * A null destination means "allocate one", and the caller frees it.
          */
         _fullpath: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, relative, max])=>{
                 const text = fullPath(readString(relative), host.files.currentDirectory());
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     const allocated = host.allocate(text.length + 1);
                     writeString(allocated, text);
@@ -787,12 +931,13 @@ export function createPathFunctions(host){
          * name to the directory and does so in place.
          */
         _getcwd: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, size])=>{
                 const text = host.files.currentDirectory();
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     const allocated = host.allocate(Math.max(text.length + 1, size | 0));
                     writeString(allocated, text);
@@ -816,15 +961,68 @@ export function createPathFunctions(host){
          * prefix and a number, on the heap for the caller to free.
          */
         _tempnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dir, prefix])=>{
-                const text = temporaryName((dir >>> 0) === 0 ? null : readString(dir),
-                    (prefix >>> 0) === 0 ? '' : readString(prefix));
+                const text = temporaryName(wholeAddress(dir) === 0 ? null : readString(dir),
+                    wholeAddress(prefix) === 0 ? '' : readString(prefix));
                 const address = host.allocate(encodeAnsi(text).length + 1);
                 writeString(address, text);
                 return address;
+            },
+        },
+
+        /**
+         * char *_mktemp(char *template)
+         *
+         * The template's six closing X's made a name no file has, in place:
+         * a letter, 'a' first, then five digits of the process -- the next
+         * letter while the name is taken. Null for a template that does not
+         * end in six X's, or when all 26 letters are taken; the template is
+         * then left as it was.
+         */
+        _mktemp: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>{
+                if (wholeAddress(template) === 0)
+                {
+                    fail(EINVAL);
+                    return 0;
+                }
+                const name = uniqueName(readString(template));
+                if (name === null)
+                {
+                    return 0;
+                }
+                writeString(template, name);
+                return template;
+            },
+        },
+
+        /** wchar_t *_wmktemp(wchar_t *template): `_mktemp` over a wide template. */
+        _wmktemp: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([template])=>{
+                if (wholeAddress(template) === 0)
+                {
+                    fail(EINVAL);
+                    return 0;
+                }
+                const name = uniqueName(readWide(template));
+                if (name === null)
+                {
+                    return 0;
+                }
+                writeWide(template, name);
+                return template;
             },
         },
 
@@ -837,6 +1035,7 @@ export function createPathFunctions(host){
          * the next call writes over.
          */
         tmpnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -850,7 +1049,7 @@ export function createPathFunctions(host){
                     name = next();
                 }
                 tmpnamCount++;
-                let at = buffer >>> 0;
+                let at = wholeAddress(buffer);
                 if (at === 0)
                 {
                     tmpnamBuffer ||= host.allocate(TMPNAM_BUFFER);
@@ -867,12 +1066,13 @@ export function createPathFunctions(host){
         ...host.readMemory ? {
             /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
             _wtempnam: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([dir, prefix])=>{
-                    const text = temporaryName((dir >>> 0) === 0 ? null : readWide(dir),
-                        (prefix >>> 0) === 0 ? '' : readWide(prefix));
+                    const text = temporaryName(wholeAddress(dir) === 0 ? null : readWide(dir),
+                        wholeAddress(prefix) === 0 ? '' : readWide(prefix));
                     const bytes = new Uint8Array((text.length + 1) * 2);
                     [...text].forEach((c, at)=>new DataView(bytes.buffer)
                         .setUint16(at * 2, c.charCodeAt(0), true));
@@ -1000,6 +1200,33 @@ export function createPathFunctions(host){
         // bytes themselves rather than the narrow string reader.
         ...(host.readMemory
             ? {
+                /** int _wmkdir(const wchar_t *path) -- `_mkdir`, the path wide. */
+                _wmkdir: operation(4, ([path])=>{
+                    const text = readWide(path);
+                    if (host.files.mkdir(text) === true)
+                    {
+                        return 0;
+                    }
+                    return exists(text) ? EEXIST : ENOENT;
+                }),
+
+                /** int _wrmdir(const wchar_t *path) */
+                _wrmdir: operation(4, ([path])=>removal(readWide(path), ENOTEMPTY)),
+
+                /** int _wunlink(const wchar_t *path) / int _wremove(const wchar_t *path) */
+                _wunlink: operation(4, ([path])=>removal(readWide(path), EACCES)),
+                _wremove: operation(4, ([path])=>removal(readWide(path), EACCES)),
+
+                /** int _wrename(const wchar_t *from, const wchar_t *to) */
+                _wrename: operation(8, ([from, to])=>{
+                    const source = readWide(from);
+                    if (host.files.rename(source, readWide(to)) === true)
+                    {
+                        return 0;
+                    }
+                    return exists(source) ? EACCES : ENOENT;
+                }, 2),
+
                 /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
                 _wfindfirst: findFirst(WFINDDATA),
 

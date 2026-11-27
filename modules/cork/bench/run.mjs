@@ -11,7 +11,7 @@
  *
  *     node modules/cork/bench/run.mjs [options]
  *
- *   --variant x87|sse|both     which build (default both)
+ *   --variant x87|sse|x64      which build (default all three)
  *   --only a,b,c               workloads to run (default all)
  *   --cork '<json>'            the translator's configuration (`EngineConfig`)
  *   --reps n                   runs of each, the fastest kept (default 1)
@@ -62,8 +62,8 @@ function parse(argv){
 }
 
 const options = parse(process.argv.slice(2));
-const variants = options.variant === 'x87' || options.variant === 'sse'
-    ? [options.variant] : ['x87', 'sse'];
+const variants = ['x87', 'sse', 'x64'].includes(String(options.variant))
+    ? [String(options.variant)] : ['x87', 'sse', 'x64'];
 const only = typeof options.only === 'string' ? options.only.split(',') : WORKLOADS;
 const reps = Number(options.reps ?? 1);
 const corkConfig = typeof options.cork === 'string' ? JSON.parse(options.cork) : {};
@@ -78,7 +78,7 @@ const { createApp } = await import(pathToFileURL(join(root, 'modules/core/src/ap
  */
 function native(variant, workload, iterations){
     const args = [join(BIN, `bench-${variant}.exe`), workload, ...iterations ? [iterations] : []];
-    const result = spawnSync(join(BIN, 'peload'), args, { encoding: 'utf8' });
+    const result = spawnSync(join(BIN, loaderOf(variant)), args, { encoding: 'utf8' });
     const ns = /native-ns (\d+)/.exec(result.stderr);
     const code = /native-exit (\d+)/.exec(result.stderr);
     const line = /^(\S+) (\d+) ([0-9a-f]{8})/m.exec(result.stdout);
@@ -97,9 +97,6 @@ function native(variant, workload, iterations){
 async function engine(executable, workload, iterations){
     const app = await createApp({
         executable,
-        // Named rather than left to the default: `--root` may be a checkout
-        // whose default is another engine.
-        engine: 'cork',
         exitNotice: false,
         commandLine: `bench.exe ${workload}${iterations ? ` ${iterations}` : ''}`,
         cork: { config: corkConfig },
@@ -129,7 +126,8 @@ async function engine(executable, workload, iterations){
 
 /** @type {Record<string, Record<string, string>>} */
 const expected = existsSync(EXPECTED) ? JSON.parse(await readFile(EXPECTED, 'utf8')) : {};
-const haveLoader = existsSync(join(BIN, 'peload'));
+/** The loader that runs a build on the processor: the x64 one is a PE32+. @param {string} variant */
+const loaderOf = variant=>(variant === 'x64' ? 'peload64' : 'peload');
 const iterations = typeof options.iterations === 'string' ? options.iterations : undefined;
 
 /** @type {{ variant: string, workload: string, mips: number, slowdown: number | null }[]} */
@@ -140,9 +138,9 @@ for (const variant of variants)
     for (const workload of only)
     {
         const key = `${workload}${iterations ? `@${iterations}` : ''}`;
-        const reference = options.native || options['update-expected'] || !expected[variant]?.[key]
-            ? haveLoader ? native(variant, workload, iterations) : null
-            : null;
+        const asked = options.native || options['update-expected'] || !expected[variant]?.[key];
+        const reference = asked && existsSync(join(BIN, loaderOf(variant)))
+            ? native(variant, workload, iterations) : null;
         if (options['update-expected'] && reference)
         {
             (expected[variant] ??= {})[key] = reference.checksum;

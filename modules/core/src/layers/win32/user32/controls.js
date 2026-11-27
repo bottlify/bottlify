@@ -30,20 +30,26 @@
  */
 
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
+import { createButtonV6 } from './button-v6.js';
+import { translated } from './unicode.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
 export const WM_SETFOCUS = 0x0007;
+const WM_SIZE = 0x0005;
 export const WM_KILLFOCUS = 0x0008;
-export const WM_ENABLE = 0x000a;
+const WM_NCDESTROY = 0x0082;
+const WM_ENABLE = 0x000a;
 export const WM_SETTEXT = 0x000c;
 export const WM_GETTEXT = 0x000d;
 export const WM_GETTEXTLENGTH = 0x000e;
 export const WM_PAINT = 0x000f;
-export const WM_CLOSE = 0x0010;
+const WM_CLOSE = 0x0010;
 export const WM_ERASEBKGND = 0x0014;
 export const WM_SHOWWINDOW = 0x0018;
 export const WM_SETFONT = 0x0030;
@@ -53,7 +59,7 @@ export const WM_GETDLGCODE = 0x0087;
 export const WM_KEYDOWN = 0x0100;
 export const WM_KEYUP = 0x0101;
 export const WM_CHAR = 0x0102;
-export const WM_INITDIALOG = 0x0110;
+const WM_INITDIALOG = 0x0110;
 export const WM_COMMAND = 0x0111;
 export const WM_SYSCOMMAND = 0x0112;
 export const WM_VSCROLL = 0x0115;
@@ -82,10 +88,10 @@ export const DLGC_WANTTAB = 0x0002;
 export const DLGC_WANTALLKEYS = 0x0004;
 export const DLGC_HASSETSEL = 0x0008;
 export const DLGC_DEFPUSHBUTTON = 0x0010;
-export const DLGC_UNDEFPUSHBUTTON = 0x0020;
-export const DLGC_RADIOBUTTON = 0x0040;
+const DLGC_UNDEFPUSHBUTTON = 0x0020;
+const DLGC_RADIOBUTTON = 0x0040;
 export const DLGC_WANTCHARS = 0x0080;
-export const DLGC_STATIC = 0x0100;
+const DLGC_STATIC = 0x0100;
 export const DLGC_BUTTON = 0x2000;
 
 /** Virtual keys the controls act on. */
@@ -124,6 +130,8 @@ const BS_OWNERDRAW = 0x0b;
  * bytes -- with the kinds of control, the reasons to draw and the states.
  */
 const WM_DRAWITEM = 0x002b;
+const WM_MEASUREITEM = 0x002c;
+const ODT_COMBOBOX = 3;
 const DRAWITEMSTRUCT_SIZE = 48;
 const ODT_BUTTON = 4;
 const ODT_STATIC = 5;
@@ -156,12 +164,14 @@ const BM_GETSTATE = 0x00f2;
 const BM_SETSTATE = 0x00f3;
 const BM_SETSTYLE = 0x00f4;
 const BM_CLICK = 0x00f5;
+const BM_GETIMAGE = 0x00f6;
+const BM_SETIMAGE = 0x00f7;
 const BST_UNCHECKED = 0;
 const BST_CHECKED = 1;
 const BST_INDETERMINATE = 2;
 const BST_PUSHED = 4;
 const BST_FOCUS = 8;
-export const BN_CLICKED = 0;
+const BN_CLICKED = 0;
 const BN_SETFOCUS = 6;
 const BN_KILLFOCUS = 7;
 /** The box a check box or radio button draws, and the gap to its text. */
@@ -192,6 +202,7 @@ const SS_CENTERIMAGE = 0x200;
 /** A static control's image stretched to the control rather than the control to it. */
 const SS_REALSIZECONTROL = 0x40;
 const SS_SUNKEN = 0x1000;
+const WS_EX_STATICEDGE = 0x00020000;
 const STM_SETICON = 0x170;
 const STM_GETICON = 0x171;
 const STM_SETIMAGE = 0x172;
@@ -201,11 +212,21 @@ const STN_DBLCLK = 1;
 /** STM_SETIMAGE's image types. */
 const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
+const IMAGE_CURSOR = 2;
+const IMAGE_ENHMETAFILE = 3;
+const SS_ENHMETAFILE = 0x0f;
 
 /** The window styles a dialog's Tab order is read from. */
 const WS_TABSTOP = 0x00010000;
+/** A dialog that is a page inside another (a property sheet's). */
+const DS_CONTROL = 0x0400;
 const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
+const WS_MINIMIZE = 0x20000000;
+const WS_CHILD = 0x40000000;
+const WS_EX_CONTROLPARENT = 0x00010000;
+/** WM_ACTIVATE: the window gaining or losing the activation. */
+const WM_ACTIVATE = 0x0006;
 
 /** Edit styles and messages. */
 const ES_MULTILINE = 0x0004;
@@ -218,7 +239,11 @@ const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
 const WM_NEXTDLGCTL = 0x0028;
+const EM_GETHANDLE = 0x00bd;
+const EM_SETHANDLE = 0x00bc;
 const EM_GETRECT = 0x00b2;
+const EM_SETRECT = 0x00b3;
+const EM_SETRECTNP = 0x00b4;
 const EM_SCROLL = 0x00b5;
 const EM_LINESCROLL = 0x00b6;
 const EM_SCROLLCARET = 0x00b7;
@@ -238,12 +263,16 @@ const WM_COPY = 0x0301;
 const WM_PASTE = 0x0302;
 const WM_CLEAR = 0x0303;
 const WM_UNDO = 0x0304;
+/** The control characters an edit answers as commands: Ctrl+C, V, X and Z. */
+const EDIT_CONTROL_CHARACTERS = new Map([[0x03, WM_COPY], [0x16, WM_PASTE], [0x18, WM_CUT],
+    [0x1a, WM_UNDO]]);
 const EM_EMPTYUNDOBUFFER = 0x00cd;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_SETREADONLY = 0x00cf;
 const EM_SETPASSWORDCHAR = 0x00cc;
 const EM_GETPASSWORDCHAR = 0x00d2;
 const EM_SETMARGINS = 0x00d3;
+const EM_GETMARGINS = 0x00d4;
 const EM_GETLIMITTEXT = 0x00d5;
 const EM_POSFROMCHAR = 0x00d6;
 const EM_CHARFROMPOS = 0x00d7;
@@ -254,6 +283,24 @@ const EN_UPDATE = 0x0400;
 const EN_MAXTEXT = 0x0501;
 /** The room an edit leaves between its border and its text. */
 const EDIT_MARGIN = 1;
+/** EM_SETMARGINS' sides, and the value that asks for the font's own margin. */
+const EC_LEFTMARGIN = 0x0001;
+const EC_RIGHTMARGIN = 0x0002;
+const EC_USEFONTINFO = 0xffff;
+/**
+ * The client width the font's margins are judged against when the client
+ * area is empty: Windows lays out a zero-sized edit as if it were this wide.
+ */
+const EMPTY_EDIT_WIDTH = 80;
+/** How much room past its text an edit's buffer is given, so typing does not move it. */
+const EDIT_BUFFER_STEP = 64;
+/** WM_SIZE's kinds that lay an edit out again; a minimized one keeps its rectangle. */
+const SIZE_RESTORED = 0;
+const SIZE_MAXIMIZED = 2;
+const WS_EX_CLIENTEDGE = 0x00000200;
+const WS_CLIPSIBLINGS = 0x04000000;
+/** SM_CYBORDER: a thin border's height, which an edit's WS_BORDER insets by and one. */
+const THIN_BORDER = 1;
 /** What a program that never set a limit may type: the documented default. */
 const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
 
@@ -268,7 +315,7 @@ const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
  * @param {(character: string) => number} advance
  * @returns {{ text: string, start: number }[]}
  */
-export function wrapEditText(text, wrap, room, advance){
+function wrapEditText(text, wrap, room, advance){
     /** @type {{ text: string, start: number }[]} */
     const lines = [];
     let at = 0;
@@ -329,6 +376,7 @@ const LB_GETTEXTLEN = 0x018a;
 const LB_GETCOUNT = 0x018b;
 const LB_DIR = 0x018d;
 const LB_GETTOPINDEX = 0x018e;
+const LB_SELECTSTRING = 0x018c;
 const LB_FINDSTRING = 0x018f;
 const LB_GETSELCOUNT = 0x0190;
 const LB_GETSELITEMS = 0x0191;
@@ -337,10 +385,19 @@ const LB_SETTOPINDEX = 0x0197;
 const LB_GETITEMRECT = 0x0198;
 const LB_GETITEMDATA = 0x0199;
 const LB_SETITEMDATA = 0x019a;
+const LB_SELITEMRANGEEX = 0x0183;
+const LB_SELITEMRANGE = 0x019b;
+const LB_SETANCHORINDEX = 0x019c;
+const LB_GETANCHORINDEX = 0x019d;
+const LB_SETCARETINDEX = 0x019e;
+const LB_GETCARETINDEX = 0x019f;
 const LB_SETITEMHEIGHT = 0x01a0;
 const LB_GETITEMHEIGHT = 0x01a1;
+const LB_GETLISTBOXINFO = 0x01b2;
 const LB_FINDSTRINGEXACT = 0x01a2;
 const LB_ERR = -1;
+/** The list box messages run from LB_ADDSTRING to this one. */
+const LB_LAST = 0x01b5;
 const LBN_SELCHANGE = 1;
 const LBN_DBLCLK = 2;
 const LBN_SETFOCUS = 4;
@@ -357,7 +414,9 @@ const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
 const CBS_SORT = 0x0100;
 const CBS_OWNERDRAW = 0x0030;
+const CBS_OWNERDRAWFIXED = 0x0010;
 const CBS_HASSTRINGS = 0x0200;
+const CBS_NOINTEGRALHEIGHT = 0x0400;
 const CB_GETEDITSEL = 0x0140;
 const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
@@ -380,6 +439,7 @@ const CB_SETEXTENDEDUI = 0x0155;
 const CB_GETEXTENDEDUI = 0x0156;
 const CB_GETDROPPEDSTATE = 0x0157;
 const CB_FINDSTRINGEXACT = 0x0158;
+const CB_SELECTSTRING = 0x014d;
 const CB_SETDROPPEDWIDTH = 0x0160;
 const CB_ERR = -1;
 const CBN_SELCHANGE = 1;
@@ -392,12 +452,12 @@ const CBN_DROPDOWN = 7;
 const CBN_CLOSEUP = 8;
 const CBN_SELENDOK = 9;
 const CBN_SELENDCANCEL = 10;
-/** The dropped list: a popup of its own over everything, never activated. */
-const WS_POPUP = 0x80000000;
+/** The dropped list: a child of the desktop over everything, never activated. */
 const WS_BORDER = 0x00800000;
-const WS_EX_TOPMOST = 0x00000008;
 const WS_EX_TOOLWINDOW = 0x00000080;
-const SW_SHOWNA = 8;
+const HWND_TOPMOST = -1;
+const SWP_NOACTIVATE = 0x0010;
+const SWP_SHOWWINDOW = 0x0040;
 const WM_DESTROY = 0x0002;
 const WM_MOUSEACTIVATE = 0x0021;
 const WM_SYSKEYDOWN = 0x0104;
@@ -406,17 +466,33 @@ const VK_F4 = 0x73;
 /** How far one notch of the wheel scrolls a dropped list, in items. */
 const WHEEL_ITEMS = 3;
 
-/**
- * The notices an editing field gives its parent as text changes: an edit
- * reports the EN_* pair, the field of an editable combo box the CBN_* one.
- * A combo box has no code for a limit reached, so its overflow is null.
- */
-const EDIT_NOTICES = Object.freeze({ update: EN_UPDATE, change: EN_CHANGE,
-    overflow: EN_MAXTEXT });
-const COMBO_NOTICES = Object.freeze({ update: CBN_EDITUPDATE, change: CBN_EDITCHANGE,
-    overflow: null });
 /** The drop button at the right of a combo box, as wide as a scroll bar. */
 const COMBO_BUTTON = 16;
+const CB_SETITEMHEIGHT = 0x0153;
+const CB_GETITEMHEIGHT = 0x0154;
+const CB_GETDROPPEDWIDTH = 0x015f;
+const CB_GETCOMBOBOXINFO = 0x0164;
+/** The ids a combo box gives its list and its edit, as Windows gives them. */
+const COMBO_LIST_ID = 1000;
+const COMBO_EDIT_ID = 1001;
+/** The combo box styles its edit takes on as the edit's own. */
+const CBS_AUTOHSCROLL = 0x0040;
+const CBS_OEMCONVERT = 0x0080;
+const CBS_UPPERCASE = 0x2000;
+const CBS_LOWERCASE = 0x4000;
+const ES_UPPERCASE = 0x0008;
+const ES_LOWERCASE = 0x0010;
+const ES_NOHIDESEL = 0x0100;
+const ES_OEMCONVERT = 0x0400;
+const WM_CTLCOLORMSGBOX = 0x0132;
+/** What a 16-bit control asked its colour with, still passed on. */
+const WM_CTLCOLOR = 0x0019;
+/** A combo box's list: a list box that tells the combo box, not its parent. */
+const LBS_COMBOBOX = 0x8000;
+const LBS_NOINTEGRALHEIGHT = 0x0100;
+const SW_HIDE = 0;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const SWP_NOSIZE = 0x0001;
 
 /** Scroll bar styles, messages and the codes a WM_VSCROLL carries. */
 const SBS_VERT = 0x0001;
@@ -452,7 +528,7 @@ const ARROW_LENGTH = 16;
 
 /** The dialog class: its messages, its extra bytes and what it answers Enter with. */
 export const DLGWINDOWEXTRA = 30;
-export const DWLP_MSGRESULT = 0;
+const DWLP_MSGRESULT = 0;
 export const DWLP_DLGPROC = 4;
 export const DWLP_USER = 8;
 const DM_GETDEFID = 0x0400;
@@ -471,9 +547,9 @@ const DT_SINGLELINE = 0x0020;
 const DT_NOPREFIX = 0x0800;
 
 /** System colour indices, as GetSysColor numbers them. */
-export const COLOR_SCROLLBAR = 0;
+const COLOR_SCROLLBAR = 0;
 export const COLOR_WINDOW = 5;
-export const COLOR_WINDOWFRAME = 6;
+const COLOR_WINDOWFRAME = 6;
 export const COLOR_WINDOWTEXT = 8;
 export const COLOR_HIGHLIGHT = 13;
 export const COLOR_HIGHLIGHTTEXT = 14;
@@ -501,6 +577,8 @@ const MAX_TEXT = 1 << 16;
  * @property {number} message
  * @property {number} wParam
  * @property {number} lParam
+ * @property {boolean} [unicode]  its text wide; the dialog class's procedure
+ *     takes a message in its window's encoding, every other one in ANSI
  */
 
 /** SetBkMode's mode in which text is drawn over the context's background colour. */
@@ -529,6 +607,11 @@ const OPAQUE = 2;
  *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
+ * @property {(hdc: number) => number} [averageWidth]  The context's font's average
+ *     character width, as GdiGetCharDimensions measures it.
+ * @property {(hdc: number, rect: Rect) => number} [clipTo]  The context's clip narrowed
+ *     to a rectangle while a control paints; answers what `unclip` puts back.
+ * @property {(hdc: number, saved: number) => void} [unclip]
  * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
  *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
  * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
@@ -601,6 +684,8 @@ export const imagePlace = (record, rect, shape)=>{
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
+ * @property {(record: any) => boolean} [shown]
+ *           IsWindowVisible: it and every ancestor shown.
  * @property {(record: any, thread?: unknown) => number | Promise<number>} [update]
  *           Paints it now, as the call of `thread` -- the control's caller's,
  *           not whichever thread holds the processor past an await.
@@ -610,15 +695,24 @@ export const imagePlace = (record, rect, shape)=>{
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
  *           MoveWindow, for a control that places itself in its parent.
+ * @property {(hwnd: number, after: number, x: number, y: number, width: number,
+ *     height: number, flags: number, thread?: unknown) => number | Promise<number>} [place]
+ *           SetWindowPos with its flags, on the thread named: a frame
+ *           recalculated (SWP_FRAMECHANGED), a child moved without
+ *           SWP_NOACTIVATE told WM_CHILDACTIVATE, as Windows' controls do.
  * @property {(record: any) => { x: number, y: number }} [clientOrigin]
  *           Where its client area is on the screen.
  * @property {(className: string, rect: { x: number, y: number, width: number,
  *     height: number }, owner: number, exStyle: number, style: number,
- *     thread?: unknown) => number | Promise<number>} [popup]
- *           A window of a system class, made by name on the screen: a combo
- *           box's dropped list. Absent, the list does not drop.
+ *     thread?: unknown, id?: number) => number | Promise<number>} [popup]
+ *           A window of a system class, made by name: a combo box's list,
+ *           a popup on the screen or a child (WS_CHILD) in its parent with
+ *           the control id `id`, a child of the desktop for an owner of
+ *           zero. Absent, a combo box has no list window.
  * @property {(hwnd: number, command: number) => number | Promise<number>} [show]
  * @property {(hwnd: number) => number | Promise<number>} [destroy]
+ * @property {(hwnd: number, address: number) => number} [comboBoxInfo]
+ *           GetComboBoxInfo, which CB_GETCOMBOBOXINFO answers with.
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {() => number} focus
  * @property {(hwnd: number) => void} setCapture
@@ -632,9 +726,16 @@ export const imagePlace = (record, rect, shape)=>{
  *           build with no heap behind it, and then a notification that needs
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
+ * @property {(address: number) => { size: number, capacity: number } | null} [block]
+ *           A block of the process heap an address starts, as LocalSize and an
+ *           in-place LocalReAlloc see it: an edit's text buffer is one.
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(event: number, hwnd: number, object: number, child: number, thread?: unknown)
+ *     => number | Promise<number>} [winEvent]
+ *           NotifyWinEvent, as the call of `thread`: what a control raises
+ *           where a screen reader would want to hear of a change.
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
  *           clipboard messages do nothing.
@@ -643,6 +744,11 @@ export const imagePlace = (record, rect, shape)=>{
  *           The thread's caret, which an edit takes while it has the focus.
  *           Absent, an edit draws its own bar where typing goes.
  * @property {import('../kernel32/files.js').FileSystem} [files]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a handle's width in a structure.
+ * @property {(code: number) => void} [setLastError]
+ * @property {(himl: number) => ({ cx: number, cy: number } | null)} [imageListSize]
+ *           An image list's image size (comctl32's), for a version 6 button's
+ *           ideal size. Absent, a button's list has no size.
  *           The volume LB_DIR and CB_DIR list. Absent, they list nothing.
  */
 
@@ -748,11 +854,13 @@ export function thumbValue(rect, vertical, held, start){
  * @returns {{ procedures: Record<string, ControlProcedure>,
  *     helpers: { dialogProc: ControlProcedure,
  *         markDefault: (dialog: any, focused: number) => void,
- *         defaultControlColors: (message: number, hdc: number) => void,
+ *         defaultControlColors: (message: number, hdc: number) => number,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
- *             x: number, y: number) => number },
+ *             x: number, y: number) => number,
+ *         comboInfo: (combo: any) => { item: Rect, button: Rect, edit: number,
+ *             list: number } },
  *     toolkit: ControlToolkit }}
  */
 export function createControlProcedures(host){
@@ -920,10 +1028,14 @@ export function createControlProcedures(host){
      *
      * @param {any} record @param {number} code @param {unknown} [thread]
      */
-    const notify = (record, code, thread)=>(record.parent
-        ? host.send(record.parent, WM_COMMAND,
-            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread)
-        : 0);
+    const notify = (record, code, thread)=>{
+        // The window CreateWindowEx was handed as the parent: a child's
+        // parent, or a top-level control's owner, which it was given the same
+        // way and which hears it the same way on Windows.
+        const to = record.parent || record.owner;
+        return to ? host.send(to, WM_COMMAND,
+            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread) : 0;
+    };
 
     /**
      * Asks the parent which brush a control's background is painted with:
@@ -1067,17 +1179,20 @@ export function createControlProcedures(host){
     const staticOpaque = hdc=>host.draw?.bkMode?.(hdc) === OPAQUE;
 
     /**
-     * The colours the default procedure gives the context a control asked
-     * WM_CTLCOLOR* about, as DefWindowProc sets them: the window text on the
-     * window colour for an edit or a list box, on the 3D face for the rest.
+     * What the default procedure answers a control that asked WM_CTLCOLOR*:
+     * the window text on the window colour for an edit or a list box, on
+     * the 3D face for the rest, set in the context, and a brush of that
+     * background (zero in a build that draws nothing).
      *
      * @param {number} message @param {number} hdc
+     * @returns {number}
      */
     const defaultControlColors = (message, hdc)=>{
         const face = message === WM_CTLCOLOREDIT || message === WM_CTLCOLORLISTBOX
             ? COLOR_WINDOW : COLOR_3DFACE;
         host.draw?.setTextColor?.(hdc, color(COLOR_WINDOWTEXT));
         host.draw?.setBkColor?.(hdc, color(face));
+        return host.draw ? host.draw.solidBrush(color(face)) : 0;
     };
 
     // --- Button -------------------------------------------------------------
@@ -1257,7 +1372,9 @@ export function createControlProcedures(host){
      * @param {any} record @param {number} action @param {unknown} [thread]
      */
     const redrawOwnerButton = (record, action, thread)=>{
-        if ((record.style & WS_VISIBLE) === 0)
+        // IsWindowVisible, as Wine's button paints: under a parent not shown
+        // yet nothing is drawn and the parent is asked for no colour.
+        if (!(host.shown?.(record) ?? (record.style & WS_VISIBLE) !== 0))
         {
             return 0;
         }
@@ -1295,11 +1412,58 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The text of a button in its font, for its ideal size: through a
+     * context on the window, the only place its font can be asked.
+     *
+     * @param {any} record @param {string} text @param {number} [wrapAt]
+     */
+    const buttonTextExtent = (record, text, wrapAt)=>{
+        const draw = host.draw;
+        if (!draw)
+        {
+            return { width: text.length * 8, height: 16 };
+        }
+        const { hdc } = host.contextOn(record);
+        try
+        {
+            const metrics = draw.measure(hdc, 'M');
+            const lines = layoutText(text, { left: 0, top: 0, right: wrapAt ?? 0x7fff,
+                bottom: 0x7fff }, wrapAt === undefined ? 0 : DT_WORDBREAK, {
+                cellWidth: metrics.width, cellHeight: metrics.height,
+                width: (/** @type {string} */ piece)=>draw.measure(hdc, piece).width,
+            });
+            const widest = lines.reduce((most, line)=>
+                Math.max(most, draw.measure(hdc, line.text).width), 0);
+            return {
+                width: widest,
+                height: Math.max(lines.length, 1) * metrics.height,
+            };
+        }
+        finally
+        {
+            host.endPaint(record, hdc);
+        }
+    };
+    const buttonV6 = createButtonV6({
+        read: host.readMemory, write: host.writeMemory, pointerSize: host.pointerSize ?? 4,
+        imageListSize: himl=>host.imageListSize?.(himl) ?? null,
+        imageSize: image=>imageSize(image),
+        textExtent: buttonTextExtent,
+        clientSize: record=>host.clientSize(record),
+        setLastError: code=>host.setLastError?.(code),
+    });
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const buttonProc = (record, message, thread)=>{
         const state = stateOf(record);
         const kind = buttonKind(record);
+        const six = buttonV6.answer(record, state, message);
+        if (six !== undefined)
+        {
+            return six;
+        }
         switch (message.message){
             case WM_PAINT:
                 if (kind === BS_OWNERDRAW)
@@ -1411,6 +1575,14 @@ export function createControlProcedures(host){
                         state.check = wanted;
                         host.invalidate(record);
                     }
+                    // A radio button checked is the one Tab reaches in its
+                    // group, and one unchecked is not (dialog.c test_focus:
+                    // the dialog's first tab stop is the group's checked one).
+                    if (RADIO_KINDS.has(kind))
+                    {
+                        record.style = (wanted === BST_UNCHECKED ? record.style & ~WS_TABSTOP
+                            : record.style | WS_TABSTOP) >>> 0;
+                    }
                 }
                 return 0;
             case BM_GETSTATE:
@@ -1428,6 +1600,22 @@ export function createControlProcedures(host){
                 return 0;
             case BM_CLICK:
                 return clickButton(record, thread);
+            // The image a button holds, whatever its style says it shows:
+            // the one before is handed back, and a type that is neither a
+            // bitmap nor an icon is no image.
+            case BM_SETIMAGE: {
+                if (message.wParam !== IMAGE_BITMAP && message.wParam !== IMAGE_ICON)
+                {
+                    return 0;
+                }
+                const before = state.image?.handle ?? 0;
+                state.image = message.lParam === 0 ? null
+                    : { type: message.wParam, handle: message.lParam >>> 0 };
+                host.invalidate(record);
+                return before;
+            }
+            case BM_GETIMAGE:
+                return state.image && state.image.type === message.wParam ? state.image.handle : 0;
             default:
                 return common(record, message, thread);
         }
@@ -1531,20 +1719,55 @@ export function createControlProcedures(host){
     const staticProc = (record, message, thread)=>{
         const state = stateOf(record);
         switch (message.message){
+            case WM_CREATE: {
+                // An etched line or a sunken static is drawn by its edge:
+                // Windows gives it WS_EX_STATICEDGE, and an etched line is the
+                // edge alone - a horizontal one has no client height, a
+                // vertical one no client width. A system class's procedure is
+                // first told WM_CREATE, so the frame is laid again here.
+                const type = record.style & SS_TYPEMASK;
+                const etched = type === SS_ETCHEDHORZ || type === SS_ETCHEDVERT;
+                if ((!etched && (record.style & SS_SUNKEN) === 0) || !host.move)
+                {
+                    return common(record, message, thread);
+                }
+                record.exStyle = (record.exStyle | WS_EX_STATICEDGE) >>> 0;
+                const framed = host.move(record.hwnd, record.x, record.y, record.width,
+                    record.height);
+                return after(framed, ()=>{
+                    if (!etched)
+                    {
+                        return common(record, message, thread);
+                    }
+                    const size = host.clientSize(record);
+                    return after(host.move?.(record.hwnd, record.x, record.y,
+                        type === SS_ETCHEDVERT ? record.width - size.width : record.width,
+                        type === SS_ETCHEDHORZ ? record.height - size.height : record.height),
+                    ()=>common(record, message, thread));
+                });
+            }
             case WM_PAINT:
                 // An owner-drawn static is its parent's to draw, all of it:
-                // asked for a colour first, as every static asks.
-                return painting(record, (hdc, rect)=>after(
-                    controlColor(record, WM_CTLCOLORSTATIC, hdc, thread), brush=>{
-                        if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
-                        {
-                            return drawItem(record, hdc, rect, { type: ODT_STATIC,
-                                action: ODA_DRAWENTIRE,
-                                state: disabled(record) ? ODS_DISABLED : 0 }, thread);
-                        }
-                        paintStatic(record, hdc, rect, brush);
-                        return 0;
-                    }));
+                // asked for a colour first, as every static asks. The
+                // context is clipped to the control while it paints, so the
+                // parent answering WM_CTLCOLORSTATIC finds a clip selected.
+                return painting(record, (hdc, rect)=>{
+                    const saved = host.draw?.clipTo?.(hdc, clientRect(record)) ?? 0;
+                    return after(after(controlColor(record, WM_CTLCOLORSTATIC, hdc, thread),
+                        brush=>{
+                            if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
+                            {
+                                return drawItem(record, hdc, rect, { type: ODT_STATIC,
+                                    action: ODA_DRAWENTIRE,
+                                    state: disabled(record) ? ODS_DISABLED : 0 }, thread);
+                            }
+                            paintStatic(record, hdc, rect, brush);
+                            return 0;
+                        }), answer=>{
+                        host.draw?.unclip?.(hdc, saved);
+                        return answer;
+                    });
+                });
             case WM_ERASEBKGND:
                 return 1;
             case WM_NCHITTEST:
@@ -1557,22 +1780,34 @@ export function createControlProcedures(host){
                 return (record.style & SS_NOTIFY) !== 0 ? notify(record, STN_DBLCLK, thread) : 0;
             case STM_SETICON:
             case STM_SETIMAGE: {
+                // A static takes only the image its style shows - an icon or
+                // a cursor for SS_ICON, a bitmap for SS_BITMAP, a metafile for
+                // SS_ENHMETAFILE - and answers 0 for another, keeping none.
+                const asked = message.message === STM_SETICON
+                    ? IMAGE_ICON : message.wParam & 0xffff;
+                const type = record.style & SS_TYPEMASK;
+                const shows = type === SS_ICON ? asked === IMAGE_ICON || asked === IMAGE_CURSOR
+                    : type === SS_BITMAP ? asked === IMAGE_BITMAP
+                        : type === SS_ENHMETAFILE && asked === IMAGE_ENHMETAFILE;
+                if (!shows)
+                {
+                    return 0;
+                }
                 const previous = state.image ?? 0;
                 state.image = (message.message === STM_SETICON
                     ? message.wParam : message.lParam) >>> 0;
-                state.imageType = message.message === STM_SETICON
-                    ? IMAGE_ICON : message.wParam & 0xffff;
+                state.imageType = asked === IMAGE_CURSOR ? IMAGE_ICON : asked;
                 host.invalidate(record);
                 // Neither centred nor stretched, the image is the control's
                 // size: it ignores the size it was made with and takes the
                 // image's, so what lies beside it in the template shows.
                 const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
                     ? imageSize(state.image) : null;
-                return sized && host.move
+                const moved = sized && host.move
                     && (sized.width !== record.width || sized.height !== record.height)
-                    ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
-                        ()=>previous)
-                    : previous;
+                    ? host.move(record.hwnd, record.x, record.y, sized.width, sized.height) : 0;
+                // Drawn at once, its parent asked for the colour again.
+                return after(moved, ()=>after(host.update?.(record, thread) ?? 1, ()=>previous));
             }
             case STM_GETICON:
                 return state.imageType === IMAGE_ICON ? state.image ?? 0 : 0;
@@ -1822,15 +2057,12 @@ export function createControlProcedures(host){
 
     /**
      * Replaces the selection with text, keeps within the limit, moves the
-     * caret past what was inserted, and tells the parent. Which pair of
-     * notices the parent gets is the control's own: an edit reports EN_*,
-     * the field of an editable combo box the CBN_* pair -- and a combo has
-     * no code for a limit reached, so its overflow notice is null.
+     * caret past what was inserted, and tells the parent: EN_UPDATE, EN_CHANGE,
+     * and EN_MAXTEXT when the limit cut the text short.
      *
      * @param {any} record @param {string} text @param {unknown} [thread]
-     * @param {{ update: number, change: number, overflow: number | null }} [codes]
      */
-    const replaceSelection = (record, text, thread, codes = EDIT_NOTICES)=>{
+    const replaceSelection = (record, text, thread)=>{
         const state = editState(record);
         const from = Math.min(state.selStart, state.selEnd);
         const to = Math.max(state.selStart, state.selEnd);
@@ -1840,10 +2072,9 @@ export function createControlProcedures(host){
         state.selStart = state.selEnd = from + inserted.length;
         state.modified = true;
         host.invalidate(record);
-        return after(notify(record, codes.update, thread), ()=>after(
-            notify(record, codes.change, thread),
-            ()=>(inserted.length < text.length && codes.overflow !== null
-                ? notify(record, codes.overflow, thread) : 0)));
+        return after(notify(record, EN_UPDATE, thread), ()=>after(
+            notify(record, EN_CHANGE, thread),
+            ()=>(inserted.length < text.length ? notify(record, EN_MAXTEXT, thread) : 0)));
     };
 
     /**
@@ -1912,16 +2143,60 @@ export function createControlProcedures(host){
     };
 
     /**
-     * A character arriving at an editing field: an edit's, or the field of an
-     * editable combo box. Backspace narrows or deletes the selection, a return
+     * Enter, Escape and Tab reaching a multi-line edit in a dialog, which
+     * asked for every key: Enter without ES_WANTRETURN goes to the dialog's
+     * default button (focus on it, then the key posted to it), Escape closes
+     * the dialog, Tab moves to the next or previous control. Null for any
+     * other key.
+     *
+     * @param {any} record @param {number} key @param {unknown} thread
+     * @returns {number | Promise<number> | null}
+     */
+    const dialogKeyOfEdit = (record, key, thread)=>{
+        const parent = record.parent;
+        if (key === VK_ESCAPE)
+        {
+            host.post({ hwnd: parent, message: WM_CLOSE, wParam: 0, lParam: 0 });
+            return 0;
+        }
+        if (key === VK_TAB)
+        {
+            return after(host.send(parent, WM_NEXTDLGCTL, host.keyDown(VK_SHIFT) ? 1 : 0, 0,
+                thread), ()=>0);
+        }
+        if (key !== VK_RETURN || (record.style & ES_WANTRETURN) !== 0)
+        {
+            return null;
+        }
+        return after(host.send(parent, DM_GETDEFID, 0, 0, thread), answer=>{
+            if ((answer >>> 16) !== DC_HASDEFID)
+            {
+                return 0;
+            }
+            const owner = host.live(parent);
+            const button = owner ? host.children(owner)
+                .find(child=>(child.id & 0xffff) === (answer & 0xffff)) : undefined;
+            if (!button)
+            {
+                return 0;
+            }
+            return after(host.send(parent, WM_NEXTDLGCTL, button.hwnd, 1, thread), ()=>{
+                host.post({ hwnd: button.hwnd, message: WM_KEYDOWN, wParam: VK_RETURN,
+                    lParam: 0 });
+                return 0;
+            });
+        });
+    };
+
+    /**
+     * A character arriving at an edit. Backspace narrows or deletes the selection, a return
      * belongs to a multi-line edit that asked for one, control characters are
      * not text, and anything else replaces the selection.
      *
      * @param {any} record @param {number} character @param {unknown} thread
-     * @param {{ update: number, change: number, overflow: number | null }} codes
      * @param {boolean} readOnly
      */
-    const editCharacter = (record, character, thread, codes, readOnly)=>{
+    const editCharacter = (record, character, thread, readOnly)=>{
         if (readOnly || disabled(record))
         {
             return 0;
@@ -1934,23 +2209,32 @@ export function createControlProcedures(host){
             {
                 state.selStart = state.selEnd - 1;
             }
-            return replaceSelection(record, '', thread, codes);
+            return replaceSelection(record, '', thread);
         }
-        if (character === VK_RETURN)
+        // Return and tab are text to a multi-line edit, whatever its
+        // ES_WANTRETURN: that style says what the edit does with the key in a
+        // dialog (WM_KEYDOWN), not with the character.
+        // In a dialog the keys themselves did the work - moved the focus,
+        // pressed the default button - and the character they translate to
+        // is not typed.
+        const inDialog = state.dialogMode === true;
+        if (inDialog && multiline(record) && (character === VK_TAB
+            || (character === VK_RETURN && (record.style & ES_WANTRETURN) === 0)))
         {
-            if (!multiline(record) || (record.style & ES_WANTRETURN) === 0)
-            {
-                return 0;
-            }
-            rememberUndo(record, true);
-            return replaceSelection(record, '\r\n', thread, codes);
+            return 0;
         }
-        if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
+        if ((character === VK_RETURN || character === VK_TAB) && multiline(record))
+        {
+            rememberUndo(record, true);
+            return replaceSelection(record, character === VK_RETURN ? '\r\n' : '\t',
+                thread);
+        }
+        if (character < VK_SPACE || character === VK_ESCAPE || character === 0x7f)
         {
             return 0;
         }
         rememberUndo(record, true);
-        return replaceSelection(record, String.fromCharCode(character), thread, codes);
+        return replaceSelection(record, String.fromCharCode(character), thread);
     };
 
     /**
@@ -2125,9 +2409,107 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The text an edit holds in the buffer EM_GETHANDLE handed out or
+     * EM_SETHANDLE gave it: the program may write it in place, so it is read
+     * before every message and written after one that changed the text. An
+     * ANSI window's buffer is ANSI, a Unicode one's UTF-16 (user32's edit;
+     * Common Controls 6's is always UTF-16).
+     *
+     * @param {any} record
+     */
+    const pullEditBuffer = record=>{
+        const state = editState(record);
+        const block = host.block?.(state.handle);
+        if (!block)
+        {
+            return;
+        }
+        const bytes = host.readMemory(state.handle, block.size);
+        if (record.unicode === true)
+        {
+            let text = '';
+            for (let at = 0; at + 1 < bytes.length; at += 2)
+            {
+                const unit = bytes[at] | bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            record.title = text;
+        }
+        else
+        {
+            const end = bytes.indexOf(0);
+            record.title = decodeAnsi(bytes.subarray(0, end < 0 ? bytes.length : end));
+        }
+    };
+    /** @param {any} record @param {string} text @returns {Uint8Array} */
+    const encodeEditBuffer = (record, text)=>{
+        if (record.unicode !== true)
+        {
+            return encodeAnsi(`${text}\0`);
+        }
+        return utf16z(text);
+    };
+    /**
+     * Writes the text back into the buffer: in place while the block holds
+     * it, else into a larger block that replaces it, as LocalReAlloc moves a
+     * fixed block - the program asks EM_GETHANDLE again for where it went.
+     *
+     * @param {any} record
+     */
+    const pushEditBuffer = record=>{
+        const state = editState(record);
+        const bytes = encodeEditBuffer(record, record.title);
+        const block = host.block?.(state.handle);
+        if (block && bytes.length <= block.capacity)
+        {
+            host.writeMemory(state.handle, bytes);
+            return;
+        }
+        const grown = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+        if (grown === 0)
+        {
+            host.divergence?.('Edit', 'no memory to grow the text buffer EM_GETHANDLE handed out');
+            return;
+        }
+        host.writeMemory(grown, bytes);
+        if (block)
+        {
+            host.release?.(state.handle);
+        }
+        state.handle = grown;
+    };
+
+    /**
+     * An edit's messages, its text read from and written back to the
+     * program's buffer around each where it has one (EM_GETHANDLE).
+     *
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const editProc = (record, message, thread)=>{
+        const state = editState(record);
+        if (!state.handle)
+        {
+            return editMessage(record, message, thread);
+        }
+        pullEditBuffer(record);
+        const before = record.title;
+        return after(editMessage(record, message, thread), answer=>{
+            if (state.handle && record.title !== before)
+            {
+                pushEditBuffer(record);
+            }
+            return answer;
+        });
+    };
+
+    /**
+     * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const editMessage = (record, message, thread)=>{
         const state = editState(record);
         const readOnly = ()=>(record.style & ES_READONLY) !== 0;
         switch (message.message){
@@ -2143,9 +2525,19 @@ export function createControlProcedures(host){
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
+                // Asked with the message the dialog manager is about to
+                // handle, the edit knows it lives in a dialog, and a
+                // multi-line one then answers Enter, Escape and Tab itself
+                // (WM_KEYDOWN below). It wants every key whatever
+                // ES_WANTRETURN says.
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    state.dialogMode = true;
+                }
+                // A combo box's edit wants Enter and Escape while the list is
+                // dropped: they close it.
                 return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_HASSETSEL
-                    | (multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                        ? DLGC_WANTALLKEYS : 0);
+                    | (multiline(record) || comboDropped(record) ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
                 takeCaret(record);
                 host.invalidate(record);
@@ -2168,12 +2560,44 @@ export function createControlProcedures(host){
                 host.invalidate(record);
                 return after(host.setFocus(record.hwnd, thread), ()=>0);
             }
-            case WM_CHAR:
-                return editCharacter(record, message.wParam & 0xffff, thread,
-                    EDIT_NOTICES, readOnly());
+            case WM_CHAR: {
+                // Ctrl+C, V, X and Z are the clipboard's and undo's, sent to the
+                // edit as their own messages; every character answers 1.
+                const character = message.wParam & 0xffff;
+                const command = EDIT_CONTROL_CHARACTERS.get(character);
+                if (command !== undefined)
+                {
+                    return after(host.send(record.hwnd, command, 0, 0, thread), ()=>1);
+                }
+                return after(editCharacter(record, character, thread, readOnly()),
+                    ()=>1);
+            }
+            case WM_SYSKEYDOWN:
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
+                // A combo box's edit hands its combo box the keys that walk
+                // and drop the list, and Enter and Escape while it is dropped.
+                const combo = comboOfEdit(record);
+                if (combo && (key === VK_UP || key === VK_DOWN
+                    || (message.message === WM_KEYDOWN && (key === VK_F4
+                        || ((key === VK_RETURN || key === VK_ESCAPE) && comboDropped(record))))))
+                {
+                    return host.send(combo.hwnd, message.message, message.wParam, message.lParam,
+                        thread);
+                }
+                if (message.message === WM_SYSKEYDOWN)
+                {
+                    return common(record, message, thread);
+                }
                 const rows = editGridRows(record);
+                if (state.dialogMode === true && multiline(record) && record.parent)
+                {
+                    const answered = dialogKeyOfEdit(record, key, thread);
+                    if (answered !== null)
+                    {
+                        return answered;
+                    }
+                }
                 switch (key){
                     case VK_LEFT:
                         moveCaret(record, state.selEnd - 1);
@@ -2390,9 +2814,114 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
-            case EM_SETMARGINS:
-            case EM_GETRECT:
+            case EM_GETHANDLE: {
+                // A single-line edit has no buffer to hand out. The block is
+                // the process heap's, so LocalLock, LocalSize and LocalFree
+                // know it.
+                if (!multiline(record))
+                {
+                    return 0;
+                }
+                if (!state.handle)
+                {
+                    const bytes = encodeEditBuffer(record, record.title);
+                    const at = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+                    if (at === 0)
+                    {
+                        return 0;
+                    }
+                    host.writeMemory(at, bytes);
+                    state.handle = at;
+                }
+                return state.handle;
+            }
+            case EM_SETHANDLE: {
+                // The program's buffer becomes the text; the one it replaces is
+                // the program's to free (EM_GETHANDLE's documented contract),
+                // and the edit frees the last one it holds when destroyed.
+                if (!multiline(record) || (message.wParam >>> 0) === 0)
+                {
+                    return 0;
+                }
+                state.handle = message.wParam >>> 0;
+                pullEditBuffer(record);
+                state.selStart = state.selEnd = 0;
+                state.firstLine = 0;
+                state.modified = false;
+                state.undo = null;
+                host.invalidate(record);
                 return 0;
+            }
+            case WM_NCDESTROY:
+                if (state.handle && host.block?.(state.handle))
+                {
+                    host.release?.(state.handle);
+                }
+                state.handle = 0;
+                return common(record, message, thread);
+            case EM_GETRECT:
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    writeRect(message.lParam >>> 0, formatRect(record));
+                }
+                return 0;
+            case EM_SETRECT:
+            case EM_SETRECTNP: {
+                // A rectangle no larger than the client area either way is
+                // not taken (Windows 10 keeps the one it has); none at all
+                // puts the default back. wParam 1 offsets the current one.
+                if ((message.lParam >>> 0) === 0)
+                {
+                    state.setRect = null;
+                }
+                else
+                {
+                    const asked = readRect(wholeAddress(message.lParam));
+                    const current = formatRect(record);
+                    const margins = state.margins ?? { left: 0, right: 0 };
+                    const rect = (message.wParam & 1) !== 0
+                        ? { left: current.left - margins.left + asked.left,
+                            top: current.top + asked.top,
+                            right: current.right + margins.right + asked.right,
+                            bottom: current.bottom + asked.bottom }
+                        : asked;
+                    const size = host.clientSize(record);
+                    if (rect.right - rect.left > size.width && rect.bottom - rect.top > size.height)
+                    {
+                        state.setRect = rect;
+                    }
+                }
+                if (message.message === EM_SETRECT)
+                {
+                    host.invalidate(record);
+                }
+                return 0;
+            }
+            case EM_SETMARGINS:
+                setMargins(record, message.wParam, message.lParam & 0xffff,
+                    message.lParam >>> 16 & 0xffff);
+                host.invalidate(record);
+                return 0;
+            case EM_GETMARGINS: {
+                const margins = state.margins ?? { left: 0, right: 0 };
+                return ((margins.right & 0xffff) << 16 | margins.left & 0xffff) >>> 0;
+            }
+            case WM_SIZE:
+                // Laid out again for a size it is restored or maximized to:
+                // a rectangle EM_SETRECT gave goes. The size in lParam is not
+                // read - the client area is asked.
+                if (message.wParam === SIZE_RESTORED || message.wParam === SIZE_MAXIMIZED)
+                {
+                    state.setRect = null;
+                }
+                return common(record, message, thread);
+            case WM_SETFONT:
+                state.cell = null;
+                return after(common(record, message, thread), answer=>{
+                    setMargins(record, EC_LEFTMARGIN | EC_RIGHTMARGIN, EC_USEFONTINFO,
+                        EC_USEFONTINFO);
+                    return answer;
+                });
             case EM_POSFROMCHAR:
             case EM_CHARFROMPOS:
                 return -1;
@@ -2446,9 +2975,115 @@ export function createControlProcedures(host){
     };
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, new Uint8Array([
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), new Uint8Array([
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
     ]));
+
+    /** @param {number} address @returns {Rect} */
+    const readRect = address=>{
+        const bytes = host.readMemory(wholeAddress(address), 16);
+        const at = (/** @type {number} */ offset)=>(bytes[offset] | bytes[offset + 1] << 8
+            | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
+        return { left: at(0), top: at(4), right: at(8), bottom: at(12) };
+    };
+    /** @param {number} address @param {Rect} rect */
+    const writeRect = (address, rect)=>{
+        writeU32(address, rect.left);
+        writeU32(address + 4, rect.top);
+        writeU32(address + 8, rect.right);
+        writeU32(address + 12, rect.bottom);
+    };
+
+    /**
+     * How far inside its client area an edit lays its text out: a pixel for
+     * WS_EX_CLIENTEDGE, a thin border and one for WS_BORDER, which Windows
+     * draws inside the client area of an edit.
+     *
+     * @param {any} record
+     */
+    const editInset = record=>((record.exStyle & WS_EX_CLIENTEDGE) !== 0 ? 1
+        : (record.style & WS_BORDER) !== 0 ? THIN_BORDER + 1 : 0);
+
+    /**
+     * The formatting rectangle EM_GETRECT reports and the text is laid out
+     * in: the client area inside the edit's border and margins, or the
+     * rectangle EM_SETRECT gave inside the margins. The border's inset is
+     * kept vertically only where a line still fits between, as Windows
+     * does; a single-line edit is one line high, cut by the client area,
+     * and a multi-line one fills it (Windows 10's model, which Wine's test
+     * measures against).
+     *
+     * @param {any} record @returns {Rect}
+     */
+    const formatRect = record=>{
+        const state = editState(record);
+        const margins = state.margins ?? { left: 0, right: 0 };
+        if (state.setRect)
+        {
+            return { ...state.setRect, left: state.setRect.left + margins.left,
+                right: state.setRect.right - margins.right };
+        }
+        const size = host.clientSize(record);
+        const inset = editInset(record);
+        const line = editCell(record).height;
+        const down = size.height >= line + 2 * inset ? inset : 0;
+        const top = down;
+        const bottom = multiline(record) ? size.height - down
+            : Math.min(top + line, size.height);
+        return { left: inset + margins.left, top,
+            right: size.width - inset - margins.right, bottom };
+    };
+
+    /**
+     * The margins EC_USEFONTINFO asks for: half the font's average
+     * character width a side, which the edit takes only when its client
+     * area is at least that and two average characters wide - a narrower
+     * edit keeps the margins it has, and an empty one is judged as
+     * EMPTY_EDIT_WIDTH wide.
+     *
+     * @param {any} record @returns {{ left: number, right: number } | null}
+     */
+    const fontMargins = record=>{
+        const draw = host.draw;
+        if (!draw?.averageWidth)
+        {
+            return null;
+        }
+        const { hdc } = host.contextOn(record);
+        const average = hdc !== 0 ? draw.averageWidth(hdc) : 0;
+        host.endPaint(record, hdc);
+        if (average <= 0)
+        {
+            return null;
+        }
+        const half = Math.floor(average / 2);
+        const size = host.clientSize(record);
+        const width = size.width <= 0 || size.height <= 0 ? EMPTY_EDIT_WIDTH : size.width;
+        return width >= 2 * half + 2 * average ? { left: half, right: half } : null;
+    };
+
+    /**
+     * EM_SETMARGINS' rule, which WM_SETFONT follows for both sides: a side
+     * named takes its value, or the font's margin where the value is
+     * EC_USEFONTINFO and the edit is wide enough for it.
+     *
+     * @param {any} record @param {number} sides @param {number} left @param {number} right
+     */
+    const setMargins = (record, sides, left, right)=>{
+        const state = editState(record);
+        const margins = { ...state.margins ?? { left: 0, right: 0 } };
+        const font = left === EC_USEFONTINFO || right === EC_USEFONTINFO
+            ? fontMargins(record) : null;
+        if ((sides & EC_LEFTMARGIN) !== 0 && (left !== EC_USEFONTINFO || font))
+        {
+            margins.left = left === EC_USEFONTINFO ? /** @type {any} */ (font).left : left;
+        }
+        if ((sides & EC_RIGHTMARGIN) !== 0 && (right !== EC_USEFONTINFO || font))
+        {
+            margins.right = right === EC_USEFONTINFO ? /** @type {any} */ (font).right : right;
+        }
+        state.margins = margins;
+    };
 
     /**
      * In the ANSI page, as the text was read.
@@ -2456,7 +3091,7 @@ export function createControlProcedures(host){
      * @param {number} address @param {string} text @returns {number} characters written
      */
     const writeString = (address, text)=>{
-        host.writeMemory(address >>> 0, encodeAnsi(`${text}\0`));
+        host.writeMemory(wholeAddress(address), encodeAnsi(`${text}\0`));
         return text.length;
     };
 
@@ -2471,16 +3106,64 @@ export function createControlProcedures(host){
 
     /**
      * @param {any} record
-     * @returns {{ items: ListItem[], current: number, top: number, itemHeight?: number,
+     * @returns {{ items: ListItem[], current: number, caret: number, anchor: number,
+     *     multi: boolean, top: number, itemHeight?: number,
      *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number,
-     *     fieldHeight?: number, grab?: number, bars?: number }}
+     *     fieldHeight?: number, fieldItem?: number, grab?: number, bars?: number }}
      */
     const listState = record=>{
+        // A combo box's items are its list window's, as on Windows, where
+        // the combo box hands its CB_ messages to that list box.
+        const list = record.className === 'ComboBox'
+            ? host.live(stateOf(record).listWindow ?? 0) : null;
+        if (list)
+        {
+            return listState(list);
+        }
         const state = stateOf(record);
         state.items ??= [];
         state.current ??= -1;
+        // The item with the focus rectangle, and the end of a range a
+        // shift-click or LB_SELITEMRANGE grows from: the first item, and
+        // none, until something moves them.
+        state.caret ??= 0;
+        state.anchor ??= -1;
+        // Whether it keeps a set of items selected: LBS_MULTIPLESEL or
+        // LBS_EXTENDEDSEL, but not with LBS_NOSEL, which makes any list box
+        // answer as a single-selection one; fixed when it is made, as a
+        // later SetWindowLong of the style changes nothing (Wine's listbox
+        // test, test_changing_selection_styles).
+        // A combo box's style bits mean other things: its list is single.
+        state.multi ??= String(record.className).toLowerCase() === 'listbox'
+            && (record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) !== 0
+            && (record.style & LBS_NOSEL) === 0;
         state.top ??= 0;
         return state;
+    };
+
+    /** Whether a list box keeps a set of items selected (`listState`). @param {any} record */
+    const multiSelect = record=>listState(record).multi;
+
+    /**
+     * The current, caret and anchor indices after an item is put in at
+     * `at` (`delta` 1) or taken out there (-1): each one past it follows its
+     * item, and one on a removed item is gone.
+     *
+     * @param {ReturnType<typeof listState>} state @param {number} at @param {1 | -1} delta
+     */
+    const shiftIndices = (state, at, delta)=>{
+        for (const key of /** @type {const} */ (['current', 'caret', 'anchor']))
+        {
+            if (delta < 0 && state[key] === at)
+            {
+                state[key] = key === 'caret' ? Math.max(0, Math.min(at, state.items.length - 1))
+                    : -1;
+            }
+            else if (state[key] >= at && (delta > 0 || state[key] > at))
+            {
+                state[key] += delta;
+            }
+        }
     };
 
     /**
@@ -2502,9 +3185,10 @@ export function createControlProcedures(host){
         }
         index = Math.max(0, Math.min(state.items.length, index));
         state.items.splice(index, 0, item);
-        if (state.current >= index)
+        // The caret of an empty list stays on the first item.
+        if (state.items.length > 1)
         {
-            state.current++;
+            shiftIndices(state, index, 1);
         }
         host.invalidate(record);
         return index;
@@ -2583,7 +3267,7 @@ export function createControlProcedures(host){
         const items = state.items;
         const strings = keepsStrings(record);
         const text = ()=>((message.lParam >>> 0) === 0
-            ? '' : host.readCString(message.lParam >>> 0, MAX_TEXT));
+            ? '' : host.readCString(wholeAddress(message.lParam), MAX_TEXT));
         switch (message.message){
             case LB_ADDSTRING:
                 return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
@@ -2613,30 +3297,50 @@ export function createControlProcedures(host){
                     return LB_ERR;
                 }
                 items.splice(at, 1);
-                if (state.current === at)
-                {
-                    state.current = -1;
-                }
-                else if (state.current > at)
-                {
-                    state.current--;
-                }
+                shiftIndices(state, at, -1);
                 host.invalidate(record);
                 return items.length;
             }
             case LB_RESETCONTENT:
                 items.length = 0;
                 state.current = -1;
+                state.caret = 0;
+                state.anchor = -1;
                 state.top = 0;
                 host.invalidate(record);
                 return 0;
             case LB_GETCOUNT:
                 return items.length;
+            // A multiple-selection list box answers its caret: it has no one
+            // current item.
             case LB_GETCURSEL:
-                return state.current;
-            case LB_SETCURSEL: {
+                return multiSelect(record) ? state.caret : state.current;
+            case LB_GETCARETINDEX:
+                return state.caret;
+            case LB_GETANCHORINDEX:
+                return state.anchor;
+            case LB_SETCARETINDEX:
+            case LB_SETANCHORINDEX: {
                 const at = message.wParam | 0;
-                if (at !== -1 && (at < 0 || at >= items.length))
+                if (at < 0 || at >= items.length)
+                {
+                    return LB_ERR;
+                }
+                state[message.message === LB_SETCARETINDEX ? 'caret' : 'anchor'] = at;
+                host.invalidate(record);
+                return 0;
+            }
+            case LB_SETCURSEL:
+            case LB_SELECTSTRING: {
+                // LB_SELECTSTRING: the first item after wParam whose text
+                // begins with the string, as LB_FINDSTRING finds it, selected.
+                const at = message.message === LB_SETCURSEL ? message.wParam | 0
+                    : strings ? findItem(record, message.wParam | 0, false, text())
+                        : findData(record, message.wParam | 0, message.lParam);
+                // LB_SETCURSEL is a single-selection list's alone.
+                if (at < -1 || at >= items.length
+                    || (at === -1 && message.message === LB_SELECTSTRING)
+                    || (message.message === LB_SETCURSEL && state.multi))
                 {
                     return LB_ERR;
                 }
@@ -2647,6 +3351,8 @@ export function createControlProcedures(host){
                 if (at !== -1)
                 {
                     items[at].selected = true;
+                    state.caret = at;
+                    state.anchor = at;
                 }
                 host.invalidate(record);
                 return at;
@@ -2700,7 +3406,7 @@ export function createControlProcedures(host){
 
     /** The item height, which is the text height. @param {any} record @param {number} hdc */
     const itemHeight = (record, hdc)=>{
-        const state = stateOf(record);
+        const state = listState(record);
         return state.itemHeight ?? /** @type {Drawing} */ (host.draw).measure(hdc, 'M').height;
     };
 
@@ -2742,24 +3448,37 @@ export function createControlProcedures(host){
      * @param {any} record @param {number} index @param {number} code  LBN_ or CBN_SELCHANGE.
      * @param {boolean} always  Whether to notify without LBS_NOTIFY.
      * @param {unknown} [thread]
+     * @param {'click' | 'key'} [by]  A key moves a multiple-selection list's caret only.
      */
-    const chooseItem = (record, index, code, always, thread)=>{
+    const chooseItem = (record, index, code, always, thread, by = 'click')=>{
         const state = listState(record);
-        if (index < 0 || index >= state.items.length || (record.style & LBS_NOSEL) !== 0)
+        if (index < 0 || index >= state.items.length)
         {
             return 0;
         }
-        if ((record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) !== 0 && code === LBN_SELCHANGE)
+        const multiple = multiSelect(record) && code === LBN_SELCHANGE;
+        const extended = multiple && (record.style & LBS_EXTENDEDSEL) !== 0;
+        if (multiple && !extended)
         {
-            state.items[index].selected = !state.items[index].selected;
+            // LBS_MULTIPLESEL: a click toggles the item and anchors there; a
+            // key only moves the caret.
+            if (by === 'click')
+            {
+                state.items[index].selected = !state.items[index].selected;
+                state.anchor = index;
+            }
         }
         else
         {
+            // One item selected: a single-selection list's, or an extended
+            // one's without a modifier - the anchor moves with it.
             state.items.forEach(item=>{
                 item.selected = false;
             });
             state.items[index].selected = true;
+            state.anchor = index;
         }
+        state.caret = index;
         state.current = index;
         host.invalidate(record);
         return always || (record.style & LBS_NOTIFY) !== 0 ? notify(record, code, thread) : 0;
@@ -2889,11 +3608,13 @@ export function createControlProcedures(host){
                 {
                     return 0;
                 }
-                const index = Math.max(0, Math.min(state.items.length - 1, state.current + step));
+                const from = multiSelect(record) ? state.caret : state.current;
+                const index = Math.max(0, Math.min(state.items.length - 1,
+                    from < 0 ? 0 : from + step));
                 // The item chosen is scrolled into the rows that show.
                 scrollList(record, index < state.top ? index
                     : index >= state.top + rows ? index - rows + 1 : state.top);
-                return chooseItem(record, index, LBN_SELCHANGE, false, thread);
+                return chooseItem(record, index, LBN_SELCHANGE, false, thread, 'key');
             }
             case WM_VSCROLL: {
                 const code = message.wParam & 0xffff;
@@ -2914,7 +3635,32 @@ export function createControlProcedures(host){
                 const item = state.items[message.wParam | 0];
                 return item ? (item.selected ? 1 : 0) : LB_ERR;
             }
+            case LB_SELITEMRANGE:
+            case LB_SELITEMRANGEEX: {
+                // A range of a multiple-selection list box; a single one has none.
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
+                const ex = message.message === LB_SELITEMRANGEEX;
+                const first = ex ? message.wParam | 0 : message.lParam & 0xffff;
+                const last = ex ? message.lParam | 0 : message.lParam >>> 16;
+                // LB_SELITEMRANGEEX with the last before the first deselects.
+                const on = ex ? first <= last : message.wParam !== 0;
+                const low = Math.max(0, Math.min(first, last));
+                const high = Math.min(state.items.length - 1, Math.max(first, last));
+                for (let at = low; at <= high; at++)
+                {
+                    state.items[at].selected = on;
+                }
+                host.invalidate(record);
+                return 0;
+            }
             case LB_SETSEL: {
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
                 const at = message.lParam | 0;
                 const on = message.wParam !== 0;
                 if (at === -1)
@@ -2926,6 +3672,10 @@ export function createControlProcedures(host){
                 else if (state.items[at])
                 {
                     state.items[at].selected = on;
+                    // The item set, either way, is where the caret and the
+                    // anchor go.
+                    state.anchor = at;
+                    state.caret = at;
                 }
                 else
                 {
@@ -2935,16 +3685,27 @@ export function createControlProcedures(host){
                 return 0;
             }
             case LB_GETSELCOUNT:
-                return (record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) === 0
+                return !multiSelect(record)
                     ? LB_ERR : state.items.filter(item=>item.selected).length;
             case LB_GETSELITEMS: {
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
                 const chosen = state.items.map((item, index)=>(item.selected ? index : -1))
                     .filter(index=>index >= 0).slice(0, message.wParam | 0);
-                chosen.forEach((index, slot)=>writeU32((message.lParam >>> 0) + slot * 4, index));
+                chosen.forEach((index, slot)=>writeU32(wholeAddress(message.lParam) + slot * 4,
+                    index));
                 return chosen.length;
             }
             case LB_GETITEMHEIGHT:
                 return state.itemHeight ?? editCell(record).height;
+            case LB_GETLISTBOXINFO: {
+                // How many items a column holds: the rows of the client area,
+                // at least one.
+                const row = Math.max(1, state.itemHeight ?? editCell(record).height);
+                return Math.max(1, Math.floor(host.clientSize(record).height / row));
+            }
             case LB_SETITEMHEIGHT:
                 state.itemHeight = message.lParam & 0xffff;
                 host.invalidate(record);
@@ -2959,7 +3720,7 @@ export function createControlProcedures(host){
                 const top = (at - state.top) * height;
                 const size = host.clientSize(record);
                 [0, top, size.width, top + height].forEach((value, slot)=>
-                    writeU32((message.lParam >>> 0) + slot * 4, value));
+                    writeU32(wholeAddress(message.lParam) + slot * 4, value));
                 return 1;
             }
             case LB_SETHORIZONTALEXTENT:
@@ -2972,43 +3733,240 @@ export function createControlProcedures(host){
     };
 
     /**
-     * A simple combo box's two parts, in its client area: the field at the
-     * top, as tall as a dropdown combo box's, and under it the list, which
-     * is always shown -- its rows inside its sunken edge.
+     * A combo box's parts, in its client area: the field at the top - all
+     * of a drop-down one, as tall as a drop-down one's in a simple one - its
+     * item inside the field's edge, where the edit or the selection is, the
+     * drop button at the field's right, none in a simple one, and under the
+     * field a simple one's list.
      *
-     * @param {any} record
+     * @param {any} combo
      */
-    const simpleParts = record=>{
-        const size = host.clientSize(record);
-        const bottom = Math.min(size.height, listState(record).fieldHeight ?? 21);
-        const list = { left: 0, top: bottom, right: size.width, bottom: size.height };
-        return { field: { left: 0, top: 0, right: size.width, bottom }, list,
-            rows: shrink(list, 2) };
+    const comboParts = combo=>{
+        const size = host.clientSize(combo);
+        const simple = (combo.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const bottom = simple ? Math.min(size.height, listState(combo).fieldHeight ?? 21)
+            : size.height;
+        const button = simple ? { left: 0, top: 0, right: 0, bottom: 0 }
+            : { left: size.width - 2 - COMBO_BUTTON, top: 2, right: size.width - 2,
+                bottom: bottom - 2 };
+        return { field: { left: 0, top: 0, right: size.width, bottom },
+            item: { left: 3, top: 3, right: (simple ? size.width : button.left) - 2,
+                bottom: bottom - 3 },
+            button,
+            list: { left: 0, top: bottom, right: size.width, bottom: size.height } };
+    };
+
+    /** A combo box's list window, live, or null. @param {any} combo */
+    const listOf = combo=>host.live(stateOf(combo).listWindow ?? 0);
+
+    /** An editable combo box's edit, live, or null. @param {any} combo */
+    const editOf = combo=>host.live(stateOf(combo).editWindow ?? 0);
+
+    /**
+     * What GetComboBoxInfo says of a combo box: its item and its button, in
+     * its client area, and its edit, zero for a drop-down list, and its list.
+     *
+     * @param {any} combo
+     */
+    const comboInfo = combo=>{
+        const { item, button } = comboParts(combo);
+        return { item, button, edit: editOf(combo)?.hwnd ?? 0, list: listOf(combo)?.hwnd ?? 0 };
     };
 
     /**
-     * The combo box's selection field: a sunken white box with the current
-     * item's text and, but for a simple combo box, a drop button at the
-     * right; a simple one has its list under the field instead.
+     * Puts a combo box's edit in its item and a simple one's list under its
+     * field, in the rest of its client area.
      *
-     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @param {any} combo
      */
-    const paintCombo = (record, hdc, rect)=>{
+    const placeComboChildren = combo=>{
+        const parts = comboParts(combo);
+        /** @param {any} child @param {Rect} rect */
+        const place = (child, rect)=>(child && host.move
+            ? host.move(child.hwnd, rect.left, rect.top, Math.max(0, rect.right - rect.left),
+                Math.max(0, rect.bottom - rect.top))
+            : 0);
+        return after(place(editOf(combo), parts.item),
+            ()=>((combo.style & CBS_TYPEMASK) === CBS_SIMPLE ? place(listOf(combo), parts.list)
+                : 0));
+    };
+
+    /**
+     * Makes an editable combo box's edit, a child in its field (id 1001)
+     * with the edit styles the combo box's ask for. Its text is the combo
+     * box's; it tells the combo box what happens to it, and hands it the
+     * keys that walk or drop the list.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const makeComboEdit = (combo, thread)=>{
+        if (!comboEditable(combo) || !host.popup)
+        {
+            return 0;
+        }
+        const style = (WS_CHILD | WS_VISIBLE | ES_NOHIDESEL
+            | ((combo.style & CBS_AUTOHSCROLL) !== 0 ? ES_AUTOHSCROLL : 0)
+            | ((combo.style & CBS_UPPERCASE) !== 0 ? ES_UPPERCASE : 0)
+            | ((combo.style & CBS_LOWERCASE) !== 0 ? ES_LOWERCASE : 0)
+            | ((combo.style & CBS_OEMCONVERT) !== 0 ? ES_OEMCONVERT : 0)
+            | (combo.style & WS_DISABLED)) >>> 0;
+        return after(host.popup('Edit', { x: 0, y: 0, width: 0, height: 0 }, combo.hwnd, 0, style,
+            thread, COMBO_EDIT_ID), hwnd=>{
+            const edit = hwnd !== 0 ? host.live(hwnd) : null;
+            if (edit)
+            {
+                edit.font = combo.font;
+                stateOf(combo).editWindow = hwnd;
+            }
+            return 0;
+        });
+    };
+
+    /**
+     * The combo box an edit is the field of, or null.
+     *
+     * @param {any} record
+     */
+    const comboOfEdit = record=>{
+        const parent = record.parent ? host.live(record.parent) : null;
+        return parent && parent.className === 'ComboBox'
+            && stateOf(parent).editWindow === record.hwnd ? parent : null;
+    };
+
+    /** Whether an edit is a combo box's whose list is dropped. @param {any} record */
+    const comboDropped = record=>{
+        const combo = comboOfEdit(record);
+        return combo !== null && (listState(combo).dropped ?? 0) !== 0;
+    };
+
+    /**
+     * Shows an item in a combo box's field: its text in the edit, all of it
+     * selected, or the field of a drop-down list. The edit is handed the
+     * text as a program would hand it, and what it says of it the combo
+     * box does not pass on: nobody typed.
+     *
+     * @param {any} combo @param {number} index @param {unknown} [thread]
+     */
+    const showItem = (combo, index, thread)=>{
+        const text = listState(combo).items[index]?.text ?? '';
+        const edit = editOf(combo);
+        host.invalidate(combo);
+        if (!edit)
+        {
+            combo.title = text;
+            return 0;
+        }
+        const bytes = encodeAnsi(`${text}\0`);
+        const at = host.allocate?.(bytes.length) ?? 0;
+        if (at === 0)
+        {
+            host.divergence?.('ComboBox', 'no memory to hand its edit the item\'s text');
+            return 0;
+        }
+        host.writeMemory(at, bytes);
+        const state = stateOf(combo);
+        state.quiet = true;
+        return after(host.send(edit.hwnd, WM_SETTEXT, 0, at, thread), ()=>{
+            state.quiet = false;
+            host.release?.(at);
+            return host.focus() === edit.hwnd ? host.send(edit.hwnd, EM_SETSEL, 0, -1, thread) : 0;
+        });
+    };
+
+    /**
+     * What a combo box makes of its edit's notifications: the focus coming
+     * or going is the combo box's, its text selected whole as it comes and
+     * the list closed as it goes, and an edit typed in is CBN_EDITUPDATE
+     * then CBN_EDITCHANGE - but not a text the combo box put there itself.
+     *
+     * @param {any} combo @param {any} edit @param {number} code @param {unknown} [thread]
+     */
+    const editNotice = (combo, edit, code, thread)=>{
+        switch (code){
+            case EN_SETFOCUS:
+                // Its text selected whole as the focus comes, and none of it
+                // as it goes, the caret at the start (combo.c
+                // test_editselection_focus: EM_SETSEL 0, INT_MAX and 0, 0).
+                host.invalidate(combo);
+                return after(host.send(edit.hwnd, EM_SETSEL, 0, 0x7fffffff, thread),
+                    ()=>notify(combo, CBN_SETFOCUS, thread));
+            case EN_KILLFOCUS:
+                host.invalidate(combo);
+                return after(closeList(combo, false, thread),
+                    ()=>after(host.send(edit.hwnd, EM_SETSEL, 0, 0, thread),
+                        ()=>notify(combo, CBN_KILLFOCUS, thread)));
+            case EN_UPDATE:
+                return stateOf(combo).quiet ? 0 : notify(combo, CBN_EDITUPDATE, thread);
+            case EN_CHANGE:
+                if (stateOf(combo).quiet)
+                {
+                    return 0;
+                }
+                if ((combo.style & CBS_TYPEMASK) === CBS_SIMPLE)
+                {
+                    followField(combo);
+                }
+                return notify(combo, CBN_EDITCHANGE, thread);
+            default:
+                return 0;
+        }
+    };
+
+    /**
+     * Makes a combo box's list window, which lives as long as the combo box:
+     * a simple combo box's is a child under its field, shown, in a sunken
+     * edge; a drop-down one's a child of the desktop with a border, hidden
+     * until it drops, and put over every window then. Its style says what
+     * the combo box's says of its items, LBS_COMBOBOX that it answers to the
+     * combo box, and LBS_NOTIFY (combo.c test_listbox_styles, which reads
+     * what Windows makes). The combo box's items are kept in it.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const makeComboList = (combo, thread)=>{
+        if (!host.popup)
+        {
+            return 0;
+        }
+        const simple = (combo.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const strings = (combo.style & CBS_HASSTRINGS) !== 0 || (combo.style & CBS_OWNERDRAW) === 0;
+        const style = (WS_CHILD | WS_CLIPSIBLINGS | LBS_COMBOBOX | LBS_NOTIFY
+            | ((combo.style & CBS_NOINTEGRALHEIGHT) !== 0 ? LBS_NOINTEGRALHEIGHT : 0)
+            | ((combo.style & CBS_SORT) !== 0 ? LBS_SORT : 0)
+            | (combo.style & CBS_OWNERDRAW)
+            | (strings ? LBS_HASSTRINGS : 0)
+            | (simple ? WS_VISIBLE : WS_BORDER)) >>> 0;
+        const rect = { x: 0, y: 0, width: combo.width, height: 0 };
+        return after(host.popup('ComboLBox', rect, simple ? combo.hwnd : 0,
+            simple ? WS_EX_CLIENTEDGE : WS_EX_TOOLWINDOW, style, thread,
+            simple ? COMBO_LIST_ID : 0), hwnd=>{
+            const list = hwnd !== 0 ? host.live(hwnd) : null;
+            if (list)
+            {
+                stateOf(list).combo = combo.hwnd;
+                list.font = combo.font;
+                stateOf(combo).listWindow = hwnd;
+            }
+            return 0;
+        });
+    };
+
+    /**
+     * The combo box's field: a sunken white box with, but for a simple combo
+     * box, a drop button at the right. A drop-down list shows the current
+     * item's text there, selected while it has the focus; an editable combo
+     * box's edit and a simple one's list are windows of their own.
+     *
+     * @param {any} record @param {number} hdc
+     */
+    const paintCombo = (record, hdc)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = listState(record);
         const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
-        const parts = simple ? simpleParts(record) : null;
-        const box = parts ? parts.field : rect;
+        const { field: box, button } = comboParts(record);
         draw.fill(hdc, box, color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
         sunkenEdge(hdc, box);
-        if (parts && parts.list.bottom > parts.list.top)
-        {
-            sunkenEdge(hdc, parts.list);
-            paintDropped(record, hdc, parts.rows, state.current);
-        }
-        const button = { left: box.right - 2 - (parts ? 0 : COMBO_BUTTON), top: box.top + 2,
-            right: box.right - 2, bottom: box.bottom - 2 };
-        if (!parts)
+        if (!simple)
         {
             draw.fill(hdc, button, color(COLOR_3DFACE));
             buttonEdge(hdc, button, false);
@@ -3021,17 +3979,14 @@ export function createControlProcedures(host){
                     bottom: arrowY + row + 1 }, color(COLOR_BTNTEXT));
             }
         }
-        const current = state.items[state.current];
-        const editable = comboEditable(record);
-        const text = editable ? record.title : current?.text ?? '';
+        if (comboEditable(record))
+        {
+            return;
+        }
+        const text = state.items[state.current]?.text ?? '';
         const field = { left: box.left + 3, top: box.top + 2, right: button.left - 1,
             bottom: box.bottom - 2 };
-        const focused = host.focus() === record.hwnd;
-        // A drop-down list in focus shows its item selected; a drop-down
-        // combo box's field is an edit, its text typed into at a caret --
-        // filled with the selection colour, a path typed there read as one
-        // block of blue.
-        const selected = focused && !editable;
+        const selected = host.focus() === record.hwnd;
         if (selected)
         {
             draw.fill(hdc, field, color(COLOR_HIGHLIGHT));
@@ -3041,26 +3996,6 @@ export function createControlProcedures(host){
             Math.floor((field.bottom - field.top - metrics.height) / 2));
         draw.text(hdc, field.left + 1, top, text, { color: color(selected ? COLOR_HIGHLIGHTTEXT
             : disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT), clip: field });
-        if (focused && editable)
-        {
-            // The edit's own selection over its text, and the caret where it ends.
-            const edit = editState(record);
-            const from = Math.max(0, Math.min(edit.selStart, edit.selEnd, text.length));
-            const to = Math.min(text.length, Math.max(edit.selStart, edit.selEnd));
-            /** @param {number} at */
-            const xOf = at=>field.left + 1 + draw.measure(hdc, text.slice(0, at)).width;
-            if (to > from)
-            {
-                const span = { left: xOf(from), top, right: Math.min(field.right, xOf(to)),
-                    bottom: top + metrics.height };
-                draw.fill(hdc, span, color(COLOR_HIGHLIGHT));
-                draw.text(hdc, span.left, top, text.slice(from, to),
-                    { color: color(COLOR_HIGHLIGHTTEXT), clip: span });
-            }
-            const at = Math.min(field.right - 1, xOf(Math.min(text.length, edit.selEnd)));
-            draw.fill(hdc, { left: at, top, right: at + 1, bottom: top + metrics.height },
-                color(COLOR_WINDOWTEXT));
-        }
     };
 
     /** A combo box message as the list box spells it, or null. @param {number} message */
@@ -3080,6 +4015,7 @@ export function createControlProcedures(host){
             case CB_SETITEMDATA: return LB_SETITEMDATA;
             case CB_FINDSTRING: return LB_FINDSTRING;
             case CB_FINDSTRINGEXACT: return LB_FINDSTRINGEXACT;
+            case CB_SELECTSTRING: return LB_SELECTSTRING;
             default: return null;
         }
     };
@@ -3100,6 +4036,9 @@ export function createControlProcedures(host){
      * takes both off the window as the combo box is made, and fits the field
      * again to every font it is given.
      *
+     * The field's item is its text's height and two rows more, or what
+     * CB_SETITEMHEIGHT(-1) made it; the field is six rows taller.
+     *
      * @param {any} record @param {boolean} creating
      */
     const fitComboField = (record, creating)=>{
@@ -3108,28 +4047,93 @@ export function createControlProcedures(host){
             record.style = (record.style & ~(WS_VSCROLL | WS_HSCROLL)) >>> 0;
             listState(record).droppedHeight = record.height;
         }
-        // The system font's thirteen rows where nothing can be measured.
-        let rows = 13;
-        if (host.draw)
-        {
-            const { hdc } = host.contextOn(record);
-            rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? rows;
-            host.endPaint(record, hdc);
-        }
+        const rows = fontRows(record);
         // A simple combo box keeps its height: its list is under the field.
         if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
         {
-            listState(record).fieldHeight = rows + 8;
+            listState(record).fieldHeight = (listState(record).fieldItem ?? rows + 2) + 6;
             host.invalidate(record);
-            return;
+            return placeComboChildren(record);
         }
-        record.height = rows + 8;
+        record.height = (listState(record).fieldItem ?? rows + 2) + 6;
+        return placeComboChildren(record);
+    };
+
+    /**
+     * How tall a window's font is: the system font's thirteen rows where
+     * nothing can be measured.
+     *
+     * @param {any} record
+     */
+    const fontRows = record=>{
+        if (!host.draw)
+        {
+            return 13;
+        }
+        const { hdc } = host.contextOn(record);
+        const rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? 13;
+        host.endPaint(record, hdc);
+        return rows;
+    };
+
+    /**
+     * Asks an owner-draw combo box's parent how tall an item is:
+     * WM_MEASUREITEM with a MEASUREITEMSTRUCT that starts at the height the
+     * combo box would give it, item -1 the field's. A build with no heap has
+     * nowhere to put the structure, and that height stands.
+     *
+     * @param {any} combo @param {number} item @param {number} rows
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const measureItem = (combo, item, rows, thread)=>{
+        const size = (host.pointerSize ?? 4) === 8 ? 32 : 24;
+        const at = combo.parent && host.allocate ? host.allocate(size) : 0;
+        if (at === 0)
+        {
+            return rows;
+        }
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        [ODT_COMBOBOX, combo.id, item, 0, rows].forEach((value, index)=>
+            view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(at, bytes);
+        return after(host.send(combo.parent, WM_MEASUREITEM, combo.id, at, thread), ()=>{
+            const height = readU32(at + 16);
+            host.release?.(at);
+            return height;
+        });
+    };
+
+    /**
+     * An owner-draw combo box's heights, which its parent decides: its
+     * field's, kept whatever font it is later given, and a fixed one's
+     * list rows.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const measureCombo = (combo, thread)=>{
+        if ((combo.style & CBS_OWNERDRAW) === 0)
+        {
+            return 0;
+        }
+        // The field is two rows taller than its text, a list row as tall.
+        const rows = fontRows(combo);
+        return after(measureItem(combo, -1, rows + 2, thread), field=>{
+            listState(combo).fieldItem = field;
+            return (combo.style & CBS_OWNERDRAW) === CBS_OWNERDRAWFIXED
+                ? after(measureItem(combo, 0, rows, thread), row=>{
+                    listState(combo).itemHeight = row;
+                    return 0;
+                }) : 0;
+        });
     };
 
     /**
      * The rows a combo box's dropped list shows, and how tall each is: the
      * height the combo box was made with is its field and its list together,
-     * and a list too short for one row still shows one.
+     * and a list too short for one row shows none, its client area empty
+     * (combo.c test_listbox_size).
      *
      * @param {any} combo
      */
@@ -3140,12 +4144,12 @@ export function createControlProcedures(host){
         host.endPaint(combo, hdc);
         const fit = Math.floor(((state.droppedHeight ?? 0) - host.clientSize(combo).height - 2)
             / row);
-        return { row, rows: Math.max(1, Math.min(Math.max(state.items.length, 1), fit)) };
+        return { row, rows: Math.max(0, Math.min(Math.max(state.items.length, 1), fit)) };
     };
 
     /**
-     * Drops a combo box's list: a popup of the ComboLBox class under the
-     * field, over every window, which takes the mouse until it closes and
+     * Drops a combo box's list: its list window, moved under the field and
+     * shown over every window, which takes the mouse until it closes and
      * never the activation -- the dialog keeps it, and the combo box the
      * focus and the keys. CBN_DROPDOWN goes first, so a parent that fills
      * the list late fills it in time.
@@ -3154,8 +4158,9 @@ export function createControlProcedures(host){
      */
     const dropList = (combo, thread)=>{
         const state = listState(combo);
+        const list = listOf(combo);
         if ((state.dropped ?? 0) !== 0 || (combo.style & CBS_TYPEMASK) === CBS_SIMPLE
-            || !host.popup || !host.clientOrigin || disabled(combo))
+            || !list || !host.place || !host.clientOrigin || disabled(combo))
         {
             return 0;
         }
@@ -3165,24 +4170,15 @@ export function createControlProcedures(host){
             const size = host.clientSize(combo);
             state.hot = state.current;
             state.top = Math.max(0, Math.min(state.current, state.items.length - rows));
-            const rect = { x: origin.x, y: origin.y + size.height,
-                width: Math.max(size.width, state.droppedWidth ?? 0), height: rows * row + 2 };
-            return after(/** @type {any} */ (host.popup)('ComboLBox', rect,
-                combo.parent || combo.hwnd, WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                WS_POPUP | WS_BORDER, thread), (/** @type {number} */ hwnd)=>{
-                const list = hwnd !== 0 ? host.live(hwnd) : null;
-                if (!list)
-                {
-                    return 0;
-                }
-                stateOf(list).combo = combo.hwnd;
-                list.font = combo.font;
-                state.dropped = hwnd;
-                host.invalidate(combo);
-                return after(host.show?.(hwnd, SW_SHOWNA) ?? 0, ()=>{
-                    host.setCapture(hwnd);
-                    return 0;
-                });
+            state.dropped = list.hwnd;
+            host.invalidate(combo);
+            // Over every window, WS_EX_TOPMOST from then on (combo.c
+            // test_listbox_styles), shown without taking the activation.
+            return after(/** @type {any} */ (host.place)(list.hwnd, HWND_TOPMOST, origin.x,
+                origin.y + size.height, Math.max(size.width, state.droppedWidth ?? 0),
+                rows * row + 2, SWP_NOACTIVATE | SWP_SHOWWINDOW, thread), ()=>{
+                host.setCapture(list.hwnd);
+                return 0;
             });
         });
     };
@@ -3208,16 +4204,13 @@ export function createControlProcedures(host){
             host.releaseCapture();
         }
         const hot = state.hot ?? -1;
-        return after(host.destroy?.(hwnd) ?? 0, ()=>{
+        return after(host.show?.(hwnd, SW_HIDE) ?? 0, ()=>{
             host.invalidate(combo);
             const changed = accept && hot >= 0 && hot < state.items.length && hot !== state.current;
-            if (changed)
-            {
-                combo.title = state.items[hot].text;
-            }
-            return after(changed ? chooseItem(combo, hot, CBN_SELCHANGE, true, thread) : 0,
-                ()=>after(notify(combo, accept ? CBN_SELENDOK : CBN_SELENDCANCEL, thread),
-                    ()=>notify(combo, CBN_CLOSEUP, thread)));
+            const chosen = changed ? after(showItem(combo, hot, thread),
+                ()=>chooseItem(combo, hot, CBN_SELCHANGE, true, thread)) : 0;
+            return after(chosen, ()=>after(notify(combo, accept ? CBN_SELENDOK : CBN_SELENDCANCEL,
+                thread), ()=>notify(combo, CBN_CLOSEUP, thread)));
         });
     };
 
@@ -3271,21 +4264,27 @@ export function createControlProcedures(host){
     const scrollDropped = (combo, top, visible)=>{
         const state = listState(combo);
         state.top = Math.max(0, Math.min(top, state.items.length - visible));
-        // A simple combo box's list is in the combo box itself.
-        host.invalidate(host.live(state.dropped ?? 0) ?? combo);
+        host.invalidate(listOf(combo) ?? combo);
     };
 
     /**
-     * The rows a simple combo box's list shows, and how tall each is.
+     * The rows a simple combo box's list shows, how tall each is, and where
+     * they are in its list window: all of its client area, inside the frame.
      *
      * @param {any} combo
      */
     const simpleRows = combo=>{
-        const { hdc } = host.contextOn(combo);
+        const list = listOf(combo);
+        if (!list)
+        {
+            return { row: 16, visible: 1, rows: { left: 0, top: 0, right: 0, bottom: 0 } };
+        }
+        const { hdc } = host.contextOn(list);
         const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
-        host.endPaint(combo, hdc);
-        const { rows } = simpleParts(combo);
-        return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)) };
+        host.endPaint(list, hdc);
+        const size = host.clientSize(list);
+        const rows = { left: 0, top: 0, right: size.width, bottom: size.height };
+        return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)), rows };
     };
 
     /**
@@ -3298,7 +4297,7 @@ export function createControlProcedures(host){
      */
     const followField = combo=>{
         const state = listState(combo);
-        const text = String(combo.title).toLowerCase();
+        const text = String((editOf(combo) ?? combo).title).toLowerCase();
         const index = text === '' ? -1
             : state.items.findIndex(item=>item.text.toLowerCase().startsWith(text));
         state.current = index;
@@ -3313,15 +4312,16 @@ export function createControlProcedures(host){
      * A press, a move with the thumb held, or a release in a simple combo
      * box's list: a row is chosen as the field's text and CBN_SELCHANGE
      * said, a double-click on one says CBN_DBLCLK, and the list's scroll bar
-     * scrolls it -- by its arrows, its track, and its thumb dragged.
+     * scrolls it -- by its arrows, its track, and its thumb dragged. The
+     * point is in the list window.
      *
-     * @param {any} combo @param {ControlMessage} message @param {unknown} [thread]
+     * @param {any} combo @param {any} list @param {ControlMessage} message
+     * @param {unknown} [thread]
      */
-    const simpleListMouse = (combo, message, thread)=>{
+    const simpleListMouse = (combo, list, message, thread)=>{
         const state = listState(combo);
         const point = pointOf(message.lParam);
-        const { rows } = simpleParts(combo);
-        const { row, visible } = simpleRows(combo);
+        const { row, visible, rows } = simpleRows(combo);
         const bar = { left: rows.right - ARROW_LENGTH, top: rows.top, right: rows.right,
             bottom: rows.bottom };
         const held = { min: 0, max: Math.max(0, state.items.length - 1), page: visible,
@@ -3348,7 +4348,7 @@ export function createControlProcedures(host){
             if (hit === SB_THUMBTRACK)
             {
                 state.grab = point.y - bar.top - (thumbOf(bar, true, held).thumb?.start ?? 0);
-                host.setCapture(combo.hwnd);
+                host.setCapture(list.hwnd);
                 return 0;
             }
             scrollDropped(combo, state.top + (hit === SB_LINEUP ? -1 : hit === SB_LINEDOWN ? 1
@@ -3368,26 +4368,62 @@ export function createControlProcedures(host){
         {
             return 0;
         }
-        combo.title = state.items[index].text;
-        return chooseItem(combo, index, CBN_SELCHANGE, true, thread);
+        return after(showItem(combo, index, thread),
+            ()=>chooseItem(combo, index, CBN_SELCHANGE, true, thread));
     };
 
     /**
-     * The ComboLBox: the list a combo box drops. It holds the mouse while it
-     * is open: the pointer over a row lights it, a press outside closes it
-     * with nothing chosen, and a release on a row chooses that row -- the
-     * press that dropped it may be held into the list and let go there.
+     * The ComboLBox: a combo box's list window, a list box that holds its
+     * items and answers the LB_ messages. A drop-down one holds the mouse
+     * while it is open: the pointer over a row lights it, a press outside
+     * closes it with nothing chosen, and a release on a row chooses that
+     * row -- the press that dropped it may be held into the list and let go
+     * there. A simple combo box's is always shown under its field.
      *
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const comboListProc = (record, message, thread)=>{
         const own = stateOf(record);
         const combo = host.live(own.combo ?? 0);
+        if (message.message >= LB_ADDSTRING && message.message <= LB_LAST)
+        {
+            return after(listBoxMessage(record, message, thread), answer=>{
+                if (combo)
+                {
+                    host.invalidate(combo);
+                }
+                return answer;
+            });
+        }
         if (!combo)
         {
             return common(record, message, thread);
         }
         const state = listState(combo);
+        if ((combo.style & CBS_TYPEMASK) === CBS_SIMPLE)
+        {
+            switch (message.message){
+                case WM_PAINT:
+                    // Its sunken edge is its frame (WS_EX_CLIENTEDGE).
+                    return painting(record, (hdc, rect)=>{
+                        paintDropped(combo, hdc, rect, state.current);
+                    });
+                case WM_ERASEBKGND:
+                    return 1;
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONDBLCLK:
+                    return after(host.setFocus(combo.hwnd, thread),
+                        ()=>simpleListMouse(combo, record, message, thread));
+                case WM_MOUSEMOVE:
+                case WM_LBUTTONUP:
+                    return simpleListMouse(combo, record, message, thread);
+                case WM_MOUSEWHEEL:
+                    return host.send(combo.hwnd, message.message, message.wParam,
+                        message.lParam, thread);
+                default:
+                    return common(record, message, thread);
+            }
+        }
         switch (message.message){
             case WM_MOUSEACTIVATE:
                 return MA_NOACTIVATE;
@@ -3474,32 +4510,82 @@ export function createControlProcedures(host){
     const comboBoxProc = (record, message, thread)=>{
         const state = listState(record);
         const sorted = (record.style & CBS_SORT) !== 0;
-        const editable = comboEditable(record);
         const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const edit = editOf(record);
         const asList = comboAsList(message.message);
         if (asList !== null)
         {
             const answer = listMessage(record, sorted, { ...message, message: asList });
-            // A selection set by the program shows in the field; a text a
-            // program reads back is that item's text.
-            if (asList === LB_SETCURSEL && answer !== LB_ERR)
+            if (simple)
             {
-                record.title = state.items[state.current]?.text ?? '';
+                host.invalidate(listOf(record) ?? record);
             }
-            return answer ?? CB_ERR;
+            // A selection set by the program shows in the field - none, an
+            // empty one (CB_SETCURSEL -1) - and the field empties with the list.
+            const showsItem = asList === LB_RESETCONTENT
+                || (asList === LB_SETCURSEL && state.current === (message.wParam | 0))
+                || (asList === LB_SELECTSTRING && answer !== LB_ERR);
+            return after(showsItem ? showItem(record, state.current, thread) : 0,
+                ()=>answer ?? CB_ERR);
+        }
+        if (message.message === WM_CTLCOLOR
+            || message.message >= WM_CTLCOLORMSGBOX && message.message <= WM_CTLCOLORSTATIC)
+        {
+            // Its edit and its list ask the combo box for their colours; the
+            // combo box asks its own parent, as Windows' does. One with no
+            // parent answers as DefWindowProc does, but Common Controls 6's
+            // answers none (user32's and comctl32's combo.c test_combo_ctlcolor).
+            if (record.parent)
+            {
+                return host.send(record.parent, message.message, message.wParam, message.lParam,
+                    thread);
+            }
+            return (record.controlsVersion ?? 5) >= 6 ? 0 : common(record, message, thread);
         }
         switch (message.message){
             case WM_CREATE:
-                fitComboField(record, true);
+                return after(makeComboList(record, thread), ()=>after(makeComboEdit(record, thread),
+                    ()=>after(measureCombo(record, thread), ()=>after(fitComboField(record, true),
+                        ()=>common(record, message, thread)))));
+            case WM_SETFONT: {
+                const list = listOf(record);
+                if (list)
+                {
+                    list.font = message.wParam >>> 0;
+                }
+                // A new font sizes the field's item afresh, but for an owner
+                // drawn one, whose parent measured it.
+                if ((record.style & CBS_OWNERDRAW) === 0)
+                {
+                    listState(record).fieldItem = undefined;
+                }
+                return after(edit ? host.send(edit.hwnd, WM_SETFONT, message.wParam, 0, thread) : 0,
+                    ()=>after(common(record, message, thread), answer=>after(
+                        fitComboField(record, false), ()=>answer)));
+            }
+            case WM_SIZE:
+                return after(placeComboChildren(record), ()=>common(record, message, thread));
+            case WM_WINDOWPOSCHANGING: {
+                // A drop-down combo box stays as tall as its field, whatever
+                // height it is given; a taller one is how far it drops, and
+                // one no taller than the field, a dialog laid out again,
+                // leaves that as it was (Wine's combo test, test_changesize).
+                const pos = message.lParam >>> 0;
+                const pointer = host.pointerSize ?? 4;
+                if (!simple && pos !== 0 && (readU32(pos + 2 * pointer + 16) & SWP_NOSIZE) === 0)
+                {
+                    const asked = readU32(pos + 2 * pointer + 12) | 0;
+                    if (asked > record.height)
+                    {
+                        state.droppedHeight = asked;
+                    }
+                    writeU32(pos + 2 * pointer + 12, record.height);
+                }
                 return common(record, message, thread);
-            case WM_SETFONT:
-                return after(common(record, message, thread), answer=>{
-                    fitComboField(record, false);
-                    return answer;
-                });
+            }
             case WM_PAINT:
-                return painting(record, (hdc, rect)=>{
-                    paintCombo(record, hdc, rect);
+                return painting(record, hdc=>{
+                    paintCombo(record, hdc);
                 });
             case WM_ERASEBKGND:
                 return 1;
@@ -3509,14 +4595,37 @@ export function createControlProcedures(host){
                 return DLGC_WANTARROWS | DLGC_WANTCHARS
                     | ((state.dropped ?? 0) !== 0 ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
+                // An editable combo box's focus is its edit's, which tells it
+                // so (EN_SETFOCUS below).
+                if (edit)
+                {
+                    return after(host.setFocus(edit.hwnd, thread), ()=>0);
+                }
                 host.invalidate(record);
                 return notify(record, CBN_SETFOCUS, thread);
             case WM_KILLFOCUS:
+                if (edit)
+                {
+                    return 0;
+                }
                 host.invalidate(record);
                 return after(closeList(record, false, thread),
                     ()=>notify(record, CBN_KILLFOCUS, thread));
+            case WM_COMMAND:
+                return edit && (message.lParam >>> 0) === edit.hwnd
+                    ? editNotice(record, edit, message.wParam >>> 16, thread)
+                    : common(record, message, thread);
+            case WM_SETTEXT:
+            case WM_GETTEXT:
+            case WM_GETTEXTLENGTH:
+                // An editable combo box's text is its edit's.
+                return edit ? host.send(edit.hwnd, message.message, message.wParam, message.lParam,
+                    thread) : common(record, message, thread);
             case WM_DESTROY:
-                return after(closeList(record, false, thread), ()=>common(record, message, thread));
+                // A simple combo box's list is its child and goes with it.
+                return after(closeList(record, false, thread), ()=>after(
+                    !simple && listOf(record) ? host.destroy?.(stateOf(record).listWindow) ?? 0 : 0,
+                    ()=>common(record, message, thread)));
             case WM_MOUSEWHEEL: {
                 if (simple)
                 {
@@ -3532,10 +4641,6 @@ export function createControlProcedures(host){
                 scrollDropped(record, state.top + wheelRows(message.wParam), rows);
                 return 0;
             }
-            case WM_MOUSEMOVE:
-            case WM_LBUTTONUP:
-                return simple ? simpleListMouse(record, message, thread)
-                    : common(record, message, thread);
             case WM_SYSKEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key !== VK_DOWN && key !== VK_UP)
@@ -3547,47 +4652,27 @@ export function createControlProcedures(host){
             }
             case WM_LBUTTONDOWN:
             case WM_LBUTTONDBLCLK: {
-                // A click in the field of an editable combo puts the caret
-                // where it landed, as a click in an edit does; one on the
-                // drop button, or anywhere on a dropdown list, drops the list;
-                // one in a simple combo box's list is the list's.
+                // The field of an editable combo box is its edit's; a click on
+                // the drop button, or anywhere on a dropdown list, drops the
+                // list, and a click on what is left of the field focuses it.
+                // Either way the click is answered TRUE, as Windows' combo
+                // box answers it (user32 combo.c test_selection, test_listbox_size).
                 const point = pointOf(message.lParam);
-                if (simple && point.y >= simpleParts(record).field.bottom)
+                const { button } = comboParts(record);
+                if (edit && (simple || point.x < button.left))
                 {
-                    return after(host.setFocus(record.hwnd, thread),
-                        ()=>simpleListMouse(record, message, thread));
+                    return after(host.setFocus(record.hwnd, thread), ()=>1);
                 }
-                if (editable && (simple
-                    || point.x < host.clientSize(record).width - COMBO_BUTTON - 2))
-                {
-                    const { hdc } = host.contextOn(record);
-                    if (hdc !== 0)
-                    {
-                        const at = charFromPoint(record, hdc, point.x, point.y);
-                        const field = editState(record);
-                        field.selStart = at;
-                        field.selEnd = at;
-                    }
-                    host.endPaint(record, hdc);
-                    host.invalidate(record);
-                    return after(host.setFocus(record.hwnd, thread), ()=>0);
-                }
-                return after(host.setFocus(record.hwnd, thread), ()=>((state.dropped ?? 0) !== 0
-                    ? closeList(record, false, thread) : dropList(record, thread)));
+                return after(host.setFocus(record.hwnd, thread), ()=>after((state.dropped ?? 0)
+                    !== 0 ? closeList(record, false, thread) : dropList(record, thread), ()=>1));
             }
+            case WM_LBUTTONUP:
+                // The dropped list holds the mouse and takes the release itself.
+                return 1;
             case WM_CHAR:
-                if (!editable)
-                {
-                    return 0;
-                }
-                return after(editCharacter(record, message.wParam & 0xffff, thread,
-                    COMBO_NOTICES, false), answer=>{
-                    if (simple)
-                    {
-                        followField(record);
-                    }
-                    return answer;
-                });
+                // Typing is the edit's; a dropdown list takes none.
+                return edit ? host.send(edit.hwnd, WM_CHAR, message.wParam, message.lParam, thread)
+                    : 0;
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key === VK_F4)
@@ -3615,35 +4700,8 @@ export function createControlProcedures(host){
                     }
                     return 0;
                 }
-                // In the field of an editable combo the caret keys edit the
-                // text; up and down still walk the list, as they do in every
-                // kind of combo.
-                if (editable && !disabled(record))
-                {
-                    const field = editState(record);
-                    switch (key){
-                        case VK_LEFT:
-                            moveCaret(record, field.selEnd - 1);
-                            return 0;
-                        case VK_RIGHT:
-                            moveCaret(record, field.selEnd + 1);
-                            return 0;
-                        case VK_HOME:
-                            moveCaret(record, 0);
-                            return 0;
-                        case VK_END:
-                            moveCaret(record, record.title.length);
-                            return 0;
-                        case VK_DELETE:
-                            if (field.selStart === field.selEnd)
-                            {
-                                field.selEnd = Math.min(record.title.length, field.selEnd + 1);
-                            }
-                            return replaceSelection(record, '', thread, COMBO_NOTICES);
-                        default:
-                            break;
-                    }
-                }
+                // Closed, up and down walk the list in every kind of combo
+                // box; the edit hands them here.
                 const step = key === VK_UP ? -1 : key === VK_DOWN ? 1 : 0;
                 if (step === 0 || state.items.length === 0)
                 {
@@ -3661,20 +4719,9 @@ export function createControlProcedures(host){
                     scrollDropped(record, index < state.top ? index
                         : index >= state.top + visible ? index - visible + 1 : state.top, visible);
                 }
-                record.title = state.items[index].text;
-                return chooseItem(record, index, CBN_SELCHANGE, true, thread);
+                return after(showItem(record, index, thread),
+                    ()=>chooseItem(record, index, CBN_SELCHANGE, true, thread));
             }
-            case WM_SETTEXT:
-                // A text the program puts in the field leaves nothing of what
-                // was selected before, as a program setting an edit's text
-                // does.
-                if (editable)
-                {
-                    const field = editState(record);
-                    field.selStart = 0;
-                    field.selEnd = 0;
-                }
-                return common(record, message, thread);
             case CB_SHOWDROPDOWN:
                 return after((message.wParam >>> 0) !== 0 ? dropList(record, thread)
                     : closeList(record, false, thread), ()=>1);
@@ -3684,41 +4731,64 @@ export function createControlProcedures(host){
                 return 0;
             case CB_GETEXTENDEDUI:
                 return 0;
-            case CB_GETEDITSEL: {
-                if (!editable)
+            case CB_GETEDITSEL:
+                return edit ? host.send(edit.hwnd, EM_GETSEL, message.wParam, message.lParam,
+                    thread) : CB_ERR;
+            case CB_SETEDITSEL:
+                // The low word is where the selection starts, the high word
+                // where it ends, each -1 as the edit takes it.
+                return edit ? after(host.send(edit.hwnd, EM_SETSEL, message.lParam << 16 >> 16,
+                    message.lParam >> 16, thread), ()=>1) : CB_ERR;
+            case CB_LIMITTEXT:
+                return after(edit ? host.send(edit.hwnd, EM_LIMITTEXT, message.wParam, 0, thread)
+                    : 0, ()=>1);
+            case CB_SETDROPPEDWIDTH:
+                // A width wider than nothing is kept; the list is never
+                // narrower than the combo box.
+                if ((message.wParam | 0) > 0)
                 {
-                    return 0;
+                    state.droppedWidth = message.wParam | 0;
                 }
-                const field = editState(record);
-                const from = Math.min(field.selStart, field.selEnd);
-                const to = Math.max(field.selStart, field.selEnd);
-                if ((message.wParam >>> 0) !== 0)
+                return Math.max(state.droppedWidth ?? 0, record.width);
+            case CB_GETDROPPEDWIDTH:
+                return Math.max(state.droppedWidth ?? 0, record.width);
+            case CB_GETDROPPEDCONTROLRECT: {
+                // Where the combo box is on the screen as it is dropped: its
+                // field and its list under it.
+                if ((message.lParam >>> 0) === 0 || !host.clientOrigin)
                 {
-                    writeU32(message.wParam, from);
+                    return CB_ERR;
                 }
-                if ((message.lParam >>> 0) !== 0)
-                {
-                    writeU32(message.lParam, to);
-                }
+                const origin = host.clientOrigin(record);
+                const height = simple ? record.height
+                    : Math.max(record.height, state.droppedHeight ?? 0);
+                writeRect(message.lParam, { left: origin.x, top: origin.y,
+                    right: origin.x + Math.max(state.droppedWidth ?? 0, record.width),
+                    bottom: origin.y + height });
                 return 1;
             }
-            case CB_SETEDITSEL:
-                if (!editable)
+            case CB_GETITEMHEIGHT:
+                if ((message.wParam | 0) === -1)
                 {
-                    return 0;
+                    return host.clientSize(record).height - 6;
                 }
-                setSelection(record, message.wParam | 0, message.lParam | 0);
-                return 1;
-            case CB_LIMITTEXT:
-                if (editable)
+                return listOf(record) ? host.send(stateOf(record).listWindow, LB_GETITEMHEIGHT,
+                    message.wParam, 0, thread) : CB_ERR;
+            case CB_SETITEMHEIGHT:
+                if ((message.wParam | 0) === -1)
                 {
-                    editState(record).limit = (message.wParam >>> 0) === 0
-                        ? DEFAULT_EDIT_LIMIT : message.wParam >>> 0;
+                    const height = message.lParam & 0xffff;
+                    if (height === 0 || height > 255)
+                    {
+                        return CB_ERR;
+                    }
+                    state.fieldItem = height;
+                    return after(fitComboField(record, false), ()=>0);
                 }
-                return 0;
-            case CB_SETDROPPEDWIDTH:
-            case CB_GETDROPPEDCONTROLRECT:
-                return 0;
+                return listOf(record) ? host.send(stateOf(record).listWindow, LB_SETITEMHEIGHT,
+                    message.wParam, message.lParam, thread) : CB_ERR;
+            case CB_GETCOMBOBOXINFO:
+                return host.comboBoxInfo?.(record.hwnd, message.lParam) ?? 0;
             default:
                 return common(record, message, thread);
         }
@@ -3993,7 +5063,7 @@ export function createControlProcedures(host){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
@@ -4048,6 +5118,67 @@ export function createControlProcedures(host){
                 return 0;
             })));
 
+    /** @param {any} dialog @param {any} control  Whether the control is inside the dialog. */
+    const inside = (dialog, control)=>{
+        for (let at = control; at && (at.style & WS_CHILD) !== 0; at = host.live(at.parent))
+        {
+            if (at.parent === dialog.hwnd)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /** @param {any} dialog  A dialog losing the activation remembers its control with the focus. */
+    const saveFocus = dialog=>{
+        const focus = host.live(host.focus());
+        if (focus && inside(dialog, focus))
+        {
+            dialog.savedFocus = focus.hwnd;
+        }
+    };
+
+    /**
+     * The focus given back to the control a dialog remembers. Only on
+     * activation (`justActivated`) is nothing done when it remembers none;
+     * otherwise its first tab stop takes it, or the dialog itself.
+     *
+     * @param {any} dialog @param {boolean} justActivated @param {unknown} thread
+     */
+    const restoreFocus = (dialog, justActivated, thread)=>{
+        if ((dialog.style & WS_MINIMIZE) !== 0)
+        {
+            return 0;
+        }
+        const saved = host.live(dialog.savedFocus ?? 0);
+        dialog.savedFocus = 0;
+        if (saved && saved !== dialog && inside(dialog, saved))
+        {
+            return justActivated ? after(host.setFocus(saved.hwnd, thread), ()=>0)
+                : giveFocus(dialog, saved, thread);
+        }
+        if (justActivated)
+        {
+            return 0;
+        }
+        const first = firstFocus(dialog);
+        return first ? giveFocus(dialog, first, thread) : 0;
+    };
+
+    /**
+     * Where a dialog's focus goes when nothing says otherwise: its first
+     * visible, enabled control that stops the Tab key or, where none does,
+     * its first visible, enabled control - a label (dialog.c test_focus).
+     *
+     * @param {any} dialog @returns {any | null}
+     */
+    const firstFocus = dialog=>{
+        const reachable = host.children(dialog).filter(child=>
+            (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE);
+        return reachable.find(child=>(child.style & WS_TABSTOP) !== 0) ?? reachable[0] ?? null;
+    };
+
     /**
      * The messages whose answer is the dialog procedure's own return value
      * rather than DWLP_MSGRESULT.
@@ -4081,25 +5212,22 @@ export function createControlProcedures(host){
                     return 1;
                 });
             }
+            // The dialog's face for its statics and buttons, the window
+            // colour for an edit and a list box, as DefWindowProc answers.
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
             case WM_CTLCOLORSCROLLBAR:
-                // The dialog's face for its statics and buttons; an edit and a
-                // list box keep the window colour, which is their own default.
-                defaultControlColors(message.message, message.wParam >>> 0);
-                return host.draw ? host.draw.solidBrush(color(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
-                defaultControlColors(message.message, message.wParam >>> 0);
-                return 0;
+                return defaultControlColors(message.message, message.wParam >>> 0);
             // The default id is the template's default push button's until a
             // program names another; the dialog manager keeps it on the
             // dialog's record, where making the dialog sets it.
             case DM_GETDEFID:
-                return record.defaultId !== undefined
-                    ? ((DC_HASDEFID << 16) | record.defaultId & 0xffff) >>> 0
-                    : 0;
+                // A dialog starts with IDOK as its default id, push button or
+                // none: Enter in a dialog with no default button is IDOK.
+                return ((DC_HASDEFID << 16) | (record.defaultId ?? IDOK) & 0xffff) >>> 0;
             case DM_SETDEFID: {
                 // The style moves with it: off the old default, onto the new
                 // one if it is a push button.
@@ -4122,20 +5250,43 @@ export function createControlProcedures(host){
                 return 0;
             case WM_GETFONT:
                 return record.font ?? 0;
-            case WM_SETFOCUS: {
-                // The dialog passes the focus on, to its first control that
-                // stops the Tab key.
-                const first = host.children(record).find(child=>(child.style
-                    & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
-                return first ? giveFocus(record, first, thread) : 0;
-            }
+            case WM_ACTIVATE:
+                // Activated, a dialog gives the focus back to the control
+                // that had it when it was deactivated, if one did; deactivated,
+                // it remembers that control (win32u DEFDLG_RestoreFocus,
+                // DEFDLG_SaveFocus).
+                if ((message.wParam & 0xffff) !== 0)
+                {
+                    return restoreFocus(record, true, thread);
+                }
+                saveFocus(record);
+                return 0;
+            case WM_SHOWWINDOW:
+                if (message.wParam === 0)
+                {
+                    saveFocus(record);
+                }
+                return host.defWindowProc(record, message, thread);
+            case WM_SETFOCUS:
+                // The dialog passes the focus on: to the control it remembers,
+                // else to its first control that stops the Tab key.
+                return restoreFocus(record, false, thread);
             case WM_NEXTDLGCTL: {
                 // The control named when lParam's low word says so, else the
                 // next or previous tab stop from the focus; the default id
                 // stays, and only the buttons' look follows the focus.
+                // A dialog inside another as a control parent (a property
+                // sheet's page) walks the tab stops of the dialog it is in,
+                // as the dialog manager searches through it.
+                let walker = record;
+                while ((walker.style & WS_CHILD) !== 0
+                    && (walker.exStyle & WS_EX_CONTROLPARENT) !== 0 && host.live(walker.parent))
+                {
+                    walker = host.live(walker.parent);
+                }
                 const target = (message.lParam & 0xffff) !== 0 ? host.live(message.wParam)
-                    : tabWalk.nextTabStop(record, host.focus(), message.wParam === 0);
-                return target ? giveFocus(record, target, thread) : 0;
+                    : tabWalk.nextTabStop(walker, host.focus(), message.wParam === 0);
+                return target ? giveFocus(walker, target, thread) : 0;
             }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have
@@ -4150,6 +5301,17 @@ export function createControlProcedures(host){
     };
 
     /**
+     * DefDlgProc's own work, which reads the ANSI page: a wide message reaches
+     * it converted, and a text it fills goes back wide.
+     *
+     * @param {any} record @param {ControlMessage & { unicode?: boolean }} message
+     * @param {unknown} [thread]
+     */
+    const byDefault = (record, message, thread)=>(message.unicode === true
+        ? translated(host, message, false, ansi=>defDlgProc(record, ansi, thread), record.style)
+        : defDlgProc(record, message, thread));
+
+    /**
      * The dialog class: every message goes to the program's own dialog
      * procedure first, and to DefDlgProc when that one answers FALSE.
      *
@@ -4160,7 +5322,7 @@ export function createControlProcedures(host){
             ? record.extra.getUint32(DWLP_DLGPROC, true) : 0;
         if (dlgProc === 0 || stateOf(record).inDlgProc === message.message)
         {
-            return defDlgProc(record, message, thread);
+            return byDefault(record, message, thread);
         }
         const state = stateOf(record);
         // A dialog procedure that sends its own window the same message it
@@ -4168,21 +5330,31 @@ export function createControlProcedures(host){
         // default, not itself again.
         const previous = state.inDlgProc;
         state.inDlgProc = message.message;
-        // The dialog procedure reads text in the encoding its dialog was made
-        // in: DialogBoxParamW's is a wide one.
-        const reads = record.unicode === true;
+        // The dialog procedure hears the message as it came - in the
+        // window's encoding through the window, in the caller's through
+        // DefDlgProcA/W - whatever encoding it was set in: no text is
+        // converted for it (dialog.c test_aw_conversion_dlgproc).
+        const reads = message.unicode === true;
         return after(host.callProcedure(dlgProc, message, thread, reads), handled=>{
             state.inDlgProc = previous;
             if ((handled | 0) === 0)
             {
-                return defDlgProc(record, message, thread);
+                return byDefault(record, message, thread);
             }
             if (message.message === WM_INITDIALOG)
             {
                 // TRUE from WM_INITDIALOG means "give the focus to the
-                // control you chose", the first tab stop.
-                const first = message.wParam >>> 0;
-                return first !== 0 ? after(host.setFocus(first, thread), ()=>1) : 1;
+                // first tab stop" - as the procedure left the controls, so a
+                // radio button it checked is the one - or, with none, to the
+                // first control; an edit's text selected on the way in. A
+                // DS_CONTROL page its template leaves hidden takes no focus
+                // (dialog.c test_focus).
+                if ((record.style & DS_CONTROL) !== 0 && record.templateVisible === false)
+                {
+                    return 1;
+                }
+                const target = firstFocus(record);
+                return target ? after(giveFocus(record, target, thread), ()=>1) : 1;
             }
             return ANSWERED_DIRECTLY.has(message.message)
                 ? handled >>> 0
@@ -4201,7 +5373,8 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit },
+        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit,
+            comboInfo },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

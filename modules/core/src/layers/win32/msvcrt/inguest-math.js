@@ -36,9 +36,11 @@ import { X87 } from './x87.js';
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').x87} x87 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 
 /** The largest double: a result above it is an overflow. */
 const MAX = 1.7976931348623157e308;
@@ -54,8 +56,7 @@ const LN2_HI = 6.93147180369123816490e-01;
 const LN2_LO = 1.90821492927058770002e-10;
 
 /**
- * log10(2), the double nearest it: `fldlg2` loads it under cork, and a unit
- * short of it under the emulator, whose log10(1000) was 2.999999999999999.
+ * log10(2), the double nearest it, as `fldlg2` loads it.
  */
 const LOG10_2 = 0.3010299956639812;
 
@@ -78,6 +79,21 @@ const POW_RANGE = 1022;
 
 /** From it on in magnitude every double is a whole even number. */
 const WHOLE = 2 ** 53;
+
+/**
+ * Whole powers below it in magnitude are taken by squaring in two doubles:
+ * 32 squarings at most.
+ */
+const POWER_STEPS = 2 ** 32;
+
+/** Veltkamp's constant: a double times it splits into halves whose products are exact. */
+const SPLIT = 134217729;
+
+/** A double's upper 26 bits, by Veltkamp's split. */
+const highOf = (/** @type {number} */ a)=>SPLIT * a - (SPLIT * a - a);
+
+/** A positive's exponent, `fxtract`'s: scaled by its negative, it is in [1, 2). */
+const exponentOf = (/** @type {number} */ a)=>X87.exponent(a);
 
 /** 2^t, n the nearest integer to t: `f2xm1` of the rest, one added, and n applied by `fscale`. */
 const twoTo = (/** @type {number} */ t, /** @type {number} */ n)=>X87.scale(X87.f2xm1(t - n) + 1, n);
@@ -460,6 +476,98 @@ export function pow({ host }, x, y){
     {
         return 1;
     }
+    // A whole power of a finite base but zero, by squaring in two doubles,
+    // hi + lo times 2^e, brought back into [1, 2) after each product so neither
+    // overflows on the way: what the runtime's x87 gets in its 64 bits, where
+    // 2 to y log2 x in doubles is hundreds of units in the last place out
+    // (10^100). A result past the normal doubles is the handler's.
+    if (Math.floor(y) === y && Math.abs(y) < POWER_STEPS && x !== 0 && Math.abs(x) <= MAX)
+    {
+        const magnitude = Math.abs(x);
+        const k0 = exponentOf(magnitude);
+        let bh = X87.scale(magnitude, -k0);
+        /** @type {f64} */
+        let bl = 0;
+        /** @type {f64} */
+        let be = k0;
+        /** @type {f64} */
+        let rh = 1;
+        /** @type {f64} */
+        let rl = 0;
+        /** @type {f64} */
+        let re = 0;
+        /** @type {f64} */
+        let n = Math.abs(y);
+        const odd = n - 2 * Math.floor(n * 0.5);
+        while (n > 0)
+        {
+            const half = Math.floor(n * 0.5);
+            if (n - 2 * half === 1)
+            {
+                const p = rh * bh;
+                // What rh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(rh);
+                const al = rh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + (rh * bl + rl * bh);
+                const h = p + e;
+                const k = exponentOf(h);
+                rh = X87.scale(h, -k);
+                rl = X87.scale(e - (h - p), -k);
+                re = re + be + k;
+            }
+            n = half;
+            if (n > 0)
+            {
+                const p = bh * bh;
+                // What bh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(bh);
+                const al = bh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + 2 * bh * bl;
+                const h = p + e;
+                const k = exponentOf(h);
+                bh = X87.scale(h, -k);
+                bl = X87.scale(e - (h - p), -k);
+                be = be + be + k;
+            }
+        }
+        if (y < 0)
+        {
+            // 1 / (rh + rl): a first quotient, and its correction from what
+            // it leaves of one, taken exactly.
+            const q = 1 / rh;
+            const p = q * rh;
+            // What q times rh lost when rounded to p, exactly (Dekker), a step a line.
+            const ah = highOf(q);
+            const al = q - ah;
+            const bh2 = highOf(rh);
+            const bl2 = rh - bh2;
+            const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+            const r = ((1 - p) - lost) - q * rl;
+            rh = q + q * r;
+            rl = 0;
+            re = -re;
+        }
+        // The significand rounded once, and the power normal only if its
+        // exponent, that rounding's included, is a normal double's.
+        const significand = rh + rl;
+        const exponent = re + exponentOf(significand);
+        if (exponent < -1022 || exponent > 1023)
+        {
+            return host();
+        }
+        const power = X87.scale(significand, re);
+        if (x < 0 && odd === 1)
+        {
+            return -power;
+        }
+        return power;
+    }
     // Any other finite power of a finite base but zero, as the runtime takes
     // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base
     // to a whole power, the sign an odd power gives. A result that leaves the
@@ -536,6 +644,98 @@ export function _CIpow({ host }, x, y){
     if (y === 0 && !Number.isNaN(x))
     {
         return 1;
+    }
+    // A whole power of a finite base but zero, by squaring in two doubles,
+    // hi + lo times 2^e, brought back into [1, 2) after each product so neither
+    // overflows on the way: what the runtime's x87 gets in its 64 bits, where
+    // 2 to y log2 x in doubles is hundreds of units in the last place out
+    // (10^100). A result past the normal doubles is the handler's.
+    if (Math.floor(y) === y && Math.abs(y) < POWER_STEPS && x !== 0 && Math.abs(x) <= MAX)
+    {
+        const magnitude = Math.abs(x);
+        const k0 = exponentOf(magnitude);
+        let bh = X87.scale(magnitude, -k0);
+        /** @type {f64} */
+        let bl = 0;
+        /** @type {f64} */
+        let be = k0;
+        /** @type {f64} */
+        let rh = 1;
+        /** @type {f64} */
+        let rl = 0;
+        /** @type {f64} */
+        let re = 0;
+        /** @type {f64} */
+        let n = Math.abs(y);
+        const odd = n - 2 * Math.floor(n * 0.5);
+        while (n > 0)
+        {
+            const half = Math.floor(n * 0.5);
+            if (n - 2 * half === 1)
+            {
+                const p = rh * bh;
+                // What rh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(rh);
+                const al = rh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + (rh * bl + rl * bh);
+                const h = p + e;
+                const k = exponentOf(h);
+                rh = X87.scale(h, -k);
+                rl = X87.scale(e - (h - p), -k);
+                re = re + be + k;
+            }
+            n = half;
+            if (n > 0)
+            {
+                const p = bh * bh;
+                // What bh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(bh);
+                const al = bh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + 2 * bh * bl;
+                const h = p + e;
+                const k = exponentOf(h);
+                bh = X87.scale(h, -k);
+                bl = X87.scale(e - (h - p), -k);
+                be = be + be + k;
+            }
+        }
+        if (y < 0)
+        {
+            // 1 / (rh + rl): a first quotient, and its correction from what
+            // it leaves of one, taken exactly.
+            const q = 1 / rh;
+            const p = q * rh;
+            // What q times rh lost when rounded to p, exactly (Dekker), a step a line.
+            const ah = highOf(q);
+            const al = q - ah;
+            const bh2 = highOf(rh);
+            const bl2 = rh - bh2;
+            const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+            const r = ((1 - p) - lost) - q * rl;
+            rh = q + q * r;
+            rl = 0;
+            re = -re;
+        }
+        // The significand rounded once, and the power normal only if its
+        // exponent, that rounding's included, is a normal double's.
+        const significand = rh + rl;
+        const exponent = re + exponentOf(significand);
+        if (exponent < -1022 || exponent > 1023)
+        {
+            return host();
+        }
+        const power = X87.scale(significand, re);
+        if (x < 0 && odd === 1)
+        {
+            return -power;
+        }
+        return power;
     }
     // Any other finite power of a finite base but zero, as the runtime takes
     // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base
@@ -789,7 +989,7 @@ export function ldexp({ host }, x, exponent){
  * answer themselves and an exponent of 0.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {f64} x @param {u32} exponent
+ * @param {Guest} guest @param {f64} x @param {ptr} exponent
  * @returns {f64}
  */
 export function frexp({ setU32 }, x, exponent){
@@ -807,7 +1007,7 @@ export function frexp({ setU32 }, x, exponent){
  * parts with x's sign but a zero fraction's, which is x less its whole.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {f64} x @param {u32} whole
+ * @param {Guest} guest @param {f64} x @param {ptr} whole
  * @returns {f64}
  */
 export function modf({ setF64 }, x, whole){
@@ -844,4 +1044,706 @@ export function _CIfloor(x){
  */
 export function _CIceil(x){
     return Math.ceil(x);
+}
+
+/**
+ * sinhf, coshf, tanhf and log10f, a 64-bit runtime's: the double form's way
+ * on the float, rounded to a float as the host's handler rounds the double
+ * answer (no float of the 2e6 compared rounds apart from Math's); what the
+ * double form leaves to its handler, theirs.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sinhf({ host }, x){
+    if (!(Math.abs(x) < EXP_RANGE))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return Math.fround(x);
+    }
+    const s = sinhOf(expm1Of(Math.abs(x)));
+    return Math.fround(x < 0 ? -s : s);
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function coshf({ host }, x){
+    if (!(Math.abs(x) < EXP_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(coshOf(expOf(Math.abs(x))));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function tanhf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    if (!(Math.abs(x) < 22))
+    {
+        return Math.fround(x < 0 ? -1 : 1);
+    }
+    if (x === 0)
+    {
+        return Math.fround(x);
+    }
+    const t = tanhOf(expm1Of(2 * Math.abs(x)));
+    return Math.fround(x < 0 ? -t : t);
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log10f({ host }, x){
+    if (!(x > 0))
+    {
+        return host();
+    }
+    return Math.fround(X87.yl2x(LOG10_2, x));
+}
+
+/** The largest float, and the least normal one: a power past them is the handler's. */
+const FLOAT_MAX = 3.4028234663852886e38;
+const FLOAT_LEAST = 2 ** -126;
+
+/**
+ * How near halfway between two floats, as a share of the power, a double
+ * computed as powf computes it may lie and still round as x^y does: its error
+ * is under 2^-45 of it (y log2 x is below 2^8 in magnitude, its rounding
+ * under 2^-45 absolute), and a double nearer halfway may be on the wrong side.
+ */
+const FLOAT_HALFWAY = 2 ** -36;
+
+/**
+ * float powf(float x, float y), a 64-bit runtime's: a positive base to a
+ * finite power as 2^(y log2 x) in doubles, rounded to a float -- the float
+ * nearest x^y, which is the host's float of its double answer, wherever the
+ * double lies farther than FLOAT_HALFWAY from halfway between two floats
+ * (x^y exactly halfway, as the square of a float of 13 bits is, and those
+ * near it are the handler's); a base of zero or below, a power past the
+ * normal floats and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function powf({ host }, x, y){
+    if (!(x > 0 && x <= FLOAT_MAX && Math.abs(y) <= FLOAT_MAX))
+    {
+        return host();
+    }
+    const power = pow2Of(X87.yl2x(y, x));
+    if (!(power >= FLOAT_LEAST && power <= FLOAT_MAX))
+    {
+        return host();
+    }
+    const nearest = Math.fround(power);
+    const past = power - nearest;
+    const e = exponentOf(nearest);
+    // Half a unit in the last place above the float, and below it: half
+    // that below a power of two.
+    const up = X87.scale(1, e - 24);
+    const down = X87.scale(nearest, -e) === 1 ? up * 0.5 : up;
+    const room = past >= 0 ? up - past : down + past;
+    if (room < power * FLOAT_HALFWAY)
+    {
+        return host();
+    }
+    return nearest;
+}
+
+/*
+ * C99's rounding and comparing functions, the UCRT's. Each is made of the
+ * operations exact at any x87 precision -- floor and ceil (`frndint`), the
+ * remainder (`fprem`), comparisons, `fabs`, `fchs` and the bits -- so a
+ * program that set the x87 to single precision, as Direct3D does, gets what
+ * the runtime's SSE2 code gives it; no sum or difference rounds on the way.
+ */
+
+/** From it on in magnitude a double, or a float, is whole: rounding leaves it be. */
+const ALL_WHOLE = 2 ** 52;
+
+/** |x| rounded half away from zero, for |x| below ALL_WHOLE. */
+const roundedMagnitude = (/** @type {number} */ a)=>(a % 1 >= 0.5 ? Math.ceil(a) : Math.floor(a));
+
+/**
+ * double round(double x) -- half away from zero, the sign of a zero kept.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
+ * @returns {f64}
+ */
+export function round({ doubleHigh }, x){
+    const a = Math.abs(x);
+    if (!(a < ALL_WHOLE))
+    {
+        return x;
+    }
+    const whole = roundedMagnitude(a);
+    return (doubleHigh(x) | 0) < 0 ? -whole : whole;
+}
+
+/**
+ * float roundf(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {f32}
+ */
+export function roundf({ floatBits }, x){
+    const a = Math.abs(x);
+    if (!(a < ALL_WHOLE))
+    {
+        return Math.fround(x);
+    }
+    const whole = roundedMagnitude(a);
+    return Math.fround((floatBits(x) | 0) < 0 ? -whole : whole);
+}
+
+/**
+ * double trunc(double x) -- toward zero.
+ *
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {f64}
+ */
+export function trunc(x){
+    return x < 0 ? Math.ceil(x) : Math.floor(x);
+}
+
+/**
+ * float truncf(float x)
+ *
+ * @guestCode cdecl
+ * @param {f32} x
+ * @returns {f32}
+ */
+export function truncf(x){
+    return Math.fround(x < 0 ? Math.ceil(x) : Math.floor(x));
+}
+
+/**
+ * long lround(double x) -- rounded half away from zero; a NaN or a value no
+ * long holds is the handler's (0 and EDOM).
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {i32}
+ */
+export function lround({ host }, x){
+    const a = Math.abs(x);
+    if (!(a < 2147483648))
+    {
+        return host();
+    }
+    const whole = roundedMagnitude(a);
+    if (x < 0)
+    {
+        return (-whole) | 0;
+    }
+    if (whole > 2147483647)
+    {
+        return host();
+    }
+    return whole | 0;
+}
+
+/**
+ * long lroundf(float x)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {i32}
+ */
+export function lroundf({ host }, x){
+    const a = Math.abs(x);
+    if (!(a < 2147483648))
+    {
+        return host();
+    }
+    const whole = roundedMagnitude(a);
+    if (x < 0)
+    {
+        return (-whole) | 0;
+    }
+    if (whole > 2147483647)
+    {
+        return host();
+    }
+    return whole | 0;
+}
+
+/**
+ * double copysign(double x, double y) -- x's magnitude, y's sign bit.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function copysign({ doubleHigh }, x, y){
+    const magnitude = Math.abs(x);
+    return (doubleHigh(y) | 0) < 0 ? -magnitude : magnitude;
+}
+
+/**
+ * float copysignf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function copysignf({ floatBits }, x, y){
+    const magnitude = Math.abs(x);
+    return Math.fround((floatBits(y) | 0) < 0 ? -magnitude : magnitude);
+}
+
+/**
+ * double fmax(double x, double y) -- a NaN loses to a number; of two zeros
+ * the positive.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function fmax({ doubleHigh }, x, y){
+    if (Number.isNaN(x))
+    {
+        return y;
+    }
+    if (Number.isNaN(y))
+    {
+        return x;
+    }
+    if (x === y)
+    {
+        return (doubleHigh(x) | 0) < 0 ? y : x;
+    }
+    return x > y ? x : y;
+}
+
+/**
+ * double fmin(double x, double y) -- a NaN loses to a number; of two zeros
+ * the negative.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function fmin({ doubleHigh }, x, y){
+    if (Number.isNaN(x))
+    {
+        return y;
+    }
+    if (Number.isNaN(y))
+    {
+        return x;
+    }
+    if (x === y)
+    {
+        return (doubleHigh(x) | 0) < 0 ? x : y;
+    }
+    return x < y ? x : y;
+}
+
+/**
+ * float fmaxf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fmaxf({ floatBits }, x, y){
+    if (Number.isNaN(x))
+    {
+        return Math.fround(y);
+    }
+    if (Number.isNaN(y))
+    {
+        return Math.fround(x);
+    }
+    if (x === y)
+    {
+        return Math.fround((floatBits(x) | 0) < 0 ? y : x);
+    }
+    return Math.fround(x > y ? x : y);
+}
+
+/**
+ * float fminf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fminf({ floatBits }, x, y){
+    if (Number.isNaN(x))
+    {
+        return Math.fround(y);
+    }
+    if (Number.isNaN(y))
+    {
+        return Math.fround(x);
+    }
+    if (x === y)
+    {
+        return Math.fround((floatBits(x) | 0) < 0 ? x : y);
+    }
+    return Math.fround(x < y ? x : y);
+}
+
+/** From it on in magnitude asinh and acosh are ln 2 past ln |x|: the rest is below a double's reach. */
+const HYPERBOLIC_LARGE = 2 ** 28;
+
+/** Below it e^x - 1 is -1 to the double: e^x is under half its last place. */
+const EXPM1_FLOOR = -40;
+
+/** The float range 2^x stays normal in. */
+const FLOAT_EXP2_RANGE = 126;
+
+/**
+ * ln(1 + a) for a above -1, u being 1 + a rounded: ln u scaled by a / (u - 1),
+ * which puts back what the rounding of u lost (Goldberg's way); a itself where
+ * u rounds to 1.
+ */
+const log1pFrom = (/** @type {number} */ a, /** @type {number} */ u)=>(u === 1 ? a
+    : X87.yl2x(X87.LN2, u) * (a / (u - 1)));
+
+/** ln(1 + a) for a above -1. */
+const log1pOf = (/** @type {number} */ a)=>log1pFrom(a, 1 + a);
+
+/** What asinh takes log1p of for a below HYPERBOLIC_LARGE: a + a^2 / (1 + sqrt(1 + a^2)). */
+const asinhArgument = (/** @type {number} */ a, /** @type {number} */ root)=>a
+    + a * a / (1 + root);
+
+/** acosh of 1 + t, t not negative: ln(1 + t + sqrt(2t + t^2)). */
+const acoshNear = (/** @type {number} */ t)=>log1pOf(t + Math.sqrt(2 * t + t * t));
+
+/** acosh of x, x finite and at least 1. */
+const acoshOf = (/** @type {number} */ x)=>(x < HYPERBOLIC_LARGE ? acoshNear(x - 1)
+    : X87.yl2x(X87.LN2, x) + X87.LN2);
+
+/** What atanh takes half the log1p of, for a in [0, 1). */
+const atanhArgument = (/** @type {number} */ a)=>2 * a / (1 - a);
+
+/** e^x - 1 for x below EXP_RANGE and not a NaN. */
+const expm1Signed = (/** @type {number} */ x)=>(x < EXPM1_FLOOR ? -1
+    : Math.abs(x) < EXPM1_RANGE ? X87.f2xm1(x * X87.L2E) : expOf(x) - 1);
+
+/**
+ * double log2(double x) -- `fyl2x` of 1 and x; zero, a negative, an infinity
+ * and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function log2({ host }, x){
+    if (!(x > 0 && x <= MAX))
+    {
+        return host();
+    }
+    return X87.yl2x(1, x);
+}
+
+/**
+ * float log2f(float x), as log2.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log2f({ host }, x){
+    if (!(x > 0 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(X87.yl2x(1, x));
+}
+
+/**
+ * double exp2(double x) -- 2^x by `f2xm1` and `fscale`, a whole x exact; past
+ * the normal doubles, an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function exp2({ host }, x){
+    if (!(Math.abs(x) < POW_RANGE))
+    {
+        return host();
+    }
+    return pow2Of(x);
+}
+
+/**
+ * float exp2f(float x), as exp2 within the normal floats.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function exp2f({ host }, x){
+    if (!(Math.abs(x) < FLOAT_EXP2_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(pow2Of(x));
+}
+
+/**
+ * double log1p(double x) -- ln(1 + x) (`log1pOf`); -1 and below, an infinity
+ * and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function log1p({ host }, x){
+    if (!(x > -1 && x <= MAX))
+    {
+        return host();
+    }
+    return log1pOf(x);
+}
+
+/**
+ * float log1pf(float x), as log1p.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log1pf({ host }, x){
+    if (!(x > -1 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(log1pOf(x));
+}
+
+/**
+ * double expm1(double x) -- e^x - 1: `f2xm1` near zero, e^x less one beyond,
+ * -1 far below; EXP_RANGE and above (an overflow there) and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function expm1({ host }, x){
+    if (!(x < EXP_RANGE))
+    {
+        return host();
+    }
+    return expm1Signed(x);
+}
+
+/**
+ * float expm1f(float x), as expm1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function expm1f({ host }, x){
+    if (!(x < EXP_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(expm1Signed(x));
+}
+
+/**
+ * double asinh(double x) -- ln(|x| + sqrt(x^2 + 1)) by log1p, the sign put
+ * back; an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function asinh({ host }, x){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const a = Math.abs(x);
+    if (!(a < HYPERBOLIC_LARGE))
+    {
+        const large = X87.yl2x(X87.LN2, a) + X87.LN2;
+        return x < 0 ? -large : large;
+    }
+    const root = Math.sqrt(1 + a * a);
+    const v = asinhArgument(a, root);
+    const s = log1pOf(v);
+    return x < 0 ? -s : s;
+}
+
+/**
+ * float asinhf(float x), as asinh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function asinhf({ host }, x){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const a = Math.abs(x);
+    if (!(a < HYPERBOLIC_LARGE))
+    {
+        const large = X87.yl2x(X87.LN2, a) + X87.LN2;
+        return Math.fround(x < 0 ? -large : large);
+    }
+    const root = Math.sqrt(1 + a * a);
+    const v = asinhArgument(a, root);
+    const s = log1pOf(v);
+    return Math.fround(x < 0 ? -s : s);
+}
+
+/**
+ * double acosh(double x) -- ln(x + sqrt(x^2 - 1)) by log1p of x - 1; below 1
+ * (EDOM), an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function acosh({ host }, x){
+    if (!(x >= 1 && x <= MAX))
+    {
+        return host();
+    }
+    return acoshOf(x);
+}
+
+/**
+ * float acoshf(float x), as acosh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function acoshf({ host }, x){
+    if (!(x >= 1 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(acoshOf(x));
+}
+
+/**
+ * double atanh(double x) -- ln((1 + |x|) / (1 - |x|)) / 2 by log1p, the sign
+ * put back; 1 and beyond in magnitude (ERANGE, EDOM) and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function atanh({ host }, x){
+    if (!(Math.abs(x) < 1))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const v = atanhArgument(Math.abs(x));
+    const t = log1pOf(v) * 0.5;
+    return x < 0 ? -t : t;
+}
+
+/**
+ * float atanhf(float x), as atanh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function atanhf({ host }, x){
+    if (!(Math.abs(x) < 1))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const v = atanhArgument(Math.abs(x));
+    const t = log1pOf(v) * 0.5;
+    return Math.fround(x < 0 ? -t : t);
+}
+
+/**
+ * int ilogb(double x) -- the unbiased exponent, `fxtract`'s, a subnormal's as
+ * though normalised; zero, an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {i32}
+ */
+export function ilogb({ host }, x){
+    if (!(Math.abs(x) <= MAX && x !== 0))
+    {
+        return host();
+    }
+    return exponentOf(Math.abs(x)) | 0;
+}
+
+/**
+ * int ilogbf(float x), as ilogb.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {i32}
+ */
+export function ilogbf({ host }, x){
+    if (!(Math.abs(x) <= MAX && x !== 0))
+    {
+        return host();
+    }
+    return exponentOf(Math.abs(x)) | 0;
+}
+
+/**
+ * float modff(float x, float *whole) -- as modf; an infinity and a NaN the
+ * handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {ptr} whole
+ * @returns {f32}
+ */
+export function modff({ host, setF32 }, x, whole){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    const truncated = x < 0 ? Math.ceil(x) : Math.floor(x);
+    setF32(whole, truncated);
+    return Math.fround(x - truncated);
 }

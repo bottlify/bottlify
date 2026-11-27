@@ -97,6 +97,7 @@ const D3DQUERYTYPE_EVENT = 8;
 const D3DISSUE_END = 1;
 const D3DGETDATA_FLUSH = 1;
 const D3DTEXF_NONE = 0;
+const D3DTEXF_LINEAR = 2;
 const ONE = 0x3f800000;
 /** Where the program keeps the indices it draws from its own memory. */
 const USER_INDICES = 0x20400;
@@ -502,6 +503,8 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'indexedUser' }
  *     | { kind: 'target', on: boolean }
  *     | { kind: 'stretch', from: 'plain' | 'back' | 'target', fill: number }
+ *     | { kind: 'current', from: 'back' | 'target', source: number[] | null,
+ *         target: number[] | null, filter: number }
  *     | { kind: 'query', issue: boolean, flush: boolean }
  *     | { kind: 'sampler', state: number, value: number } | { kind: 'stage', op: number }
  *     | { kind: 'scissor', rect: number[], on: boolean }
@@ -514,6 +517,12 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'write', on: string, offset: number, size: number, fill: number }
  *     | { kind: 'release', on: string }
  *     | { kind: 'refused', on: string, offset: number, size: number, flags: number }} Step
+ *
+ * A current is the copy a program makes onto whatever it draws into: the
+ * render target asked for, Direct3D 9's StretchRect onto it from the back
+ * buffer or the target's level between rectangles, each within its surface or
+ * not, or none, and the reference given back. Direct3D 8's copy out of a
+ * target waits for pixels this machine does not draw, so it only asks.
  *
  * A hold is a lock left held, written through by the writes after it; a write
  * goes through what the buffer's last lock handed back, held or let go of; a
@@ -565,14 +574,15 @@ function generate(seed, steps, upUnbinds, nine){
             const span = whole ? units - first : 1 + below(Math.min(24, units - first));
             const offset = first * entry.unit;
             const bytes = span * entry.unit;
-            if (flags === D3DLOCK_NOOVERWRITE
-                && entry.read.subarray(offset, offset + bytes).includes(1))
+            // With NOOVERWRITE a lock is one, DISCARD or not (`lockCode`).
+            const promises = (flags & D3DLOCK_NOOVERWRITE) !== 0;
+            if (promises && entry.read.subarray(offset, offset + bytes).includes(1))
             {
                 continue;
             }
             if (flags !== D3DLOCK_READONLY)
             {
-                if (flags !== D3DLOCK_NOOVERWRITE)
+                if (!promises)
                 {
                     entry.read = new Uint8Array(length);
                 }
@@ -721,6 +731,17 @@ function generate(seed, steps, upUnbinds, nine){
             // device in a graphics worker draws, which this machine cannot.
             program.push({ kind: 'stretch', from: pick(nine ? ['plain', 'back', 'target']
                 : ['plain', 'back']), fill: below(256) });
+            // A rectangle mostly within the target's level, which the back
+            // buffer holds too; past it, empty, turned round or negative now
+            // and then.
+            const rect = ()=>{
+                const left = below(TEXELS);
+                const top = below(TEXELS);
+                return below(4) === 0 ? null : [below(16) === 0 ? 0xffffffff : left, top,
+                    left + below(TEXELS + 2), top + below(TEXELS + 2) - (below(16) === 0 ? 4 : 0)];
+            };
+            program.push({ kind: 'current', from: pick(['back', 'target']), source: rect(),
+                target: rect(), filter: pick([D3DTEXF_NONE, D3DTEXF_LINEAR]) });
         }
         else if (roll < 55 && nine)
         {
@@ -833,8 +854,7 @@ export function streaming(seed, steps, nine){
             || !unread(on, first * entry.unit, (first + units) * entry.unit))
         {
             first = 0;
-            flags = pick([D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD,
-                D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE, 0]);
+            flags = pick([D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, 0]);
         }
         const toEnd = hold || below(5) === 0;
         const end = toEnd ? total : first + units;
@@ -1038,12 +1058,16 @@ export function streaming(seed, steps, nine){
  * @param {Version} version @param {boolean} guestCode @param {Step[]} steps
  * @param {boolean} [worker]  whether the device records for a twin that draws, as in a
  *     graphics worker
+ * @param {32 | 64} [bits]  the process's width (`machine`)
  */
-export async function play(version, guestCode, steps, worker = false){
+export async function play(version, guestCode, steps, worker = false, bits = 32){
     const calls = callsOf(version);
     // Clip planes, which a Direct3D 9 device has none of until it is told it
     // has: its guest code takes a plane only below the count.
-    const m = machine(version, guestCode, { gpu: true, worker, caps: { maxUserClipPlanes: 6 } });
+    const m = machine(version, guestCode, { gpu: true, worker, caps: { maxUserClipPlanes: 6 },
+        bits });
+    /** Where a D3DLOCKED_RECT's or D3DLOCKED_BOX's pBits is: past the pitch, a pointer's width. */
+    const BITS = OUT + m.word;
     const gpu = gpuReads(m.gpu);
     /** @type {string[]} */
     const answers = [];
@@ -1084,7 +1108,7 @@ export async function play(version, guestCode, steps, worker = false){
             if (run({ on, kind: 'texture', method: 'LockRect', args: [0, 'out', 0, 0] }).eax
                 === 0)
             {
-                write(m.memory.readU32(OUT + 4), bytes);
+                write(m.memory.readU32(BITS), bytes);
             }
             run({ on, kind: 'texture', method: 'UnlockRect', args: [0] });
             return;
@@ -1094,7 +1118,7 @@ export async function play(version, guestCode, steps, worker = false){
         if (run({ on: surface, kind: 'level', method: 'LockRect', args: ['out', 0, 0] }).eax
             === 0)
         {
-            write(m.memory.readU32(OUT + 4), bytes);
+            write(m.memory.readU32(BITS), bytes);
         }
         run({ on: surface, kind: 'level', method: 'UnlockRect', args: [] });
         run({ on: surface, kind: 'level', method: 'Release', args: [] });
@@ -1165,7 +1189,7 @@ export async function play(version, guestCode, steps, worker = false){
         if (run({ on: PLAIN, kind: 'surface', method: 'LockRect', args: ['out', 0, 0] }).eax
             === 0)
         {
-            write(m.memory.readU32(OUT + 4), Uint8Array.from({ length: TEXELS * TEXELS * 4 },
+            write(m.memory.readU32(BITS), Uint8Array.from({ length: TEXELS * TEXELS * 4 },
                 (unused, i)=>(seed + i * 3) & 0xff));
         }
         run({ on: PLAIN, kind: 'surface', method: 'UnlockRect', args: [] });
@@ -1187,7 +1211,7 @@ export async function play(version, guestCode, steps, worker = false){
                 args: ['out', 0, D3DLOCK_READONLY] }).eax === 0)
             {
                 answers.push(`read ${createHash('sha1').update(m.memory.readBytes(
-                    m.memory.readU32(OUT + 4), TEXELS * TEXELS * 4)).digest('hex')}`);
+                    m.memory.readU32(BITS), TEXELS * TEXELS * 4)).digest('hex')}`);
             }
             run({ on: PLAIN, kind: 'surface', method: 'UnlockRect', args: [] });
             return;
@@ -1243,10 +1267,10 @@ export async function play(version, guestCode, steps, worker = false){
                         run(calls.indexed(type, 0, 0, 1));
                     }
                 }
-                run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
+                run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, { at: USER },
                     FORMATS[0].stride]));
                 run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
-                    USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
+                    { at: USER_INDICES }, D3DFMT_INDEX16, { at: USER }, FORMATS[0].stride]));
             }
         }
         run(calls.device('SetViewport', [{ words: [4, 4, 16, 16, 0, ONE] }]));
@@ -1311,8 +1335,8 @@ export async function play(version, guestCode, steps, worker = false){
     let stream = 0;
     for (const step of steps)
     {
-        if (heldAhead.size > 0 && ['texels', 'copy', 'query', 'stretch', 'target', 'present']
-            .includes(step.kind))
+        if (heldAhead.size > 0 && ['texels', 'copy', 'query', 'stretch', 'current', 'target',
+            'present'].includes(step.kind))
         {
             heldAcross++;
         }
@@ -1393,7 +1417,7 @@ export async function play(version, guestCode, steps, worker = false){
             // From the program's memory in the first format, then the
             // buffer's own again where the draw unbound it.
             calls.stream(0).forEach(call=>run(call));
-            run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
+            run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, { at: USER },
                 FORMATS[0].stride]));
             calls.stream(stream).forEach(call=>run(call));
         }
@@ -1455,7 +1479,7 @@ export async function play(version, guestCode, steps, worker = false){
         {
             calls.stream(0).forEach(call=>run(call));
             run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
-                USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
+                { at: USER_INDICES }, D3DFMT_INDEX16, { at: USER }, FORMATS[0].stride]));
             calls.stream(stream).forEach(call=>run(call));
         }
         else if (step.kind === 'target')
@@ -1465,6 +1489,23 @@ export async function play(version, guestCode, steps, worker = false){
         else if (step.kind === 'stretch')
         {
             stretch(step.from, step.fill);
+        }
+        else if (step.kind === 'current')
+        {
+            const current = run(calls.device('GetRenderTarget', version.getRenderTarget));
+            answers.push(`current ${current.out}`);
+            if (current.eax === 0 && typeof current.out === 'string')
+            {
+                const from = step.from === 'back' ? back : targetLevel;
+                /** @param {number[] | null} rect */
+                const words = rect=>(rect ? { words: rect } : 0);
+                if (calls.nine)
+                {
+                    run(calls.device('StretchRect', [from, words(step.source), current.out,
+                        words(step.target), step.filter]));
+                }
+                run({ on: current.out, kind: 'level', method: 'Release', args: [] });
+            }
         }
         else if (step.kind === 'query')
         {
@@ -1537,7 +1578,8 @@ export async function play(version, guestCode, steps, worker = false){
     run(calls.present);
     await idle(m.gpu);
     return { answers, gpu, inGuest, done, moves, heldAcross,
-        storages: Object.fromEntries([...storages].map(([on, set])=>[on, set.size])) };
+        storages: Object.fromEntries([...storages].map(([on, set])=>[on, set.size])),
+        guestSlots: m.guestSlots() };
 }
 
 /** @typedef {Awaited<ReturnType<typeof play>>} Played */
@@ -1565,7 +1607,7 @@ const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetT
     'SetStreamSource', 'SetIndices', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP',
     'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState', 'Clear', 'SetViewport',
     'GetViewport', 'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetLight',
-    'LightEnable', 'SetClipPlane'];
+    'LightEnable', 'SetClipPlane', 'GetRenderTarget'];
 /**
  * And those only Direct3D 9's guest code takes: a state block's own Capture
  * and Apply, the sampler states, the scissor and a stream's divider.
@@ -1587,14 +1629,18 @@ const DONE_9 = ['StretchRect', 'Issue', 'GetData'];
  * drawing itself -- with every call a trap and with the guest code, so that
  * the recording is seen under both.
  *
+ * `covered9` is what Direct3D 9's guest code takes in that gate alone: a
+ * StretchRect only for a device that records for one drawing elsewhere.
+ *
  * @type {Record<'guest' | 'worker', { arms: [string, boolean, boolean][],
- *     pairs: [string, string][], subject: string }>}
+ *     pairs: [string, string][], subject: string, covered9: string[] }>}
  */
 const GATES = {
     guest: {
         arms: [['every call a trap', false, false], ['the guest code', true, false]],
         pairs: [['every call a trap', 'the guest code']],
         subject: 'with every call a trap',
+        covered9: [],
     },
     worker: {
         arms: [['the device drawing itself', false, false],
@@ -1603,6 +1649,7 @@ const GATES = {
         pairs: [['the device drawing itself', 'the device recording'],
             ['the device recording', 'the guest code recorded']],
         subject: 'with the device drawing on the program\'s thread',
+        covered9: ['StretchRect'],
     },
 };
 
@@ -1611,12 +1658,13 @@ const GATES = {
  *
  * @param {Version} version @param {typeof GATES[keyof typeof GATES]} gate
  * @param {Step[]} steps @param {Map<string, Played>} [played]  each arm's run, filled
+ * @param {32 | 64} [bits]
  * @returns {Promise<string[]>}
  */
-async function partings(version, gate, steps, played = new Map()){
+async function partings(version, gate, steps, played = new Map(), bits = 32){
     for (const [name, guestCode, worker] of gate.arms)
     {
-        played.set(name, await play(version, guestCode, steps, worker));
+        played.set(name, await play(version, guestCode, steps, worker, bits));
     }
     /** @type {string[]} */
     const wrong = [];
@@ -1638,13 +1686,27 @@ async function partings(version, gate, steps, played = new Map()){
  * (`frames-contract-<version>-<gate>.itest.js`): all four in one file ran
  * past the minute a file is given.
  *
+ * In a 64-bit process (`bits` 64) only what is built for its width is
+ * guest code (`createVtables`, a `wide` builder): the calls a run must have
+ * taken in the guest are those of the guest code's that the device's table
+ * holds as code there, read off the tables of the objects a run called, so
+ * the gate takes in each family as it is built wide, and `wide` names those
+ * it must hold at least.
+ *
  * @param {Version} version @param {'guest' | 'worker'} which
+ * @param {{ bits?: 32 | 64, wide?: string[] }} [options]
  */
-export function frameGate(version, which){
+export function frameGate(version, which, { bits = 32, wide = [] } = {}){
     const nine = version === D3D9;
     const gate = GATES[which];
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be ${gate.subject},`
-        + ' whatever a frame locked, uploaded, bound, referenced, drew and copied', async()=>{
+    const named = `${nine ? 'Direct3D 9' : 'Direct3D 8'}${
+        bits === 64 ? ' in a 64-bit process' : ''}`;
+    // The gates of the guest's buffer locks and moves say nothing in a
+    // 64-bit process until its locks are built wide.
+    const locks = { skip: bits === 64 && !wide.includes('Lock') };
+    test(`${named}: the GPU is given what it would be `
+        + `${gate.subject}, whatever a frame locked, uploaded, bound, referenced, drew and copied`,
+    async()=>{
         /** @type {string[]} */
         const wrong = [];
         /** @type {Map<string, number>} */
@@ -1652,6 +1714,9 @@ export function frameGate(version, which){
         /** @type {Map<string, number>} */
         const answered = new Map();
         let moves = 0;
+        /** The methods the tables of the objects called hold as guest code, in its arm. */
+        /** @type {Set<string>} */
+        const asCode = new Set();
         for (let seed = 1; seed <= 40 && wrong.length === 0; seed++)
         {
             const steps = generate(seed, 200, callsOf(version).upUnbinds, nine);
@@ -1659,7 +1724,11 @@ export function frameGate(version, which){
             const played = new Map();
             for (const [name, guestCode, worker] of gate.arms)
             {
-                const run = await play(version, guestCode, steps, worker);
+                const run = await play(version, guestCode, steps, worker, bits);
+                if (guestCode)
+                {
+                    run.guestSlots.forEach(method=>asCode.add(method));
+                }
                 played.set(name, run);
                 moves += run.moves;
                 for (const [method, times] of run.inGuest)
@@ -1690,19 +1759,25 @@ export function frameGate(version, which){
             }
         }
         assert.deepEqual(wrong, []);
-        const covered = [...COVERED, ...nine ? COVERED_9 : []];
+        const every = [...COVERED, ...nine ? [...COVERED_9, ...gate.covered9] : []];
+        assert.deepEqual(wide.filter(method=>!asCode.has(method)), [],
+            `the device's table holds these as guest code: ${JSON.stringify([...asCode])}`);
+        const covered = bits === 32 ? every : every.filter(method=>asCode.has(method));
         assert.deepEqual(covered.filter(method=>!((taken.get(method) ?? 0) > 20)), [],
             `each part of the guest code took calls: ${JSON.stringify([...taken])}`);
         const done = [...DONE, ...nine ? DONE_9 : DONE_8];
         assert.deepEqual(done.filter(method=>!((answered.get(method) ?? 0) > 20)), [],
             `each copy, target and query was made: ${JSON.stringify([...answered])}`);
-        assert.ok(moves > 10, `DISCARDs under draws moved buffers onto storages of their own (${
-            moves})`);
+        if (bits === 32 || covered.includes('Lock'))
+        {
+            assert.ok(moves > 10, `DISCARDs under draws moved buffers onto storages of their own (${
+                moves})`);
+        }
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: an index buffer moved off a storage the guest`
+    test(`${named}: an index buffer moved off a storage the guest`
         + ` wrote since the host last looked draws what was written there, ${gate.subject}`,
-    async()=>{
+    locks, async()=>{
         // Indices read at each draw, a DISCARD under them that comes to the
         // host and gives the buffer another storage, one the guest's lock
         // moves the buffer onto, a present that makes the move; then a
@@ -1721,15 +1796,16 @@ export function frameGate(version, which){
             draw(0, 2), draw(24, 2)];
         /** @type {Map<string, Played>} */
         const played = new Map();
-        assert.deepEqual(await partings(version, gate, steps, played), []);
+        assert.deepEqual(await partings(version, gate, steps, played, bits), []);
         const guestArms = gate.arms.filter(([, guestCode])=>guestCode);
         assert.ok(guestArms.every(([name])=>(played.get(name)?.moves ?? 0) === 2),
             `the guest moved the buffer twice: ${guestArms.map(([name])=>
                 played.get(name)?.moves).join(', ')}`);
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a buffer discarded in place and then moved under`
-        + ` draws has the discard made before the draws after it, ${gate.subject}`, async()=>{
+    test(`${named}: a buffer discarded in place and then moved under`
+        + ` draws has the discard made before the draws after it, ${gate.subject}`,
+    locks, async()=>{
         // A DISCARD under a draw comes to the host and gives the buffer
         // another storage; a call into the host makes the draws; a DISCARD
         // in place, with no draw in the ring, which the host replays before
@@ -1745,12 +1821,12 @@ export function frameGate(version, which){
             triangles: 2 });
         const steps = [draw, lock(11), draw, /** @type {Step} */ ({ kind: 'refused', on: STREAM,
             offset: bytesOfBuffer(STREAM), size: 0, flags: 0 }), lock(22), draw, lock(33), draw];
-        const wrong = await partings(version, gate, steps);
+        const wrong = await partings(version, gate, steps, new Map(), bits);
         assert.deepEqual(wrong, []);
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a DISCARD the buffer refuses leaves it where it`
-        + ` was, under draws, ${gate.subject}`, async()=>{
+    test(`${named}: a DISCARD the buffer refuses leaves it where it`
+        + ` was, under draws, ${gate.subject}`, locks, async()=>{
         // The buffer has another storage the guest could move it onto, a draw
         // is in the ring, and a DISCARD past the buffer's end fails: what the
         // buffer held is what the draw after reads.
@@ -1761,12 +1837,13 @@ export function frameGate(version, which){
             flags: D3DLOCK_DISCARD, fill: 11, twice: false, between: null }), draw,
         /** @type {Step} */ ({ kind: 'refused', on: STREAM, offset: 16,
             size: bytesOfBuffer(STREAM), flags: D3DLOCK_DISCARD }), draw];
-        const wrong = await partings(version, gate, steps);
+        const wrong = await partings(version, gate, steps, new Map(), bits);
         assert.deepEqual(wrong, []);
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a lock the host took and the guest let go of`
-        + ` keeps what it was drawn with when the guest locks again, ${gate.subject}`, async()=>{
+    test(`${named}: a lock the host took and the guest let go of`
+        + ` keeps what it was drawn with when the guest locks again, ${gate.subject}`,
+    locks, async()=>{
         // A lock with neither flag under a draw is the host's; the program
         // writes, draws and presents with it held, lets go of it in the guest,
         // and discards the buffer, with no draw in the ring, before the host
@@ -1782,12 +1859,12 @@ export function frameGate(version, which){
             { kind: 'present' }, { kind: 'release', on: STREAM },
             { kind: 'lock', on: STREAM, offset: 0, size: 0, flags: D3DLOCK_DISCARD, fill: 118,
                 twice: false, between: null }, draw]);
-        const wrong = await partings(version, gate, steps);
+        const wrong = await partings(version, gate, steps, new Map(), bits);
         assert.deepEqual(wrong, []);
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a buffer moved back onto a storage and written`
-        + ` with the bytes it held there before draws them, ${gate.subject}`, async()=>{
+    test(`${named}: a buffer moved back onto a storage and written`
+        + ` with the bytes it held there before draws them, ${gate.subject}`, locks, async()=>{
         // Moved off its first storage, back, and off again onto the second,
         // written each time it is moved with what that storage held the time
         // before: nothing of the storage changes, while the buffer's copy on
@@ -1801,12 +1878,13 @@ export function frameGate(version, which){
         const present = /** @type {Step} */ ({ kind: 'present' });
         const steps = [draw, lock(11), draw, lock(22), draw, present, draw, lock(33), draw,
             present, draw, lock(22), draw, present, draw, lock(33), draw];
-        const wrong = await partings(version, gate, steps);
+        const wrong = await partings(version, gate, steps, new Map(), bits);
         assert.deepEqual(wrong, []);
     });
 
-    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be ${gate.subject},`
-        + ' whatever a frame streamed through its dynamic buffers', async()=>{
+    test(`${named}: the GPU is given what it would be `
+        + `${gate.subject}, whatever a frame streamed through its dynamic buffers`,
+    locks, async()=>{
         /** @type {string[]} */
         const wrong = [];
         let moves = 0;
@@ -1821,7 +1899,7 @@ export function frameGate(version, which){
             const played = new Map();
             for (const [name, guestCode, worker] of gate.arms)
             {
-                const run = await play(version, guestCode, steps, worker);
+                const run = await play(version, guestCode, steps, worker, bits);
                 played.set(name, run);
                 if (guestCode)
                 {

@@ -25,11 +25,12 @@
  */
 
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL, DDBLT_KEYDEST,
-    DDBLT_KEYDESTOVERRIDE, DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDERR_INVALIDPARAMS,
-    DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DD_OK,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN,
+    DDBLT_COLORFILL, DDBLT_DDFX, DDBLT_DEPTHFILL, DDBLT_KEYDEST, DDBLT_KEYDESTOVERRIDE,
+    DDBLT_KEYSRC, DDBLT_KEYSRCOVERRIDE, DDBLT_ROP, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT,
+    DDERR_NORASTEROPHW, DDERR_UNSUPPORTED, DD_OK, ROP,
 } from './constants.js';
-import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { compressedBytes, decodeS3tc, encodeS3tc } from '../../media/internal/s3tc.js';
 
 /**
  * @typedef {Object} BlitSurface
@@ -42,7 +43,7 @@ import { decodeS3tc } from '../webgpu/internal/s3tc.js';
  * @property {number} [keyMask]       The bits a colour key compares; the whole pixel if absent.
  * @property {boolean} [depth]        A depth buffer, which holds no colour to fill.
  * @property {number} [depthMask]     A depth buffer's depth bits; the whole pixel if absent.
- * @property {import('../webgpu/internal/s3tc.js').S3tcKind} [compressed]
+ * @property {import('../../media/internal/s3tc.js').S3tcKind} [compressed]
  *     A DXTn surface's block kind: its bytes are blocks from `buffer` on, not rows.
  * @property {{ red: number, green: number, blue: number, alpha: number }} [channels]
  *     An RGB surface's channel masks (`alpha` 0 where it has none): what a
@@ -178,7 +179,7 @@ const rowOf = length=>{
  * @param {number} count
  * @returns {Uint32Array} the pixel values, little-endian words of the surface's width
  */
-export function readRow(memory, surface, y, x, count){
+function readRow(memory, surface, y, x, count){
     const bpp = surface.bytesPerPixel;
     const bytes = memory.readMemory(surface.buffer + y * surface.pitch + x * bpp, count * bpp);
     const out = new Uint32Array(count);
@@ -201,7 +202,7 @@ export function readRow(memory, surface, y, x, count){
  * @param {number} x
  * @param {Uint32Array} values
  */
-export function writeRow(memory, surface, y, x, values){
+function writeRow(memory, surface, y, x, values){
     const bpp = surface.bytesPerPixel;
     const bytes = new Uint8Array(values.length * bpp);
     for (let index = 0; index < values.length; index++)
@@ -243,11 +244,13 @@ export function writePixel(memory, surface, x, y, value){
  * @param {ColorKey} [job.srcColorKey]
  * @param {ColorKey} [job.destColorKey]
  * @param {Rect[]} [job.clipList]
+ * @param {number} [job.mirror]  DDBLTFX_MIRRORLEFTRIGHT and DDBLTFX_MIRRORUPDOWN, of the source
  */
 function transfer(job){
     const { memory, dest, destRect, src, srcColorKey, destColorKey, clipList } = job;
+    const mirror = job.mirror ?? 0;
     if (destColorKey === undefined && (clipList === undefined || clipList.length === 0)
-        && transferWhole(job))
+        && mirror === 0 && transferWhole(job))
     {
         return;
     }
@@ -265,16 +268,17 @@ function transfer(job){
     {
         const y = destRect.top + r;
         const from = r * dest.pitch;
-        const sampledRow = srcHeight === height ? r : Math.floor((r * srcHeight) / height);
+        const across = srcHeight === height ? r : Math.floor((r * srcHeight) / height);
+        const sampledRow = (mirror & DDBLTFX_MIRRORUPDOWN) !== 0 ? srcHeight - 1 - across : across;
         for (let column = 0; column < width; column++)
         {
             const at = from + column * bpp;
             let value = job.fill;
             if (src)
             {
-                const sampledColumn = srcWidth === width
-                    ? column
-                    : Math.floor((column * srcWidth) / width);
+                const along = srcWidth === width ? column : Math.floor((column * srcWidth) / width);
+                const sampledColumn = (mirror & DDBLTFX_MIRRORLEFTRIGHT) !== 0
+                    ? srcWidth - 1 - along : along;
                 value = pixelAt(held, (sampledRow * srcWidth + sampledColumn) * bpp, bpp);
             }
             value = (value & mask) >>> 0;
@@ -411,9 +415,13 @@ function snapshot(memory, src, rect){
 const converts = (src, dest)=>{
     const from = src.channels;
     const to = dest.channels;
+    // The same colours with no alpha on the source side are copied as they
+    // are: the bits the source leaves unused land in the destination's alpha
+    // (Wine's test_surface_format_conversion_alpha: X1R5G5B5 into A1R5G5B5
+    // keeps the clear top bit).
     return from !== undefined && to !== undefined && (src.bytesPerPixel !== dest.bytesPerPixel
         || from.red !== to.red || from.green !== to.green || from.blue !== to.blue
-        || from.alpha !== to.alpha);
+        || (from.alpha !== to.alpha && from.alpha !== 0));
 };
 
 /** @param {number} mask @returns {{ shift: number, bits: number, max: number }} */
@@ -490,7 +498,7 @@ const DECODED = Object.freeze({
  * @returns {boolean} false when the surface's bytes are too few for its blocks
  */
 function snapshotCompressed(memory, src, rect, dest){
-    const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (src.compressed);
+    const kind = /** @type {import('../../media/internal/s3tc.js').S3tcKind} */ (src.compressed);
     const blocks = Math.ceil(src.width / 4) * Math.ceil(src.height / 4)
         * (kind === 'dxt1' ? 8 : 16);
     const texels = decodeS3tc(memory.readMemory(src.buffer, blocks), kind, src.width, src.height);
@@ -509,9 +517,21 @@ function snapshotCompressed(memory, src, rect, dest){
         const from = ((rect.top + row) * src.width + rect.left) * 4;
         snapshotBytes.set(texels.subarray(from, from + width * 4), row * width * 4);
     }
-    convertSnapshot(DECODED, dest, width * rows);
+    // Bits a destination without alpha leaves unused take the texels'
+    // alpha, opaque for most: X8R8G8B8 decoded has 0xff above its colours
+    // (Wine's test_surface_format_conversion_alpha, DXT1 into RGBX).
+    const to = /** @type {NonNullable<BlitSurface['channels']>} */ (dest.channels);
+    const whole = dest.bytesPerPixel >= 4 ? 0xffffffff : (1 << (dest.bytesPerPixel * 8)) - 1;
+    const unused = (whole & ~(to.red | to.green | to.blue)) >>> 0;
+    const run = unused >>> ctz(unused);
+    const contiguous = unused !== 0 && (run & (run + 1)) === 0;
+    convertSnapshot(DECODED, to.alpha === 0 && contiguous
+        ? { ...dest, channels: { ...to, alpha: unused } } : dest, width * rows);
     return true;
 }
+
+/** @param {number} mask a non-zero mask @returns {number} its lowest set bit's index */
+const ctz = mask=>31 - Math.clz32(mask & -mask);
 
 /**
  * A depth buffer's depth bits, set to one value over a rectangle; the stencil
@@ -548,6 +568,55 @@ function depthFill(memory, dest, rect, value, clipList){
     return DD_OK;
 }
 
+/** Where a decoded DXTn destination lives: past every guest address. */
+const DECODED_AT = 2 ** 32;
+
+/**
+ * A blit into DXTn blocks: the destination decoded, the blit made into the
+ * texels as into any surface, and the blocks it touched encoded again; the
+ * others keep their bytes (Wine's test_compressed_surface_stretch).
+ *
+ * @param {Parameters<typeof blt>[0]} request
+ * @returns {number} HRESULT
+ */
+function bltIntoBlocks(request){
+    const { memory, dest } = request;
+    const kind = /** @type {import('../../media/internal/s3tc.js').S3tcKind} */ (dest.compressed);
+    // readMemory answers bytes of their own, and decoding them keeps none.
+    const blocks = memory.readMemory(dest.buffer,
+        compressedBytes(kind, dest.width, dest.height));
+    const texels = decodeS3tc(blocks, kind, dest.width, dest.height);
+    if (!texels)
+    {
+        return DDERR_INVALIDPARAMS;
+    }
+    /** @type {BlitMemory} */
+    const both = {
+        readMemory: (at, length)=>(at >= DECODED_AT
+            ? texels.slice(at - DECODED_AT, at - DECODED_AT + length)
+            : memory.readMemory(at, length)),
+        writeMemory: (at, bytes)=>(at >= DECODED_AT
+            ? texels.set(bytes, at - DECODED_AT)
+            : memory.writeMemory(at, bytes)),
+    };
+    const decoded = { ...DECODED, buffer: DECODED_AT, pitch: dest.width * 4, width: dest.width,
+        height: dest.height };
+    const hr = blt({ ...request, memory: both, dest: decoded });
+    if (hr !== DD_OK)
+    {
+        return hr;
+    }
+    const rect = wholeOf(request.destRect, dest);
+    encodeS3tc(texels, kind, dest.width, dest.height, blocks, {
+        left: Math.max(0, Math.floor(rect.left / 4)),
+        top: Math.max(0, Math.floor(rect.top / 4)),
+        right: Math.min(Math.ceil(dest.width / 4), Math.ceil(rect.right / 4)),
+        bottom: Math.min(Math.ceil(dest.height / 4), Math.ceil(rect.bottom / 4)),
+    });
+    memory.writeMemory(dest.buffer, blocks);
+    return DD_OK;
+}
+
 /**
  * IDirectDrawSurface::Blt.
  *
@@ -559,8 +628,9 @@ function depthFill(memory, dest, rect, value, clipList){
  * @param {Rect | null} [request.srcRect]
  * @param {number} request.flags   DDBLT
  * @param {{ fillColor?: number, fillDepth?: number, srcColorKey?: ColorKey,
- *            destColorKey?: ColorKey }} [request.fx]
+ *            destColorKey?: ColorKey, rop?: number, ddfx?: number }} [request.fx]
  * @param {Rect[]} [request.clipList]
+ * @param {boolean} [request.fxGiven]  Whether the program passed a DDBLTFX at all.
  * @returns {number} HRESULT
  */
 export function blt(request){
@@ -571,11 +641,60 @@ export function blt(request){
     }
     const flags = request.flags >>> 0;
     const fx = request.fx ?? {};
-    const destRect = wholeOf(request.destRect, dest);
-    if (!rectFits(destRect, dest))
+    // The arguments before the rectangles: a fill or raster operation reads
+    // its DDBLTFX, a fill takes no source, and a colour fill is no raster
+    // operation (Wine's test_color_fill).
+    const fills = flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL);
+    if (((fills !== 0 || (flags & DDBLT_ROP) !== 0) && request.fxGiven === false)
+        || (fills !== 0 && request.src)
+        || ((flags & DDBLT_COLORFILL) !== 0 && (flags & DDBLT_ROP) !== 0)
+        // A copy needs its source, before its rectangles (Wine's test_blt).
+        || (fills === 0 && (flags & DDBLT_ROP) === 0 && !request.src))
+    {
+        return DDERR_INVALIDPARAMS;
+    }
+    if (dest.compressed !== undefined)
+    {
+        return bltIntoBlocks(request);
+    }
+    const asked = wholeOf(request.destRect, dest);
+    // A rectangle past the surface is refused, unless a clipper is there to
+    // cut it: then the part on the surface is drawn, and the source's part
+    // that maps onto it (`clipped`).
+    const clipped = rectFits(asked, dest) ? null : request.clipList ? {
+        left: Math.max(0, asked.left), top: Math.max(0, asked.top),
+        right: Math.min(dest.width, asked.right), bottom: Math.min(dest.height, asked.bottom),
+    } : undefined;
+    if (clipped === undefined || (asked.left > asked.right || asked.top > asked.bottom))
     {
         return DDERR_INVALIDRECT;
     }
+    if (clipped && (clipped.left >= clipped.right || clipped.top >= clipped.bottom))
+    {
+        return DD_OK;
+    }
+    const destRect = clipped ?? asked;
+    /**
+     * The part of a source rectangle that lands on the destination once the
+     * clipper has cut it, in the source's own scale.
+     *
+     * @param {Rect} whole
+     * @returns {Rect}
+     */
+    const cutSource = whole=>{
+        if (!clipped)
+        {
+            return whole;
+        }
+        const sx = (whole.right - whole.left) / (asked.right - asked.left);
+        const sy = (whole.bottom - whole.top) / (asked.bottom - asked.top);
+        return {
+            left: whole.left + Math.floor((clipped.left - asked.left) * sx),
+            top: whole.top + Math.floor((clipped.top - asked.top) * sy),
+            right: whole.right - Math.floor((asked.right - clipped.right) * sx),
+            bottom: whole.bottom - Math.floor((asked.bottom - clipped.bottom) * sy),
+        };
+    };
     const srcColorKey = (flags & (DDBLT_KEYSRC | DDBLT_KEYSRCOVERRIDE)) !== 0
         ? fx.srcColorKey
         : undefined;
@@ -584,12 +703,35 @@ export function blt(request){
         : undefined;
     const common = { memory, dest, destRect, destColorKey, clipList: request.clipList };
 
-    if ((flags & DDBLT_DEPTHFILL) !== 0)
+    // A raster operation: the two fills it names need no source, a copy is
+    // the copy below, and any other is one this device does not make.
+    if ((flags & DDBLT_ROP) !== 0 && (flags & (DDBLT_COLORFILL | DDBLT_DEPTHFILL)) === 0)
     {
-        return dest.depth
-            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
-            : DDERR_INVALIDPARAMS;
+        const rop = (fx.rop ?? ROP.SRCCOPY) >>> 0;
+        if (rop === ROP.BLACKNESS || rop === ROP.WHITENESS)
+        {
+            // A source it does not read is still a source, and its rectangle
+            // is checked; a depth buffer is filled like any other surface.
+            if (request.src && !rectFits(wholeOf(request.srcRect, request.src), request.src))
+            {
+                return DDERR_INVALIDRECT;
+            }
+            transfer({ ...common, fill: rop === ROP.BLACKNESS ? 0 : 0xffffffff });
+            return DD_OK;
+        }
+        if (rop !== ROP.SRCCOPY)
+        {
+            return DDERR_NORASTEROPHW;
+        }
     }
+    // The effects: mirroring, which the copy below makes; any other is not made.
+    const ddfx = (flags & DDBLT_DDFX) !== 0 ? (fx.ddfx ?? 0) >>> 0 : 0;
+    if ((ddfx & ~(DDBLTFX_MIRRORLEFTRIGHT | DDBLTFX_MIRRORUPDOWN)) !== 0)
+    {
+        return DDERR_UNSUPPORTED;
+    }
+
+    // Asked for both, the colour fill is the one made.
     if ((flags & DDBLT_COLORFILL) !== 0)
     {
         if (dest.depth)
@@ -599,6 +741,12 @@ export function blt(request){
         transfer({ ...common, fill: (fx.fillColor ?? 0) >>> 0 });
         return DD_OK;
     }
+    if ((flags & DDBLT_DEPTHFILL) !== 0)
+    {
+        return dest.depth
+            ? depthFill(memory, dest, destRect, fx.fillDepth ?? 0, request.clipList)
+            : DDERR_INVALIDPARAMS;
+    }
 
     const src = request.src ?? null;
     if (!src)
@@ -607,7 +755,7 @@ export function blt(request){
     }
     if (src.compressed !== undefined)
     {
-        const whole = wholeOf(request.srcRect, src);
+        const whole = cutSource(wholeOf(request.srcRect, src));
         if (dest.channels === undefined || srcColorKey !== undefined)
         {
             return DDERR_UNSUPPORTED;
@@ -620,7 +768,7 @@ export function blt(request){
         {
             return DDERR_INVALIDPARAMS;
         }
-        transfer({ ...common, fill: 0, src, srcRect: whole });
+        transfer({ ...common, fill: 0, src, srcRect: whole, mirror: ddfx });
         return DD_OK;
     }
     const conversion = converts(src, dest);
@@ -632,7 +780,7 @@ export function blt(request){
     {
         return DDERR_UNSUPPORTED;
     }
-    const srcRect = wholeOf(request.srcRect, src);
+    const srcRect = cutSource(wholeOf(request.srcRect, src));
     if (!rectFits(srcRect, src))
     {
         return DDERR_INVALIDRECT;
@@ -643,7 +791,7 @@ export function blt(request){
         convertSnapshot(src, dest,
             (srcRect.right - srcRect.left) * (srcRect.bottom - srcRect.top));
     }
-    transfer({ ...common, fill: 0, src, srcRect, srcColorKey });
+    transfer({ ...common, fill: 0, src, srcRect, srcColorKey, mirror: ddfx });
     return DD_OK;
 }
 

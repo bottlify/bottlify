@@ -55,8 +55,18 @@ test('a status with no translation says so rather than guessing', ()=>{
     // Windows answers ERROR_MR_MID_NOT_FOUND for a status it has no message for.
     // Anything else here would be a Win32 error the failure never had, and a
     // caller acts on it as though it did.
-    assert.equal(toDosError(0xc0000123), ERROR_MR_MID_NOT_FOUND);
+    // A facility no status is defined in.
+    assert.equal(toDosError(0xc0fe0001), ERROR_MR_MID_NOT_FOUND);
     assert.equal(ERROR_MR_MID_NOT_FOUND, 317);
+});
+
+test('a status the engine never makes still maps as Windows maps it', ()=>{
+    // A program hands over statuses it got elsewhere - a driver's, an RPC
+    // runtime's - and reports what RtlNtStatusToDosError makes of them.
+    assert.equal(toDosError(0x80000002), 998, 'DATATYPE_MISALIGNMENT is ERROR_NOACCESS');
+    assert.equal(toDosError(0xc0030004 | 0), 6, 'RPC_NT_SS_IN_NULL_CONTEXT, ERROR_INVALID_HANDLE');
+    assert.equal(toDosError(0x40000002), 87, 'an informational status maps too');
+    assert.equal(toDosError(0xc0000123), ERROR_ACCESS_DENIED, 'FILE_DELETED');
 });
 
 test('a version that does not meet a request is a revision mismatch in both domains', ()=>{
@@ -75,6 +85,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
     const rows = [
         [STATUS.SUCCESS, 0],
         [STATUS.PENDING, 997],
+        [STATUS.DATATYPE_MISALIGNMENT, 998],
         [STATUS.BUFFER_OVERFLOW, 234],
         [STATUS.NO_MORE_FILES, 18],
         [STATUS.NO_MORE_ENTRIES, 259],
@@ -91,6 +102,22 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.NO_MEMORY, 8],
         [STATUS.ACCESS_DENIED, 5],
         [STATUS.DLL_NOT_FOUND, 126],
+        [STATUS.DLL_INIT_FAILED, 1114],
+        [STATUS.INVALID_PIPE_STATE, 230],
+        [STATUS.NOT_A_REPARSE_POINT, 4390],
+        [STATUS.IO_REPARSE_TAG_INVALID, 4393],
+        [STATUS.IO_REPARSE_TAG_MISMATCH, 4394],
+        [STATUS.IO_REPARSE_DATA_INVALID, 4392],
+        [STATUS.IO_REPARSE_TAG_NOT_HANDLED, 1920],
+        [STATUS.REPARSE_POINT_NOT_RESOLVED, 1921],
+        [STATUS.INVALID_USER_BUFFER, 1784],
+        [STATUS.INVALID_BUFFER_SIZE, 1784],
+        [STATUS.DIRECTORY_NOT_EMPTY, 145],
+        [STATUS.PRIVILEGE_NOT_HELD, 1314],
+        [STATUS.MEDIA_WRITE_PROTECTED, 19],
+        [STATUS.INVALID_DEVICE_REQUEST, 1],
+        [STATUS.PIPE_CONNECTED, 535],
+        [STATUS.NOT_FOUND, 1168],
         [STATUS.BUFFER_TOO_SMALL, 122],
         [STATUS.OBJECT_NAME_INVALID, 123],
         [STATUS.OBJECT_NAME_NOT_FOUND, 2],
@@ -106,13 +133,21 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.CANNOT_DELETE, 5],
         [STATUS.REVISION_MISMATCH, 1306],
         [STATUS.NOT_MAPPED_VIEW, 487],
+        [STATUS.IMAGE_NOT_AT_BASE, 700],
+        [STATUS.CONFLICTING_ADDRESSES, 487],
         [STATUS.INVALID_VIEW_SIZE, 5],
         [STATUS.INVALID_FILE_FOR_SECTION, 193],
         [STATUS.OBJECT_TYPE_MISMATCH, 6],
         [STATUS.SECTION_TOO_BIG, 8],
+        [STATUS.INVALID_PAGE_PROTECTION, 87],
         [STATUS.SECTION_NOT_IMAGE, 87],
         [STATUS.MAPPED_FILE_SIZE_ZERO, 1006],
         [STATUS.INVALID_IMAGE_NOT_MZ, 193],
+        [STATUS.INVALID_IMAGE_FORMAT, 193],
+        [STATUS.INVALID_IMAGE_NE_FORMAT, 193],
+        [STATUS.INVALID_IMAGE_PROTECT, 193],
+        [STATUS.INVALID_IMAGE_WIN_16, 193],
+        [STATUS.INVALID_IMAGE_WIN_64, 193],
         [STATUS.INVALID_CID, 87],
         [STATUS.INVALID_PARAMETER_MIX, 87],
         [STATUS.RESOURCE_DATA_NOT_FOUND, 1812],
@@ -120,6 +155,21 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.RESOURCE_NAME_NOT_FOUND, 1814],
         [STATUS.RESOURCE_LANG_NOT_FOUND, 1815],
         [STATUS.MESSAGE_NOT_FOUND, 317],
+        [STATUS.PIPE_BROKEN, 109],
+        [STATUS.PIPE_DISCONNECTED, 233],
+        [STATUS.PIPE_LISTENING, 536],
+        [STATUS.PIPE_CLOSING, 232],
+        [STATUS.INSTANCE_NOT_AVAILABLE, 231],
+        [STATUS.PIPE_NOT_AVAILABLE, 231],
+        [STATUS.ILLEGAL_FUNCTION, 1],
+        [STATUS.IO_TIMEOUT, 121],
+        [STATUS.PIPE_BUSY, 231],
+        [STATUS.INVALID_READ_MODE, 230],
+        [STATUS.OBJECT_PATH_INVALID, 161],
+        [STATUS.CANCELLED, 995],
+        [STATUS.OBJECT_NAME_EXISTS, 698],
+        [STATUS.MUTANT_NOT_OWNED, 288],
+        [STATUS.SEMAPHORE_LIMIT_EXCEEDED, 298],
     ];
     for (const [status, expected] of rows)
     {

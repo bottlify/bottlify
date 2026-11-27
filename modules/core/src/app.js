@@ -9,65 +9,89 @@ import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
-import { captureTrace, describeAddress, formatTrace } from './trace.js';
-import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
-import { HEAP_POOLS, NOT_MEASURED, withZones } from './memory-zones.js';
-import { keepOriginStorageWithin } from './storage-budget.js';
+
+import { captureTrace, formatTrace } from './trace.js';
+import { HEAP_POOLS, NOT_MEASURED } from './memory-zones.js';
 import {
-    DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
-    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
+    DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE, DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY,
+    MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
-import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
-import { JIT_CONFIG_CHAINING } from './layers/cpu/internal/v86-host.js';
 import { engineContractProblem } from './layers/cpu/engine.js';
-import { SETTINGS, processorName } from './settings.js';
+import { SETTINGS } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
-import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
-import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
-import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset }
-    from './layers/loader/internal/pe.js';
-import { planDependencies } from './layers/loader/internal/dependencies.js';
 import {
-    findResource, listResources, loadString, RT_STRING, stringInBundle,
-} from './layers/loader/internal/resources.js';
-import { readTls } from './layers/loader/internal/tls.js';
+    baseOf, compositionPlan, needsComposing,
+} from './layers/graphics/webgpu/internal/compose.js';
+import { connectGraphicsWorker } from './layers/graphics/remote/connect.js';
+import {
+    DIR_EXPORT, imageKind, parseExportDirectory, parsePe, readExports, readImports, rvaToFileOffset,
+} from './layers/loader/internal/pe.js';
+import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { WINDOWS_LIBRARIES } from './layers/loader/internal/windows-libraries.js';
+import { LIBRARIES_SINCE } from './layers/loader/internal/libraries-since.js';
+import { STATUS } from './layers/win32/ntdll/status.js';
+import { readMappedTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
-import { mangledCall } from './layers/loader/internal/mangling.js';
-import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
-import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
-import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
-import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
-import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
-import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
-    from './layers/loader/internal/init.js';
-import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
-import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
-import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
+
+import { blockLayouts, createProcessBlocks } from './layers/win32/kernel32/teb.js';
+import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
+import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
+    from './layers/win32/kernel32/shared-data.js';
+import { windowsFor, windowsVersion } from './layers/win32/kernel32/versions.js';
+import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
+import { graphicsChoice } from './layers/graphics/choice.js';
+
+import { sectionImageInformation } from './layers/win32/kernel32/mapping.js';
+import { announceSteamClient } from './layers/win32/steamclient/functions.js';
+import { synthesiseProcessInit, synthesiseStartRefused } from './layers/loader/internal/init.js';
+import {
+    createSharingMemory, openSharedSharing,
+} from './layers/filesystem/internal/shared-sharing.js';
+import { createPageFile } from './layers/filesystem/internal/page-file.js';
+import { openRunFolder } from './layers/filesystem/internal/run-folder.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
-import { blockCacheName, createBlockCache, resolveBlockStore, storedLength }
-    from './layers/filesystem/internal/bundle/cache.js';
-import { decompressZstd } from './zstd.js';
-import { mountDiscs } from './discs.js';
-import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
-import { comHandlers, remoteClassTable } from './com-link.js';
+import { remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
-import { canShareMemory, withRunMode } from './mode.js';
-import { createLinkMemory, openLink } from './system/link.js';
-import { systemHandlers } from './system-link.js';
-import { storeHandlers } from './layers/cpu/internal/store-link.js';
-import { eventFrom } from './system/events-across.js';
-import { defaultModules } from './layers/index.js';
-import { createRunRegistry } from './layers/win32/module.js';
-import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
-import { createWindowDirectory } from './layers/win32/user32/directory.js';
-import { createMixer } from './layers/audio/output/mixer.js';
-import { objectHandlers } from './system-objects.js';
+import { withConcurrency } from './concurrency.js';
+import { SHARED_MODULE_BYTES, withHeldModules } from './layers/cpu/internal/store-link.js';
+import { createMemoryBudget, openMemoryBudget, RUN_HOLDER }
+    from './layers/cpu/internal/memory-budget.js';
+import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY } from './layers/win32/programs/table.js';
+import { RUN_ONCE_ROUTINE } from './layers/win32/programs/functions.js';
+import { frameworkNeeded } from './layers/win32/mscoree/need.js';
+import { shareTransport } from './layers/win32/wsock32/transport.js';
+import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
+import { pipeStandIn } from './layers/win32/kernel32/pipes.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './layers/win32/kernel32/console.js';
 import { openProcessWorker } from './host/process-worker.js';
-import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
+import { createTranslatorPool } from './host/pool/pool.js';
 import { createInputRoute } from './layers/input/route.js';
+import { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls } from './tail-calls.js';
+import { createModuleTable, pathKey } from './process/module-table.js';
+import { createSystemModules, shapeOf } from './process/system-modules.js';
+import { bindSidecar } from './process/sidecar.js';
+import { openRunCache } from './process/run-cache.js';
+import { cacheSpace } from './layers/cache/module.js';
+import { processesBeside } from './process/beside.js';
+import { processMemories } from './process/memories.js';
+import { compatibilityOf } from './process/image-resources.js';
+import { processSound } from './process/sound.js';
+import { classServers } from './process/servers.js';
+import { IDLE_LOOK_MS } from './process/run-waits.js';
+import { ENGINE_CODE_BYTES, FIRST_PROCESS_ID } from './process/process-layout.js';
+import {
+    buildSystemHost, corkArtifacts, inputRecipient, journalEvents,
+} from './process/system-host.js';
+import { furnishVolume, openSession } from './process/session.js';
+import { mountBundle } from './process/bundle-mount.js';
+import { createLibraryLoader } from './process/library-loader.js';
+import { layerConfig } from './process/layer-config.js';
+import { processController } from './process/controller.js';
+import {
+    LIBRARY_ALIGN, RT_MANIFEST, exportTables, libraryCandidates, moduleKeyOf, pathDirectories,
+    placeLibrary, readWholeFile, resourceOfImage, startDirectoryOf,
+} from './process/libraries.js';
 
 /** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
 const FNV_OFFSET = 0x811c9dc5;
@@ -101,449 +125,12 @@ const hashText = (hash, text)=>{
  * implements. Neither should. Assembling a process is what knows both.
  */
 
-/**
- * @typedef {{ path: string, position: number }} StandardFile
- */
+/** @typedef {import('./app-options.js').SpareMemory} SpareMemory */
 
-/**
- * @typedef {Object} AppOptions
- * @property {Uint8Array} executable      The program to run.
- * @property {Object} [v86]               The emulator, for `engine: 'emulator'`. The
- *           package carries none: a caller that wants it brings both halves.
- * @property {string} [v86.moduleUrl]     The emulator's module (`libv86.mjs`).
- * @property {ArrayBuffer} [v86.wasmBytes]  Its binary (`v86.wasm`).
- * @property {Object} [cork]              The translator, for every engine but `emulator`.
- * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
- * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
- *     `store` here is a request -- `'local'` (the default) for the origin's private file
- *     system, a store of your own when the app runs in this thread, `null` for none.
- * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
- *     processes as their translation needs: on by default wherever a machine's
- *     translator would open a worker of its own, unless `cork.config.translators` is set.
- * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
- *     `navigator.hardwareConcurrency` by default.
- * @property {number} [cork.poolWindowMs]  How often the pool's driver reads its workers.
- *     Default 500.
- * @property {Partial<import('./host/pool/driver.js').DriverSettings>} [cork.poolDriver]  The
- *     driver's thresholds (`joinAt`, `leaveBelow`, `leaveAfterMs`, `idleBelow`, `trialWindows`,
- *     `trialLimit`, `restMs`, `yieldShare`).
- * @property {Object} [zstd]              The bundle decoder's wasm build, when the package's
- *           own is not wanted: `vendor/zstd.wasm` beside this module by default; absent
- *           there, the JavaScript decoder (or the emulator's, while it is loaded) decodes.
- * @property {string} [zstd.wasmUrl]      Where its binary is fetched from.
- * @property {ArrayBuffer} [zstd.wasmBytes]  Or the binary itself.
- * @property {Object} [media]             Video decoding, when this build has it.
- * @property {ArrayBuffer} [media.wasmBytes]
- *           The decoder binary. Absent, the media layer comes up and reports
- *           that nothing can be played, which is what a build without it is.
- * @property {any} [media.instance]
- *           The decoder one machine already made, so the machine that replaces
- *           it attaches to the same compiled module and linear memory rather
- *           than instantiate the binary again. Set by `createApp` on a rebuilt
- *           machine and not something a caller supplies.
- * @property {number} [stackSize]
- * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
- * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
- *           Defaults to everything above the libraries up to the end of RAM.
- * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
- * @property {boolean | { answer?: (dialog: import('./layers/win32/user32/dialogs.js')
- *     .UnattendedDialog) => number | Promise<number> }} [unattended]
- *     Nobody is at the screen -- a silent install run from a terminal: every modal dialog and
- *     message box is put to `answer` (a terminal prompt, say), or without one answered with its
- *     default button as Enter would, and each answer is reported as a divergence.
- * @property {boolean} [driveGuestCalls]  Host calls written as steps (`bridge.drive`) call the
- *     guest in the slice they came in, rather than parking the thread for each guest call
- *     and resuming it a turn later. On by default: through promises each guest call of an
- *     effect pass was a turn of its own, thousands a frame (bridge `driveMs` is what to read).
- *     False runs the steps through promises.
- * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
- *                                     report's cost per API; two clock readings a call.
- * @property {'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host'} [gpuProfile]  The profile the
- *     video adapter is shown with (`GPU_PROFILES` in `layers/graphics/seam/adapter.js`):
- *     a known card of that shader model, by its PCI ids and with its shader versions,
- *     for a program that picks its render path from the cards it knows and takes its
- *     weakest on one it does not. 'host' or absent, the adapter is shown with the
- *     browser's vendor and model 3. Its name stays Bottlify's either way.
- * @property {boolean} [sampleJs]  Keep the browser's sampler of this thread's JavaScript
- *     running and report what it spends its time in, function by function, as the
- *     `js` table (`host/js-samples.js`). Needs `Document-Policy: js-profiling` on
- *     the page and the worker scripts; off by default.
- * @property {() => boolean} [pageHidden]
- *     Whether nobody is looking at this run. A hidden page's timers are clamped
- *     by the browser, which stops the machine rather than slowing it, so the
- *     loop waits differently when this is true. Defaults to asking the document.
- * @property {number} [record]
- *     How many events at the bridge to keep, so a run that went wrong can be
- *     saved and replayed in a test. Zero, the default, records nothing.
- * @property {(dll: string, name: string | null, ordinal: number | null)
- *     => ({ args: number, strings?: (number | string)[] } | null)} [watchImport]
- *     Asked about every import as it is bound. Answering with an argument count
- *     puts a watch in front of that function, so a call from one guest module
- *     into another shows up in the trace like a call into ours. This is the only
- *     way to see them, and a game's own libraries are where its decisions live.
- *     `strings` names the arguments that point at C strings -- a stack slot by
- *     position, or `'ecx'` / `'edx'` for one passed in a register -- and the
- *     watch reports those with the answer: a pointer into the stack says
- *     nothing once the call is over, and the name a program asked for is
- *     usually the whole point.
- * @property {number} [maxFps]
- *     The most frames a second that may reach the screen. Sixty unless said
- *     otherwise; zero delivers at whatever rate the caller's scheduler offers.
- *     A frame shown faster than a display can show it is a read of the surface
- *     and an upload that nobody sees.
- * @property {{ categories?: Record<string, string>, capacity?: number,
- *     bytes?: number, sequenceBase?: number, journal?: any,
- *     now?: () => number }} [log]
- *     Which call areas are recorded from the first instruction, and how much of
- *     the journal is kept -- `capacity` records in the index, `bytes` for the
- *     records themselves (default 1 MiB; a call area logging every argument as
- *     a string fills it far sooner than `capacity`'s own default assumes).
- *     Everything a program decides about a device it decides while starting
- *     up, so a category switched on once the engine exists is switched on too
- *     late to see any of it. `sequenceBase` is set by `createApp` on a rebuilt
- *     machine, `journal` and `now` on every process of the run; none is
- *     something a caller supplies.
- * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
- *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
- *         | { table: ArrayBufferLike },
- *     beside?: { arena: [number, number] | null } }} [audio]
- *     Sound leaves through a shared track table a worklet reads, or -- with no
- *     shared memory to hand one -- a ring the engine thread mixes into itself.
- *     `drained` says that something on the other side is really reading, which
- *     is what decides whether a program's play cursor follows the sound or a
- *     clock. `shared` picks the backend; default `typeof SharedArrayBuffer ===
- *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
- *     storage outlives the process that made it, and is not something a caller
- *     supplies.
- * @property {'win2000' | 'winxp' | 'win7' | 'win10'} [windows]
- *     The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1
- *     or 10 (build 19045). Every place a program reads the version from agrees
- *     on it -- GetVersionEx, VerifyVersionInfo, the process block,
- *     RtlGetVersion, the registry, a system library's file version -- and so do
- *     the profile folders the registry, the shell and the environment name.
- *     Windows 10 tells a program whose manifest does not declare it 6.2, as
- *     the real one does. Default `winxp`; any other name is refused.
- * @property {import('./mode.js').RunMode} [mode]
- *     How much rides on shared memory: `isolated` shares the guest's memory with the
- *     graphics worker, `compatible` keeps it the engine thread's own and copies what
- *     crosses, `auto` (the default) is `isolated` on a cross-origin isolated page and
- *     `compatible` elsewhere. `isolated` where memory cannot be shared is refused.
- * @property {import('./mode.js').Concurrency} [concurrency]
- *     How many processes run at once: 1 (the default) runs a child in its parent's
- *     place until it exits; 2 or 4 runs it beside its parent from CreateProcess on,
- *     each child in a worker of its own (`host/process.worker.js`) with the run's
- *     system half reached across a link, up to that many at once and the next
- *     beside its parent on the engine's thread. More than one needs shared memory:
- *     asked for in `compatible` mode or on a page that is not cross-origin isolated,
- *     the run falls back to `compatible`, one process at a time, and says so with a
- *     `fallback` event.
- * @property {{ asked: any, detail: string } | null} [fallback]
- *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
- *     something a caller supplies.
- * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'opengl'} [graphicsApi]
- *     The graphics a bottle prefers: every DirectX up to the one named --
- *     DirectX 9 has DirectDraw and Direct3D 8 as well -- or OpenGL alone. Only
- *     those system libraries exist and only their wrappers are built, and the
- *     registry, the setup library, DxDiag and the DirectX libraries' file
- *     versions name its DirectX -- 7.0, 8.1, or 9.0c for 9 and 10. Absent,
- *     every library and DirectX 9.0c; any other name is refused.
- * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[],
- *     handleWords?: boolean }} [win32]
- *     `network` is the transport under Winsock, in the shape the win32 layer's
- *     `wsock32/transport.js` names: what a relay client hands back, or an
- *     embedder's own. Absent, Winsock runs over the loopback adapter and
- *     nothing outside this runtime is reachable, which is the default.
- *     `trustedRoots` is the root store WinVerifyTrust judges Authenticode
- *     chains against, each root as DER bytes or base64; absent, it holds
- *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
- *     nothing. `handleWords: false` leaves out the table of handle words that
- *     WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent answer from in
- *     the guest, so every such call is the host's: the second path of their gates.
- * @property {(record: any) => void} [onCall]
- *           Every host call as it returns. The ring kept for a failure holds
- *           the end of a run; this holds all of it, for a tool willing to
- *           write it somewhere. Each of the run's processes calls it, and a
- *           record names the process's image (`image`) and the calling
- *           thread (`thread`).
- * @property {Record<string, number>} [jit]
- *     The emulator's compiler budgets, by config index. For measurement.
- * @property {'emulator' | 'cork'} [engine]
- *     Which execution engine runs the program. Default `cork`, the one the
- *     package carries; `emulator` only with `v86` handed in, and refused
- *     without it.
- * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler.
- *     `false` turns it off, for a caller measuring the emulator's own compiler
- *     rather than the guest's code.
- * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
- *           it is what makes `sample` a profile rather than a rumour.
- * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
- *           ready beside, in a process with one executor, while no timed wait or timer is
- *           due within 16 ms. Default ten quanta.
- * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
- *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean, freeHost?: boolean,
- *           gcNudge?: boolean | { everyMs?: number, bytes?: number } }} [cpu]
- *           The machine's processor. `cores`: how many
- *           processors the program is told it has -- by every road Windows has to say
- *           it -- and the executors that run its threads at once, each a worker past
- *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
- *           memory one fewer than the host's processors, at most eight
- *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
- *           them, one. Under cork, on a page that can share memory; elsewhere the
- *           program runs on one and is told of one.
- *           Named, they all open before the program starts; automatic, each opens
- *           when a thread wants it, some tens of milliseconds before it runs one, so
- *           a program of one thread pays for none. `eager` says which outright.
- *           `placement`: where a process of several cores runs its ready threads --
- *           `spread` (the default beside `freeHost`) each on a core of its own,
- *           `concentrate` all taking turns on the process's own core, `auto` (the
- *           default with `freeHost` false) each moved onto the process's own core or
- *           off it, one at a time, where what it did says it gains.
- *           `placementTiming`: the moves' windows and thresholds, for a test.
- *           `playPinned`: false keeps every processor on its own core; by default a
- *           thread the program pinned to one processor and that calls into the host
- *           often has its processor played by the process's own core, where those
- *           calls are answered. `freeHost` (on unless false) keeps the process's own
- *           core for the host's answers while a thread is pinned to its processor (a
- *           game's main thread, pinned to the first), the processor played by another
- *           core; with it the threads spread unless `placement` is named, and no
- *           processor is traded on its gains, so `playPinned` applies only with it off.
- *           `gcNudge`: each thread that holds the guest's memory makes and drops an
- *           untouched buffer (64 MB every 50 ms unless named) so that JavaScriptCore
- *           collects its young garbage before it piles up; on by default where
- *           JavaScriptCore runs and nowhere else, `false` for none.
- * @property {number} [executors]  `cpu.cores` by its older name: executors of the
- *           program's process under cork, past the process's own thread each a worker
- *           running one of its threads at once with the others, the locked
- *           instructions atomic. Default 1.
- * @property {boolean} [preemption]  End a slice early when a thread of higher
- *           priority comes due, as Windows preempts (the kernel's option; off).
- * @property {(eip: number, instructions: number) => void} [sample]
- *           Called with the guest's instruction pointer at every turn boundary.
- *           This is the only view of what a program is doing between host calls,
- *           which is where a program that fails on its own computed state fails.
- * @property {number} [pendingYieldMs]  How often, in milliseconds, the run
- *     loop gives its thread away to hear an outstanding host answer while
- *     other threads still run. Default 1; lower hears answers sooner at more
- *     trips round the event loop.
- * @property {RunPacing} [pacing]
- *     How the run loop gives the thread away, and how it waits when the guest
- *     has nothing to run. The default is a page's: it cannot block, so it
- *     yields when something is pending or a few milliseconds have passed,
- *     and looks again on a short timer. A host on a thread of its own waits
- *     for the next event instead; see `RunPacing`.
- * @property {string} [imagePath]    What the program believes it was loaded from.
- * @property {string} [commandLine]
- *           What the program believes it was started with. argv[0] ends at the
- *           first space unless it is quoted, so a line composed by hand must
- *           quote it. Defaults to the image path, quoted.
- * @property {string} [startDirectory]
- *           The current directory the program starts in, where its starter
- *           chose one -- a system program, whose paths are its parent's to
- *           mean. Its own image's directory otherwise.
- * @property {number} [processId]    What GetCurrentProcessId answers: for a child, the
- *           identifier its parent was handed when it started it.
- * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
- *           objects -- for a process that joins another run's rather than making one: a
- *           process in a worker of its own is handed it across a link (`system-link.js`).
- * @property {(name: string, payload: any) => void} [relay]
- *           Told every event this process emits, for a process in a worker of its own
- *           to tell the bus of the run that started it.
- * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
- *           The files a child's parent handed it as its output and error,
- *           each the parent's own open file, whose position the child's
- *           writes move.
- * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
- *           The memory of a process of the run that has gone, for this one to
- *           take: set by the run, not something a caller supplies.
- * @property {boolean} [refuseReplacement]
- *           Stop rather than replace this process with a child it asked for. A
- *           replacement erases every log and ring of the run that asked for it,
- *           once per iteration of a loop that keeps asking, so this is how the
- *           machine is made to stand still at the point of the request with the
- *           evidence still in it.
- * @property {boolean} [exitNotice]
- *           Whether a run the program ended with exit code 0 says so to the
- *           player: a `message-box` of the engine's own (`exit: { code }`,
- *           id 0), drawn by the page like the program's boxes, that the game
- *           has finished and its process has stopped. On by default; a
- *           nonzero code is the page's error report instead.
- * @property {any} [device]          The GPU to draw on, when there is one.
- * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
- *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any,
- *     driverRules?: 'legacy' | 'current', display?: (frame: any) => void }}
- *           [graphics]
- *           The graphics layer's configuration (docs/core/configuration.md,
- *           graphics), forwarded to it as given: `compressedTextures`
- *           turns the block-compressed upload path on where the device has the
- *           feature (BC, or for OpenGL's DXT1 ASTC where there is no BC), and
- *           `maxFrameLatency` is how many frames the device may
- *           still be working on when a present answers (three; zero for no
- *           bound), a bound the run's presenter keeps. `graphics.presenter` is
- *           the run's presenter -- the canvas, its configured format, the pacer
- *           and the texture the primary is copied into. Absent, one is made
- *           from `device` and handed to every machine; set by `createApp` on a
- *           rebuilt machine and not something a caller supplies.
- *           `graphics.worker` is a way in to the run's graphics worker for a
- *           process with no GPU of its own, and `graphics.display` where its
- *           surfaces' pictures go: both set for a child in a worker of its own,
- *           whose devices draw there and whose pictures the run shows.
- * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
- *           What the program is told its display is.
- * @property {{ picture?: { width: number, height: number, bits: Uint8Array } }} [desktop]
- *           What the desktop shows where no window is: `picture`, 32 bits a
- *           pixel, top row first, each B, G, R and a byte unused, scaled to the
- *           screen -- a wallpaper, or a loading screen of the embedder's own.
- *           Absent, the desktop colour.
- * @property {any} [storage]
- *           Where the session comes from and goes: a provider with `load` and
- *           `save`, a function that only loads, or the string `local` or
- *           `opfs`. A session is the files the program wrote and the registry
- *           it wrote; `save` is handed both, and `load` may answer with both
- *           or with a bare list of files.
- * @property {string} [id]           Names the session when storage does not.
- * @property {{ path: string, bytes: Uint8Array }[]} [files]
- *           The person's own edits to the title's files, laid over the
- *           session's at every start: a realm list, a line of configuration.
- *           They win over what the program last saved, and the bundle itself
- *           is never changed.
- * @property {import('./discs.js').DiscOption[]} [discs]
- *           Disc images, each mounted as a CD-ROM drive: D:, or the first free
- *           letter after it, unless `letter` names one. An image is a `Blob`
- *           (read a range at a time in a worker, whole on a thread without
- *           `FileReaderSync`), bytes, or a synchronous `{ size, read }`.
- * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
- * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
- *           Brings a byte range of the bundle in, from wherever it is kept.
- * @property {any} [bundle.store]  Where fetched blocks are kept. `'local'` is
- *           the default and means this machine; a synchronous store of your own
- *           is used as given; anything falsy keeps nothing, and a block the
- *           reader has let go is then fetched again.
- * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
- *           a name would read each other's blocks, so it has to be the bundle's.
- * @property {number} [bundle.revision]  The bottle's revision, raised each time it is
- *           packed again. A session saved under an earlier one has the bottle's
- *           registry laid over its own, as a reinstall would.
- * @property {string} [bundle.prefix]  Where in the volume the bundle appears.
- *           Defaults to the directory a game is installed into.
- * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
- *           when nothing is being read. On by default, and inert when there is
- *           nowhere durable to keep the blocks.
- * @property {boolean} [bundle.preload]  Whether to bring the whole bundle in
- *           before the program starts, so that nothing it reads waits on the
- *           network: every block not kept yet, before `createApp` resolves.
- *           Inert, and said through `progress`, where there is nowhere durable
- *           to keep the blocks.
- * @property {(state: { bytes: number, total: number } | { unbacked: string }) => void}
- *           [bundle.progress]  Told how far a preload is: packed bytes here of
- *           the bundle's, after every request that lands.
- * @property {string} [bundle.indexSha256]  From the manifest. Checked against
- *           the index this bundle actually carries, which is what makes the
- *           per-block checksums inside it worth trusting.
- * @property {Object} [bundle.retry] How hard to try when that fetch fails.
- * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
- * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
- * @property {number} [bundle.retry.maxDelayMs]   Ceiling for that. Default 10000.
- * @property {Object} [sidecarHooks]
- *           A bundle's sidecar, next to `manifest.json` and never inside the
- *           bundle itself: replaces one or more guest functions, or one loop
- *           inside one, with host code -- a `slot` entry through the
- *           bridge's slot-hook mechanism (`bridge.hook`, a data pointer
- *           rewrite that never touches guest code) or a `site` entry through
- *           its site-hook mechanism (`bridge.siteHook`, a code patch at a
- *           point inside a function nothing else can reach, resuming at
- *           another point in it). Not `hooks` above, which rewrites a
- *           routine's code as a diagnostic. Nothing here names a title; what
- *           a hook does is entirely `sidecarHooks.source`'s.
- * @property {{ hooks: (import('./layers/loader/internal/hooks.js').HookEntry
- *           | import('./layers/loader/internal/hooks.js').SiteHookEntry)[] }}
- *           sidecarHooks.spec  The parsed `hooks.json`.
- * @property {string} sidecarHooks.source
- *           The text of `hooks.mjs`, loaded as an ES module from a blob URL
- *           inside this worker -- the bundle's own code, run on the bundle's
- *           own data, with no engine object other than a bounds-checked view
- *           of guest memory reaching it.
- */
+/** @typedef {import('./app-options.js').BundleLayer} BundleLayer */
 
-/**
- * A range fetch that survives the network going away for a moment.
- *
- * This belongs to the engine rather than to whoever supplies `fetch`, and the
- * reason is a property of the format rather than a preference: a range of a
- * bundle is immutable, so asking for it again is always safe and always yields
- * the same bytes. Nothing else in the system can say that about a retry.
- *
- * A short read counts as a failure. A truncated range is the ordinary shape of
- * a glitch -- a proxy closing a connection early answers with fewer bytes and
- * no error at all -- and accepting it would put wrong bytes into a guest's file
- * with nothing downstream in a position to notice.
- *
- * Each wait is jittered downwards. A stall usually strands many blocks at once,
- * and an unjittered backoff would march them all at the same instant into the
- * server that just failed.
- *
- * @param {any} deps
- * @returns {(offset: number, length: number,
- *            verify?: (bytes: Uint8Array) => string | null) => Promise<Uint8Array>}
- */
-export function retryingFetch({ fetch, events, retry }){
-    const attempts = retry?.attempts ?? 6;
-    const baseDelayMs = retry?.baseDelayMs ?? 250;
-    const maxDelayMs = retry?.maxDelayMs ?? 10000;
-
-    return async(offset, length, verify)=>{
-        /** @type {any} */
-        let failure = null;
-        for (let attempt = 1; attempt <= attempts; attempt++)
-        {
-            try
-            {
-                const bytes = await fetch(offset, length);
-                if (bytes.length !== length)
-                {
-                    throw new Error(
-                        `short read: ${bytes.length} of ${length} bytes`);
-                }
-                // Checked here rather than by the caller so that bytes which
-                // arrived damaged are asked for again, like any other failure.
-                // Damage is what a retry is for; a caller outside this loop
-                // could only turn it into an error.
-                const wrong = verify?.(bytes);
-                if (wrong)
-                {
-                    throw new Error(wrong);
-                }
-                return bytes;
-            }
-            catch (e){
-                failure = e;
-                if (attempt === attempts)
-                {
-                    break;
-                }
-                const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
-                const delayMs = Math.round(ceiling * (0.5 + Math.random() * 0.5));
-                events.emit('bundle-retry', {
-                    offset, length, attempt, attempts, delayMs,
-                    reason: failure?.message ?? String(failure),
-                });
-                await new Promise(resolve=>setTimeout(resolve, delayMs));
-            }
-        }
-
-        const reason = failure?.message ?? String(failure);
-        events.emit('bundle-unavailable', { offset, length, attempts, reason });
-        throw new Error(
-            `bundle: ${length} bytes at ${offset} did not arrive in ${attempts} `
-            + `attempts: ${reason}`);
-    };
-}
-
-/**
- * The process id of a run's first process, where the caller named none: the
- * kernel's, its windows' and its frames' alike, wherever it stands.
- */
-const FIRST_PROCESS_ID = 0x1000;
+/** @typedef {import('./app-options.js').AppOptions} AppOptions */
+/** @typedef {import('./app-options.js').ProcessOptions} ProcessOptions */
 
 /**
  * A first process id of its own for each run, under the 0x2000 the run's other
@@ -556,431 +143,6 @@ const FIRST_PROCESS_ID = 0x1000;
 export const runProcessId = ()=>0x400 + 8 * Math.floor(Math.random() * ((0x2000 - 0x400) / 8));
 
 /**
- * How much one range request may ask for.
- *
- * The bound is not bandwidth but what a failure costs: a request that dies at
- * 95% is refetched whole, and a thread waiting on it is parked for all of it.
- *
- * This is a separate knob from the block size, and deliberately so: the block
- * decides how long one thread is held, this decides how many times the network
- * is asked. It only has to stay above one block, or a block would be split
- * across two requests and neither half could be checked against its checksum.
- * At the default block size a full request carries sixty-four blocks.
- *
- * A demand fetch never reaches this: a group is built only from blocks the read
- * actually wants, so a small read is a small request and is not made to wait
- * behind bytes it did not ask for. The cap is for the background filler and for
- * reads that genuinely span that much.
- */
-const MAX_REQUEST_BYTES = 16 << 20;
-
-/**
- * Blocks that are already here, between two that are not, are downloaded again
- * rather than split the request in two. A round trip costs more than this many
- * bytes on any connection worth having.
- */
-const MAX_BRIDGED_GAP = 128 << 10;
-
-/**
- * Requests in flight at once. Six is what a browser will open to one host over
- * HTTP/1.1; over HTTP/2 it is one connection and the limit stops mattering, but
- * asking for more would only queue behind this on the worse of the two.
- */
-const MAX_CONCURRENT_REQUESTS = 6;
-
-/**
- * How often the background filler looks up to see whether a read is parked.
- * Short enough that a demand fetch is never held up by much, long enough that
- * an idle session is not a timer running hot.
- */
-const IDLE_CHECK_MS = 50;
-
-/**
- * Microtasks a turn waits for a host call's answer before the next thread is
- * picked: a call that runs guest code chains a few promises before it builds
- * the frame. The limit is not measured yet: `hostTurns` counts the ticks taken and the
- * waits that ran out.
- */
-const HOST_ANSWER_TICKS = 64;
-
-/** How many of the hottest sampled addresses a report carries the code around. */
-const HOT_CODE_SAMPLES = 64;
-
-/**
- * Turns blocks into range requests.
- *
- * This is what decides how many times the network is asked, and it matters far
- * more than the block size does: blocks sit in the container back to back in
- * file order, so a read that spans a run of them is one request rather than one
- * per block. A game reading a hundred megabytes of an archive asks perhaps
- * thirteen times, not four hundred.
- *
- * @param {any[]} blocks  Absent, in ascending offset order.
- * @returns {{ start: number, end: number, blocks: any[] }[]}
- */
-export function groupBlocks(blocks){
-    /** @type {{ start: number, end: number, blocks: any[] }[]} */
-    const groups = [];
-    for (const block of blocks)
-    {
-        const open = groups.at(-1);
-        const grown = block.offset + block.packed - (open?.start ?? 0);
-        if (open
-            && block.offset - open.end <= MAX_BRIDGED_GAP
-            && grown <= MAX_REQUEST_BYTES)
-        {
-            open.end = block.offset + block.packed;
-            open.blocks.push(block);
-            continue;
-        }
-        groups.push({
-            start: block.offset,
-            end: block.offset + block.packed,
-            blocks: [block],
-        });
-    }
-    return groups;
-}
-
-/**
- * How much a miss brings in beyond what the read wanted: the aligned window of
- * the container it falls in, and past a forward reader's miss, this many more
- * packed bytes of what follows.
- *
- * A miss is one round trip whatever its size, and on a real title a start is
- * a hundred of them for a few megabytes: latency, not bandwidth. Two mebibytes
- * is small against a request's ceiling and large against a block, and a
- * program that touches one block of a region it never returns to pays for this
- * much extra at most.
- */
-export const READ_AHEAD_BYTES = 2 << 20;
-
-/**
- * The round trip below which a bundle is near: a disk, or a server on the
- * network beside the browser. A window is `READ_AHEAD_BYTES` there; each
- * multiple of this a request takes widens it by as much again, up to
- * `MAX_WINDOW_SCALE` of them.
- *
- * A miss costs one round trip whatever it brings, and a bucket a continent's
- * edge away answers in a third of a second: a game loading a level waited that
- * long for every two mebibytes, though the line carries twenty-five of them in
- * that time.
- */
-export const NEAR_ROUND_TRIP_MS = 50;
-const MAX_WINDOW_SCALE = 8;
-
-/**
- * How much a miss brings in, by how far away the bundle is.
- *
- * @param {number} roundTripMs  The shortest of the bundle's recent requests;
- *     0 before there is one.
- * @returns {number} bytes
- */
-export function windowFor(roundTripMs){
-    return READ_AHEAD_BYTES
-        * Math.min(MAX_WINDOW_SCALE, Math.max(1, Math.floor(roundTripMs / NEAR_ROUND_TRIP_MS)));
-}
-
-/**
- * Widens every miss to the aligned window of the container that holds it.
- *
- * Whatever the read wanted, the request is the window: the blocks around a
- * miss are the rest of the file it is in, or the file beside it, and a start
- * that comes back for them one miss at a time pays a round trip for each.
- * Blocks already resident are stepped over, and a window is clipped at the
- * container's end. Two misses in one window are one request.
- *
- * @param {any[]} blocks  Wanted and not resident, ascending by offset.
- * @param {{ block: (index: number) => any, blockCount: number }} bundle
- * @param {(index: number) => boolean} resident
- * @param {number} [bytes]  The window, and its alignment.
- * @returns {any[]} the same blocks and the rest of their windows, ascending
- */
-export function withWindow(blocks, bundle, resident, bytes = READ_AHEAD_BYTES){
-    /** @type {Map<number, any>} */
-    const chosen = new Map(blocks.map(block=>[block.index, block]));
-    /** @param {number} index */
-    const add = index=>{
-        if (!chosen.has(index) && !resident(index))
-        {
-            const block = bundle.block(index);
-            chosen.set(index, { index, offset: block.offset, packed: block.packed, ahead: true });
-        }
-    };
-    for (const block of blocks)
-    {
-        const start = Math.floor(block.offset / bytes) * bytes;
-        for (let index = block.index - 1;
-            index >= 0 && bundle.block(index).offset >= start; index--)
-        {
-            add(index);
-        }
-        for (let index = block.index + 1;
-            index < bundle.blockCount && bundle.block(index).offset < start + bytes; index++)
-        {
-            add(index);
-        }
-    }
-    return [...chosen.values()].sort((left, right)=>left.offset - right.offset);
-}
-
-/**
- * The blocks a request would bring in for the second time.
- *
- * A block downloaded once must not be downloaded again, and this is where
- * that is checked rather than assumed: everything inside a request's span
- * that is already resident, whether asked for by name or bridged over as a
- * gap, is a byte paid for twice. Counted before the request goes out, so the
- * number is about what was asked, not about what arrived.
- *
- * @param {{ blocks: any[] }} group
- * @param {{ block: (index: number) => any }} bundle
- * @param {(index: number) => boolean} resident
- * @returns {{ blocks: number, bytes: number }}
- */
-export function refetchedIn(group, bundle, resident){
-    let blocks = 0;
-    let bytes = 0;
-    const first = group.blocks[0]?.index ?? 0;
-    const last = group.blocks[group.blocks.length - 1]?.index ?? -1;
-    for (let index = first; index <= last; index++)
-    {
-        if (resident(index))
-        {
-            blocks++;
-            bytes += bundle.block(index).packed;
-        }
-    }
-    return { blocks, bytes };
-}
-
-/**
- * Extends a miss with the blocks that follow it in the container.
- *
- * Only when the miss continues where the last fetch stopped: that is a program
- * reading forward, and reaching past it turns the run into a few requests.
- * Measured on a real title's cinematic, one block a request for two hundred
- * and forty blocks. A miss anywhere else gets its window and no more. Blocks
- * already resident count against the reach but are not asked for again.
- *
- * @param {any[]} absent  Wanted and not resident, ascending by offset.
- * @param {{ block: (index: number) => any, blockCount: number }} bundle
- * @param {(index: number) => boolean} resident
- * @param {number[]} expected
- *        The blocks a forward reader would want next: one per recent fetch,
- *        because a program streams one file while it reads another, and the
- *        two runs take turns at missing.
- * @param {number} [bytes]
- * @returns {any[]} the same blocks, then the ones reached, ascending
- */
-export function withReadAhead(absent, bundle, resident, expected, bytes = READ_AHEAD_BYTES){
-    if (absent.length === 0 || !expected.includes(absent[0].index))
-    {
-        return absent;
-    }
-    const last = absent[absent.length - 1];
-    /** @type {any[]} */
-    const reached = [];
-    let reach = 0;
-    for (let index = last.index + 1; index < bundle.blockCount && reach < bytes; index++)
-    {
-        const block = bundle.block(index);
-        reach += block.packed;
-        if (!resident(index))
-        {
-            reached.push({ index, offset: block.offset, packed: block.packed, ahead: true });
-        }
-    }
-    return reached.length === 0 ? absent : [...absent, ...reached];
-}
-
-/**
- * One event's payload as a line.
- *
- * Built now rather than left as a template argument, which is the journal's
- * usual economy: an event carries an object, and an object read later is the
- * object as it ended up rather than as it was reported. Events are occasional
- * -- a library loading, a write, a failure -- so the string costs nothing that
- * matters, and it is the difference between a log that can be read and one
- * that says [object Object].
- *
- * @param {any} payload
- * @returns {string}
- */
-export function describeEvent(payload){
-    if (payload === null || payload === undefined)
-    {
-        return '';
-    }
-    if (typeof payload !== 'object')
-    {
-        return String(payload);
-    }
-    return Object.entries(payload)
-        .map(([key, value])=>{
-            if (value instanceof Error)
-            {
-                return `${key}=${value.message}`;
-            }
-            if (Array.isArray(value))
-            {
-                return `${key}=[${value.join(' ')}]`;
-            }
-            // A picture's bytes are not a line: a cursor told every frame
-            // would fill the journal with its pixels.
-            if (ArrayBuffer.isView(value))
-            {
-                return `${key}=<${value.byteLength} bytes>`;
-            }
-            return `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`;
-        })
-        .join(' ');
-}
-
-/**
- * What a call to an import nothing claims may do: return to its caller, taking
- * the arguments it was passed off the stack as the caller expects, or not
- * return at all -- the stack is the one thing a stub must get right.
- *
- * A C++ name says its own convention and, mostly, its argument bytes: a C
- * runtime's classes are `thiscall` whatever the rest of the library is. A
- * `_name@N` name is stdcall with N bytes. Anything else is cdecl when its
- * library is, and otherwise stdcall with a count nobody knows. A library the
- * program brought is a mismatch between two of its own files, and answers
- * as its name says.
- *
- * @param {string | null} name
- * @param {{ own: boolean, cdeclLibrary: boolean }} library
- * @returns {{ returns: boolean, argBytes: number }}
- */
-export function missingImportCall(name, { own, cdeclLibrary }){
-    const mangled = name === null ? null : mangledCall(name);
-    if (mangled)
-    {
-        return { returns: mangled.argBytes !== null || own, argBytes: mangled.argBytes ?? 0 };
-    }
-    const decorated = name === null ? null : /@(\d+)$/.exec(name);
-    return {
-        returns: decorated !== null || own || cdeclLibrary,
-        argBytes: decorated ? Number(decorated[1]) : 0,
-    };
-}
-
-/**
- * Binds an import nothing implements, once per label, and bounds what a
- * program that calls it in a loop does to the engine.
- *
- * Leaving the slot alone is not an option: it keeps what the file wrote -- the
- * relative address of the name block -- so a call through it jumps to a small
- * number, runs whatever bytes are there, and dies as an invalid opcode naming
- * an address that has nothing to do with the import. What is wanted instead is
- * the name.
- *
- * Whether the stub may return is decided by the one thing that must be right
- * for the program to go on: what the caller expects of the callee's stack
- * (`missingImportCall`). Where that is known the stub answers zero and returns;
- * where nobody knows the count -- an undecorated name from a stdcall library,
- * a C++ name whose arguments the name does not size -- no stub can return
- * without leaving the stack short, so the first call goes to `fault`, which
- * names the import and its caller and ends the run. That branch cannot flood,
- * since it happens once.
- *
- * The branch that can flood is the returning one. A program calls a missing
- * classifier once per character of every string, and announcing every call puts
- * tens of thousands of structured clones and wake-ups a second through the port
- * to the page, filling its queue until the program freezes. So the event fires
- * once per label, on the first call, which is all a person needs to see that
- * the import exists and is missing; every later call is counted for
- * `diagnostics` and written to the journal, which is a ring in shared memory
- * that never waits and can afford a record a call.
- *
- * @param {Object} deps
- * @param {(name: string, spec: Object) => number} deps.register
- *        The bridge's `register`; the address it answers is what the import
- *        binds to.
- * @param {ReturnType<typeof createEvents>} deps.events
- * @param {{ write: (level: string, category: string, template: string,
- *     ...args: any[]) => void } | Record<string, any>} deps.journal
- *        The log's api; its `write` is what keeps a record of a call.
- * @param {(dll: string, name: string | null) => { own: boolean,
- *     returns: boolean, argBytes: number }} deps.classify
- *        What the library and the decoration say about the call.
- * @param {(label: string, frame: any) => number} deps.fault
- *        The non-returning branch: raise the fault, hold the thread, answer
- *        zero.
- * @returns {{ bind: (dll: string, name: string | null, ordinal: number | null)
- *     => number, calls: Map<string, number> }}
- */
-export function createMissingImports({ register, events, journal, classify, fault }){
-    /** @type {Map<string, number>} */
-    const addresses = new Map();
-    // How often a program actually called an import nothing claims. Binding one
-    // is routine and mostly harmless -- a program imports far more than it
-    // calls -- so the list of unresolved names says little on its own. Being
-    // called is the event that matters, and without this counter it leaves no
-    // trace anywhere a run can be read.
-    /** @type {Map<string, number>} */
-    const calls = new Map();
-
-    /**
-     * One stub per name, because a program is quite capable of calling the same
-     * missing import a thousand times before it gives up.
-     *
-     * @param {string} label
-     * @param {'program' | 'system'} origin
-     * @param {boolean} returns
-     */
-    const handlerFor = (label, origin, returns)=>
-        (/** @type {number[]} */ _args, /** @type {any} */ frame)=>{
-            const count = (calls.get(label) ?? 0) + 1;
-            calls.set(label, count);
-            const payload = { import: label, origin, count };
-            journal.write('warn', 'unimplemented', '{0}', describeEvent(payload));
-            if (count === 1)
-            {
-                events.emit('unimplemented', payload);
-            }
-            if (returns)
-            {
-                // Zero, and back to the caller. It reads as failure for the
-                // commonest shapes -- a null pointer, a null handle, FALSE, a
-                // count of none -- so such a caller takes its own failure path
-                // and says something about what it wanted. Not for every shape:
-                // an HRESULT or an error code of zero is success, and a C
-                // runtime call that fails with -1 or EOF (fgetc, _read) or
-                // answers "not yet" with zero (feof) reads it as a result, which
-                // can leave a read loop going round for ever. No one value
-                // fails under every convention; this one fails under most.
-                return 0;
-            }
-            return fault(label, frame);
-        };
-
-    /** @param {string} dll @param {string | null} name @param {number | null} ordinal */
-    const bind = (dll, name, ordinal)=>{
-        const label = `${dll}!${name ?? `#${ordinal}`}`;
-        const known = addresses.get(label);
-        if (known !== undefined)
-        {
-            return known;
-        }
-        const { own, returns, argBytes } = classify(dll, name);
-        const address = register(label, {
-            argBytes,
-            handler: handlerFor(label, own ? 'program' : 'system', returns),
-        });
-        addresses.set(label, address);
-        // Said at bind time as well as when called: a program that is about
-        // to run is the moment to read what it imports and nobody answers,
-        // before the first of them corrupts a stack.
-        events.emit('import-unresolved', { import: label, origin: own ? 'program' : 'system' });
-        return address;
-    };
-
-    return { bind, calls };
-}
-
-/**
  * A yield to the macrotask queue, so everything the host has queued gets a turn.
  *
  * Everything means the host's timers too, which is why Node yields through
@@ -989,8 +151,8 @@ export function createMissingImports({ register, events, journal, classify, faul
  * microtasks after each, and a loop that posts its next yield from those
  * microtasks stays inside the pass: a thousand turns go by before a timer
  * fires, a file read or a fetch answers, another port -- a worker's --
- * delivers a message, or a module the emulator compiled for a hot page is
- * installed, so the emulator interprets. Measured: a loop of half-millisecond
+ * delivers a message, or a module the translator compiled for hot code is
+ * installed, so the engine interprets. Measured: a loop of half-millisecond
  * turns yielding through a port saw a 3 ms interval fire three times in two
  * seconds, and through an immediate six hundred and sixty times. An immediate
  * set from inside an immediate runs on the next pass, and every pass looks at
@@ -1021,19 +183,19 @@ export function createMacrotask(){
     {
         // Nothing to close: an immediate holds the process open only until it
         // runs, and whoever is mid-yield is answered when it does.
-        return Object.assign(
-            ()=>new Promise(resolve=>{
-                setImmediate(resolve);
-            }),
-            { close: ()=>{} });
+        /** @param {(value?: any) => void} resolve */
+        const park = resolve=>{
+            setImmediate(resolve);
+        };
+        return Object.assign(()=>new Promise(park), { close: ()=>{} });
     }
     if (typeof MessageChannel !== 'function')
     {
-        return Object.assign(
-            ()=>new Promise(resolve=>{
-                setTimeout(resolve, 0);
-            }),
-            { close: ()=>{} });
+        /** @param {(value?: any) => void} resolve */
+        const park = resolve=>{
+            setTimeout(resolve, 0);
+        };
+        return Object.assign(()=>new Promise(park), { close: ()=>{} });
     }
     const channel = new MessageChannel();
     /** @type {(() => void)[]} */
@@ -1043,11 +205,14 @@ export function createMacrotask(){
     // is the cost this was meant to remove.
     channel.port1.onmessage = ()=>waiting.shift()?.();
     channel.port1.start?.();
+    // The promise's executor made once, not once a yield.
+    /** @param {(value?: any) => void} resolve */
+    const park = resolve=>{
+        waiting.push(/** @type {() => void} */ (resolve));
+        channel.port2.postMessage(0);
+    };
     return Object.assign(
-        ()=>new Promise(resolve=>{
-            waiting.push(/** @type {() => void} */ (resolve));
-            channel.port2.postMessage(0);
-        }),
+        ()=>new Promise(park),
         {
             close(){
                 channel.port1.close();
@@ -1096,46 +261,9 @@ export function timedWait({ hidden, macrotask, timer }){
     return hidden() ? macrotask() : timer();
 }
 
-/**
- * What the loop is waiting on when nothing is pending: a turn boundary's yield
- * and an idle wait are the two places the loop gives the thread away, and a
- * host decides how, because the answer depends on whose thread it is.
- *
- * @typedef {Object} RunPacing
- * @property {() => Record<string, number>} [counts]  What the pacing counted, for a report.
- * @property {(pending: YieldPending) => Promise<void> | null} yield
- *     At every turn boundary: a promise to await before the next turn, or
- *     null to go straight on. `pending` says what the host may have an answer
- *     for -- calls suspended on it, ranges in flight, a turn that retired
- *     nothing -- so a host can yield only when there is something to deliver.
- * @property {(until: { timer: boolean, sleep: boolean, deadlineMs: number | null,
- *     wakes: Promise<void>[] }) => Promise<void>} wait
- *     The turn found something waiting on the host. `sleep` says nothing at
- *     all can run until the host or the clock says so, and a host with a
- *     thread of its own may then sleep: `deadlineMs` is how long, in wall
- *     milliseconds, before the guest's own next deadline -- a timed wait, a
- *     queue timer, a device that wants feeding -- or null when it has none,
- *     and `wakes` settle when a host call answers or a range arrives. Without
- *     `sleep` a thread is still getting work done and the wait is a yield.
- *     `timer` is the page's own distinction, between a machine that has
- *     stopped retiring instructions and one still spinning through turns,
- *     which its default wait needs.
- * @property {(count: number) => void} [machines]
- *     How many machines take turns on the thread now, told whenever it
- *     changes: a pacing that may block the thread to wait must not while
- *     another machine has turns to run.
- */
+/** @typedef {import('./app-options.js').RunPacing} RunPacing */
 
-/**
- * What a turn boundary knows about whether the host has anything to deliver.
- *
- * @typedef {Object} YieldPending
- * @property {number} suspended   Host calls suspended on the host: not the
- *     callers parked on a queue of the guest's own, which `idlers` counts.
- * @property {number} fetching    Range requests outstanding.
- * @property {number} idlers      Callers parked on an empty message queue.
- * @property {number} spun        Turns in a row that retired no instruction.
- */
+/** @typedef {import('./app-options.js').YieldPending} YieldPending */
 
 /**
  * How long a page's thread may run turns back to back before it is given to
@@ -1180,23 +308,23 @@ export const PENDING_YIELD_MS = 1;
  * @param {() => number} deps.now             Wall milliseconds.
  * @param {number} deps.intervalMs
  * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
- * @param {number} [deps.pendingMs]  How long after the last trip an outstanding host
- *     answer or range is looked for again while other threads still run.
  * @param {Record<string, number>} [deps.counts]  Counted into: each turn, by why it went to
  *     the event loop (`suspended`, `fetching`, `spun`, `signalled`, `interval`) or `kept`.
  * @returns {RunPacing['yield']}
  */
-export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
-    pendingMs = PENDING_YIELD_MS, counts })
-{
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
     let rested = now();
+    // Made once: a closure a trip was garbage at a trip a turn.
+    const rest = ()=>{
+        rested = now();
+    };
     return pending=>{
         // An answer outstanding is looked for at once only when the turn ran
-        // nothing; while other threads run it waits out pendingMs, since a
+        // nothing; while other threads run it waits out PENDING_YIELD_MS, since a
         // trip a turn behind a loader running beside a thread parked on
         // Present was the largest host phase of a run (2.46 M trips in 1500 s).
         const since = now() - rested;
-        const look = pending.spun > 0 || since >= pendingMs;
+        const look = pending.spun > 0 || since >= PENDING_YIELD_MS;
         // Why the turn went to the event loop, the first reason that held -- what a report
         // reads when the trips are many.
         const why = pending.suspended > 0 && look ? 'suspended'
@@ -1211,9 +339,7 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
         {
             return null;
         }
-        return macrotask().then(()=>{
-            rested = now();
-        });
+        return macrotask().then(rest);
     };
 }
 
@@ -1229,13 +355,12 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false,
  * @param {number} [deps.yieldMs]
  * @param {() => number} [deps.now]
  * @param {() => boolean} [deps.signalled]
- * @param {number} [deps.pendingMs]
  * @param {Int32Array | null} [deps.napWord]  The shared word a wait to a deadline sleeps
  *     on; null spins macrotasks to it. Left out, one where a browser has it.
  * @returns {RunPacing}
  */
 export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
-    now = ()=>performance.now(), signalled, pendingMs, napWord })
+    now = ()=>performance.now(), signalled, napWord })
 {
     /** Turns kept on the thread and trips to the event loop, by why. @type {Record<string, number>} */
     const counts = {};
@@ -1248,12 +373,13 @@ export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs =
     // node, whose macrotask posts nothing and whose loop an async wait does
     // not hold open.
     const nap = napWord !== undefined ? napWord
-        : typeof setImmediate !== 'function' && typeof SharedArrayBuffer === 'function'
+        : typeof setImmediate !== 'function'
             && typeof (/** @type {any} */ (Atomics).waitAsync) === 'function'
             ? new Int32Array(new SharedArrayBuffer(4)) : null;
     return {
         counts: ()=>({ ...counts }),
-        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, pendingMs, counts }),
+        now,
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled, counts }),
         wait({ timer, sleep, deadlineMs, wakes }){
             if (!timer)
             {
@@ -1294,90 +420,6 @@ export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs =
 const DEVICE_LOOK_MS = 10;
 
 /**
- * Consecutive turns retiring no guest instruction at all before the run loop
- * stops spinning on the event loop and waits on a timer instead.
- *
- * Both waits are needed and neither will do alone. A machine whose threads are
- * running while one of its calls is parked has to come back at once, because
- * the turn after this one is real work -- and a zero timeout is clamped to four
- * milliseconds, and to more once they nest, which is that much wall clock per
- * turn for nothing. A machine where nothing ran at all has nothing to come back
- * to: only the host can change its mind, and spinning until it does burns a
- * processor to arrive no sooner while starving the very I/O it is waiting on.
- *
- * So the loop spins while the guest is still getting work done and backs off
- * once it stops. The count is small because of which way it is worse to be
- * wrong: a few spare turns cost microseconds and one turn too many on a timer
- * costs milliseconds.
- */
-const IDLE_SPINS_BEFORE_TIMER = 4;
-
-/**
- * How long the run loop sleeps between looks when nothing can run, unless
- * something wakes it sooner.
- *
- * Not zero. A zero timeout is no longer clamped by a browser that is not
- * nesting them, and the loop breaks the nesting every few turns by yielding
- * through a message port -- so a zero timeout here came round fifty thousand
- * times a second. That is a busy loop with extra steps, and it starved the
- * very thing the machine was waiting for: a decoder on the same thread whose
- * output took a second to be delivered instead of a millisecond, while every
- * guest thread sat blocked behind the one waiting on it.
- *
- * The sleep is short because it is not what ends the wait -- a host call
- * answering does, and that wakes the loop at once. It only bounds how long
- * the guest's own deadlines and the sound ring go unattended: the ring holds
- * two hundred milliseconds and the pump runs on every look.
- */
-const IDLE_LOOK_MS = 4;
-
-/**
- * How often the run loop pumps the sound at most: what the pump does --
- * position notifications, a buffer's volume and pan carried over, a queue
- * track topped up -- waits a millisecond at most, against a device that
- * reads on its own clock and a ring that holds 200 ms.
- */
-const SOUND_PUMP_MS = 1;
-
-/**
- * What the run loop is waiting on when it cannot go straight on, and how.
- *
- * A range request, a message queue with nothing in it, and some other host call
- * that has not answered are one condition from inside the loop and three
- * different costs. Named apart, a profile says which of the three a run went
- * into; named together it can only say that the machine waited.
- *
- * @param {Object} state
- * @param {number} state.fetching   Range requests outstanding.
- * @param {number} state.idlers     Callers parked on an empty message queue.
- * @param {number} state.suspended  Host calls suspended on the host, the
- *     callers parked on the guest's own queue left out.
- * @param {number} state.spun       Turns in a row that retired no instruction.
- * @param {boolean} [state.others]  The process's other executors still run its
- *     threads, the last turn having left without waiting for them.
- * @returns {{ phase: string, timer: boolean } | null} null to go straight on.
- */
-export function idleWait({ fetching, idlers, suspended, spun, others = false }){
-    if (idlers === 0 && suspended === 0)
-    {
-        return null;
-    }
-    // A caller parked on the guest's own queue has had its look this turn, and
-    // while the guest still retires instructions its next turn is work: only an
-    // answer that has to come from the host is worth handing the thread over.
-    if (spun === 0 && suspended === 0 && fetching === 0)
-    {
-        return null;
-    }
-    const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
-    // A turn the others ran retired nothing here and still resets the count:
-    // with a call waiting on the host, the loop would come straight back for
-    // as long as they run. Their bell ends the wait as the answer does.
-    const timer = spun >= IDLE_SPINS_BEFORE_TIMER || others && suspended > 0;
-    return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
-}
-
-/**
  * Whether a library is answered from this engine's table even when the program
  * brought a file of that name: a KnownDLL, which Windows never looks for beside
  * the program, or a redistributable runtime a layer stands in for -- a sound
@@ -1395,33 +437,6 @@ export function answeredByEngine(knownDlls, runtimes){
     return name=>keys.has(moduleKeyOf(name));
 }
 
-/**
- * The API sets Windows 10 resolves by its schema rather than by file, and the
- * library each is: a program imports `api-ms-win-crt-stdio-l1-1-0.dll` and is
- * bound to ucrtbase.dll, which GetModuleHandle names it too -- one module, not
- * a copy for each set, and a copy of one a program carries is never loaded.
- *
- * @type {[RegExp, string][]}
- */
-const API_SETS = [[/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase']];
-
-/**
- * The key a module is known by: its file name, without directory, case or
- * the extension a program is free to leave off.
- *
- * A library is asked for by bare name in an import descriptor and by full
- * path from a loader that found the file itself, and both must find the one
- * module -- a second copy at a second address has globals its first copy's
- * callers do not share.
- *
- * @param {string} name
- */
-export function moduleKeyOf(name){
-    const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
-    const key = file.toLowerCase().replace(/\.dll$/, '');
-    return API_SETS.find(([set])=>set.test(key))?.[1] ?? key;
-}
-
 // `relocatablePrefix` and `jumpBytes` live in `layers/loader/internal/hooks.js`
 // now -- `bindSiteHook` needs the same two functions, and `check:boundaries`
 // allows a root file to import a layer's `internal/` (this file already does
@@ -1431,6 +446,110 @@ export { jumpBytes, relocatablePrefix };
 
 /** Where the heap's arena begins under an image that ends below it (`spaceAbove`). */
 const HEAP_FLOOR = 0x0c000000;
+
+/**
+ * Where the engine's range is cut out of the heap when neither the libraries'
+ * space nor the heap's start below 0x10000000 holds it: past the bases a
+ * library is most often linked for, 0x10000000 and the few megabytes above it,
+ * which a library that cannot move takes out of the heap (`claim`). Recorded
+ * in roadmap/decisions.md (A233).
+ */
+export const ENGINE_CUT_AT = 0x14000000;
+
+/**
+ * The engine's range of one executor, in MiB: its tables and what lies past
+ * them, and the record the executors keep together (`engineAreaFor`).
+ */
+const ENGINE_FIRST_MIB = 28;
+
+/** The table of far chunks in MiB, rounded up (cork's `FAR.BYTES`, 3.75 MiB). */
+const FAR_TABLE_MIB = 4;
+
+/**
+ * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
+ * the last 64 KiB below 4 GiB are never the program's.
+ */
+const LARGE_ADDRESS_TOP = 0xfffe0000;
+
+/**
+ * And on a 32-bit Windows started with /3GB (IncreaseUserVa 3072): the last
+ * 64 KiB below 3 GiB are never the program's either.
+ */
+const INCREASED_USER_VA_TOP = 0xbfff0000;
+
+/**
+ * The engine's range in a process's guest space: its tables and other
+ * executors' pages (19.25 MiB an executor, 4.2 MiB of a record they share past
+ * one). With it the memory holds only the RAM the guest has been given and
+ * grows as it is given more (`CorkHostConfig.engineArea`); without one every
+ * process commits the whole of `memorySize` at its start.
+ *
+ * At the top of the libraries' space, under the thread stacks, where 16 MiB is
+ * left the libraries below it -- one that does not fit takes heap space, as it
+ * does already when the space is full; otherwise at the heap's start, the heap
+ * past it (`inHeap`), where it ends short of 0x10000000, the base a library is
+ * most often linked for; otherwise cut out of the heap past the bases libraries
+ * are linked for (`ENGINE_CUT_AT`, `cut`): four executors or more fit neither
+ * place, and without a range every process committed its whole RAM at its start
+ * (2.1 GiB a process on an eight-core machine). There the first executor's
+ * tables and the record the executors share stay at the top of the libraries'
+ * space and only the other executors' pages are cut out (`others`): the memory
+ * holds the RAM up to the first range from the start, as with one executor, and
+ * reaches the others' when one opens -- a process whose threads open none (most
+ * of a run's helpers) never does, where every process started at 512 MiB. A
+ * 64-bit process's 4 GiB layout takes one as a 32-bit one does (`longLayout`);
+ * a wide window's (`wide`), whose RAM is a memory of its own, none. None for a
+ * RAM that is not a power of two, or an image of the program's own lying where
+ * the range would.
+ *
+ * @param {{ wide: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
+ *     heapStart: number, executors: number, far?: boolean,
+ *     image: { imageBase: number, sizeOfImage: number } }} what
+ * @returns {{ at: number, span: number, inHeap: boolean, cut?: true,
+ *     others?: { at: number, span: number } } | undefined}
+ */
+export function engineAreaFor({ wide, memorySize, moduleBase, stackPoolStart, heapStart,
+    executors, image, far = false })
+{
+    const MIB = 0x100000;
+    // And the table of far chunks where a 64-bit process reserves past 4 GiB (`cpu.far`).
+    const span = (20 * Math.max(1, executors) + 8 + (far ? FAR_TABLE_MIB : 0)) * MIB;
+    if (wide || memorySize < 2 ** 28 || 2 ** Math.round(Math.log2(memorySize)) !== memorySize)
+    {
+        return undefined;
+    }
+    const clear = (/** @type {number} */ at)=>at % MIB === 0 && at + span < memorySize
+        && !(image.imageBase < at + span && image.imageBase + image.sizeOfImage > at);
+    const top = Math.floor((stackPoolStart - span) / MIB) * MIB;
+    if (top >= moduleBase + 16 * MIB && clear(top))
+    {
+        return { at: top, span, inHeap: false };
+    }
+    if (heapStart + span <= 0x10000000 && clear(heapStart))
+    {
+        return { at: heapStart, span, inHeap: true };
+    }
+    if (heapStart >= ENGINE_CUT_AT)
+    {
+        return clear(heapStart) ? { at: heapStart, span, inHeap: true } : undefined;
+    }
+    // The first executor's part where one executor's whole range goes, the
+    // others' cut out of the heap.
+    const first = (ENGINE_FIRST_MIB + (far ? FAR_TABLE_MIB : 0)) * MIB;
+    const othersSpan = span - first;
+    const firstTop = Math.floor((stackPoolStart - first) / MIB) * MIB;
+    /** @param {number} at @param {number} bytes */
+    const free = (at, bytes)=>at + bytes < memorySize
+        && !(image.imageBase < at + bytes && image.imageBase + image.sizeOfImage > at);
+    if (othersSpan > 0 && firstTop >= moduleBase + 16 * MIB && free(firstTop, first)
+        && free(ENGINE_CUT_AT, othersSpan))
+    {
+        return { at: firstTop, span: first, inHeap: false,
+            others: { at: ENGINE_CUT_AT, span: othersSpan } };
+    }
+    return clear(ENGINE_CUT_AT) ? { at: ENGINE_CUT_AT, span, inHeap: false, cut: true }
+        : undefined;
+}
 
 /**
  * Where the address space above the program begins: the system modules, the
@@ -1511,9 +630,10 @@ export function placeMainStack(reserve, poolBase, poolSize){
 
 /**
  * How much of the guest's RAM the heap gets: what the caller asked for, or
- * everything from the heap's base to the end of RAM, short of the system's
- * shared page at 0x7FFE0000 in a RAM that reaches it (`shared-data.js`), as a
- * Windows process's own memory ends there. The heap is otherwise the last
+ * everything from the heap's base up to where RAM keeps the system's shared
+ * page (`sharedPageAt`): at 0x7FFE0000 in a RAM that reaches it, as a Windows
+ * process's own memory ends there, and 128 KiB short of RAM's end in one that
+ * does not. The heap is otherwise the last
  * region, so the end of RAM is the only ceiling -- and a fixed size short of
  * it was what a program loading a level ran into, reporting the machine's
  * memory as exhausted while most of it sat unused above.
@@ -1531,75 +651,70 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
     {
         throw new Error(`heap: ${memorySize} bytes of RAM is less than the heap's base`);
     }
-    return Math.min(memorySize, SHARED_USER_DATA) - base;
+    return sharedPageAt(memorySize) - base;
 }
 
 /**
- * Hands a film's sound to its track and says how much of the film's timeline
- * that was, in the device's frames -- all of it, whether the track took it or
- * not.
+ * A film's sound on its way to its track: what the track took, in the device's
+ * frames, and what it had no room for yet, kept whole and offered again.
  *
- * The picture is decoded to just ahead of the sound heard, and heard is what
- * was handed over less what is still owed. A track that refuses part of a
- * block (full, or a queue the device is behind on) still moves the film on by
- * the whole block: counted as taken only, the refused part would be heard the
- * moment it was offered, the picture would race ahead to meet it and more would
- * be refused -- a film run through in a fraction of its length on a sound
- * mostly dropped.
+ * @typedef {{ taken: number, held: Uint8Array[], heldBytes: number,
+ *     framesPerByte: number }} FilmSoundLedger
+ */
+
+/**
+ * Hands a film's sound to its track as far as the track has room
+ * (`track.room()`), keeping the rest in `ledger` for the next tick; with no
+ * blocks it only offers what is held.
  *
- * @param {{ write: (bytes: Uint8Array) => number }} track
+ * Nothing is dropped. A film's file may hold its sound well behind its picture
+ * (`graph.js`'s AHEAD_MS), so a decoder that reaches it hands seconds over at
+ * once, past what a track holds: refused, that was heard as gaps, and a gap
+ * owed until played was owed for ever and held the picture back behind it.
+ *
+ * @param {{ write: (bytes: Uint8Array) => number, room?: () => number }} track
  * @param {Int16Array[]} blocks
  * @param {number} channels     the film's
- * @param {number} rate         the film's sample rate
- * @param {number} deviceRate   the rate the track counts `played()` in
- * @returns {{ offered: number, refused: number }} device frames
+ * @param {FilmSoundLedger} ledger
  */
-export function feedFilmSound(track, blocks, channels, rate, deviceRate){
-    let offered = 0;
-    let refused = 0;
+export function feedFilmSound(track, blocks, channels, ledger){
     for (const block of blocks)
     {
-        const frames = Math.round(block.length / channels * deviceRate / rate);
-        const taken = track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
-        offered += frames;
-        refused += Math.max(0, frames - taken);
+        ledger.held.push(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+        ledger.heldBytes += block.byteLength;
     }
-    return { offered, refused };
+    const stride = channels * 2;
+    while (ledger.held.length > 0)
+    {
+        const first = ledger.held[0];
+        const room = track.room?.() ?? Infinity;
+        const length = Math.min(first.length, room - room % stride);
+        if (length <= 0)
+        {
+            return;
+        }
+        ledger.taken += track.write(first.subarray(0, length));
+        ledger.heldBytes -= length;
+        if (length < first.length)
+        {
+            ledger.held[0] = first.subarray(length);
+            return;
+        }
+        ledger.held.shift();
+    }
 }
 
 /**
- * Which process a page event goes to, by the run's window manager: the
- * process of the window under the pointer or holding the mouse, the keyboard
- * to the process of the window with the focus -- and `dropped` where no window
- * has it while some window shows, as on Windows: the desktop under the
- * pointer, no window in the foreground.
+ * Device frames of a film's sound handed over and not heard yet: what its track
+ * holds unplayed, and what is held for want of room in it.
  *
- * Motion is never dropped: the cursor is the system's and goes wherever the
- * mouse takes it, and a cursor that reached the desktop under a locked
- * pointer, its motion dropped there, never left it. And a locked pointer
- * sends motion alone, so where it points is where the cursor is -- `cursor`,
- * which a process keeps -- or the manager went on choosing by the last place
- * the page named, the desktop after a click there, and every press went to
- * nobody.
+ * The picture is decoded to just ahead of the sound heard, and heard is what
+ * was handed over less this.
  *
- * @param {{ inputTarget: (event: any) => number | null,
- *     topLevel: () => { visible: boolean }[] } | undefined} manager
- * @param {import('./layers/input/router.js').HostInputEvent} event
- * @param {{ x: number, y: number } | null} [cursor]  where the cursor is, for an
- *     event of a locked pointer
- * @returns {{ target: number | null, dropped: boolean }}
+ * @param {FilmSoundLedger} ledger @param {number} played  the track's `played()`
  */
-export function inputRecipient(manager, event, cursor = null){
-    const pointed = event.kind === 'pointerMove' || event.kind === 'pointerButton'
-        || event.kind === 'wheel';
-    const located = pointed && typeof event.x !== 'number' && cursor
-        ? { ...event, x: cursor.x, y: cursor.y } : event;
-    const target = manager?.inputTarget(located) ?? null;
-    return {
-        target,
-        dropped: target === null && event.kind !== 'pointerMove'
-            && (manager?.topLevel().some(state=>state.visible) ?? false),
-    };
+export function filmSoundOwed(ledger, played){
+    return Math.max(0, ledger.taken - played) + Math.round(ledger.heldBytes * ledger.framesPerByte);
 }
 
 /**
@@ -1636,79 +751,11 @@ export function clockCredit(source, clock, cap){
 }
 
 /**
- * Where the package's own binaries are, relative to this module: the bundle
- * decoder's wasm build.
- *
- * A built package carries them beside itself and the build says where; the
- * source tree keeps them in its prebuilt directory. One expression rather
- * than two entry points, so a caller that imports either finds them without
- * being told.
- */
-const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
-    ?? '../vendor/prebuilt/';
-
-/**
- * Where the translator is, relative to this module: built beside a package,
- * the workspace's own source otherwise.
- */
-const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).env?.BOTTLIFY_CORK
-    ?? '../../cork/src/index.js';
-
-/**
- * Where a graphics resource's memory starts: on a multiple of sixteen bytes,
- * as Wine keeps every resource (its RESOURCE_ALIGNMENT, for which it drops a
- * GL mapping a driver hands back off the boundary). A program writes what it
- * locked with SSE stores, which fault off it, and one checks the pointer a
- * DISCARD hands back and, given one off it, unlocks and leaves out of the
- * frame what it would have written there. The heap's own boundary is eight.
- */
-export const RESOURCE_ALIGNMENT = 16;
-
-/**
- * Memory for a graphics resource, cleared and on `RESOURCE_ALIGNMENT`. A
- * driver hands out a new surface, texture or buffer reading as zeroes (the
- * kernel clears what it maps), and a program may draw one it never wrote: an
- * empty layer under a menu, a target it clears only in part. The guest heap
- * recycles freed blocks as they were left, so a texture made after a Reset
- * held the old back buffer's picture. Memory the heap never handed out is
- * zero already and is not written, and neither is memory the device says
- * nobody reads before it is written (`cleared` false): a render target drawn
- * by another device.
- *
- * @param {{ allocate: (bytes: number, options?: { alignment?: number }) => number,
- *     block: (address: number) => { fresh?: boolean } | null | undefined }} heap
- * @param {(address: number, value: number, length: number) => void} fill
- * @param {number} bytes
- * @param {boolean} [cleared]
- * @returns {number} the address, or 0
- */
-export function allocateCleared(heap, fill, bytes, cleared = true){
-    const address = heap.allocate(bytes, { alignment: RESOURCE_ALIGNMENT });
-    if (cleared && address !== 0 && heap.block(address)?.fresh !== true)
-    {
-        fill(address, 0, bytes);
-    }
-    return address;
-}
-
-/**
- * The translator to load for `cork`: what the caller named, else
- * the one built beside this module (see `CORK`).
- *
- * @param {{ moduleUrl?: string } | undefined} asked
- * @param {string} [here]
- */
-export function corkArtifacts(asked, here = import.meta.url){
-    return { moduleUrl: asked?.moduleUrl ?? new URL(CORK, here).href };
-}
-
-/**
  * The run's pool of translation workers, where every
  * machine's translator would otherwise open a worker of its own: on cork, with
- * shared memory and ports to lend through, and unless the caller turned it off
- * (`cork.pool: false`) or set the translators a machine opens itself
- * (`cork.config.translators`). A process in a worker of its own is lent its
- * workers by the run's system, and makes no pool.
+ * shared memory and ports to lend through, and unless the caller set the
+ * translators a machine opens itself (`cork.config.translators`). A process in a
+ * worker of its own is lent its workers by the run's system, and makes no pool.
  *
  * @param {AppOptions} options
  * @returns {Promise<ReturnType<typeof createTranslatorPool> | null>}
@@ -1716,13 +763,12 @@ export function corkArtifacts(asked, here = import.meta.url){
 async function openTranslationPool(options){
     const cork = options.cork ?? {};
     const config = /** @type {any} */ (cork.config ?? {});
-    if ((options.engine ?? DEFAULT_ENGINE) !== 'cork' || options.system || cork.pool === false
-        || typeof SharedArrayBuffer !== 'function' || typeof MessageChannel !== 'function')
+    if (options.system || typeof MessageChannel !== 'function')
     {
         return null;
     }
-    const wanted = cork.pool === true || (config.translators === undefined
-        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function')));
+    const wanted = config.translators === undefined
+        && (config.worker ?? (config.feed !== 'slice' && typeof globalThis.Worker === 'function'));
     if (!wanted)
     {
         return null;
@@ -1738,16 +784,26 @@ async function openTranslationPool(options){
     {
         return null;
     }
+    const host = globalThis.navigator?.hardwareConcurrency ?? 4;
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
-            engine: options.engine ?? DEFAULT_ENGINE, executors: options.executors,
-            sharedMemory: options.cork?.config?.sharedMemory,
-        }), globalThis.navigator?.hardwareConcurrency ?? 4),
-        ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
-        driver: cork.poolDriver ?? {},
+            executors: options.cpu?.cores }), host),
+        capacity: cork.poolCapacity ?? translatorsInRun(host),
     });
 }
+
+/**
+ * How many translation workers the whole run keeps at most, however many
+ * processes stand: the host's cores less the two the graphics worker and the
+ * browser's own threads take, and never fewer than one. Windows shares its
+ * processors among every process there is; a worker a process kept while it
+ * waited on a pipe was a heap of some 55 MB doing nothing -- sixteen
+ * scanners of a benchmark's system information held sixteen.
+ *
+ * @param {number} host  the host's (`navigator.hardwareConcurrency`)
+ */
+export const translatorsInRun = host=>Math.max(1, Math.floor(host) - 2);
 
 /**
  * How many translators the pool lends a process at most: the host's cores the
@@ -1765,118 +821,52 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
 /**
  * The machine's processor as the caller sets it up (`cpu`): `cores`, the
  * processors the program is told it has, is the executors that run its threads
- * at once -- `executors` by its older name, which it sets. Refused before
- * anything is built when it is not a whole number from 1 to 32, or when
- * `executors` says otherwise. Cores the caller named open before the program
- * starts (`cpu.eager`, unless it says otherwise): opened as a thread first wants
- * one, each came some tens of milliseconds late, a stall in the middle of a
- * game. Automatic cores stay lazy, so a program of one thread pays for none.
+ * at once. Refused before anything is built when it is not a whole number from
+ * 1 to 32, and when the caller names `executors`, its older name: taken as
+ * nothing, it would have left the run on cores the caller did not ask for.
+ * Cores the caller named open before the program starts (`cpu.eager`, unless it
+ * says otherwise): opened as a thread first wants one, each came some tens of
+ * milliseconds late, a stall in the middle of a game. Automatic cores stay
+ * lazy, so a program of one thread pays for none.
  *
- * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
- *     engine?: string, cork?: any }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean } }} T
  * @param {T} options
  * @param {CoresHost} [host]  where the run is made (`coresHost`)
- * @returns {T & { executors?: number, cpu?: { cores?: number, eager?: boolean } }}
+ * @returns {T & { cpu?: { cores?: number, eager?: boolean } }}
  */
 export function withCpuSetup(options, host = coresHost()){
-    const named = options.cpu?.cores !== undefined || options.executors !== undefined;
-    const cores = options.cpu?.cores
-        ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
+    if (/** @type {any} */ (options).executors !== undefined)
+    {
+        throw new Error('cpu: `executors` is `cpu.cores` now -- set that');
+    }
+    const named = options.cpu?.cores !== undefined;
+    const cores = options.cpu?.cores ?? automaticCores(host);
     if (cores === undefined)
     {
-        return named ? { ...options, cpu: { ...options.cpu, eager: options.cpu?.eager ?? true } }
-            : options;
+        return options;
     }
     if (!Number.isInteger(cores) || cores < 1 || cores > MAX_EXECUTORS)
     {
         throw new Error(`cpu: ${JSON.stringify(cores)} cores -- a whole number from 1 to`
             + ` ${MAX_EXECUTORS}, as many as an affinity mask has bits`);
     }
-    if (options.executors !== undefined && options.executors !== cores)
-    {
-        throw new Error(`cpu: ${cores} cores and ${options.executors} executors -- they are one`
-            + ' number; set cores alone');
-    }
-    return { ...options, executors: cores,
-        cpu: { ...options.cpu, eager: options.cpu?.eager ?? named } };
+    return { ...options, cpu: { ...options.cpu, cores, eager: options.cpu?.eager ?? named } };
 }
 
-/**
- * HACK: a workaround for a WebKit defect, to be removed once an iOS release
- * carries the fix -- https://github.com/WebKit/WebKit/pull/76671 (WebKit bug
- * 325447): iOS 27's JavaScriptCore kills the page with a pointer-authentication
- * failure on a wasm tail call into another instance.
- *
- * Whether the page is an iPhone's WebKit: on an iPhone (iOS Safari 27.0.1,
- * 2026-10-25) the page's process died as cork's regions began to run, and
- * `tools/webkit-probe/tail-calls.html` found every tail call into another
- * instance fatal and every one inside an instance sound; Safari on an M4 Mac
- * runs them all. Every browser on iOS is WebKit. An iPad, not measured, keeps them.
- * The defect came with iOS 27: Safari's "Version/" is the system's (its "iPhone OS"
- * is frozen), and an earlier one keeps its tail calls; a browser that names no
- * version (Chrome's CriOS, Firefox's FxiOS) is taken for one that has the defect.
- *
- * @param {{ userAgent?: string }} [navigator]
- */
-export function tailCallsFault(navigator = /** @type {any} */ (globalThis).navigator ?? {}){
-    const agent = String(navigator.userAgent ?? '');
-    const version = /Version\/(\d+)/.exec(agent);
-    return /iPhone|iPod/.test(agent) && (version === null || Number(version[1]) >= 27);
-}
+export { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls };
 
 /**
- * Whether the page is Safari on any machine (an iPad's among them, which names
- * itself a Mac), or any browser on a phone: Chromium says "Chrome/" beside its
- * "AppleWebKit".
+ * The engine's own C runtime routines handed to the translator to form as
+ * their operations (cork's `helpersAlso`, `known-routines.js`), unless the
+ * caller named its own.
  *
- * @param {{ userAgent?: string }} [navigator]
- */
-export function mobileOrSafari(navigator = /** @type {any} */ (globalThis).navigator ?? {}){
-    const agent = String(navigator.userAgent ?? '');
-    return tailCallsFault(navigator) || /Android|Mobi/.test(agent)
-        || /AppleWebKit\//.test(agent) && !/Chrome\/|Chromium\//.test(agent);
-}
-
-/**
- * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671, with
- * `withoutFaultingTailCalls`: how many of cork's calls made as wasm calls
- * (`callReturn`) may wait at once on an iPhone. Each waits as a region's frames
- * on the worker's stack, which on iOS is the system's 512 KB for a thread
- * other than the main one: the Doom 3 demo's load recursed through one region
- * 256 deep (cork's most, 9 KB of the game's own stack) and an iPhone 13 Pro
- * Max with iOS 27.0.1 ran out of it ("Maximum call stack size exceeded"),
- * three runs at one point. A deeper call goes through the runtime's loop and
- * its callers return through the entry hash.
- */
-const IOS_CALL_DEPTH = 64;
-
-/**
- * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671 (see
- * `tailCallsFault`). The run's tail calls kept inside one instance where a tail
- * call into another faults, in the interpreter tier every wasm function starts
- * in: cork's regions placed by module (`dispatch`), a
- * transfer within a module a direct tail call and one out of it entered by the
- * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
- * into another module, off. With them fewer calls wait as wasm calls
- * (`IOS_CALL_DEPTH`). The hottest regions are not gathered into a module of
- * their own (`gatherAfter`): each gathering builds them again, and WebKit keeps
- * what it compiled -- the Doom 3 demo's load in WebKit 27.2 (Playwright,
- * Windows, the game test page with the fake GPU, 180-240 s, one run each) held
- * 3090 MB of the web process at its end gathering and 1110 MB not, past the
- * 1720 MB an iPhone 13 Pro Max's tab is ended at. The caller's own settings
- * win. Decided on the page and carried to every worker in the options.
- *
- * @template {Record<string, any>} T
+ * @template {AppOptions} T
  * @param {T} options
- * @param {boolean} [fault]
- * @returns {T & { cork?: any, jit?: Record<string, number> }}
+ * @returns {T & { cork?: any }}
  */
-export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
-    return fault ? { ...options,
-        cork: { ...options.cork,
-            config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
-                gatherAfter: 0, ...options.cork?.config } },
-        jit: { [JIT_CONFIG_CHAINING]: 0, ...options.jit } } : options;
+export function withKnownRoutines(options){
+    return { ...options, cork: { ...options.cork,
+        config: { helpersAlso: KNOWN_ROUTINES, ...options.cork?.config } } };
 }
 
 /**
@@ -1891,8 +881,8 @@ export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
  * and 830 MB holding an untouched 512 MB buffer); a phone has the least memory
  * to give it.
  *
- * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean,
- *     oneCore?: boolean }} CoresHost
+ * @typedef {{ node: boolean, named?: string, processors?: number, oneCore?: boolean }}
+ *     CoresHost
  */
 
 /** @returns {CoresHost} */
@@ -1900,7 +890,7 @@ export function coresHost(){
     const scope = /** @type {any} */ (globalThis);
     return { node: scope.process?.versions?.node !== undefined,
         named: scope.process?.env?.BOTTLIFY_CORES,
-        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory(),
+        processors: scope.navigator?.hardwareConcurrency,
         oneCore: mobileOrSafari(scope.navigator ?? {}) };
 }
 
@@ -1908,55 +898,28 @@ export function coresHost(){
 export const AUTOMATIC_CORES = 8;
 
 /**
- * The cores a run that names none gets from where it runs. In a browser whose
- * page shares memory, one fewer than the host's processors -- the page, the
- * graphics worker and a translator take about one between them -- and at most
- * `AUTOMATIC_CORES`; the program is told of them from its first instruction and
- * sizes its threads to them, and their executors open as its threads want them.
- * One where its memory cannot be shared (a page that is not cross-origin
- * isolated, `compatible`) or under the emulator. In node, `BOTTLIFY_CORES`, so
- * every suite can be run with its programs on several executors, and otherwise
- * one: a suite runs the same on every machine.
+ * The cores a run that names none gets from where it runs. In a browser, one
+ * fewer than the host's processors -- the page, the graphics worker and a
+ * translator take about one between them -- and at most `AUTOMATIC_CORES`; the
+ * program is told of them from its first instruction and sizes its threads to
+ * them, and their executors open as its threads want them. One on Safari and a
+ * phone. In node, `BOTTLIFY_CORES`, so every suite can be run with its programs
+ * on several executors, and otherwise one: a suite runs the same on every
+ * machine.
  *
- * @param {{ mode?: string, engine?: string, cork?: any }} options
  * @param {CoresHost} host
  * @returns {number | undefined}  none: one
  */
-export function automaticCores(options, host){
+export function automaticCores(host){
     if (host.node)
     {
         return host.named === undefined || host.named === '' ? undefined : Number(host.named);
     }
-    if (!host.shareable || host.oneCore || options.mode === 'compatible'
-        || options.cork?.config?.sharedMemory === false
-        || (options.engine ?? DEFAULT_ENGINE) === 'emulator'
-        || !(Number(host.processors) >= 2))
+    if (host.oneCore || !(Number(host.processors) >= 2))
     {
         return undefined;
     }
     return Math.min(AUTOMATIC_CORES, Math.floor(Number(host.processors)) - 1);
-}
-
-/**
- * The emulator the caller brought, for `engine: 'emulator'`; null for any other
- * engine. The package carries no emulator, so a launch that names it without
- * handing one in is refused before anything is built.
- *
- * @param {Pick<AppOptions, 'engine' | 'v86'>} options
- * @returns {{ moduleUrl: string, wasmBytes: ArrayBuffer } | null}
- */
-export function emulatorOf(options){
-    if ((options.engine ?? DEFAULT_ENGINE) !== 'emulator')
-    {
-        return null;
-    }
-    const { moduleUrl, wasmBytes } = options.v86 ?? {};
-    if (!moduleUrl || !wasmBytes)
-    {
-        throw new Error('cpu: the emulator is not installed -- engine "emulator" needs'
-            + ' the caller\'s v86, as `v86: { moduleUrl, wasmBytes }`');
-    }
-    return { moduleUrl, wasmBytes };
 }
 
 /**
@@ -1983,109 +946,6 @@ export async function bytesAt(url){
 }
 
 /**
- * Where a program starts: its own directory.
- *
- * That is where the shell puts a process it starts from an icon or a disc's
- * autorun, and a program that opens its files by bare name -- a companion
- * library, a configuration beside it -- is written against it. The root of
- * the drive keeps its backslash, since `C:` alone names a drive's current
- * directory rather than its root.
- *
- * @param {string} imagePath
- */
-export function startDirectoryOf(imagePath){
-    const cut = Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/'));
-    const directory = imagePath.slice(0, cut + 1);
-    return /^[A-Za-z]:[\\/]$/.test(directory) ? directory : directory.replace(/[\\/]$/, '');
-}
-
-/**
- * Where a LoadLibrary at run time actually looks.
- *
- * A name that already says where it is, is where it is. Windows searches for a
- * bare name and takes a qualified one as given, and a program that has worked
- * out an absolute path -- a runtime loading its own plug-ins out of a directory
- * beside the executable, say -- passes one. Prefixing it again asks for
- * C:\App\C:\App\..., which is not there, and the plug-in is reported missing
- * while sitting exactly where it was asked for.
- *
- * @param {string} name        What the guest passed to LoadLibrary.
- * @param {string} imagePath   The running executable, whose directory is searched.
- */
-export function resolveLibraryPath(name, imagePath){
-    const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
-    if (qualified)
-    {
-        return name;
-    }
-    return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
-}
-
-/**
- * The file LoadLibrary looks for under a name: one whose last component has no
- * extension gets `.dll`, and a trailing dot says "no extension" and is dropped.
- * A program that asks for `rglsw` means `rglsw.dll`.
- *
- * @param {string} name
- * @returns {string}
- */
-export function withLibraryExtension(name){
-    if (name.endsWith('.'))
-    {
-        return name.slice(0, -1);
-    }
-    const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
-    return file.includes('.') ? name : `${name}.dll`;
-}
-
-/** Where Windows looks for a bare library name after the program's own directory. */
-const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
-
-/** The system directory, on the volume, without its drive or a trailing separator. */
-const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
-
-/**
- * Every place a LoadLibrary at run time looks, in order: beside the
- * executable first, then the system directories -- which is where an
- * installer puts a library it brought and then loads by bare name -- then the
- * current directory, where XP's safe search mode puts it: a setup that changes
- * to a folder of its disc and loads a helper there by bare name finds it. A
- * name with a directory in it names its one place and is looked for nowhere
- * else.
- *
- * `ours` drops the system directories: for a name the engine's own table
- * already answers, the system's copy is the engine's, and a runtime an
- * installer put there is not loaded beside it. Two of one library in a process
- * -- the installed D3DX compiling an effect our D3DX is then asked to read --
- * is a format neither side shares.
- *
- * @param {string} name
- * @param {string} imagePath
- * @param {string} [currentDirectory]
- * @param {{ ours?: boolean }} [how]
- * @returns {string[]}
- */
-export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
-    const first = resolveLibraryPath(name, imagePath);
-    if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
-        || /[\\/]/.test(name))
-    {
-        return [first];
-    }
-    const places = [first,
-        ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
-    if (currentDirectory)
-    {
-        const inCurrent = `${currentDirectory.replace(/\\$/, '')}\\${name}`;
-        if (!places.some(place=>place.toLowerCase() === inCurrent.toLowerCase()))
-        {
-            places.push(inCurrent);
-        }
-    }
-    return places;
-}
-
-/**
  * Reads a library from wherever the loader would find it, in the order it
  * would find it: beside the running program, then the system directories the
  * engine fills. The first place that has the file is the one whose bytes come
@@ -2106,12 +966,14 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
  * @param {(name: string, wanted: any[]) => boolean} [ours]  Whether the engine
  *     answers the name -- told what the importer takes from it, which a table
  *     lacking some of it does not answer.
+ * @param {{ currentDirectory?: string, path?: string[] }} [where]  The process's
+ *     current directory and PATH, searched after the system directories.
  * @returns {(name: string, wanted?: any[]) => Promise<Uint8Array | null>}
  */
-export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false){
+export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false, where = {}){
     return async(/** @type {string} */ name, /** @type {any[]} */ wanted = [])=>{
-        for (const candidate of libraryCandidates(name, imagePath, undefined,
-            { ours: ours(name, wanted) }))
+        for (const candidate of libraryCandidates(name, imagePath, where.currentDirectory,
+            { ours: ours(name, wanted), path: where.path }))
         {
             const file = await readWholeFile(filesystem, blocks, candidate);
             if (file)
@@ -2124,177 +986,43 @@ export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>f
 }
 
 /**
- * Runs `work` over `items`, at most `limit` at a time.
+ * What a process's engine libraries are, as far as is known before any of
+ * them is made (`win32/lazy-libraries.js`): every library's name, the faces'
+ * tables whole, the numbers they are imported by, the Windows the machine is
+ * and the window they are laid out in. Two processes with the same lay their
+ * modules out the same (`process/system-modules.js`), and a module made
+ * otherwise than its layout says is refused where it is placed (`shapeOf`):
+ * a hash, not the text.
  *
- * Bounded rather than all at once: the point of issuing requests together is to
- * overlap their latency, and past the connection limit they queue anyway, with
- * the ones that queue holding their errors until the end.
- *
- * @template T
- * @param {T[]} items
- * @param {number} limit
- * @param {(item: T) => Promise<void>} work
+ * @param {string[]} libraries
+ * @param {Record<string, Record<string, any>>} faces
+ * @param {Record<string, Record<number, string>>} ordinals
+ * @param {{ long: boolean, start: number, end: number, windows: string }} window
  */
-export async function inParallel(items, limit, work){
-    let next = 0;
-    const runners = Array.from({ length: Math.min(limit, items.length) }, async()=>{
-        while (next < items.length)
+export function tablesFingerprint(libraries, faces, ordinals, window){
+    let hash = 0x811c9dc5;
+    /** @param {string} text */
+    const mix = text=>{
+        for (let index = 0; index < text.length; index++)
         {
-            await work(items[next++]);
+            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
         }
-    });
-    await Promise.all(runners);
-}
-
-/**
- * How a program reaches a module's resources by the instance it holds.
- *
- * An HINSTANCE is the base a module was mapped at, and zero means the running
- * program -- which is what a program passes when it asks for its own strings,
- * dialogs and icons, which is nearly always. All three answers are made from
- * one lookup so that they cannot disagree about which module an instance
- * names: a resource found in one module and addressed relative to another's
- * base is a pointer into the wrong image.
- *
- * A library LoadLibraryEx mapped as data is no module, and its handle is its
- * base with a low bit set: one for a view of the file as it lies on disk, two
- * for one laid out as an image. The resource calls take that handle as they
- * take a module's, and in the file's own layout a resource lies at its file
- * offset from the base rather than at its RVA -- so that is the `rva` a data
- * file's lookup answers, since every caller adds it to the base.
- *
- * A mapped module's strings are read where it lies in memory, as Windows
- * reads them: a packed image's file names its string tables at addresses
- * that hold them only once its own code has unpacked them there.
- *
- * @param {() => any} main       The running program's module, once loaded.
- * @param {Map<number, any>} byBase  Every mapped module by its base.
- * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
- * @param {(address: number, length: number) => Uint8Array} [readMemory]
- */
-export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
-    /** @param {number} instance */
-    const moduleOf = instance=>{
-        if (instance === 0)
-        {
-            return main();
-        }
-        return (instance & 3) !== 0
-            ? dataFiles.get(instance >>> 0) ?? null
-            : byBase.get(instance >>> 0) ?? null;
     };
-    return {
-        /** @param {number} instance @param {number} id */
-        loadString: (instance, id)=>{
-            const module = moduleOf(instance);
-            if (!module?.file || module.flat || !readMemory)
-            {
-                return module?.file ? loadString(module.file, module.image, id) : null;
-            }
-            const found = findResource(module.file, module.image, RT_STRING,
-                ((id >>> 0) >> 4) + 1);
-            return found
-                ? stringInBundle(readMemory(module.base + found.rva, found.size), id & 15)
-                : null;
-        },
-        /**
-         * Whether a module carries a resource, and where: what a cursor or
-         * icon loaded out of the program's own image is checked against
-         * before a handle to it is handed out.
-         *
-         * @param {number} instance @param {number} type @param {number | string} name
-         * @param {number | null} [language]  Absent means the first language there is.
-         */
-        findResource: (instance, type, name, language = null)=>{
-            const module = moduleOf(instance);
-            const found = module?.file
-                ? findResource(module.file, module.image, type, name, language)
-                : null;
-            if (!found || !module.flat)
-            {
-                return found;
-            }
-            try
-            {
-                return { ...found, rva: rvaToFileOffset(module.image, found.rva) };
-            }
-            catch {
-                // Data outside every section: a file that describes a
-                // resource it does not hold.
-                return null;
-            }
-        },
-        /**
-         * Everything a module carries, for the enumerations: a program picks
-         * its string table by language this way.
-         *
-         * @param {number} instance
-         */
-        listResources: instance=>{
-            const module = moduleOf(instance);
-            return module?.file ? listResources(module.file, module.image) : [];
-        },
-        /**
-         * Where a module is mapped: the address a resource's RVA is relative
-         * to. An instance that names no module is zero, and a caller adding
-         * an RVA to that gets an address nothing is mapped at rather than one
-         * inside the wrong module.
-         *
-         * @param {number} instance
-         */
-        moduleBase: instance=>moduleOf(instance)?.base ?? 0,
-    };
-}
-
-/**
- * Sorts a parent's deferred writes into the ones that land in the child's image
- * and the ones that do not.
- *
- * A launcher that hollows its child writes into it while it is suspended, which
- * here is a write against an image nothing has mapped yet. The writes are kept
- * and replayed at the addresses they name -- but only inside the image they were
- * meant for. One outside it was addressing a mapping this process does not have,
- * and putting those bytes down anyway would corrupt whatever really is there
- * while looking, from the guest's side, like the child being wrong.
- *
- * @param {{ address: number, bytes: Uint8Array }[]} patches
- * @param {number} base
- * @param {number} size
- * @returns {{ applied: { address: number, bytes: Uint8Array }[],
- *             refused: { address: number, bytes: Uint8Array }[] }}
- */
-export function placePatches(patches, base, size){
-    /** @type {{ address: number, bytes: Uint8Array }[]} */
-    const applied = [];
-    /** @type {{ address: number, bytes: Uint8Array }[]} */
-    const refused = [];
-    for (const patch of patches)
+    mix(`${window.long}|${window.start}|${window.end}|${window.windows}`);
+    for (const name of libraries)
     {
-        const inside = patch.address >= base
-            && patch.address + patch.bytes.length <= base + size;
-        (inside ? applied : refused).push(patch);
+        mix(`|library:${name}:${JSON.stringify(ordinals[name] ?? {})}`);
     }
-    return { applied, refused };
+    for (const [name, table] of Object.entries(faces))
+    {
+        mix(`|face:${name}:${JSON.stringify(ordinals[name] ?? {})}:${shapeOf(table)}`);
+    }
+    return (hash >>> 0).toString(16);
 }
 
-/**
- * What a mapped library's base is rounded up to.
- *
- * Where they start is not a constant: it is wherever the system modules end,
- * because a fixed address chosen in advance is a guess about how much memory
- * the emulator was given, and a wrong guess maps a library outside guest RAM.
- */
-const LIBRARY_ALIGN = 0x10000;
-
-/** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
-const DONT_RESOLVE_DLL_REFERENCES = 0x1;
-const LOAD_LIBRARY_AS_DATAFILE = 0x2;
-const LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20;
-const LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE = 0x40;
-const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
-    | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
-/** A page: a view of a file is mapped in whole ones. */
-const PAGE_SIZE = 0x1000;
+/** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
+/** What int3 raises (winnt.h's EXCEPTION_BREAKPOINT, STATUS_BREAKPOINT). */
+const EXCEPTION_BREAKPOINT = 0x80000003;
 
 /**
  * The system libraries in every process, whatever it imports.
@@ -2339,333 +1067,24 @@ const SYSTEM_IMPORTS = Object.freeze({
 });
 
 /**
- * Where a mounted game appears inside the guest's volume: its files sit
- * directly in this directory, the way an installation's do.
+ * Whether Windows itself carries a library: one in system32
+ * (`WINDOWS_LIBRARIES`) of the Windows this is, no later one's
+ * (`LIBRARIES_SINCE`), or an API set, which the system's schema resolves by
+ * name and no program brings.
  *
- * A directory of its own rather than the root, because a program of this era
- * finds its own data by asking where it is itself and looking beside that. At
- * the root those two places coincide, so a wrong answer to that question still
- * works and stays hidden until something depends on it being right.
+ * @param {string} name
+ * @param {{ major: number, minor: number }} [windows]  the machine's; none, any
  */
-const BUNDLE_DIRECTORY = 'App';
-
-/**
- * Where in a bottle the registry its installation left is kept: beside the
- * files, as one of them, so an unpacked bottle describes itself. The installer
- * writes it there (`@bottlify/installer`'s `REGISTRY_PATH`).
- */
-export const BOTTLE_REGISTRY_PATH = '.bottlify\\registry.json';
-
-/**
- * Where in a bottle the files its installation added to `C:\WINDOWS\system32`
- * are kept -- the libraries its DirectX setup installed, say -- beside the
- * registry, and mounted back where Windows keeps them. The installer puts
- * them there (`@bottlify/installer`'s `SYSTEM_PATH`, the same path).
- */
-export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
-
-/**
- * Where in a bottle what its installation wrote elsewhere on C: is kept, by its
- * path from the drive's root -- a shared runtime in Common Files, a settings
- * file beside Windows -- and mounted back there (`@bottlify/installer`'s
- * `DRIVE_PATH`, the same path).
- */
-export const BOTTLE_DRIVE_PATH = '.bottlify\\drive_c';
-
-/**
- * The version resource of a file on the volume, or null: for a file that is
- * not there, is not an image or carries none. A file of a bundle whose bytes
- * have not arrived answers with a promise: the blocks the read missed are
- * fetched and the walk made again, as ReadFile waits for its own, so the guest
- * call is parked until they are here. Without `blocks` such a file is null.
- *
- * Only the headers, the resource directory and the block itself are read: an
- * installer asks after every file it puts down, a gigabyte archive among them.
- *
- * @param {any} filesystem
- * @param {string} path
- * @param {{ fetch: (blocks: any) => Promise<unknown> } | null} [blocks]
- * @param {number} [tries]  Walks left: each of its reads may miss once.
- * @returns {Uint8Array | null | Promise<Uint8Array | null>}
- */
-export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
-    const RT_VERSION = 16;
-    const DIR_RESOURCE = 2;
-    const HEADER_BYTES = 0x1000;
-    let handle;
-    try
+export function isWindowsLibrary(name, windows){
+    const lower = name.toLowerCase();
+    const file = lower.includes('.') ? lower : `${lower}.dll`;
+    const since = LIBRARIES_SINCE.get(file);
+    if (since && windows && (windows.major < since[0]
+        || (windows.major === since[0] && windows.minor < since[1])))
     {
-        handle = filesystem.open(path, { create: false });
+        return false;
     }
-    catch {
-        return null;
-    }
-    try
-    {
-        const size = filesystem.size(handle);
-        /** @param {number} offset @param {number} length */
-        const readAt = (offset, length)=>{
-            filesystem.seek(handle, offset);
-            return filesystem.read(handle, Math.max(0, Math.min(length, size - offset)));
-        };
-        /** @param {Uint8Array} bytes */
-        const viewOf = bytes=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        let head = readAt(0, HEADER_BYTES);
-        const peOffset = head.length >= 0x40 ? viewOf(head).getUint32(0x3c, true) : 0;
-        if (peOffset + 24 > head.length && head.length < size)
-        {
-            head = readAt(0, peOffset + HEADER_BYTES);
-        }
-        // The section table ends the headers: the file header's counts say where.
-        if (peOffset + 24 <= head.length)
-        {
-            const end = peOffset + 24 + viewOf(head).getUint16(peOffset + 20, true)
-                + viewOf(head).getUint16(peOffset + 6, true) * 40;
-            if (end > head.length && head.length < size)
-            {
-                head = readAt(0, end);
-            }
-        }
-        const image = parsePe(head, { wide: true });
-        const directory = image.directories[DIR_RESOURCE];
-        if (!directory || directory.size === 0)
-        {
-            return null;
-        }
-        // The directory alone, as a section of its own starting at its first
-        // byte: every offset the walk follows is inside it, and the leaf it
-        // ends at names the block's place in the file.
-        const tree = readAt(rvaToFileOffset(image, directory.address), directory.size);
-        const found = findResource(tree, {
-            ...image,
-            sizeOfHeaders: 0,
-            sections: [{ name: '.rsrc', virtualAddress: directory.address,
-                virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
-                readable: true, writable: false, executable: false }],
-        }, RT_VERSION, 1);
-        if (!found)
-        {
-            return null;
-        }
-        const block = readAt(rvaToFileOffset(image, found.rva), found.size);
-        return block.length === found.size ? block : null;
-    }
-    catch (e){
-        const miss = /** @type {any} */ (e);
-        if (miss?.code === 'BLOCK_MISS' && blocks && tries > 0)
-        {
-            return blocks.fetch(miss.blocks)
-                .then(()=>versionResourceOf(filesystem, path, blocks, tries - 1), ()=>null);
-        }
-        return null;
-    }
-    finally
-    {
-        filesystem.close(handle);
-    }
-}
-
-/**
- * What a program's own image says about the Windows it was written for: the
- * supportedOS elements of its manifest (RT_MANIFEST 1, the one CreateProcess
- * reads) and the operating system version its PE header names. Windows 10
- * answers the program's version calls from these.
- *
- * @param {Uint8Array} executable
- * @returns {import('./layers/win32/kernel32/versions.js').ProgramCompatibility}
- */
-export function compatibilityOf(executable){
-    const RT_MANIFEST = 24;
-    const image = parsePe(executable, { wide: true });
-    const view = new DataView(executable.buffer, executable.byteOffset, executable.byteLength);
-    // MajorOperatingSystemVersion and its minor, forty bytes into the optional
-    // header that follows the signature and the file header.
-    const optional = view.getUint32(0x3c, true) + 24;
-    const imageVersion = {
-        major: view.getUint16(optional + 40, true),
-        minor: view.getUint16(optional + 42, true),
-    };
-    const found = findResource(executable, image, RT_MANIFEST, 1);
-    if (!found)
-    {
-        return { supportedOS: [], imageVersion };
-    }
-    const at = rvaToFileOffset(image, found.rva);
-    const bytes = executable.subarray(at, at + found.size);
-    const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le' : 'utf-8';
-    return { supportedOS: supportedOsOf(new TextDecoder(encoding).decode(bytes)), imageVersion };
-}
-
-/**
- * A child's image: its file on the volume, or -- for a program of the system
- * folder the volume has no file for, or one a title brought that the engine
- * runs in its place -- the image the engine makes for it
- * (`win32/programs/table.js`). Every way a child is started reads it here, so
- * such a program is a process in each of them.
- *
- * @param {any} filesystem
- * @param {any} blocks
- * @param {string} path
- * @returns {Promise<Uint8Array | null>}
- */
-async function readProgramImage(filesystem, blocks, path){
-    const file = await readWholeFile(filesystem, blocks, path);
-    return file ? programInPlaceOf(file) ?? file : systemProgramImage(path);
-}
-
-/**
- * A child's image as it stands when CreateProcess is called, read at once, or
- * null when any of it is not here yet (it is then read when the child starts,
- * from a volume nothing of the run changes it on). Windows maps the image then:
- * a setup that copies itself to a temporary file opened delete-on-close,
- * starts the copy and exits has the file gone by the time a later read looks.
- *
- * @param {any} filesystem @param {string} path
- * @returns {Uint8Array | null}
- */
-function readImageNow(filesystem, path){
-    let handle;
-    try
-    {
-        handle = filesystem.open(path, { create: false });
-    }
-    catch {
-        return null;
-    }
-    try
-    {
-        const size = filesystem.size(handle);
-        const bytes = new Uint8Array(size);
-        for (let at = 0; at < size;)
-        {
-            const chunk = filesystem.read(handle, size - at);
-            if (chunk.length === 0)
-            {
-                return bytes.subarray(0, at);
-            }
-            bytes.set(chunk, at);
-            at += chunk.length;
-        }
-        return programInPlaceOf(bytes) ?? bytes;
-    }
-    catch {
-        return null;
-    }
-    finally
-    {
-        filesystem.close(handle);
-    }
-}
-
-/**
- * Reads a whole file off the volume, waiting for whatever is not here yet.
- *
- * A read of a block that has not been fetched reports which blocks it needs
- * rather than waiting -- that is what lets a guest read look synchronous -- so
- * a host-side reader has to do what the guest's would: fetch, and look again.
- * This runs before the first guest instruction, so it may simply wait.
- *
- * @param {any} filesystem
- * @param {any} blocks
- * @param {string} path
- * @returns {Promise<Uint8Array | null>}
- */
-async function readWholeFile(filesystem, blocks, path){
-    let handle;
-    try
-    {
-        handle = filesystem.open(path, { create: false });
-    }
-    catch {
-        return null;
-    }
-
-    try
-    {
-        const size = filesystem.size(handle);
-        const bytes = new Uint8Array(size);
-        let at = 0;
-        while (at < size)
-        {
-            let chunk;
-            try
-            {
-                chunk = filesystem.read(handle, size - at);
-            }
-            catch (e){
-                const miss = /** @type {any} */ (e);
-                if (miss?.code !== 'BLOCK_MISS' || !blocks)
-                {
-                    throw miss;
-                }
-                await blocks.fetch(miss.blocks);
-                continue;
-            }
-            if (chunk.length === 0)
-            {
-                break;
-            }
-            bytes.set(chunk, at);
-            at += chunk.length;
-        }
-        return bytes.subarray(0, at);
-    }
-    finally
-    {
-        filesystem.close(handle);
-    }
-}
-
-/**
- * Where a library goes.
- *
- * One that carries relocations takes the first base at or after `next` that
- * nothing holds. One that does not can run only at its preferred base -- every
- * absolute address in it assumes that base -- and takes it when it lies in the
- * modules' space and nothing holds it, or when `claim` can give up that span
- * from elsewhere: a base such a library names is free memory of a new process
- * on Windows, whatever this layout has put there. Otherwise it is refused, as
- * the PE format says a loader refuses such an image, rather than mapped
- * somewhere its addresses do not describe. A library that can move and finds
- * the modules' space full is put wherever `claim` finds room, as Windows puts
- * one in any free span.
- *
- * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
- * @param {{ next: number, floor: number, limit: number,
- *     holder: (base: number, size: number) => { base: number, size: number } | null,
- *     claim?: (base: number | null, size: number) => number }} space
- *        `floor` and `limit` bound the modules' space: below is the program and
- *        the engine's own, above the thread stacks and the heap. `holder`
- *        answers what already holds part of a span, if anything; `claim` takes
- *        a span outside the space -- at a base, or anywhere for null -- and
- *        answers where, or zero when there is none.
- * @returns {{ base: number } | { refused: string }}
- */
-export function placeLibrary(image, { next, floor, limit, holder, claim }){
-    if (!image.relocatable)
-    {
-        const base = image.imageBase;
-        if ((base >= floor && base + image.sizeOfImage <= limit
-            && !holder(base, image.sizeOfImage)) || claim?.(base, image.sizeOfImage) === base)
-        {
-            return { base };
-        }
-        return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
-    }
-    let base = next;
-    // Past the limit there is nothing more to search, and a holder that spans
-    // to the end of the space answers there for ever.
-    for (let held = holder(base, image.sizeOfImage); held && base + image.sizeOfImage <= limit;
-        held = holder(base, image.sizeOfImage))
-    {
-        base = Math.ceil((held.base + held.size) / LIBRARY_ALIGN) * LIBRARY_ALIGN;
-    }
-    if (base + image.sizeOfImage > limit)
-    {
-        const anywhere = claim?.(null, image.sizeOfImage) ?? 0;
-        return anywhere === 0 ? { refused: 'no room' } : { base: anywhere };
-    }
-    return { base };
+    return WINDOWS_LIBRARIES.has(file) || /^(api|ext)-ms-win-/.test(lower);
 }
 
 /**
@@ -2677,15 +1096,30 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
  * address yet.
  *
  * A library is looked for beside the executable, which is where a program's own
- * libraries live and where its loader would look.
+ * libraries live and where its loader would look, then in the system
+ * directories, the current directory (`options.currentDirectory`) and the
+ * directories PATH names (`options.path`), as Windows looks for a program's
+ * imports -- a delay-loaded one among them, which Windows resolves on its
+ * first call from the same places and this loader binds at the start.
+ *
+ * `options.bits` is the process's machine (32 when not given): a library of the
+ * other is refused, said with the reason, as Windows refuses to map it.
  *
  * @param {any} options
  * @returns {Promise<any[]>}
  */
 export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
-        isKnownDll, byName, byBase } = options;
+        isKnownDll, modules } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
+    const bits = options.bits ?? 32;
+    /**
+     * Where the process's activation context puts a library, when it does:
+     * the program's manifest names the assembly it is in.
+     *
+     * @type {(name: string) => { path: string, source: string | null } | null}
+     */
+    const redirect = name=>(isKnownDll(name) ? null : options.redirect?.(name) ?? null);
 
     /**
      * The first place a bare library name is on the volume: beside the program,
@@ -2697,8 +1131,8 @@ export async function mapShippedLibraries(options){
      * @param {string} name
      * @returns {string}
      */
-    const placeOf = name=>libraryCandidates(name, imagePath, undefined,
-        { ours: isSystem(name) }).find(candidate=>{
+    const placeOf = name=>redirect(name)?.path ?? libraryCandidates(name, imagePath,
+        options.currentDirectory, { ours: isSystem(name), path: options.path }).find(candidate=>{
         try
         {
             const entry = filesystem.stat(candidate);
@@ -2709,18 +1143,31 @@ export async function mapShippedLibraries(options){
         }
     }) ?? `${directory}${name}`;
 
-    const { order, missing } = await planDependencies({
+    const shipped = shippedLibraryReader(filesystem, blocks, imagePath,
+        (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true),
+        { currentDirectory: options.currentDirectory, path: options.path });
+    const { order, missing, absent } = await planDependencies({
         entry: executable,
         entryName: imagePath.slice(
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1),
         isSystem,
         isKnownDll,
+        isWindowsLibrary: (/** @type {string} */ name)=>isWindowsLibrary(name, options.windows),
         // A file the program brought is read from beside it; a file it did not
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
         // neither has it does the engine's own table answer.
-        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath,
-            (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true)),
+        readLibrary: async(name, wanted)=>{
+            // An assembly's DLL is read from where the context puts it -- or
+            // is the engine's own, when the engine answers it.
+            const found = redirect(name);
+            if (found)
+            {
+                return found.source === null ? null
+                    : await readWholeFile(filesystem, blocks, found.source);
+            }
+            return shipped(name, wanted);
+        },
     });
 
     if (missing.length > 0)
@@ -2730,13 +1177,29 @@ export async function mapShippedLibraries(options){
         // here would.
         events.emit('libraries-missing', { names: missing });
     }
+    if (absent.length > 0)
+    {
+        // A library the program was meant to bring, found nowhere: Windows does
+        // not start it, and the start is refused (`options.onAbsent`).
+        events.emit('libraries-not-found', { names: absent, program: imagePath });
+        options.onAbsent?.(absent);
+    }
 
     let next = options.base;
     /** @type {any[]} */
     const mapped = [];
     for (const { name, file } of order)
     {
-        const image = parsePe(file);
+        let image;
+        try
+        {
+            image = parsePe(file, { bits });
+        }
+        catch (e){
+            events.emit('libraries-missing',
+                { names: [name], reason: /** @type {Error} */ (e).message });
+            continue;
+        }
         const place = placeLibrary(image, { next, floor: options.floor, limit: options.limit,
             holder: options.holder, claim: options.claim });
         if ('refused' in place)
@@ -2749,33 +1212,26 @@ export async function mapShippedLibraries(options){
             continue;
         }
         const base = place.base;
-        const record = loader.map(file, { base, name });
+        // Named by the file, as a library loaded later is: the table of the
+        // same name has its own region.
+        const region = placeOf(name);
+        const record = loader.map(file, { base, name: region, bits });
         const { exports } = readExports(file, image);
-
-        const addresses = new Map(exports
-            .filter(entry=>entry.name !== null && entry.forwards === null)
-            .map(entry=>[String(entry.name), base + entry.rva]));
-        const ordinals = new Map(exports
-            .filter(entry=>entry.forwards === null)
-            .map(entry=>[entry.ordinal, base + entry.rva]));
 
         const held = {
             name,
             base,
             size: image.sizeOfImage,
-            /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
-            /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            region,
+            ...exportTables(exports, base),
             entryPoint: record.record.entryPoint,
+            // Until it is bound (`buildApp`), and let go of then: the mapped
+            // image and its file are in guest memory from there on.
             mapped: record,
-            // Kept for the same reason the program's own image is: a resource
-            // is read out of the file rather than out of the mapping, and a
-            // library a program ships carries the strings, icons, dialogs and
-            // version information that program asks for. Without these a
-            // module answers nothing for every resource call -- including the
-            // one it makes to tell a person what went wrong.
-            file,
+            // A library a program ships carries the strings, icons, dialogs
+            // and version information that program asks for; they are read
+            // where it lies mapped (`resourceLookup`), as Windows reads them.
+            fromFile: true,
             image,
             // Where it came from. A program asks a library where it lives and
             // then looks for its own data beside it, so this has to be the
@@ -2785,8 +1241,7 @@ export async function mapShippedLibraries(options){
             // to find it.
             path: placeOf(name),
         };
-        byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
-        byBase.set(base, held);
+        modules.add(held, name.toLowerCase().replace(/\.dll$/, ''));
         mapped.push(held);
 
         if (image.relocatable)
@@ -2797,643 +1252,6 @@ export async function mapShippedLibraries(options){
 
     events.emit('libraries', { loaded: mapped.map(entry=>entry.name), missing });
     return mapped;
-}
-
-/**
- * The check that makes every block's checksum worth something.
- *
- * The index carries them, so nothing inside the container can vouch for the
- * index itself: a bundle replaced wholesale would arrive with an index that
- * agrees with its own blocks perfectly. The digest that settles it has to come
- * from somewhere else, and the manifest -- fetched to decide whether to
- * download at all -- is that somewhere.
- *
- * The whole-bundle digest in the manifest answers the same question, but over
- * gigabytes. This one is over the index alone, which is already being fetched,
- * so it is affordable on every launch rather than on request.
- *
- * @param {string | undefined} expected
- * @returns {((stored: Uint8Array) => Promise<string | null>) | undefined}
- */
-function expectIndex(expected){
-    if (!expected)
-    {
-        return undefined;
-    }
-    return async stored=>{
-        const digest = await crypto.subtle.digest('SHA-256', stored.slice());
-        const found = [...new Uint8Array(digest)]
-            .map(byte=>byte.toString(16).padStart(2, '0')).join('');
-        return found === expected.toLowerCase()
-            ? null
-            : `its digest is ${found}, not ${expected}`;
-    };
-}
-
-/**
- * The zstd decoder a bundle read uses, by engine. While the emulator is loaded
- * its wasm decoder is several times faster than this project's own
- * (`modules/core/src/zstd.js`), and a first bundle load decodes the whole
- * bundle, so `emulator` uses it; `cork` has no emulator and uses
- * the project's. Both answer synchronously, as a guest read needs. The choice
- * is made once, when the bundle is mounted; when `zstd.js` is measured at the
- * wasm decoder's speed it becomes the decoder for every engine.
- *
- * @param {string} engine
- * @param {{ decompressZstd: (packed: Uint8Array, expectedLength: number) => Uint8Array }} cpu
- * @param {import('./zstd-wasm.js').ZstdWasm | null} [wasm]  The wasm build, when carried.
- * @returns {(packed: Uint8Array, expectedLength: number) => Uint8Array}
- */
-export function chooseZstdDecoder(engine, cpu, wasm = null){
-    // The wasm build of the project's own decoder, when this build carries it,
-    // decodes for every engine at the emulator decoder's speed and with no
-    // emulator loaded.
-    if (wasm)
-    {
-        return wasm.decompress;
-    }
-    if (engine !== 'cork')
-    {
-        return (packed, expectedLength)=>cpu.decompressZstd(packed, expectedLength);
-    }
-    return decompressZstd;
-}
-
-/**
- * The wasm decoder from the app's options or the package's vendor directory;
- * null when the build carries none (the artifact is optional: a fetch that
- * fails or a file that is absent is the JavaScript decoder's turn, not an
- * error), so a package built without it still mounts every bundle.
- *
- * @param {AppOptions} options
- * @param {string} [here]
- * @returns {Promise<import('./zstd-wasm.js').ZstdWasm | null>}
- */
-export async function zstdWasmFor(options, here = import.meta.url){
-    try
-    {
-        const bytes = options.zstd?.wasmBytes
-            ?? await bytesAt(options.zstd?.wasmUrl ?? new URL(`${VENDOR}zstd.wasm`, here).href);
-        return await loadZstdWasm(bytes);
-    }
-    catch {
-        return null;
-    }
-}
-
-/**
- * Mounts a bundle as the read-only half of the volume.
- *
- * The blocks that have been brought in are held here rather than inside the
- * source, because what fetches them is the caller's business -- a file, a range
- * request, a cache -- and the source only has to know whether a block is
- * resident. A read of an absent block reports which ones it needs; this is what
- * goes and gets them.
- *
- * They are held in storage rather than in the heap. A bundle can be larger than
- * any single buffer a browser will hand out, and a program that plays a lot of
- * a large game eventually touches nearly all of it, so blocks accumulating in
- * memory is not a cost that levels off -- it is the run failing later instead
- * of sooner. The source keeps its own bounded cache of decoded blocks in front
- * of this, which is what a repeated read actually hits.
- *
- * @param {any} deps
- * @returns {Promise<{ source: any, fetch: (needed: any[]) => Promise<void>,
- *                     stop: () => void, ahead: () => number,
- *                     refetched: () => { blocks: number, bytes: number },
- *                     ranges: () => { requests: number, bytes: number },
- *                     decoded: () => { blocks: number, bytes: number, ms: number },
- *                     held: () => Record<string, number | string>,
- *                     registry: Promise<any> } | null>}
- */
-async function mountBundle({ options, cpu, events, translationStore }){
-    if (!options.bundle?.fetch)
-    {
-        return null;
-    }
-    // Everything below fetches through this, the index included: the first
-    // range of the run is as exposed to a dropped connection as the last.
-    const retrying = retryingFetch({
-        fetch: options.bundle.fetch,
-        events,
-        retry: options.bundle.retry,
-    });
-    /**
-     * How long the bundle's last requests took. The shortest of them is the
-     * round trip with the least transfer in it: what a miss costs whatever it
-     * brings (`windowFor`).
-     *
-     * @type {number[]}
-     */
-    const recentMs = [];
-    const ROUND_TRIPS_KEPT = 8;
-    /** @type {typeof retrying} */
-    const fetchRange = async(offset, length, verify)=>{
-        const began = performance.now();
-        const bytes = await retrying(offset, length, verify);
-        recentMs.push(performance.now() - began);
-        if (recentMs.length > ROUND_TRIPS_KEPT)
-        {
-            recentMs.shift();
-        }
-        return bytes;
-    };
-    const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
-
-    const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
-        await zstdWasmFor(options));
-    /**
-     * A block, turned back into bytes, without awaiting anything.
-     *
-     * zstd is decoded by the engine's decoder (`chooseZstdDecoder` above): the
-     * emulator's wasm one under `emulator`, this project's own
-     * (`zstd.js`) under `cork`. Both answer synchronously. Deflate has
-     * no synchronous decoder in a browser at all, so a deflate block is
-     * inflated when it is *fetched* -- which is already an asynchronous step --
-     * and by the time a read reaches it, it is plain. That is why codec 1 is
-     * passed through rather than refused.
-     *
-     * @param {number} codec
-     * @param {Uint8Array} bytes
-     * @param {number | null} expectedLength
-     */
-    const decode = (codec, bytes, expectedLength)=>{
-        if (codec === 2)
-        {
-            // Counted: the decoding a guest read waits for is what a pool
-            // worker would take off this thread.
-            const startedAt = performance.now();
-            const plain = zstdForEngine(bytes, expectedLength ?? 0);
-            decoded.blocks++;
-            decoded.bytes += plain.length;
-            decoded.ms += performance.now() - startedAt;
-            return plain;
-        }
-        return bytes;
-    };
-    const decoded = { blocks: 0, bytes: 0, ms: 0 };
-
-    // The index is deflated, and opening is asynchronous anyway, so it may use
-    // the decoder a guest read cannot.
-    const bundle = await openBundle(
-        fetchRange,
-        (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
-        { verifyIndex: expectIndex(options.bundle.indexSha256) });
-
-    const blockStore = options.bundle.store === undefined ? 'local' : options.bundle.store;
-    if (blockStore === 'local')
-    {
-        // The origin's caches kept under its budget, the oldest let go: in the
-        // background, as nothing of this run's own is touched.
-        keepOriginStorageWithin({
-            blocks: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
-            translations: options.bundle.id ?? options.id ?? 'bundle',
-        }).then(result=>events.emit('storage-budget', result), ()=>{});
-    }
-    const cache = await createBlockCache({
-        // Absent means local, and only an explicit falsy value turns it off --
-        // so `??` will not do here: `store: null` has to mean no cache.
-        store: await resolveBlockStore(blockStore),
-        // A cache of this bundle as it was packed before stays on the store
-        // until the origin's budget lets it go (`storage-budget.js`).
-        name: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
-        blockSize: bundle.blockSize,
-        blockCount: bundle.blockCount,
-        // Where the blocks have no store but the heap, the heaps' pool for them:
-        // a read in flight keeps its blocks past it, and nothing else does.
-        maxHeapBytes: HEAP_POOLS.blockCache,
-    });
-
-    const source = createBundleSource({
-        bundle,
-        /** @param {number} index */
-        readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
-        decode,
-        maxDecodedBytes: HEAP_POOLS.decodedBlocks,
-        // A game lives in a directory of its own, the way an installation does.
-        // At the root of the volume a program's own directory and the system
-        // root are the same place, so every answer to "where do I live" happens
-        // to work and a wrong one is invisible until it is not.
-        prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
-        // What the installation left in system32 is found there again, read
-        // from the bundle a block at a time like any of its files.
-        // So is what it wrote anywhere else on C:, at the drive's root.
-        relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY, [BOTTLE_DRIVE_PATH]: '' },
-    });
-
-
-    /**
-     * A member's bytes, read before the program runs: one request for its run
-     * of blocks, each checked against the index and decoded as a guest read's
-     * block is. Not kept in the block cache, where nothing would read it
-     * again: whoever asked keeps what it takes.
-     *
-     * @param {import('./layers/filesystem/internal/bundle/format.js').BundleMember} of
-     * @param {string} what  named in a damaged block's report
-     */
-    const readMember = async(of, what)=>{
-        const first = bundle.block(of.firstBlock);
-        const last = bundle.block(of.firstBlock + of.blocks - 1);
-        const whole = await fetchRange(first.offset, last.offset + last.packed - first.offset,
-            bytes=>{
-                for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
-                {
-                    const block = bundle.block(at);
-                    const from = block.offset - first.offset;
-                    if (block.crc !== null
-                        && crc32(bytes.subarray(from, from + block.packed)) !== block.crc)
-                    {
-                        return `block ${at} of ${what} arrived damaged`;
-                    }
-                }
-                return null;
-            });
-        const out = new Uint8Array(of.size);
-        let written = 0;
-        for (let at = of.firstBlock; at < of.firstBlock + of.blocks; at++)
-        {
-            const block = bundle.block(at);
-            const from = block.offset - first.offset;
-            const raw = whole.subarray(from, from + block.packed);
-            const bytes = block.codec === 1 ? await inflateRaw(raw) : decode(block.codec, raw,
-                block.length);
-            out.set(bytes, written);
-            written += bytes.length;
-        }
-        return written === of.size ? out : null;
-    };
-
-    // The bundle's translation seed goes into the translator's store before
-    // the program's first instruction, and every lookup waits for it, so the
-    // first run of the bundle on this machine starts from the regions a run
-    // elsewhere made instead of from none. Once a store has taken this seed
-    // it is not fetched again. Only an engine with the translator has a use
-    // for it, the default among them.
-    const member = bundle.translations;
-    if (member !== null && (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
-        && typeof translationStore?.seed === 'function')
-    {
-        const seeding = (async()=>(await translationStore.seededWith() === member.sha256
-            ? null : readMember(member, 'the translations'))
-        )();
-        translationStore.seed(seeding, member.sha256).then((/** @type {any} */ result)=>{
-            events.emit('bundle-translations', { size: member.size, ...result });
-        });
-    }
-
-    // The registry the installation left, which travels in the bottle beside
-    // its files: read now, while nothing else is, and parsed once.
-    const registryFile = bundle.find(BOTTLE_REGISTRY_PATH);
-    const registry = registryFile === null ? Promise.resolve(null)
-        : readMember(registryFile, 'the registry').then(bytes=>(bytes === null ? null
-            : JSON.parse(new TextDecoder().decode(bytes)))).catch((/** @type {any} */ e)=>{
-            events.emit('bundle-registry-unreadable', { reason: e?.message ?? String(e) });
-            return null;
-        });
-
-    events.emit('bundle', {
-        files: bundle.files.length,
-        blockSize: bundle.blockSize,
-        blocks: bundle.blockCount,
-        cached: cache.diagnostics().resident,
-        backed: cache.backed,
-        remembered: cache.order().length,
-    });
-    if (!cache.backed)
-    {
-        // Said out loud, in the words of the setting it defeats: a store that
-        // quietly failed to open reads from outside as a cache that never
-        // worked, and every block of this run will be fetched again next time.
-        events.emit('bundle-unbacked', {
-            reason: cache.reason,
-            effect: 'fetched blocks are not kept on this machine',
-        });
-    }
-
-    /**
-     * Brings in one run of blocks: one request, then split and checked.
-     *
-     * The checksums are per block, so a group is verified block by block and a
-     * group with one bad block is asked for again whole. Damage is rare enough
-     * that paying for the neighbours beats tracking which part to re-ask for.
-     *
-     * Each block is copied out with `slice`, not viewed with `subarray`: a view
-     * would keep the entire request's buffer alive for as long as any one block
-     * of it is held, which for a 8 MiB request holding one 256 KiB block is
-     * thirty-one blocks of the group nobody wanted.
-     *
-     * @param {{ start: number, end: number, blocks: any[] }} group
-     */
-    const fetchGroup = async group=>{
-        const twice = refetchedIn(group, bundle, has);
-        refetched.blocks += twice.blocks;
-        refetched.bytes += twice.bytes;
-        const span = group.end - group.start;
-        ranges.requests++;
-        ranges.bytes += span;
-        const whole = await fetchRange(group.start, span, bytes=>{
-            for (const block of group.blocks)
-            {
-                const expected = bundle.block(block.index).crc;
-                if (expected === null)
-                {
-                    continue;
-                }
-                const at = block.offset - group.start;
-                const found = crc32(bytes.subarray(at, at + block.packed));
-                if (found !== expected)
-                {
-                    return `block ${block.index} arrived damaged `
-                        + `(checksum ${found}, expected ${expected})`;
-                }
-            }
-            return null;
-        });
-
-        for (const block of group.blocks)
-        {
-            const at = block.offset - group.start;
-            const raw = whole.slice(at, at + block.packed);
-            // Inflated here, once, rather than on every read: this is the only
-            // place a deflate block can be decoded at all, since the read side
-            // is synchronous and the browser's inflate is not.
-            cache.put(block.index,
-                bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
-        }
-    };
-
-    /** @param {number} index */
-    const has = index=>cache.has(index);
-    /** Blocks a request went out for that were already here. */
-    const refetched = { blocks: 0, bytes: 0 };
-    /**
-     * What went over the wire: range requests and the bytes they spanned. The
-     * count of reads that waited is a different number -- one read may be
-     * several requests, and a request may serve a read that never waited.
-     */
-    const ranges = { requests: 0, bytes: 0 };
-    /**
-     * Blocks a request is out for right now, each with the promise of it. A
-     * second read that wants one of them waits for that request rather than
-     * sending its own: two threads reading neighbouring files would otherwise
-     * fetch the same window twice, once each.
-     *
-     * @type {Map<number, Promise<void>>}
-     */
-    const inFlight = new Map();
-
-    // What a read is waiting on right now. The background filler stands aside
-    // whenever this is above zero: a block a parked thread wants is worth more
-    // than any block nobody has asked for.
-    let waiting = 0;
-    let stopped = false;
-    /** Blocks brought in ahead of a read, ever. */
-    let ahead = 0;
-    /**
-     * The block after each of the last few fetches: where a forward reader's
-     * next miss lands. A few rather than one, because two files streamed at
-     * once take turns at missing and each turn would otherwise start over.
-     */
-    /** @type {number[]} */
-    const expected = [];
-    const EXPECTED_KEPT = 4;
-
-    /** @param {any[]} needed */
-    const demand = async needed=>{
-        for (const block of needed)
-        {
-            cache.demanded(block.index);
-        }
-        const absent = [...new Map(needed
-            .filter(block=>!cache.has(block.index))
-            .map(block=>[block.index, block])).values()]
-            .sort((left, right)=>left.offset - right.offset);
-
-        // Wide only where the blocks are kept: a cache in the heap is a few
-        // windows, and windows of 16 MiB evicted each other's blocks before
-        // the read that wanted them came back for them -- a start fetched
-        // four times its bundle and never got going.
-        const window = cache.backed ? windowFor(roundTrip()) : READ_AHEAD_BYTES;
-        const reaching = withWindow(withReadAhead(absent, bundle, has, expected, window),
-            bundle, has, window);
-        ahead += reaching.length - absent.length;
-        if (reaching.length > 0)
-        {
-            expected.push(reaching[reaching.length - 1].index + 1);
-            if (expected.length > EXPECTED_KEPT)
-            {
-                expected.shift();
-            }
-        }
-        const borrowed = [...new Set(reaching.map(block=>inFlight.get(block.index)))]
-            .filter(promise=>promise !== undefined);
-        const own = reaching.filter(block=>!inFlight.has(block.index));
-        waiting++;
-        const request = inParallel(groupBlocks(own), MAX_CONCURRENT_REQUESTS, fetchGroup);
-        for (const block of own)
-        {
-            inFlight.set(block.index, request);
-        }
-        try
-        {
-            // A borrowed request that fails is the other read's failure to
-            // report; this one comes back for the block if it is still absent.
-            await Promise.all([request, ...borrowed.map(promise=>promise.catch(()=>{}))]);
-        }
-        finally
-        {
-            waiting--;
-            for (const block of own)
-            {
-                inFlight.delete(block.index);
-            }
-        }
-
-        // Once per batch, not once per block: losing the record of a block that
-        // is already on disk costs one refetch, and writing it every time would
-        // cost far more than that.
-        await cache.persist();
-    };
-
-    /**
-     * Brings groups in one at a time, and only while no read is parked. Both
-     * follow from what the filler is for: it exists to use idle time, so the
-     * moment the time stops being idle it has to give the connections back to
-     * the read that a player is actually waiting on.
-     *
-     * Except where the bundle is far (`NEAR_ROUND_TRIP_MS`): there a parked
-     * read is a round trip's wait however wide the line, and a level loading is
-     * a read parked nearly all the time, so a filler that stood aside never ran
-     * while it mattered. It goes on beside the read, one request against the
-     * read's six, and a read that wants a block of its request waits for it
-     * rather than asking again.
-     *
-     * @param {{ start: number, end: number, blocks: any[] }[]} groups
-     * @returns {Promise<boolean>} whether to go on
-     */
-    const fillGroups = async groups=>{
-        for (const group of groups)
-        {
-            while (true)
-            {
-                if (stopped)
-                {
-                    return false;
-                }
-                if (waiting === 0 || roundTrip() >= NEAR_ROUND_TRIP_MS)
-                {
-                    break;
-                }
-                await new Promise(resolve=>setTimeout(resolve, IDLE_CHECK_MS));
-            }
-            // Only what is still missing, regrouped: a read may have brought
-            // part of this group in while the filler stood aside.
-            const missing = group.blocks
-                .filter(block=>!has(block.index) && !inFlight.has(block.index));
-            if (missing.length === 0)
-            {
-                continue;
-            }
-
-            try
-            {
-                for (const part of groupBlocks(missing))
-                {
-                    const request = fetchGroup(part);
-                    for (const block of part.blocks)
-                    {
-                        inFlight.set(block.index, request);
-                    }
-                    try
-                    {
-                        await request;
-                    }
-                    finally
-                    {
-                        for (const block of part.blocks)
-                        {
-                            if (inFlight.get(block.index) === request)
-                            {
-                                inFlight.delete(block.index);
-                            }
-                        }
-                    }
-                }
-                await cache.persist();
-            }
-            catch (e){
-                // A run that cannot be filled in the background is still a run.
-                // The blocks it failed on will be asked for again, in front of a
-                // parked thread, where the failure belongs.
-                events.emit('bundle-prefetch-failed',
-                    { start: group.start, reason: /** @type {any} */ (e).message });
-                return false;
-            }
-            events.emit('bundle-prefetch', {
-                resident: cache.diagnostics().resident,
-                blocks: bundle.blockCount,
-            });
-        }
-        return true;
-    };
-
-    /**
-     * Fills the rest of the cache while the game is not asking for anything.
-     *
-     * First what the last run asked for, in the order it asked: a start reads
-     * the same things in the same order every time, so that is the one thing
-     * known about what will be read next, and each of those blocks comes in
-     * with its window the way a miss would. Then the whole bundle, in container
-     * order, taken one request at a time out of the gaps -- not a guess about
-     * what will be read next, so nothing about it can be wrong about the game's
-     * access pattern, it can only be early or late.
-     *
-     * Off when the blocks have nowhere to go. Filling a bounded heap cache with
-     * a whole bundle would evict as fast as it fills, and pay for every byte of
-     * it twice.
-     */
-    const fill = async()=>{
-        if (!cache.backed || options.bundle.prefetch === false)
-        {
-            return;
-        }
-
-        for (const index of cache.order())
-        {
-            if (!has(index)
-                && !await fillGroups(groupBlocks(withWindow([bundle.block(index)], bundle, has))))
-            {
-                return;
-            }
-        }
-
-        // The translation seed's blocks are the store's business, read once.
-        const all = Array.from({ length: bundle.blockCount },
-            (unused, index)=>bundle.block(index))
-            .filter(block=>member === null || block.index < member.firstBlock
-                || block.index >= member.firstBlock + member.blocks);
-        await fillGroups(groupBlocks(all));
-    };
-
-    /**
-     * The whole bundle before the program starts (`bundle.preload`): every
-     * block not kept yet, as many requests at once as a read may have, each
-     * kept and recorded as it lands, so a preload cut short is resumed where it
-     * stopped. Not the translation seed, which the translator's store reads.
-     */
-    const preload = async()=>{
-        const progress = options.bundle.progress ?? (()=>{});
-        if (!cache.backed)
-        {
-            progress({ unbacked: cache.reason ?? 'nowhere to keep the blocks' });
-            return;
-        }
-        const all = Array.from({ length: bundle.blockCount }, (unused, index)=>bundle.block(index))
-            .filter(block=>member === null || block.index < member.firstBlock
-                || block.index >= member.firstBlock + member.blocks);
-        const total = all.reduce((sum, block)=>sum + block.packed, 0);
-        const missing = all.filter(block=>!has(block.index));
-        let bytes = total - missing.reduce((sum, block)=>sum + block.packed, 0);
-        progress({ bytes, total });
-        await inParallel(groupBlocks(missing), MAX_CONCURRENT_REQUESTS, async group=>{
-            await fetchGroup(group);
-            await cache.persist();
-            bytes += group.blocks.reduce((sum, block)=>sum + block.packed, 0);
-            progress({ bytes, total });
-        });
-    };
-    if (options.bundle.preload === true)
-    {
-        await preload();
-    }
-    else
-    {
-        // Deliberately not awaited: it runs for as long as the bundle has
-        // blocks left, which is the whole session.
-        fill();
-    }
-    return {
-        /** The bundle's files as a drive's read-only layer, for each machine to mount. */
-        source,
-        fetch: demand,
-        registry,
-        /** How many blocks were brought in ahead of a read, ever. */
-        ahead: ()=>ahead,
-        /** Blocks a request went out for that were already here: the number
-         *  that has to stay at zero. */
-        refetched: ()=>({ ...refetched }),
-        decoded: ()=>({ ...decoded }),
-        /** What the bundle's pools hold of the tab's heaps (`memory-zones.js`). */
-        held: ()=>({
-            blockCache: cache.diagnostics().heapBytes ?? NOT_MEASURED,
-            decodedBlocks: source.heldBytes(),
-        }),
-        /** Range requests made and bytes asked for, ever. */
-        ranges: ()=>({ ...ranges }),
-        stop(){
-            stopped = true;
-        },
-    };
 }
 
 /**
@@ -3488,270 +1306,33 @@ export function areaOf(call, cache){
 }
 
 /**
- * @typedef {Object} GuestMemory
- * @property {(address: number) => number} readU8
- * @property {(address: number, value: number) => void} writeU8
- * @property {(address: number) => number} readU32
- * @property {(address: number, value: number) => void} writeU32
- * @property {(address: number, count: number, into: number[] | Float32Array) => void} readF32sInto
- * @property {(address: number, length: number) => Uint8Array} window
- */
-
-/**
- * A kernel's view of guest memory: the scalar accessors a hook has always
- * had, plus `u8s`/`i32s`/`f32s`, a typed-array view over a span rather than
- * one call per element. `memory.window` already hands back a live subarray
- * of the emulator's own RAM, bounds-checked once for the whole span (the
- * same primitive `audio` and `graphics` already read through) -- this only
- * adds the `Int32Array`/`Float32Array` reinterpretation on top of it, so
- * nothing new needed to be added to the memory layer itself.
+ * The run's own folder in the origin's file system (`run-folder.js`), where it
+ * keeps what it lets go of from memory and no later run reads, or null to
+ * keep it all in memory.
  *
- * `Int32Array`/`Float32Array` need a 4-byte-aligned byte offset into the
- * backing buffer, so an unaligned span throws -- the same outcome as any bad
- * address: the call falls through to the guest's own function. A copy would
- * be the alternative, and a copy's writes would never reach the guest.
- *
- * @param {GuestMemory} memory
+ * @param {AppOptions} options
  */
-export function createGuestView(memory){
-    const floatScratch = new Float32Array(1);
-    const floatBits = new DataView(floatScratch.buffer);
-
-    /**
-     * @param {number} at @param {number} count @param {number} bytesPerElement
-     * @param {Float32ArrayConstructor | Int32ArrayConstructor} Ctor
-     */
-    const typedView = (at, count, bytesPerElement, Ctor)=>{
-        const span = memory.window(at, count * bytesPerElement);
-        if (span.byteOffset % bytesPerElement !== 0)
-        {
-            throw new RangeError(
-                `${Ctor.name} view at 0x${at.toString(16)} is not ${bytesPerElement}-byte aligned`);
-        }
-        return new Ctor(/** @type {ArrayBuffer} */ (span.buffer), span.byteOffset, count);
-    };
-
-    return {
-        u8: (/** @type {number} */ at)=>memory.readU8(at),
-        writeU8: (/** @type {number} */ at, /** @type {number} */ value)=>{
-            memory.writeU8(at, value);
-        },
-        i32: (/** @type {number} */ at)=>memory.readU32(at) | 0,
-        f32: (/** @type {number} */ at)=>{
-            memory.readF32sInto(at, 1, floatScratch);
-            return floatScratch[0];
-        },
-        writeF32: (/** @type {number} */ at, /** @type {number} */ value)=>{
-            floatScratch[0] = value;
-            memory.writeU32(at, floatBits.getUint32(0, true));
-        },
-        /** A `Uint8Array` window over `count` bytes at `at`, bounds-checked once. */
-        u8s: (/** @type {number} */ at, /** @type {number} */ count)=>memory.window(at, count),
-        /** An `Int32Array` view over `count` dwords at `at`, bounds-checked once. */
-        i32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(at, count, 4, Int32Array),
-        /** A `Float32Array` view over `count` floats at `at`, bounds-checked once. */
-        f32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(at, count, 4, Float32Array),
-    };
+async function openRunFolderOf(options){
+    const spec = options.pageFile ?? 'local';
+    return spec === false ? null
+        : openRunFolder({ root: spec === 'local' ? undefined : spec.root });
 }
 
 /**
- * The lazy, remembered resolve of the OpenGL seam `frame.gl` needs:
- * `graphics.opengl()` is not called until a kernel's first `entry()` call,
- * and a seam that throws (a build with no OpenGL layer) is remembered rather
- * than retried on every later call, so a Direct3D title still binds its
- * kernels with `entry` answering `null` for every name.
- * @param {{ opengl: () => {
- *   entry: (name: string) => ((args: number[]) => number) | null } }} graphics
- * @returns {{ entry: (name: string) => ((args: number[]) => number) | null }}
+ * The run's page file (`page-file.js`): its volume's writable layers keep
+ * their pieces in the run's cache, a space of their own (`pages/`), each the
+ * only copy for the run: in its shared memory, and on its disk in the run's
+ * folder for room (none without a folder). A put the cache has no room for is
+ * said once, and the files stay in memory.
+ *
+ * @param {any} events @param {import('@bottlify/cellar').Reader} reader  the run's cache
  */
-export function resolveOpenglEntry(graphics){
-    let openglLayer = /** @type {ReturnType<typeof graphics.opengl> | null} */ (null);
-    let openglSeamFailed = false;
-    return {
-        entry(name){
-            if (openglSeamFailed)
-            {
-                return null;
-            }
-            if (!openglLayer)
-            {
-                try
-                {
-                    openglLayer = graphics.opengl();
-                }
-                catch {
-                    openglSeamFailed = true;
-                    return null;
-                }
-            }
-            return openglLayer.entry(name);
-        },
-    };
-}
-
-/**
- * The OpenGL handle a site kernel gets as `frame.gl`.
- *
- * `entry(name)` resolves one OPENGL32 entry point to a function the kernel
- * keeps and calls with raw dwords; each call is written to the journal under
- * `call.gpu` exactly as a trapped call is (same name, same category), so a
- * trace of the run stays honest when a kernel issues the work the guest would
- * have issued. Nothing else of the engine reaches the kernel through this.
- *
- * A build with no OpenGL seam (a Direct3D title) has an `opengl.entry` that
- * throws or is otherwise unusable; that answers `null` for every name rather
- * than taking the run down, so a title with no OpenGL still binds its kernels.
- *
- * @param {{ entry: (name: string) => ((args: number[]) => number) | null }} opengl
- * @param {(call: { name: string, args: number[], result: string }) => void} journalCall
- * @param {() => boolean} traced   whether `call.gpu` is on at TRACE right now
- * @param {{ calls: number }} counters
- */
-export function createKernelGl(opengl, journalCall, traced, counters){
-    return {
-        /** @param {string} name @returns {((args: number[]) => number) | null} */
-        entry(name){
-            let handler;
-            try
-            {
-                handler = opengl.entry(name);
-            }
-            catch {
-                return null;
-            }
-            if (!handler)
-            {
-                return null;
-            }
-            const label = `OPENGL32.dll!${name}`;
-            return args=>{
-                // Counted before the call, not after: a handler that throws
-                // still issued the call (its GL side effect, if any, already
-                // happened), and `kernelGlCalls` must match what the
-                // `hook-error` payload's `glCalls` counts against it.
-                counters.calls++;
-                const result = handler(args);
-                if (traced())
-                {
-                    journalCall({ name: label, args, result: `0x${(result >>> 0).toString(16)}` });
-                }
-                return result;
-            };
-        },
-    };
-}
-
-/**
- * The session storage holds for a run, its registry laid into `registry`
- * before the program's first instruction, and what saves it from then on.
- *
- * @param {{ options: AppOptions, events: any, filesystem: any, registry: any,
- *     inherited: boolean, standing?: boolean }} deps
- *     `standing`: the volume is the run's already, its files laid on it.
- *     `inherited`: the registry is the run's already, made by a process before
- *     this one
- */
-async function openSession({ options, events, filesystem, registry, inherited, standing = false }){
-    const storage = resolveStorage(options.storage, options.id ?? 'session');
-
-    // Seeded before the program's first instruction, and awaited: a save that
-    // arrives after the program has looked for it is a save that was not there.
-    // A process standing on the run's drives and hive reads nothing: what was
-    // saved is on them already, laid there by the process that made them, and
-    // reading the folder while that process saves into it -- a launcher
-    // starting a compiler for every shader -- catches an entry mid-write.
-    const seeded = normaliseSession(standing && inherited ? null : await storage.load());
-    // The registry first, and before the program's first instruction: its
-    // settings and its name are here as often as in a file, and a program
-    // that finds the key empty writes its defaults over them. The files wait
-    // for the volume they belong on, which the bundle mount replaces.
-    // A process the run started after the first has the run's registry
-    // already, with what its parent wrote a moment before starting it -- a
-    // write no save may have reached -- and reading the save back over it
-    // would undo that.
-    if (seeded.registry && !inherited)
-    {
-        registry.fromJSON(seeded.registry);
-    }
-
-    // One way out. What the program writes is announced once the writes settle;
-    // nothing is ever pulled back in while it runs.
-    const persist = storage.save;
-    /** @type {ReturnType<typeof coalescedSaver> | null} */
-    let saver = null;
-    let stopSavingRegistry = ()=>{};
-    if (persist)
-    {
-        saver = coalescedSaver({
-            snapshot: ()=>({
-                files: filesystem.export(),
-                // The bottle's revision it was saved under rides with the hive.
-                registry: { ...registry.toJSON(), revision: options.bundle?.revision ?? 0 },
-            }),
-            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
-                (/** @type {Error} */ error)=>{
-                    events.emit('error', { reason: 'session-save', error });
-                }),
-        });
-        const pending = saver;
-        /** @param {any[]} changes */
-        const save = changes=>{
-            events.emit('session', { changes });
-            pending.note(changes);
-        };
-        filesystem.onChanged(save);
-        // A registry write is a change to the session like a file write is,
-        // announced without a path: the whole hive travels with every save.
-        // The hive is the run's and outlives this machine: the subscription
-        // goes with it (`dispose`).
-        stopSavingRegistry = registry.onChanged(()=>save([{ kind: 'registry' }]));
-    }
-    return { seeded, saver, stopSavingRegistry };
-}
-
-/**
- * Lays down the run's volume before its first instruction: the bundle under
- * C:, the discs, the session's files and the page's own over them; and the
- * registry the installation wrote into `registry`, when there is one to fill.
- *
- * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
- *     seeded: { files: any[], registry?: any }, registry: any }} deps
- */
-async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
-    if (blocks)
-    {
-        filesystem.mount('C', { source: blocks.source });
-    }
-    // What the installation wrote to the registry is the machine's before the
-    // program's first instruction, as it was on the machine it was installed
-    // on: a launcher finds its game installed by the key its setup made. What
-    // the session saved since is kept over it -- unless the session was saved
-    // under an earlier revision of the bottle, whose registry is then laid over
-    // it, as a reinstall would: a corrected install path reaches a person who
-    // ran the bottle before.
-    const installedRegistry = await blocks?.registry;
-    if (installedRegistry && registry)
-    {
-        registry.fillFromJSON(installedRegistry,
-            (seeded.registry?.revision ?? 0) < (options.bundle?.revision ?? 0));
-    }
-    // A disc is a drive of its own, and takes D: or the first letter nothing
-    // holds once the machine's own disk is mounted.
-    await mountDiscs({ discs: options.discs, filesystem, events });
-
-    // The session's files go onto the volume once the bundle is under it, so
-    // that a saved file the bundle also carries is the one the program sees.
-    if (seeded.files.length > 0)
-    {
-        filesystem.apply(seeded.files);
-    }
-    // The person's own edits to the title's files -- a realm list, a config
-    // line -- laid over the session's, so they win over what the program
-    // last saved and never touch the bundle itself.
-    if (options.files && options.files.length > 0)
-    {
-        filesystem.apply(options.files);
-    }
+function openRunPageFile(events, reader){
+    return createPageFile(cacheSpace(reader, 'pages', { onlyCopy: true, disk: 'run' }), {
+        workingBytes: HEAP_POOLS.writableFiles,
+        onFailure: error=>events.emit('divergence', { api: 'filesystem',
+            detail: `${error.message}; what the program writes is kept in memory from here` }),
+    });
 }
 
 /**
@@ -3760,50 +1341,102 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
  * library that could not be found is the warning that explains a program's
  * next decision. Everything else is what happened, at info.
  */
-const SEVERITY = /** @type {Record<string, string>} */ ({
-    error: 'error',
-    'bundle-unavailable': 'error',
-    'library-missing': 'warn',
-    'libraries-missing': 'warn',
-    divergence: 'warn',
-    // The program's own words about why it is stopping. It is not our
-    // failure, but it is never good news.
-    'message-box': 'warn',
-    'bundle-retry': 'warn',
-    'bundle-prefetch-failed': 'warn',
-    'bundle-unbacked': 'warn',
-});
+/** A loss repeated is said again once in this many times, with its count. */
+const LOSS_EVERY = 256;
 
 /**
- * Events the bus does not write down. An event whose own source writes the
- * journal keeps a record per call while the event itself fires once, so the
- * bus must not write the first of those calls a second time: `unimplemented`,
- * whose program may call a missing import in a loop and would fill the page's
- * queue with a clone and a wake-up per call. And a position rather than a
- * happening: `cursor-moved` fires at every move of the mouse, and written down
- * it laps everything else out of the ring. Nor `bundle-fetching`, at each start and end
- * of the range requests, which the bundle's own read counts account for.
- */
-const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching']);
-
-/**
- * Every event the run reports also goes to its journal, so that one ordered
- * stream carries the whole story. A consumer that subscribes to a name still
- * gets it exactly as before -- a watcher never answers, so it cannot take an
- * event away from a handler that would have.
+ * Says that a call succeeded but did not do all of what it promises
+ * (`'divergence'`, a warning) or did not happen at all (`'loss'`, an error).
  *
- * @param {{ onAny: (watcher: (name: string, payload: any) => void) => unknown }} events
- * @param {{ write: (level: string, category: string, template: string,
- *     ...args: any[]) => any }} into
+ * A divergence is not a failure: a program is entitled to make the call, and
+ * refusing it changes what the program does -- usually by stopping it. But
+ * accepting a state and not honouring it is the defect class that produces a
+ * picture rather than an error, and the only thing separating it from correct
+ * behaviour is somebody saying so. A layer notices one where it happens, which
+ * for a graphics state is every draw, so each is said once: a short list of
+ * what this build does differently.
+ *
+ * A loss is worse: something the program made or asked for did not happen --
+ * a draw or a frame dropped, an object WebGPU refused, data not written. It is
+ * said the first time and then every LOSS_EVERY times with its count, so one
+ * that repeats every frame stays in the journal as it goes on.
+ *
+ * @param {(name: 'divergence' | 'loss', payload: { api: string, detail: string,
+ *     seen?: number }) => void} emit
+ * @returns {((api: string, detail: string, severity?: 'loss') => void)
+ *     & { divergences: Set<string>, losses: Map<string, number> }}  the reporter, with
+ *     what it has heard: every divergence, and every loss with how many times it came
  */
-function journalEvents(events, into){
-    events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
-        if (UNJOURNALLED.has(name))
+export function divergenceReporter(emit){
+    /** @type {Set<string>} */
+    const divergences = new Set();
+    /** @type {Map<string, number>} */
+    const losses = new Map();
+    /** @param {string} api @param {string} detail @param {'loss'} [severity] */
+    const report = (api, detail, severity)=>{
+        const key = `${api}: ${detail}`;
+        if (severity === 'loss')
+        {
+            const seen = (losses.get(key) ?? 0) + 1;
+            losses.set(key, seen);
+            if (seen === 1 || seen % LOSS_EVERY === 0)
+            {
+                emit('loss', { api, detail, ...(seen > 1 ? { seen } : {}) });
+            }
+            return;
+        }
+        if (divergences.has(key))
         {
             return;
         }
-        into.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
-    });
+        divergences.add(key);
+        emit('divergence', { api, detail });
+    };
+    return Object.assign(report, { divergences, losses });
+}
+
+/** The Subsystem of a console program's image. */
+const IMAGE_SUBSYSTEM_WINDOWS_CUI = 3;
+/** The console's own standard handles, which a window program has none of. */
+const CONSOLE_STANDARD = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
+
+/**
+ * The handles a child's parent handed down, as this process holds them, and
+ * its standard handles. A child that inherited nothing and was named no
+ * standard handles is handed its parent's own when it is a console program,
+ * duplicates of them (`consoleOnly`), and none when it is a window program,
+ * as Windows decides by the image's subsystem; a window program has no
+ * console, so a console handle handed it is NULL there.
+ *
+ * @param {any} options
+ * @returns {{ inherited: { handle: number, type: string, object: any }[],
+ *     standard: { input?: number, output?: number, error?: number } | undefined }}
+ */
+function handedDown(options){
+    /** @type {any[]} */
+    const all = options.inheritedHandles ?? [
+        ...(options.pipeEnds ?? []).map((/** @type {any} */ end)=>({
+            handle: end.handle, type: 'pipe', object: pipeStandIn(end.id, end) })),
+        ...options.inheritedFiles ?? []];
+    if (!options.consoleHandles && !options.standardHandles)
+    {
+        return { inherited: all, standard: undefined };
+    }
+    const kind = options.executable ? imageKind(options.executable) : null;
+    const consoleProgram = kind?.kind === 'pe' && kind.subsystem === IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    for (const one of all)
+    {
+        if (one.consoleOnly && !consoleProgram)
+        {
+            one.drop?.();
+        }
+    }
+    /** @type {Record<string, number>} */
+    const named = options.standardHandles
+        ?? (consoleProgram ? options.consoleHandles : { input: 0, output: 0, error: 0 });
+    return { inherited: all.filter(one=>consoleProgram || !one.consoleOnly),
+        standard: consoleProgram ? named : Object.fromEntries(Object.entries(named)
+            .map(([which, handle])=>[which, CONSOLE_STANDARD.has(handle) ? 0 : handle])) };
 }
 
 /**
@@ -3814,33 +1447,39 @@ function journalEvents(events, into){
  * image, after the first has been disposed -- so everything here belongs to the
  * program it was built for, and nothing survives except what is passed back in.
  *
- * @param {AppOptions & {
- *     events?: any,
- *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
- *     patches?: { address: number, bytes: Uint8Array }[],
- *     spawned?: (request: any) => void,
- *     logSinks?: Map<Function, (payload: any) => void>,
- *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
- *         ids: { thread: number, process: number }, volume: any },
- *     mainThreadId?: number,
- *     beside?: (request: any) => void,
- *     terminate?: (request: any, code: number) => boolean,
- *     othersRunning?: () => boolean,
- *     com?: { table: any, process: unknown },
- * }} options
+ * @param {ProcessOptions} options
  * @returns {Promise<any>} an AppController
  */
 async function buildApp(options){
+    // What its parent handed it, and which are its standard handles.
+    const handed = handedDown(options);
+    /**
+     * The libraries this build synthesises, once their table is made: a file
+     * call the modules make while they are being built (the standard
+     * directories made at start) finds none, rather than the table before it
+     * exists.
+     *
+     * @type {Record<string, unknown> | null}
+     */
+    let builtLibraries = null;
     // Handed in across a replacement, so a caller's subscriptions outlive the
     // process they were made against: the program has changed, the machine it
     // is running in has not.
     const events = options.events ?? createEvents();
+    /** The last lines the layers traced, for a report (`TRACED_KEPT`). @type {string[]} */
+    const layerTraces = [];
     // The presenter the run made. A machine is a process; the canvas, the
     // texture the primary is copied into and the pacer are not. This machine
     // hands the run's presenter to the graphics layer and draws through it, so
     // the last frame of the process it replaced stays on the canvas until this
     // one has something to show.
     const runPresenter = options.graphics?.presenter ?? null;
+    /**
+     * This process's debugger while one hears it: from its start, or since
+     * one attached (`debug-events.js`); null otherwise.
+     */
+    const debuggerNow = ()=>(options.debugger && (options.debugger.debugged?.() ?? true)
+        ? options.debugger : null);
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -3858,12 +1497,57 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const mainImage = programImage(options.executable);
+    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory,
+        memorySize: options.memorySize });
+    // An image past 4 GiB (`wide`) lies apart from the space below, which is laid
+    // out as for an image at the 32-bit programs' base: its libraries, stacks and
+    // heap where any other process has them.
+    const mainImage = programLoaded.wide === undefined || programLoaded.wide.codeBase === 0
+        ? programLoaded : { ...programLoaded, imageBase: LONG_IMAGE_BASE, sizeOfImage: 0x10000 };
     // An x86-64 program (`roadmap/x64.md`): long mode on cork, one executor,
     // its image in the window below 4 GiB.
     const long = mainImage.bits === 64;
-    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
+    /** The machine every image mapped into the process must be (`parsePe`). */
+    const processBits = long ? 64 : 32;
+    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_START }
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
+    // The engine's range in the guest's space (`engineAreaFor`): where the
+    // memory grows as the guest is given more, rather than every process
+    // committing the whole of `memorySize`. Not where the run asks for the
+    // whole memory from the start (`cpu.grow` false).
+    const mayGrow = options.cpu?.grow !== false;
+    /** @param {number} size */
+    const areaFor = size=>(mayGrow ? engineAreaFor({ wide: programLoaded.wide !== undefined,
+        memorySize: size,
+        moduleBase: MODULE_BASE, stackPoolStart: STACK_POOL_START, heapStart: HEAP_START,
+        executors: options.cpu?.cores ?? 1, image: mainImage,
+        far: long && options.cpu?.far === true }) : undefined);
+    // `memorySize` is the program's RAM: a limit on what it is given in all, not
+    // its address space. The address space is Windows's: 2 GiB, and for a program
+    // linked /LARGEADDRESSAWARE 4 GiB under WOW64 or 3 GiB on a 32-bit Windows
+    // (`HEAP_SIZE`), whatever RAM the machine has. A memory that grows holds only
+    // what the program was given of that space, so its window is the whole of it;
+    // one that cannot grow is made whole, and is as large as the RAM.
+    // Past 2 GiB the window is all of wasm's 4 GiB -- the tables inside the
+    // guest's space, not past it -- and only a memory that grows holds it.
+    // A wide window's space below is laid out as a 2 GiB one - its libraries and stacks
+    // where any process has them - and its heap reaches on to 4 GiB (`HEAP_SIZE`): its
+    // RAM is the window, and the image's low dword span is cut from that heap. Past
+    // 4 GiB its RAM is handed out by reservation once the space below has no room
+    // (`far-space.js`), as much as the program's memory says.
+    const ramLimit = Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE,
+        programLoaded.wide?.ram ?? 2 ** 32);
+    const largeSpace = mainImage.largeAddressAware && options.heapSize === undefined;
+    const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
+        : !mayGrow ? ramLimit
+            : largeSpace ? 2 ** 32 : 2 ** 31;
+    const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
+        : askedMemory;
+    const engineArea = areaFor(memorySize);
+    const HEAP_BASE = HEAP_START + (engineArea?.inHeap ? engineArea.span : 0);
+    /** Where the libraries' space ends: at the engine's range where that lies at its top. */
+    const LIBRARIES_END = engineArea && !engineArea.inHeap && !engineArea.cut ? engineArea.at
+        : STACK_POOL_START;
     /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
     const imageInHeap = mainImage.imageBase >= HEAP_BASE;
     // Where a thread that is not the first gets its stack. Above the space
@@ -3880,20 +1564,131 @@ async function buildApp(options){
     // pool with room for only one thread.
     const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
-    const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
-    const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
+    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB: up to
+    // 4 GiB on a 64-bit Windows, up to 3 GiB on a 32-bit one, taken as started
+    // with /3GB (`roadmap/decisions.md` A287). Any other stays below, where it may
+    // keep a pointer's sign.
+    const HEAP_SIZE = (memorySize > 2 ** 31 || programLoaded.wide !== undefined)
+        && largeSpace
+        ? (long || options.machine === 'amd64' ? LARGE_ADDRESS_TOP : INCREASED_USER_VA_TOP)
+            - HEAP_BASE
+        : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
     /**
-     * The modules win32 implements, filled in below. win32 is built before they
-     * exist -- it is what says which functions they export -- so it is handed
-     * these lookups rather than the answers, and only ever calls them while the
-     * guest is running.
-     *
-     * @type {Map<string, any>}
+     * The process's modules, win32's among them, filled in below. win32 is
+     * built before they exist -- it is what says which functions they export
+     * -- so it is handed lookups rather than the answers, and only ever calls
+     * them while the guest is running.
      */
-    const byName = new Map();
-    /** @type {Map<number, any>} */
-    const byBase = new Map();
+    /**
+     * The span the guest code the engine writes itself is placed in - its
+     * routines and what they keep, a 64-bit process's call stubs - at the
+     * start of the modules' window, before the system modules
+     * (`ENGINE_CODE_BYTES`), written as modules are placed. Not the
+     * program's heap: a routine is placed when the module that has it is first
+     * loaded, and where the program's own allocations land must not hang on
+     * which modules it loaded before them. Past its end, the heap.
+     */
+    const engineCode = {
+        next: 0,
+        end: 0,
+        said: false,
+        /** Lays the span out at `base`: one region, its memory reached as it is taken. @param {number} base */
+        open(base){
+            this.next = base;
+            this.end = base + ENGINE_CODE_BYTES;
+            memory.register({ name: 'engine code', base, size: ENGINE_CODE_BYTES,
+                kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE });
+        },
+        /** A module's own part of the span while it is placed (`within`): [next, end). */
+        slice: /** @type {{ next: number, end: number } | null} */ (null),
+        /** Counts the parts placing began (`within`): the code arena's page per part. */
+        part: 0,
+        /**
+         * A block of the span, reading as zeroes as a heap block does: what the
+         * engine keeps there (a routine's tables, the clock's last answer) is
+         * read before it is written. A memory just made is zero; one a gone
+         * process left holds what that process kept at the same addresses
+         * (`reusedMemory`), and the clock's last answer read from it held the
+         * counter still for as long as the gone process had lived.
+         *
+         * @param {number} bytes
+         */
+        take(bytes){
+            const size = Math.ceil(bytes / 16) * 16;
+            const at = this.from(size);
+            if (at !== null && options.reusedMemory)
+            {
+                memory.fillBytes(at, 0, size);
+            }
+            return at;
+        },
+        /** @param {number} size */
+        from(size){
+            const slice = this.slice;
+            if (slice && slice.next + size <= slice.end)
+            {
+                const at = slice.next;
+                slice.next += size;
+                return at;
+            }
+            if (this.next === 0 || this.next + size > this.end)
+            {
+                if (this.next !== 0 && !this.said)
+                {
+                    this.said = true;
+                    reportDivergence('engine code', `its ${ENGINE_CODE_BYTES} bytes are`
+                        + ' spent: the rest goes to the heap');
+                }
+                return null;
+            }
+            const at = this.next;
+            this.next += size;
+            memory.reach?.(this.next);
+            return at;
+        },
+        /**
+         * Runs `place` with what it takes from the span taken from [from, to) -
+         * the part a module took where the machine's layout was laid out - in
+         * the same order, so a routine lies at the address it has in every
+         * process; what does not fit goes on past every module's part.
+         *
+         * @template T @param {number} from @param {number} to @param {() => T} place @returns {T}
+         */
+        within(from, to, place){
+            const was = this.slice;
+            const wasPart = this.part;
+            this.slice = to > from ? { next: from, end: to } : null;
+            this.part = ++this.parts;
+            memory.reach?.(to);
+            try
+            {
+                return place();
+            }
+            finally
+            {
+                this.slice = was;
+                this.part = wasPart;
+            }
+        },
+        parts: 0,
+    };
+    const modules = createModuleTable({
+        keyOf: moduleKeyOf,
+        placesNamed: (path, only)=>placesNamed(path, only),
+        importsOf: (/** @type {any} */ module)=>SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [],
+        onLoaded: (/** @type {any} */ module)=>{
+            threadBlocks?.addModule(module);
+            // A library of the engine's loaded once the process runs is told to
+            // its debugger as it is marked, without waiting for the answer: the
+            // mark is made inside a lookup that cannot wait (`debug-events.js`).
+            if (debugStarted)
+            {
+                debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                    threadId: kernel.currentThread()?.id >>> 0, base: module.base });
+            }
+        },
+    });
     /** The heap up to the highest address it ever handed out: what of it the tab pays for. */
     const heapTouched = ()=>{
         const handedTo = core.api('win32')?.heap?.()?.handedTo?.();
@@ -3913,9 +1708,11 @@ async function buildApp(options){
      */
     const guestHeld = ()=>{
         let images = 0;
-        for (const held of byBase.values())
+        for (const held of modules.all())
         {
-            images += held.loaded !== false && held.base < HEAP_BASE ? held.size ?? 0 : 0;
+            // A system module's bytes are there once placed, loaded or not.
+            const there = held.placed ?? held.loaded !== false;
+            images += there && held.base < HEAP_BASE ? held.size ?? 0 : 0;
         }
         return {
             images,
@@ -3950,13 +1747,30 @@ async function buildApp(options){
     let startupImages = [];
     /**
      * Every image with a thread-local directory, by base, those loaded at
-     * run time among them: the dword its slot is written in, the block each
-     * thread is given a copy of, and its TLS callbacks.
+     * run time among them: its index in each thread's thread-local array, the
+     * block each thread is given a copy of, and its TLS callbacks.
      *
-     * @type {Map<number, { indexAddress: number, template: Uint8Array, size: number,
+     * @type {Map<number, { index: number, template: Uint8Array, size: number,
      *     callbacks: number[] }>}
      */
     const threadLocalImages = new Map();
+    /**
+     * The lowest index in the thread-local array no image holds: the loader's
+     * own numbering, as Windows gives it -- the program's image 0, the
+     * libraries after it in the order they are loaded, an unloaded one's index
+     * free again. Not TlsAlloc's: a program compiled to reach its own image's
+     * variables at index 0 without reading _tls_index finds them there
+     * whatever slots it has allocated.
+     */
+    const freeLocalIndex = ()=>{
+        const taken = new Set([...threadLocalImages.values()].map(local=>local.index));
+        let index = 0;
+        while (taken.has(index))
+        {
+            index++;
+        }
+        return index;
+    };
     /**
      * Libraries that asked not to be told of threads (DisableThreadLibraryCalls), by base.
      *
@@ -3995,57 +1809,73 @@ async function buildApp(options){
     let loaderLock = 0;
     /** @type {any} */
     let mainModule = null;
+    /** Whether a debuggee's start is told: a library loaded after is told as it loads. */
+    let debugStarted = false;
 
     /**
-     * Marks a module the process has loaded, with what it brings in, for
-     * everything that answers only about loaded modules: GetModuleHandle and
-     * PEB->Ldr. A module synthesised at the start is there to be bound to
-     * whenever it is asked for, but it is loaded only once something imports
-     * it or loads it.
+     * Every file a path given to LoadLibrary can name, as `pathKey`s: the one
+     * it fixes, or each place a relative one is searched for in.
      *
-     * @param {any} module
+     * @param {string} path @param {string[]} [only]  A LoadLibraryEx search's places.
      */
-    const markLoaded = module=>{
-        if (!module || module.loaded !== false)
-        {
-            return;
-        }
-        module.loaded = true;
-        threadBlocks?.addModule(module);
-        for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
-        {
-            markLoaded(byName.get(imported) ?? null);
-        }
-    };
+    const placesNamed = (path, only = undefined)=>libraryCandidates(path,
+        options.imagePath ?? 'C:\\app.exe', core.api('filesystem').currentDirectory(), { only })
+        .map(pathKey);
 
-    /** @param {string | null} name */
-    const findModule = name=>{
-        if (name === null || name === '')
+    const { markLoaded, answersPath } = modules;
+    const findModule = modules.find;
+
+    /**
+     * Whether a file, not a directory, stands at a path on the volume.
+     *
+     * @param {string} path
+     */
+    const standsAt = path=>{
+        try
         {
-            return mainModule;
+            const entry = core.api('filesystem').stat(path);
+            return Boolean(entry && !entry.directory);
         }
-        return byName.get(moduleKeyOf(name)) ?? null;
+        catch {
+            return false;
+        }
     };
 
     // Where input goes when nobody names a window: the active one, and while
     // there is none -- a program whose window was never shown -- the one it
     // made last, which is the only other thing it could be looking at.
-    let lastCreated = 0;
-    const foreground = ()=>win32.activeWindow?.() || lastCreated;
+    const lastCreated = { value: 0 };
+    const foreground = ()=>win32.activeWindow?.() || lastCreated.value;
     /** Whether a frame is open in the journal: the first present opens one, the rest close and reopen. */
-    let framed = false;
+    const framed = { value: false };
     // Where the counters stood when the frame being measured began.
-    let retiredAtFrameStart = 0;
-    let interpretedAtFrameStart = 0;
-    let writtenAtFrameStart = 0;
-    let heapAtFrameStart = 0;
+    const retiredAtFrameStart = { value: 0 };
+    const interpretedAtFrameStart = { value: 0 };
+    const translateAtFrameStart = { value: 0 };
+    const exitsAtFrameStart = { value: 0 };
+    const writtenAtFrameStart = { value: 0 };
+    const heapAtFrameStart = { value: 0 };
+    /** The graphics worker's frame times when the frame began (`WorkerFrameTimes`). */
+    /** @type {{ value: any }} */
+    const workerAtFrameStart = { value: null };
+    /** The graphics worker's frame times now, or null with no worker or no graphics layer. */
+    const workerFrameTimes = ()=>{
+        try
+        {
+            return core.api('graphics').workerFrameTimes?.() ?? null;
+        }
+        catch {
+            return null;
+        }
+    };
     /** The JS heap, where the runtime will say; a frame's growth is what the host allocated. */
+    const heapReadable = ()=>/** @type {any} */ (globalThis.performance)?.memory !== undefined;
     const heapUsed = ()=>{
         const performance = /** @type {any} */ (globalThis.performance);
         return performance?.memory?.usedJSHeapSize ?? 0;
     };
 
-    // Filled in once the emulator is up and a bundle, if any, is mounted. win32
+    // Filled in once the machine is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
     /** @type {{ source: any, fetch: (needed: any[]) => Promise<void>, stop: () => void,
      *          ahead: () => number,
@@ -4064,6 +1894,7 @@ async function buildApp(options){
      * slots from linear address zero and up.
      *
      * @type {{
+     *     peb: number,
      *     createThreadBlock: (thread: { id: number, stackBase: number,
      *         stackLimit: number,
      *         locals?: import('./layers/win32/kernel32/teb.js').ThreadLocal[] })
@@ -4074,22 +1905,45 @@ async function buildApp(options){
      *     removeThreadLocal: (slot: number) => void,
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
+     *     entryOf: (base: number) => number,
+     *     hasThreadLocals: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
+    /** @type {(() => Uint8Array) | null} */
+    let imageInformation = null;
+    /**
+     * The callbacks LdrRegisterDllNotification registered, by their cookie, in
+     * the order registered (`tellNotified`).
+     *
+     * @type {Map<number, { callback: number, context: number }>}
+     */
+    const notifications = new Map();
+    let nextNotificationCookie = 1;
+    /** What ntdll's LdrRegisterDllNotification and LdrUnregisterDllNotification act on. */
+    const dllNotifications = {
+        get size(){
+            return notifications.size;
+        },
+        values: ()=>notifications.values(),
+        /** @param {number} callback @param {number} context */
+        register: (callback, context)=>{
+            const cookie = nextNotificationCookie++;
+            notifications.set(cookie, { callback: callback >>> 0, context: context >>> 0 });
+            return cookie;
+        },
+        /** @param {number} cookie */
+        unregister: cookie=>notifications.delete(cookie >>> 0),
+    };
     /**
      * What a thread made after the process's first is given a copy of: every
-     * image's thread-local block, in the slot the image was given, as the
-     * loader does for each thread. The slot is read as each thread is made:
-     * a startup image's is the startup stub's TlsAlloc's, which has not run
-     * when the image is mapped.
+     * image's thread-local block, at the image's index, as the loader does
+     * for each thread.
      *
      * @returns {import('./layers/win32/kernel32/teb.js').ThreadLocal[]}
      */
     const threadLocals = ()=>[...threadLocalImages.values()]
-        .map(({ indexAddress, template, size })=>({
-            slot: core.api('memory').readU32(indexAddress), template, size,
-        }));
+        .map(({ index, template, size })=>({ slot: index, template, size }));
     /**
      * Every thread holding blocks, and its environment block. Each is given
      * back at the next thread's making once its thread is gone, as a stack is:
@@ -4145,13 +1999,13 @@ async function buildApp(options){
      * fetching. One is a bound to raise; the other is nothing to do with us.
      */
     const bundleReads = { requests: 0, blocks: 0, bytes: 0, again: 0, againBytes: 0 };
-    /** @type {Set<number>} */
+    /** By bundle and block: a layer's blocks are numbered from 0 as the bundle's are. @type {Set<string>} */
     const blocksSeen = new Set();
 
     // A call that is waiting -- a message loop with an empty queue -- is let go
     // once per scheduler turn to look again.
-    /** @type {(() => void)[]} */
-    let idlers = [];
+    /** @type {{ value: (() => void)[] }} */
+    const idlers = { value: [] };
 
     /**
      * What the program is told its display is. Mutable: a program that creates
@@ -4174,39 +2028,7 @@ async function buildApp(options){
     const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height,
         ...((shownAtMost ?? 0) > 0 ? { refresh: shownAtMost } : {}) };
 
-    /**
-     * Divergences already reported, so each is said once.
-     *
-     * A layer notices a divergence where it happens, which for a graphics state
-     * is every draw. Reported per call it would fill a frame's journal with one
-     * repeated line and bury everything else; reported once it is a short list
-     * of what this build does differently, which is what a reader wants.
-     *
-     * @type {Set<string>}
-     */
-    const divergences = new Set();
-
-    /**
-     * Says that a call succeeded but did not do all of what it promises.
-     *
-     * Not a failure: a program is entitled to make the call, and refusing it
-     * changes what the program does -- usually by stopping it. But accepting a
-     * state and not honouring it is the defect class that produces a picture
-     * rather than an error, and the only thing separating it from correct
-     * behaviour is somebody saying so.
-     *
-     * @param {string} api      Which surface diverged, as a program names it.
-     * @param {string} detail   What was accepted and not acted on.
-     */
-    const reportDivergence = (api, detail)=>{
-        const key = `${api}: ${detail}`;
-        if (divergences.has(key))
-        {
-            return;
-        }
-        divergences.add(key);
-        events.emit('divergence', { api, detail });
-    };
+    const reportDivergence = divergenceReporter((name, payload)=>events.emit(name, payload));
 
     // A call site is made thousands of times in a run and its name never
     // changes, so the area string is built once per name rather than on
@@ -4223,18 +2045,20 @@ async function buildApp(options){
     const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
     const callerTag = options.log?.journal ? `${callerImage}:` : '';
     // The cursor the page shows: the system's or a device's (`visibleCursor`).
-    /** @type {any} */
-    let systemCursor = { shown: true };
-    /** @type {any} */
-    let deviceCursor = null;
-    let mouseHeld = false;
+    /** @type {{ value: any }} */
+    const systemCursor = { value: { shown: true } };
+    /** @type {{ value: any }} */
+    const deviceCursor = { value: null };
+    const mouseHeld = { value: false };
     const showCursor = ()=>{
-        const cursor = visibleCursor(systemCursor, deviceCursor, mouseHeld);
+        const cursor = visibleCursor(systemCursor.value, deviceCursor.value, mouseHeld.value);
         core.api('input')?.cursorShown?.(cursor.shown !== false);
         events.emit('cursor', cursor);
     };
     /** @type {any} */
     let win32Api = null;
+    /** The calling thread's last error, from win32: looked up once. */
+    const lastErrorOfWin32 = ()=>(win32Api ??= core.api('win32')).lastError();
 
     /**
      * Writes one host call to the journal.
@@ -4333,938 +2157,95 @@ async function buildApp(options){
 
     // What the volume's reader calls for blocks a read found absent, kept so a
     // reader outside win32 -- DirectMusic's loader -- can wait for them too.
-    /** @type {((needed: any[]) => Promise<unknown>) | null} */
-    let fetchBundleBlocks = null;
+    const fetchBundleBlocks = (/** @type {any[]} */ needed)=>{
+        if (!blocks)
+        {
+            return Promise.resolve();
+        }
+        // Counted, because from the run loop every parked thread looks
+        // the same and they are not: a thread waiting on a range
+        // request is waiting on the network, and a thread waiting on
+        // its own message queue is waiting on nothing at all. Told
+        // apart, one of them is a number to reduce and the other is a
+        // loop to stop taking so seriously.
+        bundleReads.requests++;
+        for (const block of needed)
+        {
+            bundleReads.blocks++;
+            bundleReads.bytes += block.packed;
+            const seen = `${block.layer ?? 0}:${block.index}`;
+            if (blocksSeen.has(seen))
+            {
+                bundleReads.again++;
+                bundleReads.againBytes += block.packed;
+            }
+            else
+            {
+                blocksSeen.add(seen);
+            }
+        }
+        fetching++;
+        if (fetching === 1)
+        {
+            // The loop is about to have nothing to do until this
+            // answers, and it can be told exactly when that is. Without
+            // it the only way to find out was to sleep and look again,
+            // on a timeout a browser clamps to a millisecond -- which
+            // measured out at nineteen wake-ups per range request and a
+            // fifth of a whole run spent asking.
+            fetched = new Promise(resolve=>{
+                arrived = resolve;
+            });
+            // A page shows that a stall is the bundle arriving, not the game.
+            events.emit('bundle-fetching', { fetching: true });
+        }
+        return blocks.fetch(needed).finally(()=>{
+            fetching--;
+            if (fetching === 0)
+            {
+                const open = arrived;
+                fetched = null;
+                arrived = ()=>{};
+                open();
+                events.emit('bundle-fetching', { fetching: false });
+            }
+        });
+    };
 
-    const core = await assembleModules({
-        kernel: {
-            // How many guest instructions a thread runs before the next one
-            // gets a turn. Lowering it is how a sampled profile gets enough
-            // points to say anything; raising it costs nothing but resolution.
-            quantum: options.quantum,
-            // A thread alone takes longer turns: the turn's own cost is what
-            // a short one buys nothing for (the kernel's scheduler).
-            soloQuantum: options.soloQuantum,
-            // Spread over the executors, kept on the process's own, or chosen by
-            // what the program gets done each way (the kernel's `placement`).
-            placement: options.cpu?.placement,
-            placementTiming: options.cpu?.placementTiming,
-            // A host-bound thread pinned to one processor has it played by the
-            // process's own executor (the kernel's `playPinned`) unless false.
-            playPinned: options.cpu?.playPinned,
-            // The process's own executor kept for the host's answers while a
-            // thread is pinned to its processor (the kernel's `freeHost`).
-            freeHost: options.cpu?.freeHost,
-            // Off unless asked for: see the kernel's `preemption`.
-            preemption: options.preemption,
-            // Every thread gets the stack the image was linked to expect, the
-            // way Windows does -- not a fixed small one. A program that recurses
-            // in a worker thread, or builds a large structure on its stack,
-            // sizes that against SizeOfStackReserve and has no reason to expect
-            // less; measured on a real title, a worker was already using three
-            // quarters of a sixty-four kilobyte stack.
-            stacks: {
-                base: STACK_POOL_BASE,
-                size: threadStackSize,
-                limit: STACK_POOL_BASE + STACK_POOL_SIZE,
-            },
-            // The run's thread and process ids, which every process numbers
-            // its own from (`system`).
-            ids: options.system?.ids,
-            // A process across a link reaches the run's named objects there.
-            remoteObjects: options.system?.objects ?? null,
-        },
-        cpu: {
-            jit: options.jit, sampling: options.sampling, memorySize,
-            reused: options.reusedMemory ?? undefined,
-            initialStack: mainStack.initialStack,
-            // ponytail: open, where Windows never maps the first 64 KiB, until
-            // a store alone can fault there. Closed, FMOD's mixer thread reads
-            // NULL+0x54 before its creator has set the pointer and faults; open,
-            // PECompact2's deliberate store through NULL goes through instead of
-            // reaching the handler it installed, so a packed setup cannot run.
-            closedBelow: 0,
-            // Nothing runs there all the same: a call through a null pointer
-            // faults, as on Windows, rather than sliding through the zeroes.
-            noExecuteBelow: 0x10000,
-            engine: options.engine ?? DEFAULT_ENGINE,
-            executors: long ? 1 : options.executors ?? 1,
-            bits: long ? 64 : 32,
-            eagerExecutors: options.cpu?.eager === true,
-            // The threads holding the guest's memory bring JavaScriptCore's
-            // collections forward (`gc-nudge.js`): by default there only.
-            gcNudge: options.cpu?.gcNudge,
-            engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
-                ? corkArtifacts(options.cork).moduleUrl : null,
-            cork: {
-                cacheVersion: SETTINGS.cork.cacheVersion,
-                ...options.cork?.config,
-                store: translationStore,
-                bundleId: options.bundle?.id ?? options.id ?? 'bundle',
-            },
-        },
-        bridge: {
-            // win32 sits above the bridge and cannot be reached from it, so the
-            // reader is handed down from here. It costs one call per traced
-            // call and buys a trace that says which call left an error behind.
-            // Looked up once: it is asked on every crossing.
-            lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
-            // Where the reader above finds it for a thread with a block,
-            // read there directly.
-            lastErrorOffset: TEB.LAST_ERROR,
-            // Costly and off unless asked for; see the dispatcher.
-            traceStrings: options.traceStrings ?? false,
-            callPhases: options.profileCalls ?? false,
-            driveGuestCalls: options.driveGuestCalls ?? true,
-            record: options.record ?? 0,
-            onCall: (/** @type {any} */ call)=>{
-                journalCall(call);
-                if (options.onCall)
-                {
-                    // Every process of a run hands its calls to the one sink,
-                    // and names its first thread "main": a call says whose
-                    // image made it, beside the thread the bridge names.
-                    call.image = callerImage;
-                    options.onCall(call);
-                }
-            },
-            // Which calls the sink above keeps: every one for a caller's own
-            // sink, the traced ones otherwise. The bridge asks once for each
-            // function and again when a level moves, and calls the sink for
-            // those alone.
-            wantsCall: (/** @type {string} */ name)=>options.onCall !== undefined
-                || journal.enabled(areaOfCall({ name }), journal.Level.TRACE),
-        },
-        filesystem: {
-            // The run's drives, as one Windows has one volume: a process after
-            // the first stands on the first one's, its writes and all, rather
-            // than on a copy of it.
-            volume: options.system?.volume,
-        },
-        media: {
-            // The decoder, handed down the same way the emulator's binary is:
-            // this layer is one module over one wasm blob, and which blob is
-            // the assembling caller's decision rather than something to fetch
-            // from inside a worker. Absent, the layer comes up and says so.
-            wasmBytes: options.media?.wasmBytes,
-            // The decoder a machine that replaced this one already made, so
-            // this process opens its cinematics over the same compiled module
-            // and linear memory instead of compiling the binary again. Absent
-            // on the first process, which makes its own.
-            instance: options.media?.instance,
-            // The hosted JPEG library reads a program's buffers and writes its
-            // pictures; handed the same thunks the sound layer's provider gets.
-            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-                core.api('memory').readBytes(address, length),
-            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-                core.api('memory').writeBytes(address, bytes),
-            allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
-            warn: (/** @type {string} */ message)=>reportDivergence('ijl15', message),
-        },
-        log: {
-            // Every call area starts switched off. A short run makes tens of
-            // thousands of host calls; a reader who has not asked for them
-            // should pay a map lookup and a comparison, not a formatted line.
-            // A filter turning one on is what makes them appear.
-            //
-            // A caller may ask for some of them on from the first instruction,
-            // and has to be able to: everything a program decides about a
-            // device it decides while starting up, and a category switched on
-            // once the engine exists is switched on after that has happened.
-            categories: {
-                'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off',
-                'call.video': 'off', 'call.input': 'off', 'call.net': 'off',
-                'call.com': 'off', 'call.hook': 'off',
-                ...options.log?.categories,
-            },
-            // Likewise the ring: a run whose interesting part is its first
-            // second needs it no bigger, and one that has to hold a whole
-            // startup needs it much bigger.
-            capacity: options.log?.capacity,
-            // The record count above bounds how many entries the index holds;
-            // this is the byte budget the entries themselves are packed into,
-            // and a category logging strings on every host call (a call area,
-            // every argument as hex) fills it far faster than `capacity`'s own
-            // default assumes. Left at the layer's default for a caller that
-            // never asks.
-            bytes: options.log?.bytes,
-            // A machine rebuilt on a child's image continues the sequence
-            // numbering of the one it replaced, so a reader holding a cursor
-            // from that journal keeps reading rather than falling behind a
-            // block that started over.
-            sequenceBase: options.log?.sequenceBase,
-            // The run's journal, when this machine is one of its later processes.
-            journal: options.log?.journal,
-            // The guest's clock, for the same reason the sound buffers use it:
-            // a phase timed against the host and a phase timed against the
-            // guest cannot be added together, and the number this layer exists
-            // to produce -- how much of a frame was ours -- is a sum.
-            now: options.log?.now ?? (()=>core.api('kernel').clock.virtualTime()),
-        },
-        audio: {
-            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
-                core.api('bridge').publishInterface(object, iid),
-            divergence: reportDivergence,
-            // The guest's clock, never the host's. A program that fills a sound
-            // buffer reads how far playback has got and compares it with a time
-            // it took from somewhere else; two clocks make it disagree with
-            // itself about whether it is behind.
-            now: ()=>core.api('kernel').clock.virtualTime(),
-            allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
-            // A guest buffer a handler fills on the program's behalf -- a
-            // segment's bytes read out of its stream -- goes back to the same
-            // heap it came from.
-            free: (/** @type {number} */ address)=>core.api('win32').heap().free(address),
-            // How DirectMusic's loader reads a wave a segment names. The
-            // loader knows the file's name and not where the volume keeps it,
-            // and the layer that answers for the volume is below audio, so
-            // the reader is handed down as a thunk the same way the mixer is
-            // handed to win32.
-            readFile: async(/** @type {string} */ path)=>{
-                /** @type {any} */
-                let handle;
-                try
-                {
-                    handle = core.api('filesystem').open(path, { create: false });
-                }
-                catch {
-                    return null;
-                }
-                if (!handle)
-                {
-                    return null;
-                }
-                const filesystem = core.api('filesystem');
-                try
-                {
-                    try
-                    {
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                    catch (e){
-                        // A block of the bundle not fetched yet: fetched, then
-                        // read once more, as the volume's own reader does.
-                        const miss = /** @type {any} */ (e);
-                        if (miss?.code !== 'BLOCK_MISS' || !fetchBundleBlocks)
-                        {
-                            throw miss;
-                        }
-                        await fetchBundleBlocks(miss.blocks);
-                        filesystem.seek(handle, 0);
-                        return filesystem.read(handle, filesystem.size(handle));
-                    }
-                }
-                finally
-                {
-                    core.api('filesystem').close(handle);
-                }
-            },
-            // Whether anything is reading the other end of the ring. Told from
-            // outside because only the assembling caller knows whether it
-            // opened a device, and it decides whether a program's play cursor
-            // follows the sound or the clock.
-            drained: options.audio?.drained ?? false,
-            // The storage of the output an earlier machine made, so a process
-            // replacement mixes into the same storage its reader already
-            // holds instead of orphaning it on a buffer nothing reads. Absent
-            // on the first process, which makes its own.
-            memory: options.audio?.memory,
-            // A process beside another on that storage rather than in its
-            // place: the arena span it was lent, and nothing of the other's
-            // closed.
-            beside: options.audio?.beside,
-            // Shared memory is what a worklet needs to read the far end at
-            // all, so this is an environment question answered here rather
-            // than guessed inside the mixer: without it (a page that is not
-            // cross-origin isolated) only this thread can ever read the
-            // output, and the engine mixer is the only backend built for that.
-            shared: options.audio?.shared ?? (typeof SharedArrayBuffer === 'function'),
-            // Whose call a sound provider is answering, read before it awaits
-            // anything: a callback into the guest after an await has to name
-            // the thread whose call it continues.
-            currentThread: ()=>core.api('kernel').currentThread(),
-            // An export's address, of a library the program ships or of one we
-            // synthesised. A provider announces itself through the library
-            // that loaded it, and hands that library its own entry points.
-            /** @param {string} dll @param {string} name */
-            resolveImport: (dll, name)=>resolveImport(dll, name, null),
-            // Setting an event belongs to the kernel, which sits below this
-            // layer and cannot be reached from it, so it is handed down the way
-            // the wave notifier's is. A stale handle is the program's mistake
-            // and not ours to fault on.
-            signal: (/** @type {number} */ handle)=>{
-                try
-                {
-                    const kernel = core.api('kernel');
-                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
-                }
-                catch (e){
-                    void e;
-                }
-            },
-            sampleRate: options.audio?.sampleRate,
-            // Whether the hosted MPEG provider is offered at all. Off, a
-            // program runs the decoder it ships, which is the comparison a
-            // measurement of the hosted one is made against.
-            mp3: options.audio?.mp3 ?? true,
-        },
-        input: {
-            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
-                core.api('bridge').publishInterface(object, iid),
-            /** @param {boolean} held */
-            mouseHeld: held=>{
-                mouseHeld = held;
-                showCursor();
-            },
-            divergence: reportDivergence,
-            cursorMoved: (/** @type {number} */ x, /** @type {number} */ y)=>
-                events.emit('cursor-moved', { x, y }),
-            // The event SetEventNotification names, set when the device takes
-            // input -- the kernel's, handed down as the sound layer's is.
-            signal: (/** @type {number} */ handle)=>{
-                try
-                {
-                    const kernel = core.api('kernel');
-                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
-                }
-                catch (e){
-                    void e;
-                }
-            },
-            now: ()=>core.api('kernel').clock.virtualTime(),
-            // Where a keystroke goes: the window win32 reports as foreground --
-            // the active one, not merely the last made, which may be hidden or
-            // a child -- because a person types into what they are looking at.
-            foreground,
-            // The cursor is confined to the display the program was told it
-            // has: a program that reads a position outside its own screen
-            // concludes the mouse left the window.
-            bounds: display && (()=>({ width: display.width, height: display.height })),
-            /**
-             * One line per press, and nothing at all when nobody asked for it.
-             *
-             * A press used to leave no trace anywhere: `call.input` is the
-             * program's own calls into USER32 and DINPUT, so it says what was
-             * asked and never whether anything arrived. "Did the click get in,
-             * and where did it land" was then unanswerable from a log, which is
-             * the one question a dead button asks.
-             *
-             * Its own category so a reader can take this and nothing else, and
-             * formatted behind the level check so a run nobody is watching pays
-             * a comparison per press.
-             *
-             * @param {import('./layers/input/router.js').PressRecord} press
-             */
-            trace: press=>{
-                if (!journal.enabled('input.press', journal.Level.TRACE))
-                {
-                    return;
-                }
-                journal.write('trace', 'input.press', '{0} {1} at={2} {3}',
-                    press.button, press.down ? 'down' : 'up', `${press.x},${press.y}`,
-                    `hwnd=0x${press.hwnd.toString(16)} msg=0x${press.message.toString(16)}`
-                    + ` wParam=0x${press.wParam.toString(16)}`
-                    + ` lParam=0x${press.lParam.toString(16)}`);
-            },
-        },
-        graphics: {
-            // The layer's own configuration fields, as the caller set them
-            // (`compressedTextures` and whatever the layer adds); what this
-            // build composes below -- the device, the presenter, the screen --
-            // is the run's and wins over a caller's value of the same name.
-            ...options.graphics,
-            choice: options.graphicsApi,
-            // Whose frames this machine's devices present: the run's screen
-            // is composed of every process's picture by its windows.
-            processId: options.processId ?? FIRST_PROCESS_ID,
-            // The display's raster -- the vertical blank, the scan line --
-            // runs on the guest's clock, which only this assembly can reach:
-            // a program times its spin on the blank with its own timers.
-            guestNow: ()=>core.api('kernel').clock.virtualTime(),
-            // A device call that waits on the display -- a Present beat-synced
-            // to the retrace -- stops the calling thread until that moment of
-            // the guest's clock and returns what its call answers then.
-            /** @param {number} deadline @param {number} result */
-            waitUntil: (deadline, result)=>{
-                const kernel = core.api('kernel');
-                const thread = kernel.currentThread();
-                kernel.block(thread, 'the vertical blank', { deadline, result });
-                return core.api('bridge').park(thread);
-            },
-            // Where a COM interface goes when a program asks for one. Without
-            // it the drawing entry points refuse rather than publishing into
-            // nowhere, which is what a build with no bridge should do.
-            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
-                core.api('bridge').publishInterface(object, iid),
-            unpublishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
-                core.api('bridge').unpublishInterface(object, iid),
-            // The device, with the frame boundary marked around what it
-            // presents. The profiler has always been able to account per frame
-            // and nothing ever told it where a frame ends, so every report said
-            // it had seen none -- and "where did the frame go" could not be
-            // asked at all, only "where did the run go".
-            // How often a frame may reach the screen at most. A guest presents
-            // whenever its own loop finishes, which can be far more often than
-            // any display shows -- and every one of those costs a read of the
-            // surface out of guest memory and an upload.
-            maxFps: options.maxFps ?? SETTINGS.frame.maxFps,
-            // The run's presenter, made once above every machine. The layer
-            // draws through it without making one of its own, so a replacement
-            // does not reconfigure the canvas or clear the last frame.
-            presenter: runPresenter,
-            device: options.device
-                ? {
-                    ...options.device,
-                    // The profile the adapter is shown with (`seam/adapter.js`).
-                    adapter: options.gpuProfile && options.gpuProfile !== 'host'
-                        ? { ...options.device.adapter, profile: options.gpuProfile }
-                        : options.device.adapter,
-                    /** @param {any} frame */
-                    presentTo: frame=>{
-                        // A frame runs from one present to the next, so the
-                        // first present has none to close. Closing one anyway
-                        // is counted as an imbalance and was the one this
-                        // engine reported on every run.
-                        if (framed)
-                        {
-                            // What the frame retired, and how much of it the
-                            // interpreter ran: a frame of ordinary slices that
-                            // all ran slowly is a compiler that had thrown its
-                            // code away, and nothing else in the frame says so.
-                            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                            {
-                                journal.note('instructions',
-                                    cpu.instructionCount() - retiredAtFrameStart);
-                                journal.note('interpreted',
-                                    cpu.interpretedSteps() - interpretedAtFrameStart);
-                                journal.note('hostWrittenBytes',
-                                    cpu.hostWrittenBytes() - writtenAtFrameStart);
-                                journal.note('heapDelta', heapUsed() - heapAtFrameStart);
-                            }
-                            // Run in every build: the frame's samplers feed the translator.
-                            journal.endFrame();
-                        }
-                        // The run's presenter owns the canvas copy; a build
-                        // with no presenter of its own -- a direct assembly,
-                        // a test -- still has whatever the caller handed in.
-                        if (runPresenter)
-                        {
-                            // A frame of the graphics worker says whose it is;
-                            // one drawn here is this process's.
-                            runPresenter.show(frame.source === undefined
-                                ? { ...frame, source: options.processId ?? FIRST_PROCESS_ID }
-                                : frame);
-                        }
-                        else
-                        {
-                            options.device.presentTo?.(frame);
-                        }
-                        journal.beginFrame();
-                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                        {
-                            retiredAtFrameStart = cpu.instructionCount();
-                            interpretedAtFrameStart = cpu.interpretedSteps();
-                            writtenAtFrameStart = cpu.hostWrittenBytes();
-                            heapAtFrameStart = heapUsed();
-                        }
-                        framed = true;
-                    },
-                }
-                : null,
-            screen: display,
-            // A program that creates its device at a resolution names its screen:
-            // one window is that resolution. The reported metrics follow it.
-            /**
-             * @param {number} width @param {number} height
-             * @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where]
-             */
-            resolution: (width, height, where = {})=>{
-                if (width > 0 && height > 0)
-                {
-                    display.width = width;
-                    display.height = height;
-                    // A fullscreen device takes the window it presents into
-                    // with it, as the real one does: placed at the origin, the
-                    // mode's size, and told so. A window left at its old size
-                    // has the program clipping its cursor to a corner of the
-                    // picture -- the picture fills the mode, the window does not.
-                    if (where.fullscreen && where.window)
-                    {
-                        win32.placeWindow(where.window, 0, 0, width, height,
-                            { announce: where.announce === true });
-                    }
-                }
-            },
-            // Where a locked surface or vertex buffer's bytes live. A lock
-            // hands the program an address it writes through and the unlock
-            // reads those bytes back, so it has to be memory the guest can
-            // reach -- an address invented for the purpose is one the program
-            // writes into nothing and we read nothing out of -- and on the
-            // boundary a driver keeps (`RESOURCE_ALIGNMENT`).
-            allocate: (/** @type {number} */ bytes, /** @type {boolean | undefined} */ cleared)=>
-                allocateCleared(win32.heap(), (address, value, length)=>
-                    core.api('memory').fillBytes(address, value, length), bytes, cleared !== false),
-            // The guest code the seams write, on pages nothing else is handed.
-            // None of it waits, and some of it writes records other threads'
-            // entries into the host read, so no slice ends inside it -- but in
-            // what says it may (`unbroken` false): a copy longer than the steps
-            // that finish a routine run.
-            allocateCode: (/** @type {number} */ bytes, unbroken = true)=>{
-                const at = win32.heap().allocateCode(bytes);
-                if (at !== 0 && unbroken)
-                {
-                    core.api('kernel').atomicCode(at, bytes);
-                }
-                return at;
-            },
-            // What wglGetProcAddress answers for a name OPENGL32 exports
-            // itself: the export's own address, the one an import bound to.
-            /** @param {string} name */
-            exportAddress: name=>findModule('OPENGL32.dll')?.addressOf(name) ?? 0,
-            // And back again when the last reference to a resource goes. The
-            // arena is the same one the program's own allocator draws from, and
-            // GlobalMemoryStatus reports what is left of it -- so a texture
-            // whose pixels are never given back does not only cost address
-            // space, it tells the program it is running out of memory.
-            free: (/** @type {number} */ address)=>win32.heap().free(address),
-            // Where "this call succeeded and did not do all of what it
-            // promises" goes. Every drawing API has states it accepts and does
-            // not honour yet, and a state accepted in silence is the defect
-            // class that produces a picture rather than an error.
-            divergence: reportDivergence,
-            // A window's client area, which is the size a device's back buffer
-            // takes when the program asks for zero by zero. Only the window
-            // layer can measure one, and a device answered with the whole
-            // display instead lays out and rasterises against a screen its
-            // window does not have.
-            windowClientSize: (/** @type {number} */ hwnd)=>{
-                const rect = win32.clientRect(hwnd);
-                return rect ? {
-                    width: rect.right - rect.left,
-                    height: rect.bottom - rect.top,
-                } : null;
-            },
-            // The cursor a program asks its device to draw. Nothing here
-            // composites one over the frame; the host is told, with the
-            // bitmap and the hot spot, and shows it the way its screen can.
-            /** @param {any} cursor */
-            cursor: cursor=>{
-                deviceCursor = cursor;
-                showCursor();
-            },
-        },
-        win32: {
-            // The Windows the machine is, and what the program says it knows,
-            // which is all Windows 10 needs to decide what to tell it.
-            windows: options.windows,
-            directx: options.graphicsApi
-                ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
-            compatibility: compatibilityOf(options.executable),
-            // The speed the registry reports: the rate the engine's rdtsc
-            // advances at. The emulator's counter keeps the default.
-            processorMhz: (options.engine ?? DEFAULT_ENGINE) === 'cork' ? CORK_TSC_MHZ : undefined,
-            processorName: (options.engine ?? DEFAULT_ENGINE) === 'cork'
-                ? processorName(SETTINGS) : undefined,
-            performanceFrequency: SETTINGS.qpc.frequency,
-            // What every process of the run shares, as one Windows does: the
-            // namespace a named mutex, event, semaphore, timer and file
-            // mapping are found in, and the registry. Carried in from outside
-            // this build, so a name a parent registered is one a child still
-            // finds and a key it wrote is one the child reads -- a
-            // replacement rebuilds this layer, and neither was ever this
-            // process's to keep.
-            system: options.system,
-            processId: options.processId,
-            standardFiles: options.standardFiles,
-            // The run's table of class objects served out of process, and this
-            // process's name in it: shared for the same reason.
-            com: options.com,
-            // The network beyond this runtime, when the embedder supplied one.
-            network: options.win32?.network,
-            unattended: Boolean(options.unattended),
-            answer: typeof options.unattended === 'object' ? options.unattended.answer : undefined,
-            // The roots WinVerifyTrust judges a signature's chain against;
-            // absent, the win32 layer's default store.
-            trustedRoots: options.win32?.trustedRoots,
-            // Off only for a gate's second path (`handleWords`).
-            handleWords: options.win32?.handleWords,
-            // What the program is told its display is, handed to the libraries
-            // that answer for one as well as to the layer that draws on it.
-            screen: display,
-            desktop: options.desktop,
-            // The system cursor, from user32's own state -- ShowCursor's count
-            // and a null SetCursor; a device's shown cursor goes over it.
-            /** @param {any} cursor */
-            reportCursor: cursor=>{
-                systemCursor = cursor;
-                showCursor();
-            },
-            // Sound leaves through the audio layer's mixer, and win32 sits
-            // below it. Handed down as a thunk and asked for only when a
-            // program opens a device: audio is created after win32, and a build
-            // with nothing draining the ring answers null, which is what keeps
-            // the wave cursor on the clock rather than stalling it against a
-            // device nobody is listening to.
-            output: ()=>{
-                const audio = core.api('audio');
-                return audio?.available?.() ? audio.output() : null;
-            },
-            // Where the pointer is and what is held down, for the calls that
-            // ask rather than wait for a message. Handed down for the same
-            // reason as the mixer: input is above win32 and cannot be reached
-            // from it, and it does not exist yet when this is read.
-            // The pixel-format negotiation and the end of an OpenGL frame,
-            // whose entry points GDI32 exports but whose answers belong to the
-            // graphics layer above. Every call goes through a thunk for the
-            // reason the mixer does: graphics is created after win32.
-            graphics: {
-                pixelFormat: {
-                    size: ()=>core.api('graphics').opengl().pixelFormat.size(),
-                    count: ()=>core.api('graphics').opengl().pixelFormat.count(),
-                    /** @param {Uint8Array} bytes */
-                    choose: bytes=>core.api('graphics').opengl().pixelFormat.choose(bytes),
-                    /** @param {number} index @param {number} bytes */
-                    describe: (index, bytes)=>
-                        core.api('graphics').opengl().pixelFormat.describe(index, bytes),
-                    /** @param {number} hdc @param {number} index */
-                    set: (hdc, index)=>core.api('graphics').opengl().pixelFormat.set(hdc, index),
-                    /** @param {number} hdc */
-                    get: hdc=>core.api('graphics').opengl().pixelFormat.get(hdc),
-                },
-                /** @param {number} hdc */
-                swapBuffers: hdc=>core.api('graphics').opengl().swapBuffers(hdc),
-                // GDI's drawing, and the pixels a context over a bitmap in
-                // guest memory draws into. Every draw a program makes through
-                // a device context lands here or fails.
-                /** @param {{ objects: any, metrics: (font: number) => any }} drawing */
-                createDrawing: drawing=>core.api('graphics').gdiDrawing().create(drawing),
-                /** @param {any} dc @param {any} bitmap */
-                surfaceFor: (dc, bitmap)=>core.api('graphics').gdiDrawing().surfaceFor(dc, bitmap),
-                // The font engine's measurements, so what a program lays out
-                // against is what the same engine draws.
-                /** @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font */
-                fontMetrics: font=>core.api('graphics').gdiDrawing().fontMetrics(font),
-                /**
-                 * @param {number} code
-                 * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
-                 */
-                glyph: (code, font)=>core.api('graphics').gdiDrawing().glyph(code, font),
-                /**
-                 * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
-                 * @param {string} text
-                 */
-                textWidth: (font, text)=>core.api('graphics').gdiDrawing().textWidth(font, text),
-                /** A program's own font, AddFontMemResourceEx's. @param {string} family @param {Uint8Array} bytes */
-                addFont: (family, bytes)=>core.api('graphics').gdiDrawing().addFont(family, bytes),
-                // The desktop every window context draws into, shown after
-                // a paint pass. The window manager decides when a pass is
-                // over; the graphics layer owns the surface and the screen.
-                presentDesktop: (/** @type {any} */ dc)=>core.api('graphics').gdiDrawing()
-                    .presentDesktop(dc),
-                // The display's gamma ramp, which the presenter shows every
-                // frame through, whichever API set it last.
-                /** @param {any} ramp */
-                setGammaRamp: ramp=>core.api('graphics').gdiDrawing().setDisplayGamma(ramp),
-                gammaRamp: ()=>core.api('graphics').gdiDrawing().displayGamma(),
-                appliesGamma: ()=>core.api('graphics').gdiDrawing().appliesGamma(),
-            },
-            // What a filter graph plays. Handed down rather than reached for:
-            // win32 sits below the media layer and may not import it, and the
-            // file the graph is asked for is read through the same volume every
-            // other file goes through -- which for a bundle means waiting for
-            // blocks, so this answers with a promise and the graph's own
-            // RenderFile parks the calling thread on it.
-            video: {
-                /** @param {string} path */
-                open: async path=>{
-                    const media = core.api('media');
-                    if (!media?.available?.())
-                    {
-                        return null;
-                    }
-                    try
-                    {
-                        const bytes = await readWholeFile(filesystem, blocks, path);
-                        return await media.open(bytes);
-                    }
-                    catch (e){
-                        // A film that cannot be read or cannot be decoded is an
-                        // ordinary state of a machine -- a codec nobody
-                        // installed -- and the graph already answers for it.
-                        events.emit('debug', { text: `video: ${path} could not be opened: ${
-                            e instanceof Error ? e.message : String(e)}` });
-                        return null;
-                    }
-                },
-            },
-            cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
-            // The cursor space a program declares with ClipCursor: the input
-            // layer scales pointer motion into it, so a menu built for a smaller
-            // logical screen than the backbuffer tracks the pointer exactly.
-            /** @param {{ left: number, top: number, right: number, bottom: number } | null} rect */
-            clipCursor: rect=>core.api('input')?.clip?.(rect),
-            /** @param {number} x @param {number} y */
-            placeCursor: (x, y)=>core.api('input')?.place?.(x, y),
-            // What SendInput puts into the stream goes into the input layer's
-            // router, the same place a real event from the page goes: a move
-            // becomes a message and a DirectInput delta both, or neither.
-            /** @param {any} event */
-            sendInput: event=>core.api('input')?.send?.(event),
-            /** @param {number} key */
-            keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
-            /** @param {number} key */
-            asyncKeyState: key=>core.api('input')?.asyncKeyState?.(key) ?? 0,
-            // The whole keyboard, as GetKeyboardState fills its caller's array
-            // and SetKeyboardState writes back: the same state GetKeyState
-            // reads one key at a time, so the two can never disagree.
-            keyboardState: ()=>core.api('input')?.keyboardState?.() ?? null,
-            /** @param {Uint8Array} bytes */
-            setKeyboardState: bytes=>core.api('input')?.setKeyboardState?.(bytes),
-            // The same reporter the graphics layer gets: a Win32 function that
-            // accepts a flag it does not act on owes the reader the same
-            // warning as a Direct3D state that is stored and unused.
-            divergence: reportDivergence,
-            // Each shader the program compiled, its source beside what came
-            // out, for a tool that asks: a picture wrong in a shader is read
-            // there and nowhere else.
-            shaderCompiled: (/** @type {any} */ record)=>events.emit('shader-compiled', record),
-            // Text a program copied, for the page to put on the browser's
-            // clipboard: the copy button of an error console is useless if
-            // what it copied cannot leave the engine.
-            /** @param {string} text */
-            onClipboard: text=>events.emit('clipboard', { text }),
-            // An address the program asked the shell to open -- a setup's
-            // "visit our site", a readme's link -- for the page to open, as
-            // XP's browser would. Taken whether or not anyone opens it: the
-            // machine reports a browser installed, and its ShellExecute
-            // answers success.
-            /** @param {string} url */
-            openUrl: url=>{
-                events.emit('open-url', { url });
-                return true;
-            },
-            /** @param {number} handle @param {string} text */
-            onOutput: (handle, text)=>events.emit('output', { handle, text }),
-            /** @param {string} text */
-            onTrace: text=>events.emit('debug', { text }),
-            registers: {
-                /** @param {string} name */
-                read: name=>core.api('cpu').readReg32(name),
-                /** @param {string} name @param {number} value */
-                write: (name, value)=>core.api('cpu').writeReg32(name, value),
-            },
-            // A C runtime returns a double on the floating-point stack, not in
-            // a register, so the functions that do are exported only when this
-            // is here to leave one there.
-            fpu: {
-                /** @param {number} value */
-                setResult: value=>core.api('cpu').fpu.setResult(value),
-                /** @param {number} index */
-                get: index=>core.api('cpu').fpu.get(index),
-                pop: ()=>core.api('cpu').fpu.pop(),
-            },
-            arena: { base: HEAP_BASE, size: HEAP_SIZE },
-            modules: {
-                /**
-                 * A module the process has loaded: one synthesised but not yet
-                 * imported or loaded is not there to be asked about.
-                 *
-                 * @param {string | null} name
-                 */
-                find: name=>{
-                    const module = findModule(name);
-                    return module?.loaded === false ? null : module;
-                },
-                /** @param {number} base */
-                byBase: base=>byBase.get(base >>> 0) ?? null,
-                /** Every module the process has loaded, in the order it loaded them. */
-                list: ()=>[...byBase.values()].filter(module=>module.loaded !== false),
-                /**
-                 * The module an address lies in, or null: what a program asks
-                 * GetModuleHandleEx of an address in its own code.
-                 *
-                 * @param {number} address
-                 */
-                containing: address=>{
-                    const at = address >>> 0;
-                    for (const module of byBase.values())
-                    {
-                        if (at >= module.base && at < module.base + (module.size ?? 0))
-                        {
-                            return module;
-                        }
-                    }
-                    return null;
-                },
-                imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
-                /** @param {string} name */
-                /** @param {string} name @param {number} [flags] */
-                load: (name, flags)=>loadLibraryAtRuntime(name, flags),
-                /** @param {number} handle */
-                dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
-                /**
-                 * What a thread's start and end are told of, image by image in
-                 * load order (`imagesTold`); none for one that asked not to be.
-                 */
-                threadCalls: ()=>imagesTold()
-                    .filter(each=>!withoutThreadCalls.has(each.base)),
-                /**
-                 * What the process's end is told of, the other way round: the
-                 * last image attached first, each one's TLS callbacks still
-                 * before its entry point, and the program's own last (decisions
-                 * A50).
-                 */
-                processDetach: ()=>imagesTold().reverse(),
-                /**
-                 * DisableThreadLibraryCalls. An image with static thread-local
-                 * storage goes on being told: its callbacks build each thread's
-                 * thread-local objects, and the call is documented to make no
-                 * optimisation for it.
-                 *
-                 * @param {number} base
-                 */
-                disableThreadCalls: base=>{
-                    if (!threadLocalImages.has(base >>> 0))
-                    {
-                        withoutThreadCalls.add(base >>> 0);
-                    }
-                },
-                loaderLock: ()=>loaderLock,
-                /** @param {any} asked */
-                resolved: asked=>events.emit('resolved', asked),
-                ...resourceLookup(()=>mainModule, byBase, dataFiles,
-                    (address, length)=>core.api('memory').readBytes(address, length)),
-                /**
-                 * The version resource of a file on the volume, by path: what
-                 * an installer compares before it replaces a shared component.
-                 *
-                 * @param {string} path
-                 */
-                versionInfo: path=>versionResourceOf(filesystem, path, blocks),
-                /**
-                 * Where the program found the copy of a library the table
-                 * answers in its place (`broughtCopies`), or null.
-                 *
-                 * @param {string} name
-                 */
-                broughtLibrary: name=>broughtCopies.get(moduleKeyOf(name)) ?? null,
-                /**
-                 * A whole file off the volume, waited for.
-                 *
-                 * @param {string} path
-                 */
-                readFile: path=>readWholeFile(filesystem, blocks, path),
-                /**
-                 * Whether a library is one this build synthesises, which has
-                 * a version though no file.
-                 *
-                 * @param {string} name
-                 */
-                systemLibrary: name=>systemLibraries.has(moduleKeyOf(name)),
-                /**
-                 * Every library this build synthesises, whichever layer
-                 * answers for it: what a setup finds in the system folder.
-                 */
-                systemLibraries: ()=>Object.keys(allLibraries),
-            },
-            commandLine: options.commandLine,
-            // Every child a program asks for, while the stack that asked is
-            // still standing. Kept by the caller above this, because honouring
-            // one of these tears the machine down and takes the logs with it.
-            /** @param {any} request */
-            spawned: request=>{
-                // The image as it is now (`readImageNow`), for every way the
-                // child is started to take before it reads the volume again.
-                request.image ??= readImageNow(filesystem, request.imagePath);
-                events.emit('process-create', {
-                    image: request.imagePath,
-                    commandLine: request.commandLine,
-                    suspended: request.suspended,
-                });
-                options.spawned?.({
-                    imagePath: request.imagePath,
-                    commandLine: request.commandLine,
-                    suspended: request.suspended,
-                    trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
-                });
-            },
-            // A child running beside this process, ended where it runs.
-            terminate: (/** @type {any} */ request, /** @type {number} */ code)=>
-                options.terminate?.(request, code) ?? false,
-            /** @param {any} thread */
-            threadBlock: thread=>{
-                if (!threadBlocks)
-                {
-                    return;
-                }
-                giveBackBlocks();
-                holdBlock(thread, threadBlocks.createThreadBlock({
-                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
-                    locals: threadLocals(),
-                }));
-            },
-            idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
-            /** @param {any[]} needed */
-            /** @param {any[]} needed */
-            fetchBlocks: fetchBundleBlocks = needed=>{
-                if (!blocks)
-                {
-                    return Promise.resolve();
-                }
-                // Counted, because from the run loop every parked thread looks
-                // the same and they are not: a thread waiting on a range
-                // request is waiting on the network, and a thread waiting on
-                // its own message queue is waiting on nothing at all. Told
-                // apart, one of them is a number to reduce and the other is a
-                // loop to stop taking so seriously.
-                bundleReads.requests++;
-                for (const block of needed)
-                {
-                    bundleReads.blocks++;
-                    bundleReads.bytes += block.packed;
-                    if (blocksSeen.has(block.index))
-                    {
-                        bundleReads.again++;
-                        bundleReads.againBytes += block.packed;
-                    }
-                    else
-                    {
-                        blocksSeen.add(block.index);
-                    }
-                }
-                fetching++;
-                if (fetching === 1)
-                {
-                    // The loop is about to have nothing to do until this
-                    // answers, and it can be told exactly when that is. Without
-                    // it the only way to find out was to sleep and look again,
-                    // on a timeout a browser clamps to a millisecond -- which
-                    // measured out at nineteen wake-ups per range request and a
-                    // fifth of a whole run spent asking.
-                    fetched = new Promise(resolve=>{
-                        arrived = resolve;
-                    });
-                    // A page shows that a stall is the bundle arriving, not the game.
-                    events.emit('bundle-fetching', { fetching: true });
-                }
-                return blocks.fetch(needed).finally(()=>{
-                    fetching--;
-                    if (fetching === 0)
-                    {
-                        const open = arrived;
-                        fetched = null;
-                        arrived = ()=>{};
-                        open();
-                        events.emit('bundle-fetching', { fetching: false });
-                    }
-                });
-            },
-            /** @param {number} hwnd */
-            created: hwnd=>{
-                lastCreated = hwnd;
-            },
-        },
-    });
+    const core = await assembleModules(await layerConfig({
+        HEAP_BASE, HEAP_SIZE, STACK_POOL_BASE, STACK_POOL_SIZE, STACK_POOL_START, areaOfCall,
+        callerImage, dataFiles, deviceCursor, display, dllNotifications, engineArea,
+        engineCode, events, exitsAtFrameStart, fetchBundleBlocks, findModule, foreground, framed,
+        giveBackBlocks, handed, heapAtFrameStart, heapReadable, heapUsed, holdBlock, imagesTold,
+        interpretedAtFrameStart, journalCall, lastCreated, lastErrorOfWin32, layerTraces, long,
+        mainImage, mainStack, memorySize, modules, mouseHeld, options, processBits, ramLimit,
+        programLoaded, reportDivergence, retiredAtFrameStart, runPresenter, showCursor,
+        systemCursor, threadLocalImages, threadLocals, threadStackSize, translateAtFrameStart,
+        translationStore, withoutThreadCalls, workerAtFrameStart, workerFrameTimes,
+        writtenAtFrameStart,
+        blocks: ()=>blocks,
+        bridge: ()=>bridge,
+        broughtCopies: ()=>broughtCopies,
+        builtLibraries: ()=>builtLibraries,
+        cpu: ()=>cpu,
+        exportOf: ()=>exportOf,
+        filesystem: ()=>filesystem,
+        idlers: ()=>idlers.value,
+        imageInformation: ()=>imageInformation,
+        journal: ()=>journal,
+        kernel: ()=>kernel,
+        loadErrors: ()=>loadErrors,
+        loadLibraryAtRuntime: ()=>loadLibraryAtRuntime,
+        loaderLock: ()=>loaderLock,
+        mainModule: ()=>mainModule,
+        memory: ()=>memory,
+        moduleUnderContext: ()=>moduleUnderContext,
+        resolveImport: ()=>resolveImport,
+        systemLibraries: ()=>systemLibraries,
+        threadBlocks: ()=>threadBlocks,
+        win32: ()=>win32,
+        core: ()=>core,
+    }));
 
     // The hosted MPEG provider decodes through the media layer's binary and
     // asks for it synchronously, so the binary has to be up before the first
@@ -5282,7 +2263,15 @@ async function buildApp(options){
     const registryInherited = core.api('win32').registryInherited?.() ?? false;
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
         registry: core.api('win32').registry(), inherited: registryInherited,
-        standing: filesystem.inherited?.() ?? false });
+        standing: filesystem.inherited?.() ?? false, system: options.system });
+    // A saved session restored the registry whole, with the client a past run
+    // had: this run's is announced over it.
+    const steamClient = core.api('win32').steamClient?.() ?? 0;
+    if (steamClient !== 0 && options.win32?.steam)
+    {
+        announceSteamClient(core.api('win32').registry(),
+            { pid: steamClient, account: options.win32.steam });
+    }
 
     const journal = core.api('log');
     // The run's processes share one event bus and one journal, so only the
@@ -5291,7 +2280,7 @@ async function buildApp(options){
     // machine, and a process that replaced it still fires events.
     if (!options.log?.journal)
     {
-        journalEvents(events, journal.journal?.() ?? journal);
+        journalEvents(events, journal.journal?.() ?? journal, { shaders: options.log?.shaders });
     }
 
     const cpu = core.api('cpu');
@@ -5300,19 +2289,18 @@ async function buildApp(options){
     const lentTranslators = new Map();
     const memory = core.api('memory');
     const kernel = core.api('kernel');
-    // Children run beside this process where the run runs processes at once:
-    // a wait on one is timed from the moment it is made.
-    kernel.processes?.runBeside?.(typeof options.beside === 'function');
     const loader = core.api('loader');
     const win32 = core.api('win32');
+    /** The activation contexts the loader looks libraries up through (`actctx.js`). */
+    const activation = /** @type {any} */ (win32.activationContexts)?.() ?? null;
     const bridge = core.api('bridge');
     const graphics = core.api('graphics');
     const audio = core.api('audio');
     const input = core.api('input');
 
-    // Cork runs with nothing of the emulator loaded: its own host, its own
-    // memory, and the translator named by `engineUrl`.
-    await cpu.boot(emulatorOf(options) ?? undefined);
+    // The machine: cork's own host and memory, and the translator named by
+    // `engineUrl`.
+    await cpu.boot();
 
     // A processor exception goes to the handlers the program registered
     // before it stops the machine. The thread waits the way a host call does
@@ -5340,15 +2328,14 @@ async function buildApp(options){
         return true;
     });
 
-    // Mounted after the machine is up. A zstd block is decoded by this
-    // project's own decoder now, so the mount no longer needs the emulator.
-    // The bundle is the run's: the first process opens it -- its index, its
-    // block cache, the background fill -- and every process after it mounts
-    // the same one, rather than each reading the index again and filling a
-    // second cache from the network beside the first.
+    // Mounted after the machine is up. The bundle is the run's: the first
+    // process opens it -- its index, its block cache, the background fill --
+    // and every process after it mounts the same one, rather than each reading
+    // the index again and filling a second cache from the network beside the
+    // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
-        ?? await mountBundle({ options, cpu, events, translationStore });
+        ?? await mountBundle({ options, events, translationStore });
     if (options.system && blocks)
     {
         options.system.bundle = blocks;
@@ -5359,8 +2346,13 @@ async function buildApp(options){
     // what the processes before it wrote.
     if (!(filesystem.inherited?.() ?? false))
     {
-        await furnishVolume({ options, events, filesystem, blocks, seeded,
+        blocks = await furnishVolume({ options, events, filesystem, blocks, seeded,
+            reader: options.cache?.reader ?? null,
             registry: registryInherited ? null : core.api('win32').registry() });
+        if (options.system && blocks)
+        {
+            options.system.bundle = blocks;
+        }
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
@@ -5398,38 +2390,68 @@ async function buildApp(options){
     // layout question rather than something to honour silently.
     const stackRoom = initialStack - (mainStack.initialStack === undefined
         ? thunkBase + cpu.layout.thunkCapacity : STACK_POOL_START);
-    const stackSize = options.stackSize
-        ?? Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
+    const stackSize = Math.min(stackReserveOf(mainImage.stackReserve), stackRoom);
 
     memory.register({
-        name: 'entry-vector', base: entryVector, size: 4,
+        name: 'entry-vector', base: entryVector, size: long ? 8 : 4,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
     memory.register({
         name: 'stack', base: initialStack - stackSize, size: stackSize,
         kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE,
     });
-    memory.register({
-        name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
-        kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
-    });
-    // Our own boot ROM, so that a report can name it. A fault leaves the
-    // processor standing in the stub behind its vector, and until this was here
-    // that address came back as unmapped -- which sent every reader of a crash
-    // looking for a guest bug at an address belonging to the engine. Cork has
-    // no ROM and so registers none.
-    if (cpu.layout.romSize > 0)
+    // The engine's range where it is cut out of the heap (`engineAreaFor`'s
+    // `cut`): never handed out, and the heap's region two, on either side of it,
+    // as a span a library claims leaves it.
+    // The other executors' pages, where only they are cut out (`others`).
+    const cutRange = engineArea?.cut ? engineArea : engineArea?.others ?? null;
+    const cutArea = cutRange && cutRange.at > HEAP_BASE
+        && cutRange.at + cutRange.span < HEAP_BASE + HEAP_SIZE ? cutRange : null;
+    if (cutRange && !cutArea)
+    {
+        throw new Error(`app: the engine's range at 0x${cutRange.at.toString(16)} lies`
+            + ` outside the heap's span 0x${HEAP_BASE.toString(16)}+0x${HEAP_SIZE.toString(16)}`);
+    }
+    /** @type {{ name: string, base: number, end: number }[]} */
+    const heapParts = cutArea
+        ? [{ name: 'heap', base: HEAP_BASE, end: cutArea.at },
+            { name: `heap@${(cutArea.at + cutArea.span).toString(16)}`,
+                base: cutArea.at + cutArea.span, end: HEAP_BASE + HEAP_SIZE }]
+        : [{ name: 'heap', base: HEAP_BASE, end: HEAP_BASE + HEAP_SIZE }];
+    for (const { name, base, end } of heapParts)
     {
         memory.register({
-            name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
-            kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
+            name, base, size: end - base,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
         });
     }
-
-    // Every system module exists in guest memory before the program's first
-    // instruction, not when something first asks for it. An address taken early
-    // has to be the address that works later (§13.3), and a module conjured on
-    // demand cannot promise that.
+    // The space past 4 GiB a 64-bit process reserves in (`cpu.far`): the program's
+    // to read and write where kernel32 has given its chunks frames.
+    // A wide window's RAM past 4 GiB is registered by reservation, as kernel32 makes
+    // them (`far-space.js`): an image may lie there too.
+    const farSpace = memory.farSpace?.() ?? null;
+    const farFrom = farSpace?.direct === undefined ? farSpace?.base : farSpace.table;
+    if (farSpace !== null && farFrom !== undefined)
+    {
+        memory.register({ name: 'far', base: farFrom, size: farSpace.top - farFrom,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE });
+    }
+    if (cutArea)
+    {
+        win32.heap().allocateAt(cutArea.at, cutArea.span,
+            { owner: 'engine', reserving: true, held: true });
+    }
+    // A heap past 2 GiB (`LARGE_ADDRESS_TOP`) runs over the system's shared
+    // page, where it lies once the RAM held reaches past it: the heap never
+    // hands it out, nor the 64 KiB after it, as Windows maps neither.
+    if (HEAP_BASE < SHARED_USER_DATA && HEAP_BASE + HEAP_SIZE > SHARED_USER_DATA + 0x20000)
+    {
+        win32.heap().allocateAt(SHARED_USER_DATA, 0x20000,
+            { owner: 'kuser', reserving: true, held: true });
+    }
+    // Every system module has its span and its addresses before the program's
+    // first instruction: an address taken early has to be the address that
+    // works later (§13.3). Its bytes are written when something first loads it.
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
         ...(audio.ordinals?.() ?? {}),
@@ -5439,13 +2461,16 @@ async function buildApp(options){
     // The drawing APIs are libraries like any other as far as a program is
     // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
     // and nothing about how they are reached should differ.
-    const allLibraries = {
-        ...win32.libraries(),
-        ...graphics.libraries?.() ?? {},
-        ...audio.libraries?.() ?? {},
-        ...input.libraries?.() ?? {},
-        ...core.api('media').libraries?.() ?? {},
-    };
+    // Merged name by name as each layer keeps it: win32's are made when first
+    // read, and a spread would make them all.
+    /** @type {Record<string, Record<string, any>>} */
+    const allLibraries = {};
+    for (const tables of [win32.libraries(), graphics.libraries?.() ?? {},
+        audio.libraries?.() ?? {}, input.libraries?.() ?? {},
+        core.api('media').libraries?.() ?? {}])
+    {
+        Object.defineProperties(allLibraries, Object.getOwnPropertyDescriptors(tables));
+    }
     /**
      * The names answered from this engine's table even beside a file the
      * program brought: the KnownDLLs, and the redistributable runtimes the
@@ -5465,950 +2490,6 @@ async function buildApp(options){
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
     /**
-     * An export that is code of its own, with the traps it jumps to registered
-     * and the jumps to them for the loader to fill in.
-     *
-     * @param {any} fn @param {string} qualified  `DLL!Name`.
-     */
-    const codeExport = (fn, qualified)=>{
-        /** @type {{ at: number, target: number }[]} */
-        const jumps = [];
-        const code = fn.code({
-            /** @param {any} trap */
-            register: trap=>bridge.register(qualified, trap),
-            /** @param {number} at @param {number} target */
-            jump: (at, target)=>void jumps.push({ at, target }),
-        });
-        return { code, jumps, pointers: fn.pointers };
-    };
-    // Each system module where the one before it ends, at the granularity
-    // every image is placed at: the window they share is the room left for
-    // the libraries a program brings, and a module is a few pages -- a
-    // megabyte apart, sixty of them left a third of the window to those.
-    let systemModulesEnd = MODULE_BASE;
-    Object.entries(allLibraries).forEach(([name, table])=>{
-        // A library imported by number has to be synthesised with the numbers
-        // the program compiled against; one we assigned ourselves would bind to
-        // a different function, silently.
-        /** @type {Record<number, string>} */
-        const byOrdinal = ordinalsOf[name] ?? {};
-        const declared = new Map(Object.entries(byOrdinal)
-            .map(([ordinal, exported])=>[exported, Number(ordinal)]));
-
-        const exports = Object.entries(table).map(([exported, fn])=>({
-            name: exported,
-            ordinal: declared.get(exported),
-            // An export is a function that is code of its own, a variable the
-            // program reads through its address, a trap into the host, or
-            // guest code that decides for itself when to trap: the builder
-            // hands such an entry the means to register the traps it falls
-            // back to. Code of its own that hands a call to the host jumps to
-            // a trap answering as the export, and named as it; the jump's
-            // displacement is the loader's, which places the code.
-            // A variable may hold other exports' addresses: a vtable's slots.
-            ...fn.code ? codeExport(fn, `${name}!${exported}`) : fn.data ? {
-                data: fn.data(), pointers: fn.pointers, entry: fn.entry,
-            } : {
-                target: fn.guest
-                    ? fn.guest({
-                        /** @param {string} label @param {any} trap */
-                        register: (label, trap)=>bridge.register(label, trap),
-                    })
-                    : bridge.register(`${name}!${exported}`, fn),
-            },
-        }));
-
-        const base = systemModulesEnd;
-        // A table with a DllMain is a module with an entry point, run when a
-        // program first loads it -- which is how a library the program did not
-        // import announces itself to the one that asked for it.
-        const placed = loader.synthesise({
-            name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined,
-        });
-        systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
-
-        // An export's address is its trampoline inside the module, and that is
-        // what both the import table and GetProcAddress hand out -- so a program
-        // comparing the two finds them equal, as it does on Windows.
-        const addresses = new Map(exports.map(entry=>[entry.name, placed.addressOf(entry.name)]));
-        const ordinals = new Map([...addresses]
-            .map(([exported, address])=>[placed.ordinalOf(exported), address]));
-        for (const [exported, address] of addresses)
-        {
-            bridge.label(Number(address), `${name}!${exported}`);
-        }
-        // An export whose code writes what another thread's entry into the
-        // host reads, and never waits, runs unbroken (the kernel's atomicCode).
-        for (const entry of exports)
-        {
-            if (table[entry.name]?.unbroken && 'code' in entry)
-            {
-                core.api('kernel').atomicCode(Number(addresses.get(entry.name)), entry.code.length);
-            }
-        }
-
-        const record = {
-            name,
-            base,
-            size: placed.size,
-            /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
-            /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
-            entryPoint: placed.entryPoint,
-            // Not until a program asks for it: a synthesised module exists
-            // from the first instruction, but its entry point is a promise
-            // to whoever loads it, and runs on that caller's thread.
-            attached: false,
-            loaded: false,
-            /** @returns {number | Promise<number>} */
-            release: ()=>releaseLibrary(record),
-        };
-        byName.set(moduleKeyOf(name), record);
-        byBase.set(base, record);
-    });
-    for (const name of ALWAYS_LOADED)
-    {
-        markLoaded(byName.get(name) ?? null);
-        const always = byName.get(name);
-        if (always)
-        {
-            always.pinned = true;
-        }
-    }
-
-    /**
-     * An import's address, wherever the library that provides it came from.
-     *
-     * By ordinal as well as by name, because a library may be imported either
-     * way and some are imported only by number -- a descriptor that gives an
-     * ordinal and no name is not exotic, it is how a whole class of libraries
-     * has always been linked against.
-     *
-     * @param {string} dll
-     * @param {string | null} name
-     * @param {number | null} ordinal
-     */
-    const resolveImport = (dll, name, ordinal)=>{
-        const module = findModule(dll);
-        if (!module)
-        {
-            return null;
-        }
-        markLoaded(module);
-        module.pinned = true;
-        const address = name !== null
-            ? module.addressOf(name)
-            : ordinal === null ? null : module.addressOfOrdinal(ordinal);
-        return address === null ? null : watched(dll, name, ordinal, address);
-    };
-
-    /**
-     * Which imports to stand in front of, and what each one's arguments are.
-     * One stub per import, kept because a library is imported by many others
-     * and a second stub for the same function would report the same call twice.
-     *
-     * @type {Map<string, number>}
-     */
-    const watches = new Map();
-
-    /**
-     * Puts a watch in front of an import when the caller asked for one.
-     *
-     * Only a guest module's exports are worth watching: a call into one of our
-     * own is already a trap and already recorded, and pointing a watch at a
-     * stub would trap twice for one call.
-     *
-     * @param {string} dll @param {string | null} name
-     * @param {number | null} ordinal @param {number} address
-     * @returns {number}
-     */
-    const watched = (dll, name, ordinal, address)=>{
-        if (!options.watchImport)
-        {
-            return address;
-        }
-        const asked = options.watchImport(dll, name, ordinal);
-        if (!asked)
-        {
-            return address;
-        }
-        return installWatch(`${dll}!${name ?? `#${ordinal}`}`, asked.args * 4, address,
-            asked.strings ?? []);
-    };
-
-    /**
-     * A watch stub in front of `target`, one per label.
-     *
-     * @param {string} label @param {number} argBytes @param {number} target
-     * @param {(number | string)[]} [strings]  Which arguments to report as C strings.
-     * @returns {number} the stub's address, to be called in place of the target
-     */
-    const installWatch = (label, argBytes, target, strings = [])=>{
-        const already = watches.get(label);
-        if (already !== undefined)
-        {
-            return already;
-        }
-        const stub = bridge.watch(label, {
-            argBytes,
-            target,
-            // The call is about to reach the real function, which will leave
-            // its own result in EAX; nothing here answers it. What this does
-            // instead is arrange to be told what that answer was, by sending
-            // the function home through a stub of ours.
-            /** @param {number[]} _args @param {{ callerStack: number, freeStack: number }} frame */
-            handler: (_args, frame)=>{
-                const esp = frame.callerStack >>> 0;
-                // Read now, while the arguments are still there: a name built
-                // on the caller's stack is gone by the time the answer comes.
-                /** @param {string | number} where */
-                const pointerOf = where=>{
-                    if (String(where).startsWith('@'))
-                    {
-                        // `@hex`: an address of its own, a program's global.
-                        return parseInt(String(where).slice(1), 16) >>> 0;
-                    }
-                    // ECX is untouched by the stub; EDX was spent on the trap
-                    // and sits in the block the stub saved, third from the top.
-                    return where === 'ecx'
-                        ? cpu.readReg32('ecx') >>> 0
-                        : where === 'edx'
-                            ? memory.readU32((frame.freeStack >>> 0) + 20) >>> 0
-                            : memory.readU32(esp + 4 + Number(where) * 4) >>> 0;
-                };
-                const named = strings.map(where=>{
-                    // `ecx*104` is the object's own bytes rather than a string,
-                    // `[ecx.88]*64` those of the object a field of it points
-                    // at, and `@hex` stands for an address of the program's
-                    // own: what a method was handed, read while it runs.
-                    const bytes = /^(\[)?(ecx|edx|\d+|@[0-9a-f]+)(?:\.(\d+)\])?\*(\d+)$/.exec(String(where));
-                    if (bytes)
-                    {
-                        let at = pointerOf(bytes[2]);
-                        if (bytes[1])
-                        {
-                            at = memory.readU32(at + Number(bytes[3])) >>> 0;
-                        }
-                        try
-                        {
-                            return `0x${at.toString(16)}:`
-                                + [...memory.readBytes(at, Number(bytes[4]))]
-                                    .map(b=>b.toString(16).padStart(2, '0')).join('');
-                        }
-                        catch {
-                            return `0x${at.toString(16)}:unmapped`;
-                        }
-                    }
-                    const pointer = pointerOf(where);
-                    try
-                    {
-                        return memory.readCString(pointer, 260);
-                    }
-                    catch {
-                        return `0x${pointer.toString(16)}`;
-                    }
-                });
-                pending.push({ label, esp, returnTo: memory.readU32(esp), named,
-                    thread: kernel.currentThread() });
-                memory.writeU32(esp, catcher());
-                return 0;
-            },
-        });
-        watches.set(label, stub);
-        return stub;
-    };
-
-    /**
-     * Watched calls that have not returned yet, innermost last, each with the
-     * thread that made it.
-     *
-     * A stack rather than a map, because a return address is not enough to tell
-     * two calls apart and the answer is wanted per call; and searched for the
-     * returning thread's own innermost call, because threads interleave inside
-     * watched calls -- a worker woken by one runs before it returns -- and a
-     * return taken from another thread's frame sends this one into that
-     * thread's caller.
-     *
-     * @type {{ label: string, esp: number, returnTo: number, named: string[],
-     *     thread: any }[]}
-     */
-    const pending = [];
-
-    /** @type {number | null} */
-    let catcherStub = null;
-
-    /**
-     * Where a watched function returns to instead of its caller: a stub that
-     * reports the answer and then sends it the rest of the way.
-     *
-     * Reached by the callee's own `ret`, so the return address is gone from the
-     * stack by the time this runs and has to be put back for the stub's own
-     * `ret` to find. EAX is the answer and is preserved into ECX by the stub,
-     * because the trap needs EAX to say which stub fired.
-     */
-    const catcher = ()=>{
-        catcherStub ??= bridge.register('<watch-return>', {
-            argBytes: 0,
-            preserveResult: true,
-            handler: ()=>{
-                const answer = cpu.readReg32('ecx') >>> 0;
-                const thread = kernel.currentThread();
-                let at = pending.length - 1;
-                while (at >= 0 && pending[at].thread !== thread)
-                {
-                    at--;
-                }
-                if (at < 0)
-                {
-                    return answer;
-                }
-                const [frame] = pending.splice(at, 1);
-                events.emit('guest-return', frame.named.length
-                    ? { name: frame.label, strings: frame.named, result: answer }
-                    : { name: frame.label, result: answer });
-                const esp = (cpu.readReg32('esp') >>> 0) - 4;
-                memory.writeU32(esp, frame.returnTo);
-                cpu.writeReg32('esp', esp);
-                return answer;
-            },
-        });
-        return catcherStub;
-    };
-
-    /**
-     * Libraries that could not be given room. Remembered, because asking
-     * again cannot change the answer until something mapped is unmapped and
-     * its room is free -- forgotten then, as the room may be what one of them
-     * wanted; a library that was merely not there is not remembered, since a
-     * program puts one in place and asks again -- an installer does exactly
-     * that with a library it brought.
-     *
-     * @type {Set<string>}
-     */
-    const absentLibraries = new Set();
-    /** Where the next runtime library goes. Set once the shipped ones are placed. */
-    let nextLibraryBase = 0;
-
-    /**
-     * A library loaded at run time is given what the startup stub gives one
-     * the program imports: a slot from the pool TlsAlloc draws on, written
-     * into the dword its directory names, and a copy of its block in that
-     * slot of every thread -- those there are now, the one loading it among
-     * them, and every one made after (`threadLocals`).
-     *
-     * @param {number} base
-     * @param {import('./layers/loader/internal/tls.js').TlsDirectory} directory
-     * @returns {boolean} false, with nothing kept, when the slot is past the
-     *     thread-local array or there is no room for every thread's copy
-     */
-    const giveThreadLocals = (base, directory)=>{
-        const kernel32 = allLibraries['KERNEL32.dll'];
-        const slot = kernel32.TlsAlloc.handler([]) >>> 0;
-        const local = {
-            slot, template: directory.template,
-            size: directory.templateSize + directory.zeroFillSize,
-        };
-        // Threads that are gone take no copy.
-        giveBackBlocks();
-        if (!threadBlocks?.addThreadLocal(local))
-        {
-            // All ones is TLS_OUT_OF_INDEXES: no slot was taken.
-            if (slot !== 0xffffffff)
-            {
-                kernel32.TlsFree.handler([slot]);
-            }
-            return false;
-        }
-        memory.writeU32(base + directory.indexRva, slot);
-        threadLocalImages.set(base, {
-            indexAddress: base + directory.indexRva, template: local.template, size: local.size,
-            callbacks: directory.callbackRvas.map(rva=>base + rva),
-        });
-        return true;
-    };
-
-    /**
-     * FreeLibrary: gives back one of the references LoadLibrary took on a
-     * library the program loaded by name. The last one tells its TLS
-     * callbacks and then its DllMain of the detach, on the thread that asked
-     * and with lpvReserved NULL, and unloads it -- its thread-local slot and
-     * every thread's copy of its block are given back, a library read off the
-     * volume is unmapped and forgotten, one of ours stops being loaded. A
-     * library something imports is pinned and never unloaded.
-     *
-     * @param {any} held
-     * @returns {number | Promise<number>}
-     */
-    const releaseLibrary = held=>{
-        if (held.pinned || !(held.references > 0))
-        {
-            return 1;
-        }
-        held.references--;
-        if (held.references > 0)
-        {
-            return 1;
-        }
-        const unload = ()=>{
-            const local = threadLocalImages.get(held.base);
-            if (local)
-            {
-                // Read before the image goes, which it is a dword of.
-                const slot = memory.readU32(local.indexAddress);
-                threadLocalImages.delete(held.base);
-                threadBlocks?.removeThreadLocal(slot);
-                allLibraries['KERNEL32.dll'].TlsFree.handler([slot]);
-            }
-            threadBlocks?.removeModule(held.base);
-            const at = attachOrder.indexOf(held);
-            if (at >= 0)
-            {
-                attachOrder.splice(at, 1);
-            }
-            if (held.file)
-            {
-                byName.delete(moduleKeyOf(held.name));
-                byBase.delete(held.base);
-                memory.unregister(held.name);
-                librarySpace.giveBack(held.base);
-                // Room given back: a library refused for want of it may fit now.
-                absentLibraries.clear();
-            }
-            else
-            {
-                held.loaded = false;
-                held.attached = false;
-            }
-            events.emit('library-unloaded', { name: held.name, base: held.base });
-            return 1;
-        };
-        const routines = held.attached === false ? [] : [
-            ...threadLocalImages.get(held.base)?.callbacks ?? [],
-            ...held.entryPoint && held.entryPoint !== held.base ? [held.entryPoint] : [],
-        ];
-        if (routines.length > 0)
-        {
-            return win32.callEntryPoint({
-                routines, base: held.base, reason: DLL_PROCESS_DETACH, reserved: 0,
-                thread: kernel.currentThread(),
-            }).then(unload);
-        }
-        return unload();
-    };
-
-    /** The libraries this build synthesises, as opposed to ones a program brings. */
-    const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
-
-    /**
-     * The path a program named for a library answered from the table in place
-     * of its copy, by module key: a table that reads what the copy's package
-     * carries beside it -- DSETUP the licence in dsetup32.dll -- looks there.
-     *
-     * @type {Map<string, string>}
-     */
-    const broughtCopies = new Map();
-
-    /**
-     * Those of them that are Windows' own, by file name: a copy an installation
-     * left in system32 would be mapped in place of the engine's, so a bottle
-     * carries none (`@bottlify/installer`'s `collect`). The redistributables a
-     * table only stands in for -- the D3DX helpers -- are not among them.
-     */
-    const redistributables = new Set(
-        (/** @type {() => string[]} */ (win32.redistributables)?.() ?? []).map(moduleKeyOf));
-    const windowsLibraries = Object.keys(allLibraries)
-        .filter(name=>!redistributables.has(moduleKeyOf(name)));
-
-    // Where a call to an import nothing claims lands. The branch that returns
-    // and the branch that faults are made in `createMissingImports`; what it
-    // needs from this closure is the evidence that decides between them.
-    const { bind: missingImport, calls: missingCalls } = createMissingImports({
-        register: (name, spec)=>bridge.register(name, spec),
-        events,
-        journal,
-        classify: (dll, name)=>{
-            const own = !systemLibraries.has(moduleKeyOf(dll)) && findModule(dll) !== null;
-            // A name a library the program brought does not export is a
-            // mismatch between two of its own files, not a gap in this build:
-            // it is reported as the program's own. The full list of what
-            // nothing claims is already said at bind time, as
-            // `import-unresolved`; the call is the one that matters.
-            return {
-                own,
-                ...missingImportCall(name,
-                    { own, cdeclLibrary: win32.libraryConvention(dll) === 'cdecl' }),
-            };
-        },
-        fault: (label, frame)=>{
-            // The argument bytes are what nobody knows; the words above
-            // the return address are the next best thing, since a reader
-            // who knows the function can count them.
-            const esp = frame.callerStack >>> 0;
-            const words = [0, 1, 2, 3].map(word=>{
-                const held = memory.readU32(esp + 4 + word * 4) >>> 0;
-                return `0x${held.toString(16).padStart(8, '0')}`;
-            });
-            const from = describeAddress({ cpu, memory, kernel, bridge }, frame.hostReturn);
-            cpu.raiseFault({
-                name: 'unimplemented import',
-                eip: frame.hostReturn,
-                calledFrom: frame.hostReturn,
-                detail: `unimplemented import ${label}, called from ${from};`
-                    + ` argument bytes unknown, the stack holds ${words.join(' ')}`,
-            });
-            // The stub's `ret` goes into the park loop, whose halt ends
-            // the slice before the caller runs another instruction.
-            kernel.holdThread();
-            return 0;
-        },
-    });
-
-    // Binds the sidecar's entries for one image, once the sidecar is set up
-    // (below); until then a library loaded at run time has nothing to bind.
-    /** @type {((image: { name: string, base: number, sizeOfImage: number,
-     *   timeDateStamp: number }) => void) | null} */
-    let bindSidecar = null;
-
-    /**
-     * LoadLibrary, for a library nothing has loaded yet.
-     *
-     * Synchronous unless a PE actually has to be read, because the dispatcher
-     * treats a promise as "park the guest thread" and the two cheap answers --
-     * already here, known absent -- must not cost that.
-     *
-     * `flags` are LoadLibraryEx's. With DONT_RESOLVE_DLL_REFERENCES the library
-     * is mapped and becomes a module, but nothing it imports is loaded or bound
-     * and its entry point never runs -- and a later LoadLibrary hands back that
-     * same module as it is, as Wine's loader test has it. A program, as against
-     * a library, is loaded the same way whatever the flags say.
-     *
-     * @param {string} requested  The name as asked for, with or without its extension.
-     * @param {number} [flags]
-     * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
-     *     as another's dependency: by then the processor is someone else's.
-     * @returns {number | Promise<number>}
-     */
-    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined)=>{
-        const name = withLibraryExtension(requested);
-        if ((flags & LOAD_AS_DATA) !== 0)
-        {
-            return loadAsData(name, flags);
-        }
-        // Read now, before anything is awaited: this is the thread whose
-        // LoadLibrary call is being answered, and it is the one whose stack the
-        // library's entry point has to run on -- the dependencies' entry points
-        // too, which are loaded after awaits, when the thread on the processor
-        // is any other.
-        const asked = thread ?? kernel.currentThread();
-        const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
-        const key = name.toLowerCase().replace(/\.dll$/, '');
-        if (isKnownDll(name) && /[\\/]/.test(name))
-        {
-            broughtCopies.set(moduleKeyOf(name), name);
-        }
-        if (absentLibraries.has(key))
-        {
-            return 0;
-        }
-        // A KnownDLL is always ours, and a file of that name beside the
-        // program is ignored; for every other name the program's own file wins
-        // and our table is only the fallback. So the file is looked for before
-        // the table is consulted, save for a library already mapped out of one,
-        // which is what a second LoadLibrary must get back.
-        //
-        // A library already here is handed back rather than loaded again, which
-        // is what Windows does: LoadLibrary on a loaded module raises its
-        // reference count and returns the handle it already has.
-        //
-        // Loading it twice is not merely wasteful. A program that asks for the
-        // same library in a loop -- and they do, because asking is how a
-        // program checks something is there -- gets a second copy of the image
-        // at a second address every time: its exports resolve to code whose
-        // globals are not the ones the first copy's callers hold, the address
-        // space fills until there is no room left, and re-reading, re-parsing,
-        // re-mapping and re-binding a megabyte of library is most of what the
-        // machine then does with its time.
-        const loaded = findModule(name);
-        const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
-            ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-                filesystem.currentDirectory(), { ours: loaded !== null })
-            : [];
-        if (candidates.length > 0)
-        {
-            // Looked for before anything is awaited: a title probes for
-            // hardware support once a frame by asking for a library that does
-            // not exist, and a probe that has to wait is a stall per frame. The
-            // volume's index answers at once, and answers afresh each time, so a
-            // library put in place since the last ask is found.
-            const wanted = candidates.find(candidate=>{
-                try
-                {
-                    const entry = filesystem.stat(candidate);
-                    return entry && !entry.directory;
-                }
-                catch {
-                    return false;
-                }
-            });
-            if (wanted !== undefined)
-            {
-                return (async()=>{
-                    const file = await readWholeFile(filesystem, blocks, wanted);
-                    if (!file)
-                    {
-                        events.emit('library-missing', { name, path: wanted });
-                        return 0;
-                    }
-
-                    let image;
-                    try
-                    {
-                        image = parsePe(file);
-                    }
-                    catch (e){
-                        // A file that is not an image -- a program does load
-                        // one, by mistake or to find out -- is a library it
-                        // cannot have, not a fault in the machine: the load
-                        // fails and the program is told, as Windows tells it.
-                        events.emit('library-missing', {
-                            name, path: wanted, reason: /** @type {Error} */ (e).message,
-                        });
-                        return 0;
-                    }
-                    const place = placeLibrary(image, { next: nextLibraryBase, ...librarySpace });
-                    if ('refused' in place)
-                    {
-                        absentLibraries.add(key);
-                        events.emit('libraries-missing', { names: [name], reason: place.refused });
-                        return 0;
-                    }
-
-                    const base = place.base;
-                    const mapped = loader.map(file, { base, name });
-                    const { exports } = readExports(file, image);
-                    const addresses = new Map(exports
-                        .filter(entry=>entry.name !== null && entry.forwards === null)
-                        .map(entry=>[String(entry.name), base + entry.rva]));
-                    const ordinals = new Map(exports
-                        .filter(entry=>entry.forwards === null)
-                        .map(entry=>[entry.ordinal, base + entry.rva]));
-
-                    // Only a library's imports are resolved and its entry
-                    // point run: a program loaded by name is mapped for what
-                    // it holds, and its entry point is its main.
-                    const inert = unresolved || !image.library;
-                    const held = {
-                        name, base, size: image.sizeOfImage,
-                        /** @param {string} exported */
-                        addressOf: exported=>addresses.get(exported) ?? null,
-                        /** @param {number} ordinal */
-                        addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
-                        entryPoint: mapped.record.entryPoint,
-                        // As above: resources come from the file, so a library
-                        // loaded at run time has to keep its own.
-                        file,
-                        image,
-                        path: wanted,
-                    };
-                    // Registered before its own imports are bound, so a library
-                    // that imports back into itself -- or into one still being
-                    // loaded -- finds an address rather than nothing.
-                    Object.assign(held, {
-                        references: 1,
-                        /** @returns {number | Promise<number>} */
-                        release: ()=>releaseLibrary(held),
-                    }, inert ? { inert, attached: false } : {});
-                    byName.set(moduleKeyOf(name), held);
-                    byBase.set(base, held);
-                    // Joins PEB->Ldr's own module list the same moment: a
-                    // program that walks it right after this LoadLibraryA
-                    // returns is not told the library it just asked for was
-                    // never loaded.
-                    threadBlocks?.addModule(held);
-                    if (image.relocatable)
-                    {
-                        nextLibraryBase = base
-                            + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
-                    }
-
-                    // Its own libraries first, then binding.
-                    //
-                    // The order is the whole of it. A library brought in by
-                    // this one is where half of this one's imports come from, so
-                    // binding before they are loaded leaves every one of those
-                    // slots unclaimed -- and a program that calls through such a
-                    // slot does not fail at the call, it runs whatever bytes the
-                    // slot happened to name. What is seen is an invalid opcode
-                    // at an address belonging to nothing.
-                    if (!inert)
-                    {
-                        // A library one of whose own libraries is nowhere --
-                        // not on the volume, not one the engine provides --
-                        // is refused whole, with ERROR_MOD_NOT_FOUND, as
-                        // Windows refuses it: a program asking at run time is
-                        // asking whether it may have the library, and a "yes"
-                        // whose imports fault when called takes away the
-                        // fallback it has for "no" (its own resources, another
-                        // renderer).
-                        /** @type {string[]} */
-                        const absent = [];
-                        /** @type {any[]} */
-                        const brought = [];
-                        for (const dependency of readImports(file, image))
-                        {
-                            if (findModule(dependency.dll) === null)
-                            {
-                                const got = await loadLibraryAtRuntime(dependency.dll, 0, asked);
-                                if (got === 0)
-                                {
-                                    absent.push(dependency.dll);
-                                }
-                                else
-                                {
-                                    brought.push(byBase.get(got));
-                                }
-                            }
-                        }
-                        /** @param {string} reason */
-                        const refuse = async reason=>{
-                            threadBlocks?.removeModule(base);
-                            byName.delete(moduleKeyOf(name));
-                            byBase.delete(base);
-                            memory.unregister(name);
-                            librarySpace.giveBack(base);
-                            for (const other of brought)
-                            {
-                                if (other)
-                                {
-                                    await releaseLibrary(other);
-                                }
-                            }
-                            events.emit('libraries-missing', { names: [name], reason });
-                            return 0;
-                        };
-                        if (absent.length > 0)
-                        {
-                            return refuse(`it imports ${absent.join(', ')}`);
-                        }
-
-                        loader.bind(mapped, resolveImport, missingImport);
-                        // Both tables, and in this order: the delay-load pass
-                        // adds to what the first one recorded rather than
-                        // replacing it.
-                        loader.bindDelayed(mapped, resolveImport, missingImport);
-
-                        // Its thread-local storage, before any of it runs, as
-                        // Windows gives a library loaded at run time since
-                        // Vista: Wine's loader test reads the slot and the
-                        // calling thread's copy of the block as soon as
-                        // LoadLibrary returns, and a thread made afterwards
-                        // finds its own.
-                        const directory = readTls(file, image);
-                        if (directory && !giveThreadLocals(base, directory))
-                        {
-                            return refuse('no thread-local slot, or no room for every'
-                                + ' thread\'s copy of its block');
-                        }
-                    }
-                    // Before DllMain: a sidecar entry for this library patches
-                    // its code, which must happen before any of it has run
-                    // or been compiled.
-                    bindSidecar?.({
-                        // By file name, as the sidecar names an image; the
-                        // program may have asked for the library by path.
-                        name: name.slice(
-                            Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1),
-                        base, sizeOfImage: image.sizeOfImage,
-                        timeDateStamp: image.timeDateStamp,
-                    });
-
-                    // Its TLS callbacks, then its DllMain, lpvReserved NULL as
-                    // for any library loaded by name. On the thread that asked
-                    // for the library, which by now is not the one on the
-                    // processor: mapping it awaited a file and a range
-                    // request, and the loop gave every other thread its turns
-                    // while that was outstanding. Running a DllMain on whoever
-                    // happens to be current builds its frame on a stranger's
-                    // stack.
-                    const routines = inert ? [] : [
-                        ...threadLocalImages.get(base)?.callbacks ?? [],
-                        ...held.entryPoint && held.entryPoint !== base ? [held.entryPoint] : [],
-                    ];
-                    for (const routine of routines)
-                    {
-                        await bridge.callGuest({
-                            entry: routine,
-                            args: [base, DLL_PROCESS_ATTACH, 0],
-                            thread: asked,
-                        });
-                    }
-                    if (routines.length > 0)
-                    {
-                        attachOrder.push(held);
-                    }
-                    events.emit('library-loaded', { name, base });
-                    return base;
-                })();
-            }
-        }
-        if (loaded)
-        {
-            markLoaded(loaded);
-            loaded.references = (loaded.references ?? 0) + 1;
-            // One of ours asked for unresolved is left unattached, and a later
-            // load attaches it: its entry point is our own setup, which the
-            // rest of it relies on.
-            if (loaded.attached !== false || !loaded.entryPoint || loaded.inert || unresolved)
-            {
-                return loaded.base;
-            }
-            // Its first LoadLibrary: the entry point runs now, on the thread
-            // that asked, exactly as a library read off the volume gets its
-            // DllMain above. Marked first, so a load the entry point itself
-            // provokes does not run it twice.
-            loaded.attached = true;
-            return bridge.callGuest({
-                entry: loaded.entryPoint,
-                args: [loaded.base, DLL_PROCESS_ATTACH, 0],
-                thread: asked,
-            }).then(()=>{
-                attachOrder.push(loaded);
-                return loaded.base;
-            });
-        }
-        // Said out loud, because this is the failure a program reports as
-        // "could not open" and then exits on. Without it the only trace is a
-        // zero, and a zero says nothing about which path was tried -- which is
-        // the whole question.
-        events.emit('library-missing', {
-            name,
-            path: isKnownDll(name) ? 'KnownDLLs' : candidates.join(';'),
-        });
-        return 0;
-    };
-
-    /**
-     * FreeLibrary on a data file's handle: the last one unmaps the view.
-     *
-     * @param {number} handle
-     */
-    const releaseData = handle=>{
-        const held = dataFiles.get(handle);
-        if (!held)
-        {
-            return 0;
-        }
-        held.references--;
-        if (held.references === 0)
-        {
-            dataFiles.delete(handle);
-            if (held.region)
-            {
-                memory.unregister(held.region);
-                librarySpace.giveBack(held.base);
-                absentLibraries.clear();
-            }
-        }
-        return 1;
-    };
-
-    /**
-     * LoadLibraryEx with a flag that loads a library as data, for its
-     * resources: nothing in it is bound or run.
-     *
-     * A library already loaded as a module is answered with its module handle,
-     * and counted, as Wine's loader test has it. Any other is mapped apart and
-     * is no module -- GetModuleHandle does not find it -- and its handle is its
-     * base with a low bit set: one for a view of the file as it lies on disk,
-     * two for one laid out as an image (LOAD_LIBRARY_AS_IMAGE_RESOURCE). Each
-     * such load is a view of its own.
-     *
-     * @param {string} name
-     * @param {number} flags
-     * @returns {number | Promise<number>}
-     */
-    const loadAsData = (name, flags)=>{
-        const loaded = findModule(name);
-        if (loaded && loaded.loaded !== false)
-        {
-            loaded.references = (loaded.references ?? 0) + 1;
-            return loaded.base;
-        }
-        const layout = (flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE) !== 0 ? 2 : 1;
-        /**
-         * @param {any} held  What was mapped, and where.
-         * @returns {number}
-         */
-        const record = held=>{
-            const handle = (held.base | layout) >>> 0;
-            dataFiles.set(handle, {
-                ...held, references: 1, release: ()=>releaseData(handle),
-            });
-            return handle;
-        };
-        const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-            filesystem.currentDirectory())
-            .find(candidate=>{
-                try
-                {
-                    const entry = filesystem.stat(candidate);
-                    return entry && !entry.directory;
-                }
-                catch {
-                    return false;
-                }
-            });
-        if (wanted === undefined)
-        {
-            // One of ours nothing has loaded: there is no file to view, and
-            // the image it has holds no resources.
-            if (loaded)
-            {
-                return record({ name, base: loaded.base, file: null, image: null,
-                    flat: false, region: null });
-            }
-            events.emit('library-missing', { name, path: 'as data' });
-            return 0;
-        }
-        return (async()=>{
-            const file = await readWholeFile(filesystem, blocks, wanted);
-            let image;
-            try
-            {
-                image = file ? parsePe(file) : null;
-            }
-            catch {
-                image = null;
-            }
-            if (!file || !image)
-            {
-                events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
-                return 0;
-            }
-            const bytes = layout === 1 ? file : mapImage(file, image.imageBase).bytes;
-            const size = Math.ceil(bytes.length / PAGE_SIZE) * PAGE_SIZE;
-            const place = placeLibrary({ relocatable: true, imageBase: 0, sizeOfImage: size },
-                { next: nextLibraryBase, ...librarySpace });
-            if ('refused' in place)
-            {
-                events.emit('libraries-missing', { names: [name], reason: place.refused });
-                return 0;
-            }
-            const region = `${name} as data at 0x${place.base.toString(16)}`;
-            memory.register({
-                name: region, base: place.base, size,
-                kind: memory.RegionKind.IMAGE, access: memory.Access.READ_WRITE,
-            });
-            memory.writeBytes(place.base, bytes);
-            // Read-only once filled, as a view of a data file is mapped.
-            memory.protect(region, memory.Access.READ);
-            return record({ name, base: place.base, file, image, flat: layout === 1, region,
-                path: wanted });
-        })();
-    };
-
-    /**
      * The spans `claim` took from the heap's arena, by base, with the region
      * each was cut from: what `giveBack` puts back.
      *
@@ -6419,7 +2500,7 @@ async function buildApp(options){
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
         floor: imageInHeap ? MODULE_BASE : mainImage.imageBase + mainImage.sizeOfImage,
-        limit: STACK_POOL_START,
+        limit: LIBRARIES_END,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
             base < region.base + region.size && region.base < base + size) ?? null,
@@ -6497,6 +2578,119 @@ async function buildApp(options){
             });
         },
     };
+    /**
+     * The libraries an assembly of the engine's store carries in a version of
+     * its own (`win32.faces`): laid out beside system32's of the same name.
+     *
+     * @type {Record<string, Record<string, any>>}
+     */
+    const faceTables = /** @type {any} */ (win32).faces?.() ?? {};
+    engineCode.open(MODULE_BASE);
+    /** @type {any} */ (win32).runtimeHeap?.();
+    const systemModules = createSystemModules({
+        loader, bridge, cpu, long, ordinalsOf, librarySpace, placeLibrary,
+        atomicCode: (address, length)=>core.api('kernel').atomicCode(address, length),
+        start: MODULE_BASE + ENGINE_CODE_BYTES, end: LIBRARIES_END, align: LIBRARY_ALIGN,
+        clientFiles: options.win32?.steam?.clientFiles,
+        reportDivergence: (api, detail)=>reportDivergence(api, detail),
+        release: record=>releaseLibrary(record),
+        // A module's bytes go into the process's memory when something first
+        // imports or loads it: its span and its addresses are fixed now, in
+        // the same order for every process, so an address taken before it is
+        // loaded is the one that works after, and a translation of code that
+        // calls it is the same in every process.
+        later: true,
+        // The same tables lay out the same: a layout an earlier process of
+        // this runtime made is taken, and a module built only where placed.
+        placing: place=>/** @type {any} */ (win32).placing?.(place) ?? place(),
+        // Where a module's routines lie: each module's part of the engine's
+        // span as laid out.
+        engine: {
+            at: ()=>engineCode.next,
+            skipTo: to=>{
+                engineCode.next = Math.max(engineCode.next, to);
+                memory.reach?.(engineCode.next);
+            },
+            within: (from, to, place)=>engineCode.within(from, to, place),
+        },
+        traps: cpu.trapLayout,
+        fingerprint: tablesFingerprint(Object.keys(allLibraries), faceTables, ordinalsOf,
+            { long, start: MODULE_BASE, end: LIBRARIES_END,
+                windows: JSON.stringify(options.windows ?? null) }),
+    });
+    const { leftOutAt64 } = systemModules;
+    builtLibraries = allLibraries;
+    for (const name of Object.keys(allLibraries))
+    {
+        const record = systemModules.build(name, ()=>allLibraries[name]);
+        modules.add(record, moduleKeyOf(name));
+    }
+    /**
+     * The libraries an assembly of the engine's store carries in a version of
+     * its own (`win32.faces`), by key: a module beside system32's of the same
+     * name, found by no bare name, bound where a context puts the name in
+     * that assembly (`faceFor`).
+     *
+     * @type {Map<string, any>}
+     */
+    const faces = new Map();
+    for (const [name, table] of Object.entries(faceTables))
+    {
+        // Beside system32's library of the same name, so its region is its own.
+        const record = systemModules.build(name, table, `${name} (assembly)`);
+        modules.add(record, null);
+        faces.set(moduleKeyOf(name), record);
+    }
+    systemModules.done();
+    /**
+     * The face a load of `name` binds: where a context redirects the name to
+     * an assembly of the engine's (no file of its own, `source` null), that
+     * assembly's own version of the library, seen at the assembly's directory.
+     *
+     * @param {string} name
+     * @param {{ path: string, source: string | null } | null} redirected
+     */
+    const faceFor = (name, redirected)=>{
+        const face = redirected?.source === null ? faces.get(moduleKeyOf(name)) : undefined;
+        if (!face)
+        {
+            return null;
+        }
+        face.path ??= redirected?.path;
+        return face;
+    };
+    /**
+     * The library a bare name is under the running thread's context and the
+     * process default: a face where one redirects it, else the name's own.
+     *
+     * @param {string | null} name
+     */
+    const moduleUnderContext = name=>(name && !/[\\/]/.test(name)
+        ? faceFor(name, activation?.redirect(name) ?? null) : null) ?? findModule(name);
+    for (const name of ALWAYS_LOADED)
+    {
+        markLoaded(modules.named(name));
+        const always = modules.named(name);
+        if (always)
+        {
+            always.pinned = true;
+        }
+    }
+
+    // Imports resolved, libraries loaded and let go at run time, files loaded
+    // as data (`process/library-loader.js`).
+    const libraryLoader = createLibraryLoader({
+        allLibraries, win32, events, journal, moduleUnderContext, markLoaded, findModule,
+        modules, options, bridge, cpu, memory, kernel, freeLocalIndex, giveBackBlocks,
+        threadLocalImages, dllNotifications, processBits, debuggerNow, attachOrder, librarySpace,
+        isKnownDll, answersPath, activation, filesystem, faceFor, loader, dataFiles, standsAt,
+        threadBlocks: ()=>threadBlocks,
+        blocks: ()=>blocks,
+    });
+    const {
+        resolveImport, missingImport, loadLibraryAtRuntime, exportOf, loadErrors, broughtCopies,
+        systemLibraries, releaseLibrary, installWatch, windowsLibraries, missingCalls, watches,
+    } = libraryLoader;
 
     // An image in the heap's span takes its place there before anything else
     // can: the heap has handed nothing that high out yet, and a library placed
@@ -6507,6 +2701,57 @@ async function buildApp(options){
         throw new Error(`image: 0x${mainImage.imageBase.toString(16)}+0x`
             + `${mainImage.sizeOfImage.toString(16)} lies in the heap and is not free there`);
     }
+    // A wide window's image past 4 GiB: its span at the low dword kept from everything
+    // else, where the host reads a pointer into the image it was handed the low half of
+    // (the cpu's `hostAlias`).
+    const aliasAt = programLoaded.wide === undefined || programLoaded.wide.codeBase === 0 ? null
+        : programLoaded.imageBase % 2 ** 32;
+    if (aliasAt !== null && librarySpace.claim(aliasAt, programLoaded.sizeOfImage) !== aliasAt)
+    {
+        throw new Error(`image: its low dword's span 0x${aliasAt.toString(16)}+0x`
+            + `${programLoaded.sizeOfImage.toString(16)} is not free below 4 GiB`);
+    }
+    if (aliasAt !== null)
+    {
+        // A region of its own, so the host's accesses there pass the map; the image's
+        // pages keep their own protection at its real address.
+        memory.register({ name: 'image (low dword)', base: aliasAt,
+            size: programLoaded.sizeOfImage, kind: memory.RegionKind.RESERVED,
+            access: memory.Access.READ_WRITE_EXECUTE });
+    }
+
+    // A managed program on a machine with no Framework that runs it: the
+    // embedder is asked for the layer that carries one. The program goes on,
+    // as it would on that machine, until a start with the layer under it.
+    const neededLayer = frameworkNeeded(options.executable,
+        path=>{
+            try
+            {
+                const entry = filesystem.stat(path);
+                return Boolean(entry) && !entry.directory;
+            }
+            catch {
+                return false;
+            }
+        }, WINDOWS_DIRECTORY);
+    if (neededLayer !== null)
+    {
+        events.emit('layer-needed', { layer: neededLayer, program: options.imagePath ?? null });
+    }
+
+    // The program's activation context, before any library is looked for:
+    // the assemblies its manifest names decide where some of them are, and a
+    // context that cannot be built -- an assembly found nowhere -- ends the
+    // start, as Windows ends it.
+    const unbuilt = await activation?.processDefaultFrom(
+        resourceOfImage(options.executable, RT_MANIFEST, 1), options.imagePath ?? 'C:\\app.exe')
+        ?? null;
+    if (unbuilt !== null)
+    {
+        events.emit('activation-context-failed', { reason: unbuilt });
+        throw Object.assign(new Error(`the side-by-side configuration is incorrect: ${unbuilt}`),
+            { reason: 'side-by-side', code: 'SXS_CANT_GEN_ACTCTX' });
+    }
 
     // The libraries the program brought with it, before the program itself.
     //
@@ -6514,8 +2759,19 @@ async function buildApp(options){
     // binding the first needs the second's exports, which need the second's
     // base. And they are bound after the program is mapped and known by name,
     // because a library may import from the program that loads it.
+    /**
+     * The static imports found nowhere: the process is created and ends in its
+     * first thread with STATUS_DLL_NOT_FOUND, before anything of it runs.
+     * @type {string[]}
+     */
+    let refusedLibraries = [];
     const shipped = await mapShippedLibraries({
+        onAbsent: (/** @type {string[]} */ names)=>{
+            refusedLibraries = names;
+        },
         executable: options.executable,
+        bits: processBits,
+        windows: windowsVersion(options.windows),
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
@@ -6530,19 +2786,28 @@ async function buildApp(options){
                 ? table.addressOf(entry.name) : table.addressOfOrdinal(entry.ordinal)) !== null);
         },
         isKnownDll,
-        byName, byBase,
+        redirect: (/** @type {string} */ name)=>activation?.redirect(name) ?? null,
+        // Where else Windows looks for a program's imports: its current
+        // directory and the PATH it starts with - its parent's, or for a
+        // session's first program the one the registry builds.
+        currentDirectory: filesystem.currentDirectory(),
+        path: pathDirectories(Object.entries(options.environment ?? win32.environment?.() ?? {})
+            .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1]),
+        modules,
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.
-        base: systemModulesEnd,
+        base: systemModules.end(),
         ...librarySpace,
     });
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
-    nextLibraryBase = shipped.reduce(
-        (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
+    libraryLoader.nextLibraryBase = shipped.reduce(
+        (highest, library)=>Math.max(highest, library.base + library.size), systemModules.end());
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
-        ...long ? { wide: true, base: mainImage.imageBase } : {} });
+        bits: processBits,
+        ...long || programLoaded.moved ? { base: programLoaded.imageBase } : {} });
+    win32.imageMapped(image.base);
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -6554,8 +2819,10 @@ async function buildApp(options){
     // directory's head has changed since; one the image could not hold is no
     // exports at all, said once.
     const ownImage = parsePe(options.executable, { wide: true });
+    imageInformation = ()=>sectionImageInformation({ file: options.executable, image: ownImage,
+        bytes: memory.readBytes(image.base, ownImage.sizeOfImage) });
     const ownDirectory = ownImage.directories[DIR_EXPORT];
-    /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
+    /** @type {({ head: string } & ReturnType<typeof exportTables>) | null} */
     let ownTable = null;
     let ownRefusal = '';
     const ownExports = ()=>{
@@ -6574,13 +2841,7 @@ async function buildApp(options){
                 ownRefusal = parsed.refused;
                 events.emit('exports-refused', { name: mainModule.path, reason: parsed.refused });
             }
-            const resolved = parsed.exports.filter(entry=>entry.forwards === null);
-            ownTable = {
-                head,
-                byName: new Map(resolved.filter(entry=>entry.name !== null)
-                    .map(entry=>[String(entry.name), image.base + entry.rva])),
-                byOrdinal: new Map(resolved.map(entry=>[entry.ordinal, image.base + entry.rva])),
-            };
+            ownTable = { head, ...exportTables(parsed.exports, image.base) };
         }
         return ownTable;
     };
@@ -6592,12 +2853,14 @@ async function buildApp(options){
         // and a loader stub that asks after its own module gave up there.
         size: ownImage.sizeOfImage,
         /** @param {string} exported */
-        addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
+        addressOf: exported=>ownExports()?.addressOf(exported) ?? null,
         /** @param {number} ordinal */
-        addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
-        // Kept because a program reads its own resources, and a resource
-        // directory is read out of the file rather than out of the mapping.
-        file: options.executable,
+        addressOfOrdinal: ordinal=>ownExports()?.addressOfOrdinal(ordinal) ?? null,
+        /** @param {string | null} exported @param {number | null} ordinal */
+        forwardOf: (exported, ordinal)=>ownExports()?.forwardOf(exported, ordinal) ?? null,
+        // A program reads its own resources where it lies mapped
+        // (`resourceLookup`), as Windows reads them: no copy of its file.
+        fromFile: true,
         image: ownImage,
         // The same answer whether a program asks by null handle or by its own
         // image base, which are the two ways of asking the same question. A
@@ -6605,35 +2868,21 @@ async function buildApp(options){
         // looking for its own data there.
         path: options.imagePath ?? 'C:\\app.exe',
     };
-    byBase.set(image.base, mainModule);
     // Known by its file name as well: a program that loads or asks for a
     // handle to its own image by name -- the way it reaches its own resources
     // -- is handed the mapping it is running from, as Windows hands back a
     // module already loaded, rather than a second copy at the one base an
     // image without relocations can take.
-    byName.set(moduleKeyOf(mainModule.path), mainModule);
+    modules.setMain(mainModule, moduleKeyOf(mainModule.path));
     for (const library of shipped)
     {
         loader.bind(library.mapped, resolveImport, missingImport);
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
-    }
-
-    // What the process that asked for this one wrote into it before it existed.
-    // This is the first moment at which the addresses those writes name mean
-    // anything, because it is the first moment the image is there.
-    if (options.patches && options.patches.length > 0)
-    {
-        const { applied, refused } = placePatches(
-            options.patches, image.base, mainModule.image.sizeOfImage);
-        for (const patch of applied)
-        {
-            memory.writeBytes(patch.address, patch.bytes);
-        }
-        events.emit('process-patched', {
-            applied: applied.length,
-            refused: refused.map(patch=>
-                `${patch.address.toString(16)}+${patch.bytes.length}`),
-        });
+        win32.imageMapped(library.base);
+        // Bound and written: the guest's copy is the image from here on, and
+        // holding the file and the mapped image beside it was each library
+        // twice over in the engine's heap for the life of the process.
+        library.mapped = null;
     }
 
     // Somewhere to put what a process needs before it starts: thread-local
@@ -6646,7 +2895,8 @@ async function buildApp(options){
     // would fit: below the thread stacks and on nothing mapped. When the
     // libraries reach the stacks, any gap in the modules' space will do.
     const arenaSpan = { relocatable: true, imageBase: 0, sizeOfImage: STARTUP_ARENA };
-    let arenaPlace = placeLibrary(arenaSpan, { next: nextLibraryBase, ...librarySpace });
+    let arenaPlace = placeLibrary(arenaSpan,
+        { next: libraryLoader.nextLibraryBase, ...librarySpace });
     if ('refused' in arenaPlace)
     {
         arenaPlace = placeLibrary(arenaSpan, {
@@ -6665,7 +2915,8 @@ async function buildApp(options){
         // too, and it is guest code.
         kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
     });
-    nextLibraryBase = Math.max(nextLibraryBase, startupArena + STARTUP_ARENA);
+    libraryLoader.nextLibraryBase = Math.max(libraryLoader.nextLibraryBase,
+        startupArena + STARTUP_ARENA);
 
     let scratch = startupArena;
     /** @param {number} size */
@@ -6686,133 +2937,11 @@ async function buildApp(options){
     // it always answers a number rather than being missing from the report.
     const glCounters = { calls: 0 };
 
-    // A bundle's sidecar, applied once the image it targets is at its real
-    // address. The engine names nothing here: `hooks.json` carries the image,
-    // the RVAs and the kernel name, and `hooks.mjs` -- the bundle's own code
-    // -- is what a kernel does. This layer only loads the module, gives it a
-    // bounds-checked view of guest memory, and wires a hook's outcome to the
-    // bridge's own EIP redirect.
-    if (options.sidecarHooks)
-    {
-        const kernelModule = await import(
-            /* webpackIgnore: true */
-            URL.createObjectURL(
-                new Blob([options.sidecarHooks.source], { type: 'text/javascript' })));
-        const kernels = kernelModule.kernels ?? {};
-        const imagePath = options.imagePath ?? 'C:\\app.exe';
-        const imageName = imagePath.slice(
-            Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
-        const guestView = createGuestView(/** @type {GuestMemory} */ (memory));
-        // Resolved against the graphics seam the first time a kernel actually
-        // asks, not at bind time (`resolveOpenglEntry`): a build with no
-        // OpenGL layer (a Direct3D title) still binds every kernel.
-        const kernelGl = createKernelGl(
-            resolveOpenglEntry(/** @type {{ opengl: () => ReturnType<
-                typeof import('./layers/graphics/opengl/exports.js').createOpengl> }} */ (
-                    core.api('graphics'))),
-            journalCall, ()=>journal.enabled('call.gpu', journal.Level.TRACE), glCounters);
-        const spec = options.sidecarHooks.spec;
-        /**
-         * @param {{ name: string, base: number, sizeOfImage: number, timeDateStamp: number }}
-         *     target the image, as placed
-         */
-        bindSidecar = target=>{
-            const result = loader.bindHooks(
-                spec,
-                target,
-                /** @param {{ name: string, argBytes: number, target: number, handler: Function,
-                 *   site?: undefined }
-                 *   | { name: string, site: true, trampoline: number, resume: number,
-                 *   stackAdjust: number, handler: Function }} hookOptions */
-                hookOptions=>hookOptions.site
-                    ? bridge.siteHook(hookOptions.name, hookOptions)
-                    : bridge.hook(hookOptions.name, hookOptions),
-                /** @param {import('./layers/loader/internal/hooks.js').HookEntry
-                 *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry */
-                entry=>resolveKernel(entry, target.base),
-                allocateFromHeap);
-            events.emit('hooks-bound', { image: target.name, ...result });
-        };
-        /**
-         * @param {import('./layers/loader/internal/hooks.js').HookEntry
-         *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry
-         * @param {number} base the base of the image the entry names
-         */
-        const resolveKernel = (entry, base)=>{
-            const kernelFn = kernels[entry.kernel];
-            if (!kernelFn)
-            {
-                return null;
-            }
-            const guest = {
-                ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
-            };
-            const site = Boolean(entry.site);
-            // Built once per bound entry rather than once per call: the
-            // base and the GL handle are the same on every call a given
-            // site makes, so only the kernel's own arguments change.
-            const frame = site ? { base, gl: kernelGl } : undefined;
-            return (/** @type {number[] | Record<string, number>} */ argsOrRegisters)=>{
-                // Guard and fall through, the discipline every guest-code
-                // replacement in this engine keeps: a kernel is the
-                // bundle's own code, on the bundle's own data, and a bug
-                // in it is not a reason to bring the run down when the
-                // guest's own function is right there to fall back on.
-                let handled;
-                // A GL call the kernel already issued through `frame.gl`
-                // before it threw is not undone -- the guest's own
-                // function then runs the whole pass again on top of it --
-                // so `hook-error`'s payload says how many, rather than
-                // leaving that silent.
-                const glCallsBefore = glCounters.calls;
-                try
-                {
-                    // A site kernel gets a third argument, `frame`, with
-                    // the image base -- so it can follow a data pointer
-                    // the sidecar gave it as an RVA -- distinct from the
-                    // dispatcher's own call frame, which a site hook has
-                    // no real use for (there was no call to marshal).
-                    handled = site
-                        ? kernelFn(guest, argsOrRegisters, frame)
-                        : kernelFn(guest, argsOrRegisters);
-                }
-                catch (e){
-                    events.emit('hook-error', {
-                        kernel: entry.kernel,
-                        message: e instanceof Error ? e.message : String(e),
-                        glCalls: glCounters.calls - glCallsBefore,
-                    });
-                    return false;
-                }
-                // `oracle` never skips the guest's own code, whatever the
-                // kernel decided: that is the whole of the differential
-                // guard, and it is the sidecar's flag, not the kernel's.
-                // A site hook has no in-browser oracle; its `mode` is always
-                // `replace`.
-                return entry.mode === 'oracle' ? false : handled;
-            };
-        };
-        bindSidecar({
-            name: imageName, base: image.base,
-            sizeOfImage: mainModule.image.sizeOfImage,
-            timeDateStamp: mainModule.image.timeDateStamp,
-        });
-        // Libraries the bundle shipped and the image imported statically are
-        // already placed by now; a runtime load binds itself as it maps.
-        for (const held of byBase.values())
-        {
-            if (held.image && held.base !== image.base)
-            {
-                bindSidecar({
-                    name: held.name.slice(
-                        Math.max(held.name.lastIndexOf('\\'), held.name.lastIndexOf('/')) + 1),
-                    base: held.base,
-                    sizeOfImage: held.image.sizeOfImage,
-                    timeDateStamp: held.image.timeDateStamp,
-                });
-            }
-        }
-    }
+    await bindSidecar({
+        allocateFromHeap, bridge, core, events, glCounters, image, journal, journalCall,
+        libraryLoader, loader, memory, modules, options,
+        mainModule: ()=>mainModule,
+    });
 
     const stubs = cpu.thunkImage();
     memory.register({
@@ -6832,12 +2961,16 @@ async function buildApp(options){
 
     // Thread-local storage, for every image that declares any.
     //
-    // The block is filled here, on the host, because it is only bytes; the slot
-    // number has to come from the guest's own TlsAlloc, because a runtime later
-    // reads it with TlsGetValue and the two have to be talking about the same
-    // pool. So the stub does the asking and this does the filling.
+    // Each image is given its index in the thread-local array here, in load
+    // order with the program's own first, so the program's is 0 as on Windows
+    // -- an image may be compiled to reach its variables at index 0 without
+    // reading the _tls_index written for it. The block is filled here too; the
+    // stub puts it in the first thread's array.
+    let nextLocal = 0;
     const withTls = [mainModule, ...shipped].map(held=>{
-        const directory = held.file ? readTls(held.file, held.image ?? parsePe(held.file)) : null;
+        const directory = held.fromFile && held.image
+            ? readMappedTls((rva, length)=>memory.readBytes(held.base + rva, length),
+                held.image, held.base) : null;
         if (!directory)
         {
             return held;
@@ -6846,11 +2979,13 @@ async function buildApp(options){
         const blockAddress = allocateFromHeap(size);
         memory.writeBytes(blockAddress, new Uint8Array(size));
         memory.writeBytes(blockAddress, directory.template);
+        const index = nextLocal++;
+        memory.writeU32(held.base + directory.indexRva, index);
 
         return {
             ...held,
             tls: {
-                indexAddress: held.base + directory.indexRva,
+                index,
                 blockAddress,
                 callbacks: directory.callbackRvas.map(rva=>held.base + rva),
                 template: directory.template,
@@ -6858,8 +2993,8 @@ async function buildApp(options){
             },
         };
     });
-    // Every later thread's blocks are copies of the same templates, in the
-    // slots the first thread's were given (`threadLocals`). Without them a
+    // Every later thread's blocks are copies of the same templates, at the
+    // indices the first thread's were given (`threadLocals`). Without them a
     // thread's thread-local variables were at linear address zero and up, the
     // same bytes for every thread but the first: Call of Duty 4's renderer and
     // its two workers kept their scratch buffers' pointers there, and a worker
@@ -6868,8 +3003,8 @@ async function buildApp(options){
     {
         if (held.tls)
         {
-            const { indexAddress, template, size, callbacks } = held.tls;
-            threadLocalImages.set(held.base, { indexAddress, template, size, callbacks });
+            const { index, template, size, callbacks } = held.tls;
+            threadLocalImages.set(held.base, { index, template, size, callbacks });
         }
     }
 
@@ -6879,20 +3014,54 @@ async function buildApp(options){
     // exports assume. It is guest code because the calls belong on a guest
     // stack; the stub's last instruction enters the program.
     const kernel32 = findModule('kernel32');
-    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else.
-    loaderLock = allocateFromHeap(24);
-    memory.writeBytes(loaderLock, new Uint8Array(24));
-    memory.writeU32(loaderLock + 4, 0xffffffff);
+    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else. Its first
+    // field is a pointer, so the count is past eight bytes in a 64-bit
+    // process, and the whole is 40 bytes there.
+    const pointerSize = long ? 8 : 4;
+    loaderLock = allocateFromHeap(long ? 40 : 24);
+    memory.writeBytes(loaderLock, new Uint8Array(long ? 40 : 24));
+    memory.writeU32(loaderLock + pointerSize, 0xffffffff);
     const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
     const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
+    // A session is a logon: its first process runs the RunOnce pass before
+    // anything of its own, as Explorer does before the desktop is the user's
+    // (an installation leaves a library's registration there for it).
+    // A child its parent debugs reports its start before anything of it runs
+    // (`debug-events.js`), as Windows' loader does: the process, every library
+    // mapped with it, then the loader's breakpoint - an int3 of its own, not
+    // DbgBreakPoint - each waited on until the debugger continues it.
+    const debugStart = debuggerNow() && !long ? bridge.register('<debug start>', {
+        argBytes: 0,
+        handler: async()=>{
+            const report = /** @type {NonNullable<typeof options.debugger>} */ (
+                options.debugger).report;
+            const threadId = kernel.currentThread()?.id >>> 0;
+            await report({ code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base,
+                start: image.entryPoint });
+            for (const held of modules.all())
+            {
+                if (held !== mainModule && held.loaded !== false)
+                {
+                    await report({ code: DEBUG_EVENT.LOAD_DLL, threadId, base: held.base });
+                }
+            }
+            const breakpoint = allocateFromHeap(1);
+            memory.writeBytes(breakpoint, new Uint8Array([0xcc]));
+            debugStarted = true;
+            await report({ code: DEBUG_EVENT.EXCEPTION, threadId, exception: {
+                code: EXCEPTION_BREAKPOINT, flags: 0, address: breakpoint, parameters: [0],
+                firstChance: true } });
+            return 0;
+        },
+    }) : 0;
+    const prelude = debugStart || (options.parentProcessId
+        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0);
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
-        tlsApi: kernel32 && {
-            alloc: kernel32.addressOf('TlsAlloc') ?? 0,
-            set: kernel32.addressOf('TlsSetValue') ?? 0,
-        },
         ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
+        long,
+        prelude,
     });
     startupImages = [mainModule, ...shipped];
     for (const name of startup.attached)
@@ -6906,19 +3075,39 @@ async function buildApp(options){
     // Inside the same span the blocks came from, rather than beside it: it is
     // written once, before anything runs, and giving it a region of its own
     // only creates a boundary two allocations can land on either side of.
-    const start = startup.attached.length === 0 && startup.tlsImages === 0
-        ? image.entryPoint
-        : (()=>{
-            const at = allocateFromHeap(startup.bytes.length);
-            memory.writeBytes(at, startup.bytes);
-            events.emit('libraries-attached', {
-                names: startup.attached,
-                tlsImages: startup.tlsImages,
-            });
-            return at;
-        })();
+    const exitProcess = kernel32?.addressOf('ExitProcess') ?? 0;
+    let start = image.entryPoint;
+    if (refusedLibraries.length > 0 && exitProcess !== 0)
+    {
+        // Nothing of the program runs, no library is attached: the first
+        // thread's one act is the loader's refusal, as on Windows (A256).
+        const refusal = synthesiseStartRefused({ exitProcess, status: STATUS.DLL_NOT_FOUND,
+            long });
+        start = allocateFromHeap(refusal.length);
+        memory.writeBytes(start, refusal);
+        attachOrder.length = 0;
+    }
+    else if (startup.attached.length > 0 || startup.tlsImages > 0 || prelude !== 0)
+    {
+        start = allocateFromHeap(startup.bytes.length);
+        memory.writeBytes(start, startup.bytes);
+        events.emit('libraries-attached', {
+            names: startup.attached,
+            tlsImages: startup.tlsImages,
+        });
+    }
 
-    memory.writeU32(entryVector, start);
+    // A quadword in long mode: a wide window's image starts past 4 GiB.
+    if (long)
+    {
+        const vector = new Uint8Array(8);
+        new DataView(vector.buffer).setBigUint64(0, BigInt(start), true);
+        memory.writeBytes(entryVector, vector);
+    }
+    else
+    {
+        memory.writeU32(entryVector, start);
+    }
 
     // What FS points at. A program reaches this in code its compiler emitted
     // rather than code anybody wrote -- a thread-local variable is an index off
@@ -6927,6 +3116,8 @@ async function buildApp(options){
     // on with a null.
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
+        // GS's blocks in a 64-bit process, with its pointers a quadword each.
+        pointerSize,
         // A thread's blocks from the allocator everything the host hands the
         // guest comes from, which takes them back when the thread is gone;
         // the startup span never does. Aligned for the thread-local blocks
@@ -6940,6 +3131,9 @@ async function buildApp(options){
         version: windowsVersion(options.windows),
         // One for each executor, as every other road to the count says.
         processors: kernel.processors?.() ?? 1,
+        // PEB->LoaderLock: the section the loader holds around a DLL's
+        // initialisation (`init.js`), which a program reads to ask who holds it.
+        loaderLock,
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
         imagePath: options.imagePath ?? 'C:\\app.exe',
@@ -6950,29 +3144,147 @@ async function buildApp(options){
         // is entitled to the arguments its parent gave it.
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: filesystem.currentDirectory(),
-        standardHandles: { input: 0, output: 0, error: 0 },
+        // The standard handles its parent handed it, which RTL_USER_PROCESS_
+        // PARAMETERS carries as GetStdHandle answers them; none otherwise.
+        standardHandles: { input: handed.standard?.input ?? 0,
+            output: handed.standard?.output ?? 0,
+            error: handed.standard?.error ?? 0 },
         // Every module loaded by the time the first instruction runs: the
         // system libraries it imports and theirs, everything the program
         // shipped, and the program's own image -- PEB->Ldr walked before a
         // program calls a single import of its own finds all of them, never
         // an empty list. A system library loaded later joins it then.
-        modules: [...byBase.values()].filter(held=>held.loaded !== false)
+        modules: modules.loaded()
             .map(held=>held === mainModule ? {
                 ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
             } : held),
     });
     threadBlocks = process;
+    for (const held of withTls)
+    {
+        if (held.tls)
+        {
+            process.hasThreadLocals(held.base);
+        }
+    }
+    // What IsDebuggerPresent reads: a debuggee's process block says so.
+    if (debuggerNow())
+    {
+        memory.writeBytes(process.peb + blockLayouts(pointerSize).peb.BEING_DEBUGGED,
+            new Uint8Array([1]));
+    }
 
     // The page every NT process reads at 0x7FFE0000 without a call: the same
     // version as every other road, and the clocks GetTickCount answers with.
-    const sharedData = createSharedUserData({ memory, version: windowsVersion(options.windows) });
+    // In a RAM short of 0x7FFE0000 the page is kept where the engine's
+    // untested reads find it: an engine that wraps elsewhere would have the
+    // program read the heap there, so it stops the start instead.
+    // In a memory that grows (`engineArea`) the page is where the engine
+    // wraps 0x7FFE0000 into the RAM it holds now, and moves up with it.
+    const growing = cpu.growing?.() === true;
+    if (growing)
+    {
+        // The page is kept 128 KiB short of the RAM held, so the RAM held from
+        // the start reaches that far past the thread stacks and a program image
+        // in the heap's span: what is handed out from neither goes through the
+        // heap, which keeps clear of the page itself (`SHARED_PAGE_GUARD`).
+        const placed = Math.max(STACK_POOL_BASE + STACK_POOL_SIZE,
+            imageInHeap ? mainImage.imageBase + mainImage.sizeOfImage : 0);
+        memory.reach?.(placed + (0x80000000 - SHARED_USER_DATA));
+    }
+    // A wide window's RAM reaches 0x7FFE0000 itself: the page is where Windows has it.
+    let sharedAt = growing ? cpu.wrappedAddress(SHARED_USER_DATA)
+        : programLoaded.wide !== undefined ? SHARED_USER_DATA : sharedPageAt(memorySize);
+    const wrapped = cpu.wrappedAddress?.(SHARED_USER_DATA) ?? null;
+    if (wrapped !== null && wrapped !== sharedAt)
+    {
+        throw new Error(`kernel32: the engine reads 0x7FFE0000 at 0x${wrapped.toString(16)},`
+            + ` the shared page is kept at 0x${sharedAt.toString(16)}`);
+    }
+    const version = windowsVersion(options.windows);
+    // Inside the heap's span (a memory that grows, a wide window's heap to 4 GiB) the
+    // page is no region of its own; past the heap's end it is one.
+    /** @param {number} at */
+    const ownsPlace = at=>memory.find(at) === undefined;
+    let sharedOwn = ownsPlace(sharedAt);
+    let sharedData = createSharedUserData({ memory, version, at: sharedAt,
+        ownRegion: sharedOwn });
+    const refresh = ()=>sharedData?.refresh(kernel.clock.virtualTime(),
+        kernel.clock.wallClock());
     if (sharedData)
     {
-        const refresh = ()=>sharedData.refresh(kernel.clock.virtualTime(),
-            kernel.clock.wallClock());
         refresh();
         kernel.clock.whenMoved(refresh);
     }
+    if (growing)
+    {
+        // The engine's range is the engine's: nothing is mapped there.
+        const range = cpu.engineRange();
+        memory.register({ name: 'engine', base: range.from, size: range.to - range.from,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.NONE });
+        cpu.onGrow(()=>{
+            const at = cpu.wrappedAddress(SHARED_USER_DATA);
+            if (at === sharedAt || !sharedData)
+            {
+                return;
+            }
+            // Its old place becomes the heap's: left as zeros, as arena never
+            // handed out is. A region of its own is given back instead.
+            if (sharedOwn)
+            {
+                memory.unregister(KUSER_REGION);
+            }
+            else
+            {
+                memory.writeBytes(sharedAt, new Uint8Array(KUSER.SIZE));
+            }
+            sharedAt = at;
+            sharedOwn = ownsPlace(at);
+            sharedData = createSharedUserData({ memory, version, at, ownRegion: sharedOwn });
+            refresh();
+        });
+    }
+
+    /**
+     * Takes back what the loader wrote into the process that Windows writes
+     * only once the process runs, and answers the work that puts it back.
+     * 32-bit only: a 64-bit process keeps it all from its creation.
+     *
+     * @returns {() => void}
+     */
+    const holdLoaderState = ()=>{
+        if (long)
+        {
+            return ()=>{};
+        }
+        const fields = blockLayouts(pointerSize).peb;
+        /** @type {[number, Uint8Array, Uint8Array][]} each place, as built, as held */
+        const held = [
+            [process.peb + fields.LDR, 4],
+            [process.peb + fields.PROCESS_HEAP, 4],
+            // CSDVersion's UNICODE_STRING: its lengths and its buffer.
+            [process.peb + fields.CSD_VERSION, 8],
+        ].map(([at, size])=>[at, memory.readBytes(at, size), new Uint8Array(size)]);
+        for (const { entries } of readImports(options.executable, ownImage))
+        {
+            for (const { iatRva } of entries)
+            {
+                const offset = rvaToFileOffset(ownImage, iatRva);
+                held.push([image.base + iatRva, memory.readBytes(image.base + iatRva, 4),
+                    options.executable.slice(offset, offset + 4)]);
+            }
+        }
+        for (const [at, , before] of held)
+        {
+            memory.writeBytes(at, before);
+        }
+        return ()=>{
+            for (const [at, built] of held)
+            {
+                memory.writeBytes(at, built);
+            }
+        };
+    };
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
@@ -6986,7 +3298,23 @@ async function buildApp(options){
         // A program whose entry point returns ends as one that called
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
+        first: { entry: image.entryPoint, block: process.peb },
     });
+    // CREATE_SUSPENDED: the process is there, and nothing of it runs -- not
+    // its libraries' initialisers either, which run on this thread -- until
+    // its parent's ResumeThread reaches it.
+    if (options.suspended)
+    {
+        kernel.suspendThread(mainThread);
+    }
+    // What the loader leaves in a process is put there by its first thread to
+    // run, as Windows' loader initialises a process inside it (LdrInitializeThunk):
+    // a parent that reads a suspended child finds the program's import slots
+    // as its file has them and no module list, heap or service pack in its
+    // process block yet. The engine binds and builds all of it here, before
+    // the process runs; held back until its first slice, it is the same work
+    // in the same order, only seen when Windows would show it.
+    kernel.beforeFirstSlice(holdLoaderState());
     // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
     holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
@@ -7025,7 +3353,7 @@ async function buildApp(options){
      * much sound the picture is ahead of.
      */
     /** @type {{ track: any, sampleRate: number, channels: number,
-     *           written: number } | null} */
+     *           ledger: FilmSoundLedger } | null} */
     let filmTrack = null;
 
     /** Which film that track is playing, so that the next one gets a fresh one. */
@@ -7045,8 +3373,7 @@ async function buildApp(options){
      * @returns {number | null}
      */
     const filmSoundOwedMs = ()=>(sound && filmTrack && soundIsHeard
-        ? Math.max(0, filmTrack.written - filmTrack.track.played())
-            * 1000 / sound.sampleRate
+        ? filmSoundOwed(filmTrack.ledger, filmTrack.track.played()) * 1000 / sound.sampleRate
         : null);
 
     /**
@@ -7063,8 +3390,8 @@ async function buildApp(options){
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
         driftMs: 0, worstDriftMs: 0, soundMs: 0, queuedMs: 0,
-        // The film's sound its track would not take: heard as a gap.
-        refusedMs: 0,
+        // The film's sound waiting for room in its track, now and at most.
+        heldMs: 0, worstHeldMs: 0,
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
@@ -7074,6 +3401,12 @@ async function buildApp(options){
      *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
     const showVideoFrame = shown=>{
+        // Sound held for want of room goes in as the track drains, tick by
+        // tick, whether or not this one brought anything.
+        if (filmTrack && sound)
+        {
+            feedFilmSound(filmTrack.track, [], filmTrack.channels, filmTrack.ledger);
+        }
         if (!shown)
         {
             return;
@@ -7105,16 +3438,17 @@ async function buildApp(options){
                     }),
                     sampleRate: shown.sampleRate,
                     channels: shown.channels,
-                    written: 0,
+                    ledger: { taken: 0, held: [], heldBytes: 0,
+                        framesPerByte: sound.sampleRate / shown.sampleRate / (shown.channels * 2) },
                 };
             }
-            const fed = feedFilmSound(filmTrack.track, shown.audio, shown.channels,
-                shown.sampleRate, sound.sampleRate);
-            filmTrack.written += fed.offered;
-            film.refusedMs += Math.round(fed.refused * 1000 / sound.sampleRate);
+            feedFilmSound(filmTrack.track, shown.audio, shown.channels, filmTrack.ledger);
         }
         if (filmTrack && sound)
         {
+            film.heldMs = Math.round(filmTrack.ledger.heldBytes * filmTrack.ledger.framesPerByte
+                * 1000 / sound.sampleRate);
+            film.worstHeldMs = Math.max(film.worstHeldMs, film.heldMs);
             film.soundMs = Math.round(filmTrack.track.played() * 1000 / sound.sampleRate);
             film.queuedMs = Math.round(filmSoundOwedMs() ?? 0);
             film.driftMs = Math.round(shown.positionMs) - film.soundMs;
@@ -7200,16 +3534,18 @@ async function buildApp(options){
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
     kernel.refreshClockWith?.(()=>creditClock());
+    // A wait whose object another process of the run may set is sat through
+    // in real time, not skipped to its deadline (`othersRunningWith`).
+    kernel.othersRunningWith?.(()=>options.othersRunning?.() ?? false);
     // Callers parked on the guest's own queue are suspended calls too, answered
     // at the look each turn gives them.
-    kernel.hostAnsweringWith?.(()=>bridge.suspended() > idlers.length);
+    kernel.hostAnsweringWith?.(()=>bridge.waitingOnHost() > idlers.value.length);
 
     const breathe = createMacrotask();
     const jsSampler = options.sampleJs ? createJsSampler() : null;
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
-        pendingMs: options.pendingYieldMs,
     });
 
     /**
@@ -7218,18 +3554,15 @@ async function buildApp(options){
      * open -- the next look a device needs. Null when it has none.
      */
     const nextDeadlineMs = ()=>{
-        /** @type {number | null} */
-        let soonest = null;
-        for (const due of [kernel.nextDeadline(), win32.queue?.()?.nextTimerDue?.() ?? null])
-        {
-            if (due !== null && (soonest === null || due < soonest))
-            {
-                soonest = due;
-            }
-        }
+        // Asked every turn: compared in place, and the open tracks counted
+        // rather than read off the output's report.
+        const thread = kernel.nextDeadline();
+        const timer = win32.queue?.()?.nextTimerDue?.() ?? null;
+        const soonest = thread === null ? timer
+            : timer === null || thread <= timer ? thread : timer;
         let wall = soonest === null ? null : Math.max(0, soonest - clock.virtualTime());
         const feeding = clockSource() - filmTickedAt < FILM_ACTIVE_MS
-            || (sound?.diagnostics().tracks ?? 0) > 0;
+            || (sound?.tracks() ?? 0) > 0;
         if (feeding && (wall === null || wall > DEVICE_LOOK_MS))
         {
             wall = DEVICE_LOOK_MS;
@@ -7290,1476 +3623,78 @@ async function buildApp(options){
      * @returns {any}
      */
     const fail = (reason, error)=>{
+        if (disposed.value)
+        {
+            // Whatever a turn under way met once its machine was gone is the
+            // disposal, not a failure of the program: no trace, no event.
+            return gone();
+        }
         // The exception frame, when there is one. Without it the report names
         // the ROM stub the processor is standing in rather than the instruction
         // that faulted, and every register it prints is read from a machine
         // that has already left the scene.
-        const trace = captureTrace({ cpu, memory, kernel, bridge, fault: cpu.fault?.() ?? null });
+        const trace = captureTrace({ cpu, memory, kernel, bridge,
+            traced: ()=>layerTraces.slice(), fault: cpu.fault?.() ?? null });
         const text = formatTrace(trace);
         const thrown = error instanceof Error ? error : new Error(String(error));
         Object.assign(thrown, { reason, trace, traceText: text });
         return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
     };
 
+    /** This process's memory, once it has gone (`spareMemory`). @type {{ value: SpareMemory | null }} */
+    const spare = { value: null };
     /**
-     * Ends the run because a child is to take this process's place.
-     *
-     * Reached from the two places a parent can be finished: it exited, or it is
-     * waiting on a handle only the replacement could ever signal. Nothing is
-     * torn down here -- `run` returns and the caller above rebuilds, which is
-     * the one place in the engine that owns a process lifecycle.
-     *
-     * @param {any} request
+     * Set by `dispose`: the machine under a run still turning is gone. A process
+     * standing beside the program runs on a clock of its own, so the program's
+     * end is not its loop's, and a loop left turning takes the thread from
+     * whatever the page runs next.
      */
-    const handOver = request=>{
-        events.emit('process-replace', {
-            image: request.imagePath,
-            commandLine: request.commandLine,
-            patches: request.patches.length,
-        });
-        if (options.refuseReplacement)
-        {
-            throw fail('process-replacement-refused', new Error(
-                `refusing to replace this process with ${request.imagePath}`));
-        }
-    };
+    const disposed = { value: false };
+    const wasDisposed = ()=>disposed.value;
+    /** What a run ends with then. No trace: there is no machine left to read one from. */
+    const gone = ()=>Object.assign(new Error('the machine was disposed while its program ran'),
+        { reason: 'disposed' });
 
-    /** This process's memory, once it has gone (`spareMemory`). @type {{ memory: WebAssembly.Memory, guestEnd: number } | null} */
-    let spare = null;
-
-    return {
-        /** Where the program was mapped and where it starts. */
-        image,
-
-        /**
-         * Runs the program to completion, one scheduler turn at a time.
-         *
-         * Turns rather than a free-running emulator: a turn is where a thread
-         * can be preempted, where a blocked one is put back on the road, and
-         * where "nothing can run" becomes visible instead of looking like work.
-         *
-         * @param {Object} [runOptions]
-         * @param {number} [runOptions.maxTurns]
-         *     Turns in which the guest ran something. A turn that ran nothing
-         *     is the machine waiting -- on a fetch, on a timer -- and waiting
-         *     is not the work this bounds: with a yield every turn, a wait of
-         *     a few seconds is tens of thousands of such turns.
-         * @param {number | null} [runOptions.timeoutMs]
-         *     Wall milliseconds the run may take, whatever it did with them.
-         *     The bound for a program that only waits: the turn budget never
-         *     runs out on a machine that does nothing, so a caller that needs
-         *     a windowed program with an empty queue to come back at all
-         *     bounds it here.
-         * @returns {Promise<number>} the guest's exit code
-         */
-        async run({ maxTurns = 200000, timeoutMs = null } = {}){
-            let worked = 0;
-            const startedAt = clockSource();
-            // Read at the top of a turn, where a bounded wait has just
-            // returned: a machine sleeping between looks overruns by one
-            // look at most.
-            const expired = ()=>timeoutMs !== null && clockSource() - startedAt >= timeoutMs;
-            // How many turns in a row have retired nothing. This is what tells
-            // a machine waiting on its own next instruction from one waiting on
-            // the host, which are the same shape from here and want opposite
-            // waits.
-            let spun = 0;
-            /**
-             * The process's other executors' bell as the last turn left it
-             * without waiting for them, a call waiting on the host: the idle
-             * wait ends on its ring too. Null otherwise.
-             * @type {number | null}
-             */
-            let othersRung = null;
-            /** When the sound was last pumped (`SOUND_PUMP_MS`). */
-            let pumpedAt = -Infinity;
-            while (worked < maxTurns && !expired())
-            {
-                if (paused)
-                {
-                    await paused.gate;
-                }
-
-                // A turn is a phase, and everything inside it is a phase of its
-                // own. Not decoration: a region nobody opened a phase around
-                // measures nothing, so unaccounted time reads as no cost at all
-                // and the largest item in a run can be the one item nobody
-                // bracketed. `turn` is what the rest is checked against -- the
-                // sum of its occurrences is the run -- and its own self time is
-                // the loop's overhead and nothing else.
-                journal.begin('turn', journal.PhaseKind.HOST);
-                try
-                {
-                    // What passed since the last slice ended -- the yield, the
-                    // pump, the cursors, the polls -- is the program's time as
-                    // much as the slice was, and it is credited before the
-                    // sound is pumped so that a cursor read there is current.
-                    creditClock();
-
-                    // One yield per turn, so a host function suspended on a
-                    // guest callback can make progress between them. Without it
-                    // the loop never returns to the event loop on its normal
-                    // path and such a handler would be resumed exactly never.
-                    //
-                    // Bracketed because that handler runs here: whatever a
-                    // resumed host call then does is this turn's cost, and it is
-                    // charged to nothing if nobody opened a phase around it.
-                    journal.begin('microtasks', journal.PhaseKind.HOST);
-                    await Promise.resolve();
-                    journal.end('microtasks');
-
-                    // And a real one when the host says so, because that one
-                    // is a microtask and microtasks do not let anything else
-                    // happen. A program running hot never leaves the microtask
-                    // queue, so nothing outside gets a turn: a click on a pause
-                    // button is not delivered, a timer does not fire, a
-                    // presented frame is not composed, and a page looks hung
-                    // while the guest is working perfectly. When is the host's
-                    // call -- by what is pending and by a clock, never by turn:
-                    // a trip round the event loop is paid for whatever the
-                    // browser runs in the gap, and one per turn was the largest
-                    // host phase of a run.
-                    //
-                    // Sound is written ahead before the turn yields to the
-                    // browser, not after: the device reads on a thread of its
-                    // own, and a yield is where the browser may take the thread
-                    // to compose a frame or collect its garbage. Topping the
-                    // ring up first is what keeps it from draining empty in that
-                    // gap -- heard as a click in otherwise steady sound.
-                    //
-                    // Once a SOUND_PUMP_MS, though, not once a turn: a ring
-                    // topped up a millisecond ago is as full as it gets, and
-                    // a machine whose threads wait out a deadline turns --
-                    // and yields -- tens of thousands of times a second, a
-                    // pump each, 8 % of a game's thread, all doing nothing.
-                    //
-                    // A caller parked on a queue of the guest's own is a
-                    // suspended call too, but the guest answers it, at the look
-                    // every turn gives it below: what is left waits on the
-                    // host. Counted before the look, when every such caller is
-                    // parked rather than halfway through looking.
-                    const queued = idlers.length;
-                    const onHost = Math.max(0, bridge.suspended() - queued);
-                    const turnYield = pacing.yield({
-                        suspended: onHost, fetching, idlers: queued, spun,
-                    });
-                    const pumpAt = performance.now();
-                    if (sound && pumpAt - pumpedAt >= SOUND_PUMP_MS)
-                    {
-                        pumpedAt = pumpAt;
-                        journal.begin('pump', journal.PhaseKind.HOST);
-                        sound.pump();
-                        journal.end('pump');
-                    }
-                    if (turnYield)
-                    {
-                        journal.begin('yield', journal.PhaseKind.HOST);
-                        await turnYield;
-                        journal.end('yield');
-                    }
-
-                    // And devices that keep a cursor are moved on, whether or not
-                    // the guest asked anything. A program is entitled to hand a
-                    // buffer to a device and then spin on the flag the device sets
-                    // in it -- the flag is the contract, and a real device honours
-                    // it from its own clock. A cursor advanced only when the guest
-                    // calls in is a cursor that never advances for such a program,
-                    // and the spin is then forever: the machine is running, the
-                    // clock is running, and the one thing that would end it is
-                    // waiting for a call that will not come.
-                    journal.begin('waveTick', journal.PhaseKind.HOST);
-                    win32.waveTick?.();
-                    journal.end('waveTick');
-
-                    // And a film, for the same reason: nothing inside the guest
-                    // advances one. A program that plays a cinematic hands the
-                    // graph a file and then sits in its message loop until it is
-                    // told the film ended.
-                    journal.begin('videoTick', journal.PhaseKind.HOST);
-                    showVideoFrame(win32.videoTick?.(clockSource(), filmSoundOwedMs()));
-                    journal.end('videoTick');
-
-                    // And a turn is also when anything waiting for something to
-                    // arrive -- a message loop with an empty queue -- gets to look
-                    // again. Taken as a batch: a waiter that goes back to waiting
-                    // must not be released twice by its own turn.
-                    if (idlers.length > 0)
-                    {
-                        journal.begin('idlers', journal.PhaseKind.HOST);
-                        const waiting = idlers;
-                        idlers = [];
-                        for (const release of waiting)
-                        {
-                            release();
-                        }
-                        await Promise.resolve();
-                        journal.end('idlers');
-                    }
-
-                    // Still waiting after being let look, or a host call
-                    // suspended on something outside the microtask queue -- a
-                    // fetch, a file read -- means the machine has nothing to do
-                    // until the host gets a turn. A microtask does not give it
-                    // one, so this is the one place the loop hands it back.
-                    //
-                    // Through the unclamped yield while the guest is still
-                    // getting work done, and on a timer once it has stopped.
-                    // A program sitting in its own message loop takes this
-                    // branch on most turns while running perfectly well, and a
-                    // zero timeout is clamped to four milliseconds and more once
-                    // they nest -- so this branch, the one for a machine with
-                    // nothing to do, was the largest cost in a run by far,
-                    // bigger than every host call and all the emulation
-                    // together. The timer is kept for the case it is right for,
-                    // which is a machine that really can do nothing until the
-                    // host answers.
-                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun,
-                        others: othersRung !== null });
-                    if (wait)
-                    {
-                        journal.begin(wait.phase, journal.PhaseKind.HOST);
-                        creditClock();
-                        // A caller sitting on an empty message queue is waiting
-                        // for two things: something posted from outside, which
-                        // nobody can predict, and a timer of its own, whose due
-                        // time is written down in the queue. Moving the clock to
-                        // it -- never past the host's, as everywhere else -- is
-                        // the difference between finding out and looking to see.
-                        // Looking cost several thousand clamped timeouts a run.
-                        const due = wait.timer && fetching === 0
-                            ? win32.queue?.()?.nextTimerDue?.() ?? null
-                            : null;
-                        if (due !== null && clock.skipTo(due) > 0)
-                        {
-                            journal.end(wait.phase);
-                            continue;
-                        }
-                        // Whichever comes first: the range request answering,
-                        // or the timer coming round again.
-                        //
-                        // Not the request alone, however much cheaper that
-                        // reads. A thread waiting on the network is not the
-                        // only thread there is, and waiting for the answer
-                        // stops the machine for the whole of a request that can
-                        // take four seconds -- measured at two and a half times
-                        // the wall clock of looking again and finding work.
-                        //
-                        // And a host call answering ends the wait at once:
-                        // when every thread is parked on the host, that is
-                        // the only event that can put one back on the
-                        // processor, and sleeping through it costs the whole
-                        // of the look interval for every call the guest makes.
-                        /** @type {Promise<void>[]} */
-                        const wakes = [];
-                        if (fetched && wait.timer)
-                        {
-                            wakes.push(fetched);
-                        }
-                        if (wait.timer && bridge.suspended() > 0)
-                        {
-                            wakes.push(bridge.answered());
-                        }
-                        if (wait.timer && othersRung !== null)
-                        {
-                            wakes.push(cpu.executorBell().waitAsync(othersRung, IDLE_LOOK_MS));
-                        }
-                        await pacing.wait({
-                            timer: wait.timer, sleep: wait.timer,
-                            deadlineMs: nextDeadlineMs(), wakes,
-                        });
-                        // This time passed for the guest too, and it is the only
-                        // time nothing credits. A thread suspended on a host call
-                        // is parked on `hlt` and still counts as runnable, so the
-                        // scheduler never reaches the branch that moves the clock
-                        // to the next deadline -- and the clock is otherwise
-                        // credited only for turns the guest actually ran. A
-                        // machine that idles for most of its wall time then holds
-                        // its own clock nearly still, and every timed wait in the
-                        // guest waits far longer than it asked for: a sleep, a
-                        // timeout, a WM_TIMER, a wave cursor. The wait that would
-                        // end the idling is itself the thing the idling stops
-                        // from expiring. In full: a wait this long was asked
-                        // for, and a cap here would make it end early.
-                        creditClock(Infinity);
-                        journal.end(wait.phase);
-                    }
-
-                    // What the machine's state says before it is given another
-                    // slice: a failed host call, a pending replacement, an exit,
-                    // a fault. Each is a call across a layer boundary and there
-                    // are four of them per turn, so they are worth a phase of
-                    // their own rather than an unmeasured constant.
-                    journal.begin('poll', journal.PhaseKind.HOST);
-                    const failure = bridge.failure();
-                    let replacing = kernel.processes.pending();
-                    // Where processes run at once, a child starts now, beside
-                    // this one, rather than waiting to take its place.
-                    if (replacing && options.beside)
-                    {
-                        kernel.processes.started(replacing);
-                        options.beside(replacing);
-                        replacing = null;
-                    }
-                    const code = win32.exitCode();
-                    const fault = cpu.fault();
-                    journal.end('poll');
-
-                    if (failure)
-                    {
-                        throw fail('host-call', failure);
-                    }
-
-                    if (code !== null)
-                    {
-                        // A parent that exits after starting a child has handed
-                        // over; it has not finished. Saying so as an exit would
-                        // report the launcher's code as the program's.
-                        if (replacing)
-                        {
-                            handOver(replacing);
-                            return code;
-                        }
-                        events.emit('exit', { code });
-                        return code;
-                    }
-
-                    // A processor exception stops the machine rather than raising
-                    // anything: the report cannot be thrown from where it is
-                    // noticed, so it is left here to be found. Checked before the
-                    // next turn, because from outside a halted processor and a
-                    // program that finished look exactly alike.
-                    if (fault)
-                    {
-                        const error = new Error(fault.text);
-                        Object.assign(error, { code: 'GUEST_FAULT', fault });
-                        throw fail('guest-fault', error);
-                    }
-
-                    // A parent polling a child that has not run -- its exit
-                    // code, a wait that does not block -- in a loop that never
-                    // blocks is waiting on it: the child runs now, beside it,
-                    // as it would once the parent blocked on its handle.
-                    if (replacing?.polled && win32.childWaitedOn(replacing))
-                    {
-                        events.emit('process-child', {
-                            image: replacing.imagePath,
-                            commandLine: replacing.commandLine,
-                        });
-                        return 0;
-                    }
-
-                    let step;
-                    try
-                    {
-                        // The one measurement that separates emulation from our
-                        // own code. Host calls trap out from inside this and open
-                        // their own phase, so what is left as this phase's self
-                        // time is the guest actually executing -- which is the
-                        // number every question about speed starts from.
-                        journal.begin('guest', journal.PhaseKind.GUEST);
-                        const compiledBefore = import.meta.BOTTLIFY_DIAGNOSTICS !== false
-                            ? cpu.compiledModules() : 0;
-                        step = kernel.runOnce();
-                        // Compiling happens inside the slice, on the way to a
-                        // hot page, and is the guest's time only by position.
-                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                        {
-                            journal.compiled(cpu.compiledModules() - compiledBefore);
-                        }
-                        // Where the guest stood when its slice ran out. Sampled
-                        // here because this is the only boundary the host owns: a
-                        // program that decides something inside its own code makes
-                        // no call to record, and the instruction pointer is the
-                        // only thing that says which code that was.
-                        if (options.sample && step.ran)
-                        {
-                            // With what the turn actually retired. A sample per
-                            // turn weights every thread the same, and a parked
-                            // one retires two instructions and a busy one a
-                            // hundred thousand -- so an unweighted profile
-                            // reads as though the machine spends its life in
-                            // the park loop.
-                            options.sample(cpu.eip(), step.instructions ?? 1);
-                        }
-                    }
-                    catch (e){
-                        // A fault inside the guest, or inside a host function
-                        // answering it. Either way the program cannot be told, and
-                        // the state that explains it is about to be lost.
-                        journal.end('guest');
-                        throw fail('guest', e);
-                    }
-                    journal.end('guest', { instructions: step.instructions ?? 0 });
-
-                    // A slice that ended on a host call: an answer due in a few
-                    // microtasks -- a host call running guest code builds its
-                    // frame a promise or two later -- is let arrive now. The loop
-                    // otherwise awaits only when nothing is ready, and a thread
-                    // parked on an answer already made waited until every other
-                    // thread had nothing to do.
-                    if (step.ran?.awaitingHost)
-                    {
-                        let tick = 0;
-                        while (tick < HOST_ANSWER_TICKS && step.ran.awaitingHost)
-                        {
-                            await null;
-                            tick++;
-                        }
-                        kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);
-                    }
-
-                    // A turn spent waiting on the process's other executors is
-                    // the guest at work there, not a machine with nothing to do:
-                    // counted as a spin, every one went round the event loop and,
-                    // with a thread in GetMessage, slept on a timer while the
-                    // others waited for their traps to be answered.
-                    spun = step.instructions === 0 && !step.elsewhere ? spun + 1 : 0;
-                    othersRung = step.elsewhere && step.rung !== undefined ? step.rung : null;
-
-                    // The guest ran for real, so its clock moves. Nothing else in
-                    // the engine does this, and without it the clock only ever
-                    // advanced when a program waited -- so a program that does not
-                    // wait sees no time pass at all. That is not a small error: a
-                    // frame loop concludes its frame took no time, a timed wait
-                    // never expires, and a device whose cursor runs on the clock
-                    // never finishes a buffer, which strands a program spinning on
-                    // the flag that buffer would have set.
-                    //
-                    // Credited from the host's wall clock rather than from retired
-                    // instructions, because what a program is measuring is how long
-                    // its own work took, and on a machine this slow that really is
-                    // the wall time. A slow machine is a slow machine; a machine
-                    // where no time passes is a broken one.
-                    creditClock();
-
-                    if (step.ran)
-                    {
-                        worked++;
-                    }
-                    // A turn whose threads all ran on the process's other
-                    // executors is no idle machine: it came back for the clock
-                    // and the event loop, theirs still running.
-                    if (!step.ran && !step.elsewhere)
-                    {
-                        // Nobody is ready. When a child is waiting to be started
-                        // that is not a deadlock but its turn: the parent has not
-                        // exited, so it is not finished -- blocked on the child's
-                        // handle, sleeping between polls of its exit code, or idle
-                        // in its message loop -- and the child runs beside it,
-                        // the parent going on afterwards, which the caller above
-                        // arranges. Only a wait for all of a set the child cannot
-                        // answer alone still hands the parent over.
-                        if (replacing)
-                        {
-                            if (win32.childWaitedOn(replacing))
-                            {
-                                events.emit('process-child', {
-                                    image: replacing.imagePath,
-                                    commandLine: replacing.commandLine,
-                                });
-                                return 0;
-                            }
-                            handOver(replacing);
-                            return 0;
-                        }
-                        // Nothing ready is not the same as nothing to wait
-                        // for. A thread parked on a host call that has not
-                        // answered is deliberately not a candidate -- that is
-                        // what lets the scheduler move the clock -- so a turn
-                        // where only such threads exist means the machine is
-                        // waiting on us, and the wait above is where that is
-                        // paid for.
-                        if (bridge.suspended() > 0 || fetching > 0 || idlers.length > 0)
-                        {
-                            continue;
-                        }
-                        // Or every thread is in a timed wait and the clock has
-                        // caught up with the host's, so the only thing left to
-                        // do is let real time reach the deadline. That is a
-                        // machine waiting, not a machine stuck, and the two look
-                        // identical from here without asking.
-                        const waitingOnTime = kernel.nextDeadline() !== null
-                            || (win32.queue?.()?.nextTimerDue?.() ?? null) !== null;
-                        if (waitingOnTime)
-                        {
-                            journal.begin('idle-deadline', journal.PhaseKind.HOST);
-                            await pacing.wait({
-                                timer: false, sleep: true,
-                                deadlineMs: nextDeadlineMs(), wakes: [],
-                            });
-                            journal.end('idle-deadline');
-                            continue;
-                        }
-                        // Or another process of the run is running beside this
-                        // one, and what every thread here waits on -- a child's
-                        // exit, an object it sets -- is its to answer.
-                        if (options.othersRunning?.())
-                        {
-                            journal.begin('idle-host-wait', journal.PhaseKind.HOST);
-                            await pacing.wait({
-                                timer: true, sleep: true, deadlineMs: null, wakes: [],
-                            });
-                            journal.end('idle-host-wait');
-                            continue;
-                        }
-                        // Either everything finished without the program exiting,
-                        // or every thread is waiting on something no one will
-                        // signal -- and the diagnostics name what.
-                        const waiting = kernel.diagnosticsSnapshot().waiting;
-                        if (waiting.length > 0)
-                        {
-                            throw fail('deadlock',
-                                new Error(`deadlock: ${waiting.join('; ')}`));
-                        }
-                        throw fail('no-threads',
-                            new Error('every thread ended without the process exiting'));
-                    }
-                }
-                finally
-                {
-                    journal.end('turn');
-                }
-            }
-            throw fail('runaway', new Error(worked < maxTurns
-                ? `program did not finish within ${timeoutMs} ms`
-                : `program did not finish within ${maxTurns} turns`));
-        },
-
-        /** The program's first thread. */
-        mainThread,
-
-        /**
-         * The run as a session that can be replayed, when one was recorded.
-         *
-         * Everything `replaySession` needs and nothing else: the order of
-         * events at the bridge, and the threads with the stacks they were
-         * given. Written to a file, this is a failure that took a person a
-         * minute of clicking turned into a test that runs in a second.
-         */
-        /** @returns {{ threads: any[], events: any[] }} */
-        recordedSession(){
-            const recorded = bridge.recorded();
-            const named = new Set(recorded.map((/** @type {any} */ one)=>one.thread));
-            return {
-                threads: kernel.threads()
-                    .filter((/** @type {any} */ one)=>named.has(one.name))
-                    .map((/** @type {any} */ one)=>({
-                        name: one.name, stackTop: one.stackTop, stackLimit: one.stackLimit,
-                    })),
-                events: recorded,
-            };
-        },
-
-        /**
-         * Stops handing out turns without ending anything; `resume` continues
-         * from the same place, since no thread's state was touched.
-         */
-        pause: pauseRun,
-        resume: resumeRun,
-        stop: ()=>cpu.stop(),
-
-        /**
-         * Answers a message box the page was shown. A program's own boxes are
-         * dialogs on its desktop, answered there as a person answers them, and
-         * the engine's own notice waits on nothing -- so no box is ever
-         * standing here to be answered.
-         *
-         * @param {number} id   The id the `message-box` event carried.
-         * @param {number} button
-         * @returns {boolean} Whether a box was standing under that id: never.
-         */
-        answerMessageBox(id, button){
-            void id;
-            void button;
-            return false;
-        },
-
-        /**
-         * Watches, answers, or swallows something the program did.
-         *
-         * Handlers run in registration order and the first to return anything
-         * other than `undefined` decides and stops the rest -- so observing and
-         * intercepting are the same mechanism, and a handler that returns
-         * nothing has not intervened.
-         *
-         * What is emitted today: `output` ({ handle, text }) for a write to a
-         * standard handle, `debug` ({ text }) for the program's own tracing,
-         * `error` ({ reason, error }) for a failure the program cannot see,
-         * and `exit` ({ code }) when it ends.
-         *
-         * @param {string} name
-         * @param {(payload: any) => any} handler
-         * @returns {() => void} stops this handler
-         */
-        on: (name, handler)=>events.on(name, handler),
-        /** @param {string} name @param {(payload: any) => any} handler */
-        off: (name, handler)=>events.off(name, handler),
-
-        /**
-         * The emulator's account of where the guest ran, by the address of
-         * every compiled block and interpreted instruction, weighted by the
-         * instructions retired there. A sample taken where a turn stops lands
-         * on whatever stopped it; this is kept by the code as it runs, and is
-         * the only honest answer to "which of the program's own instructions
-         * is the time going to". Costs a call per block while it is kept, so
-         * it is started for a measurement and stopped after.
-         */
-        guestProfile: {
-            /**
-             * What a profiler build of the emulator counted since it started:
-             * its event counters by name and retired instructions by opcode.
-             * Null in a build without the profiler; a window is two readings.
-             */
-            instructionStats: ()=>core.api('cpu').profile?.instructionStats() ?? null,
-            available: ()=>Boolean(core.api('cpu').profile?.available()),
-            /** @param {{ keepCode?: boolean }} [how] Kept code makes
-             * the account the interpreter's own instructions. */
-            start: how=>Boolean(core.api('cpu').profile?.start(how)),
-            stop: ()=>core.api('cpu').profile?.stop(),
-            /**
-             * @returns {{ entries: { address: number, instructions: number, hits: number }[],
-             *     dropped: number } | null}
-             */
-            read: ()=>core.api('cpu').profile?.read() ?? null,
-        },
-
-        /**
-         * The journal: everything the engine reported, in one ordered stream.
-         *
-         * Every event the engine emits is written here as it happens, under its
-         * own name as the category, so a reader that wants the whole story does
-         * not have to know the names in advance and subscribe to each. That is
-         * the point of it: a program's behaviour is the interleaving, and three
-         * separate views of three kinds of event cannot be interleaved after
-         * the fact.
-         *
-         * `drain(since, limit)` reads forward and says where to resume, which
-         * is what a live view polls with; `recent(count)` reads the tail
-         * without moving anything, which is what a snapshot of a failure wants.
-         * `setLevel` decides how much is kept, per category.
-         */
-        log: {
-            /**
-             * A record from outside the engine, into the same journal: what
-             * the host's own GPU device reported about a frame, which a reader
-             * of the run's log must see beside the frame it dropped.
-             *
-             * @param {'error' | 'warn' | 'info'} level
-             * @param {string} category @param {string} text
-             */
-            write: (level, category, text)=>core.api('log').write(level, category, '{0}', text),
-            /** @param {number} [since] @param {number} [limit] */
-            drain: (since, limit)=>core.api('log').drain(since, limit),
-            /** @param {number} [count] */
-            recent: count=>core.api('log').recent(count),
-            /** The journal this machine writes into, for the next process of the run to share. */
-            journal: ()=>core.api('log').journal?.() ?? null,
-            /** @param {string} category @param {string | number} level */
-            setLevel: (category, level)=>core.api('log').setLevel(category, level),
-            /** @param {string | number} level */
-            setDefaultLevel: level=>core.api('log').setDefaultLevel(level),
-            /**
-             * The topics a reader can switch on, for one offering a filter.
-             * Named here rather than discovered from what has been logged, so a
-             * filter can offer a topic before anything in it has happened.
-             *
-             * Most are the areas a host call is filed under; `input.press` is
-             * not a call at all but the other end of the same question -- what
-             * arrived from outside, as against what the program asked.
-             */
-            areas: ()=>[
-                ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com', 'hook']
-                    .map(area=>`call.${area}`),
-                'input.press',
-                'input.message',
-            ],
-
-            /**
-             * Where a frame's time went: every phase by self time, the slowest
-             * frames, and the share of each that was ours rather than the
-             * guest's.
-             *
-             * @param {number} [worst] How many of the slowest frames to name.
-             */
-            profile: worst=>core.api('log').profile(worst),
-
-            /** @param {number} [count] The most recent frames, one row each. */
-            frames: count=>core.api('log').frames(count),
-
-            /**
-             * The journal's block and every layer's tables, for a reader on
-             * another thread. Handed over once: everything above is then read
-             * there, out of this memory, and this thread is never asked for a
-             * record, a frame or a counter again.
-             *
-             * @returns {import('./layers/log/internal/reader.js').LogMemory}
-             */
-            memory: ()=>core.api('log').memory(),
-        },
-
-        /** @param {(handle: number, text: string) => void} sink */
-        attachLog(sink){
-            /** @param {any} payload */
-            const handler = payload=>{
-                sink(payload.handle, payload.text);
-            };
-            logSinks.set(sink, handler);
-            events.on('output', handler);
-        },
-        /** @param {(handle: number, text: string) => void} sink */
-        detachLog(sink){
-            const handler = logSinks.get(sink);
-            if (handler)
-            {
-                events.off('output', handler);
-                logSinks.delete(sink);
-            }
-        },
-
-        /**
-         * Puts a message in the guest's queue: a keystroke, a mouse move, a
-         * request to close. This is the seam the input layer will post through,
-         * and the way a test drives a program that is waiting for a user.
-         *
-         * @param {{ hwnd?: number, message: number, wParam?: number, lParam?: number }} message
-         */
-        post(message){
-            win32.queue().post({
-                hwnd: message.hwnd ?? foreground(),
-                message: message.message,
-                wParam: message.wParam ?? 0,
-                lParam: message.lParam ?? 0,
-            });
-        },
-
-        /**
-         * Input, which a program reads two ways at once: `attach` listens to
-         * the viewport the game draws into and turns what happens there into
-         * both a window message and a change of DirectInput state.
-         *
-         * `send` is the same road without a browser on it, for a test or a
-         * recorded session; `poll` reads what has no events of its own -- a
-         * gamepad -- and belongs on whatever already runs once a frame, since
-         * a scheduler turn is far too often to ask.
-         */
-        input: {
-            /** @param {any} canvas @param {{ pointerLock?: boolean }} [inputOptions] */
-            attach: (canvas, inputOptions)=>input.attach(canvas, inputOptions),
-            detach: ()=>input.detach(),
-            /** @param {any} event */
-            send: event=>input.send(event),
-            poll: ()=>input.poll(),
-            showKeyboard: ()=>input.showKeyboard?.() ?? false,
-            hideKeyboard: ()=>input.hideKeyboard?.(),
-            keyboardShown: ()=>input.keyboardShown?.() ?? false,
-            route: ()=>createInputRoute(event=>input.send(event)),
-            // Where the cursor is: where a locked pointer points
-            // (`inputRecipient`), which no event of the page says.
-            cursor: ()=>input.cursor?.() ?? null,
-        },
-
-        /**
-         * A window on the running machine, for a tool that has to look at it.
-         *
-         * Deliberately narrow and read-only: what a diagnostic needs is to see
-         * what a program was given, and everything else it might ask for is
-         * already an event or a diagnostics counter.
-         */
-        debug: {
-            /** @param {number} address @param {number} length */
-            read: (address, length)=>memory.readBytes(address >>> 0, length),
-            /**
-             * The calls the guest made through Direct3D's command rings, which
-             * no call log shows: kept from now on for the last `count` of them,
-             * 0 to stop; answers what was kept.
-             *
-             * @param {number} [count]
-             */
-            ringTrace: count=>core.api('graphics').ringTrace?.(count) ?? [],
-            /**
-             * The draw check (`graphics.checkDraws`) switched on or off as the
-             * program runs: from the moment it is on, each draw recorded for
-             * the graphics worker from a buffer compares the bytes it reads
-             * with what the worker was sent of them; the report's
-             * `drawChecks` has an entry for each time it was turned on.
-             * Answers whether it is on.
-             *
-             * @param {boolean} on
-             */
-            checkDraws: on=>core.api('graphics').checkDraws?.(on === true) ?? false,
-            /**
-             * Whether the guest answers waits on events and mutexes, SetEvent,
-             * ResetEvent and ReleaseMutex by itself (`win32.handleWords`),
-             * switched as the program runs: off, every one crosses into the
-             * host. Answers whether the guest answers them.
-             *
-             * @param {boolean} on
-             */
-            handleWords: on=>core.api('kernel').handleWords?.(on !== false) ?? false,
-            /**
-             * Keeps the functions named -- `'ShowWindow,PeekMessage'`, '' none --
-             * out of the bridge's ring of recent calls from now on, so that what
-             * a program did around one moment is still there to read when an
-             * idle loop of a few calls would have pushed it out. Answers the
-             * functions it matched.
-             *
-             * @param {string} [names]
-             */
-            callRingSkip: (names = '')=>bridge.skipInRing?.(String(names).split(',')) ?? [],
-            /**
-             * Whether a system library this build makes exports a name, or a
-             * number when there is no name: what an import table is checked
-             * against without running the program (tools/import-audit.mjs).
-             * Null for a library this build does not make.
-             *
-             * @param {string} dll @param {string | null} name @param {number | null} [ordinal]
-             */
-            exported: (dll, name, ordinal = null)=>{
-                const module = systemLibraries.has(moduleKeyOf(dll)) ? findModule(dll) : null;
-                if (!module)
-                {
-                    return null;
-                }
-                return (name !== null ? module.addressOf(name)
-                    : module.addressOfOrdinal(ordinal ?? -1)) !== null;
-            },
-            /**
-             * The desktop the window manager paints into, or null before any
-             * window has drawn: for a tool that writes the screen to a file.
-             *
-             * @returns {{ width: number, height: number, pitch: number,
-             *     bytes: Uint8Array } | null}
-             */
-            desktop: ()=>{
-                const surface = core.api('graphics').gdiDrawing().desktop();
-                return surface
-                    ? { width: surface.width, height: surface.height, pitch: surface.pitch,
-                        bytes: surface.bytes.subarray(surface.offset,
-                            surface.offset + surface.pitch * surface.height) }
-                    : null;
-            },
-            /** Every live window, children included, as the window manager lists them. */
-            windows: ()=>win32.windows(),
-            ...liveDumpOf(options.device?.worker, {
-                pause: pauseRun,
-                resume: resumeRun,
-                paused: ()=>paused !== null,
-            }),
-            /** @param {string} name */
-            register: name=>cpu.readReg32(name),
-            eip: ()=>cpu.eip(),
-            /**
-             * Every image mapped so far and where: for a tool that watches a
-             * routine in a library the program imported, which was mapped
-             * before the run and so never announced itself as loaded.
-             *
-             * @returns {{ name: string, base: number, size: number }[]}
-             */
-            modules: ()=>[...new Set(byName.values())].map(module=>({
-                // The program's own image by its file, which is the name a
-                // tool asks for it by; its record's own name is a stand-in.
-                name: module === mainModule
-                    ? String(mainModule.path).split(/[\\/]/).pop() ?? module.name
-                    : module.name,
-                base: module.base,
-                size: module.size ?? 0,
-            })),
-            /**
-             * Which image an address belongs to, or null: a stack of return
-             * addresses is a list of numbers until each is given its module.
-             *
-             * @param {number} address
-             */
-            moduleAt: address=>{
-                const at = address >>> 0;
-                for (const module of byName.values())
-                {
-                    if (at >= module.base && at < module.base + (module.size ?? 0))
-                    {
-                        return { name: module.name, base: module.base, offset: at - module.base };
-                    }
-                }
-                return null;
-            },
-            /**
-             * A watch in front of a routine nothing imports, so a call the
-             * program makes into its own code appears in the trace with its
-             * arguments and its answer.
-             *
-             * The routine's opening instructions, whose lengths the caller
-             * read off a disassembly, move to a trampoline that ends in a
-             * jump back, and the entry becomes a jump into a watch stub whose
-             * target is the trampoline. They must hold no relative branch. A
-             * diagnostic, and a rewrite of the program's code: for a run
-             * under observation, never for one that is meant to be faithful.
-             *
-             * @param {number} address
-             * @param {{ label: string, argBytes: number, lengths: number[],
-             *     strings?: (number | string)[] }} how
-             */
-            hook: (address, { label, argBytes, lengths, strings = [] })=>{
-                const displaced = lengths.reduce((sum, n)=>sum + n, 0);
-                const at = address >>> 0;
-                const region = memory.find(at);
-                if (!region)
-                {
-                    throw new Error(`hook: nothing is mapped at 0x${at.toString(16)}`);
-                }
-                const moved = memory.readBytes(at, displaced).slice();
-                if (!relocatablePrefix(moved, lengths))
-                {
-                    throw new Error(`hook: the first ${displaced} bytes at 0x${at.toString(16)}`
-                        + ' cannot be moved (too few, or a relative branch among them)');
-                }
-                const trampoline = allocateFromHeap(displaced + 5);
-                memory.writeBytes(trampoline, moved);
-                memory.writeBytes(trampoline + displaced,
-                    jumpBytes(trampoline + displaced, at + displaced));
-                const stub = installWatch(label, argBytes, trampoline, strings);
-                const patch = new Uint8Array(displaced).fill(0x90);
-                patch.set(jumpBytes(at, stub));
-                // Opened for the write and put back exactly as it was: an image
-                // whose data the program writes is mapped writable, and leaving
-                // it read-only would fault the program's next store.
-                const before = region.access;
-                memory.protect(region.name, memory.Access.READ_WRITE_EXECUTE);
-                memory.writeBytes(at, patch);
-                memory.protect(region.name, before);
-                return { stub, trampoline };
-            },
-        },
-
-        /**
-         * The sound this process is making, for whoever is playing it.
-         *
-         * `memory()` is what goes to an audio worklet: shared memory, so the
-         * two sides never wait for each other -- `{ table }` when this
-         * process has a shared table, `{ control, samples }` when it has the
-         * engine backend's ring instead. `ring()`/`table()` are the live
-         * object itself, for a caller on this same thread (this process's own
-         * `run` below calls `pump` once a scheduler turn; a test harness
-         * without shared memory reads `ring()` directly).
-         */
-        audio: {
-            /** A span of the output's arena for a process beside this one. @param {number} bytes */
-            lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
-            /** @param {number} offset @param {number} bytes */
-            takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
-            ring: ()=>core.api('audio').output().ring,
-            table: ()=>core.api('audio').output().table,
-            memory: ()=>core.api('audio').output().memory,
-            format: ()=>{
-                const mixer = core.api('audio').output();
-                return { sampleRate: mixer.sampleRate, channels: mixer.channels };
-            },
-        },
-
-        /**
-         * The decoder this machine uses, for the process that takes its place.
-         *
-         * A machine is a process; the decoder is not. Handed on, the rebuilt
-         * machine's first cinematic does not wait for a second instantiation
-         * of the same binary, and nothing outside the machine that wants one
-         * decoder for the run has to reach into a module to find it.
-         */
-        media: {
-            instance: ()=>core.api('media').instance?.() ?? null,
-        },
-
-        /** The registry the program reads and writes; it outlives the process. */
-        registry: ()=>win32.registry(),
-
-        /**
-         * The libraries this build synthesises as Windows' own, by file name
-         * (`windowsLibraries`): what a bottle does not carry out of system32.
-         *
-         * @returns {string[]}
-         */
-        systemLibraries: ()=>[...windowsLibraries],
-
-        /**
-         * The session: everything the program has written, and the way to put
-         * files in from outside.
-         */
-        session: {
-            /** @returns {{ path: string, bytes: Uint8Array }[]} */
-            export: ()=>filesystem.export(),
-            /** @returns {string[]} The empty directories it made, which `export` cannot carry. */
-            directories: ()=>filesystem.exportDirectories(),
-            /**
-             * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes
-             * @param {{ quiet?: boolean }} [how]
-             */
-            apply: (changes, how)=>filesystem.apply(changes, how),
-            /** @returns {number} */
-            generation: ()=>filesystem.generation(),
-            /** @param {number} mark */
-            changesSince: mark=>filesystem.changesSince(mark),
-            /**
-             * Whether another process's session is on the same drives as this
-             * one's: the run's, where what one writes the other reads.
-             *
-             * @param {any} other
-             */
-            shares: other=>filesystem.runVolume() !== null
-                && other?.runVolume?.() === filesystem.runVolume(),
-            /** The run's drives this session is on, or null for this process's own. */
-            runVolume: ()=>filesystem.runVolume(),
-        },
-
-        /**
-         * The volume as the program sees it, read from outside while it runs:
-         * a directory's entries and a file's bytes, the bundle, the system
-         * volume and what the program wrote alike.
-         */
-        files: {
-            /**
-             * @param {string} path
-             * @returns {{ name: string, path: string, directory: boolean, size: number,
-             *     modified: number }[]}
-             */
-            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
-                name: entry.name, path: entry.path, directory: entry.directory === true,
-                size: entry.size ?? 0, modified: entry.modified ?? 0 })),
-            /**
-             * The whole file. Bytes of the bundle not fetched yet read as what
-             * the bundle's reader answers for them.
-             *
-             * @param {string} path
-             * @returns {Uint8Array}
-             */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
-            /**
-             * A directory made from outside, as a person makes one in Explorer
-             * beside the running program: what an installer expects to find
-             * and a disc or an earlier step did not leave.
-             *
-             * @param {string} path
-             * @returns {boolean} true when it was made, false when it was there.
-             */
-            createDirectory: path=>filesystem.createDirectory(path),
-            /**
-             * A file or a directory with everything in it, removed from outside: a
-             * setting the program saved and would read back, taken away so it asks
-             * again.
-             *
-             * @param {string} path
-             * @returns {boolean} true when there was something to remove.
-             */
-            remove: function remove(path){
-                const entry = filesystem.stat(path);
-                if (!entry)
-                {
-                    return false;
-                }
-                if (entry.directory)
-                {
-                    for (const child of filesystem.list(path))
-                    {
-                        remove(child.path);
-                    }
-                    filesystem.removeDirectory(path);
-                }
-                else
-                {
-                    filesystem.deleteFile(path);
-                }
-                return true;
-            },
-            /**
-             * A file written whole from outside, replacing one of that name.
-             *
-             * @param {string} path @param {Uint8Array} bytes
-             */
-            write: (path, bytes)=>{
-                const handle = filesystem.open(path,
-                    { read: false, write: true, disposition: 'create-always' });
-                if (!handle)
-                {
-                    throw new Error(`${path} could not be created`);
-                }
-                try
-                {
-                    filesystem.write(handle, bytes);
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
-        },
-
-        /**
-         * What the translator has made of this bundle's code, as the seed a
-         * bundle carries (`attachTranslations`); null without a translating
-         * engine or a store. Asked before `dispose`, which takes the
-         * translator away.
-         *
-         * @returns {Promise<Uint8Array | null>}
-         */
-        exportTranslations: ()=>cpu.exportTranslations(),
-
-        /**
-         * A worker of the run's translation pool, lent to this process: the
-         * port is the process's end of the worker's, and the token names it
-         * when the pool asks for it back (`recallTranslator`). A machine whose
-         * engine takes none tells the worker so at once.
-         *
-         * @param {MessagePort} port @param {number} token
-         */
-        lendTranslator(port, token){
-            const adapter = portTranslator(port);
-            if (cpu.attachTranslator(adapter))
-            {
-                lentTranslators.set(token, adapter);
-            }
-            else
-            {
-                adapter.terminate();
-            }
-        },
-
-        /** @param {number} token */
-        recallTranslator(token){
-            const adapter = lentTranslators.get(token);
-            if (adapter !== undefined)
-            {
-                lentTranslators.delete(token);
-                cpu.detachTranslator(adapter);
-            }
-        },
-
-        exitCode: ()=>win32.exitCode(),
-
-        /**
-         * The child that is to take this process's place, once `run` has
-         * returned. Null while the program is still its own.
-         */
-        replacement: ()=>kernel.processes.pending(),
-
-        /**
-         * Whether that child runs beside this process rather than in its
-         * place: whenever this process has not exited. It goes on afterwards.
-         *
-         * @param {any} request
-         */
-        waitingOn: (/** @type {any} */ request)=>win32.childWaitedOn(request),
-
-        /**
-         * A child that ran beside this process has exited with this code: the
-         * threads waiting on it wake. The screen is the run's presenter's to
-         * compose again, from the pictures of the processes left.
-         *
-         * @param {any} request @param {number} code
-         */
-        childExited(/** @type {any} */ request, /** @type {number} */ code){
-            win32.childExited(request, code);
-        },
-
-        /**
-         * Ends this process from outside, as its parent's TerminateProcess
-         * does: the run sees the code at the machine's next turn.
-         *
-         * @param {number} code
-         */
-        terminate: (/** @type {number} */ code)=>win32.terminate(code),
-
-        /**
-         * A file off this process's volume, waited for if it is not here yet.
-         * How the caller reads a child's image before this process -- and the
-         * volume with it -- is torn down.
-         *
-         * @param {string} path
-         */
-        readImage: path=>readProgramImage(filesystem, blocks, path),
-
-        // The zones' sums last (`memory-zones.js`), over what this thread holds.
-        diagnostics: ()=>withZones([
-            ...core.diagnostics(),
-            // The run's windows, where this thread keeps them (`manager.js`).
-            ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
-                metrics: options.system.windows.manager.diagnostics() }] : [],
-            {
-                name: 'js',
-                version: '0.1.0',
-                status: 'ready',
-                metrics: jsSampler?.snapshot()
-                    ?? { measured: false, reason: 'off: the sampleJs option' },
-            },
-            {
-                name: 'app',
-                version: '0.1.0',
-                status: 'ready',
-                metrics: {
-                    ...events.diagnostics(),
-                    bundle: {
-                        ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
-                        refetched: blocks?.refetched().blocks ?? 0,
-                        refetchedBytes: blocks?.refetched().bytes ?? 0,
-                        ranges: blocks?.ranges().requests ?? 0,
-                        rangeBytes: blocks?.ranges().bytes ?? 0,
-                        // zstd blocks decoded for guest reads, and the time it took:
-                        // a bundle mounted on this thread's; one a process in a
-                        // worker reads across its link decodes on the system's.
-                        decoded: blocks?.decoded?.().blocks ?? 0,
-                        decodedBytes: blocks?.decoded?.().bytes ?? 0,
-                        decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
-                    },
-                    film: { ...film },
-                    // Which of the program's own code the machine is spent on
-                    // is not here: the kernel publishes its page counts and the
-                    // memory layer its regions, and whoever reads them sums and
-                    // sorts on their own thread. A table computed on this one
-                    // is a reader's work done by the program.
-                    unimplementedCalls: Object.fromEntries(missingCalls),
-                    // What was said as a divergence, the first of them: a
-                    // consumer that listened for none has no other record of
-                    // what this build accepted and did not do, and the journal
-                    // has long since let go of a line said once.
-                    divergences: [...divergences].slice(0, DIVERGENCES_KEPT),
-                    // The guest-to-guest calls a watch was put in front of, by label.
-                    watches: [...watches.keys()],
-                    // How many calls a site kernel issued through `frame.gl`,
-                    // read beside the bridge's own per-hook rows: these calls
-                    // never cross the bridge, so they are not in `hooks` at all.
-                    kernelGlCalls: glCounters.calls,
-                    // Whether the guest's memory is shared with other threads, and
-                    // how many processes run at once (`mode.js`).
-                    mode: options.mode ?? null,
-                    concurrency: options.concurrency ?? 1,
-                    // What was asked for and not had, when the run fell back.
-                    fallback: options.fallback ?? null,
-                    // What a pacing that counts said of the run: in the workers
-                    // mode, the page's messages read between turns, the yields
-                    // to the event loop, and the sleeps on the doorbell.
-                    pacing: /** @type {any} */ (pacing).counts?.() ?? null,
-                    // What the program holds of its RAM, and the bundle's pools,
-                    // where this process mounted it: a bundle the run's system
-                    // mounted is the system's to report.
-                    bytesHeld: {
-                        guest: guestHeld(),
-                        heaps: mountedBlocks ? blocks?.held?.() ?? {} : {},
-                    },
-                },
-            },
-        ]),
-
-        /**
-         * Where the machine is standing, right now, asked from outside.
-         *
-         * The same report a failure carries, except that nothing has failed. A
-         * run that stops without stopping -- a call that never answers, a
-         * window procedure that never returns -- produces no error to attach a
-         * trace to, and the call log is no help either: a call is written when
-         * it returns, so the one holding everything is the one call absent from
-         * it. This is the only way to see it.
-         *
-         * @returns {string}
-         */
-        trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
-
-        /**
-         * Everything the engine can say about the run in one answer, for a
-         * report a person saves with one click: every layer's diagnostics,
-         * the phase profile and the last frames, where the machine stands, and
-         * the guest's code around the addresses it spent itself at -- the bytes
-         * a question about the translator's code for them is answered from.
-         * A request, not for polling: it reads guest memory and describes
-         * every layer.
-         *
-         * The devices drawing in the graphics worker answer what they are
-         * asked a message later, so they are asked once and waited for --
-         * no longer than `REPORT_WAIT_MS` -- before the tables are read: read
-         * at once, the first report of a run would say nothing of them.
-         */
-        async report(){
-            // A build without the graphics layer, or with its stub, has no
-            // worker to wait for.
-            const answeredByGraphics = async()=>{
-                try
-                {
-                    await core.api('graphics').answered();
-                }
-                catch {
-                    // Nothing was asked of anything that could answer.
-                }
-            };
-            this.diagnostics();
-            /** @type {ReturnType<typeof setTimeout> | undefined} */
-            let timer;
-            await Promise.race([
-                answeredByGraphics(),
-                new Promise(resolve=>{
-                    timer = setTimeout(resolve, REPORT_WAIT_MS);
-                }),
-            ]);
-            clearTimeout(timer);
-            const diagnostics = this.diagnostics();
-            const cpuTable = diagnostics.find((/** @type {any} */ table)=>table.name === 'cpu');
-            /** @type {{ address: number, instructions: number }[]} */
-            const top = cpuTable?.metrics?.samples?.top ?? [];
-            /** @type {Set<number>} */
-            const pages = new Set();
-            for (const sample of top.slice(0, HOT_CODE_SAMPLES))
-            {
-                // The page the address is on and the one after: a region the
-                // translator formed there runs on past the page's end.
-                pages.add((sample.address & ~0xfff) >>> 0);
-                pages.add(((sample.address & ~0xfff) + 0x1000) >>> 0);
-            }
-            /** @type {{ address: number, base64: string }[]} */
-            const hotCode = [];
-            for (const page of [...pages].sort((left, right)=>left - right))
-            {
-                try
-                {
-                    const bytes = memory.readBytes(page, 0x1000);
-                    let text = '';
-                    for (let at = 0; at < bytes.length; at++)
-                    {
-                        text += String.fromCharCode(bytes[at]);
-                    }
-                    hotCode.push({ address: page, base64: btoa(text) });
-                }
-                catch {
-                    // A page nothing is mapped at: the sample was in code the
-                    // program has since let go of.
-                }
-            }
-            const log = core.api('log');
-            return {
-                diagnostics,
-                profile: log.profile(20),
-                frames: log.frames(240),
-                trace: this.trace(),
-                hotCode,
-            };
-        },
-        /**
-         * This process's memory for the next one to take, once it has gone,
-         * with how much of it the guest may have written; null before then
-         * and under an engine that keeps none.
-         *
-         * @returns {{ memory: WebAssembly.Memory, guestEnd: number } | null}
-         */
-        spareMemory: ()=>spare,
-        dispose(){
-            // Read while the machine stands: the arena's mark is the last
-            // thing that says where the guest wrote.
-            const memoryLeft = cpu.wasmMemory?.() ?? null;
-            const guestEnd = win32.heap?.()?.handedTo?.();
-            // What the program wrote last is saved now rather than after it
-            // settles: the machine it was written on is about to go.
-            saver?.flush();
-            stopSavingRegistry();
-            // Before the graph goes: the background filler would otherwise go
-            // on asking for blocks nobody can put anywhere. A run's bundle is
-            // the run's to stop, after its last process.
-            if (!options.system)
-            {
-                blocks?.stop();
-            }
-            breathe.close();
-            jsSampler?.stop();
-            return core.dispose().then(()=>{
-                if (ownsTranslationStore)
-                {
-                    translationStore?.close?.();
-                }
-                spare = memoryLeft && typeof guestEnd === 'number'
-                    ? { memory: memoryLeft, guestEnd } : null;
-            });
-        },
-    };
+    return processController({
+        HEAP_BASE, STACK_POOL_BASE, allocateFromHeap, blocksSeen, breathe, bridge, bundleReads,
+        clock, clockSource, core, cpu, creditClock, disposed, events, fail, filesystem, film,
+        filmSoundOwedMs, findModule, foreground, glCounters, gone, guestHeld, idlers, image,
+        input, installWatch, journal, jsSampler, kernel, layerTraces, leftOutAt64,
+        lentTranslators, logSinks, mainThread, memory, missingCalls, modules, nextDeadlineMs,
+        options, ownsTranslationStore, pacing, pauseRun, reportDivergence, resumeRun, saver,
+        showVideoFrame, sound, spare, stopSavingRegistry, systemLibraries, translationStore,
+        wasDisposed, watches, win32, windowsLibraries,
+        // The machine its children run on: a system program's width there.
+        machine: options.machine ?? (processBits === 64 ? 'amd64' : 'x86'),
+        blocks: ()=>blocks,
+        fetched: ()=>fetched,
+        fetching: ()=>fetching,
+        mainModule: ()=>mainModule,
+        mountedBlocks: ()=>mountedBlocks,
+        paused: ()=>paused,
+    });
 }
 
 /**
- * How long a report waits for the graphics worker's devices to say what they
- * counted: a worker that is far behind, or gone, leaves their tables as they
- * were rather than holding the report.
+ * What the tab holds before any program runs, on a machine of the run's
+ * (`roadmap/decisions.md` A245): Chrome's renderer with the engine idle is
+ * 357 MiB with one executor.
  */
-const REPORT_WAIT_MS = 1000;
+const RUN_ENGINE_BYTES = 384 << 20;
 
-/** How many divergences a run's diagnostics list, in the order they were said. */
-const DIVERGENCES_KEPT = 128;
+/** Whether the run is in a browser's page or worker, where the machine is a tab. */
+const inBrowser = ()=>typeof (/** @type {any} */ (globalThis).WorkerGlobalScope) === 'function'
+    || typeof (/** @type {any} */ (globalThis).document) === 'object';
 
 /**
- * How many replacement requests are remembered.
- *
- * The ring exists because a replacement erases its own evidence: the machine it
- * was asked for in is gone, and every log and counter in it with it. A launcher
- * that re-execs in a loop would otherwise leave nothing but its last iteration.
+ * How many CreateProcess requests are remembered, each with the guest's stack
+ * at the call: a launcher that starts itself again in a loop would otherwise
+ * leave nothing to say which call started which.
  */
 const REPLACEMENT_HISTORY = 16;
 
 /** The engine's own end-of-game box: MB_OK with MB_ICONINFORMATION. */
 const EXIT_NOTICE_TYPE = 0x40;
-
-/**
- * What of a run's options never goes to a process in a worker of its own:
- * the system's -- its drives, session, bundle, devices and bus -- which the
- * process reaches across its link, and what a process is handed of its own.
- */
-const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
-    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
-    'executable', 'standardFiles', 'fallback', 'graphics', 'audio', 'cork', 'log', 'com']);
-
-/**
- * A value as it crosses to another thread's start: data -- numbers, strings,
- * bytes, arrays and plain objects of those -- and nothing that is a function
- * or an object of a class, which a structured clone refuses or empties.
- *
- * @param {any} value @param {number} [depth]
- * @returns {any}
- */
-function portable(value, depth = 0){
-    if (value === null || typeof value !== 'object')
-    {
-        return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
-    }
-    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer
-        || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer))
-    {
-        return value;
-    }
-    if (depth > 8)
-    {
-        return undefined;
-    }
-    if (Array.isArray(value))
-    {
-        return value.map(item=>portable(item, depth + 1) ?? null);
-    }
-    if (Object.getPrototypeOf(value) !== Object.prototype)
-    {
-        return undefined;
-    }
-    return Object.fromEntries(Object.entries(value).map(([key, item])=>
-        [key, portable(item, depth + 1)]).filter(([, item])=>item !== undefined));
-}
-
-/**
- * The run's options a process in a worker of its own starts with: the
- * engine, the mode, the Windows, the display, the knobs, the decoders'
- * binaries.
- *
- * @param {AppOptions} options
- */
-function portableOptions(options){
-    return portable(Object.fromEntries(Object.entries(options)
-        .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
-}
 
 /**
  * The table of the journal a machine writes on this thread: the system's,
@@ -8771,700 +3706,18 @@ const journalOf = tables=>tables.find(table=>table.name === 'system-log')
     ?? tables.find(table=>table.name === 'log');
 
 /**
- * The call areas a run's journal starts with switched off; see `buildApp`.
- */
-const CALLS_OFF = Object.freeze({
-    'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off', 'call.video': 'off',
-    'call.input': 'off', 'call.net': 'off', 'call.com': 'off', 'call.hook': 'off',
-});
-
-/**
- * The run's system where every process of it stands in a worker of its own
- * (`concurrency` above 1): this thread runs no program. What a process's
- * machine is to the page -- its log, its sound, its input, its files and
- * registry, the calls that look inside a running program -- this answers in
- * that shape. The journal, the sound output, the volume, the bundle and the
- * registry are the system's own, made here before any process; what only a
- * process has is asked of the run's first process across its link, and the
- * page's input goes to the process started last of those standing, as it
- * goes to a child the moment it starts.
- *
- * @param {{ options: AppOptions, events: any, system: any, translationStore: any,
- *     now: () => number,
- *     across: () => { image: string, id: number, link: ReturnType<typeof openLink> }[],
- *     libraries: () => string[] }} deps
- *     `across`: the processes standing in workers, oldest first; `libraries`:
- *     the system libraries the run's own program knew, once it is over
- */
-async function buildSystemHost(deps){
-    const { options, events, system, translationStore, now, across, libraries } = deps;
-    const core = await assembleModules({
-        ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
-        log: { categories: { ...CALLS_OFF, ...options.log?.categories },
-            capacity: options.log?.capacity, bytes: options.log?.bytes, now },
-        filesystem: { volume: system.volume },
-    });
-    const filesystem = core.api('filesystem');
-    const journal = core.api('log');
-    journalEvents(events, journal.journal?.() ?? journal);
-    system.registry = createRunRegistry({
-        windows: options.windows,
-        directx: options.graphicsApi
-            ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
-        processorMhz: CORK_TSC_MHZ,
-        processorName: processorName(SETTINGS),
-        // The keys a process in a worker reads are these: they name as many
-        // processors as its cpu layer will say it has.
-        processors: processorsFor({ engine: options.engine ?? DEFAULT_ENGINE,
-            executors: options.executors, sharedMemory: options.cork?.config?.sharedMemory }),
-    });
-    system.windows = createWindowDirectory();
-    const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
-        filesystem, registry: system.registry, inherited: false });
-    // Cork's own decoder reads the bundle's blocks: no processor is asked.
-    const blocks = await mountBundle({ options, cpu: null, events, translationStore });
-    system.bundle = blocks;
-    await furnishVolume({ options, events, filesystem, blocks, seeded,
-        registry: system.registry });
-    // The output every process plays into, each in a span of its arena lent
-    // it; the page's worklet reads the table.
-    const given = options.audio?.memory;
-    const output = createMixer({ shared: true, sampleRate: options.audio?.sampleRate,
-        memory: given && 'table' in given ? given : undefined });
-
-    /** The run's own program: the first process standing. */
-    const first = ()=>across()[0] ?? null;
-    /**
-     * What only a process has, asked of the run's own program.
-     *
-     * @param {string} path  a member of its machine, `debug.read`
-     * @param {any[]} [args]
-     */
-    const ask = (path, args = [])=>{
-        const process = first();
-        return process
-            ? process.link.call('facade', 'call', [path, args]).then(eventFrom)
-            : Promise.reject(new Error(`${path}: no process of the run stands`));
-    };
-    /** Every process standing, told the same. @param {string} method */
-    const tellAll = method=>{
-        for (const process of across())
-        {
-            process.link.call('control', method, []).catch(()=>{});
-        }
-    };
-    /** Whether the run was last told to pause, for a tool that must draw a frame. */
-    let pausedByCaller = false;
-    /** The canvas the page's pointer is measured on, once attached. @type {any} */
-    let viewport = null;
-    /**
-     * The run's own program's tables, as it last answered or as it ended:
-     * what a reader of the run's diagnostics wants of its processor, its
-     * pacing and its devices is there, not on this thread.
-     *
-     * @type {any[]}
-     */
-    let programTables = [];
-    /**
-     * The tables this thread keeps for the run -- its journal, its sound
-     * output, the window manager -- under the names a program's own tables
-     * have where it runs on this thread. The program's journal and sound
-     * (its phases, frames, pumps, buffers) are what a reader of a run wants
-     * under those names, as with one process; this thread's go beside them,
-     * always under the name given here, so a name says whose table it is.
-     */
-    const ownTables = new Map([['log', 'system-log'], ['audio', 'system-audio'],
-        ['windows', 'windows']]);
-
-    return {
-        log: {
-            /** @param {'error' | 'warn' | 'info'} level @param {string} category @param {string} text */
-            write: (level, category, text)=>journal.write(level, category, '{0}', text),
-            /** @param {number} [since] @param {number} [limit] */
-            drain: (since, limit)=>journal.drain(since, limit),
-            /** @param {number} [count] */
-            recent: count=>journal.recent(count),
-            journal: ()=>journal.journal?.() ?? null,
-            /** @param {string} category @param {string | number} level */
-            setLevel: (category, level)=>journal.setLevel(category, level),
-            /** @param {string | number} level */
-            setDefaultLevel: level=>journal.setDefaultLevel(level),
-            /** @param {number} [worst] */
-            profile: worst=>journal.profile(worst),
-            /** @param {number} [count] */
-            frames: count=>journal.frames(count),
-            memory: ()=>journal.memory(),
-        },
-        audio: {
-            /** @param {number} bytes */
-            lend: bytes=>output.lend(bytes),
-            /** @param {number} offset @param {number} bytes */
-            takeBack: (offset, bytes)=>output.takeBack(offset, bytes),
-            table: ()=>output.table,
-            memory: ()=>output.memory,
-            format: ()=>({ sampleRate: output.sampleRate, channels: output.channels }),
-        },
-        media: { instance: ()=>null },
-        input: {
-            /** @param {any} canvas */
-            attach: canvas=>{
-                viewport = canvas;
-                return null;
-            },
-            detach: ()=>{
-                viewport = null;
-            },
-            /** @param {any} event */
-            send: event=>{
-                // To the process of the window the run's manager says should
-                // have it (`inputTarget`, where `routedInput` explains the rest).
-                const standing = across();
-                const { target, dropped } = inputRecipient(system.windows?.manager, event);
-                if (dropped)
-                {
-                    return false;
-                }
-                const process = standing.find(each=>each.id === target) ?? standing.at(-1);
-                process?.link.call('input', 'send', [event, viewport
-                    ? { width: viewport.width, height: viewport.height } : null]).catch(()=>{});
-                return Boolean(process);
-            },
-            poll: ()=>{},
-            // The page's half has the keyboard's field; this thread has no page.
-            showKeyboard: ()=>false,
-            hideKeyboard: ()=>{},
-            keyboardShown: ()=>false,
-            /** @returns {ReturnType<typeof createInputRoute>} */
-            route(){
-                return createInputRoute(event=>this.send(event));
-            },
-        },
-        pause: ()=>{
-            pausedByCaller = true;
-            tellAll('pause');
-        },
-        resume: ()=>{
-            pausedByCaller = false;
-            tellAll('resume');
-        },
-        paused: ()=>pausedByCaller,
-        stop: ()=>tellAll('stop'),
-        answerMessageBox: ()=>false,
-        on: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
-            events.on(name, handler),
-        off: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
-            events.off(name, handler),
-        /** @param {(handle: number, text: string) => void} sink */
-        attachLog(sink){
-            events.on('output', (/** @type {any} */ payload)=>sink(payload.handle, payload.text));
-        },
-        guestProfile: {
-            instructionStats: ()=>ask('guestProfile.instructionStats'),
-            available: ()=>ask('guestProfile.available'),
-            /** @param {any} how */
-            start: how=>ask('guestProfile.start', [how]),
-            stop: ()=>ask('guestProfile.stop'),
-            read: ()=>ask('guestProfile.read'),
-        },
-        debug: {
-            /** @param {number} address @param {number} length */
-            read: (address, length)=>ask('debug.read', [address, length]),
-            /** @param {number} [count] */
-            ringTrace: count=>ask('debug.ringTrace', count === undefined ? [] : [count]),
-            /** @param {boolean} on */
-            checkDraws: on=>ask('debug.checkDraws', [on === true]),
-            /** @param {boolean} on */
-            handleWords: on=>ask('debug.handleWords', [on !== false]),
-            modules: ()=>ask('debug.modules'),
-            /** @param {number} address */
-            moduleAt: address=>ask('debug.moduleAt', [address]),
-            windows: ()=>ask('debug.windows'),
-            desktop: ()=>ask('debug.desktop'),
-            /** @param {number} address @param {any} how */
-            hook: (address, how)=>ask('debug.hook', [address, how]),
-            /** @param {string} [names] */
-            callRingSkip: names=>ask('debug.callRingSkip', [names ?? '']),
-            /**
-             * Every process of the run standing, oldest first: the run's own
-             * program is the first, and `diagnostics` answers for it alone --
-             * an installer's real work is in the child its launcher started.
-             */
-            processes: ()=>across().map(each=>({ id: each.id, image: each.image })),
-            /**
-             * One standing process's tables, as `diagnostics` gives the first's.
-             *
-             * @param {number} id
-             */
-            diagnosticsOf: id=>{
-                const process = across().find(each=>each.id === id);
-                return process
-                    ? process.link.call('report', 'diagnostics', [])
-                    : Promise.reject(new Error(`no process ${id} stands`));
-            },
-            ...liveDumpOf(options.device?.worker, {
-                pause: ()=>{
-                    pausedByCaller = true;
-                    tellAll('pause');
-                },
-                resume: ()=>{
-                    pausedByCaller = false;
-                    tellAll('resume');
-                },
-                paused: ()=>pausedByCaller,
-            }),
-        },
-        trace: ()=>ask('trace'),
-        report: ()=>ask('report'),
-        recordedSession: ()=>ask('recordedSession'),
-        registry: ()=>system.registry,
-        // Asked while the program stands; once it is over, what it knew.
-        systemLibraries: ()=>(across().length > 0 ? ask('systemLibraries') : libraries()),
-        session: {
-            export: ()=>filesystem.export(),
-            directories: ()=>filesystem.exportDirectories(),
-            /** @param {any[]} changes @param {{ quiet?: boolean }} [how] */
-            apply: (changes, how)=>filesystem.apply(changes, how),
-            generation: ()=>filesystem.generation(),
-            /** @param {number} mark */
-            changesSince: mark=>filesystem.changesSince(mark),
-            runVolume: ()=>filesystem.runVolume(),
-        },
-        files: {
-            /** @param {string} path */
-            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
-                name: entry.name, path: entry.path, directory: entry.directory === true,
-                size: entry.size ?? 0, modified: entry.modified ?? 0 })),
-            /** @param {string} path */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
-        },
-        /** @param {string} path */
-        readImage: path=>readProgramImage(filesystem, blocks, path),
-        /**
-         * The program's tables as it last answered -- asked again now, for the
-         * next reader -- with the journal and the sound output this thread
-         * keeps for the run.
-         */
-        diagnostics: ()=>{
-            first()?.link.call('report', 'diagnostics', []).then(tables=>{
-                if (Array.isArray(tables))
-                {
-                    programTables = tables;
-                }
-            }, ()=>{});
-            const own = [...core.diagnostics(),
-                { name: 'audio', status: 'ready', metrics: output.diagnostics() },
-                { name: 'windows', status: 'ready',
-                    metrics: system.windows.manager.diagnostics() },
-                // The bundle, mounted here for every process to read.
-                { name: 'system-bundle', status: 'ready',
-                    metrics: { bytesHeld: { heaps: blocks?.held?.() ?? {} } } }];
-            const theirs = programTables.filter(table=>ownTables.get(table.name) !== table.name);
-            const named = new Set(theirs.map(table=>table.name));
-            // The zones' sums over both threads' tables, the process's own sums
-            // made again with what this thread holds.
-            return withZones([...own.map(table=>({ ...table,
-                name: ownTables.get(table.name) ?? table.name }))
-                .filter(table=>!named.has(table.name)), ...theirs]);
-        },
-        /** The program's tables as it ended. @param {any[] | undefined} tables */
-        ended: tables=>{
-            if (Array.isArray(tables))
-            {
-                programTables = tables;
-            }
-        },
-        dispose(){
-            tellAll('stop');
-            saver?.flush();
-            stopSavingRegistry();
-            return core.dispose();
-        },
-    };
-}
-
-/**
  * What of a run's volume lives in memory every thread holds, where there is
  * shared memory: a word per drive letter, raised by every change to the
  * drive, under which a process in a worker of its own keeps what it read of
  * the drive; and the sharing every open is settled against, which that
- * process settles its own opens in (`volume-link.js`). A run without shared
- * memory has no process across a link, and keeps neither.
+ * process settles its own opens in (`volume-link.js`).
  *
- * @returns {{ revisions?: Int32Array, sharing?: any, sharingMemory?: SharedArrayBuffer }}
+ * @returns {{ revisions: Int32Array, sharing: any, sharingMemory: SharedArrayBuffer }}
  */
 function volumeMemory(){
-    if (typeof SharedArrayBuffer !== 'function')
-    {
-        return {};
-    }
     const sharingMemory = createSharingMemory();
     return { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
         sharing: openSharedSharing(sharingMemory), sharingMemory };
-}
-
-/**
- * A running program's frames written down on asking, by the devices the
- * graphics worker plays: `dumpFrames(n)` has the next n frames with draws
- * written down, every draw with its shaders, stages and state, and
- * `dumped()` is the last of them as the worker sent it -- from the device
- * that drew it, which a diagnostics table read a report later need not be.
- *
- * @param {any} worker  the graphics worker, when the run has one
- * @param {{ pause: () => void, resume: () => void, paused: () => boolean }} [control]
- *     the run's pause, which `pick` holds while it takes a frame apart and
- *     `freeze` while it shows one
- */
-export function liveDumpOf(worker, control){
-    /** @type {{ lines: string[], frame: number } | null} */
-    let last = null;
-    let listening = false;
-    /** Whether `freeze` paused the run, and so is the one to resume it. */
-    let frozePaused = false;
-    /** The textures read off the GPU on asking (`snapshot`), by the id a dump gives. @type {Map<string, any>} */
-    const shots = new Map();
-    const listen = ()=>{
-        if (listening || !worker)
-        {
-            return;
-        }
-        listening = true;
-        worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
-            if (event.data?.type === 'dumped')
-            {
-                last = { lines: event.data.lines, frame: event.data.frame };
-            }
-            if (event.data?.type === 'frozen')
-            {
-                // The frame a pause holds, as a dump: what `snapshot` then reads from.
-                last = { lines: event.data.lines, frame: -1 };
-            }
-            if (event.data?.type === 'snapped')
-            {
-                const { id, width, height, format, data } = event.data;
-                shots.set(id, { width, height, format, data });
-            }
-        });
-    };
-    /** @param {number} [frames] */
-    const dumpFrames = (frames = 1)=>{
-        if (!worker)
-        {
-            throw new Error('dumpFrames: this run draws without a graphics worker');
-        }
-        listen();
-        worker.postMessage({ type: 'debug', dumpFrames: frames });
-        return frames;
-    };
-    return {
-        dumpFrames,
-        /**
-         * The graphics worker's capture of what it is sent (a worker opened
-         * with `capture`, `remote/capture.js`) keeps `frames` more presents
-         * from now and ends: the frames `tools/graphics-replay.mjs` measures.
-         *
-         * @param {number} [frames]
-         */
-        captureFrames: (frames = 300)=>{
-            if (!worker)
-            {
-                throw new Error('captureFrames: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', captureFrames: frames });
-            return frames;
-        },
-        /**
-         * The capture, ended: its gzip bytes and what it counted, or null
-         * bytes when the worker was opened without one.
-         *
-         * @returns {Promise<{ bytes: Uint8Array | null, counts: any }>}
-         */
-        captured: ()=>{
-            if (!worker)
-            {
-                return Promise.reject(
-                    new Error('captured: this run draws without a graphics worker'));
-            }
-            return new Promise(resolve=>{
-                /** @param {{ data: any }} event */
-                const take = event=>{
-                    if (event.data?.type === 'captured')
-                    {
-                        worker.removeEventListener('message', take);
-                        resolve({ bytes: event.data.bytes ?? null,
-                            counts: event.data.counts ?? null });
-                    }
-                };
-                worker.addEventListener('message', take);
-                worker.postMessage({ type: 'debug', captured: true });
-            });
-        },
-        /**
-         * A texture as the GPU holds it at the end of the next frame -- `t4414`
-         * as a frame dump names it, its top level, in its GPU format -- for
-         * `snapped` to hand over: what an intermediate target or a shadow
-         * map holds, which a dump of the draws cannot show.
-         *
-         * @param {string} id
-         */
-        snapshot: id=>{
-            if (!worker)
-            {
-                throw new Error('snapshot: this run draws without a graphics worker');
-            }
-            listen();
-            shots.delete(String(id));
-            worker.postMessage({ type: 'debug', snapshot: String(id) });
-            return String(id);
-        },
-        /**
-         * The texture `snapshot` asked for, once the frame has read it: its size,
-         * GPU format and texels, or null until then.
-         *
-         * @param {string} id
-         */
-        snapped: id=>shots.get(String(id)) ?? null,
-        /**
-         * How the worker's devices take buffer locks from now on: '' as the
-         * program asked, 'rename' renaming at every one.
-         *
-         * @param {string} [mode]
-         */
-        bufferLocks: (mode = '')=>{
-            if (!worker)
-            {
-                throw new Error('bufferLocks: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', bufferLocks: mode });
-            return mode;
-        },
-        /**
-         * Drops every draw that samples one of these textures from now on --
-         * `t12,t40` as a frame dump names them, '' none -- so two frames
-         * differ by those draws and nothing else.
-         *
-         * @param {string} [ids]
-         */
-        skipTexture: (ids = '')=>{
-            if (!worker)
-            {
-                throw new Error('skipTexture: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', skipTexture: ids });
-            return ids;
-        },
-        /**
-         * Drops every draw made with one of these shaders from now on --
-         * `vs12,ps40` as a frame dump names them, '' none: the effect one
-         * shader paints, found by taking it away.
-         *
-         * @param {string} [ids]
-         */
-        /**
-         * Significant digits a frame dump writes constants with from now on
-         * (4, up to 9 -- every digit a float holds).
-         *
-         * @param {number} [digits]
-         */
-        dumpDigits: (digits = 4)=>{
-            if (!worker)
-            {
-                throw new Error('dumpDigits: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', dumpDigits: digits });
-            return digits;
-        },
-        skipShader: (ids = '')=>{
-            if (!worker)
-            {
-                throw new Error('skipShader: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', skipShader: ids });
-            return ids;
-        },
-        /**
-         * Keeps the first `count` texture stages of every fixed-function draw
-         * from now on, the rest as if disabled, -1 all: the cost or the look a
-         * stage adds, found by taking it away -- the stages have no shader of
-         * the program's for `skipShader` to name.
-         *
-         * @param {number} [count]
-         */
-        /**
-         * Adds to every frame dump from now on a line for each of these
-         * textures -- `t642` as a dump names it, '' none -- with what its top
-         * level holds in guest memory: least, most, mean and the share zero.
-         *
-         * @param {string} [ids]
-         */
-        textureStats: (ids = '')=>{
-            if (!worker)
-            {
-                throw new Error('textureStats: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', textureStats: ids });
-            return ids;
-        },
-        stageLimit: (count = -1)=>{
-            if (!worker)
-            {
-                throw new Error('stageLimit: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', stageLimit: count });
-            return count;
-        },
-        /**
-         * Keeps the first `count` draws of every frame from now on and drops
-         * the rest, -1 none dropped: halving it finds the draw that painted a
-         * part of the picture, numbered as a frame dump numbers them.
-         *
-         * @param {number} [count]
-         */
-        maxDraws: (count = -1)=>{
-            if (!worker)
-            {
-                throw new Error('maxDraws: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', maxDraws: count });
-            return count;
-        },
-        /**
-         * How the worker's devices answer occlusion counts from now on: ''
-         * as counted, 'visible' as if every sample passed -- what a program
-         * culls by its counts shows up.
-         *
-         * @param {string} [mode]
-         */
-        occlusion: (mode = '')=>{
-            if (!worker)
-            {
-                throw new Error('occlusion: this run draws without a graphics worker');
-            }
-            worker.postMessage({ type: 'debug', occlusion: mode });
-            return mode;
-        },
-        dumped: ()=>last,
-        /**
-         * Shows the last frame again and again, the program paused, so a cut
-         * (`maxDraws`) is seen on a picture that holds still; false stops it.
-         * A running program is paused here and resumed by `freeze(false)`: a
-         * program left running presents new frames, and the frame shown again
-         * becomes each new one, so a switch is never seen on one picture. A
-         * pause someone else holds stays theirs.
-         *
-         * @param {boolean} [on]
-         */
-        freeze: (on = true)=>{
-            if (!worker)
-            {
-                throw new Error('freeze: this run draws without a graphics worker');
-            }
-            listen();
-            if (on && !frozePaused && control && !control.paused())
-            {
-                control.pause();
-                frozePaused = true;
-            }
-            else if (!on && frozePaused)
-            {
-                control?.resume();
-                frozePaused = false;
-            }
-            worker.postMessage({ type: 'debug', freeze: on });
-            return on;
-        },
-        /**
-         * A shader the program drew with, by the id a dump names it ('ps585',
-         * 'vs31'): its bytecode and every WGSL translation made of it, or null
-         * when nothing drew with it yet.
-         *
-         * @param {string} id
-         * @returns {Promise<{ tokens: number[], translations: { tag: string, wgsl: string,
-         *     error: string | null }[] } | null>}
-         */
-        shader: id=>new Promise((resolve, reject)=>{
-            if (!worker)
-            {
-                reject(new Error('shader: this run draws without a graphics worker'));
-                return;
-            }
-            const hear = (/** @type {{ data: any }} */ event)=>{
-                if (event.data?.type === 'shaderText' && event.data.id === id)
-                {
-                    worker.removeEventListener('message', hear);
-                    resolve(event.data.result);
-                }
-            };
-            worker.addEventListener('message', hear);
-            worker.postMessage({ type: 'debug', shader: id });
-        }),
-        /**
-         * Which draw painted a pixel of the picture: the program is paused and
-         * the graphics worker plays its last frame again cut after fewer and
-         * fewer draws, reading the pixel back each time, halving to the first
-         * count at which it is as the scene leaves it (before the frame's
-         * post-processing). The centre -- a crosshair -- by default; the run
-         * is left paused as it was found.
-         *
-         * @param {number} [x] @param {number} [y]  the shown frame's pixels
-         * @param {{ tolerance?: number, depth?: number }} [options]  how far a
-         *     channel may differ and still be the same pixel; how many of the
-         *     draws that changed it to list, latest first (4)
-         */
-        pick: async(x, y, options = {})=>{
-            if (!worker)
-            {
-                throw new Error('pick: this run draws without a graphics worker');
-            }
-            const wasPaused = control?.paused() ?? true;
-            if (!wasPaused)
-            {
-                control?.pause();
-                // The frames on their way when it paused land first.
-                await new Promise(done=>setTimeout(done, 400));
-            }
-            try
-            {
-                return await new Promise((resolve, reject)=>{
-                    const hear = (/** @type {{ data: any }} */ event)=>{
-                        if (event.data?.type !== 'picked')
-                        {
-                            return;
-                        }
-                        worker.removeEventListener('message', hear);
-                        if (event.data.error)
-                        {
-                            reject(new Error(event.data.error));
-                        }
-                        else
-                        {
-                            resolve(event.data.result);
-                        }
-                    };
-                    worker.addEventListener('message', hear);
-                    worker.postMessage({ type: 'debug',
-                        pick: { x, y, tolerance: options.tolerance, depth: options.depth } });
-                });
-            }
-            finally
-            {
-                if (!wasPaused)
-                {
-                    control?.resume();
-                }
-            }
-        },
-    };
 }
 
 /**
@@ -9475,26 +3728,115 @@ export function liveDumpOf(worker, control){
 const LONG_IMAGE_BASE = 0x00400000;
 
 /**
+ * A wide window's RAM: the whole window less its last 64 KiB, which no RAM
+ * reaches (`longLayout`). A memory that long is collected without end by
+ * Chrome 157 and later (past 4 GiB a thread, 8 GiB in Chrome 153); whether a
+ * program runs better there or in the 4 GiB layout is its launcher's to find
+ * out, run by run, not a cap of the engine's.
+ *
+ * @param {number} window
+ */
+const wideRam = window=>window - 65536;
+
+/**
  * The program's image headers, a 64-bit (PE32+) one included: one whose base
  * lies above 2 GiB is placed at `LONG_IMAGE_BASE`, which its relocations (or
  * its RIP-relative code, which needs none) allow, and every address its
  * process gives out stays below 2 GiB, where a dword sign-extended to a
  * quadword is the same address.
  *
+ * One that carries no relocations stays where it was linked, past 4 GiB (a
+ * game at 0x140000000): its process runs over a wide window (`wideWindowFor`),
+ * its code the translator's in the 4 GiB block the image lies in, and every
+ * other address the process gives out below 2 GiB as before (`wide`).
+ *
  * @param {Uint8Array} executable
+ * @param {{ hostMemory?: number, memorySize?: number }} [machine]  the host's memory in
+ *     bytes, which a 16 GiB window needs 32 GB of; the program's RAM, past 4 GiB of which a
+ *     64-bit program runs over a wide window wherever its image lies
+ * A 32-bit program linked for ASLR with its base in the heap's span (mscorsvw.exe at
+ * 0x10000000) is placed where a program usually is, 0x00400000, as Windows places such a one
+ * anywhere: at its own base it made the memory of every process of it as large as its base,
+ * 512 MiB for a few hundred kilobytes, the memory being as large as the highest address it
+ * holds. One not linked for ASLR stays at its base, as Windows keeps it.
+ *
+ * @returns {import('./layers/loader/internal/pe.js').PeImage
+ *     & { wide?: { window: number, codeBase: number, ram: number }, moved?: boolean }}
  */
-function programImage(executable){
+function programImage(executable, machine = {}){
     const image = parsePe(executable, { wide: true });
+    // A 64-bit program given more than 4 GiB of memory: a wide window, its code
+    // in the first 4 GiB block, the image where any 64-bit image goes.
+    if (image.bits === 64 && (machine.memorySize ?? 0) > 2 ** 32
+        && (image.relocatable || image.imageBase + image.sizeOfImage <= 0x80000000))
+    {
+        return { ...image, ...image.imageBase + image.sizeOfImage > 0x80000000
+            ? { imageBase: LONG_IMAGE_BASE } : {},
+        wide: { window: 2 ** 33, codeBase: 0, ram: wideRam(2 ** 33) } };
+    }
+    if (image.bits === 32 && image.relocatable && image.dynamicBase
+        && image.imageBase >= HEAP_FLOOR && 0x00400000 + image.sizeOfImage <= HEAP_FLOOR)
+    {
+        return { ...image, imageBase: 0x00400000, moved: true };
+    }
     if (image.bits !== 64 || image.imageBase + image.sizeOfImage <= 0x80000000)
     {
         return image;
     }
     if (!image.relocatable)
     {
-        throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
-            + ' carries no relocations cannot be placed below 2 GiB');
+        const window = wideWindowFor(image, machine.hostMemory);
+        if (window === null)
+        {
+            throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
+                + ' carries no relocations needs a window this machine cannot give it');
+        }
+        return { ...image, wide: { window, codeBase: Math.floor(image.imageBase / 2 ** 32)
+            * 2 ** 32, ram: wideRam(window) } };
     }
     return { ...image, imageBase: LONG_IMAGE_BASE };
+}
+
+/**
+ * The window an image past 4 GiB without relocations runs over: 8 GiB where it
+ * fits there, 16 GiB only on a host of 32 GB or more (the user's ruling: the
+ * larger memory is committed whole), its code in one 4 GiB block of it; null
+ * where none holds it.
+ *
+ * @param {{ imageBase: number, sizeOfImage: number }} image
+ * @param {number} [hostMemory]  the host's memory in bytes, when known
+ * @returns {number | null}
+ */
+export function wideWindowFor(image, hostMemory = 0){
+    const end = image.imageBase + image.sizeOfImage;
+    if (image.imageBase < 2 ** 32
+        || Math.floor(image.imageBase / 2 ** 32) !== Math.floor((end - 1) / 2 ** 32))
+    {
+        return null;
+    }
+    if (end <= 2 ** 33 - 4096)
+    {
+        return 2 ** 33;
+    }
+    return end <= 2 ** 34 - 4096 && hostMemory >= 32 * 2 ** 30 ? 2 ** 34 : null;
+}
+
+/**
+ * The Windows `windows: 'auto'` runs a program on (`windowsFor`): read from its
+ * image, its manifest, its imports and its header; an image that is no PE (an
+ * MS-DOS or 16-bit program) names none, and runs on the default.
+ *
+ * @param {Uint8Array} executable
+ * @returns {ReturnType<typeof windowsFor>}
+ */
+function autoWindows(executable){
+    if (imageKind(executable)?.kind !== 'pe')
+    {
+        return windowsFor({ compatibility: {}, imports: [], bits: null });
+    }
+    const image = parsePe(executable, { wide: true });
+    return windowsFor({ compatibility: compatibilityOf(executable),
+        imports: readImports(executable, image).map(table=>table.dll), bits: image.bits });
 }
 
 /**
@@ -9512,14 +3854,45 @@ function programImage(executable){
  * @returns {Promise<any>} an AppController
  */
 export async function createApp(options){
+    // `auto`: the Windows the program was made for, chosen once for the whole
+    // run, so a process it starts runs on the same one.
+    const chosenWindows = options.windows === 'auto' ? autoWindows(options.executable) : null;
+    if (chosenWindows)
+    {
+        options = { ...options, windows: chosenWindows.windows };
+    }
     // Refused before anything is built: a machine made to the wrong Windows
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
-    options = withRunMode(withCpuSetup(withoutFaultingTailCalls(options)));
+    options = withConcurrency(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
     options = { ...options, processId: options.processId ?? runProcessId() };
+    // The machine's memory, made once by the run and carried to every process
+    // it starts, here or in a worker of its own (`memory-budget.js`).
+    // Named, not yet the RAM asked for by default: a run of several processes
+    // (an installer, its services, a compiler's workers) finds no room at two
+    // gigabytes until the engine's own parts give back under pressure.
+    const tabMemory = options.machineMemory;
+    if (options.memoryBudget === undefined && tabMemory !== undefined && tabMemory > 0)
+    {
+        const memoryBudget = createMemoryBudget(tabMemory);
+        const run = openMemoryBudget(memoryBudget);
+        // The compiled modules every process shares, sized to the machine and
+        // taken as they are kept, by what they cost (`sharedCharge`).
+        const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
+        run.take(shared, 'translation');
+        // In a tab, the tab's own: the page, the engine's thread, the graphics
+        // and translators' workers, the browser's code mapped in.
+        if (inBrowser())
+        {
+            run.take(RUN_ENGINE_BYTES, 'engine');
+        }
+        const config = options.cork?.config;
+        options = { ...options, memoryBudget,
+            cork: { ...options.cork, config: { ...config,
+                sharedModuleBytes: config?.sharedModuleBytes ?? shared } } };
+    }
     graphicsChoice(options.graphicsApi);
-    emulatorOf(options);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
@@ -9530,12 +3903,10 @@ export async function createApp(options){
     {
         events.onAny(options.relay);
     }
-    // A run asked for more than this page allows starts all the same, as
-    // much as it allows, and says so: the first subscriber hears it.
-    if (options.fallback)
+    // The Windows `auto` chose, and why: what the program was made for.
+    if (chosenWindows)
     {
-        events.emit('fallback', { ...options.fallback, mode: options.mode,
-            concurrency: options.concurrency });
+        events.emit('windows', chosenWindows);
     }
     /** @type {any[]} */
     const requested = [];
@@ -9566,14 +3937,21 @@ export async function createApp(options){
      * later process is handed rather than a copy of it.
      *
      * @type {{ namedObjects: Map<string, any>, registry: any, bundle: any, windows: any,
-     *     ids: { thread: number, process: number },
+     *     sharedViews?: any, processDirectory?: Map<number, any>,
+     *     processTables?: Map<number, any>, ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
-     *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
+     *         sharing?: any, sharingMemory?: SharedArrayBuffer, pageFile?: any } }}
      */
     // A process in a worker of its own is handed the run's across a link
     // (`system-link.js`), and joins it rather than making one.
     const system = options.system ?? { namedObjects, registry: null, bundle: null, windows: null,
+        // Views of one page-file section, kept agreeing at the edges of each
+        // process's turns (`shared-views.js`).
+        sharedViews: createSharedViews(),
+        processDirectory: new Map(),
+        // Every process's handle table on this thread, by id (DuplicateHandle).
+        processTables: new Map(),
         ids: { thread: 1, process: 0x2000 },
         volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
             watchers: new Set(), ...volumeMemory() } };
@@ -9594,6 +3972,8 @@ export async function createApp(options){
     let logSequence = 0;
     /** The journal every process of the run writes into; the first one's. @type {any} */
     let runJournal = null;
+    /** And the profiler every one measures its output with: the first one's. @type {any} */
+    let runProfiler = null;
     // The journal's own clock, one for the run. A process's guest clock is
     // not it: each machine has its own, a parent's stands still while the
     // child beside it runs, and a replacement's starts again from zero.
@@ -9604,15 +3984,17 @@ export async function createApp(options){
     // its audio graph over that memory once. A rebuilt machine has to mix into
     // the same storage rather than make new storage nobody reads --
     // `{ table }` with a shared track table, `{ control, samples }` with the
-    // engine backend's ring.
+    // engine backend's ring. The first machine mixes into the output it was
+    // handed, if any: a process in a worker of its own is given the run's
+    // table, and built over one of its own it played where no page listened.
     /** @type {any} */
-    let audioMemory = null;
+    let audioMemory = options.audio?.memory ?? null;
     // The decoded binary's instance outlives the process too: a machine is a
     // process, the decoder is a service of the run. The child attaches to the
     // parent's compiled module and linear memory, so the first cinematic after
     // a swap does not wait for another instantiation.
-    /** @type {any} */
-    let mediaInstance = null;
+    /** @type {{ value: any }} */
+    const mediaInstance = { value: null };
     // The presenter is a service of the run too, and for the same reason: a
     // machine is a process, but the canvas it draws into is not. Made once
     // here -- from the GPU the worker opened and the canvas the device carries
@@ -9638,6 +4020,7 @@ export async function createApp(options){
             onFrame: options.device.onFrame,
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
+            frameClock: options.device.frameClock,
             // The run's windows, by which the screen is composed of every
             // process's picture while more than one has a window showing.
             windows: ()=>{
@@ -9663,16 +4046,99 @@ export async function createApp(options){
     // synchronous handle -- the child stopped at its first append.
     const runStoreSpec = options.cork?.config?.store === undefined ? 'local'
         : options.cork.config.store;
-    const translationStore = await resolveTranslationStore(runStoreSpec,
+    const openedStore = await resolveTranslationStore(runStoreSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
+    // Processes in workers of their own: the batch modules they compile are
+    // kept alive here, beside the store they are stored in, for the next ones
+    // to find compiled (`withHeldModules`), where the engine hands code by
+    // bytes (V8, not JavaScriptCore). Not in a process joined to a run
+    // across a link: its store is the run's, kept alive where the run is.
+    const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
+    const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
+        && heldModuleBytes > 0 ? withHeldModules(openedStore, heldModuleBytes) : openedStore;
+
+    // The run's cache, its keeper on this thread beside the stores: a process
+    // here reads it through the reader made with it, one in a worker of its own
+    // through a reader there (`processesBeside`). A process joined to a run
+    // across a link is handed the run's reader (`options.cache`).
+    // Both keep what they let go of from memory in the run's own folder.
+    const runFolder = options.system ? null : await openRunFolderOf(options);
+    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+        // An owner that went (a graphics root) leaving bodies under its names
+        // past what it held: let go of now, said as what it is.
+        onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `
+            + `bodies (${tail.bytes} bytes under it) ${tail.why === 'unreleased'
+                ? 'held by an owner that went without letting go of them'
+                : `past the ${tail.held} its owner said it held`}` }) });
+
+    // The pieces of the run's writable layers are the run's, as its volume is:
+    // a process in a worker of its own writes through the run's.
+    if (runCache)
+    {
+        system.volume.pageFile = openRunPageFile(events, runCache.reader);
+    }
 
     const translationPool = await openTranslationPool(options);
     /** What a machine's translator is told where the run lends it its translators. */
     const lentConfig = translationPool ? { worker: true, translators: 0 } : {};
 
+    /**
+     * The machine every process of the run is on (`AppOptions.machine`): as
+     * the caller says, else as wide as the run's first program. A memory past
+     * 2 GiB is a 64-bit Windows's: only there does a 32-bit program get addresses
+     * past 2 GiB, under WOW64. An image that cannot be read here is left for its
+     * own build to refuse.
+     *
+     * @type {'x86' | 'amd64'}
+     */
+    const runMachine = options.machine ?? (()=>{
+        if ((options.memorySize ?? 0) > 2 ** 31)
+        {
+            return 'amd64';
+        }
+        try
+        {
+            return options.executable && programImage(options.executable).bits === 64
+                ? 'amd64' : 'x86';
+        }
+        catch {
+            return 'x86';
+        }
+    })();
+
+    // The network is the run's, one link for every process; each process's
+    // sockets are a view of it, so what arrives reaches the process it is for.
+    // An address space of the embedder's own (an adapter, which binds) is
+    // the processes' to share as it is.
+    const supplied = options.win32?.network;
+    const sharedNetwork = supplied && typeof supplied.bind !== 'function'
+        ? shareTransport(supplied) : null;
+
+    /**
+     * How the run's pool reaches a process's other executors: each one taken
+     * as a process of the pool's own, keyed apart from every process id.
+     *
+     * @param {number} id  the process's
+     */
+    const executorLending = id=>({
+        add: (/** @type {number} */ index, /** @type {any} */ reach)=>{
+            translationPool?.addProcess(-(id * 64 + index), reach).catch(()=>{});
+        },
+        remove: (/** @type {number} */ index)=>translationPool?.removeProcess(-(id * 64 + index)),
+    });
+
     /** @param {any} [extra] */
     const machine = extra=>({
         ...options,
+        ...translationPool ? { cpu: { ...options.cpu, executorTranslators:
+            executorLending(extra?.processId ?? options.processId ?? FIRST_PROCESS_ID) } } : {},
+        ...sharedNetwork ? { win32: { ...options.win32, network: sharedNetwork.view() } } : {},
+        // One machine for every process of the run: a 32-bit child of a 64-bit
+        // program runs under WOW64 on it.
+        machine: runMachine,
+        ...runCache === null ? {}
+            : { cache: { reader: runCache.reader, figures: runCache.figures,
+                join: runCache.join, serve: runCache.serve } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
@@ -9681,10 +4147,11 @@ export async function createApp(options){
         system,
         log: {
             ...options.log, sequenceBase: logSequence, ...runJournal ? { journal: runJournal } : {},
+            ...runProfiler ? { profiler: runProfiler } : {},
             now: journalClock,
         },
         audio: { ...options.audio, memory: audioMemory },
-        media: { ...options.media, instance: mediaInstance },
+        media: { ...options.media, instance: mediaInstance.value },
         graphics: { ...options.graphics, presenter },
         ...extra,
     });
@@ -9710,21 +4177,46 @@ export async function createApp(options){
     const processIds = new WeakMap();
     /** @type {Set<Promise<unknown>>} */
     const servers = new Set();
-    /** @type {Set<any>} */
+    /** @type {Set<{ current: any, main: boolean, service: string | null }>} */
     const serving = new Set();
+    /** The services started in workers of their own, by process id. @type {Map<number, string>} */
+    const servicesAcross = new Map();
+    /**
+     * A service does not end when its last client lets go: it runs until the
+     * machine stops, and the end of the run's program is that. Each one still
+     * running is ended then, its control handler not told
+     * SERVICE_CONTROL_SHUTDOWN first.
+     */
+    const endServices = ()=>{
+        /** @param {string} service */
+        const said = service=>events.emit('divergence', { api: 'Services', detail: `the service`
+            + ` ${service} is ended with the run, without a shutdown control` });
+        for (const each of serving)
+        {
+            if (each.service)
+            {
+                said(each.service);
+                each.current.terminate(0);
+            }
+        }
+        for (const [id, service] of servicesAcross)
+        {
+            said(service);
+            reachable.get(id)?.terminate(0);
+        }
+    };
     /** @type {any} */
     let runOptionsNow;
     /** The machines of the run not yet retired. @type {Set<any>} */
     const standing = new Set();
-    /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
+    /** Whether the run's processes run at once, each beside its parent (`concurrency.js`). */
     const processesAtOnce = (options.concurrency ?? 1) > 1;
     /**
      * Whether every process of the run stands in a worker of its own, its
-     * first one too: where processes run at once, on cork, this thread is the
+     * first one too: where processes run at once, this thread is the
      * system alone and runs no program (`buildSystemHost`).
      */
-    const rootAcross = processesAtOnce && !options.system
-        && (options.engine ?? DEFAULT_ENGINE) === 'cork';
+    const rootAcross = processesAtOnce && !options.system;
     /** @type {import('./layers/win32/ole32/remote.js').ClassTableHooks} */
     const serveHere = {
         launch: (request, process)=>{
@@ -9746,20 +4238,14 @@ export async function createApp(options){
         ? remoteClassTable(options.system.com, serveHere)
         : createClassTable(serveHere);
 
-    /**
-     * The memory of the last process to go, for the next one built: a gone
-     * process's memory waits for a garbage collection nothing prompts, and a
-     * parent that starts one short-lived child after another -- a compiler a
-     * shader at a time -- would hold one memory per child until the page ran
-     * out. Taken once.
-     *
-     * @type {{ memory: WebAssembly.Memory, guestEnd: number } | null}
-     */
-    let spareMemory = null;
-    /** @param {any} gone  a machine disposed */
-    const keepMemory = gone=>{
-        spareMemory = gone?.spareMemory?.() ?? spareMemory;
-    };
+    const processMemoriesParts = processMemories({
+        options,
+
+    });
+    const {
+        dropSpare, holderOf, keepMemory, keepSpare, machineMemory, releaseCredit, releaseHolder,
+        roomForProcess, spareMemories, spareToProcess, spareToRun,
+    } = processMemoriesParts;
 
     /**
      * A machine for a process, named to the class table.
@@ -9770,25 +4256,59 @@ export async function createApp(options){
         const process = {};
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
-        const reusedMemory = spareMemory;
-        spareMemory = null;
-        const built = await buildApp(machine({ ...extra, reusedMemory,
+        const reusedMemory = spareMemories.pop() ?? null;
+        // Its own holder of the machine's memory; the first process of a
+        // worker holds the one its parent claimed for it.
+        const given = extra === undefined ? options.memoryHolder : undefined;
+        const holder = machineMemory === null ? RUN_HOLDER
+            : given ?? machineMemory.claim();
+        spareToProcess(reusedMemory, holder);
+        const start = { reused: reusedMemory };
+        const memoryCredit = await roomForProcess(start, holder).catch(e=>{
+            // No room: the memory it was to run in goes back to the run.
+            if (given === undefined)
+            {
+                releaseHolder(holder, [start.reused]);
+            }
+            else if (start.reused)
+            {
+                spareToRun(start.reused, holder);
+                keepSpare(start.reused);
+            }
+            throw e;
+        });
+        const built = await buildApp(machine({ ...extra, reusedMemory: start.reused, memoryCredit,
+            ...machineMemory === null ? {} : { memoryHolder: holder },
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
             // have nothing left to run, and runs in its place.
-            beside: processesAtOnce
-                ? (/** @type {any} */ request)=>startBeside(self, request) : undefined,
-            terminate: processesAtOnce ? terminateBeside : undefined,
+            beside: (/** @type {any} */ request)=>startBeside(self, request),
+            // Read when called: the parts beside are made further down.
+            terminate: (/** @type {any} */ request, /** @type {number} */ code)=>
+                terminateBeside(request, code),
+            askChild: (/** @type {any} */ request, /** @type {any} */ call)=>askBeside(request, call),
             // Only where processes run at once: one run in its parent's place
             // has the parent paused, which wakes nothing. A process that joined
             // the run's system from a worker of its own is never the run's only
             // one -- its parent at least stands -- so what it waits on is
             // another's to answer, and the run, not it, says when it is over.
-            othersRunning: processesAtOnce
-                ? ()=>Boolean(options.system) || starting > 0 || across > 0
-                    || [...standing].some(other=>other !== self)
-                : undefined }));
+            // A child beside counts until its parent is told it ended: its
+            // machine stops standing when its run is over and is taken down
+            // after, which awaits, while the parent's turns go on -- a parent
+            // whose every thread waits on it would find nothing to wake it.
+            othersRunning: ()=>Boolean(options.system) || starting.value > 0 || across.value > 0
+                || besides.size > 0
+                || [...standing].some(other=>other !== self) }))
+            .catch(e=>{
+                if (given === undefined)
+                {
+                    machineMemory?.release(holder);
+                }
+                throw e;
+            })
+            .finally(()=>releaseCredit(memoryCredit, holder));
+        holderOf.set(built, { holder, own: given === undefined });
         self = built;
         standing.add(built);
         processes.set(process, built);
@@ -9801,7 +4321,15 @@ export async function createApp(options){
         translationPool?.addProcess(id, {
             lend: (port, token)=>built.lendTranslator(port, token),
             recall: token=>built.recallTranslator(token),
+            demand: ()=>built.translatedHere(),
         }).catch(()=>{});
+        // A child beside its parent in a worker, whose run lends translators
+        // to its own machines only: told to lend to this one too, or it
+        // interprets every instruction, being told it is lent them.
+        if (!translationPool && extra)
+        {
+            options.system?.translators?.add(id);
+        }
         return built;
     };
 
@@ -9815,17 +4343,22 @@ export async function createApp(options){
         standing.delete(ended);
         translationPool?.removeProcess(processIds.get(ended)
             ?? options.processId ?? FIRST_PROCESS_ID);
+        if (!translationPool && ended !== current && processIds.has(ended))
+        {
+            options.system?.translators?.remove(processIds.get(ended));
+        }
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
     };
 
     /** @type {any} */
-    /** The system libraries the run's own program knew, once it is over. @type {string[]} */
-    let rootLibraries = [];
+    /** The system libraries the run's own program knew, once it is over. @type {{ value: string[] }} */
+    const rootLibraries = { value: [] };
     let current = rootAcross
         ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
-            across: ()=>[...standingAcross], libraries: ()=>rootLibraries })
+            reader: runCache?.reader ?? null,
+            across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value })
         : await build();
     // What every process's devices present comes back from the run's
     // graphics worker to the machine that opened it; where no process stands
@@ -9838,6 +4371,7 @@ export async function createApp(options){
     // beside it or in its place, writes there, and a reader of the facade's
     // log sees them all in one order on one clock.
     runJournal = current.log.journal?.() ?? null;
+    runProfiler = current.log.profiler?.() ?? null;
 
     // Read from the machine that made it, while it still stands, and handed to
     // every rebuild from here on.
@@ -9943,252 +4477,23 @@ export async function createApp(options){
         }
     };
 
-    /**
-     * The executable a server's command line names: quoted, the text inside
-     * the quotes; unquoted, the shortest run of words up to a space that is a
-     * file, as CreateProcess reads a command line without quotes.
-     *
-     * @param {any} parent @param {string} command
-     * @returns {Promise<{ path: string, image: Uint8Array } | null>}
-     */
-    const serverImage = async(parent, command)=>{
-        const text = command.trim();
-        /** @type {string[]} */
-        const candidates = [];
-        if (text.startsWith('"'))
-        {
-            const end = text.indexOf('"', 1);
-            candidates.push(end > 0 ? text.slice(1, end) : text.slice(1));
-        }
-        else
-        {
-            for (let at = text.indexOf(' '); at > 0; at = text.indexOf(' ', at + 1))
-            {
-                candidates.push(text.slice(0, at));
-            }
-            candidates.push(text);
-        }
-        for (const path of candidates.flatMap(one=>(/\.[^\\.]+$/.test(one)
-            ? [one] : [one, `${one}.exe`])))
-        {
-            const image = await parent.readImage(path).catch(()=>null);
-            if (image)
-            {
-                return { path, image };
-            }
-        }
-        return null;
-    };
+    const { lendSound, ownSound } = processSound({
+        events, options,
+        audioMemory: ()=>audioMemory,
+    });
 
-    /**
-     * The sound a process started beside `parent` plays into: the run's
-     * output, its slots taken as free ones come, and a span of the parent's
-     * arena lent for its voices' mirrors -- the largest of four, two, one or
-     * half a mebibyte the parent has free, or none, its buffers then played
-     * through queues. Given back once the process is gone and has closed
-     * what it held.
-     *
-     * @param {any} parent
-     * @param {number} [largest]  the most it is lent
-     */
-    const lendSound = (parent, largest = 4 << 20)=>{
-        let bytes = largest;
-        let span = -1;
-        for (; bytes >= 512 << 10 && span < 0; bytes /= 2)
-        {
-            span = parent.audio?.lend?.(bytes) ?? -1;
-        }
-        bytes *= 2;
-        return {
-            options: { ...options.audio, memory: audioMemory,
-                beside: { arena: span >= 0 ? [span, bytes] : null } },
-            giveBack(){
-                if (span >= 0)
-                {
-                    try
-                    {
-                        parent.audio.takeBack(span, bytes);
-                    }
-                    catch {
-                        // The parent went before the process it lent to.
-                    }
-                    span = -1;
-                }
-            },
-        };
-    };
-
-    /** The tables `ownSound` has named to the page so far. */
-    let soundTables = 0;
-    /**
-     * The sound of a process started beside another on this thread: a table
-     * of its own, which the page is told of and mixes with the run's
-     * (`sound-table`), and forgets once the process is gone
-     * (`sound-table-closed`) -- two processes' sound as two films' playing
-     * at once. On the run's table a process beside another was built as the
-     * one in its place, and closed every track it found open there: the
-     * parent's music went silent at its first child.
-     */
-    const ownSound = ()=>{
-        const id = ++soundTables;
-        let told = false;
-        return {
-            options: { ...options.audio, memory: undefined, beside: undefined },
-            /** @param {any} built */
-            announce(built){
-                const memory = built?.audio?.memory?.();
-                if (memory && 'table' in memory)
-                {
-                    told = true;
-                    events.emit('sound-table', { id, table: memory.table });
-                }
-            },
-            giveBack(){
-                if (told)
-                {
-                    told = false;
-                    events.emit('sound-table-closed', { id });
-                }
-            },
-        };
-    };
-
-    /**
-     * Starts a class's server beside the process that asked for it, with
-     * `-Embedding` after its command line as COM starts one, and runs it
-     * alongside every other process until it exits. The page sees and
-     * drives the server while it stands, as it does a child run beside its
-     * parent.
-     *
-     * @param {any} parent @param {{ command: string, clsid: string }} request
-     * @returns {Promise<number>} its exit code
-     */
-    const startServer = async(parent, request)=>{
-        const found = await serverImage(parent, request.command);
-        const sound = ownSound();
-        if (!found)
-        {
-            events.emit('divergence', { api: 'COM',
-                detail: `the server ${request.command} of ${request.clsid} is not on the volume` });
-            return -1;
-        }
-        const server = await build({
-            executable: found.image,
-            imagePath: found.path,
-            commandLine: `${request.command.trim()} -Embedding`,
-            ...newProcessIds(),
-            audio: sound.options,
-        });
-        sound.announce(server);
-        // A line of processes of its own: a server that starts a child and
-        // waits on it, or hands over to another image, is run the way the
-        // program the page started is.
-        const line = { current: server, main: false };
-        serving.add(line);
-        noteMachines();
-        events.emit('process-server', { image: found.path, clsid: request.clsid });
-        stand(server);
-        bindLogLevels();
-        let code = -1;
-        try
-        {
-            code = await runProcesses(runOptionsNow, line, true);
-        }
-        catch (e){
-            events.emit('error', { reason: 'server', error: e });
-        }
-        await retire(line.current);
-        serving.delete(line);
-        noteMachines();
-        await line.current.dispose();
-        keepMemory(line.current);
-        sound.giveBack();
-        stand(current);
-        bindLogLevels();
-        events.emit('process-server-exit', { image: found.path, code });
-        return code;
-    };
-
-    /**
-     * Runs a child on a machine of its own while its parent waits on it, and
-     * gives the parent back what the child left: the files it wrote, the
-     * registry it changed, and its exit code, which wakes the parent's wait.
-     *
-     * The parent's machine is left standing, paused where it blocked; the
-     * child's is built beside it, run through `own.run` -- so a child that
-     * starts children of its own is handled the same way -- and disposed.
-     * This is how a parent that goes on after its child works: an installer
-     * that runs a setup stage and then finishes, a launcher that waits for the
-     * game to close.
-     *
-     * @param {{ current: any, main: boolean }} line  The processes this one is of.
-     * @param {any} parent @param {any} request @param {any} runOptions
-     */
-    const runBeside = async(line, parent, request, runOptions)=>{
-        const image = request.image ?? await parent.readImage(request.imagePath);
-        if (!image)
-        {
-            throw new Error(`cannot start ${request.imagePath}: it is not on the volume`);
-        }
-        noteLogSequence();
-        mediaInstance = parent.media.instance() ?? mediaInstance;
-        const sound = ownSound();
-        line.current = await build({
-            executable: image,
-            imagePath: request.imagePath,
-            commandLine: request.commandLine,
-            patches: request.patches,
-            processId: request.id,
-            mainThreadId: request.threadId,
-            standardFiles: request.standardFiles,
-            startDirectory: request.startDirectory,
-            audio: sound.options,
-        });
-        sound.announce(line.current);
-        replayLogLevels();
-        stand(line.current);
-        bindLogLevels();
-        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence });
-        const parentImage = imagePath;
-        if (line.main)
-        {
-            imagePath = request.imagePath;
-        }
-
-        // The parent runs nothing until its child is done: a message sent to
-        // its windows meanwhile would wait for ever, and is refused instead.
-        system.windows?.hold(processIds.get(parent), true);
-        let code;
-        try
-        {
-            code = await runProcesses(runOptions, line, true);
-        }
-        finally
-        {
-            system.windows?.hold(processIds.get(parent), false);
-        }
-        imagePath = parentImage;
-
-        // What an installer's second stage laid down is what the first stage
-        // goes on to find: its drives and its registry are the parent's own,
-        // the run's, so what it wrote is there already.
-        const child = line.current;
-        await retire(child);
-        noteLogSequence();
-        mediaInstance = child.media.instance() ?? mediaInstance;
-        await child.dispose();
-        keepMemory(child);
-        sound.giveBack();
-
-        line.current = parent;
-        replayLogLevels();
-        stand(parent);
-        bindLogLevels();
-        // Its picture goes with it: no window of the run is drawn from it.
-        presenter?.forget?.(request.id);
-        parent.childExited(request, code);
-        events.emit('process-resumed', { image: request.imagePath, code });
-    };
+    const classServersParts = classServers({
+        bindLogLevels, build, events, keepMemory, newProcessIds, ownSound, retire, serving,
+        current: ()=>current,
+        noteMachines: ()=>noteMachines,
+        runOptionsNow: ()=>runOptionsNow,
+        runProcesses: ()=>runProcesses,
+        stand: ()=>stand,
+        standingBeside: ()=>standingBeside,
+    });
+    const {
+        serverImage, startServer,
+    } = classServersParts;
 
     /**
      * The children running beside their parents, with concurrency: each
@@ -10198,9 +4503,9 @@ export async function createApp(options){
      */
     const besides = new Set();
     /** Children asked for whose machines are not built yet. */
-    let starting = 0;
+    const starting = { value: 0 };
     /** Children running in workers of their own. */
-    let across = 0;
+    const across = { value: 0 };
     /**
      * Whether the next child runs in a worker of its own: while fewer than
      * the run's concurrency run at once, the first on this thread. One past
@@ -10209,15 +4514,31 @@ export async function createApp(options){
      * beside it, in its worker: the run's processes are counted by the run.
      */
     const inWorker = ()=>!options.system
-        && across < (options.concurrency ?? 1) - (rootAcross ? 0 : 1);
+        && across.value < (options.concurrency ?? 1) - (rootAcross ? 0 : 1);
     /**
      * The children standing in workers of their own, each with the way its
-     * diagnostics are asked for across its link.
+     * diagnostics are asked for across its link, and those of every process
+     * running beside it there.
      *
-     * @type {Set<{ image: string, id: number, link: ReturnType<typeof openLink>,
-     *     diagnostics: () => Promise<any> }>}
+     * @type {Set<{ image: string, id: number, link: ReturnType<typeof import('./system/link.js').openLink>,
+     *     diagnostics: () => Promise<any>,
+     *     frames: (count: number) => Promise<any[] | null>,
+     *     read: (address: number, length: number) => Promise<Uint8Array | null>,
+     *     standing: (journal: number) => Promise<{ image: string, diagnostics: any }[]
+     *         | null> }>}
      */
     const standingAcross = new Set();
+    /**
+     * The children running beside their parent, in this worker: listed with
+     * the others, since a child that never exits holds its executors and
+     * their memory, and a list without it says the run has one process.
+     *
+     * @type {Set<{ image: string, id: number, beside: true,
+     *     diagnostics: () => Promise<any>,
+     *     read: (address: number, length: number) => Uint8Array,
+     *     hook: (address: number, how: any) => any }>}
+     */
+    const standingBeside = new Set();
 
     /**
      * The page's input, where the run's window manager says it goes
@@ -10374,751 +4695,45 @@ export async function createApp(options){
         return screen;
     };
 
-    /**
-     * The facade speaks for this process from now on, its input routed and a
-     * tool's view of the windows and the screen the run's.
-     *
-     * @param {any} speaking
-     */
-    const stand = speaking=>{
-        Object.assign(facade, speaking, own);
-        facade.input = routedInput(speaking.input);
-        if (speaking.debug)
-        {
-            facade.debug = { ...speaking.debug,
-                windows: ()=>runWindows() ?? speaking.debug.windows(),
-                desktop: ()=>runDesktop(()=>speaking.debug.desktop()),
-                // `diagnostics` answers for this process alone, and an
-                // installer's work is often in a child its launcher started:
-                // the run's processes, and any one's tables by its id.
-                processes: ()=>[
-                    { id: options.processId ?? FIRST_PROCESS_ID, image: options.imagePath ?? '' },
-                    ...[...standingAcross].map(each=>({ id: each.id, image: each.image })),
-                ],
-                /** @param {number} id */
-                diagnosticsOf: id=>{
-                    if (id === (options.processId ?? FIRST_PROCESS_ID))
-                    {
-                        return facade.diagnostics();
-                    }
-                    const child = [...standingAcross].find(each=>each.id === id);
-                    return child ? child.diagnostics()
-                        : Promise.reject(new Error(`no process ${id} stands`));
-                } };
-        }
-    };
-
-    /**
-     * Runs a child in a worker of its own: its machine there, the run's
-     * system half answered from here across a link (`system-link.js`), its
-     * output the run's. Its exit code is the answer.
-     *
-     * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
-     *     sound: () => ({ options: any, giveBack: () => void } | null) }} from
-     *     its parent, as the run reaches it: where its image is read, and the
-     *     sound it lends
-     * @param {any} request
-     * @param {{ link: ReturnType<typeof openLink> | null, code: number | null }} [reach]
-     *     how its parent's TerminateProcess reaches it: given its link once
-     *     there is one, and the code it was ended with before then
-     * @returns {Promise<{ code: number, diagnostics?: any, systemLibraries?: string[] }>}
-     *     its exit code, its layers' diagnostics as it ended, and the system
-     *     libraries it knew
-     */
-    const runAcross = async(from, request, reach)=>{
-        const image = request.image
-            ?? await from.readImage(request.imagePath).catch(()=>null);
-        if (!image)
-        {
-            events.emit('divergence', { api: 'process',
-                detail: `${request.imagePath} is not on the volume, and did not start` });
-            return { code: 2 };
-        }
-        const memory = createLinkMemory();
-        // Its classes, served to and from every other process of the run.
-        const com = comHandlers(/** @type {any} */ (classTable), {
-            call: (method, args)=>link.call('com', method, args),
-            launch: serverAcross,
-        });
-        const { dispose: forgetObjects, ...objects } = objectHandlers({
-            table: system.namedObjects,
-            wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
-        const link = openLink(memory.a, {
-            ...systemHandlers(/** @type {any} */ (system),
-                (target, method, args)=>link.callWaiting(target, method, args)),
-            ...objects,
-            com: com.handlers,
-            // The run's translation store, which only this thread can hold open.
-            ...translationStore ? storeHandlers(translationStore) : {},
-            process: {
-                output: (/** @type {number} */ handle, /** @type {string} */ text)=>
-                    events.emit('output', { handle, text }),
-            },
-            // Everything else that happens to it, for the page subscribed here.
-            events: {
-                emit: (/** @type {string} */ name, /** @type {any} */ payload)=>{
-                    events.emit(name, eventFrom(payload));
-                },
-            },
-            // Its own children, which the run starts, counted with the rest.
-            processes: {
-                start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
-                terminate: (/** @type {number} */ id, /** @type {number} */ code)=>
-                    terminateBeside({ id }, code),
-            },
-            // The parent's open files the child writes its output and error
-            // into: one position, the parent's, which the child's writes move.
-            standard: {
-                /** @param {'output' | 'error'} which */
-                position: which=>request.standardFiles?.[which]?.position ?? 0,
-                /** @param {'output' | 'error'} which @param {number} at */
-                setPosition: (which, at)=>{
-                    const file = request.standardFiles?.[which];
-                    if (file)
-                    {
-                        file.position = at;
-                    }
-                },
-            },
-        });
-        const answering = link.serve();
-        if (reach)
-        {
-            reach.link = link;
-            if (reach.code !== null)
-            {
-                terminateAcross(link, reach.code);
-            }
-        }
-        // Its own way in to the run's graphics worker, where its Direct3D
-        // devices draw; what they present comes back here, to the run's
-        // presenter, as every root's frames do.
-        const graphicsWorker = options.device?.worker;
-        const graphics = graphicsWorker ? new MessageChannel() : null;
-        if (graphics)
-        {
-            graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
-        }
-        // And the pictures of its own surfaces -- a DirectDraw primary, the
-        // desktop its windows are drawn on -- which come in as the graphics
-        // worker's frames do and are shown by the run's presenter.
-        const display = presenter && options.device?.device ? new MessageChannel() : null;
-        const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
-            device: options.device.device,
-            presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
-        // Its sound goes onto the run's table, in a span its parent lends it,
-        // where the table is shared memory a worker can be handed; elsewhere
-        // the run's sound is mixed on this thread, and the child has none.
-        const sound = from.sound();
-        const worker = await openProcessWorker();
-        translationPool?.addProcess(request.id, {
-            lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
-            recall: token=>worker.post({ type: 'recall', token }),
-        }).catch(()=>{});
-        // The page's input reaches it as the run routes it (`routedInput`).
-        const asked = { image: request.imagePath, id: request.id, link,
-            diagnostics: ()=>link.call('report', 'diagnostics', []) };
-        standingAcross.add(asked);
-        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
-            worker: true });
-        try
-        {
-            return await new Promise((resolve, reject)=>{
-                worker.onMessage(data=>{
-                    if (data?.type === 'exited')
-                    {
-                        resolve({ code: data.code, diagnostics: data.diagnostics,
-                            systemLibraries: data.systemLibraries });
-                    }
-                    else if (data?.type === 'failed')
-                    {
-                        reject(Object.assign(new Error(data.message),
-                            { diagnostics: data.diagnostics }));
-                    }
-                });
-                worker.onLost(reason=>reject(new Error(reason)));
-                // The graphics layer's knobs, not the run's presenter or a
-                // callback: neither crosses, and the child shows nothing itself.
-                const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
-                    .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
-                worker.post({
-                    type: 'start',
-                    end: memory.b,
-                    volume: { revisions: system.volume.revisions ?? null,
-                        sharing: system.volume.sharingMemory ?? null },
-                    // The run's foreground window, focus and captured window,
-                    // read where the run keeps them.
-                    windowCells: system.windows?.cells ?? null,
-                    graphics: graphics?.port1 ?? null,
-                    display: display?.port2 ?? null,
-                    options: {
-                        ...portableOptions(options),
-                        executable: image,
-                        imagePath: request.imagePath,
-                        commandLine: request.commandLine,
-                        startDirectory: request.startDirectory,
-                        patches: request.patches,
-                        processId: request.id,
-                        mainThreadId: request.threadId,
-                        // Named, not handed: the position stays here.
-                        standardFiles: request.standardFiles && Object.fromEntries(
-                            Object.entries(request.standardFiles).filter(([, file])=>file)
-                                .map(([which, file])=>[which, { path: file.path }])),
-                        // The run tells the player the game is over, once.
-                        exitNotice: false,
-                        log: { categories: options.log?.categories,
-                            capacity: options.log?.capacity, bytes: options.log?.bytes },
-                        graphics: knobs,
-                        audio: sound ? Object.fromEntries(Object.entries(sound.options)
-                            .filter(([, value])=>typeof value !== 'function')) : undefined,
-                        // The translator's store is the run's, asked across the
-                        // link; the doorbell is this thread's.
-                        cork: { config: { ...options.cork?.config, ...lentConfig,
-                            store: translationStore ? 'run' : null, doorbell: undefined } },
-                    },
-                    run: { maxTurns: runOptionsNow?.maxTurns, timeoutMs: runOptionsNow?.timeoutMs },
-                }, [...graphics ? [graphics.port1] : [], ...display ? [display.port2] : []]);
-            });
-        }
-        finally
-        {
-            standingAcross.delete(asked);
-            translationPool?.removeProcess(request.id);
-            forgetObjects();
-            await com.gone();
-            link.close();
-            await answering;
-            worker.terminate();
-            sound?.giveBack();
-            shown?.dispose();
-            display?.port1.close();
-            presenter?.forget?.(request.id);
-        }
-    };
-    /**
-     * The children running beside their parents, by process id, from the
-     * moment each is asked for: how its parent's TerminateProcess reaches it
-     * wherever it runs, holding the code until it can take it.
-     *
-     * @type {Map<number, { terminate: (code: number) => void }>}
-     */
-    const reachable = new Map();
-
-    /**
-     * Tells a process in a worker of its own its parent ended it.
-     *
-     * @param {ReturnType<typeof openLink>} link @param {number} code
-     */
-    const terminateAcross = (link, code)=>{
-        link.call('control', 'terminate', [code]).catch(()=>{
-            // Gone already: its exit is on its way to its parent.
-        });
-    };
-
-    /** The code the last of the run's processes beside another exited with. */
-    let lastBesideCode = 0;
-    /**
-     * Tells the pacing the run shares how many machines take turns on this
-     * thread: one of several may not block the thread to wait, which would
-     * stop the others with it.
-     */
-    const noteMachines = ()=>{
-        options.pacing?.machines?.(1 + besides.size + serving.size);
-    };
-
-    /**
-     * Runs a child in a worker of its own, counted among the run's, and tells
-     * `exited` its code when it is gone.
-     *
-     * @param {Parameters<typeof runAcross>[0]} from @param {any} request
-     * @param {((code: number, ended: { systemLibraries?: string[] }) => void) | null}
-     *     exited  its parent's; null for the run's own program, which resumes
-     *     nothing
-     * @param {(ended: { code: number, diagnostics?: any, systemLibraries?: string[] })
-     *     => void} [over]
-     *     told as it ends, whoever it was
-     */
-    const startAcross = (from, request, exited, over)=>{
-        across++;
-        /** @type {{ link: ReturnType<typeof openLink> | null, code: number | null }} */
-        const reach = { link: null, code: null };
-        reachable.set(request.id, { terminate: code=>{
-            reach.code = code;
-            if (reach.link)
-            {
-                terminateAcross(reach.link, code);
-            }
-        } });
-        const running = (async()=>{
-            /** @type {{ code: number, diagnostics?: any, systemLibraries?: string[] }} */
-            let ended;
-            try
-            {
-                ended = await runAcross(from, request, reach);
-            }
-            catch (e){
-                events.emit('error', { reason: 'process', error: e });
-                ended = { code: -1, diagnostics: /** @type {any} */ (e)?.diagnostics };
-            }
-            finally
-            {
-                across--;
-                reachable.delete(request.id);
-            }
-            const { code, diagnostics } = ended;
-            lastBesideCode = code;
-            over?.(ended);
-            if (exited)
-            {
-                exited(code, ended);
-                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
-            }
-            return code;
-        })();
-        besides.add(running);
-        noteMachines();
-        running.finally(()=>{
-            besides.delete(running);
-            noteMachines();
-        });
-    };
-
-    /**
-     * A class's server a process in a worker of its own asked COM for,
-     * started in a worker of its own while the run has room for one, with
-     * `-Embedding` as COM starts one; null when there is no room, and the
-     * process starts it beside itself.
-     *
-     * @param {{ command: string, clsid: string }} request
-     * @returns {{ exited: Promise<number> } | null}
-     */
-    const serverAcross = request=>{
-        if (!inWorker())
-        {
-            return null;
-        }
-        const exited = (async()=>{
-            const found = await serverImage(current, request.command);
-            if (!found)
-            {
-                events.emit('divergence', { api: 'COM',
-                    detail: `the server ${request.command} of ${request.clsid}`
-                        + ' is not on the volume' });
-                return -1;
-            }
-            const { processId, mainThreadId } = newProcessIds();
-            events.emit('process-server', { image: found.path, clsid: request.clsid });
-            return new Promise(resolve=>{
-                startAcross({ readImage: path=>current.readImage(path),
-                    sound: ()=>lendSound(current) },
-                { imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
-                    id: processId, threadId: mainThreadId }, null, ended=>{
-                    events.emit('process-server-exit', { image: found.path, code: ended.code });
-                    resolve(ended.code);
-                });
-            });
-        })();
-        return { exited };
-    };
-
-    /**
-     * A child a process in a worker of its own asked for, started in a worker
-     * of its own while the run has room for one; its parent is asked across
-     * its link for the position of the files it handed on, and told when it
-     * is gone. False when there is no room: the parent runs it
-     * beside itself, in its own worker.
-     *
-     * @param {ReturnType<typeof openLink>} link  the parent's
-     * @param {any} asked  the child, as values
-     * @returns {boolean}
-     */
-    const startAcrossFor = (link, asked)=>{
-        if (!inWorker())
-        {
-            return false;
-        }
-        /** @param {string} which */
-        const handedOn = which=>({
-            path: asked.standardFiles[which].path,
-            get position(){
-                return link.callWaiting('parent', 'position', [asked.id, which]);
-            },
-            set position(at){
-                link.callWaiting('parent', 'setPosition', [asked.id, which, at]);
-            },
-        });
-        const request = { ...asked, standardFiles: asked.standardFiles && Object.fromEntries(
-            Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
-        startAcross({
-            // Read from the run's volume, where the parent found it: a launcher
-            // that starts its game and exits is gone before the game's image
-            // would come back from it.
-            readImage: path=>current.readImage(path),
-            // Lent by the parent, and taken back there when it hears the
-            // child is gone.
-            sound: ()=>(asked.arena ? { options: { ...options.audio, memory: audioMemory,
-                beside: { arena: asked.arena } }, giveBack(){} } : null),
-        }, request, code=>{
-            link.call('parent', 'exited', [asked.id, code]).catch(()=>{
-                // The parent went first: nothing of it waits on the code.
-            });
-        });
-        return true;
-    };
-
-    /**
-     * The children this process, joined to the run from a worker of its own,
-     * had the run start in workers of their own: by process id, each with
-     * the machine that asked and the sound it lent.
-     *
-     * @type {Map<number, { parent: any, request: any,
-     *     sound: { giveBack: () => void } | null }>}
-     */
-    const childrenAcross = new Map();
-    options.system?.processes?.answer({
-        /** @param {number} id @param {'output' | 'error'} which */
-        position: (id, which)=>childrenAcross.get(id)?.request.standardFiles?.[which]
-            ?.position ?? 0,
-        /** @param {number} id @param {'output' | 'error'} which @param {number} at */
-        setPosition: (id, which, at)=>{
-            const file = childrenAcross.get(id)?.request.standardFiles?.[which];
-            if (file)
-            {
-                file.position = at;
-            }
-        },
-        /** @param {number} id @param {number} code */
-        exited: (id, code)=>{
-            const child = childrenAcross.get(id);
-            if (!child)
-            {
-                return;
-            }
-            childrenAcross.delete(id);
-            child.sound?.giveBack();
-            child.parent.childExited(child.request, code);
-        },
+    const processesBesideParts = processesBeside({
+        across, besides, bindLogLevels, build, classTable, endServices, events,
+        facade, inWorker, keepMemory, keepSpare, lendSound, lentConfig, machineMemory, mainLine,
+        mediaInstance, names, newProcessIds, noteLogSequence, noticeExit, options, ownSound,
+        presenter, releaseHolder, replayLogLevels, retire, rootAcross, rootLibraries,
+        routedInput, runDesktop, runMachine, runWindows, serverImage, servers, servicesAcross,
+        serving, spareMemories, standing, standingAcross, standingBeside, starting, system,
+        translationPool, translationStore, runCache,
+        audioMemory: ()=>audioMemory,
+        current: ()=>current,
+        imagePath: ()=>imagePath,
+        logSequence: ()=>logSequence,
+        own: ()=>own,
+        runOptionsNow: ()=>runOptionsNow,
     });
+    const {
+        askBeside, noteMachines, reachable, runProcesses, runRoot, stand, startBeside,
+        terminateBeside,
+    } = processesBesideParts;
 
     /**
-     * Starts a child at once, beside the parent that asked for it, and runs
-     * it alongside every other process until it exits: concurrency's
-     * CreateProcess, as on Windows. The parent goes on running; a thread of
-     * its waiting on the child, polling its exit code, or waiting on an
-     * object the child sets, is answered as the child goes. The page sees
-     * and drives the child while it stands, as it does one run in its
-     * parent's place.
+     * A machine of this app by its process id; its first, the app's own, for
+     * none.
      *
-     * @param {any} parent @param {any} request
+     * @param {number | null | undefined} processId
      */
-    const startBeside = (parent, request)=>{
-        const shared = audioMemory && 'table' in audioMemory
-            && typeof SharedArrayBuffer === 'function'
-            && audioMemory.table instanceof SharedArrayBuffer;
-        if (inWorker())
+    const machineOf = processId=>{
+        if (processId === null || processId === undefined)
         {
-            startAcross({
-                readImage: path=>parent.readImage(path),
-                sound: ()=>(shared ? lendSound(parent) : null),
-            }, request, code=>parent.childExited(request, code));
-            return;
+            return current;
         }
-        // A process that joined the run's system from a worker of its own has
-        // the run start its child, which counts the workers; the sound it
-        // plays into is this process's to lend, and to take back when the
-        // run says the child has gone.
-        const processesAcross = options.system?.processes;
-        if (processesAcross)
+        for (const built of [current, ...processes.values()])
         {
-            const sound = shared ? lendSound(parent) : null;
-            // Known before it is asked for: the run may ask for the position of
-            // a file it was handed before the call that starts it returns.
-            childrenAcross.set(request.id, { parent, request, sound });
-            const placed = processesAcross.start({
-                imagePath: request.imagePath,
-                commandLine: request.commandLine,
-                startDirectory: request.startDirectory,
-                patches: request.patches,
-                id: request.id,
-                threadId: request.threadId,
-                standardFiles: request.standardFiles && Object.fromEntries(
-                    Object.entries(request.standardFiles).filter(([, file])=>file)
-                        .map(([which, file])=>[which, { path: file.path }])),
-                arena: sound?.options.beside.arena ?? null,
-            });
-            if (placed)
+            if (processIds.get(built) === processId)
             {
-                return;
+                return built;
             }
-            childrenAcross.delete(request.id);
-            sound?.giveBack();
         }
-        // Running from the moment it is asked for, not from when its machine
-        // is built: a parent that waits on it at once is waiting on something
-        // that will answer, not stuck.
-        starting++;
-        /** @type {{ line: { current: any } | null, code: number | null }} */
-        const reach = { line: null, code: null };
-        reachable.set(request.id, { terminate: code=>{
-            if (reach.line)
-            {
-                reach.line.current.terminate(code);
-            }
-            else
-            {
-                reach.code = code;
-            }
-        } });
-        const running = (async()=>{
-            /** @type {any} */
-            let child = null;
-            const sound = ownSound();
-            try
-            {
-                const image = request.image ?? await parent.readImage(request.imagePath);
-                if (!image)
-                {
-                    events.emit('divergence', { api: 'process',
-                        detail: `${request.imagePath} is not on the volume, and did not start` });
-                }
-                else
-                {
-                    noteLogSequence();
-                    mediaInstance = parent.media.instance() ?? mediaInstance;
-                    child = await build({
-                        executable: image,
-                        imagePath: request.imagePath,
-                        commandLine: request.commandLine,
-                        patches: request.patches,
-                        processId: request.id,
-                        mainThreadId: request.threadId,
-                        standardFiles: request.standardFiles,
-                        startDirectory: request.startDirectory,
-                        audio: sound.options,
-                    });
-                    sound.announce(child);
-                }
-            }
-            catch (e){
-                events.emit('error', { reason: 'process', error: e });
-            }
-            finally
-            {
-                starting--;
-            }
-            if (!child)
-            {
-                reachable.delete(request.id);
-                sound.giveBack();
-                parent.childExited(request, 2);
-                return 2;
-            }
-            replayLogLevels();
-            stand(child);
-            bindLogLevels();
-            events.emit('process-started', { image: request.imagePath,
-                sequenceBase: logSequence });
-            const line = { current: child, main: false };
-            reach.line = line;
-            if (reach.code !== null)
-            {
-                child.terminate(reach.code);
-            }
-            let code = -1;
-            try
-            {
-                code = await runProcesses(runOptionsNow, line, true);
-            }
-            catch (e){
-                events.emit('error', { reason: 'process', error: e });
-            }
-            finally
-            {
-                reachable.delete(request.id);
-            }
-            const ended = line.current;
-            await retire(ended);
-            noteLogSequence();
-            mediaInstance = ended.media.instance() ?? mediaInstance;
-            await ended.dispose();
-            keepMemory(ended);
-            sound.giveBack();
-            // The page sees whoever stands in the main line again.
-            replayLogLevels();
-            stand(mainLine.current);
-            bindLogLevels();
-            presenter?.forget?.(request.id);
-            parent.childExited(request, code);
-            lastBesideCode = code;
-            events.emit('process-resumed', { image: request.imagePath, code });
-            return code;
-        })();
-        besides.add(running);
-        noteMachines();
-        running.finally(()=>{
-            besides.delete(running);
-            noteMachines();
-        });
-    };
-
-    /**
-     * A parent's TerminateProcess on a child running beside it: ended where
-     * it runs -- on this thread, in a worker of its own, or through the run
-     * for a process that joined it from a worker -- and its parent told as
-     * any child's exit is told. False for a child the run does not have.
-     *
-     * @param {{ id: number }} request @param {number} code
-     * @returns {boolean}
-     */
-    function terminateBeside(request, code){
-        const child = reachable.get(request.id);
-        if (child)
-        {
-            child.terminate(code >>> 0);
-            return true;
-        }
-        if (childrenAcross.has(request.id))
-        {
-            return options.system?.processes?.terminate?.(request.id, code) === true;
-        }
-        return false;
-    }
-
-    /**
-     * Runs the live process, and each child that takes its place or runs
-     * beside it, until one exits with nothing left to run.
-     *
-     * @param {any} runOptions
-     * @param {{ current: any, main: boolean }} [line]  The line of processes:
-     *        the page's, or a server's.
-     * @param {boolean} [nested]  Run for a parent waiting on it.
-     * @returns {Promise<number>} the last program's exit code
-     */
-    const runProcesses = async(runOptions, line = mainLine, nested = false)=>{
-        while (true)
-        {
-            const code = await line.current.run(runOptions);
-            const request = line.current.replacement();
-            if (!request)
-            {
-                // Run out: nothing it holds wakes another process now.
-                standing.delete(line.current);
-                if (line.main && !nested)
-                {
-                    // Its servers end with it: its references go back, and
-                    // what they write before they stop is its to keep.
-                    const ending = line.current;
-                    await classTable.ended(names.get(ending));
-                    while (servers.size > 0)
-                    {
-                        await Promise.allSettled([...servers]);
-                    }
-                    // A launcher that started its game and went is not the
-                    // end of the run: the game is, and its code is the run's.
-                    if (besides.size > 0)
-                    {
-                        while (besides.size > 0)
-                        {
-                            await Promise.allSettled([...besides]);
-                        }
-                        noticeExit(lastBesideCode);
-                        return lastBesideCode;
-                    }
-                    noticeExit(code);
-                }
-                return code;
-            }
-
-            if (line.current.waitingOn(request))
-            {
-                await runBeside(line, line.current, request, runOptions);
-                continue;
-            }
-
-            // Read before the tear-down. What the process wrote stays on the
-            // run's drives when it goes: an extractor that unpacked its
-            // payload and then started it leaves the payload where the child
-            // finds it.
-            const child = request.image ?? await line.current.readImage(request.imagePath);
-            // The sequence the journal reached, read while the machine that
-            // wrote it still stands. The child's journal continues from
-            // here, so the cursor a reader is holding points into it rather
-            // than past the end of a block that started over.
-            const written = journalOf(line.current.diagnostics())?.metrics?.journal?.written;
-            if (typeof written === 'number')
-            {
-                logSequence = written;
-            }
-            // Likewise read while it stands: the decoder the parent made is
-            // handed to the child so the same compiled module and linear
-            // memory serve both, and only the parent still holds it.
-            mediaInstance = line.current.media.instance() ?? mediaInstance;
-            await retire(line.current);
-            await line.current.dispose();
-            keepMemory(line.current);
-
-            if (!child)
-            {
-                throw new Error(
-                    `cannot start ${request.imagePath}: it is not on the volume`);
-            }
-
-            line.current = await build({
-                executable: child,
-                imagePath: request.imagePath,
-                commandLine: request.commandLine,
-                startDirectory: request.startDirectory,
-                patches: request.patches,
-                processId: request.id,
-                mainThreadId: request.threadId,
-            });
-            if (line.main)
-            {
-                imagePath = request.imagePath;
-            }
-            replayLogLevels();
-            stand(line.current);
-            bindLogLevels();
-            // The child's journal is a fresh block, continuing the parent's
-            // sequence. Whoever holds a reader of its own -- the page's
-            // keeper -- is told where it starts so it can be handed the
-            // block: a drain cursor taken before the swap is above zero and
-            // below the child's first record, and only this says so.
-            events.emit('process-started', {
-                image: request.imagePath,
-                sequenceBase: logSequence,
-            });
-        }
-    };
-
-    /**
-     * Runs the run's program in a worker of its own, and every process it
-     * starts, until the last of them is gone; the code is the last one's, as
-     * a launcher that started its game and went leaves the game's.
-     */
-    const runRoot = async()=>{
-        rootLibraries = [];
-        startAcross({
-            readImage: async()=>options.executable,
-            // Half the output's arena: the rest is for what it starts.
-            sound: ()=>lendSound(current, 8 << 20),
-        }, {
-            imagePath,
-            commandLine: options.commandLine,
-            // The id it has in its worker, where none was handed in, as a
-            // process built here has: its windows and its frames are told
-            // apart by it.
-            id: options.processId ?? FIRST_PROCESS_ID,
-        }, null, ended=>{
-            rootLibraries = ended.systemLibraries ?? [];
-            current.ended(ended.diagnostics);
-        });
-        while (besides.size > 0)
-        {
-            await Promise.allSettled([...besides]);
-        }
-        noticeExit(lastBesideCode);
-        return lastBesideCode;
+        return null;
     };
 
     const own = {
@@ -11129,26 +4744,76 @@ export async function createApp(options){
          */
         translationPool: ()=>translationPool?.diagnostics() ?? null,
         /**
+         * The run's cache as its keeper stands (`run-cache.js`): its segments,
+         * hot and cold bodies, what went to the run's folder, its budget and
+         * the most it held at once. The run's, not a process's: the keeper is
+         * on this thread whichever process the facade speaks for. A run with
+         * no cache of its own (a process joined to a run elsewhere) says so.
+         */
+        runCache: ()=>runCache?.figures()
+            ?? `${NOT_MEASURED}: the run's cache is kept where the run is, not here`,
+        /**
+         * A worker of the run's pool lent to a process of this app: its own
+         * (no id) or a child beside it, by id - not the facade's, which speaks
+         * for the child started last. One gone already gives the port back.
+         *
+         * @param {number | null | undefined} processId
+         * @param {MessagePort} port @param {number} token
+         */
+        lendTranslatorTo(processId, port, token){
+            const to = machineOf(processId);
+            if (to)
+            {
+                to.lendTranslator(port, token);
+            }
+            else
+            {
+                port.close();
+            }
+        },
+        /** @param {number | null | undefined} processId @param {number} token */
+        recallTranslatorFrom(processId, token){
+            machineOf(processId)?.recallTranslator(token);
+        },
+        /**
+         * A call this process's parent makes in it (`cross-process.js`): the
+         * process the run was started for, not a child it stands for now.
+         *
+         * @param {any} call
+         */
+        answerCall: (/** @type {any} */ call)=>mainLine.current.answerCall(call),
+        /**
          * Every process standing, each with its image and its own diagnostics:
          * the facade speaks for one of them, and an install several processes
          * deep that waits on itself shows nothing through one.
          *
-         * @returns {Promise<{ image: string, diagnostics: any }[]>}
+         * With `journal`, each also with the last that many entries of its
+         * own call journal: a process in a worker keeps its ring there, and
+         * one that never ends never hands it back.
+         *
+         * @param {{ journal?: number }} [asked]
+         * @returns {Promise<{ image: string, diagnostics: any, worker?: boolean,
+         *     journal?: { time: number, text: string }[] }[]>}
          */
-        async standing(){
+        async standing({ journal = 0 } = {}){
             const machines = new Set([...rootAcross ? [] : [current], ...processes.values()]);
             return Promise.all([
                 ...[...machines].map(async made=>({
                     image: images.get(made) || imagePath,
                     diagnostics: await made.diagnostics(),
+                    ...journal > 0 ? { journal: (made.log?.recent?.(journal) ?? [])
+                        .map((/** @type {any} */ entry)=>({ time: entry.time,
+                            text: String(entry.text) })) } : {},
                 })),
                 // A child in a worker of its own answers at its next look at
-                // its link; one that ends meanwhile answers nothing.
-                ...[...standingAcross].map(async child=>({
-                    image: child.image,
-                    diagnostics: await child.diagnostics().catch(()=>null),
-                })),
-            ]);
+                // its link, with every process running beside it there; one
+                // that ends meanwhile answers nothing.
+                ...[...standingAcross].map(async child=>{
+                    const there = await child.standing(journal).catch(()=>null);
+                    return (there ?? [{ image: child.image, diagnostics: null }])
+                        .map(each=>({ ...each, worker: true }));
+                }),
+            ]).then(found=>found.flat());
         },
 
         /**
@@ -11169,19 +4834,56 @@ export async function createApp(options){
          * earlier, because the process that takes this one's place still needs
          * them.
          */
-        dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
+        dispose: ()=>Promise.all(
+            // Every machine of the run on this thread, not only the servers: a child
+            // beside its parent turns on a loop of its own, which ends when its
+            // machine is disposed and not when the program's does.
+            [...new Set([...[...serving].map(line=>line.current), ...standing])]
+                .filter(one=>one !== current).map(one=>one.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
+                // A process in a worker of its own keeps its memories for the
+                // worker to hand back to the run's thread.
+                if (options.spareMemories)
+                {
+                    [...serving].forEach(line=>keepMemory(line.current));
+                    keepMemory(current);
+                }
+                else
+                {
+                    // The run is over: what its last processes held goes with them.
+                    for (const gone of [...serving.values()].map(line=>line.current)
+                        .concat(current))
+                    {
+                        const held = holderOf.get(gone);
+                        holderOf.delete(gone);
+                        if (held?.own)
+                        {
+                            machineMemory?.release(held.holder);
+                        }
+                    }
+                }
                 system.bundle?.stop();
+                // Closed once the last save under way has read its files.
+                if (!options.system)
+                {
+                    system.volume.pageFile?.close();
+                }
                 // The run's store outlives each machine it was handed to, and
-                // goes with the last of them.
+                // goes with the last of them; the run is gone once its last
+                // records are written and the file let go of.
+                runCache?.close();
                 if (runStoreSpec === 'local')
                 {
-                    translationStore?.close?.();
+                    return translationStore?.close?.();
                 }
+                return undefined;
             })
             .finally(()=>{
-                spareMemory = null;
+                if (!options.spareMemories)
+                {
+                    spareMemories.splice(0).forEach(dropSpare);
+                }
                 shownHere?.dispose();
                 presenter?.dispose?.();
                 translationPool?.dispose();
@@ -11196,9 +4898,8 @@ export async function createApp(options){
         presenter: ()=>presenter,
 
         /**
-         * The last few replacement requests, each with the guest's stack at the
-         * call that made it -- kept out here so that honouring one does not
-         * take the record of it away.
+         * The last few CreateProcess requests, each with the guest's stack at
+         * the call that made it.
          */
         replacements: ()=>[...requested],
     };

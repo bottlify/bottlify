@@ -21,7 +21,13 @@
  */
 
 import { STATUS } from './status.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, decodeOem, encodeAnsi, encodeOem, upcaseUnit } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
+/** @param {string} text */
+export const upcaseText = text=>Array.from(text,
+    c=>String.fromCharCode(upcaseUnit(c.charCodeAt(0)))).join('');
 
 /** UNICODE_STRING and ANSI_STRING, which differ only in what they point at. */
 export const COUNTED_STRING = Object.freeze({
@@ -52,14 +58,12 @@ const MAX_WIDE_BYTES = 0xfffc;
  */
 
 /**
- * Builds the string half of the table: name -> { argBytes, handler }.
+ * Reading and writing counted strings in guest memory: the descriptor, and the
+ * characters it covers in either width. Shared by every function over them.
  *
- * All of these are stdcall, which is the bridge's default, so none of them says
- * so. `argBytes` is the size of the argument list the guest compiled against.
- *
- * @param {CountedStringHost} host
+ * @param {Pick<CountedStringHost, 'readMemory' | 'writeMemory'>} host
  */
-export function createCountedStringFunctions(host){
+export function countedStringAccess(host){
     /** @param {number} at */
     const readDescriptor = at=>{
         const bytes = host.readMemory(at, COUNTED_STRING.SIZE);
@@ -117,24 +121,23 @@ export function createCountedStringFunctions(host){
         return text;
     };
 
-    /**
-     * In the ANSI code page, a character it lacks as the default character.
-     *
-     * @param {number} at @param {string} text  The terminator is written too.
-     */
-    const writeAnsi = (at, text)=>{
-        host.writeMemory(at, encodeAnsi(`${text}\0`));
-    };
+    return { readDescriptor, writeDescriptor, ansiAt, wideAt };
+}
+
+/**
+ * Builds the string half of the table: name -> { argBytes, handler }.
+ *
+ * All of these are stdcall, which is the bridge's default, so none of them says
+ * so. `argBytes` is the size of the argument list the guest compiled against.
+ *
+ * @param {CountedStringHost} host
+ */
+export function createCountedStringFunctions(host){
+    const { readDescriptor, writeDescriptor, wideAt } = countedStringAccess(host);
 
     /** @param {number} at @param {string} text  The terminator is written too. */
     const writeWide = (at, text)=>{
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            view.setUint16(index * 2, text.charCodeAt(index), true);
-        }
-        host.writeMemory(at, bytes);
+        host.writeMemory(at, utf16z(text));
     };
 
     /**
@@ -152,7 +155,7 @@ export function createCountedStringFunctions(host){
      * @param {number} string
      */
     const freeString = string=>{
-        const at = string >>> 0;
+        const at = wholeAddress(string);
         const { buffer } = readDescriptor(at);
         if (buffer !== 0)
         {
@@ -169,7 +172,7 @@ export function createCountedStringFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([destination, source])=>{
-            const at = source >>> 0;
+            const at = wholeAddress(source);
             const text = at === 0 ? '' : host.readCString(at, MAX_ANSI_BYTES);
             writeDescriptor(destination >>> 0, {
                 length: text.length,
@@ -181,6 +184,112 @@ export function createCountedStringFunctions(host){
             return 0;
         },
     };
+
+    /**
+     * A narrow counted string widened into a wide one, the narrow bytes read
+     * in a code page.
+     *
+     * Refuses rather than truncates when the caller's buffer is too small,
+     * which is the opposite of the other direction and is not a choice made
+     * here -- a caller that asked for the widening knows how much room the
+     * result needs, and one that got it wrong wants to hear so.
+     *
+     * @param {(bytes: Uint8Array) => string} decode
+     */
+    const narrowToWide = decode=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([destination, source, allocateDestination])=>{
+            const from = readDescriptor(wholeAddress(source));
+            const text = from.buffer === 0 || from.length === 0 ? ''
+                : decode(host.readMemory(from.buffer, from.length));
+            const total = text.length * 2 + 2;
+            if (total > MAX_MAXIMUM)
+            {
+                // Widening doubled it past what MaximumLength can describe.
+                return STATUS.INVALID_PARAMETER_2;
+            }
+
+            const to = readDescriptor(wholeAddress(destination));
+            let buffer = to.buffer;
+            let maximumLength = to.maximumLength;
+            if (asked(allocateDestination))
+            {
+                buffer = host.allocate(total);
+                if (buffer === 0)
+                {
+                    return STATUS.NO_MEMORY;
+                }
+                maximumLength = total;
+            }
+            else if (total > to.maximumLength)
+            {
+                return STATUS.BUFFER_OVERFLOW;
+            }
+
+            writeWide(buffer, text);
+            writeDescriptor(destination >>> 0, { length: total - 2, maximumLength, buffer });
+            return STATUS.SUCCESS;
+        },
+    });
+
+    /**
+     * A wide counted string narrowed into a narrow one, in a code page, upper-
+     * cased first where asked; a counted result has no terminator.
+     *
+     * Truncates into a buffer that is too small, terminates what it wrote and
+     * says so with a status. A caller that ignores the status still holds a
+     * valid string rather than an unterminated one, which is why this half of
+     * the pair behaves differently from the other.
+     *
+     * @param {{ encode: (text: string) => Uint8Array, upcase?: boolean,
+     *     counted?: boolean }} how
+     */
+    const wideToNarrow = ({ encode, upcase = false, counted = false })=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([destination, source, allocateDestination])=>{
+            const from = readDescriptor(wholeAddress(source));
+            const read = wideAt(from.buffer, from.length);
+            const text = upcase ? upcaseText(read) : read;
+            const terminator = counted ? 0 : 1;
+            const total = text.length + terminator;
+            if (total > MAX_MAXIMUM)
+            {
+                return STATUS.INVALID_PARAMETER_2;
+            }
+
+            const to = readDescriptor(wholeAddress(destination));
+            let buffer = to.buffer;
+            let maximumLength = to.maximumLength;
+            let kept = text;
+            /** @type {number} */
+            let status = STATUS.SUCCESS;
+            if (asked(allocateDestination))
+            {
+                buffer = host.allocate(Math.max(total, 1));
+                if (buffer === 0)
+                {
+                    return STATUS.NO_MEMORY;
+                }
+                maximumLength = total;
+            }
+            else if (total > to.maximumLength)
+            {
+                if (to.maximumLength < terminator || counted)
+                {
+                    // No room even for the terminator, so nothing is written.
+                    return STATUS.BUFFER_OVERFLOW;
+                }
+                kept = text.slice(0, to.maximumLength - terminator);
+                status = STATUS.BUFFER_OVERFLOW;
+            }
+
+            host.writeMemory(buffer, encode(counted ? kept : `${kept}\0`));
+            writeDescriptor(destination >>> 0, { length: kept.length, maximumLength, buffer });
+            return status;
+        },
+    });
 
     return {
         RtlInitAnsiString: initAnsiString,
@@ -196,9 +305,9 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const at = source >>> 0;
+                const at = wholeAddress(source);
                 const text = at === 0 ? '' : host.readWideString(at, MAX_WIDE_BYTES);
-                writeDescriptor(destination >>> 0, {
+                writeDescriptor(wholeAddress(destination), {
                     length: text.length * 2,
                     maximumLength: at === 0 ? 0 : text.length * 2 + 2,
                     buffer: at,
@@ -211,107 +320,91 @@ export function createCountedStringFunctions(host){
          * NTSTATUS RtlAnsiStringToUnicodeString(PUNICODE_STRING DestinationString,
          *                                       PCANSI_STRING SourceString,
          *                                       BOOLEAN AllocateDestinationString)
-         *
-         * Refuses rather than truncates when the caller's buffer is too small,
-         * which is the opposite of the other direction and is not a choice made
-         * here -- a caller that asked for the widening knows how much room the
-         * result needs, and one that got it wrong wants to hear so.
          */
-        RtlAnsiStringToUnicodeString: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, allocateDestination])=>{
-                const from = readDescriptor(source >>> 0);
-                const text = ansiAt(from.buffer, from.length);
-                const total = text.length * 2 + 2;
-                if (total > MAX_MAXIMUM)
-                {
-                    // Widening doubled it past what MaximumLength can describe.
-                    return STATUS.INVALID_PARAMETER_2;
-                }
+        RtlAnsiStringToUnicodeString: narrowToWide(decodeAnsi),
 
-                const to = readDescriptor(destination >>> 0);
-                let buffer = to.buffer;
-                let maximumLength = to.maximumLength;
-                if (asked(allocateDestination))
-                {
-                    buffer = host.allocate(total);
-                    if (buffer === 0)
-                    {
-                        return STATUS.NO_MEMORY;
-                    }
-                    maximumLength = total;
-                }
-                else if (total > to.maximumLength)
-                {
-                    return STATUS.BUFFER_OVERFLOW;
-                }
-
-                writeWide(buffer, text);
-                writeDescriptor(destination >>> 0, {
-                    length: total - 2,
-                    maximumLength,
-                    buffer,
-                });
-                return STATUS.SUCCESS;
-            },
-        },
+        /** NTSTATUS RtlOemStringToUnicodeString(PUNICODE_STRING, PCOEM_STRING, BOOLEAN) */
+        RtlOemStringToUnicodeString: narrowToWide(decodeOem),
 
         /**
          * NTSTATUS RtlUnicodeStringToAnsiString(PANSI_STRING DestinationString,
          *                                       PCUNICODE_STRING SourceString,
          *                                       BOOLEAN AllocateDestinationString)
-         *
-         * Truncates into a buffer that is too small, terminates what it wrote and
-         * says so with a status. A caller that ignores the status still holds a
-         * valid string rather than an unterminated one, which is why this half of
-         * the pair behaves differently from the other.
          */
-        RtlUnicodeStringToAnsiString: {
-            argBytes: 12,
+        RtlUnicodeStringToAnsiString: wideToNarrow({ encode: encodeAnsi }),
+
+        /** NTSTATUS RtlUnicodeStringToOemString(POEM_STRING, PCUNICODE_STRING, BOOLEAN) */
+        RtlUnicodeStringToOemString: wideToNarrow({ encode: encodeOem }),
+
+        /** NTSTATUS RtlUpcaseUnicodeStringToAnsiString(PANSI_STRING, PCUNICODE_STRING, BOOLEAN) */
+        RtlUpcaseUnicodeStringToAnsiString: wideToNarrow({ encode: encodeAnsi, upcase: true }),
+
+        /** NTSTATUS RtlUpcaseUnicodeStringToOemString(POEM_STRING, PCUNICODE_STRING, BOOLEAN) */
+        RtlUpcaseUnicodeStringToOemString: wideToNarrow({ encode: encodeOem, upcase: true }),
+
+        /**
+         * NTSTATUS RtlUpcaseUnicodeStringToCountedOemString(POEM_STRING, PCUNICODE_STRING,
+         *                                                   BOOLEAN)
+         *
+         * Counted: no terminator, and no room is made for one.
+         */
+        RtlUpcaseUnicodeStringToCountedOemString:
+            wideToNarrow({ encode: encodeOem, upcase: true, counted: true }),
+
+        /**
+         * BOOLEAN RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING Destination, PCSZ Source)
+         *
+         * A wide copy of an ANSI string in a buffer of its own, terminated, for
+         * RtlFreeUnicodeString to give back; FALSE when there is no room for it.
+         */
+        RtlCreateUnicodeStringFromAsciiz: {
+            argBytes: 8,
             /** @param {number[]} args */
-            handler: ([destination, source, allocateDestination])=>{
-                const from = readDescriptor(source >>> 0);
-                const text = wideAt(from.buffer, from.length);
-                const total = text.length + 1;
+            handler: ([destination, source])=>{
+                const text = host.readCString(wholeAddress(source), MAX_ANSI_BYTES);
+                const total = text.length * 2 + 2;
                 if (total > MAX_MAXIMUM)
                 {
-                    return STATUS.INVALID_PARAMETER_2;
+                    return 0;
                 }
-
-                const to = readDescriptor(destination >>> 0);
-                let buffer = to.buffer;
-                let maximumLength = to.maximumLength;
-                let kept = text;
-                /** @type {number} */
-                let status = STATUS.SUCCESS;
-                if (asked(allocateDestination))
+                const buffer = host.allocate(total);
+                if (buffer === 0)
                 {
-                    buffer = host.allocate(total);
-                    if (buffer === 0)
-                    {
-                        return STATUS.NO_MEMORY;
-                    }
-                    maximumLength = total;
+                    return 0;
                 }
-                else if (total > to.maximumLength)
-                {
-                    if (to.maximumLength === 0)
-                    {
-                        // No room even for the terminator, so nothing is written.
-                        return STATUS.BUFFER_OVERFLOW;
-                    }
-                    kept = text.slice(0, to.maximumLength - 1);
-                    status = STATUS.BUFFER_OVERFLOW;
-                }
+                writeWide(buffer, text);
+                writeDescriptor(wholeAddress(destination),
+                    { length: total - 2, maximumLength: total, buffer });
+                return 1;
+            },
+        },
 
-                writeAnsi(buffer, kept);
-                writeDescriptor(destination >>> 0, {
-                    length: kept.length,
-                    maximumLength,
-                    buffer,
-                });
-                return status;
+        /**
+         * BOOLEAN RtlCreateUnicodeString(PUNICODE_STRING Destination, PCWSTR Source)
+         *
+         * The wide string copied into a buffer of its own, terminated, for
+         * RtlFreeUnicodeString to give back; FALSE where it would not fit a
+         * UNICODE_STRING or there is no room for it.
+         */
+        RtlCreateUnicodeString: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([destination, source])=>{
+                const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES);
+                const total = text.length * 2 + 2;
+                if (total > MAX_MAXIMUM)
+                {
+                    return 0;
+                }
+                const buffer = host.allocate(total);
+                if (buffer === 0)
+                {
+                    return 0;
+                }
+                writeWide(buffer, text);
+                writeDescriptor(wholeAddress(destination),
+                    { length: total - 2, maximumLength: total, buffer });
+                return 1;
             },
         },
 

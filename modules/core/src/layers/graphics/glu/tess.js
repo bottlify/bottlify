@@ -74,7 +74,7 @@ export const TESS = Object.freeze({
  */
 
 /** @param {number} rule @param {number} winding */
-export function inside(rule, winding){
+function inside(rule, winding){
     switch (rule)
     {
         case TESS.WINDING_ODD: return (winding & 1) !== 0;
@@ -135,7 +135,7 @@ const crosses = (a, b, c, d)=>{
  * @param {TessVertex[][]} contours @param {number[]} given
  * @returns {((p: TessVertex) => { u: number, v: number }) | null}
  */
-export function projection(contours, given){
+function projection(contours, given){
     let [nx, ny, nz] = given;
     if (nx === 0 && ny === 0 && nz === 0)
     {

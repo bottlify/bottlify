@@ -117,7 +117,7 @@ export function rasterStatus(raster){
 }
 
 /** D3DPRESENT_INTERVAL_IMMEDIATE: present at once, never at a blank. */
-const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+export const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 
 /**
  * How many frames presented and not yet shown a Present lets wait for their
@@ -127,7 +127,7 @@ const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
  * ponytail: an Ex device's SetMaximumFrameLatency is not followed here; follow it
  * when a program that sets one is measured.
  */
-export const FRAMES_AHEAD = 3;
+const FRAMES_AHEAD = 3;
 
 /**
  * The frames a device presented, each shown at a blank its presentation

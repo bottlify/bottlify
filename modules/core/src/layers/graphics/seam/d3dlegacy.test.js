@@ -24,7 +24,8 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import {
-    IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAW_SLOTS,
+    IDIRECTDRAW2_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE_SLOTS,
+    IDIRECTDRAW_SLOTS,
 } from './vtables.js';
 import {
     IDIRECT3D2_SLOTS, IDIRECT3D3_SLOTS, IDIRECT3D_SLOTS, IDIRECT3DDEVICE2_SLOTS,
@@ -46,26 +47,30 @@ import {
     D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
-import { guidBytes } from './d3d7.js';
-import { SHADOW } from './shadow.js';
+import { guidBytes } from '../../../system/guid.js';
+import { SHADOW } from './block.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }
     from '../ddraw/structs.js';
 import { d3dFormatOf } from '../d3d7/device.js';
 import { D3DFMT } from '../d3d7/constants.js';
 import {
-    DDCKEY_SRCBLT, DDERR_NOCOLORKEY, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN,
-    DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
+    DDCKEY_SRCBLT, DDERR_INVALIDCAPS, DDERR_INVALIDPIXELFORMAT, DDERR_NOCOLORKEY,
+    DDERR_NOPALETTEATTACHED, DDPCAPS_8BIT, DDPF_PALETTEINDEXED8, DDPF_RGB, DDSCAPS_3DDEVICE,
+    DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS,
+    DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
     D3DDEB_BUFSIZE, D3DDEB_CAPS, DDERR_ALREADYINITIALIZED,
     D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_HWRASTERIZATION, D3DERR_NOCURRENTVIEWPORT,
+    D3DERR_SURFACENOTINVIDMEM,
     D3DERR_VIEWPORTDATANOTSET, D3DERR_VIEWPORTHASNODEVICE, D3DFDS_GUID, D3DLIGHTSTATE,
     D3DLIGHT_ACTIVE, D3DPTEXTURECAPS_POW2, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND,
     DEVICE_IDS,
 } from '../d3d7/constants.js';
 import { D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -90,7 +95,7 @@ function machine(){
     const bytes = new Uint8Array(4 << 20);
     const view = new DataView(bytes.buffer);
     let next = 0x100;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -99,7 +104,7 @@ function machine(){
         readU32: at=>view.getUint32(at, true),
         /** @param {number} at @param {number} value */
         writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
@@ -848,8 +853,8 @@ test('GetCaps writes each description as large as its caller said, and GetStats 
     const vertices = 0x7000;
     h.box.bytes.fill(0, vertices, vertices + 4 * 24);
     assert.equal(h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP,
-        FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), 0x88760000 + 761,
-    'D3DERR_SCENE_NOT_IN_SCENE: the draw was read and handed down');
+        FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), D3D_OK,
+    'outside a scene: the draw was read and handed down, and drawn');
     h.device(device, 'BeginScene');
     assert.equal(h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLESTRIP,
         FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, vertices, 4, 0]), D3D_OK);
@@ -859,8 +864,9 @@ test('GetCaps writes each description as large as its caller said, and GetStats 
     assert.equal(h.device(device, 'GetStats', [stats]), DDERR_INVALIDPARAMS >>> 0);
     h.box.memory.writeU32(stats, D3DSTATS.SIZE);
     assert.equal(h.device(device, 'GetStats', [stats]), D3D_OK);
-    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn), 2);
-    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwVerticesProcessed), 4);
+    // Both strips, the one outside the scene too.
+    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwTrianglesDrawn), 4);
+    assert.equal(h.box.memory.readU32(stats + D3DSTATS.dwVerticesProcessed), 8);
 
     h.release(viewport);
     assert.equal(h.release(device), 0);
@@ -897,6 +903,9 @@ test('a DirectX 6 vertex buffer counts on its own and is no IDirect3DVertexBuffe
     assert.equal(h.query(buffer, IID_IDirect3DVertexBuffer).hr, DD_OK);
     h.release(buffer);
     assert.equal(h.query(buffer, IID_IDirect3DVertexBuffer7).hr, E_NOINTERFACE);
+    const unknown = h.query(buffer, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(unknown.pointer, buffer, 'IUnknown is the buffer\'s own pointer');
+    h.release(unknown.pointer);
 
     const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
         h.box.call(buffer, slot(IDIRECT3DVERTEXBUFFER_SLOTS, name), args);
@@ -1120,12 +1129,12 @@ test('IDirect3D2 describes its devices at DirectX 5\'s size, and names formats b
         const d3d = h.query(ddraw, IID_IDirect3D2).pointer;
         assert.equal(await h.box.callRaw(d3d, slot(IDIRECT3D2_SLOTS, 'EnumDevices'),
             [0x1234, 0]), D3D_OK);
-        assert.equal(h.callbacks.length, 2);
-        // The fourth and fifth arguments are the two descriptions; each
-        // reads its own size first.
+        // The ramp emulation, the RGB one, the HAL and the MMX emulation
+        // (ddraw2 test_enum_devices). The fourth and fifth arguments are the
+        // two descriptions; each reads its own size first.
+        assert.equal(h.callbacks.length, 4);
         assert.deepEqual(h.callbacks.map(call=>call.seen.slice(3, 5)),
-            [[D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2],
-                [D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2]]);
+            Array.from({ length: 4 }, ()=>[D3DDEVICEDESC.SIZE_V2, D3DDEVICEDESC.SIZE_V2]));
 
         const search = 0x6000;
         const result = 0x6100;
@@ -1262,13 +1271,73 @@ test('IDirect3D is a query away from IDirectDraw, makes no device, and initializ
         {
             seen.push([h.box.memory.readU32(args[3]), h.box.memory.readU32(args[4])]);
         }
-        assert.deepEqual(seen, [[D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1],
-            [D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1]], 'DirectX 3\'s description size');
+        assert.deepEqual(seen, Array.from({ length: 3 },
+            ()=>[D3DDEVICEDESC.SIZE_V1, D3DDEVICEDESC.SIZE_V1]),
+        'the ramp emulation, the RGB one and the HAL, at DirectX 3\'s description size');
 
         h.release(d3d.pointer);
         h.release(ddraw);
         h.assertAllReleased();
     });
+
+test('each version lists and finds its own devices: the ramp emulation before IDirect3D3, the'
+    + ' MMX one in IDirect3D2, described as Windows describes its software devices', async()=>{
+    // ddraw1, ddraw2 and ddraw4 test_enum_devices and test_find_device.
+    const h = seamed((box, args)=>{
+        const bytes = box.bytes.slice(args[2], args[2] + 32);
+        const hel = args[4];
+        return { name: new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0))),
+            colourModel: box.memory.readU32(hel + D3DDEVICEDESC.dcmColorModel),
+            devCaps: box.memory.readU32(hel + D3DDEVICEDESC.dwDevCaps),
+            flags: box.memory.readU32(hel + D3DDEVICEDESC.dwFlags) };
+    });
+    const versions = [
+        { make: ()=>h.create1(), iid: IID_IDirect3D, slots: IDIRECT3D_SLOTS,
+            size: D3DDEVICEDESC.SIZE_V1 },
+        { make: ()=>h.create2(), iid: IID_IDirect3D2, slots: IDIRECT3D2_SLOTS,
+            size: D3DDEVICEDESC.SIZE_V2 },
+        { make: ()=>h.create4(), iid: IID_IDirect3D3, slots: IDIRECT3D3_SLOTS,
+            size: D3DDEVICEDESC.SIZE },
+    ];
+    /** @type {any[][]} */
+    const listed = [];
+    /** @type {number[][]} */
+    const found = [];
+    for (const version of versions)
+    {
+        const ddraw = version.make();
+        const d3d = h.query(ddraw, version.iid).pointer;
+        h.callbacks.length = 0;
+        assert.equal(await h.box.callRaw(d3d, slot(version.slots, 'EnumDevices'), [0x1234, 0]),
+            D3D_OK);
+        listed.push(h.callbacks.map(call=>call.seen));
+        found.push([DEVICE_IDS.RAMP, DEVICE_IDS.MMX].map(id=>{
+            const search = 0x6000;
+            const result = 0x6100;
+            h.box.bytes.fill(0, search, search + 0x400);
+            h.box.memory.writeU32(search, D3DFINDDEVICESEARCH.SIZE);
+            h.box.memory.writeU32(search + D3DFINDDEVICESEARCH.dwFlags, D3DFDS_GUID);
+            h.box.putGuid(search + D3DFINDDEVICESEARCH.guid, id);
+            h.box.memory.writeU32(result, D3DFINDDEVICERESULT.ddHwDesc + 2 * version.size);
+            return h.box.call(d3d, slot(version.slots, 'FindDevice'), [search, result]) >>> 0;
+        }));
+        h.release(d3d);
+        h.release(ddraw);
+    }
+    assert.deepEqual(listed.map(devices=>devices.map(device=>device.name)), [
+        ['Ramp Emulation', 'RGB Emulation', 'Direct3D HAL'],
+        ['Ramp Emulation', 'RGB Emulation', 'Direct3D HAL', 'MMX Emulation'],
+        ['RGB Emulation', 'Direct3D HAL'],
+    ]);
+    assert.deepEqual(found, [[D3D_OK, DDERR_NOTFOUND >>> 0], [D3D_OK, D3D_OK],
+        [DDERR_NOTFOUND >>> 0, DDERR_NOTFOUND >>> 0]]);
+    const [ramp, rgb] = listed[1];
+    assert.deepEqual([ramp.colourModel, rgb.colourModel], [1, 2], 'mono, then RGB');
+    assert.deepEqual([rgb.flags, rgb.devCaps], [0x7df, 0x55b], 'before IDirect3D3');
+    assert.deepEqual([listed[2][0].flags, listed[2][0].devCaps], [0x7ff, 0x551],
+        'through IDirect3D3');
+    h.assertAllReleased();
+});
 
 test('a surface asked for a device is one, with the surface\'s interfaces and count', ()=>{
     const h = seamed();
@@ -1313,6 +1382,114 @@ test('a surface asked for a device is one, with the surface\'s interfaces and co
     const model = h.publisher.objectAt(surface);
     assert.equal(h.release(device), 0);
     assert.ok(model.destroyed, 'the last reference was the device\'s, and the surface went');
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a surface no device could draw into refuses the device GUID with why (test_rt_caps)', ()=>{
+    const h = seamed();
+    const ddraw = h.create1();
+    const at = 0x5000;
+    /** @param {number} caps @param {any} [pixelFormat] @returns {number} a new 8x8 surface */
+    const surfaceWith = (caps, pixelFormat = XRGB32)=>{
+        h.box.bytes.fill(0, at, at + DDSURFACEDESC.SIZE);
+        writeSurfaceDesc(h.box.services, at, DDSURFACEDESC, {
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+            width: 8, height: 8, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+            caps, caps2: 0, pixelFormat,
+        });
+        assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreateSurface'),
+            [at, 0x5100, 0]), DD_OK);
+        return h.box.memory.readU32(0x5100);
+    };
+
+    const plain = surfaceWith(DDSCAPS_OFFSCREENPLAIN);
+    const refused = h.query(plain, DEVICE_IDS.HAL);
+    assert.equal(refused.hr, DDERR_INVALIDCAPS >>> 0, 'no 3DDEVICE cap: no device');
+    assert.equal(refused.pointer, 0);
+    assert.equal(h.query(plain, DEVICE_IDS.RGB).hr, DDERR_INVALIDCAPS >>> 0);
+    assert.equal(h.countOf(plain), 1, 'a refusal takes no reference');
+
+    const system = surfaceWith(DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY);
+    assert.equal(h.query(system, DEVICE_IDS.HAL).hr, D3DERR_SURFACENOTINVIDMEM >>> 0,
+        'the hardware device wants video memory');
+    const software = h.query(system, DEVICE_IDS.RGB);
+    assert.equal(software.hr, DD_OK, 'the software one draws into system memory');
+    assert.equal(h.query(system, DEVICE_IDS.RGB).pointer, software.pointer,
+        'the device made once is answered again');
+    h.release(software.pointer);
+    h.release(software.pointer);
+
+    // An indexed target: only the software device of the first generation
+    // takes one, and once made it is answered whatever the palette does.
+    const indexed = surfaceWith(DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, Object.freeze({
+        size: 0x20, flags: DDPF_PALETTEINDEXED8 | DDPF_RGB, fourCC: 0, bitCount: 8,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0,
+    }));
+    assert.equal(h.query(indexed, DEVICE_IDS.RGB).hr, DDERR_NOPALETTEATTACHED >>> 0);
+    h.box.bytes.fill(0, 0x5800, 0x5c00);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW_SLOTS, 'CreatePalette'),
+        [DDPCAPS_8BIT, 0x5800, 0x5900, 0]), DD_OK);
+    const palette = h.box.memory.readU32(0x5900);
+    const setPalette = (/** @type {number} */ to)=>
+        h.box.call(indexed, slot(IDIRECTDRAWSURFACE_SLOTS, 'SetPalette'), [to]);
+    assert.equal(setPalette(palette), DD_OK);
+    assert.equal(h.query(indexed, DEVICE_IDS.HAL).hr, DDERR_INVALIDPIXELFORMAT >>> 0);
+    const onIndexed = h.query(indexed, DEVICE_IDS.RGB);
+    assert.equal(onIndexed.hr, DD_OK);
+    assert.equal(h.device1(onIndexed.pointer, 'CreateMatrix', [0x4600]), D3D_OK,
+        'the first call makes the device');
+    assert.equal(setPalette(0), DD_OK);
+    assert.equal(h.query(indexed, DEVICE_IDS.RGB).hr, DD_OK, 'the device it has is answered');
+    h.release(onIndexed.pointer);
+    h.release(onIndexed.pointer);
+    h.release(palette);
+    h.release(indexed);
+    h.release(plain);
+    h.release(system);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('a material has a handle a device (test_multiple_devices)', ()=>{
+    const h = seamed();
+    const ddraw = h.create4();
+    const first = h.createDevice(ddraw);
+    const second = h.createDevice(ddraw);
+    const d3d = h.direct3D(ddraw);
+    const material = h.make(d3d, 'CreateMaterial');
+    const handle = (/** @type {number} */ device)=>{
+        assert.equal(h.box.call(material, slot(IDIRECT3DMATERIAL3_SLOTS, 'GetHandle'),
+            [device, 0x6300]), D3D_OK);
+        return h.box.memory.readU32(0x6300);
+    };
+    const one = handle(first.device);
+    assert.equal(handle(first.device), one, 'asked again through one device, the same');
+    assert.notEqual(handle(second.device), one, 'another through another');
+    h.release(material);
+    h.release(d3d);
+    for (const { device, target } of [first, second])
+    {
+        assert.equal(h.release(device), 0);
+        h.release(target);
+    }
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('IDirect3DDevice3::ComputeSphereVisibility answers in D3DVIS bits', ()=>{
+    const h = seamed();
+    const ddraw = h.create4();
+    const { device, target } = h.createDevice(ddraw);
+    h.box.putFloats(0x6000, [0, 0, 0.5]);
+    h.box.putFloats(0x6100, [0.5]);
+    h.box.memory.writeU32(0x6200, 0xdeadbeef);
+    assert.equal(h.device(device, 'ComputeSphereVisibility', [0x6000, 0x6100, 1, 0, 0x6200]),
+        D3D_OK);
+    assert.equal(h.box.memory.readU32(0x6200), 0x1401,
+        'crossing the frustum, its near and far sides (test_compute_sphere_visibility)');
+    assert.equal(h.release(device), 0);
+    h.release(target);
     h.release(ddraw);
     h.assertAllReleased();
 });
@@ -1486,6 +1663,115 @@ test('Execute runs the instructions through its viewport, and draws nothing past
         assert.equal(h.release(buffer), 0);
         h.release(viewport);
         assert.equal(h.release(device), 0);
+        h.release(d3d);
+        h.release(ddraw);
+        h.assertAllReleased();
+    });
+
+test('TransformVertices carries points onto the viewport, and says which planes cut them',
+    ()=>{
+        // Wine's ddraw1.c test_transform_vertices, its numbers as Windows gave them.
+        const h = seamed();
+        const ddraw = h.create4();
+        const { device, target } = h.createDevice(ddraw, 320, 320);
+        h.device(device, 'GetDirect3D', [0x4500]);
+        const d3d = h.box.memory.readU32(0x4500);
+        const viewport = h.make(d3d, 'CreateViewport');
+        assert.equal(h.device(device, 'AddViewport', [viewport]), D3D_OK);
+        const vp = 0x6000;
+        /** @param {number} x @param {number} y @param {number} w @param {number} hh @param {number[]} floats */
+        const setViewport = (x, y, w, hh, floats)=>{
+            h.box.memory.writeU32(vp, D3DVIEWPORT.SIZE);
+            [x, y, w, hh].forEach((value, index)=>h.box.memory.writeU32(vp + 4 + 4 * index, value));
+            h.box.putFloats(vp + D3DVIEWPORT.dvScaleX, floats);
+            assert.equal(h.viewport(viewport, 'SetViewport', [vp]), D3D_OK);
+        };
+        const input = 0x7000;
+        const output = 0x7400;
+        const homogeneous = 0x7800;
+        const data = 0x7c00;
+        const offscreen = 0x7d00;
+        /** @param {number[][]} points  x, y, z, then five dwords */
+        const put = points=>points.forEach((point, k)=>{
+            h.box.putFloats(input + k * 36, point.slice(0, 4));
+            point.slice(4).forEach((word, i)=>h.box.memory.writeU32(input + k * 36 + 16 + 4 * i,
+                word >>> 0));
+        });
+        /** @param {number} count @param {number} flags */
+        const transform = (count, flags)=>{
+            [0x34, input, 36, output, 40, homogeneous].forEach((value, index)=>
+                h.box.memory.writeU32(data + 4 * index, value));
+            h.box.memory.writeU32(offscreen, 0xdeadbeef);
+            assert.equal(h.viewport(viewport, 'TransformVertices', [count, data, flags,
+                offscreen]), D3D_OK);
+            return h.box.memory.readU32(offscreen);
+        };
+        /** @param {number} k */
+        const out = k=>h.box.floatsAt(output + k * 40, 4);
+        const near = (/** @type {number[]} */ got, /** @type {number[]} */ want)=>
+            assert.ok(got.every((value, i)=>Math.abs(value - want[i]) < 1e-3),
+                `${got} against ${want}`);
+        const UNCLIPPED = 2;
+        const CLIPPED = 1;
+
+        put([[0, 0, 0, 0, 1, 2, 3, 4, 5], [1, 1, 1, 8, 6, 7, 8, 9, 10],
+            [-1, -1, -1, 4, 11, 12, 13, 14, 15], [0.5, 0.5, 0.5, 2, 16, 17, 18, 19, 20],
+            [-0.5, -0.5, -0.5, 1, ~1, ~2, ~3, ~4, ~5], [-0.5, -0.5, 0, 0, ~6, ~7, ~8, ~9, ~0]]);
+        for (let k = 0; k < 6; k++)
+        {
+            h.box.memory.writeU32(output + k * 40 + 32, 0xdeadbeef);
+        }
+        setViewport(0, 0, 256, 256, [1, 1, 256, 256, 0, 1]);
+        assert.equal(transform(6, UNCLIPPED), 0, 'nothing is offscreen unclipped');
+        [[128, 128, 0, 1], [129, 127, 1, 1], [127, 129, -1, 1], [128.5, 127.5, 0.5, 1],
+            [127.5, 128.5, -0.5, 1], [127.5, 128.5, 0, 1]].forEach((want, k)=>near(out(k), want));
+        assert.deepEqual([16, 20, 24, 28, 32].map(at=>h.box.memory.readU32(output + 40 + at)),
+            [6, 7, 8, 9, 0xdeadbeef], 'four dwords carried, the rest left alone');
+
+        setViewport(0, 0, 256, 256, [5, 5, 256, 256, -25, 60]);
+        transform(6, UNCLIPPED);
+        near(out(1), [133, 123, 1, 1]);
+        near(out(3), [130.5, 125.5, 0.5, 1]);
+        setViewport(10, 20, 256, 256, [5, 5, 256, 256, -25, 60]);
+        transform(6, UNCLIPPED);
+        near(out(0), [138, 148, 0, 1]);
+        near(out(2), [133, 153, -1, 1]);
+
+        assert.equal(transform(6, CLIPPED), 0);
+        /** @param {number} k */
+        const hv = k=>[h.box.memory.readU32(homogeneous + k * 16),
+            ...h.box.floatsAt(homogeneous + k * 16 + 4, 3)];
+        assert.deepEqual(hv(2)[0], 0x10, 'behind the front plane');
+        near(hv(2).slice(1), [-1, -1, -1]);
+        assert.deepEqual(hv(1), [0, 1, 1, 1]);
+
+        put([[25.59, 25.59, 1, 0, 1, 2, 3, 4, 5], [25.61, 25.61, 1.01, 0, 1, 2, 3, 4, 5],
+            [-25.59, -25.59, 0, 0, 1, 2, 3, 4, 5], [-25.61, -25.61, -0.01, 0, 1, 2, 3, 4, 5]]);
+        transform(4, CLIPPED);
+        assert.deepEqual([0, 1, 2, 3].map(k=>hv(k)[0]), [0, 0x2 | 0x20 | 0x4, 0, 0x1 | 0x8 | 0x10]);
+        // Wine's 1000 high on a first-generation device; 300 on this one, y still inside.
+        setViewport(0, 0, 10, 300, [5, 5, 256, 256, -25, 60]);
+        transform(4, CLIPPED);
+        assert.deepEqual([0, 1, 2, 3].map(k=>hv(k)[0]), [0x2, 0x2 | 0x20, 0x1, 0x1 | 0x10]);
+
+        // The offscreen word is the AND of every point's planes.
+        setViewport(0, 0, 5, 5, [10000, 10000, 256, 256, -25, 60]);
+        assert.equal(transform(1, UNCLIPPED), 0);
+        assert.equal(transform(1, CLIPPED), 0x2 | 0x4);
+        assert.equal(transform(2, CLIPPED), 0x2 | 0x4);
+        assert.equal(transform(3, CLIPPED), 0);
+
+        h.box.memory.writeU32(data, 0x30);
+        assert.equal(h.viewport(viewport, 'TransformVertices', [1, data, CLIPPED, offscreen]),
+            DDERR_INVALIDPARAMS >>> 0, 'a structure of another size');
+        h.box.memory.writeU32(data, 0x34);
+        assert.equal(h.viewport(viewport, 'TransformVertices', [1, data, 0, offscreen]),
+            DDERR_INVALIDPARAMS >>> 0, 'no clipping flag');
+
+        assert.equal(h.device(device, 'DeleteViewport', [viewport]), D3D_OK);
+        assert.equal(h.release(viewport), 0);
+        h.release(device);
+        h.release(target);
         h.release(d3d);
         h.release(ddraw);
         h.assertAllReleased();

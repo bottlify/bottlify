@@ -5,12 +5,14 @@
  */
 
 import { test } from 'node:test';
+import { longMachine, callLong } from '../../../../scripts/guest-code/long.mjs';
 import assert from 'node:assert/strict';
-import { TEB } from './teb.js';
+import { TEB, TEB64 } from './teb.js';
 import { createProcessors } from './processor.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
     queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
+    queryPerformanceCounterCode64, queryPerformanceFrequencyCode64, tickCountCode64,
     tlsGetValueCode, tlsSetValueCode,
 } from './process.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from './versions.js';
@@ -72,7 +74,7 @@ function fakeHost({ arena = 0 } = {}){
         now: ()=>clock.uptimeMs,
         systemTimeMs: ()=>clock.wallMs,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
             for (let i = 0; i < data.length; i++)
@@ -222,12 +224,24 @@ test('a reallocated slot reads as zero rather than as its previous tenant', ()=>
 test('TlsAlloc reports exhaustion instead of handing out an index it does not have', ()=>{
     const { fns } = setup();
 
-    for (let i = 0; i < TLS_SLOTS; i++)
+    // Index 0 is the process's from the start.
+    for (let i = 1; i < TLS_SLOTS; i++)
     {
         assert.notEqual(fns.TlsAlloc.handler(), TLS_OUT_OF_INDEXES);
     }
 
     assert.equal(fns.TlsAlloc.handler(), TLS_OUT_OF_INDEXES);
+});
+
+test('TLS index 0 is reserved: never handed out, and reads as zero', ()=>{
+    const { fns } = setup();
+
+    assert.equal(fns.TlsGetValue.handler([0]), 0);
+    const slot = fns.TlsAlloc.handler();
+    assert.notEqual(slot, 0);
+    assert.notEqual(slot, TLS_OUT_OF_INDEXES);
+    fns.TlsSetValue.handler([slot, 1]);
+    assert.equal(fns.TlsGetValue.handler([0]), 0, 'another slot\'s value does not show through');
 });
 
 test('an index nobody allocated fails and says why', ()=>{
@@ -329,6 +343,24 @@ test('each Windows is answered by GetVersion and GetVersionExA alike', ()=>{
         assert.equal(host.view.getUint16(address + 148, true), version.servicePackMajor);
         assert.equal(host.view.getUint16(address + 152, true), version.suiteMask, version.name);
     }
+});
+
+test('GetProductInfo answers the machine\'s edition for a system from Vista on', ()=>{
+    // Wine's kernel32 version test_GetProductInfo: a version before 6.0 is
+    // PRODUCT_UNDEFINED and FALSE; the Steam client asks with 10.0.
+    const PRODUCT_PROFESSIONAL = 0x30;
+    const { host, fns } = setup({ version: WINDOWS_VERSIONS.win10 });
+    assert.equal(fns.GetProductInfo.argBytes, 20);
+    host.view.setUint32(0x400, 0xcdcdcdcd, true);
+    assert.equal(fns.GetProductInfo.handler([10, 0, 0, 0, 0x400]), 1);
+    assert.equal(host.view.getUint32(0x400, true), PRODUCT_PROFESSIONAL, 'Windows 10 Pro');
+    assert.equal(fns.GetProductInfo.handler([5, 1, 3, 0, 0x400]), 0);
+    assert.equal(host.view.getUint32(0x400, true), 0, 'PRODUCT_UNDEFINED');
+    assert.equal(fns.GetProductInfo.handler([10, 0, 0, 0, 0]), 0, 'nowhere to put it');
+
+    const xp = setup({ version: WINDOWS_VERSIONS.winxp });
+    assert.equal(xp.fns.GetProductInfo.handler([6, 0, 0, 0, 0x400]), 0, 'XP has no editions');
+    assert.equal(xp.host.view.getUint32(0x400, true), 0);
 });
 
 test('GetVersionExW fills the wide structures and refuses any other size', ()=>{
@@ -440,6 +472,19 @@ test('GetSystemTimeAsFileTime writes 100ns units since 1601', ()=>{
     fns.GetSystemTimeAsFileTime.handler([filetime]);
     assert.equal(u64(filetime), FILETIME_AT_UNIX_EPOCH + 10_000_000n);
 });
+
+test('GetSystemTimePreciseAsFileTime is the same clock below the millisecond; a prefetch is a hint',
+    ()=>{
+        // Wine's time.c test_GetSystemTimePreciseAsFileTime: spinning until
+        // it changes, it changes by less than a millisecond.
+        const { host, fns, u64 } = setup();
+        host.clock.wallMs = 2500.25;
+        fns.GetSystemTimePreciseAsFileTime.handler([0x500]);
+        assert.equal(u64(0x500), FILETIME_AT_UNIX_EPOCH + 25_002_500n);
+        fns.GetSystemTimeAsFileTime.handler([0x508]);
+        assert.equal(u64(0x508), FILETIME_AT_UNIX_EPOCH + 25_000_000n, 'the coarse one: whole ms');
+        assert.equal(fns.PrefetchVirtualMemory.handler([-1, 1, 0x600, 0]), 1);
+    });
 
 test('GetSystemTimeAdjustment reports a millisecond clock nothing adjusts, a DWORD each', ()=>{
     // Three four-byte answers side by side: one written as eight would run
@@ -553,21 +598,6 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.TlsSetValue.argBytes, 8);
 });
 
-test('fibre-local storage is thread-local storage under other names', ()=>{
-    // A machine with no fibres has exactly one fibre per thread, so the two are
-    // the same store. A runtime looks the Fls names up at run time and takes a
-    // less-travelled fallback path when they are absent.
-    const { fns: table } = setup();
-
-    const slot = table.FlsAlloc.handler([0]);
-    assert.notEqual(slot, 0xffffffff, 'a slot was handed out');
-    assert.equal(table.FlsSetValue.handler([slot, 0x1234]), 1);
-    assert.equal(table.FlsGetValue.handler([slot]), 0x1234);
-    assert.equal(table.TlsGetValue.handler([slot]), 0x1234,
-        'and it is the same store the thread-local names see');
-    assert.equal(table.FlsFree.handler([slot]), 1);
-});
-
 test('a decoded pointer is the pointer that was encoded', ()=>{
     // The pair is a contract with itself and nothing else. What a program
     // requires is that decoding what it encoded gives the pointer back; the
@@ -598,19 +628,38 @@ test('a thread with a block keeps its last error in the block', ()=>{
     assert.equal(fns.GetLastError.handler(), 0, 'a thread without a block keeps its own');
 });
 
+test('GetCurrentThreadStackLimits answers the reservation\'s bottom and the stack\'s base', ()=>{
+    // Low is DeallocationStack, not the committed StackLimit, at either width.
+    const host = fakeHost();
+    host.threads.first.tebAddress = 0x100;
+    host.view.setUint32(0x100 + TEB.STACK_BASE, 0x00300000, true);
+    host.view.setUint32(0x100 + TEB.STACK_LIMIT, 0x002ff000, true);
+    host.view.setUint32(0x100 + TEB.DEALLOCATION_STACK, 0x00200000, true);
+    const fns = createProcessFunctions(host);
+    assert.equal(fns.GetCurrentThreadStackLimits.handler([0x40, 0x44]), 0);
+    assert.equal(host.view.getUint32(0x40, true), 0x00200000);
+    assert.equal(host.view.getUint32(0x44, true), 0x00300000);
+    assert.equal(fns.GetCurrentThreadStackLimits.argBytes, 8);
+
+    const long = createProcessFunctions({ ...host, pointerSize: 8 });
+    host.view.setBigUint64(0x100 + TEB64.STACK_BASE, 0x7ff00300000n, true);
+    host.view.setBigUint64(0x100 + TEB64.DEALLOCATION_STACK, 0x7ff00200000n, true);
+    long.GetCurrentThreadStackLimits.handler([0x40, 0x48]);
+    assert.equal(host.view.getBigUint64(0x40, true), 0x7ff00200000n);
+    assert.equal(host.view.getBigUint64(0x48, true), 0x7ff00300000n);
+});
+
 test('freeing a slot zeroes it in the block of every thread', ()=>{
     // The guest-side TlsGetValue reads the block and has no generation to
     // compare against, so a freed slot has to read as zero everywhere at once.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
         allThreads: ()=>[host.threads.first, host.threads.second],
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsSetValue.handler([slot, 0x11]), 1);
@@ -623,25 +672,60 @@ test('freeing a slot zeroes it in the block of every thread', ()=>{
     assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and for the second');
 });
 
+test('a 64-bit thread\'s slots are quadwords, at 0x1480 in its block, its last error at 0x68', ()=>{
+    // The guest-side routines read `gs:[0x1480+rcx*8]`: a slot four bytes wide
+    // puts every value but the first in another's high half.
+    const host = fakeHost();
+    const blocks = { first: 0x100 + TEB64.TLS_SLOTS, second: 0x300 + TEB64.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
+    host.bytes.fill(0xcc, blocks.first, blocks.first + 0x100);
+    const fns = createProcessFunctions({
+        ...host,
+        pointerSize: 8,
+        allThreads: ()=>[host.threads.first, host.threads.second],
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB64.TLS_SLOTS,
+    });
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n,
+        'a slot handed out is zero, all eight bytes');
+    assert.equal(fns.TlsSetValue.handler([slot, 0x0c001230]), 1);
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0x0c001230n);
+    assert.equal(fns.TlsGetValue.handler([slot]), 0x0c001230);
+    assert.equal(host.view.getUint32(0x100 + TEB64.LAST_ERROR, true), 0,
+        'success clears the error, at the 64-bit block\'s offset');
+    assert.equal(fns.TlsGetValue.handler([TLS_SLOTS]), 0);
+    assert.equal(host.view.getUint32(0x100 + TEB64.LAST_ERROR, true), 87,
+        'ERROR_INVALID_PARAMETER where GetLastError reads it');
+    assert.equal(fns.TlsFree.handler([slot]), 1);
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n);
+});
+
+test('GetTickCount64 answers the milliseconds whole, past the dword GetTickCount wraps at', ()=>{
+    const { host, fns, registers } = setup();
+    host.clock.uptimeMs = 0x1_2345_6789 + 0.5;
+    assert.equal(fns.GetTickCount64.handler([]), 0x2345_6789);
+    assert.equal(registers.edx, 1, 'the high half, where a 32-bit caller reads it');
+    assert.equal(fns.GetTickCount.handler([]), 0x2345_6789, 'the same count, wrapped');
+});
+
 test('a slot handed out again reads zero in every block, whatever was set in it while free', ()=>{
-    // The guest-side TlsSetValue writes a slot of the array without asking
+    // The guest-side TlsSetValue writes a slot of the block without asking
     // whether it is allocated, as Windows does, so between TlsFree and the
     // next TlsAlloc a thread can put a value back into the freed slot; the
     // slot's next owner must not find it.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
         allThreads: ()=>[host.threads.first, host.threads.second],
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsFree.handler([slot]), 1);
-    // As the guest-side routine writes them, in each thread's array.
+    // As the guest-side routine writes them, in each thread's block.
     host.view.setUint32(blocks.first + slot * 4, 0x1234, true);
     host.view.setUint32(blocks.second + slot * 4, 0x5678, true);
     assert.equal(fns.TlsAlloc.handler(), slot, 'the freed index is the one handed out');
@@ -654,12 +738,11 @@ test('a slot handed out again reads zero in every block, whatever was set in it 
 
 test('without a list of threads, a slot handed out again is zero in the caller\'s block', ()=>{
     const host = fakeHost();
-    const block = 0x1100;
-    host.threads.first.tebAddress = 0x1000;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, block, true);
+    const block = 0x100 + TEB.TLS_SLOTS;
+    host.threads.first.tebAddress = 0x100;
     const fns = createProcessFunctions({
         ...host,
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     assert.equal(fns.TlsFree.handler([slot]), 1);
@@ -694,45 +777,43 @@ test('TlsSetValue in the guest writes the block and leaves the host the rest', (
     assert.deepEqual([...code.slice(4, 7)], [0x83, 0xf8, 64], 'cmp eax, 64');
     assert.equal(code[7], 0x73, 'jae');
     const slow = 9 + code[8];
-    assert.deepEqual([...code.slice(9, 16)], [0x64, 0x8b, 0x0d, TEB.TLS_POINTER, 0, 0, 0],
-        'mov ecx, fs:[0x2c]: the array the compiler reads');
-    assert.deepEqual([...code.slice(20, 23)], [0x89, 0x14, 0x81], 'mov [ecx+eax*4], edx');
+    assert.deepEqual([...code.slice(9, 13)], [0x8b, 0x54, 0x24, 0x08], 'mov edx, [esp+8]');
+    assert.deepEqual([...code.slice(13, 21)], [0x64, 0x89, 0x14, 0x85, 0x10, 0x0e, 0, 0],
+        'mov fs:[0xe10+eax*4], edx: TlsSlots, not the array behind fs:[0x2c]');
     assert.deepEqual([...code.slice(slow - 8, slow)], [0xb8, 1, 0, 0, 0, 0xc2, 0x08, 0x00],
         'TRUE, and both arguments popped');
     assert.equal(code[slow], 0xe9);
     assert.equal((at + slow + 5 + view.getInt32(slow + 1, true)) >>> 0, trap,
-        'past the array, the host');
+        'past the block\'s slots, the host');
     assert.equal(code.length, slow + 5);
     // Windows leaves the last error alone on a successful set; the get is
     // the one that clears it.
     assert.equal(code.join(',').includes([0x64, 0xc7, 0x05, TEB.LAST_ERROR].join(',')), false);
 });
 
-test('a slot in a thread\'s array has one record, which the guest and the host share', ()=>{
-    // The guest-side TlsSetValue writes the array and nothing else, so the
+test('a slot in a thread\'s block has one record, which the guest and the host share', ()=>{
+    // The guest-side TlsSetValue writes the block and nothing else, so the
     // host reads a slot there too; a value the host sets is the one the
-    // guest-side TlsGetValue and the compiler's fs:[0x2c] sequence read.
+    // guest-side TlsGetValue reads.
     const host = fakeHost();
-    const blocks = { first: 0x1100, second: 0x1300 };
-    host.threads.first.tebAddress = 0x1000;
-    host.threads.second.tebAddress = 0x1200;
-    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
-    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const blocks = { first: 0x100 + TEB.TLS_SLOTS, second: 0x300 + TEB.TLS_SLOTS };
+    host.threads.first.tebAddress = 0x100;
+    host.threads.second.tebAddress = 0x300;
     const fns = createProcessFunctions({
         ...host,
-        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+        tlsBlock: ()=>host.currentThread().tebAddress + TEB.TLS_SLOTS,
     });
     const slot = fns.TlsAlloc.handler();
     host.view.setUint32(blocks.first + slot * 4, 0xabcd, true);   // as the guest writes it
     assert.equal(fns.TlsGetValue.handler([slot]), 0xabcd, 'what the guest set');
     assert.equal(fns.TlsSetValue.handler([slot, 0x5150]), 1);
     assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0x5150,
-        'what the host sets is in the array');
+        'what the host sets is in the block');
     host.run(host.threads.second);
     assert.equal(fns.TlsGetValue.handler([slot]), 0, 'and in no other thread\'s');
 });
 
-test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s own', ()=>{
+test('TlsSetValue is a routine in the guest, over the host\'s own', ()=>{
     const { fns } = setup({ arena: 0x4000 });
     /** @type {{ label: string, trap: any }[]} */
     const registered = [];
@@ -743,14 +824,54 @@ test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s
             return 0x105000 + registered.length * 0x10;
         },
     };
-    const set = boundTo(fns.TlsSetValue, builder);
-    assert.equal(boundTo(fns.FlsSetValue, builder), set);
+    boundTo(fns.TlsSetValue, builder);
     const trap = registered.find(one=>one.label === '<tls-set>');
     assert.ok(trap, 'the slow path has a trap of its own');
     assert.equal(trap.trap.argBytes, 8);
     const slot = fns.TlsAlloc.handler();
     assert.equal(trap.trap.handler([slot, 0x77]), 1, 'which is the host\'s TlsSetValue');
     assert.equal(fns.TlsGetValue.handler([slot]), 0x77);
+});
+
+test('the process priority boost is set on every thread and read back on its own', ()=>{
+    const { fns, host } = setup();
+    /** @type {any} */ (host).allThreads = ()=>[host.threads.first, host.threads.second];
+    const thread = /** @type {any} */ (host.threads.first);
+
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0, 'boost is enabled until disabled');
+
+    assert.equal(fns.SetProcessPriorityBoost.handler([0xffffffff, 1]), 1);
+    assert.equal(thread.priorityBoostDisabled, true, 'and so is each thread\'s');
+    assert.equal(/** @type {any} */ (host.threads.second).priorityBoostDisabled, true);
+
+    // A thread setting its own back leaves the process's as it was.
+    thread.priorityBoostDisabled = false;
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1);
+
+    assert.equal(fns.SetProcessPriorityBoost.handler([0xffffffff, 0]), 1);
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0);
+    assert.equal(fns.GetProcessPriorityBoost.handler([0xffffffff, 0]), 0, 'no place to answer');
+    assert.equal(fns.SetProcessPriorityBoost.argBytes, 8);
+    assert.equal(fns.GetProcessPriorityBoost.argBytes, 8);
+});
+
+test('the processors are counted in one group', ()=>{
+    const { fns, host } = setup();
+    for (const name of ['GetActiveProcessorCount', 'GetMaximumProcessorCount'])
+    {
+        assert.equal(fns[name].handler([0xffff]), 1, `${name}: ALL_PROCESSOR_GROUPS`);
+        assert.equal(fns[name].handler([0]), 1, 'group 0');
+        assert.equal(fns[name].handler([0x10000]), 1, 'a WORD');
+        assert.equal(fns[name].handler([1]), 0, 'no group 1');
+        assert.equal(fns.GetLastError.handler(), ERROR_INVALID_PARAMETER);
+        assert.equal(fns[name].argBytes, 4);
+    }
+    assert.equal(fns.GetActiveProcessorGroupCount.handler(), 1);
+    assert.equal(fns.GetMaximumProcessorGroupCount.handler(), 1);
+    void host;
 });
 
 test('the priority and affinity calls pop their own stdcall bytes', ()=>{
@@ -946,8 +1067,8 @@ for (const words of [false, true])
         assert.equal(host.refreshes.length, 1, 'one block for all of them');
 
         // One block, and a page of its own: the engine writes it whenever the
-        // clock moves, and a write into a page holding compiled code costs the
-        // emulator everything it compiled there -- including these routines.
+        // clock moves, and a write near translated code drops what the
+        // translator made of it -- these routines included.
         const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
         assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
             'the tick count reads the same block');
@@ -1090,6 +1211,17 @@ test('GetModuleHandleEx takes a reference unless told not to, and finds a module
         assert.equal(fns.GetModuleHandleExW.argBytes, 12);
     });
 
+test('the unbiased interrupt time is the uptime in 100-nanosecond units', ()=>{
+    const { host, fns, u64 } = setup();
+    host.clock.uptimeMs = 1500;
+    assert.equal(fns.QueryUnbiasedInterruptTime.handler([0x400]), 1);
+    assert.equal(u64(0x400), 15_000_000n);
+    assert.equal(fns.QueryUnbiasedInterruptTime.handler([0]), 0);
+    assert.equal(fns.GetLastError.handler(), 87, 'ERROR_INVALID_PARAMETER: nowhere to write');
+    fns.QueryUnbiasedInterruptTimePrecise.handler([0x408]);
+    assert.equal(u64(0x408), 15_000_000n);
+});
+
 test('the power status is a desktop on mains power, with no battery', ()=>{
     const { host, fns } = setup();
     assert.equal(fns.GetSystemPowerStatus.handler([0x800]), 1);
@@ -1115,4 +1247,54 @@ test('GetCurrentThreadId is the field of the block the host fills with the id', 
     assert.deepEqual([...getCurrentThreadIdCode()], [0x64, 0xa1, 0x24, 0, 0, 0, 0xc3]);
     assert.ok(createProcessFunctions(fakeHost()).GetCurrentThreadId.guest,
         'offered as guest code');
+});
+
+test('the clock routines\' x86-64 answers what the i386 ones do, a null left for the trap', ()=>{
+    const m = longMachine();
+    const at = 0x100000;
+    const trap = 0x1f0000;
+    const back = 0xf00;
+    const block = 0x31000;
+    const out = 0x32000;
+    m.write(back, [0xf4]);
+    m.write(trap, [0xf4]);
+    // Each routine at an address of its own: a write does not take back what
+    // the translator made of the bytes there before.
+    /** @param {Uint8Array} code @param {bigint} pointer */
+    const call = (code, pointer)=>{
+        const place = placed.get(code) ?? at + placed.size * 0x1000;
+        if (!placed.has(code))
+        {
+            placed.set(code, place);
+            m.write(place, code);
+        }
+        callLong(m, place, { args: [pointer], returnTo: back });
+        return m.rip() - 1;
+    };
+    /** @type {Map<Uint8Array, number>} */
+    const placed = new Map();
+    const counter = queryPerformanceCounterCode64(at, trap, block);
+    m.setQuad(block + CLOCK.COUNTER, 100n);
+    m.setQuad(block + CLOCK.LAST, 7n);
+    assert.equal(call(counter, BigInt(out)), back);
+    assert.equal(m.reg('rax') & 0xffffffffn, 1n);
+    assert.deepEqual([m.quad(out), m.quad(block + CLOCK.LAST)], [100n, 100n],
+        'the counter, later than the last answer, kept as it');
+    assert.equal(call(counter, BigInt(out)), back);
+    assert.deepEqual([m.quad(out), m.quad(block + CLOCK.LAST)], [101n, 101n],
+        'the counter standing still: the last answer and one tick more');
+    m.setQuad(block + CLOCK.COUNTER, 0x1_0000_0005n);
+    call(counter, BigInt(out));
+    assert.equal(m.quad(out), 0x1_0000_0005n, 'the whole quadword');
+    assert.equal(call(counter, 0n), trap, 'a null pointer is the host\'s');
+    assert.equal(m.reg('rcx'), 0n, 'with RCX as the program passed it');
+
+    const frequency = queryPerformanceFrequencyCode64(at + 0x1000, trap, 0xfedcba98);
+    assert.equal(call(frequency, BigInt(out)), back);
+    assert.equal(m.quad(out), 0xfedcba98n, 'zero-extended, not sign-extended');
+    assert.equal(call(frequency, 0n), trap);
+
+    m.write(block + CLOCK.TICKS, [0x78, 0x56, 0x34, 0x12]);
+    assert.equal(call(tickCountCode64(block), 0n), back);
+    assert.equal(m.reg('rax') & 0xffffffffn, 0x12345678n);
 });

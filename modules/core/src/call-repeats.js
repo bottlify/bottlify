@@ -24,7 +24,7 @@
  */
 
 /** The longest loop recognised, in calls. */
-export const MAX_PERIOD = 8;
+const MAX_PERIOD = 8;
 
 /** How many calls must already repeat before the next is counted rather than written. */
 export const WINDOW = 8;

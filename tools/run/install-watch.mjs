@@ -1,0 +1,1332 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * Runs an installer in Node, unattended, and says what every process of it is
+ * doing while it runs: each process's threads by state, what they wait on, the
+ * host calls parked and for how long, the last call -- every `--every` seconds.
+ * An install several processes deep that has stopped shows here which process
+ * waits on which; the facade alone speaks for one of them.
+ *
+ *   node tools/run/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
+ *       | --bundle ID [--which PATH]
+ *       [--every 30] [--minutes 20]
+ *       [--journal SECONDS] [--memory MB] [--machine MB] [--key Code@S]... [--click X,Y@S]...
+ *       [--cpu-profile FILE[:FROM[:FOR]]] [--calls N]
+ *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
+ *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
+ *       [--copy 'C:\WINDOWS\TEMP' temp]... [--layers dotnet48-x86,...]
+ *
+ * `--layers ID,ID` stands the run on the layer bundles in `bundles/ID` (the .NET
+ * Framework's), as the launcher does a bottle that needs one: a setup whose
+ * wizard or checks want the runtime finds it installed, and what it writes is
+ * the bottle's own, not the layer's.
+ *
+ * `--trace-box` prints the trace when the first box reporting an error is shown instead, and
+ * `--trace-fault` when a process, or a server COM started, ends with an exception's code.
+ * `--journal S` prints, S seconds in, the last cross-process COM calls and message waits from
+ * the call journal (every call area on); `--trace S` prints the last three thousand calls of
+ * every kind instead (`--trace-lines N`), with their first arguments -- what a process that
+ * loops without waiting keeps calling; `--trace-match REGEX` keeps only the lines that match. A
+ * process that ran in a worker of its own (`--concurrency`) keeps its calls in its own ring,
+ * which it hands back as it ends: the first `--trace-worker N` (3) of those are printed after
+ * the run's, each under its image, and then the journal of every process still standing in a
+ * worker, asked of it then. A run that ends sooner prints either when it ends. `--strings`
+ * peeks every pointer argument for a string, so those lines name the paths and texts
+ * themselves.
+ *
+ * A wizard waits in its own message loop rather than in a modal dialog an
+ * unattended run answers, so a route through one is given as input: `--key
+ * Enter@40` presses a key (a `KeyboardEvent.code`) forty seconds in, `--click
+ * 320,400@55` clicks at a point of the screen, and `--press 'Next >|Finish'`
+ * presses buttons by their titles in turn, each once it has stood a whole
+ * look. Each goes to the process the facade stands for, which is the newest
+ * one standing. Every status line is followed by that process's visible
+ * windows, one a line, children indented: what a person would have seen at
+ * that moment. `--shots DIR` writes the
+ * desktop the facade's process paints into as a PNG at every status, which is
+ * what a person would have seen, pixel for pixel. `--list DIR` prints the
+ * files under a directory of the volume once the run is over -- what an
+ * install left behind, which is what a bottle is made of. `--cat FILE` prints
+ * a text file of the volume once the run is over -- the log a setup keeps of
+ * what it decided. `--copy DIR TO` writes a directory of the volume out to TO
+ * on this machine -- what a setup unpacked, for the PE tools to read. `--peek
+ * ADDRESS LENGTH` prints guest memory there once the run is over, and `--args
+ * '...'` is what follows the program's own path on its command line. `--registry
+ * FILE` writes the registry as it stands once the run is over.
+ * `--collect` takes that prefix off the finished run as the installer's own
+ * wizard does (`collectFrom`) and says which root, entry and
+ * files a bottle would get;
+ * `--collect-to DIR` also writes it there, a directory make-btl packs.
+ *
+ * `--bundle ID` runs an installed program instead (its blocks kept in
+ * `bundles/ID/blocks`, or the folder `--blocks DIR` names, between runs), `--file HOST=GUEST` putting
+ * a file of this disk on its volume first (`--steam ACCOUNT` signs the run in to
+ * Steam as bottlify-ui/gamehub/tools/steam-account.mjs's account, for the engine's Steam client;
+ * and `--reg 'HKCU\path\name=value'` a
+ * registry value, a string or `dword:N`): the bundle in
+ * `bundles/ID`, mounted where its installation put it, started at its entry
+ * or at `--which`, a path in the bundle -- a launcher's dialog driven by the
+ * same keys, clicks and pictures as a wizard's. `--attended` leaves a message
+ * box on the desktop for those to answer rather than answering it unseen.
+ *
+ * `--network ws://host:port/` puts the run on a relay's network
+ * (`modules/networking`): Winsock's connections and names go through it, in
+ * room `harness`, as game.mjs's do. Without it the machine has the loopback
+ * adapter alone. `--roots FILE` adds a PEM bundle's certificates to the
+ * machine's trusted roots (tools/lib/relay-option.mjs).
+ *
+ * `--debug-strings` prints what the programs say through OutputDebugString.
+ *
+ * `--store memory` keeps cork's translations for the whole run in memory, as a
+ * page's origin file system keeps them: a process started later finds what an
+ * earlier one translated, as it would in a browser.
+ *
+ * `--cork-figures` adds a CORK line to each process's status: the share of its
+ * instructions translated code retired, the translator's time, what threw
+ * translations away, and (with cork's `timings`) where the interpreter ran;
+ * with cork's `blockProfile`, how its calls went (`mechanisms`), and
+ * `--profile-out DIR` writes each standing process's block profile there at
+ * every status (`IMAGE-N-S.json`, N its place among those standing, S the
+ * second), with its images' bases and its transfers' targets, for
+ * tools/translator/cork-calls.mjs and tools/translator/cork-asm.mjs.
+ *
+ * `--type 'text@S'` types text into whatever has the focus S seconds in.
+ *
+ * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
+ * (every one of a library's without `!Name`) and prints each call when it
+ * returns, with the arguments `=` names read as it was made (see
+ * modules/core/src/watch-arguments.js): what a program handed a library of
+ * its own, a result it never shows included. Repeatable.
+ *
+ * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
+ * the one a bundle's manifest names (XP when neither does); `--arch x86|amd64`
+ * whether it is a 32- or a 64-bit one (createApp's `machine`; the first
+ * program's width when not named), a 32-bit setup on a 64-bit one under WOW64.
+ *
+ * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
+ * as a page does; `--cork JSON` sets cork's own settings (`EngineConfig`), and
+ * `--graphics JSON` the graphics layer's (`{"guestCode":false}` traps every Direct3D call).
+ */
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import { Worker } from 'node:worker_threads';
+import { deflateSync } from 'node:zlib';
+import { openBundle } from '../lib/btl.mjs';
+import { relayFromArgv, rootsFromArgv } from '../lib/relay-option.mjs';
+import { diskDirectory } from '../lib/disk-directory.mjs';
+import { cpuProfiler } from '../lib/thread-profile.mjs';
+import { isButtonClass, label } from './wizard-buttons.mjs';
+import { createApp } from '../../modules/core/src/app.js';
+import { createDirectoryTranslationStore, createMemoryDirectory }
+    from '../../modules/core/src/layers/cpu/internal/translation-store.js';
+import { createFakeDevice } from '../../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
+import { archiveDisc, collectFrom, collectLayer, discOptions, placementOf, prefixOptions,
+    readZip } from '../../modules/installer/src/index.js';
+import { bundleDir, hostFiles, number as numberOf, option, options } from '../lib/common.mjs';
+
+const argv = process.argv.slice(2);
+/** @param {string} flag @param {number} fallback */
+const number = (flag, fallback)=>numberOf(argv, flag, fallback);
+const bundleId = argv.includes('--bundle') ? argv[argv.indexOf('--bundle') + 1] : null;
+const file = bundleId
+    ?? argv.find(argument=>!argument.startsWith('--') && !/^\d+$/.test(argument));
+if (!file)
+{
+    console.log('usage: node tools/run/install-watch.mjs <setup.exe> | --bundle ID [--which PATH]'
+        + ' [--every S] [--minutes M] [--journal S] [--memory MB]');
+    process.exit(2);
+}
+const every = number('--every', 30);
+const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : null;
+const profileOut = argv.includes('--profile-out') ? argv[argv.indexOf('--profile-out') + 1] : null;
+/**
+ * `--cpu-profile FILE[:FROM[:FOR]]`: a V8 CPU profile of this thread, the one
+ * every process of the run turns on, over FOR seconds from FROM: what a phase
+ * the CORK and status lines only total is made of.
+ */
+const topCalls = argv.includes('--calls') ? Number(argv[argv.indexOf('--calls') + 1]) : 0;
+const profiling = argv.includes('--cpu-profile')
+    ? await cpuProfiler(argv[argv.indexOf('--cpu-profile') + 1]) : null;
+
+/**
+ * Every value a repeatable flag was given.
+ *
+ * @param {string} flag
+ */
+const all = flag=>options(argv, flag);
+const traceAt = number('--trace', 0);
+// `--dump-at S`: S seconds in, the next frame with draws written down by the
+// devices the graphics worker plays (`--worker`), every draw with its state,
+// shaders and textures, into `--dump-to` (dump.txt by default) once the
+// worker has sent it.
+const dumpAt = number('--dump-at', 0);
+const dumpTo = argv.includes('--dump-to') ? argv[argv.indexOf('--dump-to') + 1] : 'dump.txt';
+let dumpAsked = false;
+let dumpWritten = false;
+// `--trace-box`: the trace printed when the first message box is shown --
+// the calls that led a setup to the error it reports, which a fixed time
+// misses when the box's moment moves from run to run.
+const traceOnBox = argv.includes('--trace-box');
+// `--trace-fault`: the trace printed when a process ends with an exception's
+// code -- the calls that led to a crash nothing reported in a box.
+const traceOnFault = argv.includes('--trace-fault');
+// `--trace-exit REGEX`: the trace and every `--cat` file printed when a process whose image
+// matches ends with any code but 0 - a program that gives up and exits on its own (ngen's worker
+// answering 1) raises nothing `--trace-fault` sees, and says why only in its log.
+const traceExit = argv.includes('--trace-exit')
+    ? new RegExp(String(argv[argv.indexOf('--trace-exit') + 1]), 'i') : null;
+const journalAt = number('--journal', 0) || traceAt
+    || (traceOnBox || traceOnFault || traceExit ? 1e6 : 0);
+const memory = number('--memory', 0);
+/** `--machine MB`: every process of the run together held to that (createApp's machineMemory). */
+const machine = number('--machine', 0);
+const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
+// The launcher hands a program the size of the screen it is on; the engine's
+// own default is 640x480, which a wizard laid out for 800x600 overhangs.
+const [screenWidth, screenHeight] = argv.includes('--screen')
+    ? argv[argv.indexOf('--screen') + 1].split('x').map(Number) : [0, 0];
+
+/**
+ * An installed program to start: the bundle's entry, or the path `--which`
+ * names in it, at the place its installation put it, the bundle's files read
+ * from the file on this disk.
+ *
+ * @param {string} id
+ */
+/**
+ * `--layers ID,ID`: the layers the run stands on (a runtime built once, the
+ * .NET Framework's), each a bundle in `bundles/ID` read from its file on this
+ * disk, as the launcher mounts them: `layers` for a setup, `bundle.layers`
+ * for an installed program.
+ */
+const layerIds = String(option(argv, '--layers', '')).split(',').filter(Boolean);
+const layerSpecs = await Promise.all(layerIds.map(async id=>{
+    const handle = await open(join(bundleDir(id), 'bundle.btl'), 'r');
+    return {
+        id,
+        /** @param {number} offset @param {number} length */
+        fetch: async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        },
+        store: diskDirectory(join(bundleDir(id), 'blocks')),
+        prefetch: false,
+    };
+}));
+
+const mountBundle = async id=>{
+    const directory = bundleDir(id);
+    const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+    const path = join(directory, 'bundle.btl');
+    const wanted = option(argv, '--which', manifest.entry);
+    const reader = await openBundle(path);
+    const executable = new Uint8Array(await reader.read(wanted));
+    await reader.close();
+    const handle = await open(path, 'r');
+    const placement = placementOf({ ...manifest, entry: wanted });
+    // `--file HOST=GUEST`: a file of this disk put on the session's volume
+    // before the program starts -- a saved game to load, a settings file.
+    const seeded = hostFiles(argv);
+    return {
+        executable,
+        windows: manifest.windows,
+        imagePath: placement.imagePath,
+        // Laid over the volume as a person's own edits are (`files`),
+        // over whatever session there is rather than as one.
+        storage: null,
+        files: seeded,
+        bundle: {
+            /** @param {number} offset @param {number} length */
+            fetch: async(offset, length)=>{
+                const buffer = Buffer.alloc(length);
+                await handle.read(buffer, 0, length, offset);
+                return new Uint8Array(buffer);
+            },
+            // The blocks read kept in a folder (`--blocks DIR`, the bundle's
+            // own by default) as a page keeps them in its origin's storage:
+            // in memory the pool holds 64 MiB, and a program whose libraries
+            // are larger than that fetches and inflates every block again on
+            // each pass the loader makes over them.
+            store: diskDirectory(argv.includes('--blocks')
+                ? argv[argv.indexOf('--blocks') + 1] : join(directory, 'blocks')),
+            prefetch: false,
+            prefix: placement.prefix,
+            ...layerSpecs.length > 0 ? { layers: layerSpecs } : {},
+        },
+    };
+};
+// `--siblings`: the files beside the setup go on the medium with it, as an
+// unpacked distribution's do -- a setup reads its cabinets from its own place.
+const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
+    .filter(one=>one.isFile() && one.name !== basename(file))
+    .map(one=>({ name: one.name,
+        bytes: new Uint8Array(readFileSync(join(dirname(file), one.name))) }));
+/**
+ * A disc image, or a zip built into one as the page builds it, mounted as D:
+ * with the program it names started from there -- the autorun's, or the one
+ * `--entry PATH` names on it.
+ */
+/** What an install came from, for `--collect`: the setup, or the disc built for it. */
+/** @type {any} */
+let collectable = null;
+const discMedia = async()=>{
+    const name = basename(file);
+    const bytes = new Uint8Array(readFileSync(file));
+    const read = /\.zip$/i.test(name) ? readZip : null;
+    const disc = read ? archiveDisc(name, await read(new Blob([bytes]))) : { name, disc: bytes };
+    collectable = disc;
+    return discOptions(disc, argv.includes('--entry')
+        ? { entry: argv[argv.indexOf('--entry') + 1] } : {});
+};
+const isDisc = !bundleId && /\.(iso|zip)$/i.test(file);
+const media = bundleId || isDisc ? null : {
+    name: basename(file),
+    bytes: new Uint8Array(readFileSync(file)),
+    ...argv.includes('--siblings') ? { files: besideSetup() } : {},
+};
+/** @type {any} */
+const prefix = media ? prefixOptions(media) : isDisc ? await discMedia() : await mountBundle(file);
+/**
+ * `--worker`: the devices draw as a page's do, in a graphics worker -- a
+ * worker thread playing their calls over the fake GPU, which this thread
+ * stands in front of too.
+ */
+const graphicsDevice = ()=>{
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    const thread = new Worker(new URL('../fixtures/fake-graphics-worker.mjs', import.meta.url));
+    thread.unref();
+    thread.postMessage({ type: 'open', frames: 'none' });
+    /** @type {Map<Function, (data: any) => void>} */
+    const listeners = new Map();
+    return {
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
+        worker: {
+            postMessage: (/** @type {any} */ message, /** @type {any} */ transfer)=>
+                thread.postMessage(message, transfer),
+            addEventListener: (/** @type {string} */ type, /** @type {Function} */ listener)=>{
+                const relay = (/** @type {any} */ data)=>listener({ data });
+                listeners.set(listener, relay);
+                thread.on('message', relay);
+            },
+            removeEventListener: (/** @type {string} */ type, /** @type {Function} */ listener)=>{
+                thread.off('message', /** @type {any} */ (listeners.get(listener)));
+            },
+        },
+    };
+};
+const network = await relayFromArgv(argv);
+const roots = rootsFromArgv(argv);
+const started = Date.now();
+const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
+// `--steam ACCOUNT`: the signed-in Steam account and the games it owns
+// (bottlify-ui/gamehub/tools/steam-account.mjs), which the engine's Steam client answers with.
+// `--steam-app N` is the app being run, as Steam tells a game it starts.
+const steam = argv.includes('--steam')
+    ? { ...JSON.parse(readFileSync(String(option(argv, '--steam')), 'utf8')),
+        ...argv.includes('--steam-app')
+            ? { appId: Number(argv[argv.indexOf('--steam-app') + 1]) } : {} }
+    : null;
+/** `--watch-import` specs: a library, maybe one name, the arguments to read. */
+const importWatches = argv.flatMap((flag, index)=>{
+    if (flag !== '--watch-import')
+    {
+        return [];
+    }
+    const spec = argv[index + 1];
+    const equals = spec.indexOf('=');
+    const target = equals < 0 ? spec : spec.slice(0, equals);
+    const [library, name = null] = target.split('!');
+    return [{ library: library.toLowerCase(), name,
+        strings: equals < 0 ? [] : spec.slice(equals + 1).split('+').filter(Boolean)
+            .map(one=>(/^\d+$/.test(one) ? Number(one) : one)) }];
+});
+
+/** `--then 'C:\path\program.exe args'`: programs of the volume run after the first, each on what
+ * the run before it left (its files and registry), as a person runs them one after another on the
+ * same machine; the outputs (`--list`, `--copy`, `--registry`, `--cat`) are taken after the
+ * last. */
+const thenLines = argv.flatMap((arg, at)=>(argv[at - 1] === '--then' ? [arg] : []));
+/** `--keep DIR`: before each `--then` program, the volume and hive the runs left, written under
+ * DIR (a folder a drive, `registry.json`, the hive before any program, `hive-before.json`), so a
+ * run cut short goes on from there with `--from DIR`: the first program is not run again, and the
+ * `--then` programs run on what DIR holds. A setup and its ngen take hours, and a machine short of
+ * memory takes a run at any point of them. */
+const keepDir = argv.includes('--keep') ? argv[argv.indexOf('--keep') + 1] : null;
+const fromDir = argv.includes('--from') ? argv[argv.indexOf('--from') + 1] : null;
+/** @param {string} dir @param {{ files: any[], registry: any }} session @param {any} before */
+const keepSession = (dir, session, before)=>{
+    rmSync(dir, { recursive: true, force: true });
+    for (const written of session.files)
+    {
+        const [, drive, rest] = /^([A-Za-z]):\\(.*)$/.exec(written.path) ?? [];
+        if (!drive)
+        {
+            continue;
+        }
+        const target = join(dir, drive.toUpperCase(), ...rest.split('\\'));
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, written.bytes);
+    }
+    writeFileSync(join(dir, 'registry.json'), JSON.stringify(session.registry));
+    writeFileSync(join(dir, 'hive-before.json'), JSON.stringify(before));
+};
+/** @param {string} dir @returns {{ session: { files: any[], registry: any }, before: any }} */
+const readSession = dir=>{
+    /** @type {{ path: string, bytes: Uint8Array }[]} */
+    const files = [];
+    /** @param {string} at @param {string} guest */
+    const walk = (at, guest)=>{
+        for (const entry of readdirSync(at, { withFileTypes: true }))
+        {
+            const host = join(at, entry.name);
+            if (entry.isDirectory())
+            {
+                walk(host, `${guest}\\${entry.name}`);
+            }
+            else
+            {
+                files.push({ path: `${guest}\\${entry.name}`,
+                    bytes: new Uint8Array(readFileSync(host)) });
+            }
+        }
+    };
+    for (const entry of readdirSync(dir, { withFileTypes: true }))
+    {
+        if (entry.isDirectory() && /^[A-Z]$/.test(entry.name))
+        {
+            walk(join(dir, entry.name), `${entry.name}:`);
+        }
+    }
+    /** @param {string} name */
+    const json = name=>JSON.parse(readFileSync(join(dir, name), 'utf8'));
+    return { session: { files, registry: json('registry.json') },
+        before: json('hive-before.json') };
+};
+const runOptions = {
+    ...importWatches.length > 0 ? {
+        watchImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
+            const asked = importWatches.find(one=>one.library === dll.toLowerCase()
+                && (one.name === null || one.name === name));
+            // Six words read: a watch forwards into the real function rather
+            // than returning, so the count needs to be no more than a reach.
+            return asked ? { args: 6, strings: asked.strings } : null;
+        },
+    } : {},
+    win32: { ...network ? { network } : {},
+        ...roots ? { trustedRoots: roots } : {}, ...steam ? { steam } : {} },
+    executable: prefix.executable,
+    imagePath: prefix.imagePath,
+    // `--args '...'`: what follows the program's own path on its command line.
+    ...'commandLine' in prefix ? { commandLine: prefix.commandLine } : {},
+    ...'discs' in prefix ? { discs: prefix.discs } : {},
+    ...'startDirectory' in prefix ? { startDirectory: prefix.startDirectory } : {},
+    ...argv.includes('--args')
+        ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
+    storage: prefix.storage,
+    ...prefix.files?.length > 0 ? { files: prefix.files } : {},
+    ...'bundle' in prefix ? { bundle: prefix.bundle }
+        : layerSpecs.length > 0 ? { layers: layerSpecs } : {},
+    // `--windows NAME`: the Windows the machine is, over the one a bundle's
+    // manifest names -- a program that refuses an old one says so first.
+    ...argv.includes('--windows') || prefix.windows
+        ? { windows: argv.includes('--windows')
+            ? argv[argv.indexOf('--windows') + 1] : prefix.windows }
+        : {},
+    ...argv.includes('--arch') ? { machine: argv[argv.indexOf('--arch') + 1] } : {},
+    // `--concurrency N`: processes at once, each child in a worker of its
+    // own, as a page with concurrency runs them.
+    ...argv.includes('--concurrency') ? { concurrency: number('--concurrency', 1) } : {},
+    // `--executors N`: the program's threads on N executors at once, as the
+    // player's multi modes run them.
+    ...argv.includes('--executors') ? { cpu: { cores: number('--executors', 1) } } : {},
+    // `--cork JSON`: cork's settings (`EngineConfig`).
+    cork: { config: {
+        ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
+        // `--store memory`: the translations kept for the whole run in memory, in
+        // the store's own format, as the origin's file system keeps them for a
+        // page, so ngen's next worker finds what the last translated.
+        ...argv.includes('--store') && argv[argv.indexOf('--store') + 1] === 'memory'
+            ? { store: await createDirectoryTranslationStore(createMemoryDirectory(), 'run') }
+            : {},
+    } },
+    // `--graphics JSON`: the graphics layer's settings beside these, `guestCode` among them.
+    graphics: { raster: false,
+        ...argv.includes('--graphics') ? JSON.parse(argv[argv.indexOf('--graphics') + 1]) : {} },
+    ...argv.includes('--worker') ? { device: graphicsDevice() } : {},
+    // Nobody at the screen unless `--attended`: then a message box is drawn
+    // on the desktop and waits for a key or a click like any dialog.
+    unattended: !argv.includes('--attended'),
+    ...memory > 0 ? { memorySize: memory * 1048576 } : {},
+    ...machine > 0 ? { machineMemory: machine * 1048576 } : {},
+    ...screenWidth > 0
+        ? { screen: { width: screenWidth, height: screenHeight, bitsPerPixel: 32 } } : {},
+    // Every pointer argument peeked for a string, so a journal line names
+    // the path or the text a call was given: costly, and off unless asked.
+    ...argv.includes('--strings') ? { traceStrings: true } : {},
+    // The ring holds as many lines as `--trace-lines` asks for: by bytes, a
+    // default ring holds a few thousand of them, a fraction of a second of a
+    // setup's calls, and the call an error comes of is often seconds before it.
+    ...journalAt > 0 ? { log: {
+        capacity: Math.max(100000, number('--trace-lines', 0)),
+        bytes: Math.max(1 << 20, number('--trace-lines', 0) * 512),
+        // Every call area, as the header promises: a program that stops over
+        // its sockets or its sound leaves nothing to read otherwise.
+        categories: {
+            'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
+            'call.net': 'trace', 'call.audio': 'trace', 'call.video': 'trace',
+            'call.hook': 'trace',
+        },
+    } } : {},
+    // What the run wrote, handed to the next program `--then` names.
+    ...thenLines.length > 0 ? { collectOnExit: true } : {},
+};
+let app = await createApp(runOptions);
+// The machine's hive before any program ran: what a `--layer` leaves out of its registry.
+const resumed = fromDir ? readSession(fromDir) : null;
+const hiveBefore = resumed?.before ?? app.registry().toJSON();
+/** @param {any} running */
+const watchEvents = running=>{
+    for (const name of ['process-create', 'process-child', 'process-started', 'process-resumed',
+        'process-server', 'process-server-exit', 'error', 'exit', 'divergence', 'message-box',
+        'unimplemented', 'library-missing', 'libraries-missing',
+        // `--debug-strings`: what the programs say through OutputDebugString --
+        // a client's own log and its assertions, which name where it gave up.
+        ...argv.includes('--debug-strings') ? ['debug'] : []])
+    {
+        // An error keeps its whole stack and guest trace: the host function
+        // a fault came through and the guest frames that called it are
+        // past the length the other events are cut to.
+        const [stack, record] = name === 'error' ? [6000, 12000] : [800, 900];
+        running.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
+            JSON.stringify(event, (key, value)=>(key === 'error' && value
+                ? String(value.stack ?? value).slice(0, stack) : value))?.slice(0, record)));
+    }
+};
+watchEvents(app);
+
+// What the programs write to their consoles, a line at a time: a console
+// program's own account of what it did.
+let pendingOutput = '';
+app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>{
+    const lines = (pendingOutput + text).split(/\r?\n/);
+    pendingOutput = lines.pop() ?? '';
+    for (const line of lines)
+    {
+        console.log(seconds(), 'OUT', line);
+    }
+});
+
+app.on('guest-return', (/** @type {any} */ done)=>console.log(seconds(), 'watch', done.name,
+    JSON.stringify(done.strings ?? []), `-> 0x${(done.result >>> 0).toString(16)}`));
+
+// Bound and never called is ordinary -- a program imports far more than it
+// calls -- so these are counted and said once, at the end, per library.
+/** @type {Map<string, string[]>} */
+const unresolved = new Map();
+app.on('import-unresolved', (/** @type {any} */ event)=>{
+    const [library, name] = String(event.import).split('!');
+    unresolved.set(library, [...unresolved.get(library) ?? [], name]);
+});
+
+/**
+ * The windows a process shows, as lines: its visible top-level windows and,
+ * under each, its visible children, with where they are and what they say.
+ *
+ * @param {any[]} windows
+ */
+const describeWindows = windows=>{
+    const shown = windows.filter(window=>window.visible);
+    /** @type {string[]} */
+    const lines = [];
+    /** @param {any} window @param {number} depth */
+    const add = (window, depth)=>{
+        lines.push(`${'  '.repeat(depth + 1)}${window.hwnd} ${window.className}`
+            + ` "${String(window.title).slice(0, 80)}" ${window.x},${window.y}`
+            + ` ${window.width}x${window.height} ${window.style ?? ''}/${window.exStyle ?? ''}`);
+        for (const child of shown.filter(other=>other.parent === window.hwnd))
+        {
+            add(child, depth + 1);
+        }
+    };
+    for (const top of shown.filter(window=>!window.child))
+    {
+        add(top, 0);
+    }
+    return lines;
+};
+
+/** @param {Uint8Array} bytes @returns {number} */
+const crc32 = bytes=>{
+    let crc = ~0;
+    for (const byte of bytes)
+    {
+        crc ^= byte;
+        for (let bit = 0; bit < 8; bit++)
+        {
+            crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+        }
+    }
+    return ~crc >>> 0;
+};
+
+/**
+ * A 32-bit DIB's pixels -- blue, green, red, unused -- as an opaque PNG.
+ *
+ * @param {{ width: number, height: number, pitch: number, bytes: Uint8Array }} surface
+ */
+const png = ({ width, height, pitch, bytes })=>{
+    const stride = width * 4 + 1;
+    const raw = Buffer.alloc(stride * height);
+    for (let y = 0; y < height; y++)
+    {
+        for (let x = 0; x < width; x++)
+        {
+            const from = y * pitch + x * 4;
+            const to = y * stride + 1 + x * 4;
+            raw[to] = bytes[from + 2];
+            raw[to + 1] = bytes[from + 1];
+            raw[to + 2] = bytes[from];
+            raw[to + 3] = 0xff;
+        }
+    }
+    /** @param {string} type @param {Buffer} body */
+    const chunk = (type, body)=>{
+        const head = Buffer.alloc(8);
+        head.writeUInt32BE(body.length, 0);
+        head.write(type, 4, 'latin1');
+        const crc = Buffer.alloc(4);
+        crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), body])), 0);
+        return Buffer.concat([head, body, crc]);
+    };
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(width, 0);
+    header.writeUInt32BE(height, 4);
+    header[8] = 8;
+    header[9] = 6;
+    return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        chunk('IHDR', header), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+};
+
+if (shotsAt)
+{
+    mkdirSync(shotsAt, { recursive: true });
+}
+
+/** @param {string} spec @returns {{ at: number, what: string }} */
+const timed = spec=>{
+    const [what, at] = spec.split('@');
+    return { what, at: Number(at) };
+};
+for (const { what, at } of all('--key').map(timed))
+{
+    setTimeout(()=>{
+        console.log(seconds(), 'KEY', what);
+        app.input.send({ kind: 'key', code: what, down: true });
+        setTimeout(()=>app.input.send({ kind: 'key', code: what, down: false }), 150);
+    }, at * 1000);
+}
+// `--type 'text@S'`: text typed into whatever has the focus from S seconds
+// on, a character every 150 ms, each the key's press, its character and its
+// release, the way the page's keyboard delivers one.
+/** @param {string} character */
+const codeOf = character=>(/[a-z]/i.test(character) ? `Key${character.toUpperCase()}`
+    : /\d/.test(character) ? `Digit${character}`
+        : ({ '-': 'Minus', ' ': 'Space', '.': 'Period', ',': 'Comma', '/': 'Slash' })[character]
+            ?? null);
+for (const spec of all('--type'))
+{
+    const at = spec.lastIndexOf('@');
+    const text = spec.slice(0, at);
+    [...text].forEach((character, index)=>setTimeout(()=>{
+        const code = codeOf(character);
+        if (code)
+        {
+            app.input.send({ kind: 'key', code, down: true });
+        }
+        app.input.send({ kind: 'text', text: character });
+        if (code)
+        {
+            setTimeout(()=>app.input.send({ kind: 'key', code, down: false }), 60);
+        }
+    }, Number(spec.slice(at + 1)) * 1000 + index * 150));
+}
+
+// Clicks go through the input layer's route (`app.input.route`), a step every
+// 150 ms: a pointer a program keeps by relative motion is pushed into the
+// corner first and moved from there, and a dialog's button sees a press and a
+// release apart. Nothing here presents frames to count, so a timer stands in.
+const route = app.input.route();
+setInterval(()=>route.tick(), 150).unref?.();
+
+// `--press 'Next >|I &accept|Finish'`: the buttons pressed in turn, each by
+// its title once it has stood visible and enabled for a whole look, and is not
+// the button pressed last unless three looks have passed -- a wizard's pages
+// driven without guessing when each will come, which drifts from run to run.
+//
+// `--press-any 'Next >|OK|Finish'`: any of them, in whatever order they come,
+// for as long as the run lasts -- every installer on the disk driven by one
+// list of the buttons that go forward.
+const anyOrder = argv.includes('--press-any');
+const pressing = argv.includes('--press') || anyOrder
+    ? argv[argv.indexOf(anyOrder ? '--press-any' : '--press') + 1].split('|').map(label) : [];
+if (pressing.length > 0)
+{
+    let step = 0;
+    let lastButton = '';
+    let looksSince = 0;
+    let seen = '';
+    let looking = false;
+    const WS_DISABLED = 0x08000000;
+    const look = setInterval(async()=>{
+        if (looking || step >= pressing.length)
+        {
+            return;
+        }
+        looking = true;
+        looksSince++;
+        try
+        {
+            for (const { diagnostics } of await app.standing())
+            {
+                const win32 = diagnostics.find((/** @type {any} */ entry)=>entry.name === 'win32')
+                    ?.metrics ?? {};
+                // Of several standing at once, the one named first: a licence
+                // page's "I accept" before the "Next >" beside it, which on its
+                // own goes nowhere.
+                const button = (win32.windows ?? []).filter((/** @type {any} */ w)=>w.visible
+                    && isButtonClass(w.className)
+                    && (anyOrder ? pressing.includes(label(w.title))
+                        : label(w.title) === pressing[step])
+                    && (w.hwnd !== lastButton || looksSince > 3)
+                    && (parseInt(w.style, 16) & WS_DISABLED) === 0)
+                    .sort((/** @type {any} */ a, /** @type {any} */ b)=>
+                        pressing.indexOf(label(a.title)) - pressing.indexOf(label(b.title)))[0];
+                if (!button)
+                {
+                    continue;
+                }
+                if (seen !== button.hwnd)
+                {
+                    seen = button.hwnd;
+                    break;
+                }
+                const x = Math.round((button.rect.left + button.rect.right) / 2);
+                const y = Math.round((button.rect.top + button.rect.bottom) / 2);
+                console.log(seconds(), 'PRESS', button.title, x, y);
+                lastButton = button.hwnd;
+                looksSince = 0;
+                step += anyOrder ? 0 : 1;
+                route.click(x, y);
+                break;
+            }
+        }
+        finally
+        {
+            looking = false;
+        }
+    }, 2000);
+    look.unref?.();
+}
+for (const { what, at } of all('--click').map(timed))
+{
+    const [x, y] = what.split(',').map(Number);
+    setTimeout(()=>{
+        console.log(seconds(), 'CLICK', x, y);
+        route.click(x, y);
+    }, at * 1000);
+}
+
+/**
+ * Each process's reading of where its slices went, by address bucket, at the
+ * last status: the difference to the next one is where it ran in between.
+ *
+ * @type {Map<string, Map<number, number>>}
+ */
+const lastSamples = new Map();
+
+/**
+ * Where a process ran since the last status, the busiest buckets first, each
+ * with the image it falls in when the facade's process is the one asked.
+ *
+ * @param {string} image @param {any} cpu
+ */
+const ranSince = (image, cpu)=>{
+    /** @type {Map<number, number>} */
+    const now = new Map((cpu.samples?.top ?? []).map((/** @type {any} */ bucket)=>
+        [bucket.address, bucket.instructions]));
+    const before = lastSamples.get(image) ?? new Map();
+    lastSamples.set(image, now);
+    return [...now].map(([address, instructions])=>[address,
+        instructions - (before.get(address) ?? 0)])
+        .filter(([, grew])=>grew > 0)
+        .sort((left, right)=>right[1] - left[1])
+        .slice(0, 6)
+        .map(([address, grew])=>{
+            // Named from the modules of the process the engine's debug window
+            // stands for, and only for that process: another process maps other
+            // images at the same addresses (ngen's mscorsvc.dll is mscorsvw's
+            // clr.dll), and a name read from the wrong table is worse than none.
+            const own = speaksFor(image);
+            const at = own ? app.debug.moduleAt(address) : null;
+            return `0x${address.toString(16)}${at ? `(${at.name.split('\\').pop()}`
+                + `+0x${at.offset.toString(16)})` : own ? '' : '(another process\'s module)'}`
+                + `:${grew}`;
+        });
+};
+
+/**
+ * Whether the engine's debug window (`app.debug`) reads the memory of the
+ * process running `image`: its main module is that image's file.
+ *
+ * @param {string} image
+ */
+const speaksFor = image=>{
+    const named = image.split('\\').pop()?.toLowerCase() ?? '';
+    try
+    {
+        return app.debug.modules().some((/** @type {any} */ one)=>
+            String(one.name).toLowerCase() === named);
+    }
+    catch {
+        return false;
+    }
+};
+
+setInterval(async()=>{
+    try
+    {
+        // This process as a whole, every worker in it: what grows between two
+        // lines is what a page's tab would grow by.
+        const usage = process.memoryUsage();
+        const mb = (/** @type {number} */ bytes)=>Math.round(bytes / 1048576);
+        console.log(seconds(), 'MEM', JSON.stringify({ rss: mb(usage.rss),
+            heapUsed: mb(usage.heapUsed), external: mb(usage.external),
+            arrayBuffers: mb(usage.arrayBuffers) }));
+        let machineSaid = false;
+        for (const [place, standing] of (await app.standing()).entries())
+        {
+            // A process standing in a worker of its own may not have said
+            // its image or its figures yet.
+            const image = String(standing.image ?? 'process');
+            const diagnostics = standing.diagnostics ?? [];
+            /** @param {string} layer */
+            const metrics = layer=>diagnostics.find((/** @type {any} */ entry)=>
+                entry.name === layer)?.metrics ?? {};
+            const kernel = metrics('kernel');
+            const bridge = metrics('bridge');
+            const win32 = metrics('win32');
+            console.log(seconds(), 'STATUS', image.split('\\').pop(), JSON.stringify({
+                threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
+                calls: bridge.calls, lastCall: bridge.lastCall,
+                suspended: bridge.suspendedCalls, windows: win32.windows,
+                procedures: win32.windowProcedures, messages: win32.messages,
+            }).slice(0, 1500));
+            // `--calls N`: the N host functions that took this process's host
+            // time so far, heaviest first, and the time in all: what a trap
+            // phase the CORK line only totals is made of.
+            if (topCalls > 0)
+            {
+                console.log(seconds(), 'CALLS', image.split('\\').pop(), JSON.stringify({
+                    hostMs: bridge.hostMs, byFunction: (bridge.byFunction ?? []).slice(0, topCalls),
+                }));
+            }
+            // A process in a worker of its own: that worker's heap, which ends
+            // the process unsaid when it runs out.
+            if (diagnostics.some((/** @type {any} */ entry)=>entry.name === 'heap'))
+            {
+                console.log(seconds(), 'HEAP', image.split('\\').pop(),
+                    JSON.stringify(metrics('heap')));
+            }
+            const cpu = metrics('cpu');
+            // The machine's memory every process takes from, said once a tick:
+            // a refusal under `--machine` is read off its kinds, not the heap's.
+            if (cpu.machineMemory && !machineSaid)
+            {
+                machineSaid = true;
+                const said = cpu.machineMemory;
+                console.log(seconds(), 'MACHINE', JSON.stringify({ limitMB: mb(said.limit),
+                    usedMB: mb(said.used), peakMB: mb(said.peak), refused: said.refused,
+                    made: said.made, dropped: said.dropped, byKindMB: Object.fromEntries(
+                        Object.entries(said.byKind ?? {})
+                            .map(([kind, bytes])=>[kind, mb(bytes)])) }));
+            }
+            console.log(seconds(), 'CPU', image.split('\\').pop(), JSON.stringify({
+                recent: (cpu.recent ?? []).slice(-4), ran: ranSince(image, cpu),
+                traps: `${cpu.traps}/${cpu.trapCapacity}`,
+                refused: bridge.comInterfacesRefused, because: bridge.comRefusedBecause,
+            }));
+            // `--cork-figures`: where the process's instructions ran - the share
+            // translated code retired, what the translator spent, what threw
+            // translations away, and where the interpreter's instructions went
+            // (those need `--cork '{"timings":true}'`).
+            if (argv.includes('--cork-figures'))
+            {
+                const figures = cpu.cork ?? {};
+                console.log(seconds(), 'CORK', image.split('\\').pop(), JSON.stringify({
+                    // The instructions it retired, which a rate is read off, and
+                    // the run loop's busiest phases: where its wall time went.
+                    instructions: cpu.instructions,
+                    phases: (metrics('log').topPhases ?? []).slice(0, 12),
+                    translatedShare: figures.translatedShare, regions: figures.regions,
+                    translateMs: figures.translateMs, workerBusyMs: figures.workerBusyMs,
+                    // Of a process started again: what the run's store answered,
+                    // and where the engine thread's translating went.
+                    store: {
+                        hits: figures.cacheHits, misses: figures.cacheMisses,
+                        noRecord: figures.missNoRecord, changed: figures.missChanged,
+                        formedAgain: figures.hitsFormedAgain,
+                        asRecorded: figures.formedAsRecorded,
+                        unformed: figures.takenUnformed,
+                        // Modules taken as a runtime sharing the store compiled them.
+                        sharedModules: figures.sharedModules, sharedHeld: figures.sharedHeld,
+                    },
+                    ms: {
+                        forming: figures.formingMs, lookup: figures.lookupMs,
+                        emit: figures.emitMs, encode: figures.encodeMs,
+                        instantiate: figures.instantiateMs, publish: figures.publishMs,
+                        workerEmit: figures.workerEmitMs, workerCompile: figures.workerCompileMs,
+                    },
+                    modules: figures.modules, compiledApart: figures.compiledApart,
+                    invalidations: figures.invalidations, dropped: figures.dropped,
+                    volatilePages: figures.volatilePages, volatileNow: figures.volatileNow,
+                    exits: figures.exits, untranslatedBy: figures.untranslatedBy,
+                    interpretedFrom: (figures.interpretedFrom ?? []).slice(0, 8),
+                    refused: figures.refused, refusedWhy: figures.refusedWhy,
+                    forcedSteps: figures.forcedSteps, forcedAt: figures.forcedAt,
+                    crtFormed: figures.crtFormed,
+                    exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 32),
+                    // With cork's `blockProfile`: how its calls and returns went.
+                    ...figures.mechanisms ? { mechanisms: figures.mechanisms } : {},
+                }));
+                // `--profile-out DIR`: the process's block profile as it stands, with
+                // where its images lie and where its transfers went, for
+                // tools/translator/cork-calls.mjs and tools/translator/cork-asm.mjs: a file a process and
+                // status, so the counts of two statuses give a window's.
+                if (profileOut !== null && Array.isArray(figures.blockCounts))
+                {
+                    mkdirSync(profileOut, { recursive: true });
+                    writeFileSync(join(profileOut,
+                        `${image.split('\\').pop()}-${place}-${seconds()}.json`),
+                    JSON.stringify({ image, seconds: Number(seconds()),
+                        instructions: cpu.instructions, bases: metrics('loader').bases ?? [],
+                        mechanisms: figures.mechanisms, transferTargets: figures.transferTargets,
+                        blocks: figures.blockCounts }));
+                }
+            }
+            // What the devices drew against what reached the screen: a
+            // picture that stops changing while the program still presents
+            // is a device that stopped replaying, and only these say so.
+            const graphics = metrics('graphics');
+            const device = graphics.seam?.device;
+            if (dumpAt > 0 && !dumpAsked && Number(seconds()) >= dumpAt)
+            {
+                dumpAsked = true;
+                app.debug.dumpFrames(1);
+                console.log(seconds(), 'DUMP asked');
+            }
+            else if (dumpAsked && !dumpWritten && app.debug.dumped())
+            {
+                dumpWritten = true;
+                const { lines, frame } = app.debug.dumped();
+                writeFileSync(dumpTo, `${lines.join('\n')}\n`);
+                console.log(seconds(), 'DUMP', dumpTo, `frame ${frame}`, lines.length, 'lines');
+            }
+            if (device || graphics.worker)
+            {
+                const last = device?.recentFrames?.at(-1);
+                console.log(seconds(), 'GFX', image.split('\\').pop(), JSON.stringify({
+                    shown: graphics.worker?.frames, dropped: graphics.worker?.dropped,
+                    drawn: device?.frames, replays: device?.timing?.replays,
+                    failures: device?.failures, last: last && `#${last.index} ${last.draws}`
+                        + ` draws ${last.clears} clears ${last.target}`
+                        + (last.fogs ? ` fog ${last.fogs}` : ''),
+                    // The messages to the worker and back, and the calls waited on it.
+                    sent: graphics.worker?.sent, back: graphics.worker?.received,
+                    waited: graphics.worker && Object.entries(graphics.worker.waits ?? {})
+                        .map(([name, one])=>`${name} ${/** @type {any} */ (one).count}`).join(', '),
+                }));
+            }
+            for (const line of describeWindows(win32.windows ?? []))
+            {
+                console.log(seconds(), 'WINDOW', line);
+            }
+        }
+        const desktop = shotsAt ? app.debug.desktop() : null;
+        if (shotsAt && desktop)
+        {
+            const name = join(shotsAt, `${seconds().padStart(6, '0')}.png`);
+            writeFileSync(name, png(desktop));
+            console.log(seconds(), 'SHOT', name);
+        }
+    }
+    catch (e){
+        console.log('status failed:', e instanceof Error ? e.message : e);
+    }
+}, every * 1000);
+
+// Printed once: at S seconds, or when the run ends first -- an installer that
+// quits on an error it just showed has its last calls in the journal still.
+/**
+ * The journals of processes that ran in workers of their own, each given as
+ * it ended (`process-journal`): their calls are in their own rings, not the run's.
+ *
+ * @type {{ image: string, id: number, entries: { time: number, text: string }[] }[]}
+ */
+const workerJournals = [];
+app.on('process-journal', (/** @type {any} */ event)=>{
+    workerJournals.push(event);
+});
+
+let journalPrinted = false;
+const printJournal = ()=>{
+    if (journalAt <= 0 || journalPrinted)
+    {
+        return;
+    }
+    journalPrinted = true;
+    const crossing = /OleMainThread|CoWait|MsgWait|PostMessage|PostThread|SendMessage|WaitFor/;
+    const whole = traceAt > 0 || traceOnBox || traceOnFault;
+    // `--trace-match REGEX`: only the calls whose line matches -- one family
+    // (`WS2_32|WSA|GetQueuedCompletion`) across a run far longer than the lines kept.
+    const match = argv.includes('--trace-match')
+        ? new RegExp(argv[argv.indexOf('--trace-match') + 1]) : null;
+    const trail = app.log.recent(Math.max(100000, number('--trace-lines', 0))).filter((/** @type {any} */ entry)=>(whole
+        || entry.category === 'call.com' || crossing.test(entry.text))
+        && (!match || match.test(entry.text)));
+    for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
+    {
+        console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+    }
+    // `--trace-worker N`: the journals of the first N processes that ran in
+    // workers of their own, each under its image and id.
+    /** @param {{ time: number, text: string }[]} entries */
+    const printEntries = entries=>{
+        const kept = entries.filter(entry=>!match || match.test(entry.text));
+        for (const entry of kept.slice(whole ? -number('--trace-lines', 3000) : -150))
+        {
+            console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+        }
+    };
+    for (const { image, id, entries } of workerJournals.slice(0, number('--trace-worker', 3)))
+    {
+        console.log(`JOURNAL of ${image} (process ${id}, in a worker of its own)`);
+        printEntries(entries);
+    }
+    // And those of every process still standing in a worker - its own or
+    // beside its parent there - asked of it now: one that never ends (a
+    // helper its parent waits on, then kills) hands no ring back.
+    app.standing({ journal: Math.max(3000, number('--trace-lines', 0)) }).then((/** @type {any[]} */ standing)=>{
+        for (const { image, journal } of standing.filter(each=>each.worker && each.journal))
+        {
+            console.log(`JOURNAL of ${image} (still standing in a worker)`);
+            printEntries(journal);
+        }
+    }, (/** @type {any} */ e)=>console.log('standing journals failed:', e?.message ?? e));
+};
+if (traceOnFault)
+{
+    const EXCEPTION_CODES = 0xc0000000;
+    /** @param {any} event */
+    const onEnd = event=>{
+        if ((event?.code >>> 0) >= EXCEPTION_CODES)
+        {
+            console.log(seconds(), 'FAULT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+        }
+    };
+    // A child the program waited on ends through its resume; a server COM
+    // started for it (mscorsvw for ngen) ends on its own.
+    app.on('process-resumed', onEnd);
+    app.on('process-server-exit', onEnd);
+}
+/** Every `--cat` file as the run has it now. @param {string} heading */
+const catNow = async heading=>{
+    for (const path of all('--cat'))
+    {
+        try
+        {
+            console.log(seconds(), `${heading} ${path}\n${new TextDecoder('latin1')
+                .decode(await app.files.read(path))}`);
+        }
+        catch (e){
+            console.log(seconds(), `${heading} failed:`, path, e instanceof Error ? e.message : e);
+        }
+    }
+};
+// `kill -USR2 <pid>`: the `--cat` files printed while the run goes on.
+process.on('SIGUSR2', ()=>{
+    void catNow('CAT-NOW');
+});
+if (traceExit)
+{
+    /** @param {any} event */
+    const onExit = event=>{
+        if ((event?.code >>> 0) !== 0 && traceExit.test(String(event?.image ?? '')))
+        {
+            console.log(seconds(), 'EXIT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+            void catNow('CAT-AT-EXIT');
+        }
+    };
+    app.on('process-resumed', onExit);
+    app.on('process-server-exit', onExit);
+}
+if (journalAt > 0 && !traceOnBox && !traceOnFault && !traceExit)
+{
+    setTimeout(printJournal, journalAt * 1000);
+}
+if (traceOnBox)
+{
+    app.on('divergence', (/** @type {any} */ event)=>{
+        if (/MessageBox|DialogBox/.test(event?.api ?? '') && /error|cannot|fail|not /i
+            .test(event?.detail ?? ''))
+        {
+            printJournal();
+        }
+    });
+    app.on('message-box', printJournal);
+}
+
+// `--reg 'HKCU\Software\Vendor\Name=value'`: a registry value set before the
+// program starts, a string or `dword:N` -- a setting a person's machine has and
+// a bottle must not carry, laid in for this run alone.
+const ROOTS = { HKCU: 0x80000001, HKLM: 0x80000002 };
+for (const entry of all('--reg'))
+{
+    const [, root, path, name, value] = /^(HKCU|HKLM)\\(.*)\\([^\\=]*)=(.*)$/s.exec(entry) ?? [];
+    if (!root)
+    {
+        throw new Error(`--reg ${entry}: not ROOT\\path\\name=value`);
+    }
+    const hive = app.registry();
+    const { key } = hive.create(hive.root(ROOTS[/** @type {'HKCU' | 'HKLM'} */ (root)]), path);
+    const dword = /^dword:(\d+)$/.exec(value);
+    hive.setValue(key, name, dword ? 4 : 1, dword
+        ? new Uint8Array(Uint32Array.of(Number(dword[1])).buffer)
+        // Narrow, as the hive keeps a string.
+        : Uint8Array.from([...value, '\0'], character=>character.charCodeAt(0) & 0xff));
+}
+
+if (resumed)
+{
+    console.log(`run: not run again, going on from ${fromDir}`);
+}
+else
+{
+    try
+    {
+        console.log('run ->', await app.run({ maxTurns: Number.MAX_SAFE_INTEGER,
+            timeoutMs: number('--minutes', 20) * 60000 }));
+    }
+    catch (e){
+        console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+    }
+}
+let goingOn = resumed?.session ?? null;
+for (const line of thenLines)
+{
+    // The files the run wrote (its names and links) and its hive, as a saved session holds them.
+    const session = goingOn
+        ?? { files: await app.session.export(), registry: app.registry().toJSON() };
+    goingOn = null;
+    if (keepDir)
+    {
+        keepSession(keepDir, session, hiveBefore);
+        console.log(seconds(), `kept: ${session.files.length} files in ${keepDir}`);
+    }
+    const [, quoted, bare] = /^\s*(?:"([^"]+)"|(\S+))/.exec(line) ?? [];
+    const imagePath = quoted ?? bare;
+    const image = session.files.find((/** @type {any} */ one)=>
+        one.path.toLowerCase() === imagePath?.toLowerCase());
+    if (!image)
+    {
+        console.log(`then: ${imagePath} is not among the files the run left`);
+        break;
+    }
+    await app.dispose?.();
+    const rest = line.slice(line.indexOf(imagePath) + imagePath.length).replace(/^"/, '');
+    app = await createApp({ ...runOptions, executable: image.bytes, imagePath,
+        commandLine: `"${imagePath}"${rest}`,
+        storage: async()=>session, files: undefined, bundle: undefined });
+    watchEvents(app);
+    console.log(seconds(), 'then', line);
+    try
+    {
+        console.log('then ->', await app.run({ maxTurns: Number.MAX_SAFE_INTEGER,
+            timeoutMs: number('--minutes', 20) * 60000 }));
+    }
+    catch (e){
+        console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+    }
+}
+printJournal();
+if (listAt)
+{
+    /** @param {string} directory */
+    const walk = directory=>{
+        for (const entry of app.files.list(directory))
+        {
+            console.log('FILE', entry.directory ? '<dir>' : String(entry.size).padStart(10),
+                entry.path);
+            if (entry.directory)
+            {
+                walk(entry.path);
+            }
+        }
+    };
+    try
+    {
+        walk(listAt);
+    }
+    catch (e){
+        console.log('list failed:', e instanceof Error ? e.message : e);
+    }
+}
+// `--layer DIR`: what the runs wrote, as a layer bundle lays it out (the .NET Framework's,
+// `roadmap/dotnet-layer.md`; `collectLayer`, the launcher's own build of one too): every file
+// under DIR/.bottlify/drive_c by its path from C:, and DIR/.bottlify/registry.json the keys and
+// values the runs added or changed. `make-btl pack DIR <id>` makes the bundle.
+if (argv.includes('--layer'))
+{
+    const to = argv[argv.indexOf('--layer') + 1];
+    // The folder the first program was put in to be run (the setup itself) is not the layer's.
+    const runFrom = (prefix.imagePath ?? '').replace(/[^\\]*$/, '');
+    const layer = collectLayer({ files: await app.session.export(),
+        registry: app.registry().toJSON(), before: hiveBefore,
+        leave: runFrom === '' ? [] : [runFrom] });
+    let bytes = 0;
+    for (const written of layer)
+    {
+        const target = join(to, ...written.path.split('\\'));
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, written.bytes);
+        bytes += written.bytes.length;
+    }
+    console.log(`layer: ${layer.length - 1} files and the registry, ${(bytes / 1048576).toFixed(1)}`
+        + ` MB, in ${to}`);
+}
+if (argv.includes('--registry'))
+{
+    const to = argv[argv.indexOf('--registry') + 1];
+    mkdirSync(dirname(to), { recursive: true });
+    writeFileSync(to, JSON.stringify(app.registry().toJSON()));
+}
+for (const path of all('--cat'))
+{
+    try
+    {
+        console.log(`CAT ${path}\n${new TextDecoder('latin1')
+            .decode(await app.files.read(path))}`);
+    }
+    catch (e){
+        console.log('cat failed:', path, e instanceof Error ? e.message : e);
+    }
+}
+for (let at = argv.indexOf('--peek'); at >= 0; at = argv.indexOf('--peek', at + 1))
+{
+    const address = Number(argv[at + 1]);
+    const bytes = app.debug.read(address, Number(argv[at + 2]));
+    for (let row = 0; row < bytes.length; row += 16)
+    {
+        const line = [...bytes.subarray(row, row + 16)];
+        console.log('PEEK', (address + row).toString(16).padStart(8, '0'),
+            line.map(byte=>byte.toString(16).padStart(2, '0')).join(' '),
+            line.map(byte=>(byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.')).join(''));
+    }
+}
+/** @param {string} from @param {string} to */
+const copyOut = async(from, to)=>{
+    mkdirSync(to, { recursive: true });
+    for (const entry of app.files.list(from))
+    {
+        const name = join(to, entry.path.slice(entry.path.lastIndexOf('\\') + 1));
+        if (entry.directory)
+        {
+            await copyOut(entry.path, name);
+        }
+        else
+        {
+            const bytes = await app.files.read(entry.path);
+            if (bytes)
+            {
+                writeFileSync(name, bytes);
+            }
+            else
+            {
+                console.log('copy: nothing read at', entry.path);
+            }
+        }
+    }
+};
+// `--copy FROM TO`: FROM's last part may be /REGEX/, every entry beside it whose name
+// matches -- a folder a setup names at random (`C:\/^[0-9a-f]{20,}$/`).
+for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 1))
+{
+    try
+    {
+        const from = argv[at + 1];
+        const pattern = /^(.*)\\\/(.+)\/$/.exec(from);
+        const sources = pattern === null ? [from] : app.files.list(pattern[1])
+            .filter((/** @type {any} */ entry)=>new RegExp(pattern[2], 'i')
+                .test(entry.path.slice(entry.path.lastIndexOf('\\') + 1)))
+            .map((/** @type {any} */ entry)=>entry.path);
+        for (const source of sources)
+        {
+            await copyOut(source, sources.length > 1 || pattern !== null
+                ? join(argv[at + 2], source.slice(source.lastIndexOf('\\') + 1)) : argv[at + 2]);
+        }
+    }
+    catch (e){
+        console.log('copy failed:', argv[at + 1], e instanceof Error ? e.message : e);
+    }
+}
+const collectTo = argv.includes('--collect-to') ? argv[argv.indexOf('--collect-to') + 1] : null;
+collectable ??= media;
+if (collectable && (argv.includes('--collect') || collectTo))
+{
+    try
+    {
+        const collected = collectFrom(app, collectable);
+        const bytes = collected.files.reduce((total, one)=>total + one.bytes.length, 0);
+        console.log('COLLECT root', collected.root, 'entry', collected.entry,
+            'files', collected.files.length, 'bytes', bytes, 'outside', collected.outside.length);
+        for (const one of collected.files.slice(0, 60))
+        {
+            console.log('COLLECT file', String(one.bytes.length).padStart(10), one.path);
+        }
+        // The prefix unpacked, as a directory make-btl packs into the bottle
+        // the wizard would have published.
+        for (const one of collectTo ? collected.files : [])
+        {
+            const to = join(collectTo, ...one.path.split('\\'));
+            mkdirSync(dirname(to), { recursive: true });
+            writeFileSync(to, one.bytes);
+        }
+        // The directories left empty too: a program that checks its tree (an
+        // updater verifying its install) finds one missing as damage.
+        for (const path of collectTo ? collected.directories ?? [] : [])
+        {
+            mkdirSync(join(collectTo, ...path.split('\\')), { recursive: true });
+        }
+    }
+    catch (e){
+        console.log('collect failed:', e instanceof Error ? e.message : e);
+    }
+}
+for (const [library, names] of unresolved)
+{
+    console.log('unresolved', library, names.length, names.slice(0, 40).join(' '));
+}
+console.log('seconds', seconds());
+await profiling?.stop();
+process.exit(0);

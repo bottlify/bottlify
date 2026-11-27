@@ -17,7 +17,7 @@
 
 import {
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND,
-    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, E_NOTIMPL, ExternalError,
+    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, E_NOTIMPL,
 } from '../script/external.js';
 
 /** @type {Readonly<Record<number, string>>} */
@@ -246,7 +246,7 @@ const SYSTEM_MESSAGES = new Map([
  * anything else as the HRESULT itself, which Err.Number reads signed. The
  * description and source are the object's where it gave them.
  *
- * @param {ExternalError} failure @returns {VBRuntimeError}
+ * @param {import('../script/external.js').ExternalError} failure @returns {VBRuntimeError}
  */
 export function fromExternalError(failure){
     const number = failure.number | 0;
@@ -256,5 +256,3 @@ export function fromExternalError(failure){
         || UNKNOWN_ERROR;
     return new VBRuntimeError(own, description, failure.source || SOURCE_RUNTIME);
 }
-
-export { ExternalError };

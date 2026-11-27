@@ -14,6 +14,13 @@
  * So the pool keeps threads, grows when every one of them is busy, and hands
  * each callback to an idle one.
  *
+ * It grows by one thread at a time: while callbacks wait, one more thread is
+ * starting, and the next once that one has taken its first. Callbacks that
+ * return at once are run by the threads already there, as Windows' pool adds
+ * threads only while its own stay busy; a thread for every callback queued at
+ * once took a stack each and kept it, and a hundred work items left no room
+ * for the next thread a program made.
+ *
  * A pool thread is the wave notice thread's shape (`winmm/thread.js`): a loop
  * of a few guest instructions asks the host for the next callback, calls it,
  * asks again, and asking with nothing to do blocks the thread until a callback
@@ -21,6 +28,10 @@
  * on its own stack, and the loop keeps the record it is handed on that stack
  * too, so each thread has one and nothing is shared between them.
  */
+
+import { createThreadpoolApi } from './threadpool-api.js';
+import { wholeAddress } from '../common/pointers.js';
+import { createDeadlines } from '../../../system/deadlines.js';
 
 /** A pool this size runs more callbacks at once than a program has reason to ask for. */
 const MAX_THREADS = 32;
@@ -30,18 +41,28 @@ const RUN = 0x10000;
 /** What the loop hands the trap after a callback returned, and the first time it asks. */
 const RAN = 0x20000;
 
-/** The record a callback is handed through: the routine, then four arguments. */
+/**
+ * The record a callback is handed through: the routine, then six arguments,
+ * as many as the widest callback takes (a thread pool I/O's).
+ */
 const RECORD = {
     ENTRY: 0,
     ARGS: 4,
-    SIZE: 20,
+    COUNT: 6,
+    SIZE: 28,
 };
 
 /** CompletionEvent's value for "wait here until the callbacks have finished". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
+/** A wait with no time-out. */
+const INFINITE = 0xffffffff;
+/** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
+const FILETIME_EPOCH_MS = 11644473600000;
 
 /** Flags of CreateTimerQueueTimer: a timer that fires once whatever its period. */
 const WT_EXECUTEONLYONCE = 0x00000008;
+/** A registered wait's callback runs on the wait thread rather than the pool's. */
+const WT_EXECUTEINWAITTHREAD = 0x00000004;
 
 /** What a wait answers: the object signalled, abandoned, or the time out. */
 const WAIT_OBJECT_0 = 0;
@@ -54,30 +75,50 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_IO_PENDING = 997;
 
+/** The same answers as ntdll's statuses. */
+const STATUS_SUCCESS = 0;
+const STATUS_PENDING = 0x103;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+
+/** What an alertable wait answers when routines queued to its thread ended it. */
+const WAIT_IO_COMPLETION = 0xc0;
+/** The most objects one wait for any of them takes. */
+const MAXIMUM_WAIT_OBJECTS = 64;
+/** The pseudo-handles of the process and the thread, always there to wait on. */
+const CURRENT_PROCESS = 0xffffffff;
+const CURRENT_THREAD = 0xfffffffe;
+
 /**
  * The loop, as x86. `fetch` is the trap and `at` is where these bytes will be,
  * because the call to the trap is relative.
  *
- *            sub esp, 20            ; the record, on this thread's own stack
+ *            sub esp, 28            ; the record, on this thread's own stack
  *            mov eax, RAN
  *     loop:  push eax               ; what the last call answered
  *            lea ecx, [esp+4]
  *            push ecx               ; where the host writes the next callback
  *            call fetch             ; stdcall: EAX = RUN when the record is filled
+ *            test eax, eax
+ *            jz exit                ; 0: the thread is done
  *            cmp eax, RUN
  *            jne loop
  *            mov ebx, esp
- *            push dword [ebx+16]
- *            push dword [ebx+12]
- *            push dword [ebx+8]
+ *            push dword [ebx+24]    ; the six arguments, last first
+ *            ...
  *            push dword [ebx+4]
  *            call dword [ebx]
- *            mov esp, ebx           ; however many of the four the routine took
+ *            mov esp, ebx           ; however many of the six the routine took
  *            mov eax, RAN
  *            jmp loop
+ *     exit:  add esp, 28
+ *            ret 4                  ; to where a thread that returns ends
  *
  * The stack pointer is put back from EBX, which a routine keeps, because the
- * callbacks differ in how many arguments they take and who removes them.
+ * callbacks differ in how many arguments they take and who removes them. The
+ * record's address is the callback instance a callback is handed: it is the
+ * running callback's own, as Windows' instance lives on the pool thread's
+ * stack.
  *
  * @param {number} fetch
  * @param {number} at
@@ -95,9 +136,13 @@ export function poolLoopCode(fetch, at){
         0x8d, 0x4c, 0x24, 0x04,
         0x51,
         0xe8, ...dword(relative),
+        0x85, 0xc0,
+        0x74, 0x26,
         0x3d, ...dword(RUN),
-        0x75, 0xee,
+        0x75, 0xea,
         0x89, 0xe3,
+        0xff, 0x73, 0x18,
+        0xff, 0x73, 0x14,
         0xff, 0x73, 0x10,
         0xff, 0x73, 0x0c,
         0xff, 0x73, 0x08,
@@ -105,7 +150,9 @@ export function poolLoopCode(fetch, at){
         0xff, 0x13,
         0x89, 0xdc,
         0xb8, ...dword(RAN),
-        0xeb, 0xd5,
+        0xeb, 0xcb,
+        0x83, 0xc4, RECORD.SIZE,
+        0xc2, 0x04, 0x00,
     ]);
 }
 
@@ -126,7 +173,7 @@ export function poolLoopCode(fetch, at){
  * @param {number} wait @param {number} after @param {number} at
  * @returns {Uint8Array}
  */
-export function waitLoopCode(wait, after, at){
+function waitLoopCode(wait, after, at){
     /** @param {number} value */
     const dword = value=>
         [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -144,71 +191,27 @@ export function waitLoopCode(wait, after, at){
 }
 
 /**
- * @typedef {Object} ThreadPoolHost
- * @property {any} kernel  `createThread`, `block`, `wake`, `currentThread`, the
- *           timers (`createTimer`, `armTimer`, `cancelTimer`), `setEvent`,
- *           `handles` and the guest clock.
- * @property {(name: string, fn: { argBytes: number, handler: Function }) => number} register
- *           Puts a host function behind a guest address: the loop's trap.
- * @property {(bytes: number) => number} allocate
- *           Guest memory for what a program is handed as a handle, which on
- *           Windows is an address too, and 0 when there is none.
- * @property {(bytes: number) => number} [allocateCode]
- *           Pages of their own for the loop (`code-arena.js`).
- * @property {(address: number) => void} [free]
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(thread: any) => void} [threadBlock]
- *           Gives a pool thread its environment block, as CreateThread's are.
- * @property {(thread: any) => any} park  Stops a thread inside a trap.
- * @property {(code: number) => void} setLastError
- * @property {(handle: number, milliseconds: number) => any} [waitFor]
- *           WaitForSingleObject, from inside a trap: its answer, or the park
- *           that answers it later. Absent, no wait can be registered.
- * @property {() => number} [threadReturn]  Where a thread that returns ends.
- * @property {() => number} [threadStart]
- *           Where a pool thread begins, as CreateThread's do: the libraries
- *           told of it, then its loop. Zero, or absent, and it begins in its loop.
+ * @typedef {import('./pool-types.js').ThreadPoolHost} ThreadPoolHost
+ * @typedef {import('./pool-types.js').Job} Job
+ * @typedef {import('./pool-types.js').Instance} Instance
+ * @typedef {import('./pool-types.js').Waiter} Waiter
+ * @typedef {import('./pool-types.js').Owner} Owner
+ * @typedef {import('./pool-types.js').Timer} Timer
+ * @typedef {import('./pool-types.js').Queue} Queue
+ * @typedef {import('./pool-types.js').Wait} Wait
+ * @typedef {import('./pool-types.js').Lane} Lane
+ * @typedef {import('./pool-types.js').Worker} Worker
  */
 
 /**
- * A callback handed to the pool, and whatever counts it as outstanding until
- * it has returned.
+ * What a deletion answers, in its caller's terms: kernel32's BOOL and last
+ * error, or ntdll's status. `done` is also what a caller that waited for the
+ * callbacks is woken with.
  *
- * @typedef {Object} Job
- * @property {number} entry
- * @property {number[]} args
- * @property {Owner} owner
- */
-
-/**
- * @typedef {Object} Waiter
- * @property {any} [thread]  blocked in a deletion that waits
- * @property {any} [event]   a kernel event to set
- * @property {number} until  finished once no more than this many are outstanding
- */
-
-/**
- * Anything whose callbacks a deletion can wait for.
- *
- * @typedef {Object} Owner
- * @property {number} outstanding  handed to the pool and not yet returned
- * @property {Waiter[]} waiters
- * @property {() => void} [settled]  told each time one returns
- */
-
-/**
- * @typedef {Owner & {
- *     handle: number, queue: Queue, callback: number, parameter: number,
- *     period: number, spent: boolean, cancelled: boolean, clock: any }} Timer
- */
-
-/**
- * @typedef {Owner & { handle: number, timers: Set<Timer>, deleting: boolean }} Queue
- */
-
-/**
- * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
- *     timeout: number, once: boolean, cancelled: boolean }} Wait
+ * @typedef {Object} Answers
+ * @property {number} done
+ * @property {() => number} pending  callbacks still run and nobody waits for them
+ * @property {(error: number) => number} refused  a Win32 error, said the caller's way
  */
 
 /**
@@ -217,21 +220,16 @@ export function waitLoopCode(wait, after, at){
 export function createThreadPool(host){
     const { kernel } = host;
 
-    /**
-     * @typedef {Object} Worker
-     * @property {any} thread
-     * @property {number} record
-     * @property {Job | null} job
-     */
+    /** @param {string} name @param {number} max @returns {Lane} */
+    const makeLane = (name, max)=>({ name, max, threads: 0, idle: [], backlog: [], starting: 0 });
+    const poolLane = makeLane('thread pool', MAX_THREADS);
+    const waitLane = makeLane('wait thread', 1);
 
     /** @type {Map<any, Worker>} */
     const workers = new Map();
-    /** @type {Worker[]} */
-    const idle = [];
-    /** @type {Job[]} */
-    const backlog = [];
-    /** Threads made and not yet at their first question. */
-    let starting = 0;
+    /** The lane of each thread made and not yet at its first question. */
+    /** @type {Map<any, Lane>} */
+    const lanes = new Map();
     let loop = 0;
 
     /**
@@ -256,11 +254,12 @@ export function createThreadPool(host){
     /** @param {Worker} worker @param {Job} job */
     const give = (worker, job)=>{
         worker.job = job;
+        const args = job.instanced ? [worker.record, ...job.args] : job.args;
         host.writeMemory(worker.record + RECORD.ENTRY, dword(job.entry));
-        for (let index = 0; index < 4; index++)
+        for (let index = 0; index < RECORD.COUNT; index++)
         {
             host.writeMemory(worker.record + RECORD.ARGS + index * 4,
-                dword(job.args[index] ?? 0));
+                dword(args[index] ?? 0));
         }
     };
 
@@ -271,7 +270,7 @@ export function createThreadPool(host){
             waiters.splice(waiters.indexOf(waiter), 1);
             if (waiter.thread)
             {
-                kernel.wake(waiter.thread, 1);
+                kernel.wake(waiter.thread, waiter.answer ?? 1);
             }
             if (waiter.event)
             {
@@ -280,12 +279,75 @@ export function createThreadPool(host){
         }
     };
 
-    /** @param {Job} job */
-    const settle = job=>{
-        const { owner } = job;
-        owner.outstanding--;
+    /**
+     * Callbacks of an owner that are outstanding no more: returned, let go
+     * by their instance, or dropped before they ran.
+     *
+     * @param {Owner} owner @param {number} count
+     */
+    const uncount = (owner, count)=>{
+        owner.outstanding -= count;
         release(owner.waiters, owner.outstanding);
         owner.settled?.();
+    };
+
+    /**
+     * Callbacks of an owner that are running or waiting to run no more:
+     * returned, or dropped. One its instance let go is still live until it
+     * returns, and a cleanup group waits for it (`gather`).
+     *
+     * @param {Owner} owner @param {number} count
+     */
+    const unlive = (owner, count)=>{
+        owner.live = (owner.live ?? 0) - count;
+        for (const told of owner.gathers ?? [])
+        {
+            told();
+        }
+        owner.settled?.();
+    };
+
+    /**
+     * A callback returned: what it asked of its instance is done, in the
+     * order Windows does it, and its owner has one fewer outstanding unless
+     * it had let its owner go already.
+     *
+     * @param {Job} job
+     */
+    const finish = job=>{
+        const state = job.state;
+        for (const [name, args] of state?.completion ?? [])
+        {
+            if (host.call)
+            {
+                host.call(name, args);
+            }
+            else
+            {
+                host.divergence?.(name, 'asked of a thread pool callback\'s instance,'
+                    + ' with no kernel32 here to do it');
+            }
+        }
+        if (!state?.disassociated)
+        {
+            uncount(job.owner, 1);
+        }
+        unlive(job.owner, 1);
+        job.done?.();
+    };
+
+    /** @param {Lane} lane  callbacks its threads are running */
+    const busy = lane=>lane.threads - lane.starting - lane.idle.length;
+
+    /**
+     * A thread of a pool that is closing ends: it is no longer the pool's,
+     * and its loop returns.
+     *
+     * @param {Worker} worker
+     */
+    const retire = worker=>{
+        workers.delete(worker.thread);
+        worker.lane.threads--;
     };
 
     /**
@@ -294,37 +356,74 @@ export function createThreadPool(host){
      *
      * @param {number[]} args
      */
-    const fetch = ([record])=>{
+    const fetch = ([record, last])=>{
         const thread = kernel.currentThread();
         let worker = workers.get(thread);
         if (!worker)
         {
-            worker = { thread, record: record >>> 0, job: null };
+            const lane = lanes.get(thread) ?? poolLane;
+            lanes.delete(thread);
+            worker = { thread, record: record >>> 0, job: null, lane };
             workers.set(thread, worker);
-            starting = Math.max(0, starting - 1);
+            lane.starting = Math.max(0, lane.starting - 1);
+        }
+        const { lane } = worker;
+        // Back from routines queued to it (an APC ended its idle wait): it is
+        // idle no longer, and a callback handed to it meanwhile has not run.
+        const idle = lane.idle.indexOf(worker);
+        if (idle >= 0)
+        {
+            lane.idle.splice(idle, 1);
+        }
+        if (worker.job && (last >>> 0) !== RAN)
+        {
+            return RUN;
         }
         if (worker.job)
         {
             const done = worker.job;
             worker.job = null;
             ran++;
-            settle(done);
+            // The environment's FinalizationCallback, on the same thread and
+            // instance once the callback returned; the callback is done after
+            // it, and what it asked of the instance done then.
+            const { owner } = done;
+            if (!done.finalizing && owner.finalization)
+            {
+                give(worker, { entry: owner.finalization, args: [owner.context ?? 0],
+                    instanced: true, owner, state: done.state, finalizing: true });
+                return RUN;
+            }
+            finish(done);
         }
-        const next = backlog.shift();
+        // A pool's maximum holds the callbacks running at once: a thread
+        // past it, its maximum lowered, goes idle rather than take another.
+        const next = busy(lane) - 1 < lane.max ? take(lane) : undefined;
         if (next)
         {
             give(worker, next);
+            grow(lane);
             return RUN;
         }
-        idle.push(worker);
-        kernel.block(thread, 'a thread pool callback');
-        return host.park(thread);
+        if (lane.retiring?.())
+        {
+            retire(worker);
+            return 0;
+        }
+        // Idle, it waits alertably, as Windows' pool threads do: a routine
+        // queued to it runs there and then (`apc.js`), and the loop asks again.
+        lane.idle.push(worker);
+        return kernel.alertably(thread, ()=>{
+            kernel.block(thread, 'a thread pool callback');
+            return host.park(thread);
+        });
     };
 
-    const spawn = ()=>{
-        if (workers.size + starting >= MAX_THREADS)
+    /** @param {Lane} lane @returns {boolean} whether a thread was made */
+    const spawn = lane=>{
+        if (lane.threads >= lane.max)
         {
-            return;
+            return false;
         }
         if (loop === 0)
         {
@@ -333,40 +432,147 @@ export function createThreadPool(host){
             const at = (host.allocateCode ?? host.allocate)(size);
             if (at === 0)
             {
-                return;
+                return false;
             }
             host.writeMemory(at, poolLoopCode(trap, at));
             loop = at;
         }
-        const thread = makeThread({ entry: loop, name: 'thread pool' });
+        const thread = makeThread({ entry: loop, name: lane.name,
+            returnTo: host.threadReturn?.(),
+            ...lane.stack
+                ? { stackReserve: lane.stack.reserve, stackSize: lane.stack.commit } : {} });
         if (!thread)
         {
-            return;
+            return false;
         }
         host.threadBlock?.(thread);
-        starting++;
+        lanes.set(thread, lane);
+        lane.threads++;
+        lane.starting++;
+        return true;
     };
 
     /**
-     * Hands a callback to an idle thread, or to the next one to ask, making
-     * one when every thread there is is busy.
+     * One more thread, while callbacks wait and none is on its way to them.
      *
-     * @param {Job} job
+     * @param {Lane} lane
      */
-    const dispatch = job=>{
+    const grow = lane=>{
+        if (lane.backlog.length > 0 && lane.starting === 0)
+        {
+            spawn(lane);
+        }
+    };
+
+    /**
+     * Hands a callback to an idle thread of its lane, or to the next one to
+     * ask, making one when every thread there is is busy.
+     *
+     * @param {Job} job @param {Lane} [lane]
+     */
+    const dispatch = (job, lane = poolLane)=>{
         job.owner.outstanding++;
-        const worker = idle.pop();
+        job.owner.live = (job.owner.live ?? 0) + 1;
+        const worker = busy(lane) < lane.max ? lane.idle.pop() : undefined;
         if (worker)
         {
             give(worker, job);
             kernel.wake(worker.thread, RUN);
             return;
         }
-        backlog.push(job);
-        if (backlog.length > starting)
+        lane.backlog.push(job);
+        grow(lane);
+    };
+
+    let turn = 0;
+    /**
+     * The next callback waiting in a lane: the oldest of the owner served
+     * longest ago, so owners take turns, as Windows' pool takes its objects
+     * in turn -- one object's many callbacks do not hold up another's.
+     *
+     * @param {Lane} lane
+     * @returns {Job | undefined}
+     */
+    const take = lane=>{
+        let at = -1;
+        for (let index = 0; index < lane.backlog.length; index++)
         {
-            spawn();
+            if (at < 0 || (lane.backlog[index].owner.served ?? 0)
+                < (lane.backlog[at].owner.served ?? 0))
+            {
+                at = index;
+            }
         }
+        if (at < 0)
+        {
+            return undefined;
+        }
+        const [job] = lane.backlog.splice(at, 1);
+        job.owner.served = ++turn;
+        return job;
+    };
+
+    /**
+     * Callbacks of an owner not yet started are dropped, as a wait asked to
+     * cancel the pending ones drops them.
+     *
+     * @param {Owner} owner @param {Lane} lane
+     * @returns {number}  how many were dropped
+     */
+    const drop = (owner, lane)=>{
+        const kept = lane.backlog.filter(job=>job.owner !== owner);
+        const dropped = lane.backlog.length - kept.length;
+        lane.backlog.splice(0, lane.backlog.length, ...kept);
+        if (dropped > 0)
+        {
+            uncount(owner, dropped);
+            unlive(owner, dropped);
+        }
+        return dropped;
+    };
+
+    /**
+     * Until the callbacks of every one of `owners` have returned, but for
+     * `own` of them (the caller's): 0 at once, or a promise its caller waits
+     * on, as a lock's waiter does. A callback that let its owner go is
+     * waited for too.
+     *
+     * @param {Owner[]} owners @param {number} own
+     * @returns {0 | Promise<0>}
+     */
+    const gather = (owners, own)=>{
+        const left = ()=>owners.reduce((sum, owner)=>sum + (owner.live ?? 0), 0);
+        if (left() <= own)
+        {
+            return 0;
+        }
+        return new Promise(resolve=>{
+            const told = ()=>{
+                if (left() <= own)
+                {
+                    owners.forEach(owner=>owner.gathers?.delete(told));
+                    resolve(0);
+                }
+            };
+            owners.forEach(owner=>(owner.gathers ??= new Set()).add(told));
+        });
+    };
+
+    /**
+     * The instance a running callback was handed, and its job: the record's
+     * address on a pool thread.
+     *
+     * @param {number} instance
+     */
+    const instanceOf = instance=>{
+        for (const worker of workers.values())
+        {
+            if (worker.record === (instance >>> 0) && worker.job)
+            {
+                return worker;
+            }
+        }
+        return null;
     };
 
     /**
@@ -378,18 +584,19 @@ export function createThreadPool(host){
      *
      * @param {Owner} owner @param {number} event @param {number} own
      *     the caller's own callback, when it is one of the owner's
+     * @param {Answers} [answers]  kernel32's unless the caller is ntdll
      * @returns {number | any}
      */
-    const complete = (owner, event, own)=>{
-        const handle = event >>> 0;
+    const complete = (owner, event, own, answers = boolAnswers)=>{
+        const handle = wholeAddress(event);
         if (handle === INVALID_HANDLE_VALUE)
         {
             if (owner.outstanding <= own)
             {
-                return 1;
+                return answers.done;
             }
             const thread = kernel.currentThread();
-            owner.waiters.push({ thread, until: own });
+            owner.waiters.push({ thread, until: own, answer: answers.done });
             kernel.block(thread, 'a thread pool deletion');
             return host.park(thread);
         }
@@ -403,7 +610,7 @@ export function createThreadPool(host){
                     kernel.setEvent(signal);
                 }
             }
-            return 1;
+            return answers.done;
         }
         if (handle !== 0)
         {
@@ -413,8 +620,7 @@ export function createThreadPool(host){
                 owner.waiters.push({ event: signal, until: 0 });
             }
         }
-        host.setLastError(ERROR_IO_PENDING);
-        return 0;
+        return answers.pending();
     };
 
     /** @param {number} handle */
@@ -436,6 +642,16 @@ export function createThreadPool(host){
     const fail = code=>{
         host.setLastError(code);
         return 0;
+    };
+
+    /** @type {Answers} */
+    const boolAnswers = { done: 1, pending: ()=>fail(ERROR_IO_PENDING), refused: fail };
+    /** @type {Answers} */
+    const statusAnswers = {
+        done: STATUS_SUCCESS,
+        pending: ()=>STATUS_PENDING,
+        refused: error=>(error === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
+            : STATUS_INVALID_PARAMETER),
     };
 
     /** @type {Map<number, Queue>} */
@@ -575,24 +791,30 @@ export function createThreadPool(host){
         return timer;
     };
 
-    /** @param {number} timerHandle @param {number} event */
-    const deleteTimer = (timerHandle, event)=>{
+    /**
+     * @param {number} timerHandle @param {number} event
+     * @param {Answers} [answers]
+     */
+    const deleteTimer = (timerHandle, event, answers = boolAnswers)=>{
         const timer = timers.get(timerHandle >>> 0);
         if (!timer)
         {
-            return fail(ERROR_INVALID_PARAMETER);
+            return answers.refused(ERROR_INVALID_PARAMETER);
         }
         const own = running()?.owner === timer ? 1 : 0;
         cancel(timer);
-        return complete(timer, event, own);
+        return complete(timer, event, own, answers);
     };
 
-    /** @param {number} queueHandle @param {number} event */
-    const deleteQueue = (queueHandle, event)=>{
+    /**
+     * @param {number} queueHandle @param {number} event
+     * @param {Answers} [answers]
+     */
+    const deleteQueue = (queueHandle, event, answers = boolAnswers)=>{
         const queue = queues.get(queueHandle >>> 0);
         if (!queue)
         {
-            return fail(ERROR_INVALID_HANDLE);
+            return answers.refused(ERROR_INVALID_HANDLE);
         }
         queues.delete(queue.handle);
         queue.deleting = true;
@@ -606,7 +828,7 @@ export function createThreadPool(host){
             }
         }
         recount(queue);
-        const answer = complete(queue, event, own);
+        const answer = complete(queue, event, own, answers);
         recount(queue);
         return answer;
     };
@@ -615,53 +837,241 @@ export function createThreadPool(host){
     const waits = new Map();
     let waitLoop = 0;
 
-    /** @param {Wait} wait */
+    /**
+     * A thread that waits on the objects of many registered waits at once,
+     * as Windows' wait threads do: one wait for any of them, the time-out the
+     * nearest of theirs. A thread for every wait cost a stack each, and a
+     * program registering hundreds of waits ran out of room for threads.
+     *
+     * @typedef {Object} WaitThread
+     * @property {number} id  the thread's parameter, the address its loop asks by
+     * @property {any} thread
+     * @property {number} handles  where the objects are written for the wait
+     * @property {Wait[]} waits  in the order they were registered
+     * @property {import('../../../system/deadlines.js').Deadlines} deadlines  when each
+     *     wait's time runs out, under its `id`; a wait for ever has none
+     * @property {Wait[]} byId  the waits by `id`
+     * @property {(id: number) => void} ranOut  fires the wait under `id`, its time out
+     * @property {Wait[][]} asked  the waits the wait under way was asked for, by object in
+ *     its order: two waits on one object are one entry, which fires the first of them
+     * @property {boolean} leaving  out of waits, its loop ending
+     */
+
+    /** @type {Map<number, WaitThread>} */
+    const waitThreads = new Map();
+
+    /**
+     * A wait unregistered is let go once its callbacks have returned. The
+     * thread that waited for it holds the wait itself, not its handle, so the
+     * handle may go to the next registration at once.
+     *
+     * @param {Wait} wait
+     */
     const forget = wait=>{
-        if (wait.outstanding === 0 && waits.get(wait.handle) === wait)
+        if (wait.cancelled && wait.outstanding === 0 && waits.get(wait.handle) === wait)
         {
             waits.delete(wait.handle);
             host.free?.(wait.handle);
         }
     };
 
-    /** The wait's thread asks: the wait on its object, or abandoned once unregistered. */
-    const waitStep = (/** @type {number[]} */ [handle])=>{
-        const wait = waits.get(handle >>> 0);
-        return wait && !wait.cancelled
-            ? /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
-                wait.object, wait.timeout)
-            : WAIT_ABANDONED;
+    /**
+     * The wait leaves its thread, its time-out with it. Its thread is not
+     * told (`detach`).
+     *
+     * @param {Wait} wait
+     * @returns {WaitThread | undefined}  the thread it left
+     */
+    const leave = wait=>{
+        const home = wait.home;
+        wait.home = undefined;
+        if (home)
+        {
+            home.waits.splice(home.waits.indexOf(wait), 1);
+            home.deadlines.release(wait.id);
+            home.byId[wait.id] = undefined;
+            wait.id = -1;
+        }
+        return home;
     };
 
     /**
-     * The wait answered: the callback handed to the pool -- the object
-     * signalled or abandoned FALSE, the time out TRUE, as its TimerOrWaitFired
-     * says -- and whether to wait again.
+     * The wait leaves its thread, which is told so: blocked, it is taken out
+     * of its wait and waits again for what is left. Left in its wait, it
+     * would take the next signal for a wait nobody has any more -- a
+     * semaphore's count, an auto-reset event -- from whoever waits on the
+     * object next.
+     *
+     * @param {Wait} wait
      */
-    const waitDone = (/** @type {number[]} */ [handle, answer])=>{
-        const wait = waits.get(handle >>> 0);
-        const result = answer >>> 0;
-        if (!wait || wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
-            && result !== WAIT_TIMEOUT)
+    const detach = wait=>{
+        const home = leave(wait);
+        if (home)
         {
+            kernel.alert(home.thread, WAIT_IO_COMPLETION);
+        }
+    };
+
+    /** The wait's time runs out its time-out from now. @param {Wait} wait */
+    const startTimeout = wait=>{
+        if (wait.timeout !== INFINITE && wait.home)
+        {
+            wait.home.deadlines.move(wait.id, kernel.clock.virtualTime() + wait.timeout);
+        }
+    };
+
+    /**
+     * The wait thread asks: a wait for any of its waits' objects, alertable,
+     * until the nearest time-out.
+     */
+    const waitStep = (/** @type {number[]} */ [id])=>{
+        const home = /** @type {WaitThread} */ (waitThreads.get(id >>> 0));
+        /** @type {Map<number, Wait[]>} */
+        const byObject = new Map();
+        const never = neverSignalled();
+        for (const wait of home.waits)
+        {
+            // The process's and the thread's own pseudo-handles are never
+            // signalled while it runs, and no wait for many objects takes
+            // them: such a wait is its time-out alone.
+            if (never !== 0 && isPseudo(wait.object))
+            {
+                continue;
+            }
+            byObject.set(wait.object, [...byObject.get(wait.object) ?? [], wait]);
+        }
+        home.asked = [...byObject.values()];
+        const objects = home.asked.map(([wait])=>wait.object);
+        if (objects.length === 0)
+        {
+            objects.push(never);
+        }
+        const now = kernel.clock.virtualTime();
+        const nearest = home.deadlines.soonest();
+        const bytes = new Uint8Array(objects.length * 4);
+        const view = new DataView(bytes.buffer);
+        objects.forEach((object, index)=>view.setUint32(index * 4, object, true));
+        host.writeMemory(home.handles, bytes);
+        return /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
+            objects.length, home.handles,
+            nearest === Infinity ? INFINITE : Math.max(0, Math.ceil(nearest - now)));
+    };
+
+    /** @param {number} handle */
+    const isPseudo = handle=>handle === CURRENT_PROCESS || handle === CURRENT_THREAD;
+
+    let neverEvent = 0;
+    /**
+     * An event nobody sets, which a wait thread whose waits are all on
+     * pseudo-handles waits on for their time-outs. Made by kernel32 when
+     * first needed; 0 where there is no kernel32 to make it, and the
+     * pseudo-handles are then waited on as they are.
+     */
+    const neverSignalled = ()=>(neverEvent ||=
+        (host.call?.('CreateEventW', [0, 1, 0, 0]) ?? 0) >>> 0);
+
+    /**
+     * A wait fired: its callback handed to the pool, with the object
+     * signalled or abandoned FALSE and the time out TRUE, as its
+     * TimerOrWaitFired says. One that fires once leaves its thread; any
+     * other waits again from now.
+     *
+     * @param {Wait} wait @param {number} result
+     */
+    const fireWait = (wait, result)=>{
+        dispatch({ entry: wait.callback,
+            args: wait.argsFor?.(result) ?? [wait.context, result === WAIT_TIMEOUT ? 1 : 0],
+            owner: wait.owner ?? wait, instanced: wait.instanced },
+        wait.inWaitThread ? waitLane : wait.lane ?? poolLane);
+        if (wait.once)
+        {
+            wait.spent = true;
+            leave(wait);
+        }
+        else
+        {
+            startTimeout(wait);
+        }
+    };
+
+    /**
+     * The wait answered: the wait whose object came fired, or every wait
+     * whose time ran out; routines queued to the thread, or a wait added or
+     * removed, end it with nothing to fire. The thread goes on while it has
+     * waits, and ends once it has none.
+     */
+    const waitDone = (/** @type {number[]} */ [id, answer])=>{
+        const home = /** @type {WaitThread} */ (waitThreads.get(id >>> 0));
+        const result = wholeAddress(answer);
+        const live = (/** @type {Wait | undefined} */ wait)=>
+            wait !== undefined && !wait.cancelled && wait.home === home;
+        if (result < home.asked.length || (result >= WAIT_ABANDONED
+            && result < WAIT_ABANDONED + home.asked.length))
+        {
+            const wait = home.asked[result & 0x7f]?.find(live);
+            if (wait)
+            {
+                fireWait(wait, result < WAIT_ABANDONED ? WAIT_OBJECT_0 : WAIT_ABANDONED);
+            }
+        }
+        else if (result === WAIT_TIMEOUT)
+        {
+            home.deadlines.takeDue(kernel.clock.virtualTime(), home.ranOut);
+        }
+        else if (result !== WAIT_IO_COMPLETION)
+        {
+            // An object closed under a wait: the wait for all of them fails.
+            // The waits whose objects are gone can never fire; they are said
+            // and dropped, and the others wait on.
+            for (const wait of home.asked.flat()
+                .filter(each=>live(each) && !eventOrObject(each.object)))
+            {
+                host.divergence?.('RegisterWaitForSingleObject',
+                    `the object 0x${wait.object.toString(16)} was closed under its wait,`
+                    + ' which will never fire');
+                leave(wait);
+            }
+        }
+        if (home.waits.length === 0)
+        {
+            home.leaving = true;
+            waitThreads.delete(home.id);
+            host.free?.(home.handles);
+            host.free?.(home.id);
             return 0;
         }
-        dispatch({ entry: wait.callback,
-            args: [wait.context, result === WAIT_TIMEOUT ? 1 : 0], owner: wait });
-        return wait.once ? 0 : 1;
+        return 1;
+    };
+
+    /** Whether a handle still names something a thread can wait on. @param {number} handle */
+    const eventOrObject = handle=>{
+        if (handle === CURRENT_PROCESS || handle === CURRENT_THREAD)
+        {
+            return true;
+        }
+        try
+        {
+            return kernel.handles.resolve(handle) !== null;
+        }
+        catch (e){
+            void e;
+            return false;
+        }
     };
 
     /**
-     * A wait with a thread of its own, its callback run on the pool's.
+     * A wait thread with room for one more wait, made when every one is
+     * full.
      *
-     * @param {number} object @param {number} callback @param {number} context
-     * @param {number} timeout @param {number} flags
-     * @returns {Wait | number}  the wait, or the error that refused it
+     * @returns {WaitThread | null}
      */
-    const registerWait = (object, callback, context, timeout, flags)=>{
-        if (!host.waitFor || (callback >>> 0) === 0)
+    const waitThreadWithRoom = ()=>{
+        for (const home of waitThreads.values())
         {
-            return ERROR_INVALID_PARAMETER;
+            if (!home.leaving && home.waits.length < MAXIMUM_WAIT_OBJECTS)
+            {
+                return home;
+            }
         }
         if (waitLoop === 0)
         {
@@ -672,74 +1082,195 @@ export function createThreadPool(host){
             const at = (host.allocateCode ?? host.allocate)(size);
             if (at === 0)
             {
-                return ERROR_NOT_ENOUGH_MEMORY;
+                return null;
             }
             host.writeMemory(at, waitLoopCode(step, done, at));
             waitLoop = at;
+        }
+        const id = host.allocate(4);
+        const handles = id === 0 ? 0 : host.allocate(MAXIMUM_WAIT_OBJECTS * 4);
+        if (handles === 0)
+        {
+            host.free?.(id);
+            return null;
+        }
+        const thread = makeThread({ entry: waitLoop, parameter: id,
+            name: 'registered waits', returnTo: host.threadReturn?.() });
+        if (!thread)
+        {
+            host.free?.(handles);
+            host.free?.(id);
+            return null;
+        }
+        host.threadBlock?.(thread);
+        /** @type {WaitThread} */
+        const home = { id, thread, handles, waits: [], asked: [], leaving: false,
+            deadlines: createDeadlines(MAXIMUM_WAIT_OBJECTS), byId: [],
+            ranOut: slot=>fireWait(/** @type {Wait} */ (home.byId[slot]), WAIT_TIMEOUT) };
+        waitThreads.set(id, home);
+        return home;
+    };
+
+    /**
+     * A wait on one of the wait threads, its callback run on the pool's.
+     *
+     * @param {number} object @param {number} callback @param {number} context
+     * @param {number} timeout @param {number} flags
+     * @returns {Wait | number}  the wait, or the error that refused it
+     */
+    const registerWait = (object, callback, context, timeout, flags)=>{
+        if (!host.waitFor || (callback >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
         }
         const handle = host.allocate(4);
         if (handle === 0)
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        /** @type {Wait} */
-        const wait = { handle, object: object >>> 0, callback: callback >>> 0,
-            context: context >>> 0, timeout: timeout >>> 0,
-            once: (flags & WT_EXECUTEONLYONCE) !== 0, cancelled: false, outstanding: 0,
-            waiters: [] };
-        wait.settled = ()=>{
-            if (wait.cancelled)
-            {
-                forget(wait);
-            }
-        };
-        const thread = makeThread({ entry: waitLoop, parameter: handle,
-            name: 'registered wait', returnTo: host.threadReturn?.() });
-        if (!thread)
+        const home = waitThreadWithRoom();
+        if (!home)
         {
             host.free?.(handle);
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        host.threadBlock?.(thread);
+        /** @type {Wait} */
+        const wait = { handle, object: object >>> 0, callback: callback >>> 0,
+            context: context >>> 0, timeout: timeout >>> 0, id: home.deadlines.claim(),
+            once: (flags & WT_EXECUTEONLYONCE) !== 0,
+            inWaitThread: (flags & WT_EXECUTEINWAITTHREAD) !== 0, cancelled: false,
+            spent: false, outstanding: 0, waiters: [] };
+        wait.settled = ()=>forget(wait);
+        wait.home = home;
+        home.waits.push(wait);
+        home.byId[wait.id] = wait;
+        startTimeout(wait);
         waits.set(handle, wait);
+        // Waiting already, the thread starts its wait again with this one in it.
+        kernel.alert(home.thread, WAIT_IO_COMPLETION);
         return wait;
     };
 
     /**
-     * No more callbacks: the wait's thread stops at its next answer.
-     * ponytail: one blocked on an object never signalled stays blocked; wake
-     * it once the kernel can withdraw a thread from a wait.
+     * No more callbacks: the wait leaves its thread (`detach`).
      *
      * @param {number} waitHandle @param {number} event
+     * @param {Answers} [answers]
      */
-    const unregisterWait = (waitHandle, event)=>{
+    const unregisterWait = (waitHandle, event, answers = boolAnswers)=>{
         const wait = waits.get(waitHandle >>> 0);
         if (!wait || wait.cancelled)
         {
-            return fail(ERROR_INVALID_HANDLE);
+            return answers.refused(ERROR_INVALID_HANDLE);
         }
         wait.cancelled = true;
+        detach(wait);
         const own = running()?.owner === wait ? 1 : 0;
-        const answer = complete(wait, event, own);
+        // Its own callback on the wait thread is the only one of it that can
+        // be running there, so nothing is left pending (Wine's kernel32
+        // test_RegisterWaitForSingleObject); one on the pool's is pending, as
+        // a timer's own callback deleting it is.
+        const answer = own === 1 && wait.inWaitThread && (event >>> 0) === 0 ? answers.done
+            : complete(wait, event, own, answers);
         forget(wait);
         return answer;
     };
 
+    /**
+     * A due time or time-out a thread pool timer or wait is handed, in
+     * milliseconds from now: a FILETIME below zero is relative, in 100 ns
+     * units; zero is now; above zero, a moment of the wall clock.
+     *
+     * @param {number} pointer
+     */
+    const dueIn = pointer=>{
+        if (!host.readMemory)
+        {
+            return 0;
+        }
+        const bytes = host.readMemory(pointer, 8);
+        const value = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
+        if (value <= 0n)
+        {
+            return Number(-value / 10000n);
+        }
+        const now = host.wallClock?.() ?? kernel.clock.wallClock?.() ?? 0;
+        return Math.max(0, Number(value / 10000n) - FILETIME_EPOCH_MS - now);
+    };
+
+    /**
+     * A registered wait stopped from outside its callbacks (a thread pool
+     * wait set again or closed): it leaves its thread and fires no more.
+     *
+     * @param {Wait} wait
+     */
+    const cancelWait = wait=>{
+        if (!wait.cancelled)
+        {
+            wait.cancelled = true;
+            detach(wait);
+            forget(wait);
+        }
+    };
+
+    /**
+     * A closed pool's idle threads end now; its busy ones once they are idle
+     * (`fetch`), the lane's `retiring` saying so.
+     *
+     * @param {Lane} lane
+     */
+    const retireIdle = lane=>{
+        for (const worker of lane.idle.splice(0))
+        {
+            retire(worker);
+            kernel.wake(worker.thread, 0);
+        }
+    };
+
+    /**
+     * The thread pool API (CreateThreadpoolWork and the rest, ntdll's Tp*
+     * calls) over these threads, lanes and waits: one mechanism under both.
+     */
+    const api = createThreadpoolApi({
+        kernel, host, poolLane, makeLane, spawn, dispatch, drop, uncount, unlive, gather,
+        complete, running,
+        instanceOf, registerWait, cancelWait, dueIn, retireIdle,
+    });
+
     return {
         diagnostics: ()=>({
             threads: workers.size,
-            idle: idle.length,
-            backlog: backlog.length,
+            idle: poolLane.idle.length + waitLane.idle.length,
+            backlog: poolLane.backlog.length + waitLane.backlog.length,
             ran,
             queues: queues.size,
             timers: timers.size,
             waits: waits.size,
             fired,
+            ...api.diagnostics(),
         }),
 
+        /**
+         * The deletions as ntdll answers them: a status, and a caller that
+         * waits for the callbacks woken with STATUS_SUCCESS; and the thread
+         * pool API's objects, which ntdll's Tp* calls are.
+         */
+        native: {
+            /** @param {number} wait @param {number} event */
+            deregisterWait: (wait, event)=>unregisterWait(wait, event, statusAnswers),
+            /** @param {number} timer @param {number} event */
+            deleteTimer: (timer, event)=>deleteTimer(timer, event, statusAnswers),
+            /** @param {number} queue @param {number} event */
+            deleteTimerQueue: (queue, event)=>deleteQueue(queue, event, statusAnswers),
+            objects: api.objects,
+        },
+
         table: {
+            ...api.table,
+
             /** HANDLE CreateTimerQueue(void) */
             CreateTimerQueue: {
+                returns: 'pointer',
                 argBytes: 0,
                 handler: ()=>{
                     const handle = host.allocate(4);
@@ -767,7 +1298,7 @@ export function createThreadPool(host){
                 argBytes: 28,
                 /** @param {number[]} args */
                 handler: ([out, queue, callback, parameter, due, period, flags])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
@@ -776,7 +1307,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(out >>> 0, dword(made.handle));
+                    host.writeMemory(wholeAddress(out), dword(made.handle));
                     return 1;
                 },
             },
@@ -869,14 +1400,16 @@ export function createThreadPool(host){
              *
              * The callback is handed its context and whether the time ran out,
              * on a pool thread, each time the object is signalled or the time
-             * runs out -- once only with WT_EXECUTEONLYONCE. The flags that
-             * choose a kind of thread choose nothing here.
+             * runs out -- once only with WT_EXECUTEONLYONCE. With
+             * WT_EXECUTEINWAITTHREAD it runs on the wait thread, which every
+             * such wait shares, so their callbacks run one after another. The
+             * other flags that choose a kind of thread choose nothing here.
              */
             RegisterWaitForSingleObject: {
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([out, object, callback, context, timeout, flags])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
@@ -885,7 +1418,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(out >>> 0, dword(made.handle));
+                    host.writeMemory(wholeAddress(out), dword(made.handle));
                     return 1;
                 },
             },
@@ -937,11 +1470,12 @@ export function createThreadPool(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([routine, context])=>{
-                    if ((routine >>> 0) === 0)
+                    if (wholeAddress(routine) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    dispatch({ entry: routine >>> 0, args: [context >>> 0], owner: workItems });
+                    dispatch({ entry: wholeAddress(routine), args: [wholeAddress(context)],
+                        owner: workItems });
                     return 1;
                 },
             },

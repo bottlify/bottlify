@@ -31,7 +31,7 @@
  * from the calling thread's own stack rather than from this handler's.
  */
 
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from '../ole32/objref.js';
 import {
     NDR_LOCAL_DATA_REPRESENTATION, PROXY_PHASE, RPC_MESSAGE, RPC_STATUS, RpcException,
@@ -40,6 +40,7 @@ import {
 import {
     STUB_VTBL, factoryClass, readProxyFiles, registerProxyFiles, unregisterProxyFiles,
 } from './proxyfile.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -101,6 +102,7 @@ const STUBLESS_ENTRY = 0xffffffff;
 
 /**
  * @typedef {Object} RuntimeHost
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate  Task memory, as CoTaskMemAlloc.
@@ -130,14 +132,14 @@ export function createRuntime(host){
 
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} at @param {number} value */
-    const w32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(
+    const w32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
     /** @param {number} at */
-    const guidAt = at=>formatGuid(host.readMemory(at >>> 0, 16));
+    const guidAt = at=>formatGuid(host.readMemory(wholeAddress(at), 16));
 
     /**
      * A method of a guest object, whoever implements it.
@@ -185,8 +187,7 @@ export function createRuntime(host){
     // --- the format-string engine, over this process ---------------------------
 
     const ndr = createNdr({
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        guest: host.guest,
         // Through the stub descriptor's routines, which are the DLL's -- the
         // NdrOleAllocate it imported, as a rule, but not necessarily.
         allocate: (call, bytes)=>{
@@ -232,6 +233,7 @@ export function createRuntime(host){
             return made.pointer;
         },
         releaseInterface: (call, pointer)=>callSlot(pointer, SLOT.RELEASE, [], call.thread),
+        callRoutine: (call, routine, args)=>host.call(routine, args, call.thread),
         interfaceBytes: OBJREF_BYTES,
         divergence: report,
     });
@@ -666,12 +668,13 @@ export function createRuntime(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([proxy, rpc, message, descriptor, procedure])=>{
-                host.writeMemory(rpc >>> 0, new Uint8Array(RPC_MESSAGE.SIZE));
+                host.writeMemory(wholeAddress(rpc), new Uint8Array(RPC_MESSAGE.SIZE));
                 w32(rpc + RPC_MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
                 w32(rpc + RPC_MESSAGE.PROC_NUM, procedure);
                 w32(rpc + RPC_MESSAGE.INTERFACE_INFORMATION,
                     u32(descriptor + STUB_DESC.INTERFACE_INFORMATION));
-                initialize(message >>> 0, rpc >>> 0, descriptor >>> 0, true);
+                initialize(wholeAddress(message), wholeAddress(rpc), wholeAddress(descriptor),
+                    true);
                 w32(message + STUB_MESSAGE.STUB_PHASE, PROXY_PHASE.CALCSIZE);
                 const channel = u32(proxy + PROXY.CHANNEL);
                 w32(message + STUB_MESSAGE.CHANNEL, channel);
@@ -699,7 +702,7 @@ export function createRuntime(host){
                     {
                         throw new RpcException(hr >>> 0);
                     }
-                    buffered.add(message >>> 0);
+                    buffered.add(wholeAddress(message));
                     takeBuffer(message);
                     w32(message + STUB_MESSAGE.STUB_PHASE, PROXY_PHASE.MARSHAL);
                     return 0;
@@ -748,7 +751,7 @@ export function createRuntime(host){
             handler: ([proxy, message])=>{
                 // Called from every proxy's RpcFinally, whether or not a
                 // buffer was ever taken.
-                if (!buffered.delete(message >>> 0))
+                if (!buffered.delete(wholeAddress(message)))
                 {
                     return 0;
                 }
@@ -792,8 +795,9 @@ export function createRuntime(host){
             handler: ([message, format, argument])=>{
                 const thread = host.callerThread();
                 return raising(thread, async()=>{
-                    await ndr.clearOut({ message: message >>> 0, thread }, format >>> 0,
-                        argument >>> 0);
+                    await ndr.clearOut({ message: wholeAddress(message), thread },
+                        wholeAddress(format),
+                        wholeAddress(argument));
                     return 0;
                 });
             },
@@ -823,10 +827,12 @@ export function createRuntime(host){
          *     IRpcChannelBuffer *pRpcChannelBuffer)
          */
         NdrStubInitialize: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor, channel])=>{
-                initialize(message >>> 0, rpc >>> 0, descriptor >>> 0, false);
+                initialize(wholeAddress(message), wholeAddress(rpc), wholeAddress(descriptor),
+                    false);
                 w32(message + STUB_MESSAGE.REUSE_BUFFER, 1);
                 w32(message + STUB_MESSAGE.CHANNEL, channel);
                 w32(message + STUB_MESSAGE.STUB_PHASE, STUB_UNMARSHAL);
@@ -868,7 +874,9 @@ export function createRuntime(host){
 
         /** void *NdrOleAllocate(size_t Size) and void NdrOleFree(void *NodeToFree): task memory. */
         NdrOleAllocate: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(size >>> 0),
         },
@@ -992,7 +1000,7 @@ export function createRuntime(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([stub, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -1025,13 +1033,13 @@ export function createRuntime(host){
         NdrCStdStubBuffer_Release: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([stub, factory])=>releaseStub(stub >>> 0, factory >>> 0,
+            handler: ([stub, factory])=>releaseStub(wholeAddress(stub), wholeAddress(factory),
                 host.callerThread()),
         },
         CStdStubBuffer_Release: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([stub])=>releaseStub(stub >>> 0, u32(stub + STUB.FACTORY),
+            handler: ([stub])=>releaseStub(wholeAddress(stub), u32(stub + STUB.FACTORY),
                 host.callerThread()),
         },
         /**
@@ -1044,7 +1052,7 @@ export function createRuntime(host){
         NdrCStdStubBuffer2_Release: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([stub, factory])=>releaseStub(stub >>> 0, factory >>> 0,
+            handler: ([stub, factory])=>releaseStub(wholeAddress(stub), wholeAddress(factory),
                 host.callerThread()),
         },
         /** HRESULT CStdStubBuffer_Connect(IRpcStubBuffer *This, IUnknown *pUnkServer) */
@@ -1053,7 +1061,7 @@ export function createRuntime(host){
             /** @param {number[]} args */
             handler: ([stub, server])=>{
                 const thread = host.callerThread();
-                if ((server >>> 0) === 0)
+                if (wholeAddress(server) === 0)
                 {
                     return E_UNEXPECTED;
                 }
@@ -1122,6 +1130,7 @@ export function createRuntime(host){
         },
         /** IRpcStubBuffer *CStdStubBuffer_IsIIDSupported(IRpcStubBuffer *This, REFIID riid) */
         CStdStubBuffer_IsIIDSupported: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([stub, riid])=>{
@@ -1145,7 +1154,7 @@ export function createRuntime(host){
             /** @param {number[]} args */
             handler: ([stub, out])=>{
                 const server = u32(stub + STUB.SERVER);
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     w32(out, server);
                 }
@@ -1172,13 +1181,13 @@ export function createRuntime(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([rclsid, riid, out, list, pclsid, factory])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
                 w32(out, 0);
-                const interfaces = readProxyFiles(host, list >>> 0);
-                const clsid = factoryClass(host, interfaces, pclsid >>> 0);
+                const interfaces = readProxyFiles(host, wholeAddress(list));
+                const clsid = factoryClass(host, interfaces, wholeAddress(pclsid));
                 const asked = guidAt(rclsid);
                 if (clsid === null
                     || (asked !== clsid && !interfaces.some(entry=>entry.iid === asked)))
@@ -1225,9 +1234,9 @@ export function createRuntime(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([module, list, pclsid])=>{
-                const interfaces = readProxyFiles(host, list >>> 0);
-                const clsid = factoryClass(host, interfaces, pclsid >>> 0);
-                const path = host.modulePath?.(module >>> 0) ?? null;
+                const interfaces = readProxyFiles(host, wholeAddress(list));
+                const clsid = factoryClass(host, interfaces, wholeAddress(pclsid));
+                const path = host.modulePath?.(wholeAddress(module)) ?? null;
                 if (!host.hive || clsid === null || path === null)
                 {
                     report('NdrDllRegisterProxy: nothing to register, or nowhere to register it');
@@ -1241,8 +1250,8 @@ export function createRuntime(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, list, pclsid])=>{
-                const interfaces = readProxyFiles(host, list >>> 0);
-                const clsid = factoryClass(host, interfaces, pclsid >>> 0);
+                const interfaces = readProxyFiles(host, wholeAddress(list));
+                const clsid = factoryClass(host, interfaces, wholeAddress(pclsid));
                 if (!host.hive || clsid === null)
                 {
                     return E_FAIL;

@@ -23,7 +23,7 @@
 export const isEmptyRect = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
 
 /** @param {Rect} a @param {Rect} b @returns {Rect} */
-export const intersectRect = (a, b)=>({
+const intersectRect = (a, b)=>({
     left: Math.max(a.left, b.left),
     top: Math.max(a.top, b.top),
     right: Math.min(a.right, b.right),
@@ -37,7 +37,7 @@ export const intersectRect = (a, b)=>({
  * @param {Rect} rect @param {Rect} hole
  * @returns {Rect[]}
  */
-export const subtractRect = (rect, hole)=>{
+const subtractRect = (rect, hole)=>{
     const cut = intersectRect(rect, hole);
     if (isEmptyRect(cut))
     {

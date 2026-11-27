@@ -38,6 +38,9 @@ import {
     after, pointOf,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { notifyWindow } from './notify.js';
+import { stableSort } from './stable-sort.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -58,8 +61,8 @@ export const TVM_INSERTITEMA = TVM_FIRST + 0;
 export const TVM_DELETEITEM = TVM_FIRST + 1;
 export const TVM_EXPAND = TVM_FIRST + 2;
 export const TVM_GETCOUNT = TVM_FIRST + 5;
-export const TVM_GETINDENT = TVM_FIRST + 6;
-export const TVM_SETINDENT = TVM_FIRST + 7;
+const TVM_GETINDENT = TVM_FIRST + 6;
+const TVM_SETINDENT = TVM_FIRST + 7;
 export const TVM_GETIMAGELIST = TVM_FIRST + 8;
 export const TVM_SETIMAGELIST = TVM_FIRST + 9;
 export const TVM_GETNEXTITEM = TVM_FIRST + 10;
@@ -68,24 +71,40 @@ export const TVM_GETITEMA = TVM_FIRST + 12;
 export const TVM_SETITEMA = TVM_FIRST + 13;
 export const TVM_GETVISIBLECOUNT = TVM_FIRST + 16;
 export const TVM_HITTEST = TVM_FIRST + 17;
+export const TVM_SORTCHILDREN = TVM_FIRST + 19;
 export const TVM_ENSUREVISIBLE = TVM_FIRST + 20;
+const TVM_SORTCHILDRENCB = TVM_FIRST + 21;
+export const TVM_SETBKCOLOR = TVM_FIRST + 29;
+export const TVM_SETTEXTCOLOR = TVM_FIRST + 30;
+export const TVM_GETBKCOLOR = TVM_FIRST + 31;
+export const TVM_GETTEXTCOLOR = TVM_FIRST + 32;
+export const TVM_SETSCROLLTIME = TVM_FIRST + 33;
+export const TVM_GETSCROLLTIME = TVM_FIRST + 34;
+const TVM_SETINSERTMARKCOLOR = TVM_FIRST + 37;
+const TVM_GETINSERTMARKCOLOR = TVM_FIRST + 38;
+export const TVM_GETITEMSTATE = TVM_FIRST + 39;
+const TVM_SETLINECOLOR = TVM_FIRST + 40;
+export const TVM_GETLINECOLOR = TVM_FIRST + 41;
+/** A colour the tree takes from the system: -1 for text and background. */
+const SYSTEM_COLOR = 0xffffffff;
+const CLR_DEFAULT = 0xff000000;
 
 /** TVITEM masks. */
 export const TVIF_TEXT = 0x0001;
-export const TVIF_IMAGE = 0x0002;
+const TVIF_IMAGE = 0x0002;
 export const TVIF_PARAM = 0x0004;
 export const TVIF_STATE = 0x0008;
-export const TVIF_SELECTEDIMAGE = 0x0020;
+const TVIF_SELECTEDIMAGE = 0x0020;
 export const TVIF_CHILDREN = 0x0040;
 
 /** TVITEM state bits. */
 export const TVIS_SELECTED = 0x0002;
 export const TVIS_EXPANDED = 0x0020;
+const TVIS_EXPANDEDONCE = 0x0040;
 export const TVIS_STATEIMAGEMASK = 0xf000;
 
-/** "Ask the parent" sentinels. */
+/** The "ask the parent" sentinel for a text. */
 export const LPSTR_TEXTCALLBACK = -1;
-const I_IMAGECALLBACK = -1;
 
 /** Insert-after positions. */
 const TVI_ROOT = 0xffff0000;
@@ -123,6 +142,13 @@ export const NM_DBLCLK = -3;
 const TVN_FIRST = -400;
 export const TVN_SELCHANGINGA = TVN_FIRST - 1;
 export const TVN_SELCHANGEDA = TVN_FIRST - 2;
+/** Version 6 only, and only the W spelling is ever sent (Wine's treeview test). */
+export const TVN_ITEMCHANGINGW = TVN_FIRST - 17;
+export const TVN_ITEMCHANGEDW = TVN_FIRST - 19;
+/** NMTVITEMCHANGE: the header, then what changed of which item. */
+const NMTVITEMCHANGE = Object.freeze({
+    uChanged: 12, hItem: 16, uStateNew: 20, uStateOld: 24, lParam: 28, SIZE: 32,
+});
 export const TVN_GETDISPINFOA = TVN_FIRST - 3;
 export const TVN_ITEMEXPANDINGA = TVN_FIRST - 5;
 export const TVN_ITEMEXPANDEDA = TVN_FIRST - 6;
@@ -136,7 +162,7 @@ export const TVITEM = Object.freeze({
 export const TVINSERTSTRUCT = Object.freeze({
     hParent: 0, hInsertAfter: 4, item: 8, SIZE: 48,
 });
-export const NMHDR = Object.freeze({ hwndFrom: 0, idFrom: 4, code: 8, SIZE: 12 });
+const NMHDR = Object.freeze({ hwndFrom: 0, idFrom: 4, code: 8, SIZE: 12 });
 const NMTVDISPINFO = Object.freeze({ hdr: 0, item: 12, SIZE: 52 });
 // NMTREEVIEW carries an `action` word between the header and the two items;
 // leaving it out puts both items four bytes early, and a parent reading a
@@ -221,6 +247,10 @@ export function createTreeViewProcedure(host, tk){
         held.next ??= 1;
         held.caret ??= 0;
         held.top ??= 0;
+        // The colours a program sets; -1 (and the lines' CLR_DEFAULT) is the
+        // system's (Wine's treeview test_get_set_*color).
+        held.colors ??= { bk: SYSTEM_COLOR, text: SYSTEM_COLOR, line: CLR_DEFAULT, insertMark: 0 };
+        held.scrollTime ??= 0;
         held.indent ??= DEFAULT_INDENT;
         held.lists ??= { normal: 0, state: 0 };
         return held;
@@ -269,10 +299,10 @@ export function createTreeViewProcedure(host, tk){
         : node(record, item.parent)?.children ?? []);
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, u32(value));
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @returns {number} */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @returns {number} signed */
@@ -348,7 +378,8 @@ export function createTreeViewProcedure(host, tk){
     const writeItem = (bytes, at, item, textPointer, cchTextMax)=>{
         const view = new DataView(bytes.buffer);
         view.setUint32(at + TVITEM.mask,
-            TVIF_STATE | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_CHILDREN, true);
+            TVIF_HANDLE | TVIF_STATE | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_CHILDREN,
+            true);
         view.setUint32(at + TVITEM.hItem, item.handle >>> 0, true);
         view.setUint32(at + TVITEM.state, item.state >>> 0, true);
         view.setUint32(at + TVITEM.stateMask, TVIS_STATEIMAGEMASK | TVIS_SELECTED, true);
@@ -374,7 +405,7 @@ export function createTreeViewProcedure(host, tk){
      * @returns {number | Promise<number>}
      */
     const notify = (record, code, bytes, thread)=>{
-        if (!record.parent || !host.allocate)
+        if (!notifyWindow(record) || !host.allocate)
         {
             return 0;
         }
@@ -395,7 +426,8 @@ export function createTreeViewProcedure(host, tk){
             return 0;
         }
         host.writeMemory(address, bytes);
-        return host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address, thread);
+        return host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff, address,
+            thread);
     };
 
     /**
@@ -410,7 +442,7 @@ export function createTreeViewProcedure(host, tk){
      */
     const askDispInfo = (record, item, thread)=>{
         const BUFFER = 64;
-        if (!record.parent || !host.allocate)
+        if (!notifyWindow(record) || !host.allocate)
         {
             return Promise.resolve(item.text);
         }
@@ -426,7 +458,7 @@ export function createTreeViewProcedure(host, tk){
             (address + NMTVDISPINFO.SIZE) | 0, true);
         header(bytes, record, TVN_GETDISPINFOA);
         host.writeMemory(address, bytes);
-        return Promise.resolve(host.send(record.parent, WM_NOTIFY, record.id & 0xffff,
+        return Promise.resolve(host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff,
             address, thread)).then(()=>{
             const pointer = readI32(address + NMTVDISPINFO.item + TVITEM.pszText) >>> 0;
             const text = pointer === 0 ? '' : host.readCString(pointer, BUFFER);
@@ -452,8 +484,10 @@ export function createTreeViewProcedure(host, tk){
             text: '',
             textCallback: false,
             param: 0,
-            image: I_IMAGECALLBACK,
-            selectedImage: I_IMAGECALLBACK,
+            // Image 0 until one is named, not I_IMAGECALLBACK (Wine's
+            // treeview test_fillroot).
+            image: 0,
+            selectedImage: 0,
             state: 0,
             childrenCount: 0,
             expanded: false,
@@ -468,7 +502,7 @@ export function createTreeViewProcedure(host, tk){
             }
             else if (pointer !== 0)
             {
-                item.text = host.readCString(pointer >>> 0, 0x10000);
+                item.text = host.readCString(wholeAddress(pointer), 0x10000);
                 item.textCallback = false;
             }
         }
@@ -519,7 +553,7 @@ export function createTreeViewProcedure(host, tk){
         {
             const at = siblings.findIndex(/** @param {number} each */ each=>{
                 const other = held.nodes.get(each);
-                return other ? other.text.toLowerCase() > item.text.toLowerCase() : false;
+                return other ? textOrder(other.text, item.text) > 0 : false;
             });
             siblings.splice(at === -1 ? siblings.length : at, 0, item.handle);
         }
@@ -541,6 +575,34 @@ export function createTreeViewProcedure(host, tk){
                 parentNode.childrenCount = Math.max(1, parentNode.childrenCount);
             }
         }
+    };
+
+    /**
+     * The order of two items' texts the tree sorts by, TVI_SORT and
+     * TVM_SORTCHILDREN alike: without case.
+     *
+     * @param {string} a @param {string} b
+     */
+    const textOrder = (a, b)=>{
+        const left = a.toLowerCase();
+        const right = b.toLowerCase();
+        return left < right ? -1 : left > right ? 1 : 0;
+    };
+
+    /**
+     * Puts a list of siblings in the order a comparison of their items
+     * answers, in place; TRUE once done.
+     *
+     * @param {any} record @param {number[]} siblings
+     * @param {(a: TreeNode, b: TreeNode) => number | Promise<number>} order
+     */
+    const sortChildren = (record, siblings, order)=>{
+        const items = siblings.map(handle=>/** @type {TreeNode} */ (node(record, handle)));
+        return stableSort(items, order).then(sorted=>{
+            siblings.splice(0, siblings.length, ...sorted.map(item=>item.handle));
+            host.invalidate(record);
+            return 1;
+        });
     };
 
     /** @param {any} record @param {number} handle  Removes an item and its subtree. */
@@ -636,10 +698,12 @@ export function createTreeViewProcedure(host, tk){
      * @param {any} record @param {number} handle @param {unknown} [thread]
      */
     const select = (record, handle, thread)=>{
+        // TRUE once the item is the caret, already or now; FALSE when the
+        // parent refused (Wine's treeview test_expandnotify, TVM_SELECTITEM).
         const held = state(record);
         if (held.caret === (handle >>> 0))
         {
-            return 0;
+            return 1;
         }
         const from = node(record, held.caret);
         const to = node(record, handle);
@@ -660,18 +724,51 @@ export function createTreeViewProcedure(host, tk){
             {
                 return 0;
             }
-            if (from)
-            {
-                from.state &= ~TVIS_SELECTED;
-            }
             held.caret = handle >>> 0;
-            if (to)
+            return after(selectState(record, from, false, thread),
+                ()=>after(selectState(record, to, true, thread), ()=>{
+                    host.invalidate(record);
+                    fill();
+                    return after(notify(record, TVN_SELCHANGEDA, bytes, thread), ()=>1);
+                }));
+        });
+    };
+
+    /**
+     * An item's TVIS_SELECTED set or cleared. Version 6 asks the parent first
+     * with TVN_ITEMCHANGINGW, which can keep the state as it is, and tells it
+     * after with TVN_ITEMCHANGEDW; the caret moves either way (Wine's treeview
+     * test_select_item, hBlockChange).
+     *
+     * @param {any} record @param {TreeNode | null | undefined} item @param {boolean} on
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const selectState = (record, item, on, thread)=>{
+        if (!item)
+        {
+            return 0;
+        }
+        const next = on ? item.state | TVIS_SELECTED : item.state & ~TVIS_SELECTED;
+        if ((record.controlsVersion ?? 5) < 6)
+        {
+            item.state = next;
+            return 0;
+        }
+        const bytes = new Uint8Array(NMTVITEMCHANGE.SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(NMTVITEMCHANGE.uChanged, TVIF_STATE, true);
+        view.setUint32(NMTVITEMCHANGE.hItem, item.handle >>> 0, true);
+        view.setUint32(NMTVITEMCHANGE.uStateNew, next >>> 0, true);
+        view.setUint32(NMTVITEMCHANGE.uStateOld, item.state >>> 0, true);
+        view.setUint32(NMTVITEMCHANGE.lParam, item.param >>> 0, true);
+        return after(notify(record, TVN_ITEMCHANGINGW, bytes, thread), kept=>{
+            if ((kept | 0) !== 0)
             {
-                to.state |= TVIS_SELECTED;
+                return 0;
             }
-            host.invalidate(record);
-            fill();
-            return notify(record, TVN_SELCHANGEDA, bytes, thread);
+            item.state = next;
+            return notify(record, TVN_ITEMCHANGEDW, bytes, thread);
         });
     };
 
@@ -695,9 +792,13 @@ export function createTreeViewProcedure(host, tk){
             {
                 return 0;
             }
+            // An item once opened keeps TVIS_EXPANDEDONCE; the parent is told
+            // the state the item has now.
             item.expanded = open;
-            item.state = open ? item.state | TVIS_EXPANDED : item.state & ~TVIS_EXPANDED;
+            item.state = open ? item.state | TVIS_EXPANDED | TVIS_EXPANDEDONCE
+                : item.state & ~TVIS_EXPANDED;
             host.invalidate(record);
+            writeItem(bytes, NMTREEVIEW.itemNew, item, 0, 0);
             return notify(record, TVN_ITEMEXPANDEDA, bytes, thread);
         });
     };
@@ -781,7 +882,10 @@ export function createTreeViewProcedure(host, tk){
     const paintTree = (record, hdc, rect)=>{
         const draw = /** @type {any} */ (host.draw);
         const held = state(record);
-        draw.fill(hdc, rect, tk.color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
+        /** A colour of the program's, or null for the system's. @param {number} color */
+        const own = color=>(color === SYSTEM_COLOR || color === CLR_DEFAULT ? null : color);
+        draw.fill(hdc, rect, disabled(record) ? tk.color(COLOR_3DFACE)
+            : own(held.colors.bk) ?? tk.color(COLOR_WINDOW));
         const height = measureHeight(record);
         const listed = rows(record);
         const fit = fitting(record);
@@ -790,7 +894,8 @@ export function createTreeViewProcedure(host, tk){
         const overflow = listed.length > fit;
         const area = overflow ? { ...rect, right: rect.right - SCROLLBAR } : rect;
         const focused = host.focus() === record.hwnd;
-        const ink = tk.color(disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
+        const ink = disabled(record) ? tk.color(COLOR_GRAYTEXT)
+            : own(held.colors.text) ?? tk.color(COLOR_WINDOWTEXT);
         const lines = (record.style & TVS_HASLINES) !== 0;
         const linesAtRoot = (record.style & TVS_LINESATROOT) !== 0;
         const buttons = (record.style & TVS_HASBUTTONS) !== 0;
@@ -1022,8 +1127,49 @@ export function createTreeViewProcedure(host, tk){
                 host.invalidate(record);
                 return item.handle;
             }
+            case TVM_SORTCHILDREN: {
+                // An item's children by their text, without case; equal ones
+                // keep their order. No item, or TVI_ROOT, sorts nothing and is
+                // answered TRUE when the tree has items; an item without
+                // children FALSE (Wine's treeview.c test_TVM_SORTCHILDREN,
+                // Windows' answers). The children's own children stay as they
+                // are, whatever wParam.
+                const at = message.lParam >>> 0;
+                if (at === 0 || at === TVI_ROOT)
+                {
+                    return state(record).roots.length > 0 ? 1 : 0;
+                }
+                const item = node(record, at);
+                if (!item || item.children.length === 0)
+                {
+                    return 0;
+                }
+                return sortChildren(record, item.children, (a, b)=>textOrder(a.text, b.text));
+            }
+            case TVM_SORTCHILDRENCB: {
+                // TVSORTCB: the parent, the program's comparison and its word;
+                // the comparison is handed the two items' lParams.
+                const at = message.lParam >>> 0;
+                const compare = at === 0 ? 0 : readU32(at + 4);
+                if (compare === 0 || !host.call)
+                {
+                    return 0;
+                }
+                const parent = readU32(at);
+                const siblings = parent === 0 || parent === TVI_ROOT ? state(record).roots
+                    : node(record, parent)?.children;
+                if (!siblings || siblings.length === 0)
+                {
+                    return 0;
+                }
+                const call = host.call;
+                const word = readU32(at + 8);
+                return sortChildren(record, siblings, (a, b)=>call(compare, [a.param, b.param,
+                    word], thread));
+            }
             case TVM_DELETEITEM: {
-                if ((message.lParam >>> 0) === TVI_ROOT)
+                // TVI_ROOT, or no item at all, is every item (MSDN TVM_DELETEITEM).
+                if ((message.lParam >>> 0) === TVI_ROOT || (message.lParam >>> 0) === 0)
                 {
                     return deleteAll(record, thread);
                 }
@@ -1217,6 +1363,37 @@ export function createTreeViewProcedure(host, tk){
                 writeU32(at + TVHT.hItem, hit.item.handle);
                 writeU32(at + TVHT.flags, flags);
                 return hit.item.handle;
+            }
+            case TVM_SETBKCOLOR:
+            case TVM_SETTEXTCOLOR:
+            case TVM_SETLINECOLOR:
+            case TVM_SETINSERTMARKCOLOR: {
+                const which = message.message === TVM_SETBKCOLOR ? 'bk'
+                    : message.message === TVM_SETTEXTCOLOR ? 'text'
+                        : message.message === TVM_SETLINECOLOR ? 'line' : 'insertMark';
+                const previous = held.colors[which];
+                held.colors[which] = message.lParam >>> 0;
+                host.invalidate(record);
+                return previous;
+            }
+            case TVM_GETBKCOLOR:
+                return held.colors.bk;
+            case TVM_GETTEXTCOLOR:
+                return held.colors.text;
+            case TVM_GETLINECOLOR:
+                return held.colors.line;
+            case TVM_GETINSERTMARKCOLOR:
+                return held.colors.insertMark;
+            case TVM_SETSCROLLTIME: {
+                const previous = held.scrollTime;
+                held.scrollTime = message.wParam >>> 0;
+                return previous;
+            }
+            case TVM_GETSCROLLTIME:
+                return held.scrollTime;
+            case TVM_GETITEMSTATE: {
+                const item = node(record, message.wParam);
+                return item ? item.state & message.lParam : 0;
             }
             case TVM_ENSUREVISIBLE: {
                 const item = node(record, message.lParam);

@@ -139,3 +139,42 @@ test('the table defaults to the capacity the module reserves for it', ()=>{
     }
     assert.throws(()=>table.register('one too many', 0), /stub table is full/);
 });
+
+test('a stub\'s bytes are given by its address, except where they cannot run elsewhere', ()=>{
+    const base = 0x100000;
+    const table = createThunkTable({ base, port: PORT });
+    const close = table.register('ntdll.dll!NtClose', 4);
+    const watched = table.register('KERNEL32.dll!Sleep', 4, { forwardTo: 0x401000 });
+    assert.deepEqual(table.stubAt(close.address), table.stub(close.id),
+        'the stub, which carries its id and pops its own arguments');
+    assert.equal(table.stubAt(watched.address), null, 'a forwarding stub\'s jump is relative');
+    assert.equal(table.stubAt(base), null, 'the park loop is no stub');
+    assert.equal(table.stubAt(close.address + 1), null, 'inside a slot is no stub');
+    assert.equal(table.stubAt(base + 100 * STUB_SIZE), null, 'nor is a slot not yet taken');
+});
+
+test('a table following another\'s layout gives each name the slot it took there', ()=>{
+    const base = 0x100000;
+    const first = createThunkTable({ base, port: PORT });
+    for (const name of ['<shared>', 'A!one', 'A!two', 'B!one', 'B!one'])
+    {
+        first.register(name, 0);
+    }
+    const layout = first.laidOut();
+    assert.equal(layout.end, 6);
+
+    const second = createThunkTable({ base, port: PORT });
+    const early = second.register('<before>', 0);
+    second.follow(layout);
+    // B first, then the shared one: each where the first table put it.
+    assert.equal(second.register('B!one', 0).id, 4);
+    assert.equal(second.register('B!one', 0).id, 5);
+    assert.equal(early.id, 1);
+    assert.equal(second.register('<shared>', 0).id, 6,
+        'its slot was taken here first: past the layout');
+    assert.equal(second.register('A!two', 0).id, 3);
+    assert.equal(second.register('B!one', 0).id, 7, 'a third take goes past the layout');
+    assert.equal(second.stubAt(base + 2 * STUB_SIZE), null,
+        'a slot nothing took here holds no stub');
+    assert.equal(second.image().length, 8 * STUB_SIZE);
+});

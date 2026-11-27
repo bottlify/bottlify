@@ -12,10 +12,11 @@ import {
 } from './threads.js';
 import { createSwitcher } from './switch.js';
 import { createSyncObjects } from './sync.js';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
- * be tested without an emulator. The switch primitive is the real one.
+ * be tested without an engine. The switch primitive is the real one.
  *
  * @param {number} [perSlice]
  */
@@ -95,6 +96,32 @@ test('a slice that calls the host in a loop moves the guest clock as it goes', (
     assert.equal(refreshed, 10, 'once every 64 crossings, inside the slice');
     trap.hook?.(false);
     assert.equal(refreshed, 10, 'an ask from another executor is no crossing of this thread');
+});
+
+test('another executor\'s thread calling the host in a loop moves the guest clock as it goes', ()=>{
+    // Its asks keep this executor answering: no turn here ends, and the clock
+    // moved only between turns stood still for the thread's whole slice.
+    const { cpu } = twoExecutors();
+    let refreshed = 0;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        refreshClock: ()=>refreshed++ });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    const [remote] = cpu.executors();
+    let calls = 0;
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        for (; calls < 640; calls++)
+        {
+            around(()=>{});
+        }
+        return null;
+    });
+    for (let turn = 0; turn < 4; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(calls, 640, 'the other executor\'s crossings were answered');
+    assert.equal(refreshed, 10, 'once every 64 of them');
 });
 
 test('a created thread is ready but does not take the CPU', ()=>{
@@ -197,6 +224,39 @@ test('a resumed thread reports what it waited for and what it was answered', ()=
     a.waitResult = 1;
     sched.runOnce();
     assert.deepEqual(resumed, [['a', 'any of event "#403c", event "#4040"', 1]]);
+});
+
+test('what a parked call owes once its wait ends is done as the thread resumes, once', ()=>{
+    // GetOverlappedResult's count: only the end of the wait knows it.
+    const cpu = { ...fakeCpu(), resumeContextAt: ()=>{} };
+    /** @type {number[]} */
+    const resumes = [];
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        onResume: (thread, reason, value)=>resumes.push(value) });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    let owed = 0;
+    /** @type {number[]} */
+    const answered = [];
+    a.whenResumed = (/** @type {number} */ answer)=>{
+        owed++;
+        answered.push(answer);
+        return 7;
+    };
+    sched.block(a, 'an event');
+    sched.runOnce();
+    assert.equal(owed, 0, 'not while it waits');
+    sched.wake(a);
+    a.parkedReturn = 0x401000;
+    a.waitResult = 1;
+    sched.runOnce();
+    assert.equal(owed, 1, 'as it resumes');
+    assert.deepEqual(answered, [1], 'given what the wait answered');
+    assert.equal(resumes.at(-1), 7, 'and its answer is the call\'s');
+    a.parkedReturn = 0x401000;
+    sched.block(a, 'an event');
+    sched.wake(a);
+    sched.runOnce();
+    assert.equal(owed, 1, 'and not at the next park');
 });
 
 test('waking a thread that is not blocked changes nothing', ()=>{
@@ -420,10 +480,10 @@ test('a thread a timed wait wakes, pinned to an executor still opening, is waite
     assert.match(sched.diagnostics().byThread, /^main 0 .* a2$/, 'the report names its processors');
 });
 
-test('a slice the emulator ran past is counted, not assumed away', ()=>{
+test('a slice the engine ran past is counted, not assumed away', ()=>{
     // The quantum is how long one thread may hold the machine before anything
     // else -- another thread, a message, a frame -- gets a look, and nothing
-    // checked that it was honoured. An emulator that runs four times the
+    // checked that it was honoured. An engine that runs four times the
     // instructions asked for holds the machine four times as long and says
     // nothing about it, and the only symptom is a frame rate with no
     // explanation. So this cpu ignores the slice, the way one really can.
@@ -588,70 +648,6 @@ test('a deadline set later but sooner is the first to expire, and none expires e
     sched.runOnce();
     assert.notEqual(again.state, ThreadState.BLOCKED, 'expired at its own deadline');
     assert.equal(sched.diagnostics().expiries, 2);
-});
-
-test('a higher-priority thread whose wait comes due mid-slice preempts at the next host call',
-    ()=>{
-        // A sound mixer at TIME_CRITICAL wakes every 10 ms; the thread on the
-        // processor ran a slice of 40-120 ms of host calls, and the mixer
-        // waited for the slice to end -- past the 65 ms it keeps written,
-        // heard as a crackle. Windows preempts at once.
-        let clock = 0;
-        /** @type {boolean[]} */
-        const asked = [];
-        const cpu = fakeCpu();
-        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
-            now: ()=>clock });
-        let host = 0;
-        cpu.runSlice = max=>{
-            asked.push(sched.preemptionDue(()=>{
-                clock = host;
-            }));
-            host = 10;
-            asked.push(sched.preemptionDue(()=>{
-                clock = host;
-            }));
-            return max;
-        };
-        const main = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
-        const mixer = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0,
-            name: 'mixer' });
-        mixer.priority = 15;
-        sched.block(mixer, 'its period', { deadline: 10 });
-
-        assert.equal(sched.runOnce().ran, main);
-        assert.deepEqual(asked, [false, true], 'due once its wait came due during the slice');
-        assert.equal(sched.runOnce().ran, mixer, 'and it has the next turn');
-
-        assert.equal(clock, 10, 'the guest clock was brought up to the host to see it');
-
-        asked.length = 0;
-        mixer.priority = -15;
-        sched.block(mixer, 'its period', { deadline: 20 });
-        host = 30;
-        sched.runOnce();
-        assert.deepEqual(asked, [false, false], 'a lower one waits for the slice to end');
-        assert.equal(clock, 10, 'and the clock is left to the turn');
-    });
-
-test('a higher-priority thread ready from the start of a slice does not preempt it', ()=>{
-    // Always ready and always higher, it would take the processor back at
-    // every host call; the slice it let run is the starvation rule's to end.
-    const cpu = fakeCpu();
-    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
-    /** @type {boolean[]} */
-    const asked = [];
-    cpu.runSlice = max=>{
-        asked.push(sched.preemptionDue());
-        return max;
-    };
-    const busy = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'busy' });
-    busy.priority = 2;
-    const other = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'other' });
-    other.priority = 2;
-    sched.runOnce();
-    sched.runOnce();
-    assert.deepEqual(asked, [false, false]);
 });
 
 test('priority is composed as Windows composes it for a normal-class process', ()=>{
@@ -951,6 +947,99 @@ test('a suspended thread keeps its state and gets no turn until resumed as often
     assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
 });
 
+test('the work before the first slice runs once, as the first thread of the process starts,'
+    + ' whichever it is', ()=>{
+    // A process's loader state is put in place by its first thread to run: a
+    // suspended first thread leaves it to a thread made later, and nothing of
+    // it is there while no thread has run.
+    const { sched } = scheduler();
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.suspend(main);
+    /** @type {string[]} */
+    const done = [];
+    sched.beforeFirstSlice(()=>done.push(`before ${sched.current()?.name ?? 'none'}`));
+    assert.equal(done.length, 0, 'not while nothing runs');
+    assert.equal(sched.runOnce().ran, null, 'the only thread is suspended');
+    assert.equal(done.length, 0);
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'remote' });
+    assert.equal(sched.runOnce().ran.name, 'remote');
+    assert.deepEqual(done, ['before none'], 'once, ahead of the first thread to run');
+    sched.resume(main);
+    sched.runOnce();
+    sched.runOnce();
+    assert.equal(done.length, 1, 'never again');
+    sched.beforeFirstSlice(()=>done.push('late'));
+    assert.deepEqual(done.at(-1), 'late', 'asked after a thread ran, it runs at once');
+});
+
+test('a frozen thread gets no turn, and its suspend count is the one SuspendThread made', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    sched.freeze(a);
+    assert.equal(sched.runOnce().ran.name, 'b', 'frozen');
+    assert.equal(sched.suspend(a), 0, 'the freeze is not counted');
+    assert.equal(sched.resume(a), 1);
+    assert.equal(sched.resume(a), 0, 'nor taken away by a resume');
+    assert.equal(sched.runOnce().ran.name, 'b', 'still frozen');
+    sched.thaw(a);
+    assert.equal(sched.runOnce().ran.name, 'a');
+});
+
+test('the registers of the thread on this executor\'s processor are read off it, not off what it'
+    + ' saved last', ()=>{
+    // A .NET runtime's collector, on another executor, read a thread parked
+    // here in a wait as where its last slice had ended - in a method it had
+    // since returned from - and walked a stack that was no longer there.
+    let captures = 0;
+    const cpu = { ...fakeCpu(), captureContext: ()=>({ captured: ++captures }) };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const parked = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'parked' });
+    cpu.runSlice = ()=>{
+        parked.awaitingHost = true;
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran, parked);
+    assert.equal(sched.current(), parked, 'still on the processor, its state there');
+    const saved = parked.context;
+    assert.equal(sched.settle(parked), true);
+    assert.notEqual(parked.context, saved, 'taken off the processor');
+    assert.equal(parked.context.captured, captures);
+});
+
+test('another executor\'s thread asking for the registers of the thread on this processor gets'
+    + ' them off the processor', ()=>{
+    // The collector ran on the other executor: its GetThreadContext was
+    // answered here with `current` its own thread, and the thread parked on
+    // this processor was read from what it had saved at an older slice's end.
+    const { cpu } = twoExecutors();
+    let captures = 0;
+    const counting = { ...cpu, captureContext: ()=>({ captured: ++captures }) };
+    const sched = createScheduler({ cpu: counting, switcher: createSwitcher({ cpu: counting }),
+        quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    counting.runSlice = ()=>{
+        main.awaitingHost = true;
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    const [remote] = cpu.executors();
+    /** @type {boolean[]} */
+    const answers = [];
+    const saved = main.context;
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        around(()=>answers.push(sched.settle(main)));
+        remote.step = ()=>null;
+        return null;
+    });
+    sched.runOnce();
+    assert.deepEqual(answers, [true]);
+    assert.notEqual(main.context, saved, 'taken off this processor');
+});
+
 test('the report says how long a short-period thread went without the processor', ()=>{
     // A mixer feeding a sound device from a wait of a few milliseconds is
     // heard the moment it goes without the processor longer than it wrote
@@ -1115,6 +1204,27 @@ test('a thread whose slice ended on a host call goes on once it is answered', ()
     assert.equal(sched.runOnce().ran.name, 'audio', 'starved, it is not passed over again');
 });
 
+test('a call answered by another process is a wait: its answer does not go on ahead', ()=>{
+    // Wine's kernel32 sync.c test_apc_deadlock: a thread allocating in its
+    // child over and over held the processor through every answer, and the
+    // thread its event woke waited the whole starvation bound each round.
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), now: ()=>0,
+        quantum: 5000 });
+    const asker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'asker' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'woken' });
+    cpu.runSlice = ()=>{
+        asker.awaitingHost = true;
+        sched.answeredElsewhere(asker);
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran.name, 'asker');
+    cpu.runSlice = max=>Math.min(max, 1000);
+    asker.awaitingHost = false;
+    assert.equal(sched.runOnce().ran.name, 'woken', 'the other ready thread runs first');
+    assert.equal(asker.answeredElsewhere, false, 'and the mark is the one call\'s');
+});
+
 /**
  * The cpu of a process on two executors: the other's slices never end on their
  * own, and the bell records the waits a turn takes for it.
@@ -1154,6 +1264,44 @@ function twoExecutors(){
         told,
     };
 }
+
+test('a parked thread woken onto another executor has what its call owes done first, there',
+    ()=>{
+    // GetOverlappedResult's count and answer: placed on another executor, the
+    // thread runs there from its first instruction, so the work is done on
+    // this thread before that executor is handed it, and its answer is the
+    // call's.
+        const { cpu } = twoExecutors();
+        /** @type {any} */ (cpu).resumeContextAt = ()=>{};
+        /** @type {string[]} */
+        const order = [];
+        const onExecutor = cpu.onExecutor;
+        cpu.onExecutor = (index, work)=>{
+            order.push(`executor ${index}`);
+            onExecutor(index, work);
+        };
+        /** @type {number[]} */
+        const answers = [];
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            onResume: (thread, reason, value)=>answers.push(value) });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+        sched.block(worker, 'an event');
+        worker.parkedReturn = 0x401000;
+        worker.waitResult = 1;
+        worker.whenResumed = (/** @type {number} */ answer)=>{
+            order.push(`owed ${answer}`);
+            return 0;
+        };
+        assert.equal(sched.runOnce().ran, main);
+        sched.wake(worker);
+        sched.runOnce();
+        assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+        assert.deepEqual(order.filter(step=>step === 'owed 1' || step === 'executor 1').slice(0, 2),
+            ['owed 1', 'executor 1'], 'the work before the executor is handed the thread');
+        assert.deepEqual(answers, [0], 'the work\'s answer is the call\'s');
+        assert.equal(worker.whenResumed, null, 'done once');
+    });
 
 test('a turn with nothing to run here leaves at once while a host call is still to answer', ()=>{
     // The answer comes through the event loop, which a wait for the other
@@ -1442,7 +1590,7 @@ test('another executor\'s ask inside an unbroken routine here is put off until t
     assert.equal(JSON.parse(JSON.stringify(sched.diagnostics())).asksPutOff, 2);
 });
 
-test('by default (freeHost) a thread pinned to the first processor has it played by another'
+test('a thread pinned to the first processor has it played by another'
     + ' executor, this one keeping to the host\'s answers, and is told it is on the first still',
 ()=>{
     // A game's main thread, pinned to the first processor, took four tenths of
@@ -1487,7 +1635,7 @@ test('by default (freeHost) a thread pinned to the first processor has it played
 
     // With no thread pinned to the first processor, every executor plays its own.
     const plain = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
-        quantum: 5000, freeHost: true });
+        quantum: 5000 });
     plain.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'free' });
     plain.create({ entry: 1, stackTop: 2, tebAddress: 0xd000, name: 'other' });
     for (let turn = 0; turn < 4; turn++)
@@ -1514,10 +1662,8 @@ test('a thread this executor keeps calling back from the other one stays here a 
         return { instructions: 1000, fault: null };
     };
     let clock = 0;
-    // Spread, the way this rule keeps a thread from: trials of the other way
-    // (`placement.js`) would begin before the three seconds below are out.
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        wall: ()=>clock, placement: 'spread' });
+        wall: ()=>clock });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
     // The renderer calls into the host and stays here, computing a whole slice;
@@ -1530,6 +1676,8 @@ test('a thread this executor keeps calling back from the other one stays here a 
         const where = sched.processorOf(sound);
         if (where === 1)
         {
+            // The sound thread set the renderer's event from there before: the two hand off.
+            sound.wokeHereAt = clock;
             sched.block(main, 'the sound');
             assert.equal(sched.runOnce().ran, sound,
                 'left nothing to run here, it calls the sound back and runs it');
@@ -1546,132 +1694,37 @@ test('a thread this executor keeps calling back from the other one stays here a 
     assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
 });
 
-/**
- * A main thread pinned to the first processor beside a render thread pinned
- * to the second, each making a call a round wherever it runs: the renderer's
- * `renderMs` of this executor's, the main thread's 0.2.
- *
- * @param {number} renderMs
- */
-function pinnedRenderer(renderMs){
-    const { cpu, told } = twoExecutors();
-    const [remote] = cpu.executors();
-    let clock = 0;
-    /** @type {(ms: number) => void} */
-    let timed = ()=>{};
-    /** A call of the thread current, timed as the cpu layer times it. */
-    const call = ()=>{
-        const ms = sched.current()?.name === 'render' ? renderMs : 0.2;
-        clock += ms;
-        timed(ms);
-    };
-    // A thread on the other executor waits on its call as long as the call takes here.
-    let waitedUs = 0;
-    /** @type {any} */ (remote).waitedUs = ()=>waitedUs;
-    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
-        if (remote.started === 0)
-        {
-            return null;
-        }
-        if (told.goOn === false)
-        {
-            remote.started = 0;
-            told.goOn = null;
-            return { instructions: 1000, fault: null };
-        }
-        const asked = clock;
-        around(call);
-        waitedUs += (clock - asked) * 1000;
-        return null;
-    });
-    const sched = createScheduler({
-        cpu: { ...cpu,
-            runSlice: (/** @type {number} */ max)=>{
-                clock += 5;
-                call();
-                return max;
-            },
-            trapTimed: (/** @type {(ms: number) => void} */ hook)=>{
-                timed = hook;
-            } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, wall: ()=>clock, placement: 'spread',
-        freeHost: false });
-    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
-    const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
-    main.affinityMask = 0b01;
-    render.affinityMask = 0b10;
-    let round = 0;
-    /** Runs the clock `ms` on. */
-    const run = (/** @type {number} */ ms)=>{
-        const until = clock + ms;
-        for (;;)
-        {
-            if (clock >= until)
-            {
-                return;
-            }
-            const { ran } = sched.runOnce();
-            if (ran !== null)
-            {
-                assert.equal(sched.processorOf(ran), ran === main ? 0 : 1,
-                    `${ran.name} told of another processor at round ${round}`);
-            }
-            round++;
-        }
-    };
-    /** The processors played, and the moves' account. */
-    const said = ()=>({ ...JSON.parse(sched.diagnostics().placement),
-        processors: sched.diagnostics().played.split(' ')[0] || '0,1' });
-    return { run, said };
-}
-
-test('a pinned thread whose calls take this executor the most time has its processor played'
-    + ' here once its waits for them say it gains, and kept; one whose calls are cheap is not',
-()=>{
-    // Call of Duty 4 pins its main thread to the first processor and its render
-    // thread to the last, every Present and Lock of the renderer a few hundred
-    // microseconds of this executor's while the main thread computed here.
-    const dear = pinnedRenderer(2);
-    dear.run(8000);
-    assert.deepEqual([dear.said().processors, dear.said().moves],
-        ['1,0', 1], `traded on the renderer's waits: ${JSON.stringify(dear.said())}`);
-    dear.run(40_000);
-    assert.deepEqual([dear.said().processors, dear.said().moves], ['1,0', 1],
-        `and kept, no move since: ${JSON.stringify(dear.said())}`);
-
-    // Calls as cheap as the main thread's: nothing to save by playing it here.
-    const cheap = pinnedRenderer(0.2);
-    cheap.run(48_000);
-    assert.deepEqual([cheap.said().processors, cheap.said().moves], ['0,1', 0],
-        `not traded: ${JSON.stringify(cheap.said())}`);
-});
-
 test('a thread that may run only here takes this executor\'s turn from one that may run on'
     + ' another left free, which runs there', ()=>{
-    // Call of Duty 4 pins its main thread to the first processor; a thread of
-    // its own at priority 15, pinned nowhere and made at home here, took this
-    // executor each time both were ready, and the main thread waited for it
-    // while the other executor idled 280 s of a 400 s run.
+    // Call of Duty 4 pinned its main thread to a processor this executor
+    // played; a thread of its own at priority 15, pinned nowhere and made at
+    // home here, took this executor each time both were ready, and the main
+    // thread waited for it while the other executor idled 280 s of a 400 s run.
+    // A thread pinned to the first processor, waiting, has this executor play
+    // the second (`freeTarget`): the main thread, pinned to it, may run only here.
     const { cpu } = twoExecutors();
     const [remote] = cpu.executors();
-    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        placement: 'spread', freeHost: false });
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const mixer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'mixer' });
-    main.affinityMask = 0b01;
+    const first = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'first' });
+    first.affinityMask = 0b01;
+    sched.block(first, 'its own wait');
+    main.affinityMask = 0b10;
     // THREAD_PRIORITY_TIME_CRITICAL, at home here as one made before the other executor opened.
     mixer.priority = 15;
     mixer.home = 0;
     assert.equal(sched.runOnce().ran, main, 'the main thread runs here');
-    assert.deepEqual([remote.started, sched.processorOf(mixer)], [1, 1],
-        'and the one that may run anywhere, on the other executor');
+    assert.deepEqual([remote.started, sched.processorOf(mixer), sched.processorOf(main)],
+        [1, 0, 1], 'and the one that may run anywhere, on the other executor');
 });
 
 test('a thread that may run only here, readied in the slice of one that may run on another'
     + ' executor left free, ends that slice, and the two run at once', ()=>{
     // The same game's main thread woke thread-3 and waited for it; thread-3,
     // alone and running here, woke the main thread in turn and went on, and the
-    // main thread waited out its turn, the other executor idle.
+    // main thread waited out its turn, the other executor idle. The main thread
+    // may run only here, as above.
     const { cpu } = twoExecutors();
     const [remote] = cpu.executors();
     let stops = 0;
@@ -1688,17 +1741,19 @@ test('a thread that may run only here, readied in the slice of one that may run 
                 }
                 return max;
             } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, placement: 'spread',
-        freeHost: false });
+        switcher: createSwitcher({ cpu }), quantum: 5000 });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
-    main.affinityMask = 0b01;
+    const first = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'first' });
+    first.affinityMask = 0b01;
+    sched.block(first, 'its own wait');
+    main.affinityMask = 0b10;
     worker.home = 0;
     sched.block(main, 'the worker');
     assert.equal(sched.runOnce().ran, worker, 'the worker alone runs here');
     assert.equal(stops, 1, 'and its slice ends as it wakes the main thread');
     assert.equal(sched.runOnce().ran, main, 'the main thread takes this executor');
-    assert.deepEqual([remote.started, sched.processorOf(worker)], [1, 1],
+    assert.deepEqual([remote.started, sched.processorOf(worker)], [1, 0],
         'and the worker goes on on the other');
 });
 
@@ -1753,6 +1808,8 @@ test('a thread called back after doing as much beside this executor as it did ke
             const where = sched.processorOf(render);
             if (where === 1)
             {
+                // The render thread signalled the frame from there before: the two hand off.
+                render.wokeHereAt = 0;
                 sched.block(main, 'the frame');
                 assert.equal(sched.runOnce().ran, render, 'called back, it finishes here');
                 sched.wake(main);
@@ -1763,3 +1820,180 @@ test('a thread called back after doing as much beside this executor as it did ke
         assert.deepEqual([round(), round(), round(), round(), round(), round()],
             [1, 1, 1, 1, 1, 1], 'called back round after round, it still goes there');
     });
+
+test('a thread elsewhere that wakes none of this executor\'s is called back only once it idled',
+    ()=>{
+        // A .NET game's loader went on elsewhere while the thread drawing its
+        // loading screen waited out each frame here; called back at every wait,
+        // the two took turns here while the other executor idled.
+        const { cpu, told } = twoExecutors();
+        const [remote] = cpu.executors();
+        remote.step = ()=>{
+            if (remote.started === 0 || told.goOn !== false)
+            {
+                return null;
+            }
+            remote.started = 0;
+            told.goOn = null;
+            return { instructions: 1000, fault: null };
+        };
+        let clock = 0;
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            wall: ()=>clock });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const loader = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'loader' });
+        Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+        cpu.runSlice = (/** @type {number} */ max)=>max;
+        assert.equal(sched.runOnce().ran, main);
+        assert.equal(sched.processorOf(loader), 1, 'the loader goes to the other executor');
+        sched.block(main, 'a frame\'s wait');
+        assert.notEqual(sched.runOnce().ran, loader, 'idle a moment, the loader stays there');
+        assert.equal(sched.processorOf(loader), 1);
+        clock += 25;
+        assert.equal(sched.runOnce().ran, loader, 'idle past 20 ms, it is called back');
+    });
+
+test('no turn runs past the soonest deadline at the executor\'s rate: the wait due then ends'
+    + ' at the turn\'s end, not a quantum later', ()=>{
+    // A multimedia timer thread, time-critical, woke behind a game thread's
+    // whole quantum: a tick late by milliseconds one time in three.
+    let wall = 0;
+    let clock = 0;
+    const cpu = fakeCpu(Infinity);
+    cpu.runSlice = max=>{
+        // A thousand instructions a millisecond, by both clocks.
+        wall += max / 1000;
+        clock += max / 1000;
+        return max;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        soloQuantum: 40_000, wall: ()=>wall, now: ()=>clock });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const timer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'timer' });
+    sched.block(timer, 'an event nobody sets');
+    assert.equal(sched.runOnce().instructions, 40_000, 'alone and no deadline: a solo turn');
+    sched.block(timer, 'a timed wait', { deadline: clock + 3 });
+    const turn = sched.runOnce();
+    assert.equal(turn.ran, a);
+    assert.equal(turn.instructions, 3000, 'three milliseconds of a, to the deadline');
+    sched.runOnce();
+    assert.equal(timer.state === ThreadState.READY || sched.current() === timer, true,
+        'and the wait ended there');
+});
+
+test('a thread here whose deadline passes while another executor\'s thread keeps ringing runs'
+    + ' in that same turn', ()=>{
+    // The turn waited for the other executor round and round while its thread
+    // rang, and moved neither the clock nor the deadlines: a game's Sleep(1)
+    // lasted until the sound thread beside it stopped, 10 ms and more.
+    const { cpu } = twoExecutors();
+    let clock = 0;
+    let rings = 0;
+    const bell = cpu.executorBell();
+    // Twenty rings, then quiet: the turn has to have run main by then.
+    bell.rung = ()=>Math.min(rings, 20);
+    bell.wait = ()=>{
+        rings++;
+        return 0;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        now: ()=>clock, refreshClock: ()=>{
+            clock += 0.5;
+        } });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    const [remote] = cpu.executors();
+    // The worker's slice goes on, a word rung each time it is looked at.
+    remote.step = ()=>null;
+    sched.block(main, 'Sleep', { deadline: clock + 1 });
+    const turn = sched.runOnce();
+    assert.equal(turn.ran, main, 'main woke at its deadline and ran in the same turn');
+    assert.ok(rings <= 4, `after the rings that took the clock past it: ${rings}`);
+});
+
+test('a stack pointer past its stack into memory no stack of its own holds stops the process', ()=>{
+    // Translated pushes test no page, so a thread whose stack ran out walked on
+    // through what lay below its stack, the engine's tables among it, and the
+    // engine's thread hung on the hash it wrote over. A fiber's stack is writable
+    // memory of another kind the program allocated, and runs on.
+    /** @type {Record<string, any>} */
+    const regions = {
+        gap: undefined,
+        neighbour: { kind: 'stack', access: 'rw' },
+        engine: { kind: 'reserved', access: 'none' },
+        fiber: { kind: 'virtual', access: 'rw' },
+    };
+    for (const [where, region] of Object.entries(regions))
+    {
+        /** @type {{ name: string, eip: number, detail: string }[]} */
+        const faults = [];
+        let esp = 0x1ff000;
+        const cpu = { ...fakeCpu(), readReg32: ()=>esp, eip: ()=>0x401234,
+            raiseFault: (/** @type {any} */ fault)=>faults.push(fault) };
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            regionAt: ()=>region });
+        sched.create({ entry: 1, stackTop: 0x200000, stackLimit: 0x100000, tebAddress: 0xa000,
+            name: 'main' });
+        sched.runOnce();
+        assert.equal(faults.length, 0, `${where}: inside its stack, nothing`);
+        esp = 0xff000;
+        sched.runOnce();
+        sched.runOnce();
+        if (where === 'fiber')
+        {
+            assert.equal(faults.length, 0, 'a stack the program made runs on');
+        }
+        else
+        {
+            assert.equal(faults.length, 1, `${where}: told once`);
+            assert.equal(faults[0].name, 'stack overflow');
+            assert.equal(faults[0].eip, 0x401234);
+            assert.match(faults[0].detail, /main's stack pointer 0xff000 is past/);
+        }
+    }
+});
+
+test('a ready thread whose own executor is busy runs here before a thread it outranks', ()=>{
+    // A game's sound thread, at a priority above the others and homed on an
+    // executor its renderer held, waited there for 40 to 900 ms while this one
+    // ran a thread below it: its buffer ran dry and the sound broke. Windows
+    // runs the highest priority thread ready.
+    const { cpu } = twoExecutors();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const renderer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'renderer' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(renderer), 1, 'the renderer holds the other executor');
+    const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'sound' });
+    Object.assign(sound, { home: 1, priority: 2 });
+    assert.equal(sched.runOnce().ran, sound, 'the sound thread runs here, over main');
+});
+
+test('a turn on two executors chooses without making lists, records or iterators', async()=>{
+    // A game's engine thread turns thousands of times a second: the choice's
+    // splices, its Map of placements walked by iterators, a record and two
+    // closures a placement, and its lists emptied by their length (each push
+    // then made a new store) were 1.6 KB a turn of three threads on two
+    // executors (node). What is left is the turn's answer: some 100 bytes run
+    // alone, 370 once the other tests' cpus have made the scheduler's code polymorphic.
+    const { cpu } = twoExecutors();
+    // A context captured into the thread's own record, as the engine's is.
+    /** @type {any} */ (cpu).captureContext = (/** @type {any} */ context)=>context ?? { saved: true };
+    // The executors a list kept, and clocks whose readings are no numbers
+    // made on the heap: what is counted is the scheduler's own.
+    const remotes = cpu.executors();
+    cpu.executors = ()=>remotes;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        now: ()=>0, wall: ()=>0 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'third' });
+    sched.runOnce();
+    assert.equal(sched.processorOf(worker), 1, 'the worker holds the other executor');
+    const bytes = await bytesPerCall(()=>{
+        sched.runOnce();
+    });
+    assert.ok(bytes < 512, `${bytes.toFixed(0)} bytes a turn`);
+});

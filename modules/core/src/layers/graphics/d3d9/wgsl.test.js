@@ -71,6 +71,15 @@ const pixelBody = tokens=>{
 const assertLine = (wgsl, line)=>assert.ok(wgsl.split('\n').some(one=>one.trim() === line),
     `expected the line\n    ${line}\nin\n${wgsl}`);
 
+/**
+ * A 1.x stage's coordinates divided as it projects, a zero divisor reading
+ * at the origin.
+ *
+ * @param {number} stage @param {string} by
+ */
+const projected = (stage, by)=>`(select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+    + ` in.t${stage}.${by} == 0.0))`;
+
 test('the arithmetic instructions become the statements they mean', ()=>{
     const r = REGISTER.TEMP;
     const c = REGISTER.CONST;
@@ -193,6 +202,9 @@ test('the pixel-stage instructions become the statements they mean', ()=>{
     }
 });
 
+/** Sampler 0's level bias, as a translation reads it from the draw's registers. */
+const BIAS0 = 'c[_lodBias + 0].x';
+
 test('a sampler\'s level-of-detail bias joins every kind of read through it, and only its own',
     ()=>{
         // D3DSAMP_MIPMAPLODBIAS is added to the level a read takes: one
@@ -217,16 +229,24 @@ test('a sampler\'s level-of-detail bias joins every kind of read through it, and
         const biased = translateShader(reads, { sampling: [{ lodBias: -1 }] });
         assert.equal(biased.error, null);
         for (const line of [
-            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, -1.0);',
-            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), -1.0);',
-            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
-            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
-            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * 0.5, r2.xy * 0.5);',
+            // The bias is the draw's to fill in, read from a register: one
+            // module for every value a program moves it through.
+            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, c[_lodBias + 0].x);',
+            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), c[_lodBias + 0].x);',
+            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + c[_lodBias + 0].x);',
+            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + c[_lodBias + 0].x);',
+            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * exp2(c[_lodBias + 0].x),'
+                + ' r2.xy * exp2(c[_lodBias + 0].x));',
             'r5 = textureSample(tex1, samp1, in.v0.xy);',
+            `const _lodBias = ${biased.biasRegister};`,
         ])
         {
             assertLine(biased.wgsl, line);
         }
+        assert.equal(biased.biasRegister, plain.constants, 'past every register the shader reads');
+        assert.equal(biased.constants, plain.constants + 4);
+        assert.equal(translateShader(reads, { sampling: [{ lodBias: 1.5 }] }).wgsl, biased.wgsl,
+            'another bias, the same module');
         assert.equal(translateShader(reads, { sampling: [] }).wgsl, plain.wgsl,
             'no variant is the translation as it always was, to the byte');
 
@@ -236,12 +256,12 @@ test('a sampler\'s level-of-detail bias joins every kind of read through it, and
             op(OPCODE.TEXLDL, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
             op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(r, 0), END_TOKEN]),
         { sampling: [{ lodBias: 2 }] });
-        assertLine(vertex.wgsl, 'r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + 2.0);');
+        assertLine(vertex.wgsl, `r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + ${BIAS0});`);
         const legacy = translateShader(parseShader([PS_1_1,
             0x00000042, 0xb00f0000,                 // tex t0
             0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
             END_TOKEN]), { sampling: [{ lodBias: 0.5 }] });
-        assertLine(legacy.wgsl, 't0 = textureSampleBias(tex0, samp0, in.t0.xy, 0.5);');
+        assertLine(legacy.wgsl, `t0 = textureSampleBias(tex0, samp0, in.t0.xy, ${BIAS0});`);
     });
 
 test('a mirror-once axis is folded at every kind of read, a border axis selects its colour',
@@ -266,13 +286,15 @@ test('a mirror-once axis is folded at every kind of read, a border axis selects 
         const folded = translateShader(reads, { sampling: [both, both] });
         assert.equal(folded.error, null);
         for (const line of [
-            'r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * 2.0,'
-                + ' dpdy(in.v0.xy) * 2.0);',
+            `r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * exp2(${BIAS0}),`
+                + ` dpdy(in.v0.xy) * exp2(${BIAS0}));`,
             'r2 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy)'
-                + ' * exp2(in.v0.w + 1.0), dpdy(in.v0.xy) * exp2(in.v0.w + 1.0));',
-            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + 1.0);',
-            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * 2.0, r2.xy * 2.0);',
-            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, 1.0);',
+                + ` * exp2(in.v0.w + ${BIAS0}), dpdy(in.v0.xy)`
+                + ` * exp2(in.v0.w + ${BIAS0}));`,
+            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + c[_lodBias + 0].x);',
+            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * exp2(c[_lodBias + 0].x),'
+                + ' r2.xy * exp2(c[_lodBias + 0].x));',
+            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, c[_lodBias + 0].y);',
         ])
         {
             assertLine(folded.wgsl, line);
@@ -590,6 +612,13 @@ test('a whole pixel shader reads the varyings the vertex shader wrote and writes
     assertLine(translated.wgsl, 'oC0 = (r0 * in.v1);');
     assertLine(translated.wgsl, 'out.oC0 = oC0;');
     assertLine(translated.wgsl, 'out.oDepth = oDepth.x;');
+
+    // D3DRS_SRGBWRITEENABLE encodes the colours and leaves the depth alone: a
+    // shader writing both once named a colour oC-1, and its WGSL did not compile.
+    const encoded = translateShader(parsed, { srgbWrite: true });
+    assert.equal(encoded.error, null);
+    assert.doesNotMatch(encoded.wgsl, /oC-1/);
+    assert.match(encoded.wgsl, /oC0 = vec4f\(select\(1\.055 \* pow/);
 });
 
 test('a vertex shader below model 3 hands on its colours held to [0, 1]', ()=>{
@@ -694,8 +723,8 @@ test('a 1.x read samples the texture bound at its stage, divided as the stage pr
         { stageDimensions: ['cube', '2d', '3d'], projectedBy: ['', 'w', 'z'] });
     assert.equal(shader.error, null);
     assertLine(shader.wgsl, 't0 = textureSample(tex0, samp0, in.t0.xyz);');
-    assertLine(shader.wgsl, 't1 = textureSample(tex1, samp1, (in.t1 / in.t1.w).xy);');
-    assertLine(shader.wgsl, 't2 = textureSample(tex2, samp2, (in.t2 / in.t2.z).xyz);');
+    assertLine(shader.wgsl, `t1 = textureSample(tex1, samp1, ${projected(1, 'w')}.xy);`);
+    assertLine(shader.wgsl, `t2 = textureSample(tex2, samp2, ${projected(2, 'z')}.xyz);`);
     assert.deepEqual(shader.samplers, [
         { index: 0, type: 'texture_cube<f32>' },
         { index: 1, type: 'texture_2d<f32>' },
@@ -733,9 +762,9 @@ test('texbem and texbeml move a stage\'s coordinates by its bump matrix', ()=>{
         END_TOKEN];
     const bumped = translateShader(parseShader(tokens(0x00000043)), { projectedBy: ['', 'w'] });
     assert.equal(bumped.error, null);
-    assertLine(bumped.wgsl, 't1 = textureSample(tex1, samp1, (vec4f((in.t1 / in.t1.w).xy'
+    assertLine(bumped.wgsl, `t1 = textureSample(tex1, samp1, (vec4f(${projected(1, 'w')}.xy`
         + ' + vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw)),'
-        + ' (in.t1 / in.t1.w).zw)).xy);');
+        + ` ${projected(1, 'w')}.zw)).xy);`);
     assertLine(bumped.wgsl, 'const _bump = 0;');
     assert.equal(bumped.bumpRegister, 0, 'after the none it reads');
     assert.equal(bumped.constants, 16, 'eight stages of two registers');
@@ -1132,7 +1161,12 @@ test('a vertex shader carries fog to the pixel stage: its oFog, or all fog witho
         `out.oFog = vec4f(out.oFog.x, c[${tableWrites.fogRegister}].rgb);`);
     assertLine(tableWrites.wgsl, `out.o${FOG_RANGE_LOCATION} = vec4f(c[${
         /** @type {number} */ (tableWrites.fogRegister) + 1}].xyz, 2.0);`);
-    assertLine(table.wgsl, `out.oFog = vec4f(0.0, c[${table.fogRegister}].rgb);`);
+    // Without one it carries its z times w for the depth, which the pixel
+    // stage takes back by the position's 1/w.
+    assertLine(table.wgsl,
+        `out.oFog = vec4f(out.oPos.z * out.oPos.w, c[${table.fogRegister}].rgb);`);
+    assert.equal(table.fogOver, undefined);
+    assert.equal(tableWrites.fogOver, true);
     // Later drivers take it over the depth all the same.
     const later = translateShader(shader([
         op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 0),
@@ -1200,30 +1234,32 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         [0, { components: 3, scalar: 'f32', bgra: false }],
         [1, { components: 3, scalar: 'f32', bgra: false }],
         [2, { components: 2, scalar: 'f32', bgra: false }],
-    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true });
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000], 0, undefined, { normalizeNormals: true,
+        carried: [{ set: 0, transform: 4 }, { set: 1, transform: 0 }, null, null,
+            { set: 4, transform: 4 }] });
     assert.equal(generated.error, null);
     const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
     const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
     const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
     assert.deepEqual(generated.outputs, [t0, t1, t4]);
-    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // A fifth set goes through the fifth stage's own columns: a terrain's
     // blend map is that far along the cascade, and a coordinate left raw
     // there moved with the camera.
-    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
+    const through = (/** @type {number} */ index, /** @type {number} */ from)=>
+        `vec4f(${[0, 1, 2, 3].map(axis=>`dot(c[${from + axis}], vec4f(generated${index}.xyz, 1.0))`)
+            .join(', ')})`;
+    assertLine(generated.wgsl, `out.o${t4} = ${through(4, 25)};`);
     assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
     assertLine(generated.wgsl,
         'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
     assertLine(generated.wgsl,
         'let cameraNormal = d3dNrm((mat4x4f(c[43], c[44], c[45], c[46])'
             + ' * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
-    assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
-        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
-    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
-        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
-        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
+    assertLine(generated.wgsl, 'let generated0 = vec4f(cameraPosition, 0.0);');
+    assertLine(generated.wgsl, `out.o${t0} = ${through(0, 9)};`);
+    // With no count in the flags, the normal goes on as made, w zero.
+    assertLine(generated.wgsl, 'let generated1 = vec4f(cameraNormal, 0.0);');
+    assertLine(generated.wgsl, `out.o${t1} = generated1;`);
     assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     // With D3DRS_NORMALIZENORMALS off -- its default -- the camera-space
@@ -1303,8 +1339,9 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
     assert.ok(!specular.wgsl.includes('fogFactorOf'));
 
-    // Table fog is the pixel's: the stage carries the colour, and the curve's
-    // range with the affine flag beside it, flat, for the pixel shader.
+    // Table fog is the pixel's: the stage carries its z times w for the
+    // depth, the colour, and the curve's range with the affine flag beside
+    // it, flat, for the pixel shader.
     const table = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
     ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [], [],
@@ -1313,7 +1350,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(table.wgsl, `@location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
         + ` o${FOG_RANGE_LOCATION}: vec4f,`);
     assertLine(table.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
-    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(0.0,`
+    assertLine(table.wgsl, `out.o${fogLocation} = vec4f(out.oPos.z * out.oPos.w,`
         + ` c[${HYBRID_CONSTANTS.FOG_COLOR}].rgb);`);
 });
 
@@ -1374,7 +1411,7 @@ test('the fog stage after a pixel shader mixes the shaded colour by the varying'
     assertLine(table.wgsl, 'return clamp(exp(-fogRange.z * dist), 0.0, 1.0);');
     assertLine(table.wgsl, 'fogRange = in.fogRange;');
     assertLine(table.wgsl, 'oC0 = vec4f(mix(in.fog.yzw, oC0.rgb, clamp(fogFactorOf('
-        + 'select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0), in.fog.x,'
+        + 'select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w, fogRange.w != 0.0), in.fog.x,'
         + ' fogRange.w > 1.5)), 0.0, 1.0)), oC0.a);');
 });
 
@@ -1420,4 +1457,95 @@ test('a vs_1_1 expp and logp are the old four-part results, read from the source
     const logp = translated(OPCODE.LOGP);
     assertLine(logp.wgsl, 'r0 = logParts(c[0].w);');
     assert.ok(logp.wgsl.includes('fn logParts(x: f32) -> vec4f {'));
+});
+
+test('a model 3 vertex shader sizes its points by the output it declared PSIZE', ()=>{
+    // Wine's test_pointsize, vs_3_0 with dcl_psize o1: o1.x is the size,
+    // not the render state.
+    const dclOutput = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    const parsed = parseShader([VS_3_0, ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        ...dclInput(D3DDECLUSAGE.PSIZE, 1),
+        ...dclOutput(D3DDECLUSAGE.POSITION, 0), ...dclOutput(D3DDECLUSAGE.PSIZE, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 1), src(REGISTER.INPUT, 1),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed, { points: { sprite: false } });
+    assert.equal(translated.error, null);
+    assert.ok(translated.wgsl?.includes('let pointSize = min(max(out.o1.x,'), translated.wgsl);
+});
+
+test('a pre-transformed vertex hands its other elements to a pixel shader that reads them', ()=>{
+    // Wine's d3d9 pretransformed_varying_test: a ps_3_0 reading NORMAL,
+    // BLENDWEIGHT, FOG or DEPTH of an XYZRHW vertex reads what was declared.
+    /** @type {import('./wgsl.js').InputShape} */
+    const four = { components: 4, scalar: 'f32', bgra: false };
+    const normal = varyingLocation(D3DDECLUSAGE.NORMAL, 0);
+    const depth = varyingLocation(D3DDECLUSAGE.DEPTH, 0);
+    const stage = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+        { usage: D3DDECLUSAGE.DEPTH, usageIndex: 0, register: 2 },
+    ], new Map([[0, four], [1, four], [2, four]]), [normal, depth]);
+    assertLine(stage.wgsl, `out.o${normal} = in.v1;`);
+    assertLine(stage.wgsl, `out.o${depth} = in.v2;`);
+    // Every usage's two varyings fit the 32 locations a GPU of the era's
+    // vertex outputs had, apart from one another.
+    const all = Object.values(D3DDECLUSAGE).flatMap(usage=>[0, 1]
+        .map(index=>varyingLocation(usage, index)));
+    assert.ok(Math.max(...all) <= 31, String(Math.max(...all)));
+    assert.ok(varyingLocation(D3DDECLUSAGE.DEPTH, 1) < 28 && varyingLocation(D3DDECLUSAGE.SAMPLE, 1)
+        < 28, 'below the 28 locations SwiftShader passes');
+    /** @type {number[]} */
+    const named = [D3DDECLUSAGE.COLOR, D3DDECLUSAGE.TEXCOORD, D3DDECLUSAGE.FOG,
+        D3DDECLUSAGE.PSIZE];
+    const others = Object.values(D3DDECLUSAGE).filter(usage=>!named.includes(usage))
+        .flatMap(usage=>[0, 1].map(index=>varyingLocation(usage, index)));
+    assert.equal(new Set(others).size, others.length, 'apart');
+    // Transformed, the fixed function hands on no normal.
+    const transformed = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+    ], new Map([[0, four], [1, four]]), [normal]);
+    assertLine(transformed.wgsl, `out.o${normal} = vec4f(0.0);`);
+});
+
+test('a vertex shader below model 3 leaves the diffuse it does not write one', ()=>{
+    // Wine's d3d9 test_uninitialized_varyings: vs_1_1 writing oD0.x alone
+    // gives (x, 1, 1, 1); vs_3_0 has no such default.
+    const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.ATTROUT, 0, 0x1), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed);
+    const code = translated.wgsl ?? '';
+    assert.ok(code.indexOf('out.oD0 = vec4f(1.0);') >= 0, code);
+    const written = code.indexOf('out.oD0 = vec4f(_t.x, out.oD0.y');
+    assert.ok(written > code.indexOf('out.oD0 = vec4f(1.0);'), 'before the shader writes its part');
+});
+
+test('a pixel shader writing a luminance target writes its red into all three colours', ()=>{
+    // Wine's d3d9 pixelshader_blending_test, L8.
+    const parsed = parseShader([PS_2_0, ...dclSampler(0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.CONST, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const code = translateShader(parsed, { luminance: true }).wgsl ?? '';
+    assert.ok(code.indexOf('oC0 = vec4f(oC0.rrr, oC0.a);') >= 0, code);
+    assert.ok(code.indexOf('oC0 = vec4f(oC0.rrr, oC0.a);') < code.indexOf('out.oC0 = oC0;'));
+    assert.ok(!(translateShader(parsed).wgsl ?? '').includes('oC0.rrr'));
+});
+
+test('a def of NaN or an infinity keeps it, made when the shader runs', ()=>{
+    // Wine's d3d9 fp_special_test: no WGSL literal spells them, and a constant
+    // expression that makes one is refused; they were zero.
+    const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.DEF, 5), dst(REGISTER.CONST, 1), 0x7fc00000, 0x7f800000, 0xff800000, 0,
+        op(OPCODE.MOV, 2), dst(REGISTER.TEMP, 0), src(REGISTER.CONST, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.TEMP, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const code = translateShader(parsed).wgsl ?? '';
+    assert.ok(code.includes('var<private> _nonFinite: vec4u'), code);
+    assert.ok(code.includes('vec4f(bitcast<f32>(_nonFinite.x), bitcast<f32>(_nonFinite.y),'
+        + ' bitcast<f32>(_nonFinite.z), 0.0)'), code);
 });

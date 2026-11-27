@@ -13,17 +13,27 @@
  * names one of them -- that is what these calls keep. Which desktop a window
  * is on is not kept: every window is drawn and reached as though it were on
  * the input desktop, which is the one a person sees.
+ *
+ * The message filter User Interface Privilege Isolation keeps lives here too:
+ * every process here runs at one integrity level, so no message is ever held
+ * back by it, and a program's changes to it are kept only to answer what
+ * the next one finds.
  */
 
 import { threadIdOf } from './messages.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import { readText, textBytes } from './unicode.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_NOACCESS = 998;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BUSY = 170;
 const ERROR_FILE_NOT_FOUND = 2;
+
+/** USEROBJECTFLAGS.dwFlags of a window station that has visible surfaces. */
+const WSF_VISIBLE = 1;
 
 /** GetUserObjectInformation's indices. */
 const UOI_FLAGS = 1;
@@ -33,6 +43,18 @@ const ERROR_INVALID_WINDOW_HANDLE = 1400;
 const UOI_TYPE = 3;
 const UOI_USER_SID = 4;
 const UOI_IO = 6;
+
+/** ChangeWindowMessageFilter's flags, and ChangeWindowMessageFilterEx's actions. */
+const MSGFLT_ADD = 1;
+const MSGFLT_REMOVE = 2;
+const MSGFLT_RESET = 0;
+const MSGFLT_ALLOW = 1;
+const MSGFLT_DISALLOW = 2;
+/** CHANGEFILTERSTRUCT: cbSize, ExtStatus. */
+const CHANGEFILTERSTRUCT_SIZE = 8;
+const MSGFLTINFO_NONE = 0;
+const MSGFLTINFO_ALREADYALLOWED_FORWND = 1;
+const MSGFLTINFO_ALREADYDISALLOWED_FORWND = 2;
 
 /** USEROBJECTFLAGS: fInherit, fReserved, dwFlags. */
 const USEROBJECTFLAGS_SIZE = 12;
@@ -59,7 +81,8 @@ const MAX_NAME = 256;
  *     setLastError?: (code: number) => void,
  *     call?: (entry: number, args: number[], thread?: unknown) => number | Promise<number>,
  *     allocate?: (bytes: number) => number,
- *     release?: (address: number) => void }} options.host
+ *     release?: (address: number) => void,
+ *     divergence?: (api: string, detail: string) => void }} options.host
  * @param {() => number[]} options.topLevel  The top-level windows, topmost first.
  * @param {(hwnd: number) => { exStyle: number } | null} [options.windowOf]
  *        A live window by its handle.
@@ -67,14 +90,22 @@ const MAX_NAME = 256;
  *        Puts a top-level window at the bottom of the stacking.
  */
 export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
-    /** @type {UserObject} */
-    const station = { kind: 'station', name: 'WinSta0', flags: 0 };
+    /**
+     * The interactive station, visible (WSF_VISIBLE), as the logged-on user's
+     * WinSta0 is: .NET's UserInteractive reads this flag, and without it
+     * WinForms refused every message box as shown from a service.
+     *
+     * @type {UserObject}
+     */
+    const station = { kind: 'station', name: 'WinSta0', flags: WSF_VISIBLE };
     /** @type {UserObject} */
     const standard = { kind: 'desktop', name: 'Default', flags: 0 };
     /** The desktops of the station, by name without regard to case. @type {UserObject[]} */
     const desktops = [standard];
     /** The desktop that takes the input. */
     let input = standard;
+    /** Whether SetUserObjectSecurity has said it keeps nothing. */
+    let securitySaid = false;
 
     /**
      * What a handle of this layer names, or null for one it did not open.
@@ -92,6 +123,42 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     const threadDesktops = new Map();
     /** The handle GetProcessWindowStation gives out, made when first asked for. */
     let stationHandle = 0;
+    /** Stations made beside WinSta0 (CreateWindowStation), by name without regard to case. */
+    /** @type {UserObject[]} */
+    const stations = [station];
+    /** How many unnamed stations have been made, for their generated names. */
+    let unnamed = 0;
+    /** The station SetProcessWindowStation chose, when not WinSta0. @type {UserObject} */
+    let processStation = station;
+
+    /** @param {string} name */
+    const stationNamed = name=>stations.find(each=>each.name.toLowerCase() === name.toLowerCase())
+        ?? null;
+
+    /**
+     * CreateWindowStation in either width: a station of that name, made or
+     * opened, or for no name one named as Windows names a service's
+     * (Service-0x0-<n>$). Its desktops are not kept apart from WinSta0's:
+     * every window is drawn on the input desktop all the same.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const createStation = ([name, , , attributes], wide)=>{
+        const text = (name >>> 0) === 0 ? null
+            : wide ? readText(host, name >>> 0, true, MAX_NAME)
+                : host.readCString(wholeAddress(name), MAX_NAME);
+        let made = text === null ? null : stationNamed(text);
+        if (!made)
+        {
+            made = { kind: 'station',
+                name: text ?? `Service-0x0-${(0x3e7 + ++unnamed).toString(16)}$`, flags: 0 };
+            stations.push(made);
+        }
+        const inherit = (attributes >>> 0) !== 0
+            && new DataView(host.readMemory(wholeAddress(attributes) + 8, 4).slice().buffer)
+                .getUint32(0, true) !== 0;
+        return open(made, inherit);
+    };
 
     /** @param {number} code */
     const fail = code=>{
@@ -228,7 +295,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if ((needed >>> 0) !== 0)
         {
-            host.writeMemory(needed >>> 0, new Uint8Array(new Uint32Array([bytes.length]).buffer));
+            host.writeMemory(wholeAddress(needed),
+                new Uint8Array(new Uint32Array([bytes.length]).buffer));
         }
         if ((length >>> 0) < bytes.length || ((into >>> 0) === 0 && bytes.length > 0))
         {
@@ -236,31 +304,29 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if (bytes.length > 0)
         {
-            host.writeMemory(into >>> 0, bytes);
+            host.writeMemory(wholeAddress(into), bytes);
         }
         return 1;
     };
 
     /**
-     * EnumDesktops in either encoding: the station's desktops by name, each
-     * handed to the callback until one answers FALSE.
+     * Hands each name to an enumeration's callback until one answers FALSE.
+     * The call answers what the callback last answered, as EnumDesktops and
+     * EnumWindowStations do: an lParam a callback hands back comes back.
      *
-     * @param {number[]} args  hwinsta, lpEnumFunc, lParam.
+     * @param {UserObject[]} objects @param {number} callback @param {number} lParam
      * @param {boolean} unicode
      */
-    const enumDesktops = ([handle, callback, lParam], unicode)=>{
-        if ((handle >>> 0) !== 0 && !named(handle, 'station'))
-        {
-            return fail(ERROR_INVALID_HANDLE);
-        }
+    const enumNames = (objects, callback, lParam, unicode)=>{
         const call = host.call;
         if (!call || (callback >>> 0) === 0 || !host.allocate)
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
         const thread = host.callerThread?.();
-        const names = desktops.map(each=>textBytes(each.name, unicode));
+        const names = objects.map(each=>textBytes(each.name, unicode));
         return (async()=>{
+            let answer = 1;
             for (const bytes of names)
             {
                 const at = host.allocate?.(bytes.length) ?? 0;
@@ -269,18 +335,168 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
                 host.writeMemory(at, bytes);
-                const going = await call(callback >>> 0, [at, lParam >>> 0], thread);
+                answer = await call(callback >>> 0, [at, lParam], thread) >>> 0;
                 host.release?.(at);
-                if ((going | 0) === 0)
+                if (answer === 0)
                 {
-                    return 0;
+                    break;
                 }
             }
-            return 1;
+            return answer;
         })();
     };
 
+    /**
+     * EnumDesktops in either encoding: the station's desktops by name.
+     *
+     * @param {number[]} args  hwinsta, lpEnumFunc, lParam.
+     * @param {boolean} unicode
+     */
+    const enumDesktops = (args, unicode)=>{
+        const [handle, callback] = args;
+        const lParam = /** @type {number} */ (forwarded(args, 2, true));
+        if ((handle >>> 0) !== 0 && !named(handle, 'station'))
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        return enumNames(desktops, callback, lParam, unicode);
+    };
+
+    /**
+     * SetUserObjectInformation in either encoding: only UOI_FLAGS can be set
+     * (USEROBJECTFLAGS: fInherit, fReserved, dwFlags), and it must be whole.
+     *
+     * @param {number[]} args  hObj, nIndex, pvInfo, nLength.
+     */
+    const setUserObjectInformation = ([handle, index, from, length])=>{
+        const entry = opened.get(handle >>> 0);
+        if (!entry)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if ((index | 0) !== UOI_FLAGS || (length >>> 0) < USEROBJECTFLAGS_SIZE
+            || (from >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const view = new DataView(host.readMemory(wholeAddress(from),
+            USEROBJECTFLAGS_SIZE).slice().buffer);
+        entry.inherit = view.getUint32(0, true) !== 0;
+        entry.object.flags = view.getUint32(8, true);
+        return 1;
+    };
+
+    /**
+     * The security descriptor GetUserObjectSecurity gives for a desktop or a
+     * station: self-relative, with a DACL that allows everyone all access
+     * when the DACL is asked for; the engine keeps no other security on them.
+     *
+     * @param {number} asked  SECURITY_INFORMATION's bits.
+     */
+    const userObjectSecurity = asked=>{
+        const DACL_SECURITY_INFORMATION = 0x4;
+        const SE_DACL_PRESENT = 0x0004;
+        const SE_SELF_RELATIVE = 0x8000;
+        const HEADER = 20;
+        const withDacl = (asked & DACL_SECURITY_INFORMATION) !== 0;
+        // ACL header (8), one ACCESS_ALLOWED_ACE (8) with S-1-1-0, Everyone (12).
+        const ACL_SIZE = 8 + 8 + 12;
+        const bytes = new Uint8Array(HEADER + (withDacl ? ACL_SIZE : 0));
+        const view = new DataView(bytes.buffer);
+        view.setUint8(0, 1);
+        view.setUint16(2, SE_SELF_RELATIVE | (withDacl ? SE_DACL_PRESENT : 0), true);
+        if (withDacl)
+        {
+            view.setUint32(16, HEADER, true);
+            view.setUint8(HEADER, 2);
+            view.setUint16(HEADER + 2, ACL_SIZE, true);
+            view.setUint16(HEADER + 4, 1, true);
+            const ace = HEADER + 8;
+            view.setUint16(ace + 2, 20, true);
+            view.setUint32(ace + 4, 0x10000000, true);
+            view.setUint8(ace + 8, 1);
+            view.setUint8(ace + 9, 1);
+            view.setUint8(ace + 15, 1);
+        }
+        return bytes;
+    };
+
+    /** @param {number} at */
+    const readU32 = at=>new DataView(host.readMemory(at, 4).slice().buffer).getUint32(0, true);
+    /** The messages each window was told to let in (ChangeWindowMessageFilterEx). */
+    const allowedFor = new Map();
+
     return {
+        /**
+         * BOOL ChangeWindowMessageFilter(UINT message, DWORD dwFlag)
+         *
+         * MSGFLT_ADD or MSGFLT_REMOVE for the whole process: accepted, as
+         * there is no lower integrity level to filter.
+         */
+        ChangeWindowMessageFilter: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, flag])=>{
+                if ((flag >>> 0) !== MSGFLT_ADD && (flag >>> 0) !== MSGFLT_REMOVE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ChangeWindowMessageFilterEx(HWND hwnd, UINT message, DWORD action,
+         *     PCHANGEFILTERSTRUCT pChangeFilterStruct)
+         *
+         * For one window of this process: MSGFLT_RESET, MSGFLT_ALLOW,
+         * MSGFLT_DISALLOW. The structure, when given, must say its size and
+         * is told whether the message was let in or kept out already.
+         */
+        ChangeWindowMessageFilterEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, action, info])=>{
+                if (!windowOf?.(hwnd >>> 0))
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                const at = wholeAddress(info);
+                if ((action >>> 0) > MSGFLT_DISALLOW
+                    || (at !== 0 && readU32(at) !== CHANGEFILTERSTRUCT_SIZE))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                /** @type {Set<number>} */
+                const allowed = allowedFor.get(hwnd >>> 0) ?? new Set();
+                allowedFor.set(hwnd >>> 0, allowed);
+                const was = allowed.has(message >>> 0);
+                let status = MSGFLTINFO_NONE;
+                if ((action >>> 0) === MSGFLT_RESET)
+                {
+                    allowed.clear();
+                }
+                else if ((action >>> 0) === MSGFLT_ALLOW)
+                {
+                    status = was ? MSGFLTINFO_ALREADYALLOWED_FORWND : MSGFLTINFO_NONE;
+                    allowed.add(message >>> 0);
+                }
+                else
+                {
+                    status = was ? MSGFLTINFO_NONE : MSGFLTINFO_ALREADYDISALLOWED_FORWND;
+                    allowed.delete(message >>> 0);
+                }
+                if (at !== 0)
+                {
+                    host.writeMemory(at + 4, new Uint8Array(new Uint32Array([status]).buffer));
+                }
+                return 1;
+            },
+        },
+
         /** HDESK OpenInputDesktop(DWORD dwFlags, BOOL fInherit, ACCESS_MASK dwDesiredAccess) */
         OpenInputDesktop: {
             argBytes: 12,
@@ -444,7 +660,9 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         EnumDesktopWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, callback, lParam])=>{
+            handler: args=>{
+                const [handle, callback] = args;
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const entry = (handle >>> 0) === 0 ? { object: input } : named(handle, 'desktop');
                 const call = host.call;
                 if (!entry)
@@ -460,7 +678,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }
@@ -484,13 +702,104 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             handler: args=>enumDesktops(args, true),
         },
 
+        /**
+         * BOOL EnumWindowStationsA(WINSTAENUMPROCA lpEnumFunc, LPARAM lParam)
+         *
+         * The stations by name: WinSta0 and those CreateWindowStation made.
+         */
+        EnumWindowStationsA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), false),
+        },
+        /** BOOL EnumWindowStationsW(WINSTAENUMPROCW lpEnumFunc, LPARAM lParam) */
+        EnumWindowStationsW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), true),
+        },
+
+        /**
+         * BOOL SetUserObjectInformationA(HANDLE hObj, int nIndex, PVOID pvInfo,
+         *     DWORD nLength), and the W form: the same, no text being set.
+         */
+        SetUserObjectInformationA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>setUserObjectInformation(args),
+        },
+        SetUserObjectInformationW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>setUserObjectInformation(args),
+        },
+
+        /**
+         * BOOL GetUserObjectSecurity(HANDLE hObj, PSECURITY_INFORMATION pSIRequested,
+         *     PSECURITY_DESCRIPTOR pSID, DWORD nLength, LPDWORD lpnLengthNeeded)
+         *
+         * The size is written whether or not it fits; a buffer too small is
+         * ERROR_INSUFFICIENT_BUFFER.
+         */
+        GetUserObjectSecurity: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, requested, into, length, needed])=>{
+                if (!opened.has(handle >>> 0))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (wholeAddress(requested) === 0 || wholeAddress(needed) === 0)
+                {
+                    return fail(ERROR_NOACCESS);
+                }
+                const bytes = userObjectSecurity(readU32(wholeAddress(requested)));
+                host.writeMemory(wholeAddress(needed),
+                    new Uint8Array(new Uint32Array([bytes.length]).buffer));
+                if ((length >>> 0) < bytes.length || wholeAddress(into) === 0)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(wholeAddress(into), bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetUserObjectSecurity(HANDLE hObj, PSECURITY_INFORMATION pSIRequested,
+         *     PSECURITY_DESCRIPTOR pSID)
+         *
+         * Accepted and not kept: the engine's desktops and stations have no
+         * security to change, and GetUserObjectSecurity answers as before.
+         */
+        SetUserObjectSecurity: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!opened.has(handle >>> 0))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!securitySaid)
+                {
+                    securitySaid = true;
+                    host.divergence?.('SetUserObjectSecurity',
+                        'a desktop\'s or station\'s security is accepted and not kept');
+                }
+                return 1;
+            },
+        },
+
         /** HWINSTA GetProcessWindowStation(void) */
         GetProcessWindowStation: {
             argBytes: 0,
             handler: ()=>{
-                if (stationHandle === 0 || !opened.has(stationHandle))
+                if (stationHandle === 0 || !opened.has(stationHandle)
+                    || opened.get(stationHandle)?.object !== processStation)
                 {
-                    stationHandle = open(station, false);
+                    stationHandle = open(processStation, false);
                 }
                 return stationHandle;
             },
@@ -500,18 +809,37 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         OpenWindowStationA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, inherit])=>((name >>> 0) !== 0
-                && host.readCString(name >>> 0, MAX_NAME).toLowerCase() === 'winsta0'
-                ? open(station, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND)),
+            handler: ([name, inherit])=>{
+                const found = wholeAddress(name) === 0 ? null
+                    : stationNamed(host.readCString(wholeAddress(name), MAX_NAME));
+                return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
+            },
         },
 
         /** HWINSTA OpenWindowStationW(LPCWSTR lpszWinSta, BOOL fInherit, ACCESS_MASK) */
         OpenWindowStationW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, inherit])=>((name >>> 0) !== 0
-                && readText(host, name >>> 0, true, MAX_NAME).toLowerCase() === 'winsta0'
-                ? open(station, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND)),
+            handler: ([name, inherit])=>{
+                const found = wholeAddress(name) === 0 ? null
+                    : stationNamed(readText(host, wholeAddress(name), true, MAX_NAME));
+                return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
+            },
+        },
+
+        /**
+         * HWINSTA CreateWindowStationA(LPCSTR lpwinsta, DWORD dwFlags,
+         *     ACCESS_MASK dwDesiredAccess, LPSECURITY_ATTRIBUTES lpsa), and the W form
+         */
+        CreateWindowStationA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>createStation(args, false),
+        },
+        CreateWindowStationW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>createStation(args, true),
         },
 
         /** BOOL CloseWindowStation(HWINSTA hWinSta) */
@@ -525,7 +853,15 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         SetProcessWindowStation: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(named(handle, 'station') ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>{
+                const entry = named(handle, 'station');
+                if (!entry)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                processStation = entry.object;
+                return 1;
+            },
         },
 
         /**

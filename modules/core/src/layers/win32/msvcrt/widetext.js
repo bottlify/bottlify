@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Unicode translations a descriptor can be in: `_O_WTEXT`, `_O_U16TEXT`
  * and `_O_U8TEXT`. In each, the program reads and writes UTF-16 and the file
@@ -237,38 +239,51 @@ const MAX_WIDE = 1 << 16;
 const WIDE_STRETCH = 64;
 
 /**
- * A wide string in guest memory up to its terminator, as the string its units
- * spell. Each stretch read ends at a 64-byte boundary, so a string that ends
- * just short of where its region does is not read past it.
+ * The units of a string in guest memory, one or two bytes each, up to its
+ * terminator or `limit` of them, whichever comes first -- never a byte past
+ * either. Each stretch read ends at a 64-byte boundary, so a string that
+ * ends just short of where its region does is not read past it, and a
+ * count that ends inside an unterminated one is not read past either, as
+ * the n-bounded C functions stop there.
  *
  * @param {(address: number, length: number) => Uint8Array} readMemory
- * @param {number} pointer
+ * @param {number} pointer @param {1 | 2} unit @param {number} limit
+ * @returns {Generator<number>}
  */
-export function wideStringAt(readMemory, pointer){
-    /** @type {number[]} */
-    const units = [];
+export function* unitsAt(readMemory, pointer, unit, limit){
+    const last = (pointer >>> 0) + Math.max(0, limit) * unit;
     let low = -1;
-    for (let at = pointer >>> 0; units.length < MAX_WIDE;)
+    for (let at = wholeAddress(pointer); at < last;)
     {
-        const end = at - at % WIDE_STRETCH + WIDE_STRETCH;
+        const end = Math.min(at - at % WIDE_STRETCH + WIDE_STRETCH, last);
         for (const byte of readMemory(at, end - at))
         {
-            if (low < 0)
+            if (unit === 2 && low < 0)
             {
                 low = byte;
                 continue;
             }
-            const unit = low | byte << 8;
+            const value = unit === 2 ? low | byte << 8 : byte;
             low = -1;
-            if (unit === 0)
+            if (value === 0)
             {
-                return textOfUnits(units);
+                return;
             }
-            units.push(unit);
+            yield value;
         }
         at = end;
     }
-    return textOfUnits(units);
+}
+
+/**
+ * A wide string in guest memory up to its terminator, or its first `limit`
+ * units, as the string its units spell.
+ *
+ * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {number} pointer @param {number} [limit]
+ */
+export function wideStringAt(readMemory, pointer, limit = MAX_WIDE){
+    return textOfUnits([...unitsAt(readMemory, pointer, 2, Math.min(limit, MAX_WIDE))]);
 }
 
 /**
@@ -290,20 +305,6 @@ export function textOfUnits(units){
         text += String.fromCharCode(...units.slice(at, at + 0x2000));
     }
     return text;
-}
-
-/**
- * Units as the guest bytes of UTF-16LE.
- *
- * @param {number[]} units
- */
-export function bytesOfUnits(units){
-    const bytes = new Uint8Array(units.length * 2);
-    units.forEach((unit, at)=>{
-        bytes[at * 2] = unit & 0xff;
-        bytes[at * 2 + 1] = unit >>> 8;
-    });
-    return bytes;
 }
 
 /**

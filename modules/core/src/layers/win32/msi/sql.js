@@ -44,7 +44,7 @@ const NAME_CHARACTER = {
 /**
  * @param {string} text @returns {Token[]}
  */
-export function tokenize(text){
+function tokenize(text){
     /** @type {Token[]} */
     const tokens = [];
     let at = 0;

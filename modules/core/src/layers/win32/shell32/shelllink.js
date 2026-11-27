@@ -23,25 +23,32 @@
  * here that must not be surprised.
  */
 
-import { writeGuid } from '../ole32/guid.js';
+import { writeGuid } from '../../../system/guid.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import {
-    CLSID_SHELL_LINK, SW_SHOWNORMAL, decodeShellLink, writeShellLink,
+    BLOCK_SIGNATURES, CLSID_SHELL_LINK, LINK_FLAGS, SW_SHOWNORMAL, darwinBlock, decodeShellLink,
+    writeShellLink,
 } from '../common/shell-link.js';
 import { listBytes, pathOfList } from './namespace.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** CLSID_ShellLink, and the interfaces the object answers to. */
 export { CLSID_SHELL_LINK };
 export const IID_ISHELL_LINK_A = '{000214EE-0000-0000-C000-000000000046}';
 export const IID_ISHELL_LINK_W = '{000214F9-0000-0000-C000-000000000046}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
+const IID_ISHELL_LINK_DATA_LIST = '{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
 const E_FAIL = 0x80004005 | 0;
+/** HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) */
+const E_SHARING_VIOLATION = 0x80070020 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
 const STG_E_FILENOTFOUND = 0x80030002 | 0;
 /** HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND): a save into a directory that is not there. */
 const E_PATH_NOT_FOUND = 0x80070003 | 0;
@@ -101,6 +108,21 @@ const IPERSIST_FILE_SLOTS = [
     ['GetCurFile', 1],
 ];
 
+/** IShellLinkDataList's slots after IUnknown's three. @type {[string, number][]} */
+const IDATA_LIST_SLOTS = [
+    ['AddDataBlock', 1],
+    ['CopyDataBlock', 2],
+    ['RemoveDataBlock', 1],
+    ['GetFlags', 1],
+    ['SetFlags', 1],
+];
+
+/**
+ * The target an advertised shortcut is given: the Darwin descriptor, set
+ * through SetPath behind the installer's CLSID (Wine's test_datalink).
+ */
+const DARWIN_TARGET = /^::\{9db1186e-40df-11d1-aa8c-00c04fb67863\}:(.*)::$/i;
+
 /**
  * @typedef {Object} ShellLinkState
  * @property {string} path
@@ -118,6 +140,8 @@ const IPERSIST_FILE_SLOTS = [
  *           Extra data a loaded link carried, saved back with it.
  * @property {string | null} curFile  The path Save or Load last named.
  * @property {boolean} dirty          Whether a Set* ran since the last save.
+ * @property {number} flags           SLDF_* as SetFlags left them; the
+ *           Darwin flag is the block's, and is added when it is there.
  */
 
 /** @returns {ShellLinkState} */
@@ -125,7 +149,7 @@ function newLinkState(){
     return {
         path: '', relativePath: '', arguments: '', description: '', workingDirectory: '',
         iconLocation: '', iconIndex: 0, showCmd: SW_SHOWNORMAL, hotkey: 0,
-        idList: null, blocks: [], curFile: null, dirty: false,
+        idList: null, blocks: [], curFile: null, dirty: false, flags: 0,
     };
 }
 
@@ -156,7 +180,10 @@ function newLinkState(){
  *           from here rather than from storage this file keeps.
  * @property {import('../common/shell-link.js').LinkVolume & {
  *     read: (node: any, offset: number, length: number)
- *         => Uint8Array | Promise<Uint8Array> }} [files]
+ *         => Uint8Array | Promise<Uint8Array>,
+ *     open: (path: string, mode: { read?: boolean, write?: boolean, create?: boolean,
+ *         truncate?: boolean, shareRead?: boolean, shareWrite?: boolean }) => unknown,
+ *     openRefusal?: () => string | null }} [files]
  *           The volume a link is saved on and loaded from. Absent, Save cannot
  *           leave a file and says so rather than answering success.
  * @property {(text: string) => string} [expand]
@@ -176,7 +203,7 @@ const ansiReader = host=>({ read: address=>host.readCString(address, MAX_LINK_ST
  * @param {ShellLinkHost} host
  * @returns {{ read: (address: number) => string }} the wide reader
  */
-const wideReader = host=>({ read: address=>host.readWideString(address, MAX_LINK_STRING) });
+const wideReader = host=>({ read: address=>host.readWideString(address, MAX_LINK_STRING * 2) });
 
 /**
  * Writes `text` into a guest buffer as ANSI or wide, truncated to `cch`
@@ -197,14 +224,7 @@ function writeStringBuffer(host, buffer, cch, text, wide){
     const kept = text.slice(0, cch - 1);
     if (wide)
     {
-        const bytes = new Uint8Array((kept.length + 1) * 2);
-        for (let at = 0; at < kept.length; at++)
-        {
-            const unit = kept.charCodeAt(at);
-            bytes[at * 2] = unit & 0xff;
-            bytes[at * 2 + 1] = (unit >>> 8) & 0xff;
-        }
-        host.writeMemory(buffer, bytes);
+        host.writeMemory(buffer, utf16z(kept));
         return;
     }
     host.writeMemory(buffer, encodeAnsi(`${kept}\0`));
@@ -284,12 +304,22 @@ function readList(host, list){
  */
 function cleanPath(text){
     const unquoted = /^"[^"]*"$/.test(text) ? text.slice(1, -1) : text;
-    return /^[A-Za-z]:\\?$/.test(unquoted)
-        ? `${unquoted.slice(0, 2)}\\` : unquoted.replace(/\\+$/, '');
+    // The drive is named in upper case, however it was spelled (Wine's
+    // test_get_set, against Windows).
+    const named = /^[a-z]:/.test(unquoted) ? `${unquoted[0].toUpperCase()}${unquoted.slice(1)}`
+        : unquoted;
+    return /^[A-Za-z]:\\?$/.test(named)
+        ? `${named.slice(0, 2)}\\` : named.replace(/\\+$/, '');
 }
 
 /** @param {string} path */
 const isDrivePath = path=>/^[A-Za-z]:\\/.test(path);
+
+/**
+ * The extensions a target named without one is tried with, in the order
+ * PathFileExistsDefExt documents.
+ */
+const PROGRAM_EXTENSIONS = Object.freeze(['.pif', '.com', '.exe', '.bat', '.lnk', '.cmd']);
 
 /** @param {number} value */
 const dword = value=>new Uint8Array([
@@ -329,9 +359,34 @@ function describe(id, slots, implemented = {}){
  * @param {ShellLinkHost} host
  * @returns {() => import('../ole32/objects.js').ComClassDefinition}
  */
-export function createShellLink(host){
+function createShellLink(host){
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>host.divergence?.(api, detail);
+
+    /** Whether the volume refused the last open for another open's terms. */
+    const refusedBySharing = ()=>host.files?.openRefusal?.() === 'SHARING_VIOLATION';
+
+    /**
+     * A full path that names no file, but does with a program's extension
+     * after it: the target SetPath keeps (Wine's test_get_set, "absolute
+     * path without .exe"). Any other path as it is.
+     *
+     * @param {string} path
+     */
+    const withProgramExtension = path=>{
+        const name = path.slice(path.lastIndexOf('\\') + 1);
+        const files = host.files;
+        /** @param {string} candidate */
+        const there = candidate=>{
+            const entry = files?.stat(candidate);
+            return Boolean(entry) && entry?.exists !== false;
+        };
+        if (!files || !isDrivePath(path) || name.includes('.') || there(path))
+        {
+            return path;
+        }
+        return PROGRAM_EXTENSIONS.map(extension=>`${path}${extension}`).find(there) ?? path;
+    };
 
     /**
      * The string setters and getters, built once per spelling. `read` decodes
@@ -378,7 +433,19 @@ export function createShellLink(host){
                 {
                     return E_INVALIDARG;
                 }
-                state.path = cleanPath(reader.read(address >>> 0));
+                const target = reader.read(address >>> 0);
+                const darwin = DARWIN_TARGET.exec(target);
+                if (darwin)
+                {
+                    state.blocks = [...state.blocks.filter(block=>
+                        (block.signature >>> 0) !== BLOCK_SIGNATURES.DARWIN),
+                    darwinBlock(darwin[1])];
+                    state.path = '';
+                    state.idList = null;
+                    state.dirty = true;
+                    return S_OK;
+                }
+                state.path = withProgramExtension(cleanPath(target));
                 state.idList = null;
                 state.dirty = true;
                 return S_OK;
@@ -424,7 +491,7 @@ export function createShellLink(host){
                 writeStringBuffer(host, buffer >>> 0, cch | 0, state.iconLocation, wide);
                 if ((iconIndex >>> 0) !== 0)
                 {
-                    host.writeMemory(iconIndex >>> 0, dword(state.iconIndex));
+                    host.writeMemory(wholeAddress(iconIndex), dword(state.iconIndex));
                 }
                 return S_OK;
             },
@@ -456,7 +523,7 @@ export function createShellLink(host){
         GetShowCmd: (state, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(state.showCmd));
+                host.writeMemory(wholeAddress(out), dword(state.showCmd));
             }
             return S_OK;
         },
@@ -470,7 +537,7 @@ export function createShellLink(host){
         GetHotkey: (state, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array([state.hotkey & 0xff, (state.hotkey >>> 8) & 0xff]));
             }
             return S_OK;
@@ -515,11 +582,11 @@ export function createShellLink(host){
             const block = bytes ? host.allocate(bytes.length) : 0;
             if (!bytes || block === 0)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return bytes ? E_FAIL : S_FALSE;
             }
             host.writeMemory(block, bytes);
-            host.writeMemory(out >>> 0, dword(block));
+            host.writeMemory(wholeAddress(out), dword(block));
             return S_OK;
         },
 
@@ -599,17 +666,19 @@ export function createShellLink(host){
          * there but is no link fails, and leaves the state as it was.
          */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_LINK_STRING);
+            const path = host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
             {
                 return STG_E_FILENOTFOUND;
             }
-            const node = files.open(path, { read: true });
+            // Read as Windows reads a link: sharing reading and writing with
+            // the opens already there, so only one that shares nothing bars it.
+            const node = files.open(path, { read: true, shareRead: true, shareWrite: true });
             if (!node)
             {
-                return STG_E_FILENOTFOUND;
+                return refusedBySharing() ? E_SHARING_VIOLATION : STG_E_FILENOTFOUND;
             }
             /** @param {Uint8Array} bytes */
             const finish = bytes=>{
@@ -650,7 +719,7 @@ export function createShellLink(host){
          */
         Save: (state, [name, remember])=>{
             const given = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING);
+                ? null : host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -662,8 +731,22 @@ export function createShellLink(host){
                     `no volume to save ${path} on; the link is not written`);
                 return E_FAIL;
             }
-            if (!writeShellLink(host.files, path, fieldsOf(state)))
+            const files = host.files;
+            // Written sharing reading, so a reader already there keeps it and
+            // an open that refuses writers refuses the save.
+            const sharing = {
+                stat: files.stat.bind(files),
+                /** @param {string} at @param {Record<string, boolean>} mode */
+                open: (at, mode)=>files.open(at, { ...mode, shareRead: true }),
+                write: files.write.bind(files),
+                close: files.close.bind(files),
+            };
+            if (!writeShellLink(sharing, path, fieldsOf(state)))
             {
+                if (refusedBySharing())
+                {
+                    return E_SHARING_VIOLATION;
+                }
                 const parent = path.slice(0, path.lastIndexOf('\\'));
                 return host.files.stat(parent)?.isDirectory ? E_FAIL : E_PATH_NOT_FOUND;
             }
@@ -678,7 +761,7 @@ export function createShellLink(host){
         /** HRESULT SaveCompleted(LPCOLESTR pszFileName) */
         SaveCompleted: (state, [name])=>{
             state.curFile = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING);
+                ? null : host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             state.dirty = false;
             return S_OK;
         },
@@ -690,7 +773,7 @@ export function createShellLink(host){
          * with CoTaskMemFree. S_FALSE with a null when nothing has been saved.
          */
         GetCurFile: (state, [out])=>{
-            const slot = out >>> 0;
+            const slot = wholeAddress(out);
             if (slot === 0)
             {
                 return E_FAIL;
@@ -700,13 +783,7 @@ export function createShellLink(host){
                 host.writeMemory(slot, dword(0));
                 return S_FALSE;
             }
-            const bytes = new Uint8Array((state.curFile.length + 1) * 2);
-            for (let at = 0; at < state.curFile.length; at++)
-            {
-                const unit = state.curFile.charCodeAt(at);
-                bytes[at * 2] = unit & 0xff;
-                bytes[at * 2 + 1] = (unit >>> 8) & 0xff;
-            }
+            const bytes = utf16z(state.curFile);
             const block = host.allocate(bytes.length);
             if (block === 0)
             {
@@ -715,6 +792,73 @@ export function createShellLink(host){
             }
             host.writeMemory(block, bytes);
             host.writeMemory(slot, dword(block));
+            return S_OK;
+        },
+    };
+
+    /** @type {Record<string, (state: ShellLinkState, args: number[]) => number>} */
+    const dataList = {
+        /** HRESULT AddDataBlock(void *pDataBlock): the block as it is, its cbSize long. */
+        AddDataBlock: (state, [block])=>{
+            if ((block >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const header = host.readMemory(wholeAddress(block), 8);
+            const view = new DataView(header.slice().buffer);
+            const size = view.getUint32(0, true);
+            const signature = view.getUint32(4, true);
+            if (size < 8)
+            {
+                return E_INVALIDARG;
+            }
+            state.blocks = [...state.blocks.filter(known=>(known.signature >>> 0) !== signature),
+                { signature, bytes: host.readMemory(wholeAddress(block), size).slice() }];
+            state.dirty = true;
+            return S_OK;
+        },
+        /**
+         * HRESULT CopyDataBlock(DWORD dwSig, void **ppDataBlock)
+         *
+         * A copy the caller frees with LocalFree; E_FAIL and a null for a
+         * block the link has not.
+         */
+        CopyDataBlock: (state, [signature, out])=>{
+            const found = state.blocks.find(block=>(block.signature >>> 0) === (signature >>> 0));
+            const copy = found ? host.allocate(found.bytes.length) : 0;
+            if (copy !== 0 && found)
+            {
+                host.writeMemory(copy, found.bytes);
+            }
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(wholeAddress(out), dword(copy));
+            }
+            return found ? copy === 0 ? E_OUTOFMEMORY : S_OK : E_FAIL;
+        },
+        /** HRESULT RemoveDataBlock(DWORD dwSig) */
+        RemoveDataBlock: (state, [signature])=>{
+            const kept = state.blocks.filter(block=>(block.signature >>> 0) !== (signature >>> 0));
+            if (kept.length === state.blocks.length)
+            {
+                return E_FAIL;
+            }
+            state.blocks = kept;
+            state.dirty = true;
+            return S_OK;
+        },
+        /** HRESULT GetFlags(DWORD *pdwFlags) */
+        GetFlags: (state, [out])=>{
+            const darwin = state.blocks.some(block=>
+                (block.signature >>> 0) === BLOCK_SIGNATURES.DARWIN);
+            host.writeMemory(wholeAddress(out), dword((state.flags
+                | (darwin ? LINK_FLAGS.HAS_DARWIN_ID : 0)) >>> 0));
+            return S_OK;
+        },
+        /** HRESULT SetFlags(DWORD dwFlags) */
+        SetFlags: (state, [flags])=>{
+            state.flags = flags >>> 0;
+            state.dirty = true;
             return S_OK;
         },
     };
@@ -728,6 +872,7 @@ export function createShellLink(host){
             describe(IID_ISHELL_LINK_A, ISHELL_LINK_SLOTS, ansi),
             describe(IID_ISHELL_LINK_W, ISHELL_LINK_SLOTS, wide),
             describe(IID_IPERSIST_FILE, IPERSIST_FILE_SLOTS, persistFile),
+            describe(IID_ISHELL_LINK_DATA_LIST, IDATA_LIST_SLOTS, dataList),
         ],
     });
 }

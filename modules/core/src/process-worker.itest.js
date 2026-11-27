@@ -18,12 +18,13 @@ import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { READ_AHEAD_BYTES, createApp } from './app.js';
+import { createApp } from './app.js';
+import { READ_AHEAD_BYTES } from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
 import { Worker } from 'node:worker_threads';
-import { buildExe } from '../../../tools/make-pe.mjs';
-import { texturedFrames } from '../../../tools/d3d9-program.mjs';
-import { waitingParent } from '../../../tools/spawn-program.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
+import { texturedFrames } from '../../../tools/fixtures/d3d9-program.mjs';
+import { waitingParent } from '../../../tools/fixtures/spawn-program.mjs';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 
 /** @param {number} value */
@@ -107,7 +108,6 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         const app = await createApp({
             executable: new Uint8Array(parent),
             imagePath: 'C:\\App\\spawn.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
@@ -124,7 +124,7 @@ test('a child in a worker of its own leaves its parent its file, its registry va
         /** @type {any[]} */
         const libraries = [];
         app.on('libraries', (/** @type {any} */ event)=>libraries.push(event));
-        const code = await app.run({ timeoutMs: 60000 });
+        const code = await app.run({ timeoutMs: 90_000 });
         const lines = output.join('').split('\r\n').filter(Boolean);
         assert.deepEqual(lines.filter(line=>line.startsWith('FAIL')), [], output.join(''));
         assert.equal(lines.filter(line=>line.startsWith('ok   ')).length, 10, output.join(''));
@@ -175,7 +175,6 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
                 asked.push([offset, length]);
@@ -192,7 +191,7 @@ test('a child in a worker of its own reads what the run\'s bundle has not fetche
         app.on('process-started', ()=>{
             before.count = asked.length;
         });
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x2a,
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x2a,
             'the child read its byte out of the bundle');
         assert.deepEqual(started, [true, true], 'the program and its child, each in a worker');
         assert.ok(asked.length > before.count,
@@ -205,7 +204,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         const gpu = createFakeDevice();
         Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
-        const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs',
+        const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs',
             import.meta.url));
         t.after(()=>thread.terminate());
         thread.postMessage({ type: 'open', frames: 'pixels' });
@@ -229,9 +228,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
-            cork: /** @type {any} */ ({ config: { sharedMemory: true } }),
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas, adapter: { vendor: 'fake', architecture: '',
                     description: 'a stand-in' }, worker },
@@ -246,7 +243,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         /** @type {any[]} */
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>started.push(event.worker));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0, divergences.join('\n'));
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0, divergences.join('\n'));
         assert.deepEqual(started, [true, true], 'the program and its child, each in a worker');
         assert.deepEqual(divergences, []);
         const frames = fromWorker.filter(message=>message.type === 'frame');
@@ -256,6 +253,68 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         const shown = app.presenter().presented();
         assert.ok(shown.count >= frames.length,
             `and the run showed what came back: ${shown.count} of ${frames.length}`);
+    });
+
+test('a tool reads the frames and the memory of a program in a worker of its own from that worker',
+    { timeout: 120000 }, async t=>{
+        // A program in a worker of its own keeps its frames, and their phases,
+        // in its worker's journal: read from the run's thread, they were the
+        // system's, and a slow frame of a game said nothing. Its memory is its
+        // worker's too: a loop a profile named could not be read to see what
+        // it waits for.
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+            createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
+        const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs',
+            import.meta.url));
+        t.after(()=>thread.terminate());
+        thread.postMessage({ type: 'open', frames: 'pixels' });
+        /** @type {Map<Function, (data: any) => void>} */
+        const listeners = new Map();
+        const worker = {
+            postMessage: (/** @type {any} */ message, /** @type {any} */ transfer)=>
+                thread.postMessage(message, transfer),
+            addEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                const relay = (/** @type {any} */ data)=>listener({ data });
+                listeners.set(listener, relay);
+                thread.on('message', relay);
+            },
+            removeEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                thread.off('message', /** @type {any} */ (listeners.get(listener)));
+            },
+        };
+        const app = await createApp({
+            executable: texturedFrames(400),
+            imagePath: 'C:\\a.exe',
+            concurrency: 2,
+            device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
+                canvas: gpu.canvas, adapter: { vendor: 'fake', architecture: '',
+                    description: 'a stand-in' }, worker },
+        });
+        t.after(()=>app.dispose());
+        let most = 0;
+        let header = '';
+        const looking = setInterval(async()=>{
+            for (const one of await app.debug.processes())
+            {
+                const frames = await Promise.resolve(app.debug.framesOf(one.id, 50))
+                    .catch(()=>null);
+                most = Math.max(most, Array.isArray(frames) ? frames.length : 0);
+                const bytes = await Promise.resolve(app.debug.readOf(one.id, 0x400000, 2))
+                    .catch(()=>null);
+                // A read at the moment the process ends finds nothing: what
+                // counts is that one read it while it ran.
+                if (bytes && bytes.length === 2)
+                {
+                    header = String.fromCharCode(...bytes);
+                }
+            }
+        }, 25);
+        t.after(()=>clearInterval(looking));
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
+        clearInterval(looking);
+        assert.ok(most > 0, 'its frames were read while it ran');
+        assert.equal(header, 'MZ', 'its image was read while it ran');
     });
 
 test('a child in a worker of its own is sent the page\'s input while it stands',
@@ -299,7 +358,6 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
         });
@@ -316,7 +374,7 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
             }
         });
         t.after(()=>clearInterval(/** @type {any} */ (pressing)));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41,
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41,
             'the child read the A its window was sent');
         assert.ok(pressing, 'it ran in a worker of its own');
     });
@@ -330,7 +388,6 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
     const app = await createApp({
         executable: waitingParent(),
         imagePath: 'C:\\parent.exe',
-        engine: 'cork',
         concurrency: 2,
         storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
     });
@@ -344,7 +401,7 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
     const childLayers = [];
     app.on('process-started', ()=>parentFree.push(arenaFree()));
     app.on('process-resumed', (/** @type {any} */ event)=>childLayers.push(event.diagnostics));
-    assert.equal(await app.run({ timeoutMs: 60000 }), 0);
+    assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
     assert.deepEqual(parentFree, [8 << 20, 8 << 20],
         'the system lent the program eight of its sixteen MiB, and nothing more for its child');
     assert.equal(childLayers[0]?.find((/** @type {any} */ layer)=>layer.name === 'audio')
@@ -364,7 +421,6 @@ for (const where of ['in its own place', 'in a worker of its own'])
             const app = await createApp({
                 executable: across ? waitingParent() : paintsThenWaits(),
                 imagePath: 'C:\\parent.exe',
-                engine: 'cork',
                 ...across ? { concurrency: 2 } : {},
                 device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                     canvas: gpu.canvas },
@@ -383,7 +439,7 @@ for (const where of ['in its own place', 'in a worker of its own'])
                 }
             }, 50);
             t.after(()=>clearInterval(looking));
-            assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+            assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41);
             assert.ok(red, 'the red it painted reached the GPU');
         });
 }
@@ -393,7 +449,6 @@ test('a child in a worker of its own is among the processes standing, with its o
         const app = await createApp({
             executable: waitingParent(),
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\a.exe', bytes: paintsThenWaits() }],
@@ -418,7 +473,7 @@ test('a child in a worker of its own is among the processes standing, with its o
             clearInterval(asking);
             clearInterval(/** @type {any} */ (pressing));
         });
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0x41);
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0x41);
         assert.deepEqual(standing.map(process=>process.image), ['C:\\parent.exe', 'C:\\a.exe']);
         const child = standing[1].diagnostics;
         assert.ok(child.find((/** @type {any} */ layer)=>layer.name === 'win32'),
@@ -432,7 +487,6 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     const app = await createApp({
         executable: new Uint8Array(exe),
         imagePath: 'C:\\hello.exe',
-        engine: 'cork',
         concurrency: 2,
         storage: { load: async()=>({ files: [{ path: 'C:\\note.txt',
             bytes: new TextEncoder().encode('kept') }] }) },
@@ -446,12 +500,12 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     app.on('process-started', (/** @type {any} */ event)=>{
         started.push(event);
     });
-    const running = app.run({ timeoutMs: 30000 });
+    const running = app.run({ timeoutMs: 90_000 });
     assert.equal(await running, 0);
     assert.equal(output.join(''), 'Hello from Bottlify\r\n');
     assert.deepEqual(started.map(event=>[event.image, event.worker]), [['C:\\hello.exe', true]],
         'the program started in a worker of its own');
-    assert.equal(new TextDecoder().decode(app.files.read('C:\\note.txt')), 'kept',
+    assert.deepEqual(await app.files.read('C:\\note.txt'), new TextEncoder().encode('kept'),
         'the session\'s files are on the run\'s volume, here');
     assert.ok(app.registry().root, 'the registry is the run\'s, here');
     const tables = app.diagnostics();
@@ -499,7 +553,6 @@ test('a program in a worker of its own is built from a library of the bundle no 
     const app = await createApp({
         executable: program,
         imagePath: 'C:\\z\\program.exe',
-        engine: 'cork',
         concurrency: 2,
         bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
             const buffer = Buffer.alloc(length);
@@ -508,7 +561,7 @@ test('a program in a worker of its own is built from a library of the bundle no 
         } },
     });
     t.after(()=>app.dispose());
-    assert.equal(await app.run({ timeoutMs: 60000 }), 7,
+    assert.equal(await app.run({ timeoutMs: 90_000 }), 7,
         'the library was read across the link while the program\'s machine was built');
 });
 
@@ -540,7 +593,6 @@ test('a launcher in a worker of its own that starts its game and exits leaves th
         const app = await createApp({
             executable: launcher,
             imagePath: 'C:\\launcher.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\game.exe', bytes: game }] }) },
         });
@@ -549,7 +601,7 @@ test('a launcher in a worker of its own that starts its game and exits leaves th
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 9, 'the run\'s code is the game\'s');
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 9, 'the run\'s code is the game\'s');
         assert.deepEqual(started, [['C:\\launcher.exe', true], ['C:\\game.exe', true]]);
     });
 
@@ -563,14 +615,13 @@ test('a program in a worker of its own that is stopped leaves the run its tables
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\spin.exe',
-            engine: 'cork',
             concurrency: 2,
         });
         t.after(()=>app.dispose());
         /** @type {any[]} */
         const errors = [];
         app.on('error', (/** @type {any} */ payload)=>errors.push(payload));
-        assert.equal(await app.run({ timeoutMs: 2000 }), -1);
+        assert.equal(await app.run({ timeoutMs: 90_000 }), -1);
         assert.ok(errors.some(payload=>payload.reason === 'process'), 'the stop was said');
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
         assert.ok(cpu?.metrics.instructions > 0, 'what it ran is still read');

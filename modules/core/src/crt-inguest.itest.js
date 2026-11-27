@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 import { ERANGE } from './layers/win32/msvcrt/globals.js';
 import { createMsvcrtFunctions } from './layers/win32/msvcrt/functions.js';
@@ -259,16 +259,18 @@ function buildMsvcrtAnswersExe(){
     strings('atoi', ['-2147483649'], [], 0x7fffffff);
     plain('towupper', [0xffff], 0xffff);
     plain('towlower', [0xffff], 0xffff);
-    plain('iswupper', [0xc9], 1);
-    plain('iswlower', [0xe9], 1);
-    plain('iswprint', [0xe9], 1);
-    plain('iswgraph', [0xe9], 1);
-    plain('iswpunct', [0xa9], 1);
-    plain('iswcntrl', [0x80], 1);
+    // A wide classifier answers its class's bits, as iswctype does.
+    plain('iswupper', [0xc9], 0x01);
+    plain('iswlower', [0xe9], 0x02);
+    plain('iswprint', [0xe9], 0x102);
+    plain('iswgraph', [0xe9], 0x102);
+    plain('iswpunct', [0xa9], 0x10);
+    plain('iswcntrl', [0x80], 0x20);
     plain('iswspace', [0x85], 0);
     plain('iswalpha', [0xaa], 0);
-    plain('iswdigit', [0xb2], 1);
-    plain('iswprint', [0x09], 1);
+    plain('iswdigit', [0xb2], 0x04);
+    plain('iswprint', [0x09], 0x40);
+    plain('iswdigit', [0x0660], 0x04);
     const data = Object.fromEntries(['4294967296', '-2147483649']
         .map(text=>[text, cString(text)]));
     data.euro = [0x80, 0];
@@ -324,9 +326,11 @@ function buildLibraryExe(){
     plain('isspace', [0x0b], 1);
     plain('isspace', [0xa0], 0);
     plain('isalpha', [0xffffffff], 0);
-    plain('iswspace', [0xa0], 1);
-    plain('iswspace', [0x3000], 0);
-    plain('iswalpha', [0xe9], 1);
+    plain('iswspace', [0xa0], 0x08);
+    // Past 0xff the code hands the call to the host, which classes it.
+    plain('iswspace', [0x3000], 0x08);
+    plain('iswalpha', [0x4e2d], 0x100);
+    plain('iswalpha', [0xe9], 0x102);
     plain('towupper', [0x10061], 0x41);
     /**
      * @param {string} name @param {string[]} texts @param {number[]} rest
@@ -671,7 +675,7 @@ async function exitCodeOf(executable){
 
 test('a host write into the runtime\'s variables keeps none of its code from translation',
     { timeout: 120000 }, async()=>{
-        const app = await createApp({ executable: buildNeighbourExe(), engine: 'cork' });
+        const app = await createApp({ executable: buildNeighbourExe() });
         try
         {
             assert.equal(await app.run({ timeoutMs: 60000 }), 0);

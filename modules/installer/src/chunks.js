@@ -24,6 +24,8 @@
  * @property {{ size: number, flat: Uint8Array | null,
  *     pieces: (Uint8Array | undefined)[] }} [contents]  The volume's own, not enumerable.
  * @property {Uint8Array} bytes
+ * @property {() => Promise<Uint8Array>} [read]  A file not read yet: its bytes when asked,
+ *     as a session kept in the origin's file system hands them out (`load({ lazy })`).
  */
 
 /**
@@ -37,7 +39,7 @@ export const sizeOf = file=>(file.pieces ? file.size ?? 0
     : file.contents ? file.contents.size : file.bytes.length);
 
 /** @param {ChunkedFile} file @returns {(Uint8Array | null | undefined)[]} */
-export const piecesOf = file=>file.pieces ?? (file.contents
+const piecesOf = file=>file.pieces ?? (file.contents
     ? (file.contents.flat ? [file.contents.flat] : file.contents.pieces) : [file.bytes]);
 
 /**
@@ -75,8 +77,10 @@ export function chunkedFile(path, size, pieces){
  * @param {ChunkedFile} file @param {string} path
  * @returns {ChunkedFile}
  */
-export const atPath = (file, path)=>(file.pieces || file.contents
-    ? chunkedFile(path, sizeOf(file), piecesOf(file)) : { path, bytes: file.bytes });
+export const atPath = (file, path)=>(file.read && !file.pieces && !file.contents
+    ? /** @type {ChunkedFile} */ ({ path, size: file.size, read: file.read })
+    : file.pieces || file.contents
+        ? chunkedFile(path, sizeOf(file), piecesOf(file)) : { path, bytes: file.bytes });
 
 /**
  * A file's bytes in blocks of `blockSize`, the last shorter: views of its

@@ -145,3 +145,53 @@ export function nudgeWhenAsked(scope, clock){
         made: ()=>nudge?.made() ?? 0,
     };
 }
+
+/**
+ * How much of the translator's code let go brings a collection forward, and
+ * what is made to bring it.
+ *
+ * V8 keeps a module's compiled code until a full collection finds the module
+ * unreachable, and a thread whose JavaScript heap is small runs one rarely: a
+ * minor collection frees none of it. 1 500 region modules of clr.dll compiled
+ * by TurboFan (18 MiB of wasm, node 26.13.1) held 199 MiB after they were
+ * dropped, through 5 s idle and a minor collection, and 103 MiB after a full
+ * one; an untouched 64 MiB buffer made and dropped once started that full
+ * collection (77 MiB given back). The installer of the .NET Framework under
+ * the engine let go of a run's worth of code a process at a time, and the tab
+ * held the old code beside the new until it was killed. 32 MiB of wasm is
+ * roughly 200 MiB of optimised code; a collection of the engine's heap costs
+ * milliseconds against that.
+ */
+const CODE_NUDGE = Object.freeze({ afterBytes: 32 * 1024 * 1024, bytes: 64 * 1024 * 1024 });
+
+/** What this thread let go since its last nudge, and the nudges made for it. */
+let codeLetGo = 0;
+let codeNudges = 0;
+
+/**
+ * Counts `bytes` of translated code this thread no longer reaches, and once
+ * `CODE_NUDGE.afterBytes` have gathered makes and drops one buffer, which
+ * brings the engine's full collection forward. A refused buffer is no
+ * failure: the hint is skipped.
+ *
+ * @param {number} bytes  wasm bytes of the modules let go
+ */
+export function releasedCode(bytes){
+    codeLetGo += bytes > 0 ? bytes : 0;
+    if (codeLetGo < CODE_NUDGE.afterBytes)
+    {
+        return;
+    }
+    codeLetGo = 0;
+    try
+    {
+        new ArrayBuffer(CODE_NUDGE.bytes);
+        codeNudges++;
+    }
+    catch {
+        // Near the browser's limit: the next let-go asks again.
+    }
+}
+
+/** The nudges this thread made for code let go. */
+export const codeNudgesMade = ()=>codeNudges;

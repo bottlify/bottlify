@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { createInflater, inflateMszipBlock } from './inflate.js';
+import { createInflater, inflateMszipBlock } from '../../media/internal/inflate.js';
 import { createLzxDecoder } from './lzx.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 

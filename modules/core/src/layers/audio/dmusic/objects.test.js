@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComObject } from '../../win32/ole32/objects.js';
-import { parseGuid } from '../../win32/ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createDirectMusic } from './objects.js';
 import { dmsgSegment, wavFile } from './test-fixtures.js';
 import * as ids from './ids.js';

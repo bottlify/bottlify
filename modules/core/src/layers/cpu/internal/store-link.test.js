@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeValue, encodeValue } from '../../../system/codec.js';
 import { createDirectoryTranslationStore, createMemoryDirectory } from './translation-store.js';
-import { remoteStore, storeHandlers } from './store-link.js';
+import { remoteStore, storeHandlers, withHeldModules } from './store-link.js';
 
 /** @param {any} value */
 const across = value=>decodeValue(encodeValue(value));
@@ -117,3 +117,58 @@ test('a lookup the link cannot answer is no answer, and the translator asks agai
         assert.equal(remote.getNow?.('anything'), undefined);
         assert.equal(remote.getManyNow(['a', 'b']), undefined);
     });
+
+test('a process across the link sends each module it compiles to the store\'s thread, which '
+    + 'keeps the ones used last up to its cap and still answers as the store it wraps', async()=>{
+    const store = await opened();
+    const kept = withHeldModules(store, 300);
+    const hold = kept.hold;
+    assert.ok(hold, 'held where V8 runs');
+    /** @type {any[]} */
+    const sent = [];
+    const remote = remoteStore({ ask: (method, args)=>across(/** @type {any} */ (
+        storeHandlers(kept).store)[method](...args)), call: async()=>null,
+    post: message=>sent.push(message) });
+    const module = new WebAssembly.Module(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
+    remote.hold?.('a', module, 100);
+    assert.deepEqual(sent, [{ type: 'module', key: 'a', module, bytes: 100 }]);
+    assert.equal(remoteStore({ ask: ()=>null, call: async()=>null }).hold, undefined,
+        'a link that cannot carry a module offers none');
+    for (const key of ['a', 'b', 'c'])
+    {
+        hold(key, module, 100);
+    }
+    // Used again, `a` is the last to go: `d` takes `b`'s room.
+    hold('a', module, 100);
+    hold('d', module, 100);
+    hold('e', module, 400);
+    assert.deepEqual(kept.stats().heldModules,
+        { held: 3, bytes: 300, added: 4, again: 1, dropped: 1 });
+    await kept.put('k', new Uint8Array([1, 2, 3]));
+    assert.deepEqual([...await kept.get('k') ?? []], [1, 2, 3], 'the store it wraps answers');
+    assert.ok(kept.stats().records >= 1, 'with the store\'s own figures');
+});
+
+test('a process across the link has a store made for it, and where JavaScriptCore runs the run '
+    + 'keeps no modules alive for later processes and the process sends none', async()=>{
+    // JavaScriptCore is not known to hand one worker's compiled code to another
+    // by its bytes: the modules kept would be up to their cap for nothing.
+    const webKit = 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1';
+    const chrome = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        + '(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
+    const store = await opened();
+    assert.equal(withHeldModules(store, 300, webKit), store, 'none held on JavaScriptCore');
+    assert.equal(typeof withHeldModules(store, 300, chrome).hold, 'function', 'held on V8');
+    assert.equal(withHeldModules(store, 0, chrome), store, 'none held with a cap of 0');
+    /** @type {any[]} */
+    const sent = [];
+    const link = { ask: ()=>null, call: async()=>null,
+        post: (/** @type {any} */ message)=>sent.push(message) };
+    assert.equal(remoteStore(link, webKit).hold, undefined, 'none sent on JavaScriptCore');
+    const remote = remoteStore(link, chrome);
+    assert.equal(remote.alone, true, 'made for the process: nothing kept beside it for others');
+    remote.hold?.('a', new WebAssembly.Module(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0])),
+        8);
+    assert.equal(sent.length, 1, 'sent on V8');
+});

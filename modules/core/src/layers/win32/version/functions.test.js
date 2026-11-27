@@ -195,6 +195,25 @@ test('GetFileVersionInfoSizeA tells a missing file from one with no version reso
     assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
     assert.deepEqual(errors, [1812],
         'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
+
+    // A library the engine answers for stands in the system folder as a file of an image
+    // with no version block (A41): it is told the system's version all the same.
+    errors.length = 0;
+    files.nodes.set('C:\\WINDOWS\\system32\\d3dcompiler_47.dll', Uint8Array.from([1]));
+    const standing = /** @type {any} */ (createVersionFunctions({ ...host,
+        systemLibrary: (/** @type {string} */ name)=>name.toLowerCase() === 'd3dcompiler_47.dll' }));
+    put(0x10, 'C:\\WINDOWS\\system32\\d3dcompiler_47.dll');
+    assert.ok(standing.GetFileVersionInfoSizeA.handler([0x10, 0]) > 0, 'a version block');
+    assert.deepEqual(errors, [], 'and no error');
+
+    // Wine's info test: NULL and "" name no file, and the handle is still zeroed.
+    errors.length = 0;
+    memory.set([0x55, 0x55, 0x55, 0x55], 0x40);
+    put(0x10, '');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0, 0x40]), 0);
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
+    assert.deepEqual(errors, [3, 3], 'ERROR_PATH_NOT_FOUND');
+    assert.deepEqual([...memory.subarray(0x40, 0x44)], [0, 0, 0, 0]);
 });
 
 test('a version asked of a file whose bytes are still coming is answered once they are, and '
@@ -279,6 +298,9 @@ test('a system library the engine answers for has the version of the system it b
             // The 16-bit USER every 32-bit Windows keeps, which a setup reads
             // the system's language from.
             ['C:\\WINDOWS\\system32\\user.exe', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
+            // The display driver the adapter names, at the version its
+            // identifier reports: a program reads one from the other.
+            ['C:\\WINDOWS\\system32\\bottlifyumd.dll', 1 << 16 | 0, 0, '1.0.0.0'],
         ]))
         {
             const size = version.GetFileVersionInfoSizeA.handler([put(path), 0]);
@@ -506,9 +528,11 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
     memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
     memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
 
-    // A fresh install: no copy anywhere, so the current directory is empty.
+    // A fresh install: no copy anywhere, so the current directory is empty -
+    // and that it is not the destination is VFF_CURNEDEST, as Windows answers
+    // Wine's install test for a file that does not exist.
     assert.equal(
-        version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 0);
+        version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 1);
     assert.equal(readAt(DEST), 'C:\\Games\\Doom');
     assert.equal(readAt(CUR), '');
     assert.equal(memory[CURLEN], 1, 'the terminator alone');
@@ -526,12 +550,38 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
     assert.equal(readAt(DEST), 'C:\\WINDOWS\\system32');
     assert.equal(readAt(CUR), 'C:\\WINDOWS');
 
-    // A buffer too short is told the length it needed, and given what fits.
+    // A buffer too short is told the length it needed, and given what fits;
+    // a file not shared is found in the Windows directory too, in OpenFile's
+    // order, which is not its destination.
     memory.set(new Uint8Array([4, 0, 0, 0]), DESTLEN);
     assert.equal(version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, 0, 0, DEST, DESTLEN]),
-        4, 'VFF_BUFFTOOSMALL');
+        4 | 1, 'VFF_BUFFTOOSMALL and VFF_CURNEDEST');
     assert.equal(readAt(DEST), 'C:\\');
     assert.equal(memory[DESTLEN], 'C:\\Games\\Doom'.length + 1);
+
+    // Wine's install test: no program directory recommends none, and a file
+    // found nowhere then has its empty current directory as its destination.
+    put(0x80, 'Nothing.dll');
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+    assert.equal(version.VerFindFileA.handler([0, 0x80, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 0);
+    assert.equal(memory[DESTLEN], 1);
+
+    // The current directory is searched as OpenFile searches it, and a program
+    // the engine runs in the system folder is a copy there.
+    files.nodes.set('C:\\Temp\\Save.tmp', Uint8Array.from([1]));
+    put(0x90, 'Save.tmp');
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+    const searching = /** @type {any} */ (createVersionFunctions({ ...host,
+        currentDirectory: ()=>'C:\\Temp',
+        systemProgram: (/** @type {string} */ path)=>path === 'C:\\WINDOWS\\regedit.exe' }));
+    assert.equal(searching.VerFindFileA.handler([0, 0x90, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 1);
+    assert.equal(readAt(CUR), 'C:\\Temp');
+    put(0xa0, 'regedit.exe');
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    assert.equal(searching.VerFindFileA.handler([0, 0xa0, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 1);
+    assert.equal(readAt(CUR), 'C:\\WINDOWS');
     assert.equal(version.VerFindFileA.argBytes, 32);
 });
 
@@ -560,7 +610,8 @@ test('the ANSI answers are in the ANSI page: a string value, and a directory', (
     m.memory.set([0x44, 0x2e, 0x64, 0x6c, 0x6c, 0], 0x40);
     m.memory.set([0x43, 0x3a, 0x5c, 0x80, 0x99, 0], 0x50);
     m.memory.set([0x04, 1, 0, 0], 0x1f00);
-    assert.equal(m.version.VerFindFileA.handler([0, 0x40, 0x50, 0x50, 0, 0, 0x1e00, 0x1f00]), 0);
+    assert.equal(m.version.VerFindFileA.handler([0, 0x40, 0x50, 0x50, 0, 0, 0x1e00, 0x1f00]),
+        1, 'found nowhere: VFF_CURNEDEST');
     assert.deepEqual([...m.memory.subarray(0x1e00, 0x1e06)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
 });
 
@@ -610,6 +661,10 @@ test('VerInstallFileA expands a compressed source into the destination directory
     put(0x10, 'missing.dl_');
     assert.equal(
         version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]), 0x10000);
+    // Wine's install test: no names or no directories are the same answer.
+    assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, TMP, TMPLEN]), 0x10000);
+    assert.equal(version.VerInstallFileA.handler([0, 0x10, 0, 0, 0, 0, TMP, TMPLEN]), 0x10000);
+    assert.equal(memory[TMP], 0, 'and no temp file was named');
 });
 
 test('VerInstallFileA keeps a newer file already in place and says so, unless forced', ()=>{
@@ -775,4 +830,72 @@ test('VerLanguageName names the language a translation is in, as kernel32\'s cal
         'Language Neutral\0');
     assert.equal(version.VerLanguageNameA.handler([0x7777, 0x100, 64]), 16,
         'a language not in the table is named as the neutral one');
+});
+
+test('a wide path is read whole, not cut at half of MAX_PATH', ()=>{
+    // The reader's limit is in bytes; read in characters, a path of 200
+    // characters reached the volume cut to 130 and named another file.
+    const memory = new Uint8Array(0x2000);
+    const path = `C:\\${'d'.repeat(190)}\\x.dll`;
+    [...`${path}\0`].forEach((c, i)=>{
+        memory[0x100 + i * 2] = c.charCodeAt(0);
+    });
+    /** @type {string[]} */
+    const asked = [];
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: ()=>'',
+        // As the layer reads: the limit in bytes, a longer string cut there.
+        readWideString: (/** @type {number} */ a, /** @type {number} */ limit)=>{
+            let text = '';
+            for (let at = a; at + 2 <= a + limit && (memory[at] | memory[at + 1]) !== 0; at += 2)
+            {
+                text += String.fromCharCode(memory[at] | memory[at + 1] << 8);
+            }
+            return text;
+        },
+        setLastError: ()=>{},
+        files: /** @type {any} */ ({ stat: (/** @type {string} */ p)=>{
+            asked.push(p);
+            return null;
+        } }),
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    assert.equal(version.GetFileVersionInfoSizeW.handler([0x100, 0]), 0);
+    assert.deepEqual(asked, [path]);
+});
+
+test('a name with no value is found: a length of zero, pointing where its value would be', ()=>{
+    const m = machine(node('VS_VERSION_INFO', {
+        value: fixedInfo(),
+        children: [node('StringFileInfo', {
+            children: [node('FFFF0000', { children: [node('FileVersion')] })],
+        })],
+    }));
+    m.putString(0x10, 'C:\\thing.exe');
+    m.version.GetFileVersionInfoA.handler([0x10, 0, 0x400, 0x400]);
+    m.putString(0x100, '\\StringFileInfo\\FFFF0000\\FileVersion');
+    m.memory.set([0xef, 0xbe, 0xad, 0xde, 0xef, 0xbe, 0xad, 0xde], 0x30);
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x100, 0x30, 0x34]), 1);
+    assert.equal(m.get32(0x34), 0, 'no value');
+    assert.ok(m.get32(0x30) > 0x400 && m.get32(0x30) < 0x800, 'a pointer into the block');
+    m.putString(0x100, '\\StringFileInfo\\FFFF0000\\ProductVersion');
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x100, 0x30, 0x34]), 0, 'not there');
+});
+
+test('a system program the engine runs carries the system\'s version, as an application', ()=>{
+    const m = machine(/** @type {any} */ (null));
+    const host = /** @type {any} */ ({ ...m.host, files: { stat: ()=>null },
+        systemProgram: (/** @type {string} */ path)=>
+            path.toLowerCase() === 'c:\\windows\\system32\\regsvr32.exe' });
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    m.putString(0x10, 'C:\\WINDOWS\\system32\\regsvr32.exe');
+    assert.ok(version.GetFileVersionInfoSizeA.handler([0x10, 0]) > 0);
+    version.GetFileVersionInfoA.handler([0x10, 0, 0x800, 0x400]);
+    m.putString(0x20, '\\');
+    assert.equal(version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
+    assert.equal(m.get32(m.get32(0x30) + 36), 1, 'VFT_APP');
+    m.putString(0x10, 'C:\\WINDOWS\\system32\\calc.exe');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0, 'one it does not run');
 });

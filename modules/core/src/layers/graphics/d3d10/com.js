@@ -23,7 +23,8 @@
  */
 
 import {
-    DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID, S_FALSE, S_OK,
+    D3D11_TWIN, DXGI_ERROR_MORE_DATA, DXGI_ERROR_NOT_FOUND, E_INVALIDARG, E_NOINTERFACE, IID,
+    S_FALSE, S_OK,
 } from './constants.js';
 
 /**
@@ -38,6 +39,7 @@ import {
  * @property {number} size            How big the entry is, which a too-small caller learns.
  * @property {Uint8Array | null} [data]
  * @property {any} [object]           An interface entry, with a reference taken for the caller.
+ * @property {number} [pointer]        The interface pointer it was stored through, or 0.
  */
 
 /**
@@ -52,7 +54,10 @@ import {
  * reference and reports the size of a pointer.
  */
 export function createPrivateData(){
-    /** @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean }>} */
+    /**
+     * @type {Map<string, { data: Uint8Array | null, object: any, isInterface: boolean,
+     *     pointer?: number }>}
+     */
     const entries = new Map();
 
     /** @param {string} guid */
@@ -66,6 +71,14 @@ export function createPrivateData(){
     };
 
     return {
+        /** Lets every entry go, an interface's reference with it: the object is gone. */
+        clear(){
+            for (const guid of [...entries.keys()])
+            {
+                drop(guid);
+            }
+        },
+
         /**
          * @param {string} guid
          * @param {number} size
@@ -87,15 +100,18 @@ export function createPrivateData(){
         /**
          * @param {string} guid
          * @param {any} object  Null stores a null interface rather than clearing.
+         * @param {number} [pointer]  the interface pointer the program gave, which a
+         *     get hands back as it was: an object has one per interface
          * @returns {number}
          */
-        SetPrivateDataInterface(guid, object){
+        SetPrivateDataInterface(guid, object, pointer = 0){
             if (object)
             {
                 object.addRef();
             }
             drop(guid);
-            entries.set(guid, { data: null, object: object ?? null, isInterface: true });
+            entries.set(guid, { data: null, object: object ?? null, isInterface: true,
+                pointer });
             return S_OK;
         },
 
@@ -129,7 +145,7 @@ export function createPrivateData(){
                 {
                     held.object.addRef();
                 }
-                return { hr: S_OK, size, object: held.object };
+                return { hr: S_OK, size, object: held.object, pointer: held.pointer ?? 0 };
             }
             return { hr: S_OK, size, data: held.data };
         },
@@ -143,7 +159,93 @@ export function createPrivateData(){
  * @property {boolean} [implicit]            Start at zero references.
  * @property {() => void} [onFirstRef]
  * @property {() => void} [onLastRef]
+ * @property {(iid: string) => boolean} [also]  Interfaces it has come to answer to since.
  */
+
+/**
+ * An object's count, kept on the host or in a word of guest memory the
+ * bridge gives it (`seam/com.js`'s `createCountCells`, `place`): there the
+ * guest's own AddRef and Release (`bridge/internal/vtable.js`, `COUNT_CODE`)
+ * move it without coming into the host, and only a crossing of zero is the
+ * host's. Direct3D 10 and 11 programs take and give back references to
+ * buffers, views and blobs hundreds of times a frame; each was a crossing.
+ * A move here is a compare-exchange: the guest's AddRef and Release on
+ * another executor move a placed count meanwhile.
+ */
+class PlacedCount {
+    #kept;
+    /** @type {{ address: number, read: () => number, write: (value: number) => void,
+     *     exchange?: (expected: number, value: number) => number } | null} */
+    #cell = null;
+    /** @type {() => boolean} */
+    #gone;
+
+    /** @param {number} value @param {() => boolean} gone */
+    constructor(value, gone){
+        this.#kept = value;
+        this.#gone = gone;
+    }
+
+    get value(){
+        return this.#cell ? this.#cell.read() >>> 0 : this.#kept;
+    }
+
+    /** No reference left and nothing binding it: its cell may go to another object. */
+    get destroyed(){
+        return this.#gone();
+    }
+
+    /**
+     * The count moved by `step`, unless it is 0 and the step down.
+     *
+     * @param {number} step  1 or -1
+     * @returns {{ was: number, now: number }}
+     */
+    move(step){
+        for (;;)
+        {
+            const was = this.value;
+            if (was === 0 && step < 0)
+            {
+                return { was, now: 0 };
+            }
+            const now = (was + step) >>> 0;
+            const cell = this.#cell;
+            if (cell === null)
+            {
+                this.#kept = now;
+                return { was, now };
+            }
+            if (cell.exchange === undefined)
+            {
+                cell.write(now);
+                return { was, now };
+            }
+            if ((cell.exchange(was, now) >>> 0) === was)
+            {
+                return { was, now };
+            }
+        }
+    }
+
+    /** @param {{ address: number, read: () => number, write: (value: number) => void } | null} cell */
+    place(cell){
+        const value = this.value;
+        this.#cell = cell;
+        if (cell)
+        {
+            cell.write(value);
+        }
+        else
+        {
+            this.#kept = value;
+        }
+    }
+
+    get placed(){
+        return this.#cell?.address ?? 0;
+    }
+}
 
 /**
  * @template T
@@ -156,9 +258,11 @@ export function createPrivateData(){
  *          & ReturnType<typeof createPrivateData>}
  */
 export function attachCom(target, options){
-    const interfaces = new Set([IID.IUnknown, ...options.interfaces]);
+    const interfaces = new Set([IID.IUnknown, ...options.interfaces.flatMap(id=>
+        (D3D11_TWIN[id] ? [id, D3D11_TWIN[id]] : [id]))]);
     const privateData = createPrivateData();
-    let count = options.implicit ? 0 : 1;
+    const gone = ()=>counter.value === 0 && !(/** @type {any} */ (target).bound > 0);
+    const counter = new PlacedCount(options.implicit ? 0 : 1, gone);
     if (!options.implicit)
     {
         options.onFirstRef?.();
@@ -167,29 +271,35 @@ export function attachCom(target, options){
     const methods = {
         /** @param {string} iid */
         supports(iid){
-            return interfaces.has(iid);
+            return interfaces.has(iid) || options.also?.(iid) === true;
         },
 
         addRef(){
-            if (count === 0)
+            const { was, now } = counter.move(1);
+            if (was === 0)
             {
                 options.onFirstRef?.();
             }
-            count++;
-            return count;
+            return now;
         },
 
         release(){
-            if (count === 0)
+            const { was, now } = counter.move(-1);
+            if (was === 0)
             {
                 return 0;
             }
-            count--;
-            if (count === 0)
+            if (now === 0)
             {
                 options.onLastRef?.();
+                // Gone, unless a context still keeps it bound: what it held
+                // as private data goes with it (test_private_data).
+                if (!(/** @type {any} */ (target).bound > 0))
+                {
+                    privateData.clear();
+                }
             }
-            return count;
+            return now;
         },
 
         /**
@@ -198,7 +308,7 @@ export function attachCom(target, options){
          * @returns {number}
          */
         QueryInterface(iid, out){
-            if (!interfaces.has(iid))
+            if (!methods.supports(iid))
             {
                 // Cleared on failure: callers read the out pointer back without
                 // checking and would otherwise follow whatever it held before.
@@ -228,15 +338,36 @@ export function attachCom(target, options){
         },
     };
 
+    // Configurable: a recording's proxy of the object answers its own wrapper
+    // for each method (`remote/replay.js`), which a frozen property forbids.
+    /** @param {Function} value */
+    const method = value=>({ value, enumerable: true, writable: true, configurable: true });
+    // Gone at no references, unless a context still keeps it bound (Direct3D
+    // 11's), or the object says otherwise itself.
+    if (!Object.hasOwn(/** @type {any} */ (target), 'destroyed'))
+    {
+        Object.defineProperty(target, 'destroyed', {
+            get: gone,
+            enumerable: false, configurable: true,
+        });
+        // The bridge keeps an interface whose count went to zero published
+        // while the object is still reachable: here, while it is bound.
+        Object.defineProperty(target, 'reachable', {
+            value: ()=>/** @type {any} */ (target).bound > 0,
+            enumerable: false, configurable: true, writable: true,
+        });
+    }
     return Object.defineProperties(/** @type {any} */ (target), {
-        SetPrivateData: { value: privateData.SetPrivateData, enumerable: true },
-        SetPrivateDataInterface: { value: privateData.SetPrivateDataInterface, enumerable: true },
-        GetPrivateData: { value: privateData.GetPrivateData, enumerable: true },
-        supports: { value: methods.supports, enumerable: true },
-        addRef: { value: methods.addRef, enumerable: true },
-        release: { value: methods.release, enumerable: true },
-        QueryInterface: { value: methods.QueryInterface, enumerable: true },
-        GetParent: { value: methods.GetParent, enumerable: true },
-        refCount: { get: ()=>count, enumerable: true },
+        SetPrivateData: method(privateData.SetPrivateData),
+        SetPrivateDataInterface: method(privateData.SetPrivateDataInterface),
+        GetPrivateData: method(privateData.GetPrivateData),
+        supports: method(methods.supports),
+        addRef: method(methods.addRef),
+        release: method(methods.release),
+        QueryInterface: method(methods.QueryInterface),
+        GetParent: method(methods.GetParent),
+        refCount: { get: ()=>counter.value, enumerable: true, configurable: true },
+        // The bridge places it in guest memory (`seam/com.js`, `countCell`).
+        counter: { value: counter, enumerable: false, configurable: true, writable: true },
     });
 }

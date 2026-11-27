@@ -11,11 +11,11 @@
 export const COMPILED = /** @type {const} */ ({
     CommitChanges: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: [
             'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
-            'setControlWord', 'callStd', 'host',
+            'setControlWord', 'callStd', 'host', 'pointerBytes',
         ],
         host: 281,
         code: Uint8Array.of(
@@ -209,11 +209,11 @@ export const COMPILED = /** @type {const} */ ({
     },
     BeginPass: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
         uses: [
             'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
-            'setControlWord', 'callStd', 'host',
+            'setControlWord', 'callStd', 'host', 'pointerBytes',
         ],
         host: 328,
         code: Uint8Array.of(
@@ -410,9 +410,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     EndPass: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'host'],
+        uses: ['u32', 'setU32', 'host', 'pointerBytes'],
         host: 38,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x8b, 0x50, 0x04, 0x85, 0xd2, 0x74, 0x1a, 0x8b,
@@ -423,9 +423,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     Begin: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'callStd', 'host'],
+        uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 174,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x5c, 0x24, 0x20, 0x8b,
@@ -447,9 +447,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     End: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'callStd', 'host'],
+        uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 129,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x8b, 0x44, 0x24, 0x14, 0x8b, 0x70, 0x04, 0x85,
@@ -468,9 +468,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetTechnique: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'host'],
+        uses: ['u32', 'setU32', 'host', 'pointerBytes'],
         host: 155,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x5c, 0x24, 0x1c, 0x8b,
@@ -491,9 +491,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     GetTechnique: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'host'],
+        uses: ['u32', 'host', 'pointerBytes'],
         host: 60,
         code: Uint8Array.of(
             0x53, 0x8b, 0x44, 0x24, 0x08, 0x8b, 0x50, 0x04, 0x85, 0xd2, 0x74, 0x2e,
@@ -508,7 +508,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'f32', 'setF32', 'callStd'],
+        uses: ['u32', 'setU32', 'f32', 'setF32', 'callStd', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x50, 0x8b, 0x44, 0x24, 0x68, 0x8b,
             0x40, 0x04, 0x8b, 0x00, 0x89, 0x44, 0x24, 0x4c, 0x8b, 0x44, 0x24, 0x68,
@@ -610,7 +610,7 @@ export const COMPILED = /** @type {const} */ ({
         returns: 'void',
         uses: [
             'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
-            'setControlWord',
+            'setControlWord', 'pointerBytes',
         ],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0x84, 0x00, 0x00, 0x00, 0x8b, 0x84,

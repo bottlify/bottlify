@@ -171,6 +171,16 @@ test('a stream that cannot be read says where it stopped', ()=>{
         .error ?? '', /without a destination/);
 });
 
+test('a model 3 pixel shader may take POSITION1 as an input, not POSITION0', ()=>{
+    // Wine's d3d9 test_position_index.
+    const three = { major: 3, minor: 0 };
+    const reading = (/** @type {number} */ index)=>[versionToken(SHADER_KIND.PIXEL, 3, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | (index << 16)) >>> 0, dst(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), 0x90e40000, END_TOKEN];
+    assert.equal(validateShader(reading(1), SHADER_KIND.PIXEL, three), D3D_OK);
+    assert.equal(validateShader(reading(0), SHADER_KIND.PIXEL, three), D3DERR_INVALIDCALL);
+});
+
 test('a create refuses the wrong kind, a broken stream and a model past the device', ()=>{
     const two = { major: 2, minor: 0 };
     assert.equal(validateShader(TRANSFORM_VS, SHADER_KIND.VERTEX, two), D3D_OK);
@@ -191,6 +201,45 @@ test('a create refuses the wrong kind, a broken stream and a model past the devi
         'an older shader on a newer device');
     assert.equal(validateShader([VS_1_1, END_TOKEN], SHADER_KIND.VERTEX, { major: 0, minor: 0 }),
         D3DERR_INVALIDCALL, 'any shader on a device that runs none');
+});
+
+test('a constant register past the version\'s last is refused', ()=>{
+    // Wine's test_vertex_shader_constant and test_pixel_shader_constant:
+    // def c<n> in each version, and defb/defi in ps_2_0.
+    const three = { major: 3, minor: 0 };
+    /**
+     * A shader of the version that only defines one constant.
+     *
+     * @param {string} kind @param {number} major @param {number} minor
+     * @param {number} type  The register type: 2 float, 7 integer, 14 boolean.
+     * @param {number} index
+     */
+    const def = (kind, major, minor, type, index)=>{
+        const opcode = type === 2 ? 0x51 : type === 7 ? 0x30 : 0x2f;
+        const values = type === 14 ? [1] : [0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000];
+        return validateShader([
+            versionToken(kind, major, minor),
+            opcode | (major >= 2 ? (1 + values.length) << 24 : 0),
+            0x80000000 | ((type & 7) << 28) | ((type & 0x18) << 8) | 0x000f0000 | index,
+            ...values,
+            END_TOKEN], kind, three);
+    };
+    const V = SHADER_KIND.VERTEX;
+    const P = SHADER_KIND.PIXEL;
+    assert.equal(def(V, 1, 1, 2, 255), D3D_OK);
+    assert.equal(def(V, 1, 1, 2, 256), D3DERR_INVALIDCALL);
+    assert.equal(def(V, 3, 0, 2, 256), D3DERR_INVALIDCALL);
+    assert.equal(def(V, 3, 0, 7, 15), D3D_OK);
+    assert.equal(def(V, 3, 0, 7, 16), D3DERR_INVALIDCALL);
+    assert.equal(def(V, 3, 0, 14, 16), D3DERR_INVALIDCALL);
+    assert.equal(def(P, 1, 1, 2, 7), D3D_OK);
+    assert.equal(def(P, 1, 1, 2, 8), D3DERR_INVALIDCALL);
+    assert.equal(def(P, 2, 0, 2, 31), D3D_OK);
+    assert.equal(def(P, 2, 0, 2, 32), D3DERR_INVALIDCALL);
+    assert.equal(def(P, 2, 0, 14, 0), D3DERR_INVALIDCALL, 'ps_2_0 has no booleans');
+    assert.equal(def(P, 2, 1, 14, 0), D3D_OK, 'ps_2_x has');
+    assert.equal(def(P, 3, 0, 2, 223), D3D_OK);
+    assert.equal(def(P, 3, 0, 2, 224), D3DERR_INVALIDCALL);
 });
 
 test('the function a shader hands back ends at its end token, whatever followed it', ()=>{

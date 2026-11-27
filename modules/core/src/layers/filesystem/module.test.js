@@ -7,7 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFilesystemModule, filesystemModule } from './module.js';
-import { createMemoryStore } from './internal/memory-store.js';
+import { PIECE_SIZE, createMemoryStore } from './internal/memory-store.js';
+import { createPageFile } from './internal/page-file.js';
+import { pieceSpace } from './internal/page-space.fixture.js';
+import { cacheSpace } from '../cache/module.js';
 import { buildIso } from './internal/iso/build.js';
 import { openIso } from './internal/iso/iso9660.js';
 import { createIsoSource } from './internal/iso/source.js';
@@ -70,6 +73,30 @@ test('an empty directory a program made is exported, one holding something is no
     assert.deepEqual(fs.exportDirectories(), []);
 });
 
+test('a junction\'s files are exported under its name for a reader that keeps no links',
+    async()=>{
+        // A bottle keeps no junctions: the .NET Framework's assembly cache,
+        // whose GAC folder stands for a WinSxS one, goes into it as copies.
+        const fs = await filesystemModule.create(undefined);
+        fs.createDirectory('C:\\SxS');
+        fs.createDirectory('C:\\SxS\\Lib');
+        const handle = fs.open('C:\\SxS\\Lib\\a.dll',
+            { write: true, disposition: fs.Disposition.CREATE_NEW });
+        fs.write(handle, bytes('lib'));
+        fs.close(handle);
+        fs.createDirectory('C:\\Gac');
+        fs.setReparse('C:\\Gac', { tag: 0xa0000003, data: null, target: 'C:\\SxS\\Lib' });
+
+        const paths = (/** @type {any} */ files)=>files.map((/** @type {any} */ one)=>one.path)
+            .sort();
+        assert.deepEqual(paths(fs.export()), ['C:\\SxS\\Lib\\a.dll'], 'once, where it is kept');
+        const every = fs.export(undefined, { everyName: true });
+        assert.deepEqual(paths(every), ['C:\\Gac\\a.dll', 'C:\\SxS\\Lib\\a.dll']);
+        assert.equal(new TextDecoder().decode(every.find((/** @type {any} */ one)=>
+            one.path === 'C:\\Gac\\a.dll')?.bytes), 'lib');
+        await filesystemModule.dispose();
+    });
+
 test('a file written in one case is found in another and listed in its own', async()=>{
     const fs = await volume();
 
@@ -106,6 +133,27 @@ test('a relative path follows the current directory of its drive', async()=>{
     assert.throws(()=>fs.setCurrentDirectory('C:\\Readme.TXT'), { code: 'NOT_A_DIRECTORY' });
     await filesystemModule.dispose();
 });
+
+test('the current directory is held open: not removed or renamed until another is current',
+    async()=>{
+        const fs = await volume();
+        fs.createDirectory('C:\\Held');
+        fs.createDirectory('D:\\Remembered');
+        fs.setCurrentDirectory('D:\\Remembered');
+        fs.setCurrentDirectory('C:\\Held');
+
+        assert.throws(()=>fs.removeDirectory('c:\\held'), { code: 'SHARING_VIOLATION' });
+        assert.throws(()=>fs.mayRemove('C:\\HELD'), { code: 'SHARING_VIOLATION' });
+        assert.throws(()=>fs.rename('C:\\Held', 'C:\\Moved'), { code: 'SHARING_VIOLATION' });
+        assert.ok(fs.stat('C:\\Held')?.directory, 'and nothing moved on the way');
+        fs.removeDirectory('D:\\Remembered');
+        assert.equal(fs.stat('D:\\Remembered'), null, 'another drive\'s is only remembered');
+
+        fs.setCurrentDirectory('C:\\');
+        fs.removeDirectory('C:\\Held');
+        assert.equal(fs.stat('C:\\Held'), null);
+        await filesystemModule.dispose();
+    });
 
 test('drives do not see each other', async()=>{
     const fs = await volume();
@@ -339,6 +387,29 @@ test('a rename moves a file the program wrote, and copies one the source holds',
         /already exists/);
     assert.equal(fs.stat('C:\\Steam\\Content.gcf')?.size, 1 << 20,
         'a refused move moves nothing');
+    await filesystemModule.dispose();
+});
+
+test('a file renamed while open is still the file its handles have', async()=>{
+    // An NGen worker writes a native image, renames it into the cache while
+    // its handle is open and asks that handle the image's size: Windows
+    // answers the file's, under its new name.
+    const fs = await filesystemModule.create({ drives: { C: {
+        source: createMemoryStore({}), writable: createMemoryStore() } } });
+    fs.createDirectory('C:\\Temp');
+    fs.createDirectory('C:\\Cache');
+    const handle = fs.open('C:\\Temp\\image.tmp', { read: true, write: true,
+        shareDelete: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(handle, new Uint8Array(100).fill(9));
+    fs.rename('C:\\Temp\\image.tmp', 'C:\\Cache\\image.dll');
+    assert.equal(fs.size(handle), 100, 'the size of the file it names');
+    fs.write(handle, Uint8Array.of(1, 2));
+    assert.equal(fs.stat('C:\\Cache\\image.dll')?.size, 102, 'a write reaches it there');
+    assert.equal(fs.stat('C:\\Temp\\image.tmp'), null, 'and nothing comes back at the old name');
+    assert.throws(()=>fs.open('C:\\Cache\\image.dll', { write: true }), /incompatible/,
+        'its open still settles who else may open it');
+    fs.close(handle);
+    assert.doesNotThrow(()=>fs.close(fs.open('C:\\Cache\\image.dll', { write: true })));
     await filesystemModule.dispose();
 });
 
@@ -576,4 +647,138 @@ test('a batch over a file any process holds open is refused whole, from either p
         assert.equal(other.apply([{ path: 'C:\\Save\\x.dat', bytes: bytes('theirs') }]), 1);
         await first.dispose();
         await second.dispose();
+    });
+
+test('a name the tree lists and its store has nothing at is left out of an export, and said'
+    + ' once', async()=>{
+    const writable = createMemoryStore();
+    /** @type {string[]} */
+    const warned = [];
+    const host = { requireApi: (/** @type {string} */ name)=>(name === 'log'
+        ? { warn: (/** @type {string} */ category, /** @type {string} */ message)=>
+            warned.push(`${category}: ${message}`) } : null) };
+    const fs = await filesystemModule.create({ drives: { C: { writable } } }, host);
+    for (const name of ['kept.txt', 'gone.sys'])
+    {
+        const handle = fs.open(`C:\\${name}`, { write: true,
+            disposition: fs.Disposition.CREATE_NEW });
+        fs.write(handle, bytes(name));
+        fs.close(handle);
+    }
+    // The store loses the file behind the tree's back.
+    writable.remove('gone.sys');
+    assert.deepEqual(fs.export().map((/** @type {any} */ file)=>file.path), ['C:\\kept.txt']);
+    assert.deepEqual(fs.export().map((/** @type {any} */ file)=>text(file.bytes)), ['kept.txt']);
+    assert.deepEqual(warned, ['filesystem: "C:\\gone.sys" is listed and has nothing to read:'
+        + ' left out of what was exported']);
+    await filesystemModule.dispose();
+});
+
+test('a bundle mounted over the machine\'s own directories under another spelling: a file made'
+    + ' in one is written, read, exported and deleted', async()=>{
+    // The order a run takes: kernel32 makes C:\WINDOWS\TEMP when it comes up,
+    // before the bundle is mounted; the bundle spells the directory Windows.
+    // A driver a system-information tool extracts to %TEMP% was refused by
+    // the store, left a name the tree held as written, and threw at export.
+    const layer = createFilesystemModule();
+    const fs = await layer.create({});
+    fs.createDirectory('C:\\WINDOWS');
+    fs.createDirectory('C:\\WINDOWS\\TEMP');
+    fs.mount('C', { source: createMemoryStore({ 'Windows\\system32\\kernel32.dll': 'MZ' }) });
+
+    const path = 'C:\\WINDOWS\\TEMP\\cpuz149_x32.sys';
+    const handle = fs.open(path, { write: true, disposition: fs.Disposition.CREATE_ALWAYS });
+    fs.write(handle, bytes('driver'));
+    fs.close(handle);
+    const again = fs.open(path, { write: true, disposition: fs.Disposition.CREATE_ALWAYS });
+    fs.write(again, bytes('driver2'));
+    fs.close(again);
+
+    const reading = fs.open('c:\\windows\\temp\\CPUZ149_X32.SYS', { read: true });
+    assert.equal(text(fs.read(reading, 16)), 'driver2');
+    fs.close(reading);
+    assert.deepEqual(fs.export().map((/** @type {any} */ entry)=>[entry.path, text(entry.bytes)]),
+        [['C:\\WINDOWS\\TEMP\\cpuz149_x32.sys', 'driver2']]);
+    assert.equal(/** @type {any} */ (layer.diagnostics()).metrics.volumes['C:'].disagreements, 0);
+
+    fs.deleteFile(path);
+    assert.equal(fs.stat(path), null);
+    assert.deepEqual(fs.export(), []);
+    assert.deepEqual(fs.exportDirectories(), ['C:\\WINDOWS\\TEMP']);
+    assert.equal(/** @type {any} */ (layer.diagnostics()).metrics.volumes['C:'].disagreements, 0);
+    await layer.dispose();
+});
+
+test('a directory is not moved into itself: refused, and left where it was', async()=>{
+    const fs = await createFilesystemModule().create({});
+    fs.createDirectory('C:\\Data');
+    fs.createDirectory('C:\\Data\\Inner');
+    fs.apply([{ path: 'C:\\Data\\save.dat', bytes: bytes('save') }]);
+
+    assert.throws(()=>fs.rename('C:\\Data', 'C:\\DATA\\Inner\\Data'),
+        { code: 'SHARING_VIOLATION' });
+    assert.throws(()=>fs.rename('C:\\Data', 'c:\\data\\Moved'), { code: 'SHARING_VIOLATION' });
+    assert.deepEqual(fs.list('C:\\Data').map((/** @type {any} */ entry)=>entry.name).sort(),
+        ['Inner', 'save.dat']);
+    fs.rename('C:\\Data', 'C:\\Database');
+    assert.equal(fs.stat('C:\\Database\\save.dat')?.size, 4,
+        'a name that only begins with the directory\'s is not inside it');
+});
+
+test('the writable layer says what it holds, and on a page file holds no more than its pool',
+    async()=>{
+        const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
+        const inMemory = createFilesystemModule();
+        const plain = await inMemory.create({});
+        const written = plain.open(at('setup.tmp'),
+            { write: true, disposition: plain.Disposition.CREATE_NEW });
+        plain.write(written, new Uint8Array(3 * PIECE_SIZE));
+        plain.close(written);
+        assert.deepEqual(/** @type {any} */ (inMemory.diagnostics()).metrics.bytesHeld,
+            { heaps: { writable: 3 * PIECE_SIZE } });
+        await inMemory.dispose();
+
+        const { keeper, space } = await pieceSpace(cacheSpace, { budget: 4 * PIECE_SIZE });
+        const paged = createFilesystemModule();
+        const fs = await paged.create({ pageFile: createPageFile(space,
+            { workingBytes: PIECE_SIZE }) });
+        const handle = fs.open(at('setup.tmp'),
+            { write: true, disposition: fs.Disposition.CREATE_NEW });
+        // Each piece a half at a time: filled a write at a time, held until put.
+        for (let index = 0; index < 8; index++)
+        {
+            fs.write(handle, new Uint8Array(PIECE_SIZE / 2).fill(index + 1));
+            fs.write(handle, new Uint8Array(PIECE_SIZE / 2).fill(index + 1));
+        }
+        fs.close(handle);
+        const report = /** @type {any} */ (paged.diagnostics()).metrics;
+        assert.deepEqual(report.bytesHeld, { heaps: { writable: PIECE_SIZE } });
+        assert.equal(report.pageFile.put, 7);
+        assert.equal(report.pageFile.keptBytes, 7 * PIECE_SIZE, 'the rest are the cache\'s bodies');
+        assert.ok(keeper.figures().cooled > 0, 'past its budget, on its disk');
+        const reading = fs.open(at('setup.tmp'));
+        fs.seek(reading, 3 * PIECE_SIZE + 10);
+        assert.deepEqual([...fs.read(reading, 1)], [4], 'read back from the cache\'s disk');
+        fs.close(reading);
+        await paged.dispose();
+    });
+
+test('a directory renamed keeps its number, and the numbers go out and back with the links',
+    async()=>{
+        const fs = await volume();
+        const game = fs.fileId('C:\\Game');
+        const setup = fs.fileId('C:\\Game\\Setup.EXE');
+        fs.rename('C:\\Game', 'C:\\Moved');
+        assert.equal(fs.fileId('C:\\Moved'), game, 'the directory, remade, is the same file');
+        assert.equal(fs.fileId('C:\\Moved\\Setup.EXE'), setup, 'and so is what it held');
+        assert.equal(fs.pathOfFileId('C:\\', setup), 'C:\\Moved\\Setup.EXE');
+        assert.equal(fs.pathOfFileId('D:\\', setup), null, 'a number is its own volume\'s');
+
+        const links = fs.exportLinks();
+        const again = await volume();
+        again.apply(fs.export(), { saved: true });
+        again.applyLinks(links, { saved: true });
+        assert.equal(again.fileId('C:\\Moved\\Setup.EXE'), setup, 'the next run, the same number');
+        assert.equal(fs.export(undefined, { everyName: true }).filter((/** @type {any} */ file)=>
+            /Setup/.test(file.path)).length, 1, 'a number exports no file of its own');
     });

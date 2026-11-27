@@ -26,16 +26,24 @@
 // A bundle's translations are kept beside its saves in the origin's file
 // system; a launcher clears them from here, as it opens the saves.
 export { clearTranslations } from './layers/cpu/internal/translation-store.js';
+import { replaceWhole } from './system/opfs-file.js';
+// Everything this browser keeps of a bottle -- caches and saves -- listed and
+// removed by kind, for a launcher's storage screen.
+export { bottleStorage, clearBottleStorage, storageName } from './storage-budget.js';
 
 /** Magic and version of the packed session. */
 const MAGIC = 0x53544201; // "BTS", version 1
 
 /**
  * @typedef {{ path: string, bytes: Uint8Array }} SessionFile
- * @typedef {{ files: SessionFile[], registry: any | null }} Session
+ * @typedef {{ owner: string, names: string[] }} SessionLink
+ *     A file with more than one name: the path its bytes travel under among
+ *     the files, and its other names.
+ * @typedef {{ files: SessionFile[], registry: any | null, links?: SessionLink[] | null }} Session
  *     Everything a program leaves behind: the files it wrote and the registry
  *     it wrote, because a program's settings live in either and a session that
- *     carries only one of them forgets half of what was chosen.
+ *     carries only one of them forgets half of what was chosen -- and the
+ *     hard links among the files, which a list of files cannot say.
  */
 
 /**
@@ -44,6 +52,26 @@ const MAGIC = 0x53544201; // "BTS", version 1
  * caller applying a session to a volume never writes it as a file.
  */
 const REGISTRY_ENTRY = '<registry>';
+
+/**
+ * Where the hard links travel, as the registry does: one more entry, under a
+ * name no path can have, and only when a file has more than one name -- a
+ * session with none is written exactly as one was before links existed.
+ */
+const LINKS_ENTRY = '<links>';
+
+/**
+ * A session with its links, the field there only when there are some: a
+ * session without them is the shape it always was.
+ *
+ * @param {Session} session @param {SessionLink[] | null} links
+ * @returns {Session}
+ */
+const withLinks = (session, links)=>(links && links.length > 0 ? { ...session, links } : session);
+
+/** The links entry's bytes, or null when there are no links to carry. @param {Session} session */
+const linksBytes = session=>(session.links && session.links.length > 0
+    ? new TextEncoder().encode(JSON.stringify(session.links)) : null);
 
 /**
  * The one shape a session has inside the engine, from whatever a provider or
@@ -62,7 +90,8 @@ export function normaliseSession(session){
     {
         return { files: session, registry: null };
     }
-    return { files: session.files ?? [], registry: session.registry ?? null };
+    return withLinks({ files: session.files ?? [], registry: session.registry ?? null },
+        session.links ?? null);
 }
 
 /**
@@ -133,13 +162,19 @@ export const inflateRaw = bytes=>recode(bytes, 'deflate-raw', false);
  * @returns {Promise<Uint8Array>}
  */
 export async function packSession(session){
-    const { files, registry } = normaliseSession(session);
+    const normal = normaliseSession(session);
+    const { files, registry } = normal;
     const encoder = new TextEncoder();
     const parts = files.map(file=>({ name: encoder.encode(file.path), bytes: file.bytes }));
     if (registry)
     {
         parts.push({ name: encoder.encode(REGISTRY_ENTRY),
             bytes: encoder.encode(JSON.stringify(registry)) });
+    }
+    const links = linksBytes(normal);
+    if (links)
+    {
+        parts.push({ name: encoder.encode(LINKS_ENTRY), bytes: links });
     }
     const size = parts.reduce((total, part)=>total + 8 + part.name.length + part.bytes.length, 4);
 
@@ -179,6 +214,7 @@ export async function unpackSession(packed){
     /** @type {SessionFile[]} */
     const files = [];
     let registry = null;
+    let links = null;
     let at = 4;
     while (at < raw.length)
     {
@@ -190,13 +226,17 @@ export async function unpackSession(packed){
         {
             registry = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
         }
+        else if (name === LINKS_ENTRY)
+        {
+            links = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
+        }
         else
         {
             files.push({ path: name, bytes: raw.slice(start, start + byteLength) });
         }
         at = start + byteLength;
     }
-    return { files, registry };
+    return withLinks({ files, registry }, links);
 }
 
 /** @param {Uint8Array} bytes */
@@ -299,15 +339,14 @@ async function* entryFiles(folder){
     }
 }
 
-/** @param {string} path @param {Uint8Array} bytes */
-const entryOf = (path, bytes)=>{
+/** An entry's magic and name, which its bytes follow. @param {string} path */
+const entryHeader = path=>{
     const name = new TextEncoder().encode(path);
-    const out = new Uint8Array(8 + name.length + bytes.length);
+    const out = new Uint8Array(8 + name.length);
     const view = new DataView(out.buffer);
     view.setUint32(0, ENTRY_MAGIC, true);
     view.setUint32(4, name.length, true);
     out.set(name, 8);
-    out.set(bytes, 8 + name.length);
     return out;
 };
 
@@ -322,7 +361,11 @@ const entryOf = (path, bytes)=>{
  * which a session written whole, packed and compressed on the thread the
  * program runs on made it do every time. Each entry is replaced whole when
  * its writer closes, so an entry is the old one or the new one. The first
- * save of a run writes everything, as does a change that names no path;
+ * save of a run writes what changed, the registry, and the files the folder
+ * has no entry for when the run read its session from the folder; otherwise
+ * it writes everything, as does a change that names no path: a run that read
+ * 2 GB of a .NET setup's files back wrote all of them again before its first
+ * real save, five minutes, and paced its next save nine times that later;
  * a session left in the earlier one-file form is read, and gone after the
  * first save. Saves are serialised, and one asked for while another is in
  * flight waits for it and then writes the latest.
@@ -354,17 +397,58 @@ export function opfsSession(key, directory){
     /** Whether the browser agreed to keep the origin's storage; null before it was asked. */
     /** @type {Promise<boolean> | null} */
     let persisting = null;
-    /** @type {Promise<void>} */
+    /** The writes in turn; settled whether the last one failed or not. @type {Promise<void>} */
     let writing = Promise.resolve();
+    /**
+     * A write after those in turn: its failure is its caller's, and the next
+     * write goes on (a save refused for room must not leave every later one
+     * unwritten).
+     *
+     * @param {() => Promise<void>} task
+     */
+    const inTurn = task=>{
+        const done = writing.then(task);
+        writing = done.catch(()=>{});
+        return done;
+    };
     /** Whether the folder holds this run's whole session, so a change is all a save needs. */
     let whole = false;
+    /**
+     * Whether this run's session was read from the folder (`load`): the folder
+     * then holds every file the volume was given from it, and the first save
+     * needs only what changed since and what the folder lacks.
+     */
+    let loadedWhole = false;
+    /**
+     * The files `load` handed out lazily, each its entry as the folder holds
+     * it: one handed back to `save` is kept as it is, never read to be written
+     * again (a session laid under the volume, `session-source.js`, hands back
+     * every file the program did not touch).
+     *
+     * @type {WeakSet<object>}
+     */
+    const held = new WeakSet();
+    /** The links entry as the folder holds it since this run's first save; null for none. */
+    /** @type {string | null} */
+    let linksSaved = null;
 
-    /** @param {any} folder @param {string} path @param {Uint8Array} bytes */
-    const put = async(folder, path, bytes)=>{
-        const handle = await folder.getFileHandle(await entryName(path), { create: true });
-        const stream = await handle.createWritable();
-        await stream.write(entryOf(path, bytes));
-        await stream.close();
+    /**
+     * An entry: its header, then the file's bytes in the parts its store keeps
+     * them in. A file an installer writes a piece at a time is in every save
+     * while it grows, and joining it into one array, then into a record, made
+     * two copies of all of it each time.
+     *
+     * @param {any} folder @param {string} path
+     * @param {Uint8Array | { bytes: Uint8Array, parts?: () => Iterable<Uint8Array> }} file
+     */
+    const put = async(folder, path, file)=>{
+        const parts = file instanceof Uint8Array ? [file] : file.parts?.() ?? [file.bytes];
+        // Atomic: a save cut short (the disk full, the tab gone) leaves the
+        // entry the last save wrote, never half of a saved game.
+        await replaceWhole(folder, await entryName(path), (function* (){
+            yield entryHeader(path);
+            yield* parts;
+        })(), { atomic: true });
     };
     /** @param {any} folder @param {string} name */
     const drop = async(folder, name)=>{
@@ -403,6 +487,11 @@ export function opfsSession(key, directory){
             if (old.registry)
             {
                 await put(folder, REGISTRY_ENTRY, registryBytes(old));
+            }
+            const links = linksBytes(old);
+            if (links)
+            {
+                await put(folder, LINKS_ENTRY, links);
             }
             await drop(dir, legacy);
         }
@@ -455,7 +544,7 @@ export function opfsSession(key, directory){
             for await (const file of entryFiles(folder))
             {
                 const head = await headOf(file);
-                if (head && head.path !== REGISTRY_ENTRY)
+                if (head && head.path !== REGISTRY_ENTRY && head.path !== LINKS_ENTRY)
                 {
                     files.push({ path: head.path, size: file.size - head.start });
                 }
@@ -491,8 +580,7 @@ export function opfsSession(key, directory){
          * @param {string} path @param {Uint8Array} bytes
          */
         write(path, bytes){
-            writing = writing.then(async()=>put(await folderToEdit(), path, bytes));
-            return writing;
+            return inTurn(async()=>put(await folderToEdit(), path, bytes));
         },
         /**
          * A file taken out of the session.
@@ -500,10 +588,18 @@ export function opfsSession(key, directory){
          * @param {string} path
          */
         remove(path){
-            writing = writing.then(async()=>drop(await folderToEdit(), await entryName(path)));
-            return writing;
+            return inTurn(async()=>drop(await folderToEdit(), await entryName(path)));
         },
-        async load(){
+        /**
+         * The session as it was last saved. `lazy`: each file's path, size and
+         * time now and its bytes when `read` is called, a range of them or all,
+         * so a session of gigabytes is read where the program reads it
+         * (`session-source.js`) rather than held whole at once.
+         *
+         * @param {{ lazy?: boolean }} [options]
+         * @returns {Promise<Session>}  Lazily, each of `files` a `LazySessionFile`.
+         */
+        async load(options){
             await writing;
             const dir = await open();
             const folder = await dir.getDirectoryHandle(folderName).catch(()=>null);
@@ -524,37 +620,59 @@ export function opfsSession(key, directory){
             /** @type {SessionFile[]} */
             const files = [];
             let registry = null;
+            let links = null;
             for await (const file of entryFiles(folder))
             {
-                const raw = new Uint8Array(await file.arrayBuffer());
-                const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-                if (raw.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
+                const head = await headOf(file);
+                if (!head)
                 {
                     continue;
                 }
-                const start = 8 + view.getUint32(4, true);
-                const path = decoder.decode(raw.subarray(8, start));
-                if (path === REGISTRY_ENTRY)
+                // The body read alone, its own buffer: read whole and then cut
+                // from its head, an entry's bytes were held twice.
+                const body = async(offset = 0, length = file.size - head.start - offset)=>
+                    new Uint8Array(await file.slice(head.start + offset,
+                        head.start + offset + length).arrayBuffer());
+                if (head.path === REGISTRY_ENTRY || head.path === LINKS_ENTRY)
                 {
-                    registry = JSON.parse(decoder.decode(raw.subarray(start)));
+                    const read = JSON.parse(decoder.decode(await body()));
+                    if (head.path === REGISTRY_ENTRY)
+                    {
+                        registry = read;
+                    }
+                    else
+                    {
+                        links = read;
+                    }
+                    continue;
                 }
-                else
+                if (options?.lazy)
                 {
-                    files.push({ path, bytes: raw.slice(start) });
+                    /** @type {LazySessionFile} */
+                    const lazy = { path: head.path, size: file.size - head.start,
+                        modified: file.lastModified, read: body };
+                    held.add(lazy);
+                    files.push(/** @type {any} */ (lazy));
+                    continue;
                 }
+                files.push({ path: head.path, bytes: await body() });
             }
-            return { files, registry };
+            loadedWhole = true;
+            return withLinks({ files, registry }, links);
         },
         /**
          * @param {Session} session
          * @param {SessionChange[]} [changes]  what changed since the last save; none for all
          */
         save(session, changes){
-            const { files, registry } = normaliseSession(session);
-            writing = writing.then(async()=>{
+            const normal = normaliseSession(session);
+            const { files, registry } = normal;
+            const links = linksBytes(normal);
+            const linksText = links ? new TextDecoder().decode(links) : null;
+            return inTurn(async()=>{
                 const dir = await open();
                 const folder = await dir.getDirectoryHandle(folderName, { create: true });
-                const full = !whole || !changes
+                const full = !(whole || loadedWhole) || !changes
                     || changes.some(change=>change.kind !== 'registry'
                         && typeof change.path !== 'string');
                 if (full)
@@ -563,13 +681,22 @@ export function opfsSession(key, directory){
                     for (const file of files)
                     {
                         keep.add(await entryName(file.path));
-                        await put(folder, file.path, file.bytes);
+                        if (!held.has(file))
+                        {
+                            await put(folder, file.path, file);
+                        }
                     }
                     if (registry)
                     {
                         keep.add(await entryName(REGISTRY_ENTRY));
                         await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
                     }
+                    if (links)
+                    {
+                        keep.add(await entryName(LINKS_ENTRY));
+                        await put(folder, LINKS_ENTRY, links);
+                    }
+                    linksSaved = linksText;
                     /** @type {string[]} */
                     const stale = [];
                     for await (const [name] of folder.entries())
@@ -588,6 +715,30 @@ export function opfsSession(key, directory){
                     return;
                 }
                 const byPath = new Map(files.map(file=>[file.path, file]));
+                if (!whole)
+                {
+                    // The first save of a run that read the folder: the files
+                    // laid over the session at the start (`files`) that it has no
+                    // entry for, and the hive the bundle's registry was laid into.
+                    const here = new Set();
+                    for await (const [name] of folder.entries())
+                    {
+                        here.add(name);
+                    }
+                    for (const file of files)
+                    {
+                        if (!held.has(file) && !here.has(await entryName(file.path)))
+                        {
+                            await put(folder, file.path, file);
+                        }
+                    }
+                    if (registry)
+                    {
+                        await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
+                    }
+                    await drop(dir, legacy);
+                    whole = true;
+                }
                 for (const change of /** @type {SessionChange[]} */ (changes))
                 {
                     if (change.kind === 'registry')
@@ -598,19 +749,38 @@ export function opfsSession(key, directory){
                         }
                         continue;
                     }
+                    // A record of the file changed, its number or its attributes,
+                    // not its bytes: the links entry below carries it.
+                    if (change.kind === 'named')
+                    {
+                        continue;
+                    }
                     const path = /** @type {string} */ (change.path);
                     const file = byPath.get(path);
-                    if (file)
+                    if (file && !held.has(file))
                     {
-                        await put(folder, path, file.bytes);
+                        await put(folder, path, file);
                     }
                     else
                     {
                         await drop(folder, await entryName(path));
                     }
                 }
+                // A link made, renamed or taken away names a path that is
+                // no file of the session: the record is compared instead.
+                if (linksText !== linksSaved)
+                {
+                    if (links)
+                    {
+                        await put(folder, LINKS_ENTRY, links);
+                    }
+                    else
+                    {
+                        await drop(folder, await entryName(LINKS_ENTRY));
+                    }
+                    linksSaved = linksText;
+                }
             });
-            return writing;
         },
         /**
          * The whole session taken away, in whichever form it was kept: every
@@ -618,7 +788,7 @@ export function opfsSession(key, directory){
          * registry. What removing a program from this machine asks.
          */
         clear(){
-            writing = writing.then(async()=>{
+            return inTurn(async()=>{
                 const dir = await open();
                 try
                 {
@@ -630,7 +800,6 @@ export function opfsSession(key, directory){
                 await drop(dir, legacy);
                 whole = false;
             });
-            return writing;
         },
     };
     return store;
@@ -640,6 +809,17 @@ export function opfsSession(key, directory){
  * What a save is told changed: a file by its path, or the registry.
  *
  * @typedef {{ kind: string, path?: string }} SessionChange
+ */
+
+/** The most of the time saving a session may take while a program keeps writing. */
+const SAVE_SHARE = 0.1;
+
+/**
+ * A file of a session loaded lazily: its path and size, its bytes read when
+ * asked for.
+ *
+ * @typedef {{ path: string, size: number, modified?: number,
+ *     read: (offset?: number, length?: number) => Promise<Uint8Array> }} LazySessionFile
  */
 
 /**
@@ -652,7 +832,16 @@ export function opfsSession(key, directory){
  * time packing and the save took minutes. Changes are noted and the save
  * waits for them to settle; a change that arrives while a save is under way
  * is saved once that one is done, never alongside it, so the store sees one
- * session at a time and always the latest.
+ * session at a time and always the latest. A save names each file once, by
+ * its last change: the filesystem announces once per file only within a turn
+ * of the machine, a save spans as many turns as the writes took, and the store
+ * puts a named file whole for every time it is named.
+ *
+ * A program that never stops writing - an installer laying down a framework -
+ * never lets a burst settle, and each save serializes the whole registry and
+ * lists every file again: measured in an installer's run, saves took a sixth
+ * of the engine's thread. So a save waits, besides the settling, until the one
+ * before it is at most `SAVE_SHARE` of the time since it began.
  *
  * @param {Object} options
  * @param {() => Session} options.snapshot  The session as it is now; called once per save.
@@ -660,11 +849,16 @@ export function opfsSession(key, directory){
  * @param {number} [options.settleMs]  How long after the last change a save begins.
  * @param {(fn: () => void, ms: number) => unknown} [options.schedule]
  *        How to wait; the default is the host's timer.
+ * @param {() => number} [options.clock]  Milliseconds; the default is the host's.
  */
-export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
+export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule, clock }){
     const later = schedule ?? ((fn, ms)=>setTimeout(fn, ms));
-    /** @type {SessionChange[]} */
-    let pending = [];
+    const now = clock ?? (()=>performance.now());
+    /** How long the last save took, from its snapshot to the store's answer. */
+    let lastMs = 0;
+    const wait = ()=>Math.max(settleMs, lastMs * (1 / SAVE_SHARE - 1));
+    /** @type {Map<string, SessionChange>} by path, or by kind for a change without one */
+    let pending = new Map();
     /** @type {unknown} */
     let timer = null;
     /** @type {Promise<unknown> | null} */
@@ -676,17 +870,19 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
         {
             return inFlight;
         }
-        if (pending.length === 0)
+        if (pending.size === 0)
         {
             return Promise.resolve();
         }
-        const changes = pending;
-        pending = [];
+        const changes = [...pending.values()];
+        pending = new Map();
+        const began = now();
         inFlight = Promise.resolve(persist(snapshot(), changes)).finally(()=>{
+            lastMs = now() - began;
             inFlight = null;
-            if (pending.length > 0 && timer === null)
+            if (pending.size > 0 && timer === null)
             {
-                timer = later(flush, settleMs);
+                timer = later(flush, wait());
             }
         });
         return inFlight;
@@ -695,17 +891,22 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
     return {
         /** @param {SessionChange[]} changes */
         note(changes){
-            pending.push(...changes);
+            for (const change of changes)
+            {
+                const key = change.path ?? `:${change.kind}`;
+                pending.delete(key);
+                pending.set(key, change);
+            }
             if (timer === null && !inFlight)
             {
-                timer = later(flush, settleMs);
+                timer = later(flush, wait());
             }
         },
         /** Saves what is pending now rather than after it settles. */
         flush,
-        /** Changes noted and not yet handed to the store. */
+        /** Changes noted and not yet handed to the store, each file once. */
         get pending(){
-            return pending.length;
+            return pending.size;
         },
     };
 }
@@ -717,7 +918,13 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
  *
  * @param {any} spec
  * @param {string} key  Names the session when the caller did not.
- * @returns {{ load: () => Promise<any>, save: ((session: Session, changes: any[]) => any) | null }}
+ * @returns {{ load: () => Promise<any>, save: ((session: Session, changes: any[]) => any) | null,
+ *     readsWithinSave?: boolean }}
+ *     A store that can answers `load` lazily (`LazySessionFile`): the volume is
+ *     laid a file at a time. `readsWithinSave`: the store has read every file
+ *     it was handed by the time its save settles, which a provider of the
+ *     caller's says of itself; one that does not may read them later, and
+ *     they are kept as long as it holds them.
  */
 export function resolveStorage(spec, key){
     if (!spec)
@@ -726,11 +933,13 @@ export function resolveStorage(spec, key){
     }
     if (spec === 'local')
     {
-        return localStorageSession(`bottlify:${key}`);
+        return { ...localStorageSession(`bottlify:${key}`), readsWithinSave: true };
     }
     if (spec === 'opfs')
     {
-        return opfsSession(key);
+        const session = opfsSession(key);
+        return { load: ()=>session.load({ lazy: true }), save: session.save,
+            readsWithinSave: true };
     }
     // A bare function is the common case: fetch the session from somewhere and
     // hand it over. Nothing goes back out, which is a legitimate thing to want.
@@ -741,5 +950,6 @@ export function resolveStorage(spec, key){
     return {
         load: async()=>(await spec.load?.()) ?? [],
         save: spec.save ? (files, changes)=>spec.save(files, changes) : null,
+        readsWithinSave: spec.readsWithinSave === true,
     };
 }

@@ -25,9 +25,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import {
-    commandCode, createShadow, lockCode, moveCopyCode, settledAfter, unlockCode,
-} from './shadow.js';
+import { createShadow, settledAfter } from './shadow.js';
+import { commandCode } from './routines/command.js';
+import { lockCode, moveCopyCode, unlockCode } from './routines/locks.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
@@ -127,11 +127,13 @@ function generate(seed, count){
             const span = 1 + next(Math.min(24, VERTICES - first));
             const offset = first * STRIDE;
             const length = span * STRIDE;
-            if (flags === D3DLOCK_NOOVERWRITE && read.subarray(offset, offset + length).includes(1))
+            // With NOOVERWRITE a lock is one, DISCARD or not (`lockCode`).
+            const overwrites = (flags & D3DLOCK_NOOVERWRITE) === 0;
+            if (!overwrites && read.subarray(offset, offset + length).includes(1))
             {
                 continue;
             }
-            if (flags !== D3DLOCK_NOOVERWRITE)
+            if (overwrites)
             {
                 read = new Uint8Array(LENGTH);
             }
@@ -216,7 +218,7 @@ const VERSIONS = [
 function machine(version, lent = false){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     let heap = HEAP;

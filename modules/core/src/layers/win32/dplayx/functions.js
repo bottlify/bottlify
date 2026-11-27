@@ -23,6 +23,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { sessionDefinition } from './session.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** dplay.h: MAKE_HRESULT(1, _FACDP = 0x877, code). */
 const dpError = (/** @type {number} */ code)=>(0x88770000 | code) >>> 0;
@@ -31,7 +32,7 @@ export const DPERR_UNAVAILABLE = dpError(250);
 export const DPERR_UNINITIALIZED = dpError(320);
 export const DPERR_NOTLOBBIED = dpError(1070);
 export const DPERR_INVALIDPARAMS = 0x80070057;
-export const DPERR_UNSUPPORTED = 0x80004001;
+const DPERR_UNSUPPORTED = 0x80004001;
 
 /** The numbers dplayx.dll exports these at; a program imports them so. */
 export const DPLAYX_ORDINALS = Object.freeze({
@@ -167,7 +168,7 @@ export function createDplayFunctions(host){
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -221,15 +222,15 @@ export function createDplayFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([guid, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((guid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(out) === 0)
                 {
                     return DPERR_INVALIDPARAMS;
                 }
-                if (host.readMemory(guid >>> 0, 16).some(byte=>byte !== 0))
+                if (host.readMemory(wholeAddress(guid), 16).some(byte=>byte !== 0))
                 {
                     return DPERR_UNAVAILABLE;
                 }

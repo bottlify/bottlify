@@ -102,9 +102,9 @@ test('a primary surface is visible, and refuses to be a texture or a back buffer
     assert.equal(ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_TEXTURE }).hr, DDERR_INVALIDCAPS);
     assert.equal(ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_BACKBUFFER }).hr, DDERR_INVALIDCAPS);
 
-    // Being the front of nothing is allowed; being the front of a chain that
-    // was not asked for is not.
-    const front = ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER });
+    // Being the front of nothing is allowed through the original interface;
+    // being the front of a chain that was not asked for is not.
+    const front = ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER, version: 1 });
     assert.equal(front.hr, DD_OK);
     assert.equal(front.caps,
         DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE | IN_VIDEO);
@@ -264,4 +264,30 @@ test('only a texture the runtime keeps a copy of tolerates a malformed rectangle
 
     assert.equal(acceptsMalformedLockRect(DDSCAPS_TEXTURE | DDSCAPS_SYSTEMMEMORY, 0), true);
     assert.equal(acceptsMalformedLockRect(DDSCAPS_TEXTURE, DDSCAPS2_TEXTUREMANAGE), true);
+});
+
+test('a managed texture is a texture placed by the runtime, in system memory'
+    + ' (test_texturemanage)', ()=>{
+    for (const manage of [DDSCAPS2_TEXTUREMANAGE, 0x00020000])
+    {
+        for (const caps of [DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+            DDSCAPS_VIDEOMEMORY | DDSCAPS_TEXTURE, 0, DDSCAPS_SYSTEMMEMORY, DDSCAPS_VIDEOMEMORY])
+        {
+            assert.equal(ask({ caps, caps2: manage }).hr, DDERR_INVALIDCAPS, `caps ${caps}`);
+        }
+        const made = ask({ caps: DDSCAPS_TEXTURE, caps2: manage });
+        assert.equal(made.hr, DD_OK);
+        assert.equal(made.caps, DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE);
+    }
+    assert.equal(ask({ caps: DDSCAPS_TEXTURE }).caps, DDSCAPS_TEXTURE | IN_VIDEO);
+});
+
+test('a primary that asks to be a front buffer is refused after the original interface'
+    + ' (test_primary_caps)', ()=>{
+    for (const version of /** @type {const} */ ([2, 4, 7]))
+    {
+        assert.equal(ask({ caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER, version }).hr,
+            DDERR_INVALIDCAPS);
+    }
+    assert.equal(ask({ caps: DDSCAPS_FRONTBUFFER }).hr, DD_OK, 'a plain surface may');
 });

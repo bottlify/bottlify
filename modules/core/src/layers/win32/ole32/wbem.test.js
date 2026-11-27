@@ -23,6 +23,8 @@ function setup(){
     let nextPointer = 0x8000;
     let nextBlock = 0x4000;
     let nextString = 0x1000;
+    /** Every block the heap handed out, where a free must find one. @type {Set<number>} */
+    const blocks = new Set();
     const registry = createComRegistry();
     registerWbemClasses({
         registry,
@@ -38,7 +40,11 @@ function setup(){
                 return nextPointer;
             },
         },
-        heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
+        heap: { allocate: size=>{
+            const block = (nextBlock += size + 16) - size - 16;
+            blocks.add(block);
+            return block;
+        } },
         physicalMemory: 512 << 20,
         windows: WINDOWS_VERSIONS.winxp,
         readMemory: (address, length)=>bytes.subarray(address, address + length),
@@ -54,7 +60,7 @@ function setup(){
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
     });
     return {
-        registry, reported, view,
+        registry, reported, view, blocks,
         /** @param {string} text  A BSTR's characters, which is what a method reads. */
         wide(text){
             const at = nextString + 4;
@@ -237,6 +243,11 @@ test('the machine classes answer as Windows does: one instance each, a boolean a
     const count = host.view.getUint32(array + 16, true);
     assert.ok(count > 0);
     assert.equal(host.view.getUint32(host.view.getUint32(array + 12, true), true), 7, 'PCI first');
+    // SafeArrayDestroy, which VariantClear calls, frees the block sixteen bytes in front
+    // of the descriptor: one allocated without them frees whatever lies there.
+    assert.ok(host.blocks.has(array - 16), 'the descriptor lies sixteen bytes into its block');
+    assert.equal(host.view.getUint16(array + 2, true), 0x80, 'FADF_HAVEVARTYPE');
+    assert.equal(host.view.getUint32(array - 4, true), 3, 'its VARTYPE, VT_I4, in front');
 
     const slot = only('Win32_SystemSlot');
     const hotPlug = get(slot, 'SupportsHotPlug');
@@ -249,7 +260,7 @@ test('the machine classes answer as Windows does: one instance each, a boolean a
     assert.equal(get(only('Win32_PhysicalMemoryArray'), 'MaxCapacity').value, 512 << 10);
 
     const processor = get(only('Win32_Processor'), 'ProcessorId');
-    assert.equal(text(processor.value), '0780A97900000673', 'CPUID leaf 1: EDX, then EAX');
+    assert.equal(text(processor.value), '0788A979000106A5', 'CPUID leaf 1: EDX, then EAX');
     assert.equal(get(only('Win32_Processor'), 'MaxClockSpeed').value, 1000);
 
     const location = only('Win32_MemoryDeviceLocation');
@@ -322,4 +333,17 @@ test('the processor\'s clock speed is the rate its time-stamp counter runs at', 
     const [processor] = machineClasses({ processorMhz: 3000, windows: WINDOWS_VERSIONS.winxp })
         .win32_processor;
     assert.deepEqual([processor.maxclockspeed[1], processor.currentclockspeed[1]], [3000, 3000]);
+});
+
+test('Win32_ComputerSystem is this machine: its name, its memory, its processors', ()=>{
+    // A system scanner reads the machine's model and memory here; with no
+    // instance it took the machine for one it could not describe.
+    const [system] = machineClasses({ physicalMemory: 512 << 20, processors: 4,
+        windows: WINDOWS_VERSIONS.winxp }).win32_computersystem;
+    assert.equal(system.name[1], 'BOTTLIFY');
+    assert.deepEqual(system.totalphysicalmemory, [21, String(512 << 20)], 'CIM_UINT64, a string');
+    assert.deepEqual([system.numberofprocessors[1], system.numberoflogicalprocessors[1]], [1, 4],
+        'one package, as Win32_Processor describes it');
+    assert.equal(system.systemtype[1], 'X86-based PC');
+    assert.equal(system.partofdomain[1], false);
 });

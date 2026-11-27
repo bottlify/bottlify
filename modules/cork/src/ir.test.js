@@ -413,14 +413,14 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(m.state.reg[0], 0); // rdtsc after cpuid, no counter given
     assert.equal(m.state.reg[2], 0);
     const clocked = run([0x0f, 0x31], state=>{
-        state.rdtsc = ()=>0x123456789abcdef0n;
+        state.rdtsc = ()=>0x1f_ffff_fedc_ba98;
     });
-    assert.equal(clocked.state.reg[0], 0x9abcdef0, 'the counter\'s low word in eax');
-    assert.equal(clocked.state.reg[2], 0x12345678, 'and its high word in edx');
+    assert.equal(clocked.state.reg[0], 0xfedcba98, 'the counter\'s low word in eax');
+    assert.equal(clocked.state.reg[2], 0x1fffff, 'and its high word in edx');
     const leaf = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2]);
-    assert.equal(leaf.state.reg[0], 0x00000673);
-    assert.equal(leaf.state.reg[1], 0xc0800001);
-    assert.equal(leaf.state.reg[2], 0x0780a979);
+    assert.equal(leaf.state.reg[0], 0x000106a5);
+    assert.equal(leaf.state.reg[1], 0x00982201);
+    assert.equal(leaf.state.reg[2], 0x0788a979);
     assert.equal(leaf.state.reg[3], 0x00010800);
 });
 
@@ -429,7 +429,7 @@ test('cpuid describes the processors of the state\'s layout, as translated code 
         state.layout = { processors: 4, processor: 2 };
     });
     assert.equal(pinned.state.reg[3], 0x02040800, 'four processors, APIC id 2');
-    assert.equal(pinned.state.reg[2], 0x1780a979, 'HTT set');
+    assert.equal(pinned.state.reg[2], 0x1788a979, 'HTT set');
     const cores = run([0xb8, 4, 0, 0, 0, 0xb9, 1, 0, 0, 0, 0x0f, 0xa2], state=>{
         state.layout = { processors: 4, processor: 2 };
     });
@@ -437,9 +437,9 @@ test('cpuid describes the processors of the state\'s layout, as translated code 
 });
 
 test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone', ()=>{
-    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 2
-    assert.equal(sub.state.reg[0], 0x143);
-    assert.equal(sub.state.reg[1], 0xfff);
+    const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 1, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 1
+    assert.equal(sub.state.reg[0], 0x122);
+    assert.equal(sub.state.reg[1], 0x7f);
     const values = new Set();
     for (let i = 0; i < 4; i++)
     {
@@ -608,4 +608,37 @@ test('the x87 memory forms by words: single precision, a negative quadword, a si
     });
     assert.equal(nan.state.status & 1, 1);
     assert.equal(nan.view.getBigUint64(0x2008, true), 0x7ff8000020000000n);
+});
+
+test('x87 loads, moves, sign changes and extended stores keep a signalling NaN\'s bits,'
+    + ' however often they run', ()=>{
+    // fld tword [0x2020] (a signalling NaN); fld st0; fchs; fxch st1; fxch st1;
+    // fabs; fchs; fst st2; fstp tword [0x2008]; fcmove st0, st1; frndint;
+    // fucomi st0, st1; fstp qword [0x2000]. The processor moves and changes
+    // the sign of a signalling NaN without quieting it; a double store quiets
+    // it. Rounds enough for the engine to optimize the steps: V8 14's Maglev
+    // quiets a signalling NaN a JavaScript number stores.
+    const code = [0xdb, 0x2d, 0x20, 0x20, 0, 0, 0xd9, 0xc0, 0xd9, 0xe0, 0xd9, 0xc9, 0xd9, 0xc9,
+        0xd9, 0xe1, 0xd9, 0xe0, 0xdd, 0xd2, 0xdb, 0x3d, 0x08, 0x20, 0, 0, 0xda, 0xc9, 0xd9, 0xfc,
+        0xdb, 0xe9, 0xdd, 0x1d, 0x00, 0x20, 0, 0];
+    /** @type {string[]} */
+    const wrong = [];
+    for (let round = 0; round < 3000 && wrong.length < 4; round++)
+    {
+        const m = run(code, state=>{
+            state.memory.write(0x2024, 4, 0xa0000000);
+            state.memory.write(0x2028, 2, 0x7fff);
+            state.eflags |= 0x40;
+        });
+        const seen = [m.state.f80bits[7], m.state.f80bits[0], m.view.getBigInt64(0x2000, true),
+            m.view.getBigInt64(0x2008, true), BigInt(m.view.getUint16(0x2010, true)),
+            BigInt(m.state.status & 1), BigInt(m.state.eflags & 0x45)]
+            .map(word=>BigInt.asUintN(64, word).toString(16)).join(' ');
+        if (seen !== 'fff4000000000000 fff4000000000000 fffc000000000000 a000000000000000 ffff'
+            + ' 1 45')
+        {
+            wrong.push(`round ${round}: ${seen}`);
+        }
+    }
+    assert.deepEqual(wrong, []);
 });

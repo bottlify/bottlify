@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
-    from './environment.js';
+import {
+    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
+    machineArchitecture, sessionEnvironment,
+} from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -207,14 +209,57 @@ test('expanding replaces the variables it knows and leaves the rest as written',
     assert.equal(host.readAnsi(0x200), 'C:\\TEMP\\x %NOSUCH% 100%');
 });
 
-test('expanding into a buffer too small writes nothing and still says what is needed', ()=>{
+test('the A form fits only with a byte to spare, and leaves a buffer too small empty', ()=>{
+    // Wine's environ test, test_ExpandEnvironmentStringsA: "Long long value"
+    // (15) needs 17 bytes of room, answers 16 in them and 17 in 16.
     const host = fakeHost();
     const fns = createEnvironmentFunctions(host);
-    host.plant(0x100, '%TEMP%');
+    host.plant(0x100, 'Long long value');
 
-    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0, 0]), 8);
-    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 7]), 8);
-    assert.equal(host.bytes[0x200], 0xaa);
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0, 0]), 17);
+    host.plant(0x200, 'abcdefghijklmnopqrstuv');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 16]), 17);
+    assert.equal(host.readAnsi(0x200), '', 'its first byte a terminator');
+    host.plant(0x200, 'abcdefghijklmnopqrstuv');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 0]), 17);
+    assert.equal(host.readAnsi(0x200), '', 'even at a size of 0');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 17]), 16);
+    assert.equal(host.readAnsi(0x200), 'Long long value');
+    assert.deepEqual(host.errors, [], 'the last error untouched');
+});
+
+test('the W form copies text while a character of room stays, and a value whole or not', ()=>{
+    // Wine's environ test, test_ExpandEnvironmentStringsW, with TVAR=WINE.
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    /** @param {number} address @param {string} text */
+    const plantWide = (address, text)=>{
+        [...text, '\0'].forEach((unit, at)=>{
+            host.bytes[address + at * 2] = unit.charCodeAt(0) & 0xff;
+            host.bytes[address + at * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+    };
+    plantWide(0x80, 'TVAR');
+    plantWide(0x90, 'WINE');
+    assert.equal(fns.SetEnvironmentVariableW.handler([0x80, 0x90]), 1);
+    /** @param {string} input @param {number} size */
+    const expand = (input, size)=>{
+        plantWide(0x100, input);
+        plantWide(0x300, 'abcdefghijklmnopqrstuv');
+        const count = fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, size]);
+        return [count, host.readWideString(0x300, 64)];
+    };
+    assert.deepEqual(expand('Long long value', 2), [16, 'Lbcdefghijklmnopqrstuv'],
+        'text cut a character short of the room, unterminated');
+    assert.deepEqual(expand('Long long value', 16), [16, 'Long long value']);
+    assert.deepEqual(expand('%TVAR% long long', 0), [15, 'abcdefghijklmnopqrstuv']);
+    assert.deepEqual(expand('%TVAR% long long', 4), [15, ''], 'a value that does not fit');
+    assert.deepEqual(expand('%TVAR% long long', 5), [15, 'WINE'], 'a value with its terminator');
+    assert.deepEqual(expand('%TVAR% long long', 7), [15, 'WINE lghijklmnopqrstuv']);
+    assert.deepEqual(expand('%TVAR%%TVAR% long', 9), [14, 'WINEWINE']);
+    assert.deepEqual(expand('%TVAR2% long long', 8), [18, '%TVAR2%hijklmnopqrstuv'],
+        'an unset variable is text');
+    assert.deepEqual(expand('%TVAR long long', 17), [16, '%TVAR long long']);
 });
 
 test('setting a variable is visible to the next reader', ()=>{
@@ -226,6 +271,20 @@ test('setting a variable is visible to the next reader', ()=>{
     assert.equal(fns.SetEnvironmentVariableA.handler([0x100, 0x140]), 1);
     assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 5);
     assert.equal(host.readAnsi(0x200), 'value');
+});
+
+test('the variables as they are now, for a child made now, changes included', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'NEW');
+    host.plant(0x140, 'value');
+    fns.SetEnvironmentVariableA.handler([0x100, 0x140]);
+    host.plant(0x180, 'TEMP');
+    fns.SetEnvironmentVariableA.handler([0x180, 0]);
+
+    const now = fns[ENVIRONMENT_NOW]();
+    assert.equal(now.NEW, 'value');
+    assert.equal('TEMP' in now, false, 'one removed is gone');
 });
 
 test('a null value removes the variable', ()=>{
@@ -269,7 +328,7 @@ test('GetEnvironmentVariableW reads a variable by a wide name into a wide buffer
     assert.notEqual(fns.GetEnvironmentStringsA.handler(), 0, 'the block under its A name too');
 });
 
-test('the startup record names its own size and nothing else', ()=>{
+test('a process no parent started has a startup record of its size and nothing else', ()=>{
     // dwFlags of zero is how a program is told not to read the rest, so every
     // other field being zero is the answer rather than a placeholder.
     const host = fakeHost();
@@ -280,10 +339,16 @@ test('the startup record names its own size and nothing else', ()=>{
     const view = new DataView(host.bytes.buffer);
     assert.equal(view.getUint32(0x300, true), STARTUPINFOA_SIZE);
     assert.equal(view.getUint32(0x300 + 44, true), 0, 'dwFlags');
-    assert.deepEqual([...host.bytes.slice(0x304, 0x300 + STARTUPINFOA_SIZE)],
-        new Array(STARTUPINFOA_SIZE - 4).fill(0));
-    assert.equal(fns.GetStartupInfoW, fns.GetStartupInfoA,
-        'the wide record is the same size, with no strings to give either');
+    assert.deepEqual([...host.bytes.slice(0x304, 0x300 + 56)], new Array(52).fill(0));
+    // No STARTF_USESTDHANDLES: the ANSI form answers INVALID_HANDLE_VALUE for
+    // each standard handle, the wide form leaves the caller's fields alone.
+    assert.deepEqual([56, 60, 64].map(at=>view.getUint32(0x300 + at, true)),
+        [0xffffffff, 0xffffffff, 0xffffffff]);
+    host.bytes.fill(0x5a, 0x300, 0x300 + STARTUPINFOA_SIZE);
+    fns.GetStartupInfoW.handler([0x300]);
+    assert.deepEqual([56, 60, 64].map(at=>view.getUint32(0x300 + at, true)),
+        [0x5a5a5a5a, 0x5a5a5a5a, 0x5a5a5a5a]);
+    assert.equal(view.getUint32(0x300 + 44, true), 0, 'the rest written');
 });
 
 test('the system directory is inside the windows one, as a program assumes', ()=>{
@@ -316,9 +381,9 @@ test('the system Windows directory is the Windows directory: this is no terminal
 const PROCESSOR_VARIABLES = Object.freeze({
     NUMBER_OF_PROCESSORS: '1',
     PROCESSOR_ARCHITECTURE: 'x86',
-    PROCESSOR_IDENTIFIER: 'x86 Family 6 Model 7 Stepping 3, GenuineIntel',
+    PROCESSOR_IDENTIFIER: 'x86 Family 6 Model 26 Stepping 5, GenuineIntel',
     PROCESSOR_LEVEL: '6',
-    PROCESSOR_REVISION: '0703',
+    PROCESSOR_REVISION: '1a05',
 });
 
 test('a process starts with the profile variables of the machine\'s layout', ()=>{
@@ -328,7 +393,10 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(xp, shellFolders(xp)), {
         ALLUSERSPROFILE: 'C:\\Documents and Settings\\All Users',
         APPDATA: 'C:\\Documents and Settings\\User\\Application Data',
+        CommonProgramFiles: 'C:\\Program Files\\Common Files',
         ...PROCESSOR_VARIABLES,
+        Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
+        ProgramFiles: 'C:\\Program Files',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
         TMP: 'C:\\WINDOWS\\TEMP',
@@ -343,9 +411,12 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(seven, shellFolders(seven)), {
         ALLUSERSPROFILE: 'C:\\ProgramData',
         APPDATA: 'C:\\Users\\User\\AppData\\Roaming',
+        CommonProgramFiles: 'C:\\Program Files\\Common Files',
         LOCALAPPDATA: 'C:\\Users\\User\\AppData\\Local',
         ...PROCESSOR_VARIABLES,
+        Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
         ProgramData: 'C:\\ProgramData',
+        ProgramFiles: 'C:\\Program Files',
         PUBLIC: 'C:\\Users\\Public',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
@@ -363,6 +434,25 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
         assert.deepEqual(names, [...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1
             : 1)), 'in the order Windows keeps the block, whatever the case');
     }
+});
+
+test('on a 64-bit Windows a 32-bit process\'s program folders are Program Files (x86), and both'
+    + ' widths\' are named', ()=>{
+    const seven = WINDOWS_VERSIONS.win7;
+    const narrow = defaultEnvironment(seven, shellFolders(seven, { machine64: true }), 1,
+        { wow64: true });
+    assert.equal(narrow.ProgramFiles, 'C:\\Program Files (x86)');
+    assert.equal(narrow.CommonProgramFiles, 'C:\\Program Files (x86)\\Common Files');
+    assert.equal(narrow['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
+    assert.equal(narrow['CommonProgramFiles(x86)'], 'C:\\Program Files (x86)\\Common Files');
+    assert.equal(narrow.ProgramW6432, 'C:\\Program Files');
+    assert.equal(narrow.CommonProgramW6432, 'C:\\Program Files\\Common Files');
+    const wide = defaultEnvironment(seven, shellFolders(seven, { machine64: true, long: true }), 1,
+        { long: true });
+    assert.equal(wide.ProgramFiles, 'C:\\Program Files');
+    assert.equal(wide['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
+    const names = Object.keys(narrow);
+    assert.deepEqual(names, [...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1 : 1)));
 });
 
 test('NUMBER_OF_PROCESSORS is the machine\'s count, and the processor the registry names', ()=>{
@@ -427,10 +517,6 @@ test('the wide forms answer the windows directory and expand as the A forms do',
     assert.equal(fns.ExpandEnvironmentStringsW.argBytes, 12);
     const expanded = 'C:\\TEMP\\\u3042 %NOSUCH%';
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0, 0]), expanded.length + 1);
-    host.bytes.fill(0xaa, 0x300, 0x380);
-    assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, expanded.length]),
-        expanded.length + 1);
-    assert.equal(host.bytes[0x300], 0xaa, 'a buffer too small gets nothing');
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, 64]), expanded.length + 1);
     assert.equal(host.readWideString(0x300, 64), expanded);
 });
@@ -453,4 +539,80 @@ test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees i
     assert.deepEqual(freed, [0x5000]);
     assert.equal(fns.CreateEnvironmentBlock.handler([0, 0, 1]), 0);
     assert.deepEqual(errors, [87], 'no pointer is ERROR_INVALID_PARAMETER');
+});
+
+test('a name finds its variable whatever its case, and the block keeps the first spelling', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, 'SomeWildName');
+    host.plant(0x140, 'sOMEwILDnAME');
+    host.plant(0x180, 'SomeWildValue');
+    host.plant(0x1c0, '');
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x100, 0x180]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x140, 0x200, 64]), 13);
+    assert.equal(host.readAnsi(0x200), 'SomeWildValue');
+
+    // Set to empty through the other spelling: the same variable, now "".
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0x1c0]), 1);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.readAnsi(0x200), '');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0, 0]), 1, 'the terminator');
+    const block = fns.GetEnvironmentStringsA.handler();
+    let text = '';
+    for (let at = block; host.bytes[at] !== 0 || host.bytes[at + 1] !== 0; at++)
+    {
+        text += String.fromCharCode(host.bytes[at] || 10);
+    }
+    assert.match(text, /^SomeWildName=$/m);
+
+    assert.equal(fns.SetEnvironmentVariableA.handler([0x140, 0]), 1, 'deleted by either spelling');
+    assert.equal(fns.GetEnvironmentVariableA.handler([0x100, 0x200, 64]), 0);
+    assert.equal(host.errors.at(-1), ERROR_ENVVAR_NOT_FOUND);
+});
+
+test('a NULL name names nothing, and a NULL source expands to the empty string', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    assert.equal(fns.GetEnvironmentVariableA.handler([0, 0x200, 64]), 0);
+    assert.equal(fns.GetEnvironmentVariableW.handler([0, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_ENVVAR_NOT_FOUND, ERROR_ENVVAR_NOT_FOUND]);
+    assert.equal(fns.SetEnvironmentVariableA.handler([0, 0]), 0);
+    assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0, 0x200, 64]), 1);
+    assert.equal(fns.ExpandEnvironmentStringsW.handler([0, 0x200, 64]), 1);
+});
+
+test('a process on a 64-bit machine sees its own architecture whatever its parent handed it', ()=>{
+    const parent64 = { Path: 'C:\\WINDOWS', Processor_Architecture: 'AMD64' };
+    assert.deepEqual(machineArchitecture(parent64, { long: false, wow64: true }),
+        { Path: 'C:\\WINDOWS', Processor_Architecture: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' });
+    const parent32 = { PROCESSOR_ARCHITECTURE: 'x86', processor_architew6432: 'AMD64', TEMP: 'T' };
+    assert.deepEqual(machineArchitecture(parent32, { long: true, wow64: false }),
+        { PROCESSOR_ARCHITECTURE: 'AMD64', TEMP: 'T' });
+    assert.deepEqual(machineArchitecture({}, { long: false, wow64: true }),
+        { PROCESSOR_ARCHITECTURE: 'x86', PROCESSOR_ARCHITEW6432: 'AMD64' });
+});
+
+test('a session starts with what the registry\'s environment keys hold, Path joined', ()=>{
+    // An installer that adds its folder to the system Path (Windows
+    // Installer's `[~];...`) is heard by every program started after it.
+    const base = { Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS', SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\WINDOWS\\TEMP' };
+    const block = sessionEnvironment(base, [
+        { name: 'PATH', value: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\Vendor\\Common',
+            expand: false },
+        { name: 'VENDOR_HOME', value: '%SystemRoot%\\Vendor', expand: true },
+        { name: 'LITERAL', value: '%SystemRoot%', expand: false },
+    ], [
+        { name: 'Path', value: '%VENDOR_HOME%\\bin', expand: true },
+        { name: 'TEMP', value: 'C:\\Users\\User\\Temp', expand: false },
+    ]);
+    assert.deepEqual(block, {
+        Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\Vendor\\Common;C:\\WINDOWS\\Vendor\\bin',
+        SystemRoot: 'C:\\WINDOWS',
+        TEMP: 'C:\\Users\\User\\Temp',
+        VENDOR_HOME: 'C:\\WINDOWS\\Vendor',
+        LITERAL: '%SystemRoot%',
+    }, 'the machine\'s over the defaults, the user\'s over those, each name as first spelled');
+    assert.deepEqual(sessionEnvironment(base, [], []), base, 'nothing there: the defaults');
 });

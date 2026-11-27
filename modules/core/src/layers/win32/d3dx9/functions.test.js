@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createD3dxFunctions } from './functions.js';
+import { createD3dxFunctions, d3dxVersionFunctions } from './functions.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
 import { COMPILED as VECTOR } from './inguest-vector.x86.js';
@@ -91,6 +91,14 @@ test('every mathematical export is there, stdcall, and pops its arguments', ()=>
     }
     assert.equal(fns.D3DXCreateEffectPool.argBytes, 4);
     assert.equal(fns.D3DXCreateEffectFromResourceA.argBytes, 36);
+    // Each is guest code in a 64-bit process too: its x86-64 from the same source.
+    for (const compiled of [COMPILED, MATRIX, VECTOR, QUATERNION])
+    {
+        for (const name of Object.keys(compiled))
+        {
+            assert.equal(typeof fns[name].long, 'function', `${name}: x86-64 code`);
+        }
+    }
 });
 
 test('a transpose swaps rows and columns and answers the output pointer', ()=>{
@@ -367,3 +375,17 @@ test('names that end just short of the end of their memory are read without read
             m.before('ps_2_0', ends[4]), 0, out, out + 4, out + 8]), 0);
         assert.deepEqual(m.opened, ['shaders\\tint.psh']);
     });
+
+test('D3DXCheckVersion answers its own SDK version and D3DXDebugMute the setting before', ()=>{
+    const v43 = d3dxVersionFunctions(43);
+    // D3D_SDK_VERSION 32, D3DX_SDK_VERSION the library's number.
+    assert.equal(v43.D3DXCheckVersion.handler([32, 43]), 1);
+    assert.equal(v43.D3DXCheckVersion.handler([32, 42]), 0);
+    assert.equal(v43.D3DXCheckVersion.handler([31, 43]), 0);
+    assert.equal(d3dxVersionFunctions(24).D3DXCheckVersion.handler([32, 24]), 1);
+    assert.equal(v43.D3DXCheckVersion.argBytes, 8);
+    assert.equal(v43.D3DXDebugMute.handler([1]), 0);
+    assert.equal(v43.D3DXDebugMute.handler([0]), 1);
+    assert.equal(v43.D3DXDebugMute.handler([0]), 0);
+    assert.equal(v43.D3DXDebugMute.argBytes, 4);
+});

@@ -24,7 +24,14 @@ import { EINVAL, ENOMEM } from './globals.js';
 import {
     callocCode, freeCode, mallocCode, msizeCode, reallocCode,
 } from '../kernel32/guest-heap.js';
+import {
+    bindLong, callocLongCode, freeLongCode, mallocLongCode, msizeLongCode, reallocLongCode,
+} from '../kernel32/guest-heap-long.js';
+import { wholeAddress } from '../common/pointers.js';
 
+
+/** The key the heap's later functions are carried under in msvcrt's table. */
+export const LATER_HEAP = Symbol('later heap functions');
 /**
  * @typedef {Object} HeapHost
  * @property {(bytes: number) => number} allocate
@@ -53,6 +60,10 @@ import {
 /** A pointer's size: what an aligned block keeps below itself, and its least alignment. */
 const POINTER = 4;
 
+/** The small-block threshold's step and its most. */
+const SBH_STEP = 16;
+const SBH_MAX = 1016;
+
 /**
  * @param {HeapHost} host
  */
@@ -66,6 +77,113 @@ export function createHeapFunctions(host){
      */
     let newHandler = 0;
     let newMode = 0;
+    let sbhThreshold = 0;
+
+    /**
+     * Where an aligned block keeps the address malloc gave: the
+     * pointer-aligned slot just below it.
+     *
+     * @param {number} block
+     */
+    const savedSlot = block=>(block - POINTER & ~(POINTER - 1)) >>> 0;
+
+    /** The address malloc gave for an aligned block. @param {number} block */
+    const alignedBase = block=>{
+        const saved = host.readMemory(savedSlot(block), POINTER);
+        return new DataView(saved.buffer, saved.byteOffset, POINTER).getUint32(0, true);
+    };
+
+    /**
+     * _aligned_offset_malloc's body.
+     *
+     * @param {number} size @param {number} alignment @param {number} offset
+     */
+    const alignedAllocate = (size, alignment, offset)=>{
+        if ((alignment & (alignment - 1)) !== 0 || size === 0 || offset >= size)
+        {
+            host.errno?.(EINVAL);
+            return 0;
+        }
+        const step = Math.max(alignment, POINTER);
+        const bytes = size + step + POINTER;
+        const base = bytes > 0xffffffff ? 0 : malloc(bytes);
+        if (base === 0)
+        {
+            host.errno?.(ENOMEM);
+            return 0;
+        }
+        const block = Math.ceil((base + POINTER + offset) / step) * step - offset;
+        const saved = new Uint8Array(POINTER);
+        new DataView(saved.buffer).setUint32(0, base, true);
+        host.writeMemory(savedSlot(block), saved);
+        return block;
+    };
+
+    /**
+     * _aligned_offset_realloc's body.
+     *
+     * @param {number} block @param {number} size @param {number} alignment
+     * @param {number} offset
+     */
+    const alignedResize = (block, size, alignment, offset)=>{
+        if (block === 0)
+        {
+            return alignedAllocate(size, alignment, offset);
+        }
+        if (size === 0)
+        {
+            host.free(alignedBase(block));
+            return 0;
+        }
+        const moved = alignedAllocate(size, alignment, offset);
+        if (moved === 0)
+        {
+            return 0;
+        }
+        const base = alignedBase(block);
+        const held = Math.max(0, (host.block(base)?.size ?? 0) - (block - base));
+        const kept = Math.min(held, size);
+        if (kept > 0)
+        {
+            host.writeMemory(moved, host.readMemory(block, kept));
+        }
+        host.free(base);
+        return moved;
+    };
+
+    /**
+     * The bytes an aligned block was asked for: its malloc block less the
+     * step and the slot `alignedAllocate` added, whatever the block's offset.
+     *
+     * @param {number} block @param {number} alignment
+     */
+    const alignedSize = (block, alignment)=>
+        Math.max(0, (host.block(alignedBase(block))?.size ?? 0) - Math.max(alignment, POINTER)
+            - POINTER);
+
+    /**
+     * _aligned_offset_recalloc's body: a resize to count times size, the
+     * bytes past what the block held before zeroed. A product past the
+     * address space is NULL and ENOMEM, the block kept.
+     *
+     * @param {number} block @param {number} count @param {number} size
+     * @param {number} alignment @param {number} offset
+     */
+    const alignedRecalloc = (block, count, size, alignment, offset)=>{
+        const bytes = count * size;
+        if (bytes > 0xffffffff)
+        {
+            host.errno?.(ENOMEM);
+            return 0;
+        }
+        const before = block === 0 ? 0 : alignedSize(block, alignment);
+        const moved = alignedResize(block, bytes, alignment, offset);
+        if (moved !== 0 && bytes > before)
+        {
+            host.fillMemory(moved + before, 0, bytes - before);
+        }
+        return moved;
+    };
 
     /**
      * An allocation that failed, retried for as long as the new handler says
@@ -137,13 +255,16 @@ export function createHeapFunctions(host){
         const heap = /** @type {() => number} */ (host.heapHandle)();
         const allocateCode = /** @type {(bytes: number) => number} */ (host.allocateCode);
         /**
-         * @param {string} label @param {{ argBytes: number, handler: Function }} entry
+         * @param {string} label
+         * @param {{ argBytes: number, handler: Function, returns?: string,
+         *     sizes?: number[] }} entry
          * @param {(p: import('../kernel32/guest-heap.js').Placement, at: number, trap: number)
          *     => Uint8Array} code
          */
         const place = (label, entry, code)=>{
             const trap = builder.register(label, {
                 convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+                returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
             });
             if (placement === null || !guest.isHeap(heap))
             {
@@ -166,16 +287,50 @@ export function createHeapFunctions(host){
         return routines;
     };
     /** @param {'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
+    /**
+     * The same routines in x86-64 for a 64-bit process, each placed with its
+     * module by the loader: the export each hands over to, and the routine
+     * over the tables' placement and the heap.
+     *
+     * @type {Record<'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize',
+     *     [() => { argBytes: number, handler: Function, returns?: string, sizes?: number[] },
+     *     (p: import('../kernel32/guest-heap.js').Placement, heap: number)
+     *         => import('../kernel32/guest-heap-long.js').LongRoutine]>}
+     */
+    const longRoutines = {
+        malloc: [()=>allocator, mallocLongCode],
+        new: [()=>newAllocator, mallocLongCode],
+        free: [()=>deallocator, freeLongCode],
+        calloc: [()=>table.calloc, callocLongCode],
+        realloc: [()=>table.realloc, reallocLongCode],
+        msize: [()=>table._msize, msizeLongCode],
+    };
+    /** @param {'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize'} which */
     const routine = which=>(host.guestHeap && host.heapHandle && host.allocateCode
         ? {
             /** @param {{ register: (label: string, trap: any) => number }} builder */
             guest: builder=>placedRoutines(builder)[which],
+            /** @param {import('../kernel32/guest-heap-long.js').LongBuilder} builder */
+            long: builder=>{
+                const [entryOf, make] = longRoutines[which];
+                const guest = /** @type {NonNullable<HeapHost['guestHeap']>} */ (host.guestHeap);
+                const placement = guest.placement();
+                const heap = /** @type {() => number} */ (host.heapHandle)();
+                const entry = entryOf();
+                return bindLong(builder, placement === null || !guest.isHeap(heap) ? null
+                    : make(placement, heap), {
+                    convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+                    returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
+                });
+            },
         }
         : {});
 
     const allocator = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        sizes: [0],
         handler: mallocHandler,
         ...routine('malloc'),
     };
@@ -186,8 +341,10 @@ export function createHeapFunctions(host){
      * fast path the same as malloc's.
      */
     const newAllocator = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        sizes: [0],
         handler: newHandlerCall,
         ...routine('new'),
     };
@@ -220,8 +377,10 @@ export function createHeapFunctions(host){
 
         /** void *calloc(size_t count, size_t size) */
         calloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [0, 1],
             ...routine('calloc'),
             /** @param {number[]} args */
             handler: ([count, size])=>{
@@ -241,13 +400,15 @@ export function createHeapFunctions(host){
 
         /** void *realloc(void *block, size_t size) */
         realloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             ...routine('realloc'),
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 const bytes = size >>> 0;
-                if ((address >>> 0) === 0)
+                if (wholeAddress(address) === 0)
                 {
                     return malloc(bytes);
                 }
@@ -275,7 +436,7 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 host.writeMemory(moved,
-                    host.readMemory(address, Math.min(existing.size, bytes)).slice());
+                    host.readMemory(address, Math.min(existing.size, bytes)));
                 host.free(address);
                 return moved;
             },
@@ -307,48 +468,155 @@ export function createHeapFunctions(host){
          * -- the whole point of it is that the pointer stays valid.
          */
         _expand: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>host.resize(address, size >>> 0) ? address : 0,
         },
 
         /**
          * void *_aligned_malloc(size_t size, size_t alignment)
+         * void *_aligned_offset_malloc(size_t size, size_t alignment, size_t offset)
          *
-         * A block at a multiple of `alignment`, a power of two -- zero counts
-         * -- carved from a malloc block large enough to move it up that far.
-         * The address malloc gave is kept in the pointer just below the one
-         * handed out, which is where _aligned_free looks for it; nothing is
-         * aligned to less than a pointer, so that slot is always whole. Any
-         * other alignment, or a size of zero, is NULL and EINVAL, and a
-         * failed allocation ENOMEM (Wine's msvcrt test_aligned, and the
-         * documentation).
+         * A block whose byte at `offset` -- none, for the first -- sits at a
+         * multiple of `alignment`, a power of two (zero counts), carved from
+         * a malloc block large enough to move it up that far. The address
+         * malloc gave is kept in the pointer-aligned slot just below the
+         * block, which is where _aligned_free looks for it. Any other
+         * alignment, a size of zero or an offset not inside the block is
+         * NULL and EINVAL, and a failed allocation ENOMEM (Wine's msvcrt
+         * test_aligned, and the documentation).
          */
         _aligned_malloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [0, 1],
             /** @param {number[]} args */
-            handler: ([size, alignment])=>{
-                const align = alignment >>> 0;
-                if ((align & (align - 1)) !== 0 || (size >>> 0) === 0)
-                {
-                    host.errno?.(EINVAL);
-                    return 0;
-                }
-                const step = Math.max(align, POINTER);
-                const bytes = (size >>> 0) + step + POINTER;
-                const base = bytes > 0xffffffff ? 0 : malloc(bytes);
-                if (base === 0)
-                {
-                    host.errno?.(ENOMEM);
-                    return 0;
-                }
-                const block = Math.ceil((base + POINTER) / step) * step;
-                const saved = new Uint8Array(POINTER);
-                new DataView(saved.buffer).setUint32(0, base, true);
-                host.writeMemory(block - POINTER, saved);
-                return block;
+            handler: ([size, alignment])=>alignedAllocate(size >>> 0, alignment >>> 0, 0),
+        },
+        _aligned_offset_malloc: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 12,
+            sizes: [0, 1, 2],
+            /** @param {number[]} args */
+            handler: ([size, alignment, offset])=>
+                alignedAllocate(size >>> 0, alignment >>> 0, offset >>> 0),
+        },
+
+        /**
+         * void *_aligned_realloc(void *block, size_t size, size_t alignment)
+         * void *_aligned_offset_realloc(void *block, size_t size, size_t alignment,
+         *                               size_t offset)
+         *
+         * A new aligned block with as much of the old one's bytes as both
+         * hold, the old one freed: no block is an allocation, a size of zero
+         * a free answering NULL. A request the allocation would refuse is
+         * NULL with EINVAL, the old block kept -- the alignment and offset
+         * may differ from the ones it was made with.
+         */
+        _aligned_realloc: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 12,
+            sizes: [1, 2],
+            /** @param {number[]} args */
+            handler: ([block, size, alignment])=>
+                alignedResize(wholeAddress(block), size >>> 0, alignment >>> 0, 0),
+        },
+        _aligned_offset_realloc: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 16,
+            sizes: [1, 2, 3],
+            /** @param {number[]} args */
+            handler: ([block, size, alignment, offset])=>
+                alignedResize(wholeAddress(block), size >>> 0, alignment >>> 0, offset >>> 0),
+        },
+
+        // What the 2005 runtime added to the heap's functions: msvcrt.dll has
+        // none of them, and that runtime and the universal one take them here.
+        [LATER_HEAP]: {
+            /**
+             * void *_aligned_recalloc(void *block, size_t count, size_t size, size_t alignment)
+             * void *_aligned_offset_recalloc(void *block, size_t count, size_t size,
+             *                                size_t alignment, size_t offset)
+             *
+             * _aligned_realloc to count times size, what the block did not hold
+             * before zeroed.
+             */
+            _aligned_recalloc: {
+                returns: 'pointer',
+                convention: 'cdecl',
+                argBytes: 16,
+                sizes: [1, 2, 3],
+                /** @param {number[]} args */
+                handler: ([block, count, size, alignment])=>
+                    alignedRecalloc(wholeAddress(block), count >>> 0, size >>> 0, alignment >>> 0,
+                        0),
+            },
+            _aligned_offset_recalloc: {
+                returns: 'pointer',
+                convention: 'cdecl',
+                argBytes: 20,
+                sizes: [1, 2, 3, 4],
+                /** @param {number[]} args */
+                handler: ([block, count, size, alignment,
+                    offset])=>alignedRecalloc(wholeAddress(block),
+                    count >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
+            },
+
+            /**
+             * size_t _aligned_msize(void *block, size_t alignment, size_t offset)
+             *
+             * The bytes the aligned block was made with; no block is EINVAL and
+             * the size's -1.
+             */
+            _aligned_msize: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([block, alignment])=>{
+                    if (wholeAddress(block) === 0)
+                    {
+                        host.errno?.(EINVAL);
+                        return 0xffffffff;
+                    }
+                    return alignedSize(wholeAddress(block), alignment >>> 0);
+                },
+            },
+
+            /**
+             * void *_recalloc(void *block, size_t count, size_t size)
+             *
+             * realloc to count times size, the bytes past what the block held
+             * zeroed; a product past the address space is NULL and ENOMEM.
+             */
+            _recalloc: {
+                returns: 'pointer',
+                convention: 'cdecl',
+                argBytes: 12,
+                sizes: [1, 2],
+                /** @param {number[]} args */
+                handler: ([block, count, size])=>{
+                    const bytes = (count >>> 0) * (size >>> 0);
+                    if (bytes > 0xffffffff)
+                    {
+                        host.errno?.(ENOMEM);
+                        return 0;
+                    }
+                    const before =
+                        wholeAddress(block) === 0 ? 0 : host.block(wholeAddress(block))?.size ?? 0;
+                    const moved = table.realloc.handler([block, bytes]);
+                    if (moved !== 0 && bytes > before)
+                    {
+                        host.fillMemory(moved + before, 0, bytes - before);
+                    }
+                    return moved;
+                },
             },
         },
 
@@ -358,15 +626,47 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+                if (wholeAddress(block) !== 0)
                 {
-                    const saved = host.readMemory((block >>> 0) - POINTER, POINTER);
-                    host.free(new DataView(saved.buffer, saved.byteOffset, POINTER)
-                        .getUint32(0, true));
+                    host.free(alignedBase(wholeAddress(block)));
                 }
                 return 0;
             },
         },
+
+        /**
+         * int _set_sbh_threshold(size_t size) and size_t _get_sbh_threshold(void)
+         *
+         * The size below which the old runtime took a block from its
+         * small-block heap: kept rounded up to sixteen, up to 1016 -- past it
+         * the call fails with 0 -- and zero for none. Every block here comes
+         * from one heap, so the number is only kept.
+         */
+        _set_sbh_threshold: {
+            convention: 'cdecl',
+            argBytes: 4,
+            sizes: [0],
+            /** @param {number[]} args */
+            handler: ([size])=>{
+                if ((size >>> 0) > SBH_MAX)
+                {
+                    return 0;
+                }
+                sbhThreshold = Math.ceil((size >>> 0) / SBH_STEP) * SBH_STEP;
+                return 1;
+            },
+        },
+        _get_sbh_threshold: { convention: 'cdecl', argBytes: 0, handler: ()=>sbhThreshold },
+
+        ...host.heapHandle ? {
+            /** intptr_t _get_heap_handle(void) -- the runtime's own heap, not the process's. */
+            _get_heap_handle: {
+                returns: 'pointer',
+                convention: 'cdecl',
+                argBytes: 0,
+                handler: ()=>/** @type {() => number} */ (host.heapHandle)(),
+            },
+        } : {},
 
         // The C++ operators, by their decorated names, because that is what a
         // compiled object actually imports. Failure is a null return: this
@@ -376,6 +676,11 @@ export function createHeapFunctions(host){
         '??_U@YAPAXI@Z': newAllocator,  // operator new[](unsigned int)
         '??3@YAXPAX@Z': deallocator, // operator delete(void *)
         '??_V@YAXPAX@Z': deallocator, // operator delete[](void *)
+        // And as a 64-bit compiler names them: a size is an unsigned __int64.
+        '??2@YAPEAX_K@Z': newAllocator,
+        '??_U@YAPEAX_K@Z': newAllocator,
+        '??3@YAXPEAX@Z': deallocator,
+        '??_V@YAXPEAX@Z': deallocator,
 
         /**
          * _PNH _set_new_handler(_PNH handler), by its C++ name, and
@@ -423,6 +728,7 @@ export function createHeapFunctions(host){
         _callnewh: {
             convention: 'cdecl',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>(newHandler === 0 || !host.callGuest
                 ? 0

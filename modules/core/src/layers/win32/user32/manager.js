@@ -96,8 +96,7 @@ export const WINDOW_CELLS = Object.freeze({ foreground: 0, focus: 1, capture: 2,
  */
 export function windowCells(){
     const bytes = WINDOW_CELLS.length * 4;
-    return new Int32Array(typeof SharedArrayBuffer === 'function'
-        ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes));
+    return new Int32Array(new SharedArrayBuffer(bytes));
 }
 
 /**

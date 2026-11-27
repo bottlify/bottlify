@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import {
     ANY_WINDOW, QS_KEY, QS_MOUSEBUTTON, QS_MOUSEMOVE, QS_PAINT, QS_POSTMESSAGE, QS_TIMER,
     WM_QUIT, WM_TIMER, createMessageQueue,
@@ -56,6 +57,46 @@ test('a key is held as of the key message taken, not as the keys are now', ()=>{
     queue.peek(ALL);
     queue.peek(ALL);
     assert.equal(queue.heldAsOfMessage(0x11), false);
+});
+
+test('GetKeyState\'s state moves as the thread takes its input, buttons and keys alike', ()=>{
+    // The button was pressed and let go before the program got to either
+    // message: as it handles the press, the button is down for it.
+    /** @type {Record<number, number>} */
+    const now = { 0x14: 0x0001 };
+    const main = { id: 1 };
+    const other = { id: 2 };
+    let thread = main;
+    const queue = createMessageQueue({ keyState: vk=>now[vk] ?? 0, currentThread: ()=>thread });
+    assert.equal(queue.syncedKeyState(0x01), null, 'nothing taken: the keys as they are');
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0 });
+    queue.post({ hwnd: 0, message: 0x0202, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x14, lParam: 0 });
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x01), 0x8001, 'down as of WM_LBUTTONDOWN, toggled');
+    assert.equal(queue.syncedKeyState(0x14), 0x0001, 'Caps Lock\'s toggle, as it was');
+    assert.equal(queue.syncedKeyboard()?.[0x01], 0x81);
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x01), 0x0001, 'up, still toggled by the press');
+    queue.peek(ALL);
+    assert.equal(queue.syncedKeyState(0x14), 0x8000, 'pressed: the toggle flips off');
+    // Another thread has taken nothing: it reads the keys as they are.
+    thread = other;
+    assert.equal(queue.syncedKeyState(0x01), null);
+    queue.setSyncedKeyboard(new Uint8Array(256).fill(0x81));
+    assert.equal(queue.syncedKeyState(0x41), 0x8001, 'SetKeyboardState sets the thread\'s');
+    thread = main;
+    assert.equal(queue.syncedKeyState(0x41), 0);
+
+    // A shift, control or alt keeps its side with the name: the input
+    // layer's side, or the extended bit of a message that names none.
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x10, lParam: 0x00010001, side: 0xa1 });
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x11, lParam: 0x01000001 });
+    queue.peek(ALL);
+    queue.peek(ALL);
+    const table = queue.syncedKeyboard() ?? new Uint8Array(256);
+    assert.deepEqual([0x10, 0xa0, 0xa1, 0x11, 0xa2, 0xa3].map(vk=>table[vk] & 0x80),
+        [0x80, 0, 0x80, 0x80, 0, 0x80]);
 });
 
 test('an empty queue answers with nothing rather than a placeholder', ()=>{
@@ -714,4 +755,60 @@ test('a claimed keystroke leaves the queue as WM_HOTKEY, with the id and the com
     // With nothing held, the registration does not fit and the key stands.
     queue.post({ hwnd: 0x99, message: WM_KEYDOWN, wParam: 0x41, lParam: 1, x: 0, y: 0 });
     assert.equal(queue.peek(ALL)?.message, WM_KEYDOWN);
+});
+
+test('the soonest timer is found without making anything, every turn asking', async()=>{
+    // The run loop asks every turn when the guest's next timer is due.
+    const { clock, queue } = timed();
+    clock.at = 100.5;
+    queue.setTimer(0x40, 1, 250, 0);
+    queue.setTimer(0x40, 2, 40, 0);
+    queue.postLater('a', 30.25, ()=>null);
+    // Kept in a typed cell: a fraction kept in a variable is boxed each time.
+    // The answer itself, a fraction handed back, is one number (16 bytes).
+    const due = new Float64Array(1);
+    const bytes = await bytesPerCall(()=>{
+        due[0] = queue.nextTimerDue() ?? -1;
+    });
+    assert.ok(bytes < 24, `${bytes} bytes a turn`);
+    assert.equal(due[0], 130.75);
+});
+
+test('of the timers due, the one due soonest is handed first, those due together as set', ()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 30, 0);
+    queue.setTimer(0x40, 2, 10, 0);
+    queue.setTimer(0x40, 3, 20, 0);
+    queue.setTimer(0x40, 4, 20, 0);
+    clock.at = 35;
+    /** @type {number[]} */
+    const order = [];
+    for (let message = queue.peek(ALL); message !== null; message = queue.peek(ALL))
+    {
+        order.push(message.wParam);
+    }
+    assert.deepEqual(order, [2, 3, 4, 1]);
+});
+
+test('asking whether a timer is due makes nothing and leaves the timers due', async()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 10, 0);
+    queue.setTimer(0x40, 2, 10, 0);
+    clock.at = 50;
+    const bytes = await bytesPerCall(()=>{
+        queue.waiting();
+    });
+    assert.ok(bytes < 8, `${bytes} bytes a look`);
+    assert.equal(queue.waiting() & QS_TIMER, QS_TIMER, 'and the timers are still due');
+});
+
+test('a message posted later whose news has someone look again is posted once', ()=>{
+    const { clock, queue } = timed();
+    queue.whenNews(()=>queue.news());
+    queue.postLater('a', 10, ()=>({ hwnd: 0x40, message: WM_USER, wParam: 1, lParam: 0 }));
+    queue.postLater('b', 10, ()=>({ hwnd: 0x40, message: WM_USER, wParam: 2, lParam: 0 }));
+    clock.at = 10;
+    assert.equal(queue.waiting() & QS_POSTMESSAGE, QS_POSTMESSAGE);
+    assert.deepEqual([queue.peek(ALL)?.wParam, queue.peek(ALL)?.wParam, queue.peek(ALL)],
+        [1, 2, null]);
 });

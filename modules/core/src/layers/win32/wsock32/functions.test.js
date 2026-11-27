@@ -18,7 +18,8 @@ import { createLoopbackAdapter } from './loopback.js';
 import {
     AF_INET, FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_READ, FD_WRITE, FIONBIO, FIONREAD,
     INVALID_SOCKET, SOCKET_ERROR, SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, SO_TYPE, WSADATA, WSAEINVAL, WSAEMSGSIZE, WSAENOTSOCK, WSAEWOULDBLOCK,
+    SOL_SOCKET, SO_RCVBUF, SO_SNDBUF, SO_TYPE, WSADATA, WSAEINVAL, WSAEMSGSIZE, WSAENOTSOCK,
+    WSAEWOULDBLOCK,
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WS2_32_ORDINALS, WSOCK32_ORDINALS,
 } from './constants.js';
 import { SOCKADDR_IN_SIZE, writeSockaddr } from './sockaddr.js';
@@ -644,6 +645,111 @@ test('WSAIoctl is ioctlsocket with buffers, and refuses the extension lookup', (
     assert.equal(fx.call('WSAGetLastError'), 10038, 'WSAENOTSOCK');
 });
 
+test('the controls a socket is set up with: UDP resets, keep-alive, its base and its address',
+    ()=>{
+        const fx = fixture();
+        const stream = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        const datagram = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+        const IN = 0x900;
+        const ANSWER = 0x980;
+        const RETURNED = 0x9f0;
+        fx.setDword(IN, 0);
+        assert.equal(fx.call('WSAIoctl', [datagram, 0x9800000c, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_UDP_CONNRESET');
+        assert.equal(fx.call('WSAIoctl', [datagram, 0x9800000f, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_UDP_NETRESET');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x9800000c, IN, 4, 0, 0, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'a stream socket has no UDP resets');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000004, IN, 12, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_KEEPALIVE_VALS');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000004, IN, 4, 0, 0, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'a tcp_keepalive is twelve bytes');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x98000010, IN, 4, 0, 0, RETURNED, 0, 0]), 0,
+            'SIO_LOOPBACK_FAST_PATH');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000022, 0, 0, ANSWER, 4, RETURNED, 0, 0]),
+            0);
+        assert.equal(fx.dword(ANSWER), stream, 'SIO_BASE_HANDLE: its own base');
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 64, RETURNED, 0, 0]),
+            0);
+        assert.deepEqual([fx.dword(ANSWER), fx.dword(ANSWER + 4), fx.dword(ANSWER + 8)],
+            [1, ANSWER + 12, 16],
+            'SIO_ADDRESS_LIST_QUERY: one address, in the buffer after the list');
+        assert.equal(fx.dword(RETURNED), 28);
+        assert.equal(fx.call('WSAIoctl', [stream, 0x48000016, 0, 0, ANSWER, 8, RETURNED, 0, 0]),
+            SOCKET_ERROR, 'too small a buffer');
+        assert.equal(fx.dword(RETURNED), 28, 'and the size it needs');
+        assert.equal(fx.call('WSAIoctl',
+            [datagram, 0xc8000014, IN, 16, ANSWER, 16, RETURNED, 0, 0]), 0,
+        'SIO_ROUTING_INTERFACE_QUERY');
+        assert.equal(fx.dword(ANSWER) & 0xffff, AF_INET);
+    });
+
+test('SIO_GET_EXTENSION_FUNCTION_POINTER answers mswsock\'s export for each GUID mswsock.h names',
+    async()=>{
+        /** @type {string[]} */
+        const asked = [];
+        const exports = { AcceptEx: 0x7100, ConnectEx: 0x7110, GetAcceptExSockaddrs: 0x7120,
+            DisconnectEx: 0x7130, TransmitFile: 0x7140 };
+        const fx = fixture({
+            /** @param {string} name */
+            extension: name=>{
+                asked.push(name);
+                // ConnectEx as a library still loading answers it.
+                return name === 'ConnectEx' ? Promise.resolve(exports[name])
+                    : exports[/** @type {keyof typeof exports} */ (name)] ?? 0;
+            },
+        });
+        const handle = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        const GUID = 0x930, POINTER = 0x940, RETURNED = 0x950;
+        const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
+        /** A GUID laid out as the structure holds it. @param {string} text */
+        const putGuid = text=>{
+            const [a, b, c, d, e] = text.split('-');
+            const bytes = new Uint8Array(16);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, parseInt(a, 16), true);
+            view.setUint16(4, parseInt(b, 16), true);
+            view.setUint16(6, parseInt(c, 16), true);
+            bytes.set(Buffer.from(d + e, 'hex'), 8);
+            fx.host.writeMemory(GUID, bytes);
+        };
+        const lookup = ()=>fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 16, POINTER, 4, RETURNED, 0, 0]);
+        const guids = {
+            AcceptEx: 'b5367df1-cbac-11cf-95ca-00805f48a192',
+            GetAcceptExSockaddrs: 'b5367df2-cbac-11cf-95ca-00805f48a192',
+            TransmitFile: 'b5367df0-cbac-11cf-95ca-00805f48a192',
+            DisconnectEx: '7fda2e11-8630-436f-a031-f536a6eec157',
+        };
+        for (const [name, guid] of Object.entries(guids))
+        {
+            putGuid(guid);
+            fx.setDword(RETURNED, 0);
+            assert.equal(lookup(), 0, name);
+            assert.equal(fx.dword(POINTER), exports[/** @type {keyof typeof exports} */ (name)], name);
+            assert.equal(fx.dword(RETURNED), 4, 'a pointer\'s size comes back');
+        }
+        putGuid('25a207b9-ddf3-4660-8ee9-76e58c74063e');
+        assert.equal(await lookup(), 0, 'ConnectEx, once mswsock has loaded');
+        assert.equal(fx.dword(POINTER), 0x7110);
+        assert.deepEqual(asked, ['AcceptEx', 'GetAcceptExSockaddrs', 'TransmitFile',
+            'DisconnectEx', 'ConnectEx']);
+
+        // WSARecvMsg's GUID: an extension this provider does not have.
+        putGuid('f689d7c8-6f1f-436b-8a53-e54fe351c322');
+        assert.equal(lookup(), SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10022, 'WSAEINVAL for a GUID it does not know');
+        putGuid(guids.AcceptEx);
+        assert.equal(fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 16, POINTER, 2, RETURNED, 0, 0]),
+        SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10014, 'WSAEFAULT: no room for the pointer');
+        assert.equal(fx.call('WSAIoctl',
+            [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, GUID, 8, POINTER, 4, RETURNED, 0, 0]),
+        SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError'), 10014, 'WSAEFAULT: half a GUID');
+    });
+
 /**
  * Readiness as a window message. `wParam` is always the socket; `lParam` is
  * WSAMAKESELECTREPLY(event, error) -- the event in the low word, the error
@@ -1074,6 +1180,98 @@ test('an overlapped send completes at once, its event signalled as Windows does'
     assert.equal(fx.dword(OUT2), 3);
 });
 
+/** A fixture whose completed operations are recorded as the port would be told them. */
+function withPort(){
+    /** @type {[number, number, number, number, boolean][]} */
+    const packets = [];
+    const fx = fixture({
+        completed: (/** @type {[number, number, number, number, boolean]} */ ...packet)=>
+            packets.push(packet),
+    });
+    return { fx, packets };
+}
+
+test('an operation on a socket tells its completion port, also one finished at once', async()=>{
+    // A pool of threads in GetQueuedCompletionStatus waits for the packet, not
+    // for the event: Windows posts it for an operation that completed in its
+    // own call too, and leaves it out when hEvent's low bit asks.
+    const { fx, packets } = withPort();
+    const { client, accepted } = connected(fx);
+    fx.put(TEXT, 'abc');
+    fx.setDword(WSABUF, 3);
+    fx.setDword(WSABUF + 4, TEXT);
+    assert.equal(fx.call('WSASend', [client, WSABUF, 1, OUT, 0, overlapped(fx), 0]), 0);
+    assert.deepEqual(packets, [[client, 3, OVERLAPPED, 0, true]]);
+    assert.equal(fx.call('WSASend', [client, WSABUF, 1, OUT, 0, overlapped(fx, EVENT | 1), 0]), 0);
+    assert.equal(packets.length, 1, 'the low bit of hEvent: no packet');
+
+    fx.setDword(WSABUF + 8, 16);
+    fx.setDword(WSABUF + 12, BUFFER);
+    assert.equal(fx.call('WSARecv', [accepted, WSABUF + 8, 1, OUT, OUT2, overlapped(fx), 0]), 0,
+        'six bytes waiting: done at once');
+    assert.deepEqual(packets[1], [accepted, 6, OVERLAPPED, 0, true]);
+    assert.equal(fx.call('WSARecv', [accepted, WSABUF + 8, 1, OUT, OUT2, overlapped(fx), 0]),
+        SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSA_IO_PENDING);
+    assert.equal(packets.length, 2, 'nothing for a pending one yet');
+    assert.equal(fx.call('send', [client, TEXT, 3, 0]), 3);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(packets[2], [accepted, 3, OVERLAPPED, 0, false], 'when it completes');
+});
+
+test('ConnectEx connects, sends its first bytes and completes on the socket\'s port', async()=>{
+    const { fx, packets } = withPort();
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    fx.put(TEXT, 'hey');
+    assert.equal(fx.extension('ConnectEx', [client, NAME, SOCKADDR_IN_SIZE, TEXT, 3, OUT,
+        overlapped(fx)]), 1);
+    assert.equal(fx.dword(OUT), 3, 'the bytes sent');
+    assert.deepEqual([fx.dword(OVERLAPPED), fx.dword(OVERLAPPED + 4)], [0, 3]);
+    assert.deepEqual(packets, [[client, 3, OVERLAPPED, 0, true]]);
+    assert.deepEqual(fx.signalled, [EVENT]);
+    const accepted = fx.call('accept', [server, 0, 0]);
+    assert.equal(await fx.call('recv', [accepted, BUFFER, 16, 0]), 3);
+    assert.equal(fx.read(BUFFER, 3), 'hey');
+    writeSockaddr(fx.host.writeMemory, NAME2, { host: 0, port: PORT + 1 });
+    assert.equal(fx.extension('ConnectEx', [fx.call('socket', [AF_INET, SOCK_STREAM, 0]), NAME2,
+        SOCKADDR_IN_SIZE, 0, 0, 0, overlapped(fx)]), 0, 'nobody listening');
+    assert.equal(packets.length, 1, 'a call that fails in itself posts nothing');
+});
+
+test('AcceptEx with no connection waiting completes on the listener\'s port when one comes',
+    async()=>{
+        const ACCEPT_BUFFER = 0xa00;
+        const { fx, packets } = withPort();
+        const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+        fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+        fx.call('listen', [server, 5]);
+        const target = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        assert.equal(fx.extension('AcceptEx', [server, target, ACCEPT_BUFFER, 0, 32, 32, OUT,
+            overlapped(fx)]), 0);
+        assert.equal(fx.call('WSAGetLastError'), WSA_IO_PENDING);
+        assert.equal(fx.dword(OVERLAPPED), STATUS_PENDING);
+
+        const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        assert.equal(fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]), 0);
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.deepEqual(packets, [[server, 0, OVERLAPPED, 0, false]]);
+        assert.equal(fx.registry.get(target).peer, fx.registry.get(client));
+
+        assert.equal(fx.extension('GetAcceptExSockaddrs', [ACCEPT_BUFFER, 0, 32, 32, OUT, OUT + 4,
+            OUT2, OUT2 + 4]), 0);
+        assert.deepEqual([fx.dword(OUT), fx.dword(OUT + 4), fx.dword(OUT2), fx.dword(OUT2 + 4)],
+            [ACCEPT_BUFFER, SOCKADDR_IN_SIZE, ACCEPT_BUFFER + 32, SOCKADDR_IN_SIZE]);
+        const view = new DataView(fx.bytes.buffer);
+        assert.equal(view.getUint16(ACCEPT_BUFFER + 2), PORT, 'the local address, the listener\'s');
+        assert.equal(view.getUint16(ACCEPT_BUFFER + 34), fx.registry.get(client).local.port,
+            'the remote, the client\'s');
+    });
+
 test('a socket closed under a pending receive aborts it', async()=>{
     const fx = fixture();
     const { accepted } = connected(fx);
@@ -1363,4 +1561,275 @@ test('TransmitFile sends the head, the file through ReadFile, and the tail as on
     assert.equal(fx.call('TransmitFile', [client, 0, 0, 0, 0, INFO, 1]), 1,
         'the buffers alone, then the disconnect');
     assert.equal(fx.call('send', [client, TEXT, 1, 0]), SOCKET_ERROR, 'shut down after');
+});
+
+test('WSASendMsg sends its WSABUFs to the address its WSAMSG names', async()=>{
+    const fx = fixture();
+    const receiver = fx.call('socket', [AF_INET, SOCK_DGRAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [receiver, NAME, SOCKADDR_IN_SIZE]);
+    const sender = fx.call('WSASocketW', [AF_INET, SOCK_DGRAM, 0, 0, 0, 0]);
+    assert.notEqual(sender, INVALID_SOCKET);
+    fx.put(BUFFER, 'hello');
+    fx.put(BUFFER + 0x20, 'there');
+    fx.setDword(WSABUF, 5);
+    fx.setDword(WSABUF + 4, BUFFER);
+    fx.setDword(WSABUF + 8, 5);
+    fx.setDword(WSABUF + 12, BUFFER + 0x20);
+    const message = 0x700;
+    for (const [at, value] of [[0, NAME], [4, SOCKADDR_IN_SIZE], [8, WSABUF], [12, 2], [16, 0],
+        [20, 0], [24, 0]])
+    {
+        fx.setDword(message + at, value);
+    }
+    assert.equal(fx.call('WSASendMsg', [sender, message, 0, OUT, 0, 0]), 0);
+    assert.equal(fx.dword(OUT), 10);
+    assert.equal(await fx.call('recvfrom', [receiver, OUT2, 32, 0, 0, 0]), 10);
+    assert.equal(fx.read(OUT2, 10), 'hellothere');
+    assert.equal(fx.call('WSASendMsg', [sender, 0, 0, OUT, 0, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), 10014, 'no WSAMSG: WSAEFAULT');
+});
+
+test('inet_pton and inet_ntop read and write both families\' text', ()=>{
+    const fx = fixture();
+    fx.put(BUFFER, '192.168.0.7\0');
+    assert.equal(fx.call('inet_pton', [AF_INET, BUFFER, OUT]), 1);
+    assert.deepEqual([...fx.bytes.subarray(OUT, OUT + 4)], [192, 168, 0, 7]);
+    fx.put(BUFFER, '2001:DB8::1\0');
+    assert.equal(fx.call('inet_pton', [23, BUFFER, OUT]), 1);
+    assert.equal(fx.call('inet_ntop', [23, OUT, OUT2, 46]), OUT2);
+    assert.equal(fx.read(OUT2, 12), '2001:db8::1\0');
+    fx.put(BUFFER, '1.2.3\0');
+    assert.equal(fx.call('inet_pton', [AF_INET, BUFFER, OUT]), 0, 'not an address');
+    assert.equal(fx.call('inet_pton', [99, BUFFER, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), 10047, 'WSAEAFNOSUPPORT');
+    fx.bytes.set([10, 0, 0, 1], OUT);
+    assert.equal(fx.call('inet_ntop', [AF_INET, OUT, OUT2, 16]), OUT2);
+    assert.equal(fx.read(OUT2, 9), '10.0.0.1\0');
+    assert.equal(fx.call('inet_ntop', [AF_INET, OUT, OUT2, 8]), 0, 'no room for the terminator');
+    assert.equal(fx.call('WSAGetLastError', []), 87);
+});
+
+test('the catalogue holds MSAFD\'s TCP and UDP, its path unexpanded; no name space answers',
+    ()=>{
+        const fx = fixture();
+        const errno = 0x7f0;
+        fx.setDword(OUT, 0);
+        assert.equal(fx.call('WSCEnumProtocols', [0, 0, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), 10055, 'WSAENOBUFS');
+        assert.equal(fx.dword(OUT), 2 * 628);
+        const catalogue = 0x1000;
+        assert.equal(fx.call('WSCEnumProtocols', [0, catalogue, OUT, errno]), 2);
+        assert.equal(fx.dword(catalogue + 88), SOCK_STREAM);
+        assert.equal(fx.dword(catalogue + 92), 6);
+        assert.equal(fx.dword(catalogue + 628 + 88), SOCK_DGRAM);
+        // Only UDP asked for.
+        fx.setDword(0x7e0, 17);
+        fx.setDword(0x7e4, 0);
+        assert.equal(fx.call('WSAEnumProtocolsA', [0x7e0, catalogue, OUT]), 1);
+        assert.equal(fx.read(catalogue + 116, 20), 'MSAFD Tcpip [UDP/IP]');
+
+        const guid = 0x7c0;
+        fx.bytes.set(fx.bytes.subarray(catalogue + 20, catalogue + 36), guid);
+        fx.setDword(OUT, 4);
+        assert.equal(fx.call('WSCGetProviderPath', [guid, OUT2, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), 10014);
+        const length = fx.dword(OUT);
+        assert.equal(fx.call('WSCGetProviderPath', [guid, 0x2000, OUT, errno]), 0);
+        const path = new TextDecoder('utf-16le').decode(
+            fx.bytes.subarray(0x2000, 0x2000 + (length - 1) * 2));
+        assert.equal(path, '%SystemRoot%\\system32\\mswsock.dll');
+        fx.bytes[guid] ^= 1;
+        assert.equal(fx.call('WSCGetProviderPath', [guid, 0x2000, OUT, errno]), SOCKET_ERROR);
+        assert.equal(fx.dword(errno), WSAEINVAL, 'another provider');
+
+        fx.setDword(OUT, 0);
+        assert.equal(fx.call('WSAEnumNameSpaceProvidersW', [OUT, 0]), 0, 'none installed');
+        assert.equal(fx.call('WSALookupServiceBeginW', [0x1000, 0, OUT]), SOCKET_ERROR);
+        assert.equal(fx.call('WSAGetLastError', []), 10108, 'WSASERVICE_NOT_FOUND');
+        assert.equal(fx.call('WSALookupServiceEnd', [1]), SOCKET_ERROR);
+        assert.equal(fx.call('WSASetServiceW', [0x1000, 0, 0]), SOCKET_ERROR);
+    });
+
+test('a socket is not duplicated into another process', ()=>{
+    const fx = fixture();
+    const socket = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('WSADuplicateSocketW', [socket, 1234, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), WSAEINVAL);
+    assert.equal(fx.call('WSADuplicateSocketW', [999, 1234, OUT]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError', []), WSAENOTSOCK);
+});
+
+test('WSAAccept accepts as accept does, and says a condition function goes uncalled', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const fx = fixture({ divergence: (/** @type {string} */ api)=>said.push(api) });
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    for (const condition of [0, 0x401000])
+    {
+        const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+        fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]);
+        assert.notEqual(fx.call('WSAAccept', [server, 0, 0, condition, 0]), INVALID_SOCKET);
+    }
+    assert.deepEqual(said, ['WSAAccept'], 'only the call with a condition function');
+    assert.equal(fx.call('WSAAccept', [0x999, 0, 0, 0, 0]), INVALID_SOCKET);
+    assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
+});
+
+test('WSAHtonl, WSAHtons, WSANtohl and WSANtohs write network order for a socket', ()=>{
+    const fx = fixture();
+    const socket = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('WSAHtonl', [socket, 0x11223344, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0x44332211);
+    assert.equal(fx.call('WSANtohl', [socket, 0x44332211, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0x11223344);
+    fx.setDword(WSABUF, 0xaaaaaaaa);
+    assert.equal(fx.call('WSAHtons', [socket, 0x1234, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF), 0xaaaa3412, 'a short, and nothing past it');
+    assert.equal(fx.call('WSANtohs', [socket, 0x3412, WSABUF]), 0);
+    assert.equal(fx.dword(WSABUF) & 0xffff, 0x1234);
+    assert.equal(fx.call('WSAHtonl', [0x999, 1, WSABUF]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
+    assert.equal(fx.call('WSAHtonl', [socket, 1, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAEFAULT);
+});
+
+/**
+ * A connected pair whose connection holds `held` bytes: the client sends with
+ * no buffer of its own, the accepted end receives into `held`.
+ *
+ * @param {ReturnType<typeof fixture>} fx @param {number} held
+ */
+function narrow(fx, held){
+    const pair = connected(fx);
+    fx.setDword(OUT2, 0);
+    assert.equal(fx.call('setsockopt', [pair.client, SOL_SOCKET, SO_SNDBUF, OUT2, 4]), 0);
+    fx.setDword(OUT2, held);
+    assert.equal(fx.call('setsockopt', [pair.accepted, SOL_SOCKET, SO_RCVBUF, OUT2, 4]), 0);
+    return pair;
+}
+
+test('a sender that never stops is told it would block, and FD_WRITE comes again', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 8);
+    const EVENT_HANDLE = 0x78;
+    const EVENTS = 0x700;
+    assert.equal(fx.call('WSAEventSelect', [client, EVENT_HANDLE, FD_WRITE]), 0);
+    assert.deepEqual(fx.signalled, [EVENT_HANDLE], 'a connected socket is writable at once');
+    fx.call('WSAEnumNetworkEvents', [client, EVENT_HANDLE, EVENTS]);
+
+    // The loop Wine's afd test and many a game make, ended by the connection filling.
+    fx.put(BUFFER, 'abcdef');
+    let sends = 0;
+    while (fx.call('send', [client, BUFFER, 6, 0]) === 6)
+    {
+        sends++;
+        assert.ok(sends < 10, 'the connection never filled');
+    }
+    assert.equal(fx.call('send', [client, BUFFER, 6, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAEWOULDBLOCK);
+    fx.setDword(OUT2, 0);
+    fx.call('ioctlsocket', [accepted, FIONREAD, OUT2]);
+    assert.equal(fx.dword(OUT2), 8, 'the receiver holds what its buffer holds');
+
+    fx.signalled.length = 0;
+    assert.equal(await fx.call('recv', [accepted, OUT, 4, 0]), 4);
+    assert.deepEqual(fx.signalled, [EVENT_HANDLE], 'room made, FD_WRITE again');
+    assert.equal(fx.call('WSAEnumNetworkEvents', [client, EVENT_HANDLE, EVENTS]), 0);
+    assert.equal(fx.dword(EVENTS), FD_WRITE);
+});
+
+test('a blocking send waits until the connection has taken all of it', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 4);
+
+    fx.put(BUFFER, 'abcdefghij');
+    const sending = fx.call('send', [client, BUFFER, 10, 0]);
+    assert.ok(sending instanceof Promise, 'ten bytes do not fit in four');
+    let answered = false;
+    sending.then(()=>{
+        answered = true;
+    });
+
+    assert.equal(await fx.call('recv', [accepted, OUT, 16, 0]), 4);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(answered, false, 'six bytes still to go');
+    assert.equal(await fx.call('recv', [accepted, OUT + 4, 16, 0]), 4);
+    assert.equal(await fx.call('recv', [accepted, OUT + 8, 16, 0]), 2);
+    assert.equal(await sending, 10, 'a blocking send answers with every byte');
+    assert.equal(fx.read(OUT, 10), 'abcdefghij');
+});
+
+test('select lists a full socket as not writable, and waits for room', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 2);
+    fx.put(BUFFER, 'ab');
+    assert.equal(fx.call('send', [client, BUFFER, 2, 0]), 2);
+
+    fx.setDword(FDSET, 1);
+    fx.setDword(FDSET + 4, client);
+    fx.setDword(TIMEVAL, 0);
+    fx.setDword(TIMEVAL + 4, 0);
+    assert.equal(fx.call('select', [0, 0, FDSET, 0, TIMEVAL]), 0, 'full: not writable');
+
+    fx.setDword(FDSET, 1);
+    fx.setDword(FDSET + 4, client);
+    const waiting = fx.call('select', [0, 0, FDSET, 0, 0]);
+    assert.ok(waiting instanceof Promise);
+    await fx.call('recv', [accepted, OUT, 1, 0]);
+    assert.equal(await waiting, 1);
+    assert.equal(fx.dword(FDSET + 4), client);
+});
+
+test('a 64-bit process reads its protoent and servent with quadword pointers', ()=>{
+    // struct protoent at 64 bits: p_name 0, p_aliases 8, p_proto 16; struct
+    // servent: s_name 0, s_aliases 8, s_proto 16, s_port 24 (the protocol
+    // before the port there). The lists' entries are quadwords.
+    const fx = fixture({ pointerSize: 8 });
+    /** @param {number} at  a quadword pointer below 4 GiB */
+    const pointer = at=>{
+        assert.equal(fx.dword(at + 4), 0, 'the upper half');
+        return fx.dword(at);
+    };
+    fx.bytes.fill(0xaa, 0, 0x10000);
+    const tcp = fx.call('getprotobyname', [cstring(fx, TEXT, 'tcp')]);
+    assert.equal(fx.host.readCString(pointer(tcp), 32), 'tcp');
+    const aliases = pointer(tcp + 8);
+    assert.equal(fx.host.readCString(pointer(aliases), 32), 'TCP');
+    assert.equal(pointer(aliases + 8), 0, 'the list ends in a null quadword');
+    assert.equal(fx.dword(tcp + 16) & 0xffff, 6);
+
+    const http = fx.call('getservbyname', [cstring(fx, TEXT, 'http'), 0]);
+    assert.notEqual(http, 0);
+    assert.equal(fx.host.readCString(pointer(http), 32), 'http');
+    assert.equal(pointer(pointer(http + 8)), 0, 'no aliases: a null quadword');
+    assert.equal(fx.host.readCString(pointer(http + 16), 32), 'tcp');
+    assert.deepEqual([fx.bytes[http + 24], fx.bytes[http + 25]], [0, 80], 'the port, big-endian');
+});
+
+test('a 64-bit process reads its hostent with quadword pointers: the name, the alias list'
+    + ' and the address list where its struct has them', ()=>{
+    // struct hostent at 64 bits: char *h_name at 0, char **h_aliases at 8,
+    // short h_addrtype at 16, short h_length at 18, char **h_addr_list at 24,
+    // the lists' entries quadwords. In the 32-bit layout a 64-bit program read
+    // h_aliases and the two shorts as one pointer and went through it.
+    const fx = fixture({ pointerSize: 8 });
+    fx.put(NAME, '10.0.0.7');
+    const hostent = fx.call('gethostbyname', [NAME]);
+    assert.notEqual(hostent, 0);
+    /** @param {number} at  a quadword pointer below 4 GiB */
+    const pointer = at=>{
+        assert.equal(fx.dword(at + 4), 0, 'its high half');
+        return fx.dword(at);
+    };
+    assert.equal(fx.host.readCString(pointer(hostent), 32), '10.0.0.7');
+    assert.equal(pointer(pointer(hostent + 8)), 0, 'no aliases');
+    assert.equal(new DataView(fx.bytes.buffer).getUint16(hostent + 16, true), 2, 'AF_INET');
+    assert.equal(new DataView(fx.bytes.buffer).getUint16(hostent + 18, true), 4);
+    const list = pointer(hostent + 24);
+    assert.deepEqual([...fx.bytes.subarray(pointer(list), pointer(list) + 4)], [10, 0, 0, 7]);
+    assert.equal(pointer(list + 8), 0, 'the list ends');
 });

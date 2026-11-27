@@ -7,8 +7,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createFileTimeFunctions, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
+    createFileTimeFunctions, fileAttributes, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
 } from './filetime.js';
+
+test('a file is archived until a program clears it, a reparse point too; a directory is not', ()=>{
+    const ARCHIVE = 0x20;
+    const DIRECTORY = 0x10;
+    const REPARSE_POINT = 0x400;
+    assert.equal(fileAttributes({ isDirectory: false }), ARCHIVE);
+    assert.equal(fileAttributes({ isDirectory: false, reparseTag: 0xa000000c }),
+        ARCHIVE | REPARSE_POINT, 'a symbolic link to a file');
+    assert.equal(fileAttributes({ isDirectory: true, reparseTag: 0xa0000003 }),
+        DIRECTORY | REPARSE_POINT, 'a junction');
+    assert.equal(fileAttributes({ isDirectory: false, attributes: 0x2 }), 0x2,
+        'what a program set, as set');
+});
 
 function setup(){
     const bytes = new Uint8Array(0x1000);
@@ -24,12 +37,17 @@ function setup(){
             errors.push(code);
         },
         resolveHandle: (handle, type)=>{
+            if (handle === 12 && type === 'pipe')
+            {
+                return { instance: { pipe: { name: '\\\\.\\pipe\\crashpad_1' } } };
+            }
             if (handle !== 8 || (type && type !== 'file'))
             {
                 throw new Error('bad handle');
             }
             return file;
         },
+        fileId: path=>(path === file.path ? 64 : 65),
         stat: path=>path === file.path
             ? { exists: true, isDirectory: false, size: 0x1234,
                 modified: stamped.at(-1)?.modified ?? Date.UTC(1980, 0, 1) }
@@ -111,6 +129,26 @@ test('a DOS date and time round-trips through a FILETIME to the second it can na
         'and 1601 is before the DOS calendar');
 });
 
+test('a moment between two even seconds is written as the later one', ()=>{
+    // Wine's time.c test_FileTimeToDosDateTime: 10:20:22.001 is :24,
+    // 10:20:59 is 10:21:00, 10:20:22 and 10:20:01 stay :22 and :02.
+    const { fns, bytes } = setup();
+    const view = new DataView(bytes.buffer);
+    /** @param {number} second @param {number} ms */
+    const dos = (second, ms)=>{
+        view.setBigUint64(0x100, BigInt(Date.UTC(2000, 0, 1, 10, 20, second, ms)) * 10000n
+            + 116444736000000000n, true);
+        assert.equal(fns.FileTimeToDosDateTime.handler([0x100, 0x200, 0x202]), 1);
+        const time = view.getUint16(0x202, true);
+        return [(time >>> 5) & 0x3f, (time & 0x1f) * 2];
+    };
+    assert.deepEqual(dos(22, 1), [20, 24]);
+    assert.deepEqual(dos(59, 0), [21, 0]);
+    assert.deepEqual(dos(59, 1), [21, 0]);
+    assert.deepEqual(dos(22, 0), [20, 22]);
+    assert.deepEqual(dos(1, 0), [20, 2]);
+});
+
 test('a null pointer either side is a failure, not a silent nothing', ()=>{
     const { fns } = setup();
     assert.equal(fns.FileTimeToLocalFileTime.handler([0, 0x200]), 0);
@@ -132,6 +170,17 @@ test('the file index is stable, so two handles on one file compare equal', ()=>{
     assert.equal(dword(bytes, 0x400 + BY_HANDLE_FILE_INFORMATION.nNumberOfLinks), 1);
 });
 
+test('a time is set only through a handle that may write attributes', ()=>{
+    const { fns, errors, file, stamped } = setup();
+    const held = /** @type {any} */ (file);
+    held.writeAttributes = false;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED, even setting nothing');
+    held.writeAttributes = true;
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0]), 1);
+    assert.deepEqual(stamped, []);
+});
+
 test('a handle that is not a file is refused everywhere', ()=>{
     const { fns } = setup();
     assert.equal(fns.GetFileTime.handler([99, 0x100, 0, 0]), 0);
@@ -151,12 +200,55 @@ test('the timezone reports no bias and no daylight saving', ()=>{
         'and no transition date, which is what makes the bias mean anything');
 });
 
-test('the clock cannot be set', ()=>{
+test('the dynamic zone calls: the machine\'s zone by its key, another by its key and year', ()=>{
+    // Wine's time.c test_GetDynamicTimeZoneInformation and test_GetTimeZoneInformationForYear.
+    const { fns, bytes, errors } = setup();
+    const view = new DataView(bytes.buffer);
+    const DYNAMIC = 0x800;
+    const keyOf = (/** @type {number} */ at)=>{
+        let key = '';
+        for (let code = view.getUint16(at + 172, true), next = 0; code !== 0;
+            code = view.getUint16(at + 172 + (next += 2), true))
+        {
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+    const plantKey = (/** @type {string} */ key)=>{
+        bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+        [...key].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+            character.charCodeAt(0), true));
+    };
+
+    assert.equal(fns.GetDynamicTimeZoneInformation.handler([DYNAMIC]), 0);
+    assert.equal(keyOf(DYNAMIC), 'UTC');
+    assert.equal(fns.GetTimeZoneInformation.handler([0x600]), 0);
+    assert.deepEqual(bytes.subarray(DYNAMIC, DYNAMIC + 172), bytes.subarray(0x600, 0x600 + 172));
+
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2020, 0, 0x400]), 1);
+    assert.deepEqual(bytes.subarray(0x400, 0x400 + 172), bytes.subarray(0x600, 0x600 + 172));
+    plantKey('Greenland Standard Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 1);
+    assert.equal(view.getInt32(0x400, true), 180);
+    assert.equal(view.getUint16(0x400 + 68 + 2, true), 10, 'standard time from October');
+    plantKey('Greenland Daylight Time');
+    assert.equal(fns.GetTimeZoneInformationForYear.handler([2016, DYNAMIC, 0x400]), 0);
+    assert.deepEqual(errors, [2]);
+
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([0, DYNAMIC]), 0);
+    assert.ok(keyOf(DYNAMIC).length > 0);
+    assert.equal(fns.EnumDynamicTimeZoneInformation.handler([100000, DYNAMIC]), 259);
+});
+
+test('the clock cannot be set: no program holds the privilege it takes', ()=>{
     // It is what every timestamp and every elapsed-time measurement in the run
-    // is taken against; letting a program move it makes a measurement that
-    // spans the call meaningless.
-    const { fns } = setup();
+    // is taken against; Windows refuses a process without SE_SYSTEMTIME_NAME
+    // enabled the same way, and Wine's kernel32:timer skips on it.
+    const { fns, errors } = setup();
     assert.equal(fns.SetLocalTime.handler(), 0);
+    assert.equal(errors.at(-1), 1314);
+    assert.equal(fns.SetSystemTime.handler(), 0);
+    assert.equal(errors.at(-1), 1314);
 });
 
 test('GetFileInformationByHandleEx answers the four classes and refuses the rest', ()=>{
@@ -182,6 +274,14 @@ test('GetFileInformationByHandleEx answers the four classes and refuses the rest
     assert.equal(fns.GetFileInformationByHandleEx.handler([99, 0, 0x400, 40]), 0);
     assert.equal(errors.at(-1), 6);
     assert.equal(fns.GetFileInformationByHandleEx.argBytes, 16);
+
+    // A named pipe's end: its name below the pipe file system's root.
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 2, 0x400, 0x100]), 1);
+    const pipeName = String.fromCharCode(...Array.from({ length: view.getUint32(0x400, true) / 2 },
+        (_, at)=>view.getUint16(0x404 + at * 2, true)));
+    assert.equal(pipeName, '\\crashpad_1');
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 1, 0x400, 24]), 1);
+    assert.equal(fns.GetFileInformationByHandleEx.handler([12, 0, 0x400, 40]), 0);
 });
 
 /**
@@ -260,6 +360,48 @@ test('SystemTimeToTzSpecificLocalTime runs a southern zone\'s daylight across th
     assert.deepEqual(words(bytes, 0x120).slice(4, 6), [10, 0], 'June is not');
 });
 
+test('SystemTimeToTzSpecificLocalTimeEx reads 1 January by the year before\'s rules first', ()=>{
+    // Wine's time.c test_TzSpecificLocalTimeEx. Where the platform's zone data
+    // moves Alberta to a new offset for good in 2026, 2026's rules make the
+    // new offset standard and the old one daylight from 1 January; the first
+    // hours of 2026 in UTC are still 31 December there, read by 2025's rules.
+    const { fns, bytes } = setup();
+    const view = new DataView(bytes.buffer);
+    const DYNAMIC = 0x800;
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Alberta Standard Time'].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+        character.charCodeAt(0), true));
+    putWords(bytes, 0x100, [2026, 1, 0, 1, 0, 15, 0, 0]);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]), 1);
+    assert.deepEqual(words(bytes, 0x120), [2025, 12, 3, 31, 17, 15, 0, 0]);
+    // 1 January 2027 at 06:15 UTC is read by 2026's rules on 2026's
+    // transitions - after both - and its local year is 2027, so it is read
+    // again by 2027's: the zone's offset at that moment, whichever the
+    // platform's data says it is.
+    const moment = Date.UTC(2027, 0, 1, 6, 15);
+    const offset = new Intl.DateTimeFormat('en',
+        { timeZone: 'America/Edmonton', timeZoneName: 'longOffset' }).formatToParts(moment)
+        .find(part=>part.type === 'timeZoneName')?.value ?? '';
+    const [, sign, hours] = /GMT([+-])(\d\d)/.exec(offset) ?? [];
+    const local = new Date(moment + (sign === '-' ? -1 : 1) * Number(hours) * 3_600_000);
+    // Turks and Caicos stayed on UTC-4 through 2017 and went back to Eastern
+    // time in March 2018: 2018's rules are daylight (UTC-4) from 1 January at
+    // midnight, which takes in the last hours of 2017 on the standard clock.
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Turks And Caicos Standard Time'].forEach((character, at)=>view.setUint16(
+        DYNAMIC + 172 + at * 2, character.charCodeAt(0), true));
+    putWords(bytes, 0x100, [2018, 1, 0, 1, 4, 15, 0, 0]);
+    fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]);
+    assert.deepEqual(words(bytes, 0x120).slice(0, 6), [2018, 1, 1, 1, 0, 15]);
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Alberta Standard Time'].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+        character.charCodeAt(0), true));
+    putWords(bytes, 0x100, [2027, 1, 0, 1, 6, 15, 0, 0]);
+    fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]);
+    assert.deepEqual(words(bytes, 0x120).slice(0, 6), [local.getUTCFullYear(),
+        local.getUTCMonth() + 1, local.getUTCDay(), local.getUTCDate(), local.getUTCHours(), 15]);
+});
+
 test('SystemTimeToTzSpecificLocalTime refuses a time that names no moment', ()=>{
     const { fns, bytes, errors } = setup();
     putWords(bytes, 0x100, [2026, 2, 0, 30, 0, 0, 0, 0]);
@@ -320,4 +462,54 @@ test('TzSpecificLocalTimeToSystemTime reads daylight off the local clock, as Win
     assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0x120]), 0);
     assert.equal(fns.TzSpecificLocalTimeToSystemTime.handler([0, 0x100, 0]), 0);
     assert.deepEqual(errors, [87, 87]);
+});
+
+test('a directory lists by handle as many entries as fit, then goes on, then has no more', ()=>{
+    const bytes = new Uint8Array(0x1000);
+    /** @type {number[]} */
+    const errors = [];
+    const folder = { path: 'C:\\GAME', directory: true };
+    const fns = createFileTimeFunctions({
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        setLastError: code=>{
+            errors.push(code);
+        },
+        resolveHandle: ()=>folder,
+        fileId: path=>64 + path.length,
+        stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
+        list: ()=>[{ name: 'SAVE.DAT', isDirectory: false, size: 5000 },
+            { name: 'DATA', isDirectory: true, size: 0 }],
+    });
+    const list = fns.GetFileInformationByHandleEx;
+    assert.equal(list.handler([8, 10, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(list.handler([8, 10, 0, 0x400]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    assert.equal(list.handler([8, 10, 0x100, 0]), 0);
+    assert.equal(errors.at(-1), 24);
+
+    // ".", ".." and SAVE.DAT fit: 104 + 2 -> 112, 104 + 4 -> 224, 104 + 16 = 344.
+    assert.equal(list.handler([8, 10, 0x100, 344]), 1);
+    assert.equal(dword(bytes, 0x100), 112, 'the next entry on an eight-byte boundary');
+    assert.equal(dword(bytes, 0x100 + 60), 2, '"." named');
+    assert.equal(bytes[0x100 + 104], '.'.charCodeAt(0));
+    assert.equal(dword(bytes, 0x100 + 112), 112);
+    const third = 0x100 + 224;
+    assert.equal(dword(bytes, third), 0, 'the last of this call');
+    assert.equal(dword(bytes, third + 40), 5000, 'EndOfFile');
+    assert.equal(dword(bytes, third + 48), 8192, 'whole clusters');
+    assert.equal(dword(bytes, third + 56), 0x20, 'FILE_ATTRIBUTE_ARCHIVE');
+    assert.equal(dword(bytes, third + 60), 16);
+    assert.notEqual(dword(bytes, third + 96), 0, 'a file ID');
+
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 1, 'on from where it stopped');
+    assert.equal(dword(bytes, 0x100 + 56), 0x10, 'DATA, a directory');
+    assert.equal(dword(bytes, 0x100), 0);
+    assert.equal(list.handler([8, 10, 0x100, 0x400]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+    assert.equal(list.handler([8, 11, 0x100, 112]), 1, 'a restart lists from the start');
+    assert.equal(dword(bytes, 0x100 + 60), 2);
+    assert.equal(list.handler([8, 10, 0x100, 100]), 0, 'no room for one entry');
+    assert.equal(errors.at(-1), 234, 'ERROR_MORE_DATA');
 });

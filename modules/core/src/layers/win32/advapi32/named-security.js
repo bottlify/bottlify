@@ -9,15 +9,17 @@
  * GetNamedSecurityInfo and SetNamedSecurityInfo, which an installer calls to
  * read a folder's or a key's DACL, merge entries into it and set it back.
  *
- * The volume keeps no security descriptors, and says so: GetVolumeInformation
- * reports no FILE_PERSISTENT_ACLS. So a file is answered as Windows answers
- * for a file system that keeps none, FAT32: the world descriptor the I/O
- * manager makes up for it -- owned by Everyone, its group Everyone, its DACL
- * present and null. A null DACL rather than one granting Everyone full access,
- * because a null DACL is what such a volume answers: a program merging its
- * entries into the DACL it read starts from nothing, as it would there, and
- * one checking whether everyone may write learns that they may. Setting a
- * file's security succeeds and is kept nowhere, as on such a volume.
+ * The volume is NTFS and keeps security descriptors, as GetVolumeInformation
+ * says with FILE_PERSISTENT_ACLS. So a file's security is answered the way
+ * NTFS answers for one that inherited nothing and had none set -- full
+ * control to the administrators, the system and the owner -- until a program
+ * sets one, and what it sets is kept and answered back. The descriptors are
+ * the run's, not a process's (a setup writes one and a service reads it in
+ * another process of the one run), so they live in a store beside the hive
+ * for the run's lifetime; nothing is written to the volume, so a later run
+ * starts fresh. This replaces decision A34, whose FAT32 null DACL a setup
+ * that read a folder's DACL, merged an entry and wrote it back could not see
+ * take; see roadmap/decisions.md.
  *
  * A registry key is answered in the shape Windows gives its own keys, which
  * its own tests check: owned by BUILTIN\Administrators, its group the local
@@ -35,18 +37,28 @@ import {
 import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes, wideTextAt,
 } from './tokens.js';
+import { createDescriptorCodec } from './descriptors.js';
+import { wholeAddress } from '../common/pointers.js';
+
+/** Where the file-security record hook sits in the table, past the named exports. */
+export const RECORD_SECURITY = Symbol('recordSecurity');
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_ACL = 1336;
 const ERROR_INVALID_SID = 1337;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+const ERROR_INVALID_SECURITY_DESCR = 1338;
 
 /** SE_OBJECT_TYPE: what kind of object a name names. */
 const SE_FILE_OBJECT = 1;
+const SE_SERVICE = 2;
+const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 const SE_REGISTRY_KEY = 4;
 const SE_REGISTRY_WOW64_32KEY = 12;
 
@@ -70,9 +82,39 @@ const REGISTRY_ROOTS = new Map([
 const MAX_NAME = 0x8000;
 
 const ACCESS_ALLOWED_ACE_TYPE = 0;
+const OBJECT_INHERIT_ACE = 0x1;
 const CONTAINER_INHERIT_ACE = 0x2;
+const INHERITED_ACE = 0x10;
 const KEY_READ = 0x20019;
 const KEY_ALL_ACCESS = 0xf003f;
+/** FILE_ALL_ACCESS, and the generic rights a file maps to read/write/execute/all. */
+const FILE_ALL_ACCESS = 0x1f01ff;
+const FILE_GENERIC = [0x120089, 0x120116, 0x1200a0, FILE_ALL_ACCESS];
+const GENERIC_READ = 0x80000000;
+const GENERIC_WRITE = 0x40000000;
+const GENERIC_EXECUTE = 0x20000000;
+const GENERIC_ALL = 0x10000000;
+
+/**
+ * The generic rights of a mask turned into a file's specific ones, the
+ * generic bits themselves dropped: what GetNamedSecurityInfo answers for an
+ * ACE a program set with GENERIC_ALL.
+ *
+ * @param {number} mask
+ */
+const toFileMask = mask=>{
+    let mapped = mask & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
+    [GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE, GENERIC_ALL].forEach((bit, at)=>{
+        if ((mask & bit) !== 0)
+        {
+            mapped |= FILE_GENERIC[at];
+        }
+    });
+    return wholeAddress(mapped);
+};
+
+/** CREATOR OWNER, S-1-3-0: the placeholder an inherited ACE names for whoever owns the child. */
+const CREATOR_OWNER = { authority: 3, subAuthorities: [0] };
 
 /**
  * An allowed ACE the key's subkeys inherit.
@@ -88,6 +130,45 @@ const KEY_DACL = aclBytes([
     keyAce(WELL_KNOWN_SIDS.administrators, KEY_ALL_ACCESS),
     keyAce(WELL_KNOWN_SIDS.system, KEY_ALL_ACCESS),
 ]);
+
+/**
+ * The DACL an NTFS volume gives a file or directory that inherited nothing
+ * and had none set: full control to the administrators, the system and the
+ * owner, as Windows lays a fresh volume's out. A directory's ACEs are
+ * inheritable; a file's are marked inherited.
+ *
+ * @param {boolean} directory
+ */
+const defaultFileDacl = directory=>{
+    const flags = directory ? OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE : INHERITED_ACE;
+    return aclBytes([WELL_KNOWN_SIDS.administrators, WELL_KNOWN_SIDS.system, CREATOR_OWNER]
+        .map(sid=>aceBytes(ACCESS_ALLOWED_ACE_TYPE, flags, FILE_ALL_ACCESS, sidBytes(sid))));
+};
+
+/** @param {string} path  The path a descriptor is kept under, forward slashes folded. */
+const keyForPath = path=>path.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
+/**
+ * Each ACE of an ACL with its mask mapped from the generic rights to a
+ * file's, so a DACL set with GENERIC_ALL reads back as FILE_ALL_ACCESS.
+ *
+ * @param {Uint8Array} acl @returns {Uint8Array} the ACL rebuilt
+ */
+const fileMappedAcl = acl=>{
+    const view = new DataView(acl.buffer, acl.byteOffset, acl.length);
+    const count = view.getUint16(4, true);
+    const aces = [];
+    let at = 8;
+    for (let index = 0; index < count && at + 8 <= acl.length; index++)
+    {
+        const size = view.getUint16(at + 2, true);
+        const ace = acl.slice(at, at + size).slice();
+        new DataView(ace.buffer).setUint32(4, toFileMask(view.getUint32(at + 4, true)), true);
+        aces.push(ace);
+        at += size;
+    }
+    return aclBytes(aces, acl[0]);
+};
 
 /**
  * The directory a path is in, or null for a bare name, which is in the
@@ -118,6 +199,20 @@ const parentOf = path=>{
  *           [files]  The volume. Without it no file is found.
  * @property {{ root: (root: number) => number | null,
  *              open: (key: number, path?: string | null) => number | null }} hive
+ * @property {Map<string, { owner?: Uint8Array, group?: Uint8Array,
+ *              dacl?: Uint8Array | null }>} [security]
+ *           The run's store of the descriptors programs set on files, by path,
+ *           shared by every process of the run. Without it a set is kept
+ *           nowhere and a read answers the volume's made-up descriptor.
+ * @property {(path: string) => string} [resolvePath]  A path made absolute, to key the store by.
+ * @property {(path: string) => void} [dropSecurity]  Drops a path's entry on delete.
+ * @property {(from: string, to: string) => void} [moveSecurity]  Moves it on rename.
+ * @property {(code: number) => void} [setLastError]  For the BOOL file-security calls.
+ * @property {() => { describe: (name: string, wanted: number) => Uint8Array | null,
+ *              keep: (name: string, parts: { owner?: Uint8Array, group?: Uint8Array,
+ *                     dacl?: Uint8Array | null }) => void } | null} [services]
+ *           The service manager's security by a service's name; without it a
+ *           service has none by name here.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -127,11 +222,18 @@ const parentOf = path=>{
  * @param {NamedSecurityHost} host
  */
 export function createNamedSecurityFunctions(host){
+    const codec = createDescriptorCodec(host.readMemory);
+    /** The run's file-security store; a private one when the run shares none. */
+    const store = host.security ?? new Map();
+
+    /** @param {string} path */
+    const pathKey = path=>keyForPath(host.resolvePath?.(path) ?? path);
+
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -174,12 +276,13 @@ export function createNamedSecurityFunctions(host){
 
     /**
      * The kind of object a name names, or the error that says there is none.
-     * The kinds of object this machine keeps nothing about by name -- a
-     * service, a printer, a share, a kernel object -- are reported and
-     * answered as not implemented, which a caller can tell from "not there".
+     * A service is the service manager's, by its name. The kinds of object
+     * this machine keeps nothing about by name - a printer, a share, a kernel
+     * object - are reported and answered as not implemented, which a caller
+     * can tell from "not there".
      *
      * @param {string} api @param {number} pointer @param {number} type @param {boolean} wide
-     * @returns {'file' | 'key' | number}
+     * @returns {{ kind: 'file' | 'key' | 'service', name: string } | number}
      */
     const objectOf = (api, pointer, type, wide)=>{
         if ((pointer >>> 0) === 0)
@@ -187,45 +290,82 @@ export function createNamedSecurityFunctions(host){
             return ERROR_INVALID_PARAMETER;
         }
         const name = wide ? wideTextAt(host.readMemory, pointer, MAX_NAME)
-            : host.readCString(pointer >>> 0, MAX_NAME);
+            : host.readCString(wholeAddress(pointer), MAX_NAME);
         switch (type >>> 0)
         {
             case SE_FILE_OBJECT:
             {
                 const error = findFile(name);
-                return error === ERROR_SUCCESS ? 'file' : error;
+                return error === ERROR_SUCCESS ? { kind: /** @type {const} */ ('file'), name }
+                    : error;
+            }
+            case SE_SERVICE:
+            {
+                const services = host.services?.();
+                if (services)
+                {
+                    return services.describe(name, 0) === null ? ERROR_SERVICE_DOES_NOT_EXIST
+                        : { kind: /** @type {const} */ ('service'), name };
+                }
+                break;
             }
             case SE_REGISTRY_KEY:
             case SE_REGISTRY_WOW64_32KEY:
             {
                 const error = findKey(name);
-                return error === ERROR_SUCCESS ? 'key' : error;
+                return error === ERROR_SUCCESS ? { kind: /** @type {const} */ ('key'), name }
+                    : error;
             }
             default:
-                if ((type >>> 0) === 0 || (type >>> 0) > SE_REGISTRY_WOW64_32KEY)
-                {
-                    return ERROR_INVALID_PARAMETER;
-                }
-                host.divergence?.(api, `object type ${type >>> 0} has no security by name here`);
-                return ERROR_CALL_NOT_IMPLEMENTED;
+                break;
         }
+        if ((type >>> 0) === 0 || (type >>> 0) > SE_REGISTRY_WOW64_32KEY)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        host.divergence?.(api, `object type ${type >>> 0} has no security by name here`);
+        return ERROR_CALL_NOT_IMPLEMENTED;
     };
 
     /**
-     * The descriptor an object has, with the parts asked for.
+     * The descriptor an object has, with the parts asked for. A file's is
+     * what a program set on it, kept in the store, or -- having set none --
+     * the NTFS volume's: owned by the administrators, its group the system,
+     * its DACL full control to the administrators, the system and the owner.
+     * A directory's DACL is inheritable, a file's inherited, and a mask set
+     * with the generic rights reads back as a file's specific ones.
      *
-     * @param {'file' | 'key'} kind @param {number} wanted
+     * A service's is the service manager's, as QueryServiceObjectSecurity
+     * answers it.
+     *
+     * @param {'file' | 'key' | 'service'} kind @param {string} name @param {number} wanted
+     * @returns {{ bytes: Uint8Array, offsets: { owner: number, group: number, dacl: number,
+     *             sacl: number } }}
      */
-    const descriptorOf = (kind, wanted)=>{
+    const descriptorOf = (kind, name, wanted)=>{
         /** @param {number} bit */
         const asked = bit=>(wanted & bit) !== 0;
+        if (kind === 'service')
+        {
+            const bytes = /** @type {Uint8Array} */ (host.services?.()?.describe(name, wanted));
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+            return { bytes, offsets: { owner: view.getUint32(4, true),
+                group: view.getUint32(8, true), sacl: view.getUint32(12, true),
+                dacl: view.getUint32(16, true) } };
+        }
         if (kind === 'file')
         {
-            const world = sidBytes(WELL_KNOWN_SIDS.everyone);
+            const held = store.get(pathKey(name));
+            const directory = host.files?.stat(name)?.isDirectory === true;
+            const dacl = held && 'dacl' in held
+                ? (held.dacl ? fileMappedAcl(held.dacl) : null)
+                : defaultFileDacl(directory);
             return selfRelativeDescriptor({
-                ...asked(OWNER_SECURITY_INFORMATION) ? { owner: world } : {},
-                ...asked(GROUP_SECURITY_INFORMATION) ? { group: world } : {},
-                ...asked(DACL_SECURITY_INFORMATION) ? { dacl: null } : {},
+                ...asked(OWNER_SECURITY_INFORMATION)
+                    ? { owner: held?.owner ?? sidBytes(WELL_KNOWN_SIDS.administrators) } : {},
+                ...asked(GROUP_SECURITY_INFORMATION)
+                    ? { group: held?.group ?? sidBytes(WELL_KNOWN_SIDS.system) } : {},
+                ...asked(DACL_SECURITY_INFORMATION) ? { dacl } : {},
                 ...asked(SACL_SECURITY_INFORMATION) ? { sacl: null } : {},
             });
         }
@@ -235,6 +375,90 @@ export function createNamedSecurityFunctions(host){
             ...asked(GROUP_SECURITY_INFORMATION) ? { group: sidBytes(WELL_KNOWN_SIDS.system) } : {},
             ...asked(DACL_SECURITY_INFORMATION) ? { dacl: KEY_DACL } : {},
         });
+    };
+
+    /**
+     * Keeps on a file's path the parts a program set, for the run: the SIDs
+     * and the DACL it gave, each only where its bit is in `given`. A key's are
+     * taken and kept nowhere, as the one account enforces nothing.
+     *
+     * @param {string} name @param {number} given @param {number} owner @param {number} group
+     * @param {number} dacl
+     */
+    const keepFileSecurity = (name, given, owner, group, dacl)=>{
+        store.set(pathKey(name), { ...store.get(pathKey(name)),
+            ...partsGiven(given, owner, group, dacl) });
+    };
+
+    /**
+     * The parts a caller gave, each only where its bit is in `given`: the
+     * SIDs and the DACL as bytes, the DACL null for the null DACL.
+     *
+     * @param {number} given @param {number} owner @param {number} group @param {number} dacl
+     */
+    const partsGiven = (given, owner, group, dacl)=>{
+        /** @type {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null }} */
+        const held = {};
+        if ((given & OWNER_SECURITY_INFORMATION) !== 0)
+        {
+            const sid = codec.sidAt(owner);
+            if (sid)
+            {
+                held.owner = sid;
+            }
+        }
+        if ((given & GROUP_SECURITY_INFORMATION) !== 0)
+        {
+            const sid = codec.sidAt(group);
+            if (sid)
+            {
+                held.group = sid;
+            }
+        }
+        if ((given & DACL_SECURITY_INFORMATION) !== 0)
+        {
+            if ((dacl >>> 0) === 0)
+            {
+                held.dacl = null;
+            }
+            else
+            {
+                const head = host.readMemory(wholeAddress(dacl), 4);
+                const size = head[2] | head[3] << 8;
+                held.dacl = host.readMemory(wholeAddress(dacl), size).slice();
+            }
+        }
+        return held;
+    };
+
+    /**
+     * Keeps the parts a descriptor holds -- owner, group and a present DACL,
+     * each only where its bit is in `given` -- on a file's path.
+     *
+     * @param {string} name @param {number} given
+     * @param {import('./descriptors.js').DescriptorParts} parts
+     */
+    const recordDescriptor = (name, given, parts)=>{
+        const held = { ...store.get(pathKey(name)) };
+        if ((given & OWNER_SECURITY_INFORMATION) !== 0 && parts.owner)
+        {
+            held.owner = parts.owner;
+        }
+        if ((given & GROUP_SECURITY_INFORMATION) !== 0 && parts.group)
+        {
+            held.group = parts.group;
+        }
+        if ((given & DACL_SECURITY_INFORMATION) !== 0 && parts.dacl !== undefined)
+        {
+            held.dacl = parts.dacl;
+        }
+        store.set(pathKey(name), held);
+    };
+
+    /** @param {number} code @returns {0} fails a BOOL call with a last error */
+    const setError = code=>{
+        host.setLastError?.(code);
+        return 0;
     };
 
     /**
@@ -262,16 +486,16 @@ export function createNamedSecurityFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const kind = objectOf('GetNamedSecurityInfo', name, type, wide);
-            if (typeof kind === 'number')
+            const object = objectOf('GetNamedSecurityInfo', name, type, wide);
+            if (typeof object === 'number')
             {
-                return kind;
+                return object;
             }
             if (!host.allocate)
             {
                 return ERROR_NOT_ENOUGH_MEMORY;
             }
-            const { bytes, offsets } = descriptorOf(kind, wanted >>> 0);
+            const { bytes, offsets } = descriptorOf(object.kind, object.name, wanted >>> 0);
             const block = host.allocate(bytes.length);
             host.writeMemory(block, bytes);
             for (const [out, offset] of [[owner, offsets.owner], [group, offsets.group],
@@ -303,7 +527,7 @@ export function createNamedSecurityFunctions(host){
         {
             return false;
         }
-        const head = host.readMemory(sid >>> 0, 2);
+        const head = host.readMemory(wholeAddress(sid), 2);
         return head[0] !== 1 || head[1] > 15;
     };
     /** @param {number} acl */
@@ -312,7 +536,7 @@ export function createNamedSecurityFunctions(host){
         {
             return false;
         }
-        const head = host.readMemory(acl >>> 0, 4);
+        const head = host.readMemory(wholeAddress(acl), 4);
         return !ACL_REVISIONS.has(head[0]) || (head[2] | head[3] << 8) < ACL_HEADER;
     };
 
@@ -331,10 +555,10 @@ export function createNamedSecurityFunctions(host){
         argBytes: 28,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [name, type, given, owner, group, dacl, sacl])=>{
-            const kind = objectOf('SetNamedSecurityInfo', name, type, wide);
-            if (typeof kind === 'number')
+            const object = objectOf('SetNamedSecurityInfo', name, type, wide);
+            if (typeof object === 'number')
             {
-                return kind;
+                return object;
             }
             if (((given & OWNER_SECURITY_INFORMATION) !== 0 && badSid(owner))
                 || ((given & GROUP_SECURITY_INFORMATION) !== 0 && badSid(group)))
@@ -346,14 +570,178 @@ export function createNamedSecurityFunctions(host){
             {
                 return ERROR_INVALID_ACL;
             }
+            if (object.kind === 'file')
+            {
+                keepFileSecurity(object.name, given >>> 0, owner, group, dacl);
+            }
+            else if (object.kind === 'service')
+            {
+                host.services?.()?.keep(object.name, partsGiven(given >>> 0, owner, group, dacl));
+            }
             return ERROR_SUCCESS;
         },
     });
 
+    /**
+     * BOOL GetFileSecurity(LPCTSTR lpFileName, SECURITY_INFORMATION RequestedInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor, DWORD nLength, LPDWORD lpnLengthNeeded)
+     *
+     * The file's descriptor, self-relative, into the caller's own buffer by
+     * the size convention; the parts are the same GetNamedSecurityInfo gives.
+     *
+     * @param {boolean} wide
+     */
+    const getFileSecurity = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [name, wanted, descriptor, length, needed])=>{
+            const object = objectOf('GetFileSecurity', name, SE_FILE_OBJECT, wide);
+            if (typeof object === 'number')
+            {
+                return setError(object);
+            }
+            const { bytes } = descriptorOf('file', object.name, wanted >>> 0);
+            if ((needed >>> 0) !== 0)
+            {
+                writeDword(needed, bytes.length);
+            }
+            if ((length >>> 0) < bytes.length || (descriptor >>> 0) === 0)
+            {
+                return setError(ERROR_INSUFFICIENT_BUFFER);
+            }
+            host.writeMemory(wholeAddress(descriptor), bytes);
+            return 1;
+        },
+    });
+
+    /**
+     * BOOL SetFileSecurity(LPCTSTR lpFileName, SECURITY_INFORMATION SecurityInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor)
+     *
+     * The parts the information names, taken from the descriptor, kept on the
+     * file's path for the run.
+     *
+     * @param {boolean} wide
+     */
+    const setFileSecurity = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [name, given, descriptor])=>{
+            const object = objectOf('SetFileSecurity', name, SE_FILE_OBJECT, wide);
+            if (typeof object === 'number')
+            {
+                return setError(object);
+            }
+            const parts = codec.partsOf(descriptor);
+            if (parts === null)
+            {
+                return setError(ERROR_INVALID_SECURITY_DESCR);
+            }
+            recordDescriptor(object.name, given >>> 0, parts);
+            return 1;
+        },
+    });
+
+    /**
+     * LONG RegGetKeySecurity(HKEY hKey, SECURITY_INFORMATION SecurityInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor, LPDWORD lpcbSecurityDescriptor)
+     *
+     * An open key's descriptor, self-relative, in the shape Windows gives its
+     * own keys (as GetNamedSecurityInfo answers one by name); a buffer too
+     * small is told the size, ERROR_INSUFFICIENT_BUFFER. The error is the
+     * return value.
+     */
+    const regGetKeySecurity = {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [key, wanted, descriptor, size])=>{
+            if ((key >>> 0) === 0)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if ((size >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const { bytes } = descriptorOf('key', '', wanted >>> 0);
+            const room = new DataView(host.readMemory(wholeAddress(size), 4).slice().buffer)
+                .getUint32(0, true);
+            writeDword(size, bytes.length);
+            if (room < bytes.length || (descriptor >>> 0) === 0)
+            {
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            host.writeMemory(wholeAddress(descriptor), bytes);
+            return ERROR_SUCCESS;
+        },
+    };
+
+    /**
+     * LONG RegSetKeySecurity(HKEY hKey, SECURITY_INFORMATION SecurityInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor)
+     *
+     * A descriptor that reads as one is accepted and kept nowhere, as a key's
+     * set by name is: the one account is an administrator, and nothing here
+     * enforces a key's security.
+     */
+    const regSetKeySecurity = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [key, , descriptor])=>{
+            if ((key >>> 0) === 0)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return codec.partsOf(descriptor) === null ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+        },
+    };
+
+    /**
+     * BOOL DecryptFile(LPCTSTR lpFileName, DWORD dwReserved)
+     *
+     * No file on this volume is encrypted (there is no EFS), so a file that is
+     * there is already in the clear and the call succeeds without changing
+     * it, as Windows answers for a file that was never encrypted; one that is
+     * not there fails as a lookup does. A setup engine calls it on each file
+     * it copies into its cache.
+     *
+     * @param {boolean} wide
+     */
+    const decryptFile = wide=>({
+        argBytes: 8,
+        handler: (/** @type {number[]} */ [name])=>{
+            const object = objectOf('DecryptFile', name, SE_FILE_OBJECT, wide);
+            return typeof object === 'number' ? setError(object) : 1;
+        },
+    });
+
     return {
+        DecryptFileA: decryptFile(false),
+        DecryptFileW: decryptFile(true),
         GetNamedSecurityInfoA: getNamedSecurityInfo(false),
         GetNamedSecurityInfoW: getNamedSecurityInfo(true),
         SetNamedSecurityInfoA: setNamedSecurityInfo(false),
         SetNamedSecurityInfoW: setNamedSecurityInfo(true),
+        GetFileSecurityA: getFileSecurity(false),
+        GetFileSecurityW: getFileSecurity(true),
+        SetFileSecurityA: setFileSecurity(false),
+        SetFileSecurityW: setFileSecurity(true),
+        RegGetKeySecurity: regGetKeySecurity,
+        RegSetKeySecurity: regSetKeySecurity,
+        /**
+         * Keeps the descriptor CreateFile or CreateDirectory was given, as
+         * SetFileSecurity keeps one: the owner, group and DACL it holds, under
+         * the new object's path. Nothing when no descriptor was passed.
+         *
+         * @param {string} path @param {number} sd  The SECURITY_DESCRIPTOR, or 0.
+         */
+        [RECORD_SECURITY]: (path, sd)=>{
+            const parts = (sd >>> 0) === 0 ? null : codec.partsOf(sd);
+            if (parts !== null)
+            {
+                recordDescriptor(path, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION, parts);
+            }
+        },
     };
 }

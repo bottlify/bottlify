@@ -123,6 +123,12 @@ test('C0, C2 and C3 of every compare are exact; IE and C1 are not kept', ()=>{
             assert.equal(r.fast.status() & 0x3f, 0, `${name}: no IE`);
         }
     }
+    // fld dword [DATA]; fstp st0; fld1; fcom st1; fnstsw ax -- st1 is empty, its
+    // register still holding 2.0, which compares greater than 1: unordered all the same
+    const empty = both([0xd9, 0x05, ...at(DATA), 0xdd, 0xd8, 0xd9, 0xe8, 0xd8, 0xd1, 0xdf, 0xe0],
+        { data: [0, 0, 0x00, 0x40] });
+    assert.equal(empty.fast.m.reg('eax') & 0x4500, 0x4500, 'an empty register: unordered');
+    assert.equal(empty.fast.m.reg('eax') & 0x4500, empty.precise.m.reg('eax') & 0x4500);
     // fld1; fld dword [DATA]; fcomip st1: ZF PF CF from an unordered compare, no IE
     const r = both([0xd9, 0xe8, 0xd9, 0x05, ...at(DATA), 0xdf, 0xf1], { data: nan });
     assert.equal(r.fast.m.eflags() & (CF | PF | ZF), CF | PF | ZF);
@@ -170,6 +176,50 @@ test('an integer store rounds by the control word inline and stores the indefini
         0xdf, 0x3d, ...at(DATA + 16)], { data: f64bytes(-1e30) });
     assert.equal(wide.fast.u32(DATA + 8) & 0xffff, 0x8000);
     assert.equal(wide.fast.u64(DATA + 16), 0x8000000000000000n);
+});
+
+test('a dword or word integer store of every edge of its range, under every rounding control,'
+    + ' stores what the precise module stores', ()=>{
+    const values = [0, -0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 3.5, 1e-300, -1e-300,
+        0.49999999999999994, Infinity, -Infinity, NaN, -NaN, 1e300, -1e300, 2 ** 63, -(2 ** 63),
+        2 ** 64];
+    for (const limit of [2 ** 15, 2 ** 31])
+    {
+        for (const d of [-1.5, -1, -0.5, -0.25, 0, 0.25, 0.5, 1, 1.5])
+        {
+            values.push(limit + d, -limit + d);
+        }
+    }
+    for (const big of [2 ** 51, 2 ** 52, 2 ** 53])
+    {
+        for (const d of [-1, -0.5, 0, 0.5, 1])
+        {
+            values.push(big + d, -big + d);
+        }
+    }
+    let seed = 7;
+    for (let i = 0; i < 40; i++)
+    {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        values.push((seed / 0x7fffffff - 0.5) * 2 ** (i % 40));
+    }
+    const data = values.flatMap(f64bytes);
+    for (const [opcode, reg, size] of [[0xdb, 0x1d, 4], [0xdf, 0x1d, 2], [0xdb, 0x15, 4]])
+    {
+        // fld qword [DATA + 8i]; fistp (or fist, then fstp st0) [OUT + 4i]
+        const bytes = values.flatMap((_, i)=>[0xdd, 0x05, ...at(DATA + 8 * i),
+            opcode, reg, ...at(0x4000 + 4 * i), ...reg === 0x15 ? [0xdd, 0xd8] : []]);
+        for (const control of [0x37f, 0x77f, 0xb7f, 0xf7f])
+        {
+            const r = both(bytes, { control, data });
+            values.forEach((value, i)=>{
+                const mask = size === 2 ? 0xffff : 0xffffffff;
+                const out = 0x4000 + 4 * i;
+                assert.equal(r.fast.u32(out) & mask, r.precise.u32(out) & mask,
+                    `${value} under ${control.toString(16)}, ${size} bytes`);
+            });
+        }
+    }
 });
 
 test('the status-word reads that may see what is not kept are counted at translation', ()=>{

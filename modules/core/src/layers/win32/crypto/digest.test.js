@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createMd5, createSha1, createSha256 } from './digest.js';
+import { createMd4, createMd5, createSha1, createSha256, resumeDigest } from './digest.js';
 
 const hex = (/** @type {Uint8Array} */ bytes)=>Buffer.from(bytes).toString('hex');
 const ascii = (/** @type {string} */ text)=>new Uint8Array(Buffer.from(text, 'latin1'));
@@ -61,4 +61,27 @@ test('a clone carries on from where it was taken, leaving the original as it was
         assert.equal(hex(copy.digest()), createHash(name).update('hello, world').digest('hex'));
         assert.equal(hex(digest.digest()), createHash(name).update('hello, ').digest('hex'));
     }
+});
+
+test('MD4 answers RFC 1320\'s test suite', ()=>{
+    const md4 = (/** @type {string} */ text)=>{
+        const digest = createMd4();
+        digest.update(new TextEncoder().encode(text));
+        return hex(digest.digest());
+    };
+    assert.equal(md4(''), '31d6cfe0d16ae931b73c59d7e0c089c0');
+    assert.equal(md4('a'), 'bde52cb31de33e46245e05fbdbd6fb24');
+    assert.equal(md4('abc'), 'a448017aaf21d8525fc10ae87aa6729d');
+    assert.equal(md4('message digest'), 'd9130a8164549fe818874806e1c7014b');
+    assert.equal(md4('1234567890'.repeat(8)), 'e33b4ddc9c38f2199c3e7b164fcc0536');
+});
+
+test('a digest resumed from its snapshot ends where the original would', ()=>{
+    const whole = createMd5();
+    whole.update(new TextEncoder().encode('half and the other half'));
+    const first = createMd5();
+    first.update(new TextEncoder().encode('half and t'));
+    const resumed = resumeDigest('md5', first.snapshot());
+    resumed.update(new TextEncoder().encode('he other half'));
+    assert.deepEqual(resumed.digest(), whole.digest());
 });

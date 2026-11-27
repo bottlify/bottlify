@@ -39,6 +39,7 @@ import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 export { bezierPoints } from './paths.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { boundsOf, intersectArea, subtractFromArea } from './rects.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import {
     ALTERNATE, RGN_AND, RGN_COPY, RGN_DIFF, WINDING, areaBox, areaContains, areaOf, areasEqual,
     combineAreas, offsetArea, orderedRect, polygonArea, roundedArea,
@@ -46,13 +47,17 @@ import {
 import {
     PT_BEZIERTO, PT_CLOSEFIGURE, PT_LINETO, PT_MOVETO, bezierPoints, createPath,
     ellipseCurves, figuresOf, flattened, pathBezierTo, pathClose, pathFigure, pathLineTo,
-    pathMoved, widened,
+    pathMoved, roundRectCurves, widened,
 } from './paths.js';
 import {
     BITMAP,
+    BITMAP64,
     BITMAPCOREHEADER,
     BITMAPINFOHEADER,
     DIBSECTION,
+    DIBSECTION64,
+    EXTLOGPEN64,
+    LOGBRUSH64,
     PALETTEENTRY_SIZE,
     colorEntryBytes,
     ddbStride,
@@ -521,31 +526,6 @@ const hasAlphaChannel = shape=>shape.bitCount === 32 && (shape.compression !== B
         (shape.bitfields?.[index] >>> 0) === mask));
 
 /**
- * Whether a PolyDraw type array is one Windows draws: every entry a move, a
- * line (closing or not) or the first of three curve points whose middle one
- * does not close. Nothing is drawn from an array that is not.
- *
- * @param {Uint8Array} types
- */
-export function isPolyDrawable(types){
-    for (let index = 0; index < types.length; index++)
-    {
-        const type = types[index];
-        if (type === PT_MOVETO || (type & ~PT_CLOSEFIGURE) === PT_LINETO)
-        {
-            continue;
-        }
-        if (type !== PT_BEZIERTO || index + 2 >= types.length || types[index + 1] !== PT_BEZIERTO
-            || (types[index + 2] & ~PT_CLOSEFIGURE) !== PT_BEZIERTO)
-        {
-            return false;
-        }
-        index += 2;
-    }
-    return true;
-}
-
-/**
  * @param {Object} options
  * @param {any} options.host
  * @param {any} options.objects   The GDI object table.
@@ -661,7 +641,7 @@ export function createDrawingFunctions(
         {
             return null;
         }
-        const sizes = readU32s(counts >>> 0, many);
+        const sizes = readU32s(wholeAddress(counts), many);
         if (sizes.some(size=>size < least || size > 0x100000))
         {
             return null;
@@ -729,7 +709,7 @@ export function createDrawingFunctions(
         {
             host.windowContextCurrent?.(handle >>> 0);
         }
-        // The emulator grows its memory in place, which detaches every view of
+        // Guest memory can grow in place, which detaches every view of
         // it taken before the growth; a view on a detached buffer is empty. A
         // bound surface is one such view, held for the bitmap's life, so after
         // a growth it would read zeroes and swallow every write. Its bytes
@@ -856,8 +836,15 @@ export function createDrawingFunctions(
             // test_rectangle).
             rectangle: (hdc, left, top, right, bottom)=>{
                 const box = deviceBox(left, top, right, bottom);
-                if (!inclusive && box.right > box.left && box.bottom > box.top)
+                if (!inclusive)
                 {
+                    // GM_COMPATIBLE leaves out a box with no width or no
+                    // height in device units, as nothing of it is drawn
+                    // (Wine's path.c test_rectangle); GM_ADVANCED keeps it.
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
                     box.right--;
                     box.bottom--;
                 }
@@ -867,12 +854,37 @@ export function createDrawingFunctions(
                     : corners, { closed: true });
                 return true;
             },
+            roundRect: (hdc, left, top, right, bottom, width, height)=>{
+                const box = deviceBox(left, top, right, bottom);
+                if (!inclusive)
+                {
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
+                    box.right--;
+                    box.bottom--;
+                }
+                // The corner ellipse in device units, no larger than the box.
+                const a = device(at(left, top));
+                const b = device(at((left | 0) + (width | 0), (top | 0) + (height | 0)));
+                const { points, types } = roundRectCurves(box,
+                    Math.min(Math.abs(b.x - a.x), box.right - box.left),
+                    Math.min(Math.abs(b.y - a.y), box.bottom - box.top), clockwise);
+                pathFigure(path, points, { closed: true, types });
+                return true;
+            },
             ellipse: (hdc, left, top, right, bottom)=>{
                 const box = deviceBox(left, top, right, bottom);
                 if (!inclusive)
                 {
-                    box.right = Math.max(box.left, box.right - 1);
-                    box.bottom = Math.max(box.top, box.bottom - 1);
+                    // As a rectangle: no figure from a box with no width or height.
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
+                    box.right--;
+                    box.bottom--;
                 }
                 pathFigure(path, ellipseCurves(box, clockwise), { closed: true, curves: true });
                 return true;
@@ -1395,6 +1407,112 @@ export function createDrawingFunctions(
     };
 
     /**
+     * An arc as a path keeps it: cubic curves along the ellipse, one for each
+     * quarter of it the arc crosses - split where the ellipse is at its top,
+     * bottom, left or right - each made of the two ends and the control
+     * points a quarter's curve takes (4/3 tan of a quarter of its angle along
+     * the tangent). The angles are the ellipse's own parameter, on the screen
+     * with y down, so a growing angle turns clockwise.
+     *
+     * @param {number} cx @param {number} cy @param {number} rx @param {number} ry
+     * @param {number} from @param {number} to
+     * @returns {{ start: { x: number, y: number },
+     *     curves: { x: number, y: number }[][] }}
+     */
+    const arcCurves = (cx, cy, rx, ry, from, to)=>{
+        const QUARTER = Math.PI / 2;
+        /** @param {number} t */
+        const point = t=>({ x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) });
+        /** @param {number} t */
+        const slope = t=>({ x: -rx * Math.sin(t), y: ry * Math.cos(t) });
+        /** @param {{ x: number, y: number }} p */
+        const rounded = p=>({ x: Math.round(p.x), y: Math.round(p.y) });
+        const way = to >= from ? 1 : -1;
+        const cuts = [from];
+        let quarter = way > 0 ? Math.floor(from / QUARTER) + 1 : Math.ceil(from / QUARTER) - 1;
+        // An arc that ends on a quarter's edge is cut there too, and ends
+        // in a curve of no length, as Windows' path holds it (Wine's path
+        // test_anglearc).
+        while (way > 0 ? quarter * QUARTER <= to + 1e-9 : quarter * QUARTER >= to - 1e-9)
+        {
+            cuts.push(quarter * QUARTER);
+            quarter += way;
+        }
+        cuts.push(to);
+        const curves = [];
+        for (let at = 1; at < cuts.length; at++)
+        {
+            const [a, b] = [cuts[at - 1], cuts[at]];
+            const k = 4 / 3 * Math.tan((b - a) / 4);
+            const [start, end] = [point(a), point(b)];
+            const [leaving, arriving] = [slope(a), slope(b)];
+            curves.push([
+                rounded({ x: start.x + k * leaving.x, y: start.y + k * leaving.y }),
+                rounded({ x: end.x - k * arriving.x, y: end.y - k * arriving.y }),
+                rounded(end),
+            ]);
+        }
+        return { start: rounded(point(from)), curves };
+    };
+
+    /**
+     * Arc's and ArcTo's arc as a path keeps it, in the DC's direction: from
+     * where the start radial meets the ellipse to where the end radial does,
+     * the same radial twice the whole ellipse.
+     *
+     * @param {any} dc @param {number[]} box  left, top, right, bottom, then the radials.
+     */
+    const directedArcCurves = (dc, box)=>{
+        const { left, top, right, bottom } = ellipseBox(box);
+        const [xStart, yStart, xEnd, yEnd] = box.slice(4).map(value=>value | 0);
+        const cx = (left + right) / 2;
+        const cy = (top + bottom) / 2;
+        const rx = Math.max((right - left) / 2, 0.5);
+        const ry = Math.max((bottom - top) / 2, 0.5);
+        /** @param {number} x @param {number} y */
+        const angle = (x, y)=>Math.atan2((y - cy) / ry, (x - cx) / rx);
+        const from = angle(xStart, yStart);
+        let to = angle(xEnd, yEnd);
+        if (dc?.arcDirection === AD_CLOCKWISE)
+        {
+            while (to <= from)
+            {
+                to += 2 * Math.PI;
+            }
+        }
+        else
+        {
+            while (to >= from)
+            {
+                to -= 2 * Math.PI;
+            }
+        }
+        return arcCurves(cx, cy, rx, ry, from, to);
+    };
+
+    /**
+     * An arc into a path: from the current position by a line, or a new
+     * figure begun at its start, then its curves.
+     *
+     * @param {any} interfaces @param {number} handle
+     * @param {ReturnType<typeof arcCurves>} arc @param {boolean} joined
+     */
+    const arcIntoPath = (interfaces, handle, arc, joined)=>{
+        if (joined)
+        {
+            interfaces.lineTo(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        else
+        {
+            interfaces.moveToEx(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        for (const [first, second, end] of arc.curves)
+        {
+            interfaces.bezierTo(handle >>> 0, first, second, end);
+        }
+    };
+
+    /**
      * Chord and Pie: the arc closed into a figure -- by its chord, or through
      * the ellipse's centre -- filled with the brush and outlined with the
      * pen. A rectangle with no inside has no ellipse, and nothing is drawn.
@@ -1413,8 +1531,24 @@ export function createDrawingFunctions(
         {
             return 1;
         }
-        const points = directedArc(dcOf(handle), box);
+        const dc = dcOf(handle);
         const centre = { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2) };
+        if (interfaces.bezierTo && dc.path?.open)
+        {
+            // A path keeps the arc as curves, a pie's line to the centre after
+            // them, the figure closed and the current position where it was
+            // (Wine's path.c all_funcs_path).
+            const back = { ...dc.position };
+            arcIntoPath(interfaces, handle, directedArcCurves(dc, box), false);
+            if (pie)
+            {
+                interfaces.lineTo(handle >>> 0, centre.x, centre.y);
+            }
+            pathClose(dc.path);
+            interfaces.moveToEx(handle >>> 0, back.x, back.y);
+            return 1;
+        }
+        const points = directedArc(dc, box);
         return interfaces.polygon(handle >>> 0, pie ? [centre, ...points] : points) ? 1 : 0;
     };
 
@@ -1810,13 +1944,14 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, vertices, count, mesh, entries, mode])=>{
                 const dc = dcOf(handle);
-                if (!dc || (vertices >>> 0) === 0 || (count >>> 0) === 0 || (mesh >>> 0) === 0
+                if (!dc || wholeAddress(vertices) === 0 || (count >>> 0) === 0
+                    || wholeAddress(mesh) === 0
                     || (entries >>> 0) === 0 || (mode >>> 0) > GRADIENT_FILL_TRIANGLE)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const corners = (mode >>> 0) === GRADIENT_FILL_TRIANGLE ? 3 : 2;
-                const indices = host.readMemory(mesh >>> 0, (entries >>> 0) * corners * 4);
+                const indices = host.readMemory(wholeAddress(mesh), (entries >>> 0) * corners * 4);
                 const view = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
                 const listed = Array.from({ length: entries >>> 0 }, (_, entry)=>
                     Array.from({ length: corners }, (__, corner)=>
@@ -1838,7 +1973,8 @@ export function createDrawingFunctions(
                         return known;
                     }
                     placed.set(index, used.length);
-                    used.push(readVertex(dc, ((vertices >>> 0) + index * TRIVERTEX_SIZE) >>> 0));
+                    used.push(readVertex(dc,
+                        (wholeAddress(vertices) + index * TRIVERTEX_SIZE) >>> 0));
                     return used.length - 1;
                 }));
                 if (corners === 3 && shapes.some(([a, b, c])=>
@@ -1871,7 +2007,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                const image = readDib(wholeAddress(info), bits >>> 0, usage >>> 0, dcOf(dest),
                     undefined, true);
                 if (!image)
                 {
@@ -1911,7 +2047,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const dc = dcOf(dest);
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dc, lines >>> 0);
+                const image = readDib(wholeAddress(info), bits >>> 0, usage >>> 0, dc, lines >>> 0);
                 if (!image)
                 {
                     return 0;
@@ -1942,12 +2078,13 @@ export function createDrawingFunctions(
             handler: ([handle, bitmap, start, lines, bits, info, usage])=>{
                 const record = objects.get(bitmap);
                 const dc = dcOf(handle);
-                if (!dc || !record || record.type !== 'bitmap' || (bits >>> 0) === 0
-                    || (info >>> 0) === 0)
+                if (!dc || !record || record.type !== 'bitmap' || wholeAddress(bits) === 0
+                    || wholeAddress(info) === 0)
                 {
                     return 0;
                 }
-                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, bits >>> 0, info >>> 0,
+                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, wholeAddress(bits),
+                    wholeAddress(info),
                     usage >>> 0, dc);
             },
         },
@@ -2085,6 +2222,24 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                // A path keeps the arc as curves, as Windows' does.
+                if (interfaces.bezierTo)
+                {
+                    // A figure of its own: the current position is not the
+                    // arc's, and the next line starts another figure from it
+                    // (Wine's path.c all_funcs_path).
+                    const back = { ...dcOf(handle).position };
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), false);
+                    interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                    return 1;
+                }
+                const { left, top, right, bottom } = ellipseBox(box);
+                if (right < left || bottom < top)
+                {
+                    // A box with no width or height has no ellipse to draw a
+                    // part of (Wine's bitmap.c test_arcs, "0-pixel arc").
+                    return 1;
+                }
                 const points = directedArc(dcOf(handle), box);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
@@ -2139,11 +2294,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
-                if (!interfaces || (count | 0) < 2 || (points >>> 0) === 0)
+                if (!interfaces || (count | 0) < 2 || wholeAddress(points) === 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, count | 0);
+                const through = pointsAt(wholeAddress(points), count | 0);
                 const back = interfaces.moveToEx(handle >>> 0, through[0].x, through[0].y);
                 for (const point of through.slice(1))
                 {
@@ -2167,11 +2322,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0)
+                if (!interfaces || wholeAddress(points) === 0)
                 {
                     return 0;
                 }
-                lineThrough(interfaces, handle, pointsAt(points >>> 0, count >>> 0));
+                lineThrough(interfaces, handle, pointsAt(wholeAddress(points), count >>> 0));
                 return 1;
             },
         },
@@ -2193,6 +2348,11 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                if (interfaces.bezierTo)
+                {
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), true);
+                    return 1;
+                }
                 lineThrough(interfaces, handle, directedArc(dcOf(handle), box));
                 return 1;
             },
@@ -2212,12 +2372,12 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const dc = dcOf(handle);
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0 || (count >>> 0) === 0
+                if (!interfaces || wholeAddress(points) === 0 || (count >>> 0) === 0
                     || (count >>> 0) % 3 !== 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, count >>> 0);
+                const through = pointsAt(wholeAddress(points), count >>> 0);
                 let from = { ...dc.position };
                 for (let at = 0; at < through.length; at += 3)
                 {
@@ -2233,10 +2393,17 @@ export function createDrawingFunctions(
          * BOOL PolyDraw(HDC hdc, const POINT *apt, const BYTE *aj, int cpt)
          *
          * Moves, lines and curves from the current position, each point's
-         * type saying which; a type with PT_CLOSEFIGURE also draws a line back
-         * to where the figure began -- the last move, or the position the
-         * call started from. The position ends where the drawing did. A type
-         * array Windows would not draw is refused before anything is drawn.
+         * type saying which, taken one after another. A type with
+         * PT_CLOSEFIGURE closes the figure at that point: in a path its last
+         * point carries the close, drawn it is a line back to where the
+         * figure began - the last move, or the position the call started
+         * from - and either way the position stays at the point. An entry
+         * Windows does not draw (a close alone, a move that closes, a curve
+         * of fewer than three points) ends the call with FALSE where it
+         * stands: what came before it is drawn, or kept in the path, and the
+         * position goes back to where the call began, the path's next
+         * figure starting from there as if nothing had moved it (Wine's
+         * path.c test_polydraw).
          */
         PolyDraw: {
             argBytes: 16,
@@ -2246,42 +2413,64 @@ export function createDrawingFunctions(
                 const interfaces = bound(handle);
                 const total = count | 0;
                 if (!interfaces || total < 0 || (total > 0
-                    && ((points >>> 0) === 0 || (kinds >>> 0) === 0)))
+                    && (wholeAddress(points) === 0 || wholeAddress(kinds) === 0)))
                 {
                     return 0;
                 }
-                const types = total === 0 ? new Uint8Array(0) : host.readMemory(kinds >>> 0, total);
-                if (!isPolyDrawable(types))
-                {
-                    return 0;
-                }
-                const through = pointsAt(points >>> 0, total);
-                let current = { ...dc.position };
-                let figure = current;
+                const types = total === 0 ? new Uint8Array(0)
+                    : host.readMemory(wholeAddress(kinds), total);
+                const through = pointsAt(wholeAddress(points), total);
+                const began = { ...dc.position };
+                const path = dc.path?.open ? dc.path : null;
+                const restart = path?.pending ? path.restart : null;
+                let current = began;
+                let figure = began;
                 for (let at = 0; at < total; at++)
                 {
                     const point = through[at];
-                    if (types[at] === PT_MOVETO)
+                    const type = types[at];
+                    if (type === PT_MOVETO)
                     {
                         interfaces.moveToEx(handle >>> 0, point.x, point.y);
                         current = figure = point;
+                        continue;
                     }
-                    else if (types[at] === PT_BEZIERTO)
+                    if ((type & ~PT_CLOSEFIGURE) === PT_LINETO)
+                    {
+                        interfaces.lineTo(handle >>> 0, point.x, point.y);
+                    }
+                    else if (type === PT_BEZIERTO && at + 2 < total
+                        && types[at + 1] === PT_BEZIERTO
+                        && (types[at + 2] & ~PT_CLOSEFIGURE) === PT_BEZIERTO)
                     {
                         curveTo(interfaces, handle, current, point, through[at + 1],
                             through[at + 2]);
                         at += 2;
-                        current = through[at];
                     }
                     else
                     {
-                        interfaces.lineTo(handle >>> 0, point.x, point.y);
-                        current = point;
+                        // Back to where the call began, and a path's next
+                        // figure from there - or from where a closed figure
+                        // began, if one was what the call started after.
+                        interfaces.moveToEx(handle >>> 0, began.x, began.y);
+                        if (path && restart)
+                        {
+                            path.restart = restart;
+                        }
+                        return 0;
                     }
+                    current = through[at];
                     if ((types[at] & PT_CLOSEFIGURE) !== 0)
                     {
-                        interfaces.lineTo(handle >>> 0, figure.x, figure.y);
-                        current = figure;
+                        if (path)
+                        {
+                            pathClose(path);
+                        }
+                        else
+                        {
+                            interfaces.lineTo(handle >>> 0, figure.x, figure.y);
+                            interfaces.moveToEx(handle >>> 0, current.x, current.y);
+                        }
                     }
                 }
                 return 1;
@@ -2301,11 +2490,11 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const dc = dcOf(handle);
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0 || (count | 0) < 2)
+                if (!interfaces || wholeAddress(points) === 0 || (count | 0) < 2)
                 {
                     return 0;
                 }
-                return interfaces.polygon(handle >>> 0, pointsAt(points >>> 0, count | 0),
+                return interfaces.polygon(handle >>> 0, pointsAt(wholeAddress(points), count | 0),
                     dc.polyFillMode) ? 1 : 0;
             },
         },
@@ -2374,11 +2563,12 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
                 const total = count >>> 0;
-                if (!interfaces || (points >>> 0) === 0 || total === 0 || (total - 1) % 3 !== 0)
+                if (!interfaces || wholeAddress(points) === 0 || total === 0
+                    || (total - 1) % 3 !== 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, total);
+                const through = pointsAt(wholeAddress(points), total);
                 const back = interfaces.moveToEx(handle >>> 0, through[0].x, through[0].y);
                 for (let at = 1; at + 2 < through.length; at += 3)
                 {
@@ -2418,6 +2608,13 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const r = radius | 0;
+                if (interfaces.bezierTo)
+                {
+                    // Counterclockwise on the screen is a falling angle.
+                    arcIntoPath(interfaces, handle,
+                        arcCurves(x | 0, y | 0, r, r, -from, -(from + turn)), true);
+                    return 1;
+                }
                 // A segment for about every two pixels of the way, as the
                 // other arcs are drawn, and no more than a turn's worth of
                 // them for each turn a sweep asks for.
@@ -2672,7 +2869,7 @@ export function createDrawingFunctions(
                     const logical = toLogical(dc, point);
                     return [logical.x, logical.y];
                 }));
-                host.writeMemory(kinds >>> 0, Uint8Array.from(path.types));
+                host.writeMemory(wholeAddress(kinds), Uint8Array.from(path.types));
                 return path.points.length;
             },
         },
@@ -2691,7 +2888,9 @@ export function createDrawingFunctions(
         LineDDA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([xStart, yStart, xEnd, yEnd, proc, data])=>{
+            handler: args=>{
+                const [xStart, yStart, xEnd, yEnd, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 5, true));
                 if ((xStart | 0) === (xEnd | 0) && (yStart | 0) === (yEnd | 0))
                 {
                     return 1;
@@ -2708,7 +2907,7 @@ export function createDrawingFunctions(
                 return (async()=>{
                     for (const point of points)
                     {
-                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data >>> 0], thread);
+                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data], thread);
                     }
                     return 1;
                 })();
@@ -2768,6 +2967,12 @@ export function createDrawingFunctions(
                     left: Math.min(left | 0, right | 0), top: Math.min(top | 0, bottom | 0),
                     right: Math.max(left | 0, right | 0), bottom: Math.max(top | 0, bottom | 0),
                 };
+                if ((width | 0) !== 0 && (height | 0) !== 0 && interfaces.roundRect)
+                {
+                    // A path keeps the corners as curves.
+                    return interfaces.roundRect(handle >>> 0, left | 0, top | 0, right | 0,
+                        bottom | 0, width | 0, height | 0) ? 1 : 0;
+                }
                 const cornerX = Math.min(Math.abs(width | 0), box.right - box.left) / 2;
                 const cornerY = Math.min(Math.abs(height | 0), box.bottom - box.top) / 2;
                 if (cornerX < 1 || cornerY < 1)
@@ -2914,7 +3119,7 @@ export function createDrawingFunctions(
                 }
                 const previous = dc.characterExtra;
                 dc.characterExtra = extra | 0;
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -2937,6 +3142,7 @@ export function createDrawingFunctions(
          */
         SetMiterLimit: {
             argBytes: 12,
+            floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([handle, limit, old])=>{
                 const dc = dcOf(handle);
@@ -2945,9 +3151,9 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((old >>> 0) !== 0)
+                if (wholeAddress(old) !== 0)
                 {
-                    writeU32s(host, old >>> 0, [bitsOf(dc.miterLimit)]);
+                    writeU32s(host, wholeAddress(old), [bitsOf(dc.miterLimit)]);
                 }
                 dc.miterLimit = value;
                 return 1;
@@ -2964,9 +3170,9 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [bitsOf(dc.miterLimit)]);
+                    writeU32s(host, wholeAddress(out), [bitsOf(dc.miterLimit)]);
                 }
                 return 1;
             },
@@ -3132,7 +3338,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(bits >>> 0, buffer);
+                host.writeMemory(wholeAddress(bits), buffer);
                 return written;
             },
         },
@@ -3250,7 +3456,7 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>
-                (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
+                wholeAddress(rect) === 0 ? 0 : newRegion(readRect(host, rect)),
         },
 
         /**
@@ -3276,11 +3482,11 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const { left, top, right, bottom } = readRect(host, rect >>> 0);
+                const { left, top, right, bottom } = readRect(host, wholeAddress(rect));
                 return functions.CreateEllipticRgn.handler([left, top, right, bottom]);
             },
         },
@@ -3311,11 +3517,12 @@ export function createDrawingFunctions(
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([points, count, mode])=>{
-                if ((points >>> 0) === 0 || (count | 0) < 2 || !isFillMode(mode))
+                if (wholeAddress(points) === 0 || (count | 0) < 2 || !isFillMode(mode))
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                return regionHolding(polygonArea([pointsAt(points >>> 0, count | 0)], mode | 0));
+                return regionHolding(polygonArea([pointsAt(wholeAddress(points), count | 0)],
+                    mode | 0));
             },
         },
 
@@ -3357,27 +3564,27 @@ export function createDrawingFunctions(
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([xform, size, data])=>{
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const header = readU32s(data >>> 0, 3);
+                const header = readU32s(wholeAddress(data), 3);
                 const count = header[2];
                 if (header[0] !== RGNDATAHEADER_SIZE || (size >>> 0) < RGNDATAHEADER_SIZE
                     || count > ((size >>> 0) - RGNDATAHEADER_SIZE) / RECT_SIZE)
                 {
                     return 0;
                 }
-                const values = readI32s((data >>> 0) + RGNDATAHEADER_SIZE, count * 4);
+                const values = readI32s(wholeAddress(data) + RGNDATAHEADER_SIZE, count * 4);
                 const rects = Array.from({ length: count }, (_, index)=>{
                     const [left, top, right, bottom] = values.slice(index * 4, index * 4 + 4);
                     return orderedRect(left, top, right, bottom);
                 }).filter(rect=>!isEmpty(rect));
-                if ((xform >>> 0) === 0)
+                if (wholeAddress(xform) === 0)
                 {
                     return regionHolding(rects);
                 }
-                const bytes = host.readMemory(xform >>> 0, 24);
+                const bytes = host.readMemory(wholeAddress(xform), 24);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
                 const [m11, m12, m21, m22, dx, dy] = Array.from({ length: 6 }, (_, index)=>
                     view.getFloat32(index * 4, true));
@@ -3513,13 +3720,13 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([region, out])=>{
                 const area = areaOfRegion(region);
-                if (!area || (out >>> 0) === 0)
+                if (!area || wholeAddress(out) === 0)
                 {
                     return REGION_ERROR;
                 }
                 // An empty region has no position: Windows keeps it as zeros.
                 const box = areaBox(area);
-                writeU32s(host, out >>> 0, [box.left, box.top, box.right, box.bottom]);
+                writeU32s(host, wholeAddress(out), [box.left, box.top, box.right, box.bottom]);
                 return areaKind(area);
             },
         },
@@ -3747,9 +3954,9 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const previous = dc.brushOrg ?? { x: 0, y: 0 };
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [previous.x, previous.y]);
+                    writeU32s(host, wholeAddress(out), [previous.x, previous.y]);
                 }
                 dc.brushOrg = { x: x | 0, y: y | 0 };
                 if (dc.boundSurface)
@@ -3771,12 +3978,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const origin = dc.brushOrg ?? { x: 0, y: 0 };
-                writeU32s(host, out >>> 0, [origin.x, origin.y]);
+                writeU32s(host, wholeAddress(out), [origin.x, origin.y]);
                 return 1;
             },
         },
@@ -3794,12 +4001,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const origin = dc.bounds ?? { left: 0, top: 0 };
-                writeU32s(host, out >>> 0, [origin.left, origin.top]);
+                writeU32s(host, wholeAddress(out), [origin.left, origin.top]);
                 return 1;
             },
         },
@@ -3815,11 +4022,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, rect])=>{
                 const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0)
+                if (!dc || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const asked = readRect(host, rect >>> 0);
+                const asked = readRect(host, wholeAddress(rect));
                 const area = deviceArea(dc, asked.left, asked.top, asked.right, asked.bottom);
                 return drawnAreaOf(dc).every(piece=>isEmpty(intersect(piece, area))) ? 0 : 1;
             },
@@ -3860,7 +4067,7 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, rect])=>{
                 const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0)
+                if (!dc || wholeAddress(rect) === 0)
                 {
                     return REGION_ERROR;
                 }
@@ -3869,7 +4076,7 @@ export function createDrawingFunctions(
                     : { left: 0, top: 0, right: 0, bottom: 0 };
                 const a = toLogical(dc, { x: box.left, y: box.top });
                 const b = toLogical(dc, { x: box.right, y: box.bottom });
-                writeU32s(host, rect >>> 0, [Math.min(a.x, b.x), Math.min(a.y, b.y),
+                writeU32s(host, wholeAddress(rect), [Math.min(a.x, b.x), Math.min(a.y, b.y),
                     Math.max(a.x, b.x), Math.max(a.y, b.y)]);
                 return areaKind(area);
             },
@@ -4027,12 +4234,12 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const held = record.attributes.entries;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return held.length;
                 }
                 const copied = held.slice(start >>> 0, (start >>> 0) + (count >>> 0));
-                writeU32s(host, out >>> 0, copied);
+                writeU32s(host, wholeAddress(out), copied);
                 return copied.length;
             },
         },
@@ -4054,7 +4261,7 @@ export function createDrawingFunctions(
                 const record = objects.get(handle);
                 // The stock palette is the system's, and no program changes it.
                 if (!record || record.type !== 'palette' || record.stock
-                    || (entries >>> 0) === 0)
+                    || wholeAddress(entries) === 0)
                 {
                     return 0;
                 }
@@ -4097,7 +4304,7 @@ export function createDrawingFunctions(
             handler: ([, start, count, out])=>{
                 // The palette is the system's, not the DC's: it is written
                 // whatever handle came with the call, a stale one included.
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -4115,7 +4322,7 @@ export function createDrawingFunctions(
                 }
                 if (total > 0)
                 {
-                    host.writeMemory(out >>> 0, bytes);
+                    host.writeMemory(wholeAddress(out), bytes);
                 }
                 return 0;
             },
@@ -4140,7 +4347,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const needed = RGNDATAHEADER_SIZE + RECT_SIZE * area.length;
-                if ((out >>> 0) === 0 || (count >>> 0) < needed)
+                if (wholeAddress(out) === 0 || (count >>> 0) < needed)
                 {
                     return needed;
                 }
@@ -4168,14 +4375,14 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([region, rect])=>{
                 const area = areaOfRegion(region);
-                if (!area || (rect >>> 0) === 0)
+                if (!area || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
                 // Any overlap at all, not containment: the question is whether
                 // the region has to be redrawn, and a single shared pixel says
                 // it does.
-                const asked = readRect(host, rect >>> 0);
+                const asked = readRect(host, wholeAddress(rect));
                 const box = orderedRect(asked.left, asked.top, asked.right, asked.bottom);
                 return intersectArea(area, box).length > 0 ? 1 : 0;
             },
@@ -4258,13 +4465,13 @@ export function createDrawingFunctions(
             handler: ([handle, start, count, entries])=>{
                 const record = objects.get(handle);
                 const held = record?.attributes?.entries;
-                if (record?.type !== 'palette' || record.stock || (entries >>> 0) === 0
+                if (record?.type !== 'palette' || record.stock || wholeAddress(entries) === 0
                     || (start >>> 0) >= held.length)
                 {
                     return 0;
                 }
                 const last = Math.min(held.length, (start >>> 0) + (count >>> 0));
-                const given = readU32s(entries >>> 0, last - (start >>> 0));
+                const given = readU32s(wholeAddress(entries), last - (start >>> 0));
                 for (let index = start >>> 0; index < last; index++)
                 {
                     if (((held[index] >>> 24) & PC_RESERVED) !== 0)
@@ -4314,12 +4521,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const filtered = ((dc.mapperFlags ?? 0) & ASPECT_FILTERING) !== 0;
-                writeU32s(host, out >>> 0, filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
+                writeU32s(host, wholeAddress(out), filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
                 return 1;
             },
         },
@@ -4342,9 +4549,9 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const previous = record.attributes.dimension ?? { cx: 0, cy: 0 };
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [previous.cx, previous.cy]);
+                    writeU32s(host, wholeAddress(out), [previous.cx, previous.cy]);
                 }
                 record.attributes.dimension = { cx: width | 0, cy: height | 0 };
                 return 1;
@@ -4355,12 +4562,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([bitmap, out])=>{
                 const record = objects.get(bitmap);
-                if (record?.type !== 'bitmap' || (out >>> 0) === 0)
+                if (record?.type !== 'bitmap' || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const dimension = record.attributes.dimension ?? { cx: 0, cy: 0 };
-                writeU32s(host, out >>> 0, [dimension.cx, dimension.cy]);
+                writeU32s(host, wholeAddress(out), [dimension.cx, dimension.cy]);
                 return 1;
             },
         },
@@ -4379,7 +4586,9 @@ export function createDrawingFunctions(
         EnumObjects: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, type, proc, data])=>{
+            handler: args=>{
+                const [handle, type, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 3, true));
                 const call = host.call;
                 const scratch = host.surfaces;
                 if (!dcOf(handle) || (proc >>> 0) === 0 || !call || !scratch)
@@ -4410,7 +4619,7 @@ export function createDrawingFunctions(
                         for (const fields of offered)
                         {
                             writeU32s(host, buffer, fields);
-                            answer = (await call(proc >>> 0, [buffer, data >>> 0], thread)) | 0;
+                            answer = (await call(proc >>> 0, [buffer, data], thread)) | 0;
                             if (answer === 0)
                             {
                                 break;
@@ -4438,7 +4647,7 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, size, data])=>{
                 const dc = dcOf(handle);
-                if (!dc || ((size >>> 0) !== 0 && (data >>> 0) === 0))
+                if (!dc || ((size >>> 0) !== 0 && wholeAddress(data) === 0))
                 {
                     return 0;
                 }
@@ -4489,13 +4698,13 @@ export function createDrawingFunctions(
                 const from = dcOf(source);
                 const interfaces = bound(dest);
                 const record = (mask >>> 0) === 0 ? null : objects.get(mask);
-                if (!dc || !from || !interfaces || (points >>> 0) === 0 || !bound(source)
+                if (!dc || !from || !interfaces || wholeAddress(points) === 0 || !bound(source)
                     || ((mask >>> 0) !== 0 && (record?.type !== 'bitmap'
                         || record.attributes.bitCount !== 1)))
                 {
                     return 0;
                 }
-                const corners = pointsAt(points >>> 0, 3).map(point=>toDevice(dc, point));
+                const corners = pointsAt(wholeAddress(points), 3).map(point=>toDevice(dc, point));
                 const area = deviceRect(from, x, y, width, height);
                 /** @param {number} [maskDc] */
                 const blit = maskDc=>interfaces.plgBlt(dest >>> 0, corners, source >>> 0, area,
@@ -4553,7 +4762,7 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, ramp])=>{
-                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                if (!dcOf(handle) || wholeAddress(ramp) === 0)
                 {
                     return 0;
                 }
@@ -4569,7 +4778,7 @@ export function createDrawingFunctions(
                         view.setUint16(at, entries ? entries[index] : index * 257, true);
                     }
                 }
-                host.writeMemory(ramp >>> 0, bytes);
+                host.writeMemory(wholeAddress(ramp), bytes);
                 return 1;
             },
         },
@@ -4585,11 +4794,11 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, ramp])=>{
-                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                if (!dcOf(handle) || wholeAddress(ramp) === 0)
                 {
                     return 0;
                 }
-                const read = readGammaRamp(host.readMemory(ramp >>> 0, GAMMA_RAMP_BYTES));
+                const read = readGammaRamp(host.readMemory(wholeAddress(ramp), GAMMA_RAMP_BYTES));
                 if (!read)
                 {
                     return 0;
@@ -4616,7 +4825,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((point >>> 0) !== 0)
+                if (wholeAddress(point) !== 0)
                 {
                     writeU32s(host, point, [dc.viewportOrg.x | 0, dc.viewportOrg.y | 0]);
                 }
@@ -4637,12 +4846,12 @@ export function createDrawingFunctions(
                 {
                     return refuse(ERROR_INVALID_HANDLE);
                 }
-                if (!services.pixelFormat || (descriptor >>> 0) === 0)
+                if (!services.pixelFormat || wholeAddress(descriptor) === 0)
                 {
                     return 0;
                 }
                 return services.pixelFormat.choose(
-                    host.readMemory(descriptor >>> 0, services.pixelFormat.size())) | 0;
+                    host.readMemory(wholeAddress(descriptor), services.pixelFormat.size())) | 0;
             },
         },
 
@@ -4666,7 +4875,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const count = services.pixelFormat.count() | 0;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return count;
                 }
@@ -4675,7 +4884,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(out >>> 0, described);
+                host.writeMemory(wholeAddress(out), described);
                 return count;
             },
         },
@@ -4753,7 +4962,8 @@ export function createDrawingFunctions(
     const getObject = ([handle, size, out], wide)=>{
         const record = objects.get(handle);
         const shape = record
-            ? describeObject(record, (out >>> 0) === 0 ? 0 : size | 0, wide)
+            ? describeObject(record, (out >>> 0) === 0 ? 0 : size | 0, wide,
+                host.pointerSize === 8)
             : null;
         if (!shape)
         {
@@ -4772,7 +4982,7 @@ export function createDrawingFunctions(
             host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
-        host.writeMemory(out >>> 0, shape);
+        host.writeMemory(wholeAddress(out), shape);
         return shape.length;
     };
 
@@ -4798,7 +5008,7 @@ export function createDrawingFunctions(
         const length = count >>> 0;
         const bytes = (string >>> 0) === 0 || length === 0
             ? new Uint8Array(0)
-            : host.readMemory(string >>> 0, wide ? length * 2 : length);
+            : host.readMemory(wholeAddress(string), wide ? length * 2 : length);
         let text = '';
         if (!wide)
         {
@@ -4816,7 +5026,7 @@ export function createDrawingFunctions(
         const advances = (dx >>> 0) === 0 || length === 0
             ? spacedAdvances(dcOf(handle), text) ?? undefined
             : [...Array(length).keys()].map(index=>{
-                const word = host.readMemory((dx >>> 0) + index * 4, 4);
+                const word = host.readMemory(wholeAddress(dx) + index * 4, 4);
                 return (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) | 0;
             });
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
@@ -4895,9 +5105,11 @@ export function createDrawingFunctions(
  *        DIBSECTION to a caller with room for one and a BITMAP to any other,
  *        a null buffer's question included.
  * @param {boolean} wide  GetObjectW: a font's face name is UTF-16.
+ * @param {boolean} [long]  For a 64-bit process, whose BITMAP, DIBSECTION,
+ *        LOGBRUSH and EXTLOGPEN have their pointer-sized fields eight bytes wide.
  * @returns {Uint8Array | null}
  */
-function describeObject(record, room, wide){
+function describeObject(record, room, wide, long = false){
     const attributes = record.attributes ?? {};
     switch (record.type){
         // LOGPEN: style, POINT width, colour.
@@ -4905,6 +5117,23 @@ function describeObject(record, room, wide){
         // width, brush style, colour, hatch and the dash table. A buffer
         // short of the dashes is refused, as one short of the rest is.
         case 'pen':
+            if (long && attributes.extended !== undefined)
+            {
+                /** @type {number[]} */
+                const entries = attributes.entries ?? [];
+                // Up to its last dash, as the 32-bit one is.
+                const bytes = new Uint8Array(EXTLOGPEN64.elpStyleEntry + entries.length * 4);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(EXTLOGPEN64.elpPenStyle, attributes.extended >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpWidth, attributes.width | 0, true);
+                view.setUint32(EXTLOGPEN64.elpBrushStyle, attributes.brushStyle >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpColor, attributes.color >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpHatch, attributes.hatch >>> 0, true);
+                view.setUint32(EXTLOGPEN64.elpNumEntries, entries.length, true);
+                entries.forEach((entry, index)=>view.setUint32(
+                    EXTLOGPEN64.elpStyleEntry + index * 4, entry >>> 0, true));
+                return bytes;
+            }
             return attributes.extended !== undefined
                 ? dwords([attributes.extended >>> 0, attributes.width | 0,
                     attributes.brushStyle >>> 0, attributes.color >>> 0, attributes.hatch >>> 0,
@@ -4912,9 +5141,17 @@ function describeObject(record, room, wide){
                 : dwords([attributes.style | 0, attributes.width | 0, 0, attributes.color >>> 0]);
         // LOGBRUSH: style, colour, hatch.
         case 'brush':
+            if (long)
+            {
+                const bytes = new Uint8Array(LOGBRUSH64.SIZE);
+                bytes.set(dwords([attributes.style | 0, attributes.color >>> 0,
+                    attributes.hatch | 0]));
+                return bytes;
+            }
             return dwords([attributes.style | 0, attributes.color >>> 0, attributes.hatch | 0]);
         case 'bitmap':
-            return describeBitmap(attributes, room >= DIBSECTION.SIZE);
+            return describeBitmap(attributes,
+                room >= (long ? DIBSECTION64 : DIBSECTION).SIZE, long);
         case 'font':
             return logFontBytes(attributes, wide);
         // A palette is the WORD count of its entries.
@@ -4943,22 +5180,25 @@ function dwords(values){
  * device-dependent bitmap has none, which is what a NULL bmBits says.
  *
  * @param {any} attributes @param {boolean} asSection
+ * @param {boolean} [long]  A 64-bit process's layouts.
  */
-function describeBitmap(attributes, asSection){
+function describeBitmap(attributes, asSection, long = false){
+    const BITMAP_ = long ? BITMAP64 : BITMAP;
+    const DIBSECTION_ = long ? DIBSECTION64 : DIBSECTION;
     const width = attributes.width | 0;
     const height = attributes.height | 0;
     const bitCount = attributes.bitCount ?? 32;
     const section = attributes.section >>> 0;
     const stride = section !== 0 ? dibStride(width, bitCount) : ddbStride(width, bitCount);
-    const bytes = new Uint8Array(section !== 0 && asSection ? DIBSECTION.SIZE : BITMAP.SIZE);
+    const bytes = new Uint8Array(section !== 0 && asSection ? DIBSECTION_.SIZE : BITMAP_.SIZE);
     const view = new DataView(bytes.buffer);
-    view.setInt32(BITMAP.bmWidth, width, true);
-    view.setInt32(BITMAP.bmHeight, height, true);
-    view.setInt32(BITMAP.bmWidthBytes, stride, true);
-    view.setUint16(BITMAP.bmPlanes, attributes.planes ?? 1, true);
-    view.setUint16(BITMAP.bmBitsPixel, bitCount, true);
-    view.setUint32(BITMAP.bmBits, section, true);
-    if (bytes.length === BITMAP.SIZE)
+    view.setInt32(BITMAP_.bmWidth, width, true);
+    view.setInt32(BITMAP_.bmHeight, height, true);
+    view.setInt32(BITMAP_.bmWidthBytes, stride, true);
+    view.setUint16(BITMAP_.bmPlanes, attributes.planes ?? 1, true);
+    view.setUint16(BITMAP_.bmBitsPixel, bitCount, true);
+    view.setUint32(BITMAP_.bmBits, section, true);
+    if (bytes.length === BITMAP_.SIZE)
     {
         return bytes;
     }
@@ -4966,21 +5206,23 @@ function describeBitmap(attributes, asSection){
     // height without its sign, the image size worked out, and the colour
     // table counted in full.
     /** @param {number} field @param {number} value */
-    const header = (field, value)=>view.setInt32(DIBSECTION.dsBmih + field, value | 0, true);
+    const header = (field, value)=>view.setInt32(DIBSECTION_.dsBmih + field, value | 0, true);
     header(BITMAPINFOHEADER.biSize, BITMAPINFOHEADER.SIZE);
     header(BITMAPINFOHEADER.biWidth, width);
     header(BITMAPINFOHEADER.biHeight, height);
-    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
-    view.setUint16(DIBSECTION.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
+    view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biPlanes, 1, true);
+    view.setUint16(DIBSECTION_.dsBmih + BITMAPINFOHEADER.biBitCount, bitCount, true);
     header(BITMAPINFOHEADER.biCompression, attributes.compression ?? BI_RGB);
-    header(BITMAPINFOHEADER.biSizeImage, stride * height);
+    // A section the caller described says the size it was given (a DXGI
+    // surface's DC says 0, test_getdc).
+    header(BITMAPINFOHEADER.biSizeImage, attributes.sizeImage ?? stride * height);
     header(BITMAPINFOHEADER.biXPelsPerMeter, attributes.pelsPerMeter?.[0] ?? 0);
     header(BITMAPINFOHEADER.biYPelsPerMeter, attributes.pelsPerMeter?.[1] ?? 0);
     header(BITMAPINFOHEADER.biClrUsed, attributes.palette?.length ?? 0);
     const masks = attributes.bitfields ?? [0, 0, 0];
     for (let index = 0; index < 3; index++)
     {
-        view.setUint32(DIBSECTION.dsBitfields + index * 4, masks[index] >>> 0, true);
+        view.setUint32(DIBSECTION_.dsBitfields + index * 4, masks[index] >>> 0, true);
     }
     return bytes;
 }

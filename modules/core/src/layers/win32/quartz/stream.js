@@ -34,16 +34,21 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { describe } from './describe.js';
 import {
     CLSID_ASYNC_READER, IBASE_FILTER_SLOTS, IID_IBASE_FILTER, IID_IMEDIA_FILTER,
     IID_IMEDIA_SAMPLE, IID_IMEM_ALLOCATOR, IID_IMEM_INPUT_PIN, IID_IPERSIST, IID_IPIN,
     IMEDIA_FILTER_SLOTS, IMEDIA_SAMPLE_SLOTS, IMEM_ALLOCATOR_SLOTS, IPIN_SLOTS, VTABLE,
 } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
+/** A filter still on its way to the state it was told, as GetState answers. */
+const VFW_S_STATE_INTERMEDIATE = 0x00040237;
+/** IMediaFilter::GetState, IUnknown's three and IPersist's one before it. */
+const FILTER_GET_STATE = 7;
 const E_POINTER = 0x80004003;
 const E_UNEXPECTED = 0x8000ffff;
 const VFW_E_NOT_FOUND = 0x80040216;
@@ -81,7 +86,6 @@ const TICKS_PER_SECOND = 10_000_000;
 
 /** The same catch-up budget the window path keeps; see graph.js. */
 const FRAMES_PER_TICK = 4;
-const STEPS_PER_TICK = 16;
 
 /**
  * @typedef {import('./clip.js').VideoClip} VideoClip
@@ -100,7 +104,7 @@ const STEPS_PER_TICK = 16;
  * @property {(object: ComObject, iid: string) => number} publish
  * @property {(pointer: number) => any} objectAt
  * @property {{ deliver: (entry: number, args: number[], done?: () => void, tag?: any) => void,
- *              drop: (tag: any) => { done?: () => void }[] }} notices
+ *              drop: (tag: any) => { done?: (answer: number) => void }[] }} notices
  *           The thread calls owed to the program's objects are made on; `drop`
  *           takes back the queued ones of a source that is going.
  */
@@ -177,12 +181,12 @@ export function createStreaming(host){
         {
             return E_POINTER;
         }
-        host.writeMemory(address >>> 0, words(value));
+        host.writeMemory(wholeAddress(address), words(value));
         return S_OK;
     };
 
     /** @param {number} self @param {number} slot */
-    const entryOf = (self, slot)=>host.readU32((host.readU32(self >>> 0) + slot * 4) >>> 0);
+    const entryOf = (self, slot)=>host.readU32((host.readU32(wholeAddress(self)) + slot * 4) >>> 0);
 
     /**
      * A method of one of the program's objects, called on the thread the
@@ -330,31 +334,24 @@ export function createStreaming(host){
         const want = Math.floor((nowMs - source.startedAt) * clip.fps / 1000) + 1;
         let packed = false;
         let decoded = 0;
-        let steps = 0;
-        while (source.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
+        // The picture alone: its sound is a reading of its own, and nothing
+        // connected here hears it.
+        while (source.shown < want && decoded < FRAMES_PER_TICK)
         {
-            const what = clip.decode();
-            if (what === 'frame')
+            if (clip.decode() !== 'frame')
             {
-                source.shown++;
-                decoded++;
-                const frame = clip.frame();
-                if (frame)
-                {
-                    packBottomUpRgb24(frame, source.pixels, source.width, source.height,
-                        source.stride);
-                    packed = true;
-                }
-                continue;
+                source.ended = true;
+                break;
             }
-            if (what === 'audio')
+            source.shown++;
+            decoded++;
+            const frame = clip.frame();
+            if (frame)
             {
-                // Nothing is connected to hear it.
-                clip.readAudio?.();
-                continue;
+                packBottomUpRgb24(frame, source.pixels, source.width, source.height,
+                    source.stride);
+                packed = true;
             }
-            source.ended = true;
-            break;
         }
         if (source.shown < want && !source.ended)
         {
@@ -565,7 +562,7 @@ export function createStreaming(host){
                 {
                     return E_POINTER;
                 }
-                if ((id >>> 0) === 0 || host.readWideString(id, MAX_NAME) !== PIN_NAME)
+                if ((id >>> 0) === 0 || host.readWideString(id, MAX_NAME * 2) !== PIN_NAME)
                 {
                     writeU32(out, 0);
                     return VFW_E_NOT_FOUND;
@@ -606,8 +603,32 @@ export function createStreaming(host){
         for (const filter of filters)
         {
             const answer = await call(thread, filter, slot, args);
-            result = failed(result) ? result : answer;
+            // A filter still on its way (a renderer pausing with no sample yet
+            // answers S_FALSE) makes the graph's answer S_FALSE too.
+            result = failed(result) ? result
+                : failed(answer) || answer === S_FALSE ? answer : result;
         }
+        return result;
+    };
+
+    /**
+     * IMediaFilter::GetState of each of the program's filters, the graph's
+     * answer made of theirs: a failure first, then VFW_S_STATE_INTERMEDIATE
+     * where any is still on its way to the state it was told.
+     *
+     * @param {number[]} filters @param {number} timeout
+     */
+    const states = async(filters, timeout)=>{
+        const thread = host.currentThread();
+        const slot = host.allocate(4);
+        let result = S_OK;
+        for (const filter of filters)
+        {
+            const answer = await call(thread, filter, FILTER_GET_STATE, [timeout >>> 0, slot]);
+            result = failed(result) ? result
+                : failed(answer) || answer === VFW_S_STATE_INTERMEDIATE ? answer : result;
+        }
+        host.free(slot);
         return result;
     };
 
@@ -633,9 +654,51 @@ export function createStreaming(host){
         later(filter, VTABLE.Release);
     };
 
+    /**
+     * Disconnects both ends of every connected pin of a filter, as a graph's
+     * RemoveFilter does: two filters connected hold each other through their
+     * pins, and a filter taken out of its graph with its connections left
+     * would keep its peer - and the file a source has open - for ever.
+     *
+     * @param {any} thread @param {number} filter
+     */
+    const disconnectPins = async(thread, filter)=>{
+        const slot = host.allocate(12);
+        host.writeMemory(slot, new Uint8Array(12));
+        if (failed(await call(thread, filter, VTABLE.FilterEnumPins, [slot])))
+        {
+            host.free(slot);
+            return;
+        }
+        // A filter that answered and handed out nothing has nothing to list.
+        const pins = host.readU32(slot);
+        if (pins === 0)
+        {
+            host.free(slot);
+            return;
+        }
+        while (await call(thread, pins, VTABLE.EnumNext, [1, slot + 4, 0]) === S_OK)
+        {
+            const pin = host.readU32(slot + 4);
+            host.writeMemory(slot + 8, new Uint8Array(4));
+            if (await call(thread, pin, VTABLE.PinConnectedTo, [slot + 8]) === S_OK
+                && host.readU32(slot + 8) !== 0)
+            {
+                const peer = host.readU32(slot + 8);
+                await call(thread, peer, VTABLE.PinDisconnect);
+                await call(thread, pin, VTABLE.PinDisconnect);
+                await call(thread, peer, VTABLE.Release);
+            }
+            await call(thread, pin, VTABLE.Release);
+        }
+        await call(thread, pins, VTABLE.Release);
+        host.free(slot);
+    };
+
     /** The same, on the calling thread. @param {number} filter */
     const remove = async filter=>{
         const thread = host.currentThread();
+        await disconnectPins(thread, filter);
         await call(thread, filter, VTABLE.FilterJoinGraph, [0, 0]);
         await call(thread, filter, VTABLE.Release);
         return S_OK;
@@ -690,10 +753,15 @@ export function createStreaming(host){
         }
         for (const filter of filters)
         {
+            await disconnectPins(thread, filter);
+        }
+        for (const filter of filters)
+        {
             await call(thread, filter, VTABLE.FilterJoinGraph, [0, 0]);
             await call(thread, filter, VTABLE.Release);
         }
     };
 
-    return { createSource, connect, feed, restart, close, each, join, leave, remove, teardown };
+    return { createSource, connect, feed, restart, close, each, states, join, leave, remove,
+        teardown };
 }

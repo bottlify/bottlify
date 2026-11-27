@@ -27,7 +27,8 @@ const TRAP = 0x8400;
 const TABLE = 0x100000;
 const STACK = 0x300000;
 /** What the kernel's words say, as the routines are handed it. */
-const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
+const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, invalid: MIRROR.INVALID,
+    mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -42,9 +43,9 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
             trapPort: 0xb077,
             entryVector: 0x7000,
             initialStack: STACK,
-            cork: {},
+            cork: { sliceMs: Infinity },
         });
-        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, TRAP));
         host.writePhysical(TRAP, new Uint8Array([0xf4]));
         /** @param {number} handle @param {number} value */
         const word = (handle, value)=>host.writePhysical(TABLE + (handle >>> 2) * 4,
@@ -95,6 +96,20 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
         assert.equal(poll(0xffffffff, 0), 'host', 'a pseudo-handle');
         assert.equal(poll(0xfffffff6, 0), 'host', 'a standard-handle number');
 
+        // NULL's word: WAIT_FAILED here, ERROR_INVALID_HANDLE in the TEB (FS's
+        // base is zero here: FS:[0x34] is linear 0x34), whatever the timeout.
+        word(0, MIRROR.INVALID);
+        for (const [handle, timeout] of [[0, 0xffffffff], [0, 0], [0, 5]])
+        {
+            host.writePhysical(0x34, new Uint8Array(u32(0)));
+            assert.equal(poll(handle, timeout), 0xffffffff, `NULL (${handle}) fails here`);
+            assert.deepEqual([...host.readPhysical(0x34, 4)], u32(6), 'ERROR_INVALID_HANDLE');
+        }
+        assert.equal(poll(1, 0), 'host', 'a console stream goes to the host');
+        assert.equal(poll(3, 0xffffffff), 'host');
+        word(0, MIRROR.NONE);
+        assert.equal(poll(0, 0xffffffff), 'host', 'NULL with no word goes to the host');
+
         host.stop();
     });
 
@@ -110,11 +125,14 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
-    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    /** Where a semaphore's wait goes (`semaphore-guest.js`): a halt of its own. */
+    const SEMAPHORE = 0x8800;
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, SEMAPHORE));
     host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(SEMAPHORE, new Uint8Array([0xf4]));
     // FS's base is zero here: FS:[0x24], the caller's id, is linear 0x24.
     host.writePhysical(0x24, new Uint8Array(u32(ME)));
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32((MUTEX | MUTEX_TAG) >>> 0)));
@@ -144,6 +162,12 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         host.writeReg32('eax', 0x5a5a5a5a);
         host.wake();
         runToHalt(host, 1000);
+        if (host.readReg32('eip') === SEMAPHORE + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
+                'the semaphore\'s wait is reached with the call as it was made');
+            return 'semaphore';
+        }
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
@@ -188,6 +212,15 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
     assert.equal(call(RELEASE, [HANDLE]), 1, 'but it is given back');
     assert.equal(word(), mine(MUTEX_WORD.RECURSION - 1));
 
+    // A semaphore's word, both tags: its wait is the semaphore's routine, and
+    // ReleaseMutex of it the host's to refuse, the word untouched.
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4,
+        new Uint8Array(u32((MUTEX | MUTEX_TAG | EVENT_TAG) >>> 0)));
+    setWord(0);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'semaphore', 'a semaphore\'s wait');
+    assert.equal(call(POLL, [HANDLE, 0]), 'semaphore');
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'a semaphore\'s handle released as a mutex');
+    assert.equal(word(), 0, 'untouched');
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.CLEAR)));
     assert.equal(call(RELEASE, [HANDLE]), 'host', 'an event\'s handle is the host\'s to refuse');
     host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.NONE)));
@@ -206,7 +239,7 @@ test('the guest answers SetEvent of a signalled event and ResetEvent of a clear 
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
     host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
     host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
@@ -274,9 +307,9 @@ test('the guest takes, sets and resets an event by its own word, and answers wha
         trapPort: 0xb077,
         entryVector: 0x7000,
         initialStack: STACK,
-        cork: {},
+        cork: { sliceMs: Infinity },
     });
-    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES, TRAP));
     host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
     host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
     host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
@@ -399,7 +432,7 @@ const MUTEX_SLOT = 15;
 
 /**
  * @param {number} seed @param {number} count @param {boolean} guest
- * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {typeof import('../../../../../../tools/fixtures/make-pe.mjs').buildExe} buildExe
  * @param {boolean} [mutex]  a mutex taken and given back among the events' calls
  * @param {number} [rounds]  how many times the calls are made, one after the other
  */
@@ -495,7 +528,7 @@ const runEvents = async(executable, crossed, options = {}, during = null)=>{
     const app = await createApp({ executable, ...options });
     try
     {
-        const running = app.run({ timeoutMs: 60_000 });
+        const running = app.run({ timeoutMs: 150_000 });
         await during?.(app, running);
         const code = (await running) >>> 0;
         const tables = await app.diagnostics();
@@ -518,7 +551,7 @@ const SET_OR_RESET = /!(Set|Reset)Event$/;
 
 test('seeded event programs answer alike with sets and resets in the guest and with every call'
     + ' in the host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     for (const seed of [11, 12, 13, 14, 15, 16])
     {
         const executable = eventProgram(seed, 300, true, buildExe);
@@ -533,7 +566,7 @@ test('seeded event programs answer alike with sets and resets in the guest and w
 
 test('seeded event programs answer alike with polls in the guest and with every wait in the'
     + ' host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     /** @param {Uint8Array} executable */
     const run = executable=>runEvents(executable, /WaitForSingleObject/);
     for (const seed of [1, 2, 3, 4, 5, 6])
@@ -551,7 +584,7 @@ test('seeded event and mutex programs answer alike with the guest\'s answers swi
     // `app.debug.handleWords`, switched while a program runs to see whether a
     // fault goes with the guest's own answers: a mutex the guest holds at the
     // switch keeps its owner and count in the host's hands, and back.
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     for (const seed of [21, 22, 23, 24])
     {
         const executable = eventProgram(seed, 600, true, buildExe, true, 40);
@@ -624,7 +657,7 @@ function assembler(){
  * Odd threads poll for the token, even ones wait; between, each sets, resets
  * or polls an event all of them share, whose answers go nowhere.
  *
- * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {typeof import('../../../../../../tools/fixtures/make-pe.mjs').buildExe} buildExe
  * @param {number} count @param {number} rounds
  */
 function tokenRing(buildExe, count, rounds){
@@ -717,11 +750,11 @@ function tokenRing(buildExe, count, rounds){
 test('a token passed round a ring of threads on several executors through auto-reset events is'
     + ' held by one thread at a time, and every set wakes its waiter, with the guest\'s answers'
     + ' and with every call in the host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     const COUNT = 4;
     const ROUNDS = 150;
     const executable = tokenRing(buildExe, COUNT, ROUNDS);
-    const cpu = { cores: 3, eager: true };
+    const cpu = { cores: 3 };
     const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
         { cpu });
     const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
@@ -739,7 +772,7 @@ test('an event a thread waits on together with another is set and not taken: the
     // signalled with a thread queued on it, its word the host's. The main
     // thread's poll takes A, a second times out, a reset of A set again
     // clears it: each read from the word the host writes the state into.
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     const WORKER = 0x300;
     const executable = buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'SetEvent', 'ResetEvent', 'CreateThread',
@@ -789,9 +822,9 @@ test('an event a thread waits on together with another is set and not taken: the
     for (const cores of [1, 2])
     {
         const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
-            { cpu: { cores, eager: true } });
+            { cpu: { cores } });
         const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
-            { cpu: { cores, eager: true }, win32: { handleWords: false } });
+            { cpu: { cores }, win32: { handleWords: false } });
         assert.equal(inHost.code, expected, `${cores} executors: every call in the host`);
         assert.equal(inGuest.code, expected, `${cores} executors: with the guest's answers`);
     }

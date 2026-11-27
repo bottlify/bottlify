@@ -166,6 +166,24 @@ test('a vertex blends its world matrices by the weights it carries', ()=>{
         near([0, 1, 2, 3].map(i=>s.float(dest.base + k * 16 + i * 4)), vertex, `vertex ${k}`));
 });
 
+test('a vertex with no weights blends by the bytes after its position'
+    + ' (test_process_vertices)', ()=>{
+    const s = space();
+    const src = s.buffer(FVF.XYZ, 4);
+    s.fill(src, QUAD);
+    const dest = s.buffer(FVF.XYZRHW, 4);
+    const state = device({
+        transforms: { [D3DTS.WORLD + 1]: [0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1] },
+        states: { [D3DRS.VERTEXBLEND]: 1 },
+    });
+    assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM, dest,
+        destIndex: 0, count: 3, source: s.source(src), state, flags: 0 }), D3D_OK);
+    // The weight of each is the next vertex's x.
+    const expected = [[128, 128, 0, 1], [149.33, 64, 0.3333, 0.3333], [76.8, 153.6, 0.6, 0.8]];
+    expected.forEach((vertex, k)=>near([0, 1, 2, 3].map(i=>s.float(dest.base + k * 16 + i * 4)),
+        vertex, `vertex ${k}`));
+});
+
 test('lighting uses the camera-space normal the inverse transpose carries, at its length', ()=>{
     // Wine's ddraw7 test_lighting, through ProcessVertices: a white light down
     // +z, and a normal facing it after each world matrix.
@@ -200,6 +218,67 @@ test('lighting uses the camera-space normal the inverse transpose carries, at it
         [-11, -11, -10, 0.2, 0, 0, -1, 0xff0000ff],
         { [D3DTS.WORLD]: transf, [D3DTS.WORLD + 1]: IDENTITY }, 1), 0xff0000cc,
     'blended normals are not renormalised');
+});
+
+test('a Direct3D 1-6 point light falls off by the share of its range left', ()=>{
+    // Wine's ddraw2 and ddraw4 test_specular_lighting: a point light at the
+    // eye, range 100, attenuation (0, 0, 1), a vertex at distance one in front.
+    const s = space();
+    const point = {
+        Type: D3DLIGHTTYPE.POINT, Diffuse: { r: 1, g: 1, b: 1, a: 0 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 0 },
+        Range: 100, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 1,
+        Theta: 0, Phi: 0,
+    };
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0, 0, 2, 0, 0, -1]]);
+    const white = { r: 1, g: 1, b: 1, a: 1 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    /** @param {any} light @returns {number} the diffuse's blue */
+    const lit = light=>{
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), flags: 0,
+            state: device({ lights: [light], material: { Diffuse: white, Ambient: black,
+                Specular: black, Emissive: black, Power: 0 } }) }), D3D_OK);
+        return s.dword(dest.base + 16) & 0xff;
+    };
+    assert.equal(lit(point), Math.round(255 / 4), 'Direct3D 7: one over the distance squared');
+    assert.equal(lit({ ...point, Legacy: true }), Math.round(255 * 0.98 * 0.98),
+        'Direct3D 1-6: the share of the range left, squared');
+    assert.equal(lit({ ...point, Legacy: true, Range: 1.5 }), 0, 'and nothing past the range');
+});
+
+test('a Direct3D 1-6 device moves a normal by the world matrix itself and makes it unit length,'
+    + ' so a singular world still lights', ()=>{
+    // Wine's ddraw4 test_lighting: rows one and three of the world the same,
+    // a normal of (0, 0, -1) under a light along +z: 1/sqrt(2) of the light.
+    const s = space();
+    const directional = {
+        Type: D3DLIGHTTYPE.DIRECTIONAL, Diffuse: { r: 0, g: 0, b: 1, a: 0 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 1 },
+        Range: 0, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 0,
+        Theta: 0, Phi: 0,
+    };
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0, 0, 0, 0, 0, -1]]);
+    const white = { r: 1, g: 1, b: 1, a: 1 };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    const singular = [1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0.5, 1];
+    /** @param {boolean} legacy @returns {number} the diffuse's blue */
+    const blue = legacy=>{
+        const state = { ...device({ lights: [directional], transforms: { [D3DTS.WORLD]: singular },
+            states: { [D3DRS.NORMALIZENORMALS]: legacy ? 1 : 0 },
+            material: { Diffuse: white, Ambient: black, Specular: black, Emissive: black,
+                Power: 0 } }), normalsByWorld: legacy };
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), flags: 0, state }), D3D_OK);
+        return s.dword(dest.base + 16) & 0xff;
+    };
+    assert.equal(blue(true), 0xb4);
 });
 
 test('with no light, a lit vertex is black in its own alpha, an unlit one keeps its colour', ()=>{
@@ -238,4 +317,47 @@ test('what is refused, and what DONOTCOPYDATA leaves alone', ()=>{
     assert.equal(s.dword(dest.base + 16), 0xff123456);
     assert.equal(s.float(dest.base + 20), 0.25, 'nor were the coordinates, until now');
     assert.equal(s.float(dest.base + 28 + 24), 0.5);
+});
+
+test('the specular alpha is the vertex fog factor, or the material\'s without vertex fog', ()=>{
+    // Wine's ddraw7 test_fog_process_vertices: one lit vertex, its fog by the
+    // camera-space depth 0.375, or the distance 0.625 with range fog, under
+    // the default start 0, end 1 and density 1; the table mode plays no part.
+    const s = space();
+    const light = {
+        Type: D3DLIGHTTYPE.DIRECTIONAL, Diffuse: { r: 0, g: 0, b: 0, a: 0 },
+        Specular: { r: 1, g: 1, b: 1, a: 0 }, Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Position: { x: 0, y: 0, z: 0 }, Direction: { x: 0, y: 0, z: 1 },
+        Range: 0, Falloff: 0, Attenuation0: 0, Attenuation1: 0, Attenuation2: 0, Theta: 0, Phi: 0,
+    };
+    const black = { r: 0, g: 0, b: 0, a: 0 };
+    const material = { Diffuse: black, Ambient: black, Specular: { r: 0, g: 1, b: 0, a: 0.5 },
+        Emissive: black, Power: 5 };
+    const src = s.buffer(FVF.XYZ | FVF.NORMAL, 1);
+    s.fill(src, [[0.5, 0, 1, 0, 0, -1]]);
+    const dest = s.buffer(FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR, 1);
+    const [NONE, EXP, EXP2, LINEAR] = [0, 1, 2, 3];
+    for (const [vertexMode, tableMode, range, alpha] of [
+        [NONE, NONE, 0, 0x80], [NONE, LINEAR, 0, 0x80], [EXP, NONE, 0, 0xaf],
+        [EXP2, NONE, 0, 0xde], [LINEAR, NONE, 0, 0x9f], [LINEAR, LINEAR, 0, 0x9f],
+        [NONE, NONE, 1, 0x80], [EXP, NONE, 1, 0x88], [EXP2, NONE, 1, 0xad],
+        [LINEAR, NONE, 1, 0x60], [LINEAR, EXP, 1, 0x60], [EXP, LINEAR, 1, 0x88],
+    ])
+    {
+        const state = device({
+            transforms: { [D3DTS.WORLD]: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.75, 0, 0, 0, 0, 1],
+                [D3DTS.VIEW]: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 1] },
+            lights: [light], material,
+            states: { [D3DRS.SPECULARENABLE]: 1, [D3DRS.FOGENABLE]: 1,
+                [D3DRS.FOGVERTEXMODE]: vertexMode, [D3DRS.FOGTABLEMODE]: tableMode,
+                [D3DRS.RANGEFOGENABLE]: range, [D3DRS.FOGSTART]: 0,
+                [D3DRS.FOGEND]: 0x3f800000, [D3DRS.FOGDENSITY]: 0x3f800000 },
+        });
+        assert.equal(processVertices({ memory: s.memory, vertexOp: D3DVOP.TRANSFORM | D3DVOP.LIGHT,
+            dest, destIndex: 0, count: 1, source: s.source(src), state, flags: 0 }), D3D_OK);
+        const got = s.dword(dest.base + 20) >>> 24;
+        assert.ok(Math.abs(got - alpha) <= 1,
+            `vertex fog ${vertexMode}, table ${tableMode}, range ${range}:`
+            + ` alpha ${got} against ${alpha}`);
+    }
 });

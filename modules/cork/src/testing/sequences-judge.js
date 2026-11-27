@@ -43,6 +43,7 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
 import * as engine from '../index.js';
 import { PageFlag } from '../runtime/pages.js';
+import { features as hostFeatures } from '../wasm/features.js';
 import { restore, snapshot } from './snapshot.js';
 import { replaySlice, retireExactly } from './differential.js';
 import {
@@ -91,15 +92,18 @@ const hostOf = (cork, where = {}, features = undefined)=>/** @type {CorkHost} */
  *
  * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown>,
  *     executor?: { executors: number, executor: number },
- *     features?: import('../../../core/src/layers/cpu/engine.js').EngineEnv['features'] }}
+ *     features?: import('../../../core/src/layers/cpu/engine.js').EngineEnv['features'],
+ *     spans?: { address: number, length: number }[] }}
  *     [given]  pool: the forms the sequences index (`POOL` by default); cork: the
  *     translator's settings besides the judge's own (the atomic variant's judge sets
  *     `atomic`); executor: which executor of a shared memory the translator's host is (the
  *     executors' judge); features: the host the translator makes code for, another than
- *     this one (an arm64 one's default NaN is positive)
+ *     this one (an arm64 one's default NaN is positive); spans: the memory restored before
+ *     each sequence and compared after it (the data, `SPANS`, by default; a pool that
+ *     stores onto the stack names the stack's too)
  */
 export function createJudge({ pool = undefined, cork = {}, executor = undefined,
-    features = undefined } = {})
+    features = undefined, spans = SPANS } = {})
 {
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
@@ -111,11 +115,18 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
     // sequence's own out of a batch, and a run is only repeatable from its
     // seed with the one feed. What a region leaves runs on the same
     // interpreter as the model, so a divergence is the translator's.
+    // A NaN an operation makes carries the host's sign unless `exactNaN` asks
+    // for x86's (roadmap/decisions.md): on a host whose default NaN is positive,
+    // an arm64 one, the translator is held to the model's NaNs with the fix-ups
+    // that make them, as on an x86 host it is by the host's own instructions.
+    const exact = (features ?? hostFeatures()).defaultNaNNegative || 'exactNaN' in cork
+        ? {} : { exactNaN: true };
     const translator = hostOf({
         precise: true,
         missThreshold: Number.POSITIVE_INFINITY,
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
+        ...exact,
         ...cork,
     }, executor, features);
     const runtime = translator.cork();
@@ -135,7 +146,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
         model.writeReg32(name, value);
     }
     model.writeReg32('eflags', 2);
-    const pristine = snapshot(model, SPANS);
+    const pristine = snapshot(model, spans);
 
     const oracle = { ...model, step: model.runSlice };
     const subject = { ...translator, step: translator.runSlice };
@@ -181,7 +192,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
             const code = programBytes(body, pool);
             model.writePhysical(CODE, code);
             model.writeReg32('eip', CODE);
-            const state = snapshot(model, SPANS);
+            const state = snapshot(model, spans);
             model.wake();
             const instructions = retireExactly(model.runSlice, model.halted, LIMIT);
             if (instructions === 0 || instructions >= LIMIT)
@@ -199,7 +210,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
             published += made > 0 ? 1 : 0;
             const before = runtime.diagnostics().retired;
             const tierBefore = translator.wasmRetired?.() ?? 0;
-            const result = replaySlice({ oracle, subject, state, instructions, spans: SPANS });
+            const result = replaySlice({ oracle, subject, state, instructions, spans });
             byTranslator += runtime.diagnostics().retired - before;
             byTier += (translator.wasmRetired?.() ?? 0) - tierBefore;
             bySubject += result.retiredSubject;
@@ -214,12 +225,13 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined,
  * @param {number} part @param {number} of
  * @param {import('../../../core/src/layers/cpu/engine.js').EngineEnv['features']} [features]
  *     the host the translator makes code for, another than this one (`createJudge`)
+ * @param {Record<string, unknown>} [cork]  the translator's settings besides the judge's own
  */
-export function testSequences(part, of, features = undefined){
+export function testSequences(part, of, features = undefined, cork = {}){
     test(`translated sequences of x87, MMX and SSE leave what the instruction model leaves`
         + `${features ? ' as another host translates them' : ''} (part ${part + 1} of ${of})`,
     async()=>{
-        const machine = createJudge({ features });
+        const machine = createJudge({ features, cork });
         const started = Date.now();
         const next = random(SEED);
         /** @type {Map<string, { count: number, at: string, what: string }>} */

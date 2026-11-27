@@ -22,6 +22,13 @@
  * A record's arguments are the program's own dwords, decoded here as the
  * entry point's handler decodes them: an unsigned or signed integer, a
  * float's bits, a GLboolean's low byte, a double's two words.
+ *
+ * OpenGL 2.0's calls a frame makes most -- the program in use and its
+ * uniforms, the attribute arrays, the buffer and framebuffer bindings,
+ * separate blending and stencil -- ride the ring under their core names.
+ * A uniform vector form whose elements are not a power of two bytes wide
+ * (`glUniform3fv`, `glUniformMatrix3fv`) is the host's: a record's copy is
+ * a count of elements of `1 << shift` bytes.
  */
 
 import { commandSet } from '../d3d8/commands.js';
@@ -173,8 +180,10 @@ const parameter = (leading, type, method, colours)=>({
 });
 
 /**
- * A parameter call's float vector form, as many values copied as its
- * parameter takes: four for the ones named, one for the rest.
+ * A parameter call's float vector form, as many values as its parameter
+ * takes: four for the ones named, one for the rest. They go as the record's
+ * floats were read: every setter copies what it keeps, and a display list
+ * being compiled copies a float vector it records (`enter`).
  *
  * @param {string} method @param {readonly number[]} fours
  * @returns {import('../d3d8/commands.js').CommandEntry}
@@ -182,7 +191,7 @@ const parameter = (leading, type, method, colours)=>({
 const parameterVector = (method, fours)=>({
     args: 3, pointer: 2, choose: { arg: 1, cases: fours.map(name=>[name, 16]), otherwise: 4 },
     make: (context, c)=>context[method](c.arg(0) >>> 0, c.arg(1) >>> 0,
-        [...c.floats.subarray(0, fours.includes(c.arg(1) >>> 0) ? 4 : 1)]),
+        c.floats.subarray(0, fours.includes(c.arg(1) >>> 0) ? 4 : 1)),
 });
 
 /**
@@ -200,7 +209,7 @@ const sizedVector = (leading, method, sizes)=>({
     make: (context, c)=>{
         const head = leading === 1 ? [c.arg(0) >>> 0] : [c.arg(0) >>> 0, c.arg(1) >>> 0];
         return context[method](...head,
-            [...c.floats.subarray(0, sizes.get(c.arg(leading - 1) >>> 0) ?? 1)]);
+            c.floats.subarray(0, sizes.get(c.arg(leading - 1) >>> 0) ?? 1));
     },
 });
 
@@ -278,6 +287,7 @@ const TABLE = {
     glDepthRange: same('dd', 'glDepthRange'),
     glPolygonMode: same('uu', 'glPolygonMode'),
     glPolygonOffset: same('ff', 'glPolygonOffset'),
+    glPolygonOffsetClamp: same('fff', 'glPolygonOffsetClamp'),
     glShadeModel: same('u', 'glShadeModel'),
     glScissor: same('iiii', 'glScissor'),
     glViewport: same('iiii', 'glViewport'),
@@ -297,7 +307,7 @@ const TABLE = {
         count: { arg: 1, shift: 0, most: BUFFER_BYTES },
         make: (context, c)=>context.glBufferDataARB(c.arg(0) >>> 0, c.arg(1) | 0,
             c.arg(2) === 0 ? null : c.view(c.arg(1)), c.arg(3) >>> 0) },
-    glBufferSubDataARB: { args: 4, pointer: 3, kept: true,
+    glBufferSubDataARB: { args: 4, pointer: 3,
         count: { arg: 2, shift: 0, most: BUFFER_BYTES },
         make: (context, c)=>context.glBufferSubDataARB(c.arg(0) >>> 0, c.arg(1) | 0,
             c.arg(2) | 0, c.view(c.arg(2))) },
@@ -368,8 +378,115 @@ const TABLE = {
 TABLE.glTexGenfv = {
     args: 3, pointer: 2, choose: { arg: 1, cases: [[GL.TEXTURE_GEN_MODE, 4]], otherwise: 16 },
     make: (context, c)=>context.glTexGenfv(c.arg(0) >>> 0, c.arg(1) >>> 0,
-        [...c.floats.subarray(0, (c.arg(1) >>> 0) === GL.TEXTURE_GEN_MODE ? 1 : 4)]),
+        c.floats.subarray(0, (c.arg(1) >>> 0) === GL.TEXTURE_GEN_MODE ? 1 : 4)),
 };
+
+// --- OpenGL 1.3 to 2.0 under their core names, and the GLSL program's ---
+Object.assign(TABLE, {
+    glActiveTexture: same('u', 'glActiveTextureARB'),
+    glClientActiveTexture: same('u', 'glClientActiveTextureARB'),
+    glBindBuffer: same('uu', 'glBindBufferARB'),
+    glBufferData: TABLE.glBufferDataARB,
+    glBufferSubData: TABLE.glBufferSubDataARB,
+    glVertexAttribPointer: same('uiubiu', 'glVertexAttribPointerARB'),
+    glEnableVertexAttribArray: same('u', 'glEnableVertexAttribArrayARB'),
+    glDisableVertexAttribArray: same('u', 'glDisableVertexAttribArrayARB'),
+    glBlendFuncSeparate: same('uuuu', 'glBlendFuncSeparate'),
+    glBlendEquation: same('u', 'glBlendEquation'),
+    glBlendEquationSeparate: same('uu', 'glBlendEquationSeparate'),
+    glBlendColor: same('ffff', 'glBlendColor'),
+    glStencilFuncSeparate: same('uuiu', 'glStencilFuncSeparate'),
+    glStencilOpSeparate: same('uuuu', 'glStencilOpSeparate'),
+    glStencilMaskSeparate: same('uu', 'glStencilMaskSeparate'),
+    glUseProgram: same('u', 'glUseProgram'),
+});
+TABLE.glBindFramebuffer = { args: 2,
+    make: (context, c)=>context.bindFramebuffer(c.arg(0) >>> 0, c.arg(1) >>> 0, false) };
+TABLE.glBindFramebufferEXT = { args: 2,
+    make: (context, c)=>context.bindFramebuffer(c.arg(0) >>> 0, c.arg(1) >>> 0, true) };
+
+/**
+ * The most elements of a uniform vector form a record copies, a thousand
+ * words at most, what the run decodes a record's copy through holds; past
+ * it the host reads the program's memory itself.
+ */
+const UNIFORM_ELEMENTS = 256;
+/** And of a matrix form. */
+const UNIFORM_MATRICES = 64;
+
+for (const n of [1, 2, 3, 4])
+{
+    for (const kind of /** @type {const} */ (['f', 'i']))
+    {
+        const valueOf = kind === 'f' ? asFloat : (/** @type {number} */ word)=>word | 0;
+        TABLE[`glUniform${n}${kind}`] = {
+            args: 1 + n,
+            make: (context, c)=>{
+                const values = [];
+                for (let k = 0; k < n; k++)
+                {
+                    values.push(valueOf(c.arg(1 + k)));
+                }
+                return context.uniform(c.arg(0) | 0, 1, values, kind, n);
+            },
+        };
+        if (n === 3)
+        {
+            continue;
+        }
+        TABLE[`glUniform${n}${kind}v`] = {
+            args: 3, pointer: 2,
+            count: { arg: 1, shift: Math.log2(n * 4), most: UNIFORM_ELEMENTS },
+            make: (context, c)=>context.uniform(c.arg(0) | 0, c.arg(1) | 0,
+                kind === 'f' ? c.first('floats', (c.arg(1) | 0) * n)
+                    : c.first('ints', (c.arg(1) | 0) * n), kind, n),
+        };
+    }
+}
+for (const size of [2, 4])
+{
+    TABLE[`glUniformMatrix${size}fv`] = {
+        args: 4, pointer: 3,
+        count: { arg: 1, shift: Math.log2(size * size * 4), most: UNIFORM_MATRICES },
+        make: (context, c)=>context.uniformMatrix(c.arg(0) | 0, c.arg(1) | 0, c.arg(2) & 0xff,
+            c.first('floats', (c.arg(1) | 0) * size * size), size, size),
+    };
+}
+TABLE.glUniformMatrix2x4fv = {
+    args: 4, pointer: 3,
+    count: { arg: 1, shift: 5, most: UNIFORM_MATRICES },
+    make: (context, c)=>context.uniformMatrix(c.arg(0) | 0, c.arg(1) | 0, c.arg(2) & 0xff,
+        c.first('floats', (c.arg(1) | 0) * 8), 2, 4),
+};
+TABLE.glUniformMatrix4x2fv = {
+    args: 4, pointer: 3,
+    count: { arg: 1, shift: 5, most: UNIFORM_MATRICES },
+    make: (context, c)=>context.uniformMatrix(c.arg(0) | 0, c.arg(1) | 0, c.arg(2) & 0xff,
+        c.first('floats', (c.arg(1) | 0) * 8), 4, 2),
+};
+
+// A unit's texture coordinates in immediate mode, under the extension's names
+// and the core's: a multitextured program makes one a vertex for each unit (a
+// lightmap's beside the surface's), as many as its glVertex calls. Components
+// not given are r 0 and q 1.
+for (const count of [2, 3, 4])
+{
+    /** @param {(i: number) => number} at */
+    const coordinates = at=>[at(0), at(1), count > 2 ? at(2) : 0, count > 3 ? at(3) : 1];
+    /** @type {import('../d3d8/commands.js').CommandEntry} */
+    const given = { args: 1 + count,
+        make: (context, c)=>context.glMultiTexCoord4fARB(c.arg(0) >>> 0,
+            ...coordinates(i=>asFloat(c.arg(1 + i)))) };
+    /** @type {import('../d3d8/commands.js').CommandEntry} */
+    const pointed = { args: 2, pointer: 1, bytes: count * 4,
+        make: (context, c)=>context.glMultiTexCoord4fARB(c.arg(0) >>> 0,
+            ...coordinates(i=>c.floats[i])) };
+    for (const suffix of ['ARB', ''])
+    {
+        TABLE[`glMultiTexCoord${count}f${suffix}`] = given;
+        TABLE[`glMultiTexCoord${count}fv${suffix}`] = pointed;
+    }
+}
 
 /** The calls, numbered as the ring records them: their order here. */
 const NAMES = /** @type {[string, number][]} */ (Object.keys(TABLE).map(name=>[name, 0]));

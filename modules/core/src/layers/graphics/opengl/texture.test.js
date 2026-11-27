@@ -156,7 +156,7 @@ test('every sized internal format GL 1.1 names has its base format', ()=>{
 });
 
 test('decodeS3tc and compressedBytes read the GL S3TC enum, the decoding itself is'
-    + ' webgpu/internal/s3tc.js\'s (see its own tests)', ()=>{
+    + ' media/internal/s3tc.js\'s (see its own tests)', ()=>{
     // colour0 = pure red in 5-6-5 (0xf800), colour1 = pure blue (0x001f),
     // colour0 <= colour1 after the swap below: the block has three colours
     // and index 3 -- the last texel here -- is the punch-through one.

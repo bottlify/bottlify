@@ -235,6 +235,9 @@ test('DrawState embosses disabled text and takes the mnemonic out of prefix text
     assert.equal(table.DrawStateA.handler([HDC, 0, 0, TEXT, 2, 5, 6, 0, 0, DST_TEXT]), 1);
     assert.deepEqual(texts.splice(0), [[5, 6, '&R', undefined]],
         'two characters as counted, the ampersand kept, in the context\'s own colour');
+    // Wine's text test, test_DrawState: no text fails, counted or not.
+    assert.equal(table.DrawStateA.handler([HDC, 0, 0, 0, 4, 5, 6, 0, 0, DST_TEXT]), 0);
+    assert.equal(table.DrawStateA.handler([HDC, 0, 0, 0, 0, 5, 6, 0, 0, DST_TEXT]), 0);
     const DST_COMPLEX = 0;
     assert.equal(table.DrawStateA.handler([HDC, 0, 0x401000, 0, 0, 0, 0, 8, 8, DST_COMPLEX]), 1,
         'a procedure\'s drawing is left out and the call succeeds');
@@ -327,4 +330,37 @@ test('DrawFocusRect inverts the rectangle\'s one-pixel border through the gray b
         [HDC, { left: 10, top: 21, right: 11, bottom: 39 }, true],
         [HDC, { left: 49, top: 21, right: 50, bottom: 39 }, true],
     ], 'dotted, so drawing it twice takes it away and it shows over any picture');
+});
+
+test('DrawText on a handle that is no context answers zero and reads nothing', ()=>{
+    // Wine's text test: DrawTextExW((HDC)0xdeadbeef, (LPWSTR)0xdeadbeef, 100000, ...)
+    // is zero with the last error untouched; the ANSI form says the handle.
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {number[]} */
+    const read = [];
+    const { table } = createPaintFunctions({
+        host: /** @type {any} */ ({
+            readMemory: (/** @type {number} */ address)=>{
+                read.push(address);
+                return new Uint8Array(0);
+            },
+            writeMemory: ()=>{},
+            readCString: ()=>'',
+            setLastError: (/** @type {number} */ code)=>errors.push(code),
+            draw: { isContext: (/** @type {number} */ hdc)=>hdc === 0x44 },
+        }),
+        live: ()=>null,
+        WM_PAINT: 0x000f,
+        geometry: /** @type {any} */ ({}),
+        send: ()=>0,
+        invalidated: ()=>{},
+        painted: ()=>{},
+    });
+    assert.equal(table.DrawTextExW.handler([0xdeadbeef, 0xdeadbeef, 100000, 0x100, 0, 0]), 0);
+    assert.equal(table.DrawTextW.handler([0xdeadbeef, 0, -1, 0xdeadbeef, 0x400]), 0);
+    assert.deepEqual(errors, []);
+    assert.equal(table.DrawTextExA.handler([0xdeadbeef, 0, -1, 0xdeadbeef, 0x400, 0]), 0);
+    assert.deepEqual(errors, [6]);
+    assert.deepEqual(read, []);
 });

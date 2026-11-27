@@ -19,7 +19,7 @@
  */
 
 import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE, parseDxbc } from './dxbc.js';
-import { OPCODE, OPERAND, SELECTION } from './sm4.js';
+import { MODIFIER, OPCODE, OPERAND, SELECTION } from './sm4.js';
 
 const COMPONENT_INDEX = { x: 0, y: 1, z: 2, w: 3 };
 
@@ -60,6 +60,31 @@ export const r = (index, components)=>register(OPERAND.TEMP, [index], components
 export const v = (index, components)=>register(OPERAND.INPUT, [index], components);
 /** @param {number} index @param {string} [components] */
 export const o = (index, components)=>register(OPERAND.OUTPUT, [index], components);
+/** A hull or domain shader's input control point. @param {number} point @param {number} index
+ *  @param {string} [components] */
+export const vicp = (point, index, components)=>
+    register(OPERAND.INPUT_CONTROL_POINT, [point, index], components);
+/** A hull shader's input control point as its control point phase names it: v[point][index].
+ *  @param {number} point @param {number} index @param {string} [components] */
+export const vPoint = (point, index, components)=>
+    register(OPERAND.INPUT, [point, index], components);
+/** A hull shader's output control point, as a later phase reads it.
+ *  @param {number} point @param {number} index @param {string} [components] */
+const vocp = (point, index, components)=>
+    register(OPERAND.OUTPUT_CONTROL_POINT, [point, index], components);
+/** A patch constant, as a join phase or a domain shader reads it.
+ *  @param {number} index @param {string} [components] */
+export const vpc = (index, components)=>register(OPERAND.INPUT_PATCH_CONSTANT, [index], components);
+/** @param {string} [components] */
+const vOutputControlPointID = components=>
+    register(OPERAND.OUTPUT_CONTROL_POINT_ID, [], components);
+/** @param {string} [components] */
+const vForkInstanceID = components=>
+    register(OPERAND.INPUT_FORK_INSTANCE_ID, [], components);
+/** @param {string} [components] */
+const vDomain = components=>register(OPERAND.INPUT_DOMAIN_POINT, [], components);
+/** @param {string} [components] */
+const vPrim = components=>register(OPERAND.INPUT_PRIMITIVE_ID, [], components);
 /** @param {number} slot @param {number} index @param {string} [components] */
 export const cb = (slot, index, components)=>
     register(OPERAND.CONSTANT_BUFFER, [slot, index], components);
@@ -69,6 +94,9 @@ export const t = (slot, components)=>register(OPERAND.RESOURCE, [slot], componen
 export const s = slot=>({ type: OPERAND.SAMPLER, indices: [slot] });
 export const nullDest = ()=>({ type: OPERAND.NULL, indices: [] });
 export const oDepth = ()=>({ type: OPERAND.OUTPUT_DEPTH, indices: [] });
+export const oMask = ()=>({ type: OPERAND.OUTPUT_COVERAGE_MASK, indices: [] });
+/** @param {string} [components] */
+export const vCoverage = components=>register(OPERAND.INPUT_COVERAGE_MASK, [], components);
 
 /**
  * @param {AsmOperand} operand
@@ -106,19 +134,39 @@ export const lu = (...values)=>({
     immediate: values.map(value=>value >>> 0),
 });
 
+/** @param {number[]} values one or two doubles @returns {AsmOperand} */
+export const dl = (...values)=>({
+    type: OPERAND.IMMEDIATE64,
+    indices: [],
+    immediate: values.flatMap(value=>{
+        const words = new DataView(new ArrayBuffer(8));
+        words.setFloat64(0, value, true);
+        return [words.getUint32(0, true), words.getUint32(4, true)];
+    }),
+});
+
 /** @param {AsmOperand} operand @param {boolean} destination */
 function encodeOperand(operand, destination){
     /** @type {number[]} */
     const words = [];
-    const isImmediate = operand.type === OPERAND.IMMEDIATE32;
+    const isImmediate = operand.type === OPERAND.IMMEDIATE32
+        || operand.type === OPERAND.IMMEDIATE64;
     let token = 0;
     if (isImmediate)
     {
+        // A dword or a double is one component; four dwords or two doubles four.
         const count = /** @type {number[]} */ (operand.immediate).length;
-        token |= count === 1 ? 1 : 2;
+        token |= count === (operand.type === OPERAND.IMMEDIATE64 ? 2 : 1) ? 1 : 2;
+    }
+    else if (operand.type === OPERAND.SAMPLER && operand.swizzle)
+    {
+        // A gather's sampler selects the channel it gathers.
+        token |= 2 | (SELECTION.SELECT1 << 2)
+            | (COMPONENT_INDEX[/** @type {'x'|'y'|'z'|'w'} */ (operand.swizzle[0])] << 4);
     }
     else if (operand.type === OPERAND.NULL || operand.type === OPERAND.SAMPLER
-        || operand.type === OPERAND.LABEL)
+        || operand.type === OPERAND.LABEL || operand.type === OPERAND.FUNCTION_BODY
+        || operand.type === OPERAND.INTERFACE)
     {
         // None names a component: a sampler or a label is one thing and null
         // is nothing.
@@ -186,10 +234,12 @@ function encodeOperand(operand, destination){
  * @property {number} opcode
  * @property {AsmOperand[]} [operands]
  * @property {number[]} [extra]        Trailing dwords: a system value, a return type.
+ * @property {number[]} [leading]      Dwords before the operands: `fcall`'s call site.
  * @property {number} [control]        Bits 11..23 of the opcode token.
  * @property {boolean} [saturate]
  * @property {boolean} [nonZero]
  * @property {number} [destinations]   How many leading operands are destinations; one by default.
+ * @property {number[]} [offset]       An immediate texel offset (`aoffimmi`), u, v, w.
  */
 
 /**
@@ -201,6 +251,7 @@ function encodeInstruction(instruction){
     const destinations = instruction.destinations ?? 1;
     /** @type {number[]} */
     const words = [];
+    words.push(...(instruction.leading ?? []));
     operands.forEach((operand, index)=>{
         words.push(...encodeOperand(operand, index < destinations));
     });
@@ -215,8 +266,17 @@ function encodeInstruction(instruction){
     {
         token |= 0x40000;
     }
-    token |= (words.length + 1) << 24;
-    return [token >>> 0, ...words];
+    // An immediate texel offset is an extended token of sample controls.
+    const extended = instruction.offset
+        ? [(1 | ((instruction.offset[0] & 0xf) << 9) | ((instruction.offset[1] & 0xf) << 13)
+            | ((instruction.offset[2] & 0xf) << 17)) >>> 0]
+        : [];
+    if (extended.length > 0)
+    {
+        token |= 0x80000000;
+    }
+    token |= (words.length + extended.length + 1) << 24;
+    return [token >>> 0, ...extended, ...words];
 }
 
 // --- the instructions, as a test spells them ---
@@ -230,6 +290,29 @@ const arithmetic = opcode=>
         op(opcode, [dest, ...sources]);
 
 export const mov = arithmetic(OPCODE.MOV);
+/** The rasterizer, which `sampleinfo` and `samplepos` read the sample count of. */
+export const rasterizer = ()=>register(OPERAND.RASTERIZER, [], 'xyzw');
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} resource  a texture or the rasterizer
+ * @param {boolean} [integer]  `_uint`
+ */
+export const sampleInfo = (dest, resource, integer = false)=>
+    op(OPCODE.SAMPLE_INFO, [dest, resource], integer ? { control: 1 } : {});
+/** @param {AsmOperand} dest @param {AsmOperand} resource @param {AsmOperand} index */
+export const samplePos = (dest, resource, index)=>op(OPCODE.SAMPLE_POS, [dest, resource, index]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler
+ */
+export const lod = (dest, coordinate, texture, sampler)=>
+    op(OPCODE.LOD, [dest, coordinate, texture, sampler]);
+/** @param {AsmOperand} dest @param {AsmOperand} input */
+export const evalCentroid = (dest, input)=>op(OPCODE.EVAL_CENTROID, [dest, input]);
+/** @param {AsmOperand} dest @param {AsmOperand} input @param {AsmOperand} index */
+export const evalSampleIndex = (dest, input, index)=>
+    op(OPCODE.EVAL_SAMPLE_INDEX, [dest, input, index]);
+/** @param {AsmOperand} dest @param {AsmOperand} input @param {AsmOperand} offset */
+export const evalSnapped = (dest, input, offset)=>op(OPCODE.EVAL_SNAPPED, [dest, input, offset]);
 export const movc = arithmetic(OPCODE.MOVC);
 export const add = arithmetic(OPCODE.ADD);
 export const mul = arithmetic(OPCODE.MUL);
@@ -270,6 +353,25 @@ export const ftou = arithmetic(OPCODE.FTOU);
 export const roundNe = arithmetic(OPCODE.ROUND_NE);
 export const roundNi = arithmetic(OPCODE.ROUND_NI);
 export const umin = arithmetic(OPCODE.UMIN);
+export const dadd = arithmetic(OPCODE.DADD);
+export const dmul = arithmetic(OPCODE.DMUL);
+export const ddiv = arithmetic(OPCODE.DDIV);
+export const drcp = arithmetic(OPCODE.DRCP);
+export const dfma = arithmetic(OPCODE.DFMA);
+export const dmin = arithmetic(OPCODE.DMIN);
+export const dmax = arithmetic(OPCODE.DMAX);
+export const dmov = arithmetic(OPCODE.DMOV);
+export const dmovc = arithmetic(OPCODE.DMOVC);
+export const deq = arithmetic(OPCODE.DEQ);
+export const dne = arithmetic(OPCODE.DNE);
+export const dlt = arithmetic(OPCODE.DLT);
+export const dge = arithmetic(OPCODE.DGE);
+export const dtof = arithmetic(OPCODE.DTOF);
+export const dtoi = arithmetic(OPCODE.DTOI);
+export const dtou = arithmetic(OPCODE.DTOU);
+export const ftod = arithmetic(OPCODE.FTOD);
+export const itod = arithmetic(OPCODE.ITOD);
+export const utod = arithmetic(OPCODE.UTOD);
 export const umax = arithmetic(OPCODE.UMAX);
 
 /** @param {AsmOperand} dest @param {AsmOperand[]} sources */
@@ -322,6 +424,18 @@ export const sampleD = (dest, coordinate, texture, sampler, ddx, ddy)=>
  */
 export const gather4 = (dest, coordinate, texture, sampler)=>
     op(OPCODE.GATHER4, [dest, coordinate, texture, sampler]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} texture
+ * @param {AsmOperand} sampler @param {AsmOperand} reference
+ */
+export const gather4C = (dest, coordinate, texture, sampler, reference)=>
+    op(OPCODE.GATHER4_C, [dest, coordinate, texture, sampler, reference]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} coordinate @param {AsmOperand} offset
+ * @param {AsmOperand} texture @param {AsmOperand} sampler
+ */
+export const gather4Po = (dest, coordinate, offset, texture, sampler)=>
+    op(OPCODE.GATHER4_PO, [dest, coordinate, offset, texture, sampler]);
 /** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} texture */
 export const ld = (dest, address, texture)=>op(OPCODE.LD, [dest, address, texture]);
 /**
@@ -359,8 +473,35 @@ const labelOperand = index=>({ type: OPERAND.LABEL, indices: [index] });
 export const label = index=>op(OPCODE.LABEL, [labelOperand(index)], { destinations: 0 });
 /** @param {number} index */
 export const call = index=>op(OPCODE.CALL, [labelOperand(index)], { destinations: 0 });
+/** @param {number} index  Where function body `index` begins: `label fb#`. */
+export const functionBody = index=>op(OPCODE.LABEL,
+    [{ type: OPERAND.FUNCTION_BODY, indices: [index] }], { destinations: 0 });
+/** @param {number} index */
+export const dclFunctionBody = index=>op(OPCODE.DCL_FUNCTION_BODY, [], { extra: [index] });
+/** @param {number} index @param {number[]} bodies  One for each call site. */
+export const dclFunctionTable = (index, bodies)=>op(OPCODE.DCL_FUNCTION_TABLE, [],
+    { extra: [index, bodies.length, ...bodies] });
+/**
+ * `dcl_interface fp#[size][sites] = { tables }`.
+ *
+ * @param {number} index @param {number} size @param {number} sites @param {number[]} tables
+ */
+export const dclInterface = (index, size, sites, tables)=>op(OPCODE.DCL_INTERFACE, [],
+    { extra: [index, sites, ((size << 16) | tables.length) >>> 0, ...tables] });
+/**
+ * `fcall fp#[element][site]`.
+ *
+ * @param {number} site @param {number} pointer @param {number} element
+ * @param {AsmOperand} [relative]  Added to the element.
+ */
+export const fcall = (site, pointer, element, relative)=>op(OPCODE.INTERFACE_CALL,
+    [{ type: OPERAND.INTERFACE, indices: [pointer, element], ...(relative ? { relative } : {}) }],
+    { destinations: 0, leading: [site] });
+/** @param {number} index @param {string} [components] */
+export const thisPointer = (index, components)=>
+    register(OPERAND.THIS_POINTER, [index], components);
 /** @param {AsmOperand} condition @param {number} index */
-export const callcNz = (condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
+export const callcNz =(condition, index)=>op(OPCODE.CALLC, [condition, labelOperand(index)],
     { nonZero: true, destinations: 0 });
 /** @param {AsmOperand} selector */
 export const switchOn = selector=>op(OPCODE.SWITCH, [selector], { destinations: 0 });
@@ -387,6 +528,9 @@ export const dclInputPs = (input, interpolation = 2)=>
 /** @param {AsmOperand} input @param {number} systemValue */
 export const dclInputPsSiv = (input, systemValue)=>
     op(OPCODE.DCL_INPUT_PS_SIV, [input], { control: 2, extra: [systemValue] });
+/** @param {AsmOperand} input @param {number} systemValue */
+export const dclInputPsSgv = (input, systemValue)=>
+    op(OPCODE.DCL_INPUT_PS_SGV, [input], { extra: [systemValue] });
 /** @param {AsmOperand} output */
 export const dclOutput = output=>op(OPCODE.DCL_OUTPUT, [output]);
 /** @param {AsmOperand} output @param {number} systemValue */
@@ -402,10 +546,127 @@ export const dclResource = (slot, dimension, returnType)=>op(OPCODE.DCL_RESOURCE
 });
 /** @param {number} slot @param {number} [mode] */
 export const dclSampler = (slot, mode = 0)=>op(OPCODE.DCL_SAMPLER, [s(slot)], { control: mode });
-export const dclGlobalFlags = ()=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: 1 });
+/** @param {AsmOperand} first @param {number} count */
+export const dclIndexRange = (first, count)=>
+    op(OPCODE.DCL_INDEX_RANGE, [first], { extra: [count] });
+/** @param {number} [flags]  D3D10_SB_GLOBAL_FLAGS: 1 refactoring allowed, 4 early depth tests. */
+export const dclGlobalFlags = (flags = 1)=>op(OPCODE.DCL_GLOBAL_FLAGS, [], { control: flags });
 
 /** @param {number[][]} rows */
 export const immediateConstantBuffer = rows=>({ customData: rows.flat() });
+
+// --- Shader Model 5 ---
+
+/** @param {number} slot @param {string} [components] */
+export const u = (slot, components)=>register(OPERAND.UNORDERED_ACCESS_VIEW, [slot], components);
+/** @param {number} slot @param {string} [components] */
+export const g = (slot, components)=>
+    register(OPERAND.THREAD_GROUP_SHARED_MEMORY, [slot], components);
+/** SV_DispatchThreadID. @param {string} [components] */
+export const vThreadID = components=>register(OPERAND.INPUT_THREAD_ID, [], components);
+/** SV_GroupIndex. @param {string} [components] */
+export const vThreadIDInGroupFlattened = components=>
+    register(OPERAND.INPUT_THREAD_ID_IN_GROUP_FLATTENED, [], components);
+/** @param {number} x @param {number} y @param {number} z */
+export const dclThreadGroup = (x, y, z)=>op(OPCODE.DCL_THREAD_GROUP, [], { extra: [x, y, z] });
+// A hull shader's phases and what it declares of the stage: the counts and
+// the tessellator's domain (1 isoline, 2 tri, 3 quad), partitioning (1
+// integer, 2 pow2, 3 fractional odd, 4 fractional even) and output (1 point,
+// 2 line, 3 triangle cw, 4 triangle ccw), as the token numbers them.
+export const hsDecls = ()=>op(OPCODE.HS_DECLS, []);
+export const hsControlPointPhase = ()=>op(OPCODE.HS_CONTROL_POINT_PHASE, []);
+const hsForkPhase = ()=>op(OPCODE.HS_FORK_PHASE, []);
+export const hsJoinPhase = ()=>op(OPCODE.HS_JOIN_PHASE, []);
+/** @param {number} count */
+export const dclInputControlPointCount = count=>
+    op(OPCODE.DCL_INPUT_CONTROL_POINT_COUNT, [], { control: count });
+/** @param {number} count */
+export const dclOutputControlPointCount = count=>
+    op(OPCODE.DCL_OUTPUT_CONTROL_POINT_COUNT, [], { control: count });
+/** @param {number} domain */
+export const dclTessDomain = domain=>op(OPCODE.DCL_TESS_DOMAIN, [], { control: domain });
+/** @param {number} partitioning */
+export const dclTessPartitioning = partitioning=>
+    op(OPCODE.DCL_TESS_PARTITIONING, [], { control: partitioning });
+/** @param {number} output */
+export const dclTessOutputPrimitive = output=>
+    op(OPCODE.DCL_TESS_OUTPUT_PRIMITIVE, [], { control: output });
+// A geometry shader's: its input primitive (1 point, 2 line, 3 triangle, 6 line
+// with adjacency, 7 triangle with adjacency), output topology (1 point list, 3
+// line strip, 5 triangle strip), vertices it may emit, and its vertices.
+/** @param {number} primitive */
+const dclGsInputPrimitive = primitive=>
+    op(OPCODE.DCL_GS_INPUT_PRIMITIVE, [], { control: primitive });
+/** @param {number} topology */
+const dclGsOutputTopology = topology=>
+    op(OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, [], { control: topology });
+/** @param {number} count */
+const dclMaxOutputVertexCount = count=>
+    op(OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT, [], { extra: [count] });
+/** A geometry shader's input: a register of one vertex of its primitive.
+ *  @param {number} vertex @param {number} index @param {string} [components] */
+const vgs = (vertex, index, components)=>
+    register(OPERAND.INPUT, [vertex, index], components);
+const emit = ()=>op(OPCODE.EMIT, []);
+const cut = ()=>op(OPCODE.CUT, []);
+/** @param {number} count */
+const dclHsForkPhaseInstanceCount = count=>
+    op(OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT, [], { extra: [count] });
+/** @param {number} slot */
+export const dclUavRaw = slot=>op(OPCODE.DCL_UAV_RAW, [u(slot)]);
+/** @param {number} slot @param {number} stride @param {boolean} [counter] */
+export const dclUavStructured = (slot, stride, counter = false)=>op(OPCODE.DCL_UAV_STRUCTURED,
+    [u(slot)], { extra: [stride], control: counter ? 1 << 12 : 0 });
+/** @param {number} slot @param {number} dimension @param {number} returnType */
+export const dclUavTyped = (slot, dimension, returnType)=>op(OPCODE.DCL_UAV_TYPED, [u(slot)], {
+    control: dimension,
+    extra: [returnType | (returnType << 4) | (returnType << 8) | (returnType << 12)],
+});
+/** @param {number} slot @param {number} bytes */
+export const dclTgsmRaw = (slot, bytes)=>op(OPCODE.DCL_TGSM_RAW, [g(slot)], { extra: [bytes] });
+/** @param {number} slot */
+export const dclResourceRaw = slot=>op(OPCODE.DCL_RESOURCE_RAW, [t(slot)]);
+/** @param {number} slot @param {number} stride */
+export const dclResourceStructured = (slot, stride)=>
+    op(OPCODE.DCL_RESOURCE_STRUCTURED, [t(slot)], { extra: [stride] });
+/** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} memory */
+export const ldRaw = (dest, address, memory)=>op(OPCODE.LD_RAW, [dest, address, memory]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const storeRaw = (memory, address, value)=>op(OPCODE.STORE_RAW, [memory, address, value]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} index @param {AsmOperand} offset
+ * @param {AsmOperand} memory
+ */
+export const ldStructured = (dest, index, offset, memory)=>
+    op(OPCODE.LD_STRUCTURED, [dest, index, offset, memory]);
+/**
+ * @param {AsmOperand} memory @param {AsmOperand} index @param {AsmOperand} offset
+ * @param {AsmOperand} value
+ */
+export const storeStructured = (memory, index, offset, value)=>
+    op(OPCODE.STORE_STRUCTURED, [memory, index, offset, value]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const storeUavTyped = (memory, address, value)=>
+    op(OPCODE.STORE_UAV_TYPED, [memory, address, value]);
+/** @param {AsmOperand} dest @param {AsmOperand} address @param {AsmOperand} memory */
+export const ldUavTyped = (dest, address, memory)=>
+    op(OPCODE.LD_UAV_TYPED, [dest, address, memory]);
+/** @param {AsmOperand} memory @param {AsmOperand} address @param {AsmOperand} value */
+export const atomicIadd = (memory, address, value)=>
+    op(OPCODE.ATOMIC_IADD, [memory, address, value]);
+/**
+ * @param {AsmOperand} dest @param {AsmOperand} memory @param {AsmOperand} address
+ * @param {AsmOperand} value
+ */
+export const immAtomicImax = (dest, memory, address, value)=>
+    op(OPCODE.IMM_ATOMIC_IMAX, [dest, memory, address, value], { destinations: 2 });
+/** @param {AsmOperand} dest @param {AsmOperand} memory */
+export const immAtomicAlloc = (dest, memory)=>
+    op(OPCODE.IMM_ATOMIC_ALLOC, [dest, memory], { destinations: 2 });
+/** @param {number} flags */
+export const sync = flags=>op(OPCODE.SYNC, [], { control: flags, destinations: 0 });
+/** @param {AsmOperand} dest @param {AsmOperand} memory */
+export const bufinfo = (dest, memory)=>op(OPCODE.BUFINFO, [dest, memory]);
 
 // --- the container ---
 
@@ -463,7 +724,7 @@ function encodeSignature(elements, readWriteDefault){
  * @param {(AsmInstruction | { customData: number[] })[]} instructions
  * @returns {Uint8Array}
  */
-function encodeProgram(kind, instructions){
+function encodeProgram(kind, instructions, major = 4){
     /** @type {number[]} */
     const words = [];
     for (const instruction of instructions)
@@ -478,7 +739,7 @@ function encodeProgram(kind, instructions){
     }
     const bytes = new Uint8Array((words.length + 2) * 4);
     const view = new DataView(bytes.buffer);
-    view.setUint32(0, ((kind << 16) | (4 << 4)) >>> 0, true);
+    view.setUint32(0, ((kind << 16) | (major << 4)) >>> 0, true);
     view.setUint32(4, words.length + 2, true);
     words.forEach((word, index)=>view.setUint32(8 + index * 4, word, true));
     return bytes;
@@ -522,7 +783,9 @@ export function container(chunks){
  * @property {number} kind
  * @property {AsmSignatureElement[]} [inputs]
  * @property {AsmSignatureElement[]} [outputs]
+ * @property {AsmSignatureElement[]} [patchConstants]  A hull or domain shader's PCSG.
  * @property {(AsmInstruction | { customData: number[] })[]} instructions
+ * @property {number} [major]  The shader model: 4, or 5 for what only 5 has.
  */
 
 /**
@@ -533,14 +796,17 @@ export function assemble(shader){
     return container([
         { name: 'ISGN', bytes: encodeSignature(shader.inputs ?? [], 0xf) },
         { name: 'OSGN', bytes: encodeSignature(shader.outputs ?? [], 0) },
-        { name: 'SHDR', bytes: encodeProgram(shader.kind, shader.instructions) },
+        ...(shader.patchConstants
+            ? [{ name: 'PCSG', bytes: encodeSignature(shader.patchConstants, 0) }] : []),
+        { name: shader.major === 5 ? 'SHEX' : 'SHDR',
+            bytes: encodeProgram(shader.kind, shader.instructions, shader.major) },
     ]);
 }
 
 // --- the programs the render tests draw with ---
 
 /** The position element of an input signature, at register zero. */
-export const POSITION_IN = Object.freeze({ name: 'POSITION', register: 0 });
+const POSITION_IN = Object.freeze({ name: 'POSITION', register: 0 });
 
 /**
  * A vertex shader that passes its position straight through, and a pixel
@@ -555,6 +821,31 @@ export function passThroughVertexShader(){
             dclInput(v(0)),
             dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
             mov(o(0), v(0)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A geometry shader that passes each triangle on as a strip of its three
+ * vertices: SV_POSITION in and out.
+ */
+export function triangleGeometryShader(){
+    const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+    return assemble({
+        kind: SHADER_KIND.GEOMETRY,
+        inputs: [position],
+        outputs: [position],
+        instructions: [
+            dclGsInputPrimitive(3),
+            dclGsOutputTopology(5),
+            dclMaxOutputVertexCount(3),
+            dclInputSiv(vgs(3, 0), SYSTEM_VALUE.POSITION),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            mov(o(0), vgs(0, 0)), emit(),
+            mov(o(0), vgs(1, 0)), emit(),
+            mov(o(0), vgs(2, 0)), emit(),
+            cut(),
             ret(),
         ],
     });
@@ -847,3 +1138,225 @@ export const constantBufferShader = ()=>withChunks(solidPixelShader([0, 0, 0, 1]
         target: 0xffff0400, flags: 0x100, buffers: wineConstantBuffers(),
     }),
 }]);
+
+/**
+ * A row of the immediate constant buffer, indexed by a register's component.
+ *
+ * @param {AsmOperand} relative  one component selected
+ * @param {string} [components]
+ * @returns {AsmOperand}
+ */
+const icbAt = (relative, components)=>({
+    ...register(OPERAND.IMMEDIATE_CONSTANT_BUFFER, [0], components), relative });
+
+/**
+ * A hull shader of a quad domain, written as fxc writes the one of Wine's
+ * and vkd3d's tessellation tests whose patch-constant function loops: one
+ * input control point; a control point phase that places four output points
+ * about it from an immediate constant buffer, by vOutputControlPointID; two
+ * instanced fork phases that write the edge and inside factors (1.0) through
+ * a register index; and a fork phase that writes the four output points'
+ * mean (CENTER) from the output control points. Integer partitioning,
+ * clockwise triangles.
+ *
+ * @returns {Uint8Array}
+ */
+export function forkPhaseHullShader(){
+    const corners = [[0, 0, 0, 1], [0, 2, 0, 1], [2, 0, 0, 1], [2, 2, 0, 1]]
+        .map(row=>row.map(floatBits));
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [
+            ...[0, 1, 2, 3].map(index=>({ name: 'SV_TessFactor', index,
+                systemValue: SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR, register: index, mask: 1 })),
+            ...[0, 1].map(index=>({ name: 'SV_InsideTessFactor', index,
+                systemValue: SYSTEM_VALUE.QUAD_INSIDE_TESSFACTOR, register: 4 + index, mask: 1 })),
+            { name: 'CENTER', register: 6, mask: 7 },
+        ],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(1),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(1),
+            dclTessOutputPrimitive(3),
+            hsControlPointPhase(),
+            dclOutput(o(0)),
+            dclTemps(1),
+            immediateConstantBuffer(corners),
+            mov(r(0, 'x'), vOutputControlPointID('x')),
+            add(o(0), vicp(0, 0), icbAt(r(0, 'x'))),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(4),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), l(1)),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(2),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(4, 'x'), r(0, 'x')), l(1)),
+            ret(),
+            hsForkPhase(),
+            dclTemps(1),
+            add(r(0, 'xyz'), vocp(0, 0, 'xyz'), vocp(1, 0, 'xyz')),
+            add(r(0, 'xyz'), r(0, 'xyz'), vocp(2, 0, 'xyz')),
+            add(r(0, 'xyz'), r(0, 'xyz'), vocp(3, 0, 'xyz')),
+            mul(o(6, 'xyz'), r(0, 'xyz'), l(0.25, 0.25, 0.25, 0.25)),
+            ret(),
+        ],
+    });
+}
+
+/** A quad's tess factors, as a quad hull shader writes them and its domain shader reads them. */
+const QUAD_FACTORS = Object.freeze([
+    ...[0, 1, 2, 3].map(index=>({ name: 'SV_TessFactor', index,
+        systemValue: SYSTEM_VALUE.QUAD_EDGE_TESSFACTOR, register: index, mask: 1 })),
+    ...[0, 1].map(index=>({ name: 'SV_InsideTessFactor', index,
+        systemValue: SYSTEM_VALUE.QUAD_INSIDE_TESSFACTOR, register: 4 + index, mask: 1 })),
+]);
+
+/**
+ * A hull shader that makes a quad patch of one input point: four corners at
+ * the point plus `corners` (in the order of the domain's u, v: (0, 0),
+ * (0, 1), (1, 0), (1, 1)), every factor `factor`, the given partitioning and
+ * output primitive as the declarations number them (one past Direct3D's).
+ *
+ * @param {{ factor?: number, partitioning?: number, output?: number,
+ *     corners?: number[][] }} [options]
+ */
+export function quadHullShader(options = {}){
+    const corners = (options.corners ?? [[0, 0], [0, 2], [2, 0], [2, 2]])
+        .map(([x, y])=>[x, y, 0, 0].map(floatBits));
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(1),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(options.partitioning ?? 1),
+            dclTessOutputPrimitive(options.output ?? 3),
+            hsControlPointPhase(),
+            dclOutput(o(0)),
+            dclTemps(1),
+            immediateConstantBuffer(corners),
+            mov(r(0, 'x'), vOutputControlPointID('x')),
+            add(o(0), vicp(0, 0), icbAt(r(0, 'x'))),
+            ret(),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(6),
+            dclTemps(1),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), l(options.factor ?? 1)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A domain shader over `quadHullShader`'s patches: the position the domain
+ * point makes of the corners (point 0, plus u along point 2, plus v along
+ * point 1), and a colour of u, v, the primitive's id and 1.
+ */
+export function quadDomainShader(){
+    return assemble({
+        kind: SHADER_KIND.DOMAIN,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        outputs: [
+            { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'COLOR', register: 1 },
+        ],
+        instructions: [
+            dclTessDomain(3),
+            dclInput(vDomain('xy')),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)),
+            dclTemps(1),
+            add(r(0, 'x'), vicp(2, 0, 'x'), modified(vicp(0, 0, 'x'), MODIFIER.NEG)),
+            add(r(0, 'y'), vicp(1, 0, 'y'), modified(vicp(0, 0, 'y'), MODIFIER.NEG)),
+            mad(o(0, 'xy'), r(0, 'xy'), vDomain('xy'), vicp(0, 0, 'xy')),
+            mov(o(0, 'zw'), l(0, 0, 0, 1)),
+            mov(o(1, 'xy'), vDomain('xy')),
+            utof(o(1, 'z'), vPrim('x')),
+            mov(o(1, 'w'), l(1)),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A hull shader that passes four input points through as a quad patch (no
+ * control point phase), its six factors `factors` (four edges, two inside),
+ * integer partitioning and the given output primitive as the declaration
+ * numbers it: 3 triangles clockwise, 4 counter-clockwise.
+ *
+ * @param {{ factors: number[], output: number }} options
+ */
+export function passQuadHullShader(options){
+    return assemble({
+        kind: SHADER_KIND.HULL,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        outputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        instructions: [
+            hsDecls(),
+            dclInputControlPointCount(4),
+            dclOutputControlPointCount(4),
+            dclTessDomain(3),
+            dclTessPartitioning(1),
+            dclTessOutputPrimitive(options.output),
+            hsForkPhase(),
+            dclHsForkPhaseInstanceCount(6),
+            dclTemps(1),
+            immediateConstantBuffer(options.factors.map(factor=>[floatBits(factor), 0, 0, 0])),
+            mov(r(0, 'x'), vForkInstanceID('x')),
+            mov(indexedBy(o(0, 'x'), r(0, 'x')), icbAt(r(0, 'x'), 'x')),
+            ret(),
+        ],
+    });
+}
+
+/**
+ * A domain shader that places a quad's point as Wine's quad tessellation
+ * test does: lerp(lerp(p0, p1, u), lerp(p2, p3, u), v), and paints it green.
+ */
+export function lerpQuadDomainShader(){
+    return assemble({
+        kind: SHADER_KIND.DOMAIN,
+        major: 5,
+        inputs: [{ name: 'SV_Position', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        patchConstants: [...QUAD_FACTORS],
+        outputs: [
+            { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 },
+            { name: 'COLOR', register: 1 },
+        ],
+        instructions: [
+            dclTessDomain(3),
+            dclInput(vDomain('xy')),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION),
+            dclOutput(o(1)),
+            dclTemps(2),
+            add(r(0), vicp(1, 0), modified(vicp(0, 0), MODIFIER.NEG)),
+            mad(r(0), vDomain('xxxx'), r(0), vicp(0, 0)),
+            add(r(1), vicp(3, 0), modified(vicp(2, 0), MODIFIER.NEG)),
+            mad(r(1), vDomain('xxxx'), r(1), vicp(2, 0)),
+            add(r(1), r(1), modified(r(0), MODIFIER.NEG)),
+            mad(o(0), vDomain('yyyy'), r(1), r(0)),
+            mov(o(1), l(0, 1, 0, 1)),
+            ret(),
+        ],
+    });
+}

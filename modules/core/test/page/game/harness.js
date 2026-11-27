@@ -28,12 +28,10 @@ import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
 import { gcNudgeOf } from '../../../src/layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../../../src/layers/cpu/module.js';
+import { gpuFeaturesOf, gpuLimitsOf } from '../../../src/layers/graphics/webgpu/features.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 import { createInputRoute } from '../../../src/layers/input/route.js';
-import {
-    SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
-    slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
-} from '../../../src/layers/audio/output/mix.js';
+import { createSeam, mixBlock, tableViews } from '../../../src/layers/audio/output/mix.js';
 
 /** How much of each unbounded collection survives the trip back out. */
 const LIMITS = {
@@ -50,6 +48,7 @@ const LIMITS = {
     // the cap is what stops a long run turning into hundreds of megabytes of
     // text, not a judgement about which end matters.
     log: 400000,
+    lifetimes: 20000,
 };
 
 /**
@@ -109,7 +108,7 @@ const callLog = [];
  * @param {any} call
  * @returns {string}
  */
-export function formatCall(call){
+function formatCall(call){
     const args = (call.args ?? []).map((/** @type {number} */ value,
         /** @type {number} */ index)=>(
         call.strings?.[index]
@@ -117,7 +116,12 @@ export function formatCall(call){
             : `0x${(value >>> 0).toString(16)}`)).join(', ');
     const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
     const left = call.error ? `  [err ${call.error}]` : '';
-    return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
+    // Whose call: every process of a run writes to one log, and two copies of
+    // one program share every address.
+    const who = call.process === undefined ? ''
+        : `${String(call.image ?? '').split('\\').pop()}#${call.process.toString(16)}`
+            + `${call.thread === undefined ? '' : `/${call.thread}`}  `;
+    return `${who}${from}  ${call.name}(${args}) = ${call.result}${left}`;
 }
 
 /**
@@ -125,7 +129,7 @@ export function formatCall(call){
  *
  * @param {string[]} layout
  */
-export function regionsOf(layout){
+function regionsOf(layout){
     return layout.map(entry=>{
         const [name, extent] = entry.split(' ');
         const [base, size] = extent.split('+').map(Number);
@@ -144,7 +148,7 @@ export function regionsOf(layout){
  * @param {string[]} layout  As the memory layer reports it.
  * @returns {(address: number, mask?: number) => string}
  */
-export function symboliser(layout){
+function symboliser(layout){
     const regions = regionsOf(layout);
 
     return (address, mask = 0xffffffff)=>{
@@ -276,9 +280,9 @@ async function openDevice(errors){
     {
         return { available: false, reason: 'no adapter answered requestAdapter' };
     }
-    const features = ['texture-compression-bc', 'depth-clip-control']
-        .filter(feature=>adapter.features.has(feature));
-    const device = await adapter.requestDevice({ requiredFeatures: features });
+    // The product's device, so a run here draws as the launcher's does.
+    const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter),
+        requiredLimits: gpuLimitsOf(adapter) });
     device.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
         errors.push(`gpu:${event.error.message}`);
     });
@@ -524,16 +528,10 @@ const DRAIN_CAP_FRAMES = 16384;
  * moved off the per-turn `pump()` call into this timer instead of gone --
  * see `dbg/opengl/report-next-2.md` for what that costs in practice.
  *
- * Without shared memory there is no worklet this engine could ever hand a
- * ring to, so the ring is read here and dropped instead: what matters for a
- * measurement is that it is read on the clock, because a play cursor is what
- * the device consumed and a film that paces itself by its own sound has no
- * clock at all without one.
- *
  * @param {any} app
  * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} [capture]
  *     what was mixed between two moments of the run, kept to be written out
- * @param {((table: ArrayBufferLike, sampleRate: number) => void) | undefined} [elsewhere]
+ * @param {((table: Uint8Array, sampleRate: number) => void) | undefined} [elsewhere]
  *     who reads the table instead, on a thread of its own: the page, when the
  *     engine runs in a worker, as a launcher's worklet reads it off the engine's
  * @returns {string} how the sound is read
@@ -550,33 +548,7 @@ function drainSound(app, capture = null, elsewhere = undefined){
         drainTable(table, app.audio.format().sampleRate, capture);
         return 'table';
     }
-    const ring = app.audio.ring?.();
-    if (!ring)
-    {
-        return 'none';
-    }
-    const { sampleRate, channels } = app.audio.format();
-    const block = new Float32Array(ring.capacity * channels);
-    let readAt = performance.now();
-    setInterval(()=>{
-        // By elapsed time rather than a fixed count per turn: this page's main
-        // thread is inside the engine most of the time, so the reads are late
-        // and bursty, and only the clock keeps the total honest.
-        const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
-        const frames = Math.min(ring.capacity, owed);
-        if (frames <= 0)
-        {
-            return;
-        }
-        // The clock moves on by what was really taken, not by what was asked
-        // for. A device reading on its own thread never misses its turn; this
-        // one is on the thread the engine is holding, and a read that gave up
-        // whatever it was late for would model a device running slow -- which
-        // is indistinguishable, in a report, from an engine that cannot feed
-        // one.
-        readAt += ring.read(block.subarray(0, frames * channels)) * 1000 / sampleRate;
-    }, 20);
-    return 'ring';
+    return 'none';
 }
 
 /**
@@ -585,26 +557,14 @@ function drainSound(app, capture = null, elsewhere = undefined){
  * timer on the page's own thread instead of the audio-rendering thread. See
  * {@link drainSound}.
  *
- * @param {ArrayBufferLike} table @param {number} sampleRate
+ * @param {Uint8Array} table  the track table, a view of where it lies @param {number} sampleRate
  * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} capture
  */
 export function drainTable(table, sampleRate, capture){
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
-    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
-    const slots = [];
-    /** @type {ReturnType<typeof createSeam>[]} */
-    const seams = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
-        });
-        seams.push(createSeam());
-    }
     // The voices' mirrors, which a playing buffer is read from as a device
-    // reads its DMA region.
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    // reads its DMA region, with the header and the slots (`tableViews`).
+    const { global, slots, arena } = tableViews(table);
+    const seams = slots.map(()=>createSeam());
     const block = new Float32Array(DRAIN_CAP_FRAMES * 2);
     const started = performance.now();
     let readAt = started;
@@ -615,6 +575,11 @@ export function drainTable(table, sampleRate, capture){
         {
             return;
         }
+        // mixBlock adds into the block, as the worklet's does after zeroing
+        // it: left as the last tick made it, every block carried all the
+        // earlier ones, and a capture heard a drifting offset clipped to full
+        // scale where the program wrote clean sound.
+        block.fill(0, 0, blockFrames * 2);
         mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate, arena });
         const at = readAt - started;
         if (capture && at >= capture.fromMs && at < capture.toMs)
@@ -696,8 +661,10 @@ export function listen(app, collected){
         collected.failures.push({
             reason: payload.reason ?? payload.error?.reason,
             message: payload.error?.message ?? payload.message,
+            // Deep enough to name the host call that faulted, past the memory
+            // layer's own frames.
             stack: String(payload.error?.stack ?? payload.stack ?? '').split('\n')
-                .slice(0, 8).join('\n'),
+                .slice(0, 24).join('\n'),
             trace: payload.traceText ?? payload.text ?? payload.error?.traceText,
         });
     });
@@ -713,20 +680,29 @@ export function listen(app, collected){
             collected.output.push(`[${stream}] ${text}`);
         }
     });
-    // A run that hands its process to a child -- an installer's redistributable
-    // finishing as the title, a launcher's bootstrapper stepping aside -- keeps
-    // going under a different image. Without this a report from such a run
-    // looks like one process throughout, which is the one thing it was not.
+    // A run whose processes start others -- an installer's redistributable, a
+    // launcher's game -- has more than one image. Without these a report from
+    // such a run looks like one process throughout, which is the one thing it
+    // was not.
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
-        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace',
+        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-child',
         'hooks-bound', 'hook-error', 'process-create', 'process-resumed', 'process-server',
         'process-server-exit', 'exit', 'error'])
     {
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
             {
-                collected.events.push(`[${name}] ${JSON.stringify(payload).slice(0, 300)}`);
+                // An error is kept whole enough to read, its message and stack
+                // first (an Error's own are not enumerable, so JSON drops
+                // them): what a child's failure leaves nowhere else.
+                const error = payload?.error;
+                const told = name === 'error' ? { message: error?.message ?? payload?.message,
+                    stack: String(error?.stack ?? '').slice(0, 3000), ...payload } : payload;
+                // A last chance's dump - registers, the stack above esp - is
+                // a debug line, and the frames it names are the lead.
+                collected.events.push(`[${name}] ${JSON.stringify(told)
+                    .slice(0, name === 'error' || name === 'debug' ? 12000 : 300)}`);
             }
         });
     }
@@ -753,9 +729,23 @@ export function listen(app, collected){
  *
  * @param {any} app
  * @param {{ keyTimes?: { code: string, atMs: number, holdMs?: number }[],
- *     clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[] }} request
+ *     clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
+ *     moveTimes?: { x: number, y: number, atMs: number }[],
+ *     pointer?: { x: number, y: number } | null }} request
  */
 export function scheduleKeyTimes(app, request){
+    for (const move of request.moveTimes ?? [])
+    {
+        setTimeout(()=>{
+            // A held pointer is put where it was moved to, frame after frame.
+            if (request.pointer)
+            {
+                request.pointer.x = move.x;
+                request.pointer.y = move.y;
+            }
+            app.input.send({ kind: 'pointerMove', x: move.x, y: move.y, dx: 0, dy: 0 });
+        }, move.atMs);
+    }
     for (const click of request.clickTimes ?? [])
     {
         setTimeout(()=>{
@@ -903,7 +893,42 @@ export function schedulePresses(app, request, say = ()=>{}){
  *                                    translator's counters a frame over the same frames.
  * @property {any} [steadyFrom]        The translator's counters 240 frames before that.
  * @property {any[]} [series]           A row every `series` presents (see `seriesRow`).
+ * @property {Map<number, any>} [frameRecords]  Every frame of the run the profiler recorded, by
+ *                                    its number (`keepFrames`).
  */
+
+/**
+ * The profiler's frames taken into the run's own record, each once by its
+ * number: the engine keeps the last 240, and a run reads them every 200
+ * presents, so every frame of a run is told why if it dropped (frame-drops.js).
+ *
+ * @param {any} app @param {PresentState} state
+ */
+function keepFrames(app, state){
+    state.frameRecords ??= new Map();
+    for (const frame of app.log.frames?.(240) ?? [])
+    {
+        if (state.frameRecords.size >= LIMITS.samples)
+        {
+            return;
+        }
+        state.frameRecords.set(frame.index, { index: frame.index, startedAt: frame.startedAt,
+            ms: frame.ms,
+            byKind: frame.byKind, idleMs: frame.idleMs, waits: frame.waits,
+            compiles: frame.compiles, instructions: frame.instructions,
+            notes: { interpreted: frame.notes?.interpreted ?? 0,
+                instructions: frame.notes?.instructions ?? 0,
+                translateMs: frame.notes?.translateMs ?? 0,
+                exits: frame.notes?.exits ?? 0,
+                // Absent where the heap cannot be read, which the drops say.
+                heapDelta: frame.notes?.heapDelta,
+                // The idle time by what it waited on, and what the graphics
+                // worker finished meanwhile (drop-repeat --freeze).
+                ...Object.fromEntries(Object.entries(frame.notes ?? {})
+                    .filter(([name])=>name.startsWith('idle-') || name.startsWith('gfx'))) },
+            longest: frame.longest });
+    }
+}
 
 /**
  * The counts in a list of `name count ...` lines (the kernel's `byThread`, the
@@ -938,7 +963,7 @@ function countsOf(lines){
  * @param {number} count  frames since the last row
  * @param {number} at     milliseconds since the first present
  */
-export function seriesRow(app, count, at){
+function seriesRow(app, count, at){
     const frames = app.log.profile(0).recentFrames.slice(-count);
     let ms = 0;
     let host = 0;
@@ -963,6 +988,23 @@ export function seriesRow(app, count, at){
         instructions: layers.cpu?.instructions ?? null,
         byThread: countsOf(String(layers.kernel?.byThread ?? '').split(' | ').filter(Boolean)),
         byFunction: countsOf(layers.bridge?.byFunction ?? []),
+        // Each thread's totals (the kernel's `threadTimes`) and each executor's
+        // time, so a window shows which thread ran how fast and what it waited for.
+        threadTimes: typeof layers.kernel?.threadTimes === 'string'
+            ? JSON.parse(layers.kernel.threadTimes) : null,
+        // The host's waits by what was waited on and how each ended, and the
+        // semaphores' releases and wakes (the kernel's `sync`): which of a
+        // window's waits guest code could answer.
+        sync: layers.kernel?.sync ?? null,
+        executors: {
+            own: typeof layers.kernel?.sharedTime === 'string'
+                ? JSON.parse(layers.kernel.sharedTime) : null,
+            remotes: (layers.cpu?.executors ?? []).map((/** @type {any} */ one)=>({
+                index: one.index, retired: one.retired ?? null,
+                slicesMs: one.spent?.slicesMs ?? null,
+                answerWaitMs: one.spent?.answerWaitMs ?? null,
+                idleMs: one.spent?.idleMs ?? null, traps: one.spent?.traps ?? null })),
+        },
     };
 }
 
@@ -970,8 +1012,9 @@ export function seriesRow(app, count, at){
  * One presented frame: counts it, records the gap since the last one, and
  * forwards whatever the request asked to happen at this frame number -- a
  * held pointer, a click a frame long, a key held the same way. The counter is
- * on the harness rather than the run, so it keeps counting across a
- * `process-replace`: the frame after a handover is one more, not the first.
+ * on the harness rather than the run, so it keeps counting across the
+ * processes of a run: a launcher's last frame and its game's first are one
+ * count.
  *
  * An action's `after` is a frame number, or -- given as `afterSeconds` --
  * a time since the first presented frame, resolved to the first frame
@@ -1039,12 +1082,18 @@ export function presentFrame(app, request, state, frame){
                 const per = (a, b)=>(a - b) / 240;
                 state.steady.cork = {
                     retired: per(to.retired, from.retired),
-                    transfers: per(to.transfers ?? 0, from.transfers ?? 0),
+                    // Absent where the run did not count them (countTransfers).
+                    ...to.transfers === undefined ? {}
+                        : { transfers: per(to.transfers, from.transfers ?? 0) },
                     exits: Object.fromEntries(Object.keys(to.exits ?? {}).map(kind=>[kind,
                         per(to.exits[kind], from.exits?.[kind] ?? 0)])),
                 };
             }
         }
+    }
+    if (state.presents % 200 === 0)
+    {
+        keepFrames(app, state);
     }
     if (request.series && state.presents % request.series === 0)
     {
@@ -1219,7 +1268,7 @@ function codeOf(character){
  *
  * @param {any[]} layers
  */
-export function scalars(layers){
+function scalars(layers){
     return layers.map(layer=>{
         /** @type {Record<string, string | number>} */
         const metrics = {};
@@ -1259,13 +1308,49 @@ export function scalars(layers){
 }
 
 /**
+ * The process a run's report is read from: the one that presented the most
+ * frames. The facade speaks for the process started last, and a benchmark
+ * that starts helpers after itself (a system scanner beside 3DMark) would
+ * otherwise report the helper's empty graphics and none of its own. The
+ * facade's own stays chosen while no other presented more.
+ *
+ * @param {{ image: string, diagnostics: any[] | null, worker?: boolean }[]} found
+ *     every process standing (`app.standing()`)
+ * @param {number} facadeFrames  the frames the facade's process presented
+ * @returns {{ diagnostics: any[] | null,
+ *     processes: { image: string, frames: number | null, worker: boolean, chosen: boolean }[] }}
+ *     `diagnostics`: the chosen process's tables, null for the facade's own
+ */
+export function presentingProcess(found, facadeFrames){
+    const processes = found.map(({ image, diagnostics, worker })=>{
+        const frames = (diagnostics ?? []).find(table=>table.name === 'log')?.metrics?.frames;
+        return { image, frames: typeof frames === 'number' ? frames : null,
+            worker: worker === true, chosen: false };
+    });
+    let best = -1;
+    for (const [index, one] of processes.entries())
+    {
+        if ((one.frames ?? 0) > Math.max(facadeFrames, best < 0 ? 0 : processes[best].frames ?? 0))
+        {
+            best = index;
+        }
+    }
+    if (best >= 0)
+    {
+        processes[best].chosen = true;
+    }
+    return { diagnostics: best >= 0 ? found[best].diagnostics : null, processes };
+}
+
+/**
  * What `standing` reports of each process: the few metrics a stopped run is
  * read from, small enough to cross from a worker every few seconds.
  *
  * @param {any} app
  */
-async function standingOf(app){
-    return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
+async function standingOf(app, journal = 0){
+    return (await app.standing({ journal })).map((/** @type {any} */ { image, diagnostics,
+        journal: entries })=>{
         /** @param {string} layer */
         // A process in a worker of its own that ended while asked answers
         // nothing.
@@ -1276,18 +1361,40 @@ async function standingOf(app){
         const win32 = metrics('win32');
         const cpu = metrics('cpu');
         const log = metrics('log');
+        // What the process's layers say they hold, by zone (`memory-zones.js`):
+        // what the tab's memory is measured against.
+        /** @type {Record<string, number>} */
+        const held = {};
+        for (const entry of diagnostics ?? [])
+        {
+            for (const [zone, pools] of Object.entries(entry.metrics?.bytesHeld ?? {}))
+            {
+                for (const [pool, bytes] of Object.entries(pools ?? {}))
+                {
+                    if (typeof bytes === 'number')
+                    {
+                        held[`${zone}.${entry.name}.${pool}`] = bytes;
+                    }
+                }
+            }
+        }
         return {
             image,
+            held,
             phases: (log.topPhases ?? []).slice(0, 8),
             threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
             calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
+            callingBack: bridge.callingBack ?? null,
             messages: win32.messages,
             windows: (win32.windows ?? []).filter((/** @type {any} */ window)=>window.visible)
                 .map((/** @type {any} */ window)=>({ hwnd: window.hwnd, parent: window.parent,
                     className: window.className, title: String(window.title ?? '').slice(0, 60),
                     x: window.x, y: window.y, width: window.width, height: window.height })),
             cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
-                traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+                traps: cpu.traps, trapCapacity: cpu.trapCapacity,
+                machineMemory: cpu.machineMemory ?? null },
+            com: win32.com ?? null,
+            ...entries ? { journal: entries } : {},
         };
     });
 }
@@ -1309,6 +1416,20 @@ function desktopOf(app){
     return { width: desktop.width, height: desktop.height, pitch: desktop.pitch,
         pixels: toBase64(new Uint8Array(desktop.bytes.buffer, desktop.bytes.byteOffset,
             desktop.bytes.byteLength)) };
+}
+
+/**
+ * A file's bytes as text: UTF-16 when it opens with that order mark, as a
+ * Windows log often does, and one byte a character otherwise; its last
+ * `tail` characters.
+ *
+ * @param {Uint8Array} bytes @param {number} tail
+ */
+function textTail(bytes, tail){
+    const wide = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
+    const text = new TextDecoder(wide ? 'utf-16le' : 'latin1')
+        .decode(wide ? bytes.subarray(2) : bytes);
+    return tail > 0 && text.length > tail ? text.slice(text.length - tail) : text;
 }
 
 /**
@@ -1363,7 +1484,8 @@ function filesUnder(app, directory){
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
- * @property {(list?: string) => Promise<{ processes: any[], events: string[], desktop: any,
+ * @property {(list?: string, journal?: number) => Promise<{ processes: any[], events: string[],
+ *     lifetimes: string[], desktop: any,
  *     files: { path: string, size: number }[] }>} standing
  *     Every process standing, read while the run goes on: its threads and
  *     what they wait on, its parked calls, its windows, and where its
@@ -1378,10 +1500,8 @@ function filesUnder(app, directory){
 /**
  * @param {any} canvas   Where the last frame is shown: the page's, or an
  *     OffscreenCanvas of it inside a worker.
- * @param {{ pacing?: import('../../../src/app.js').RunPacing,
- *     drainElsewhere?: (table: ArrayBufferLike, sampleRate: number) => void }} [how]
- *     How the run loop waits: a worker hands in the event-driven pacing a
- *     thread of its own allows, a page leaves the default.
+ * @param {{ drainElsewhere?: (table: Uint8Array, sampleRate: number) => void }} [how]
+ *     Where the sound is read, when not on this thread.
  * @returns {Harness}
  */
 export function createHarness(canvas, how = {}){
@@ -1428,6 +1548,14 @@ export function createHarness(canvas, how = {}){
     let endRun = null;
     /** What the run in progress has said so far, for `standing`. @type {string[]} */
     let runningEvents = [];
+    /**
+     * Every process the run started and ended, with when: kept past the cap on
+     * events, since an install starts hundreds and the one that never ended is
+     * what a stopped run is read from.
+     *
+     * @type {string[]}
+     */
+    let runningLifetimes = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
     const snaps = new Map();
     /**
@@ -1450,12 +1578,12 @@ export function createHarness(canvas, how = {}){
      *           bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
-     *           concurrency?: import('../../../src/mode.js').Concurrency,
+     *           concurrency?: import('../../../src/concurrency.js').Concurrency,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           gpuProfile?: 'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
-     *           logCapacity?: number, logBytes?: number,
+     *           logCapacity?: number, logBytes?: number, journalLines?: number,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -1464,15 +1592,18 @@ export function createHarness(canvas, how = {}){
      *           pasted?: { text: string, after: number }[],
      *           logMatch?: string,
      *           network?: { module: string, url: string, room: string },
+     *           steamClientUrls?: Record<string, string>,
+     *           steamTickets?: Record<string, string>,
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
+     *           moveTimes?: { x: number, y: number, atMs: number }[],
      *           files?: { path: string, base64: string }[],
-     *           wholeFiles?: boolean,
-     *           sampling?: boolean,
+     *           wholeFiles?: boolean, session?: 'opfs',
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
-     *               strings: number[] }, record?: number, memorySize?: number }} request
+     *               strings: number[] }, record?: number, memorySize?: number,
+     *           machineMemory?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1487,7 +1618,7 @@ export function createHarness(canvas, how = {}){
         // With the fake device the devices are played in a worker of their own
         // over another fake, as the player's split has them.
         // `captureGraphics` has the worker write down everything it is sent,
-        // for `tools/graphics-replay.mjs` to play again in node; the capture
+        // for `tools/read/graphics-replay.mjs` to play again in node; the capture
         // is posted to the driver's server at `captureGraphicsTo` at the end.
         const captureGraphics = request.captureGraphics === true;
         // Nudged as the player's is, by the run's own setting.
@@ -1498,7 +1629,8 @@ export function createHarness(canvas, how = {}){
                 url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`
                     + `&features=${(request.fakeFeatures ?? []).join(',')}`, import.meta.url) })
             : request.graphicsWorker
-                ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics, gcNudge })
+                ? await openGraphicsWorker({ capture: captureGraphics, gcNudge,
+                    frames: request.graphicsWorker === 'pixels' ? 'pixels' : 'bitmap' })
                 : null;
         if (graphicsWorker && !graphicsWorker.worker)
         {
@@ -1544,6 +1676,9 @@ export function createHarness(canvas, how = {}){
                 // do not belong in `failure` above; a run watching one still
                 // wants to see them as they happen.
                 recentEvents: collected.events.slice(-5),
+                // The last divergences, every process's: a run whose page stops
+                // answering leaves only this to say what it was refused.
+                divergences: collected.divergences.slice(-20),
                 frames: seen.frames,
                 averageFrameMs: seen.averageFrameMs,
                 hostShare: seen.hostShare,
@@ -1558,8 +1693,12 @@ export function createHarness(canvas, how = {}){
                     longest: frame.longest, longestGuest: frame.longestGuest,
                     waits: frame.waits, compiles: frame.compiles, notes: frame.notes,
                 })),
+                // Whole enough for a drop to be told why (frame-drops.js), and
+                // numbered, so a reader polling every few seconds keeps each once.
                 recentFrames: seen.recentFrames.map((/** @type {any} */ frame)=>({
-                    ms: frame.ms, byKind: frame.byKind,
+                    index: frame.index, ms: frame.ms, byKind: frame.byKind,
+                    idleMs: frame.idleMs, waits: frame.waits, compiles: frame.compiles,
+                    instructions: frame.instructions, notes: frame.notes, longest: frame.longest,
                 })),
                 messages: layers.win32?.messages ?? null,
                 // Where the guest itself is spending its turns. The only account
@@ -1648,9 +1787,17 @@ export function createHarness(canvas, how = {}){
                 .connectRelay({ url: request.network.url, room: request.network.room })
             : null;
         const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
+        // The Steam client's own files, as a launcher keeps them in its
+        // storage: fetched from the harness, which cached Valve's.
+        const clientFiles = request.steamClientUrls ? Object.fromEntries(await Promise.all(
+            Object.entries(request.steamClientUrls).map(async([name, url])=>
+                [name, new Uint8Array(await (await fetch(url)).arrayBuffer())]))) : null;
+        const ownershipTickets = Object.fromEntries(Object.entries(request.steamTickets ?? {})
+            .map(([app, ticket])=>[app, fromBase64(ticket)]));
+        const win32 = request.win32?.steam ? { ...request.win32, steam: { ...request.win32.steam,
+            ...clientFiles ? { clientFiles } : {}, ownershipTickets } } : request.win32;
         const app = await createApp({
-            pacing: how.pacing,
-            win32: network || request.win32 ? { ...request.win32, ...network ? { network } : {} }
+            win32: network || win32 ? { ...win32, ...network ? { network } : {} }
                 : undefined,
             executable: request.exe ? fromBase64(request.exe)
                 : new Uint8Array(await (await fetch(request.exeUrl)).arrayBuffer()),
@@ -1671,6 +1818,7 @@ export function createHarness(canvas, how = {}){
             watchImport: request.watch ? watchFrom(request.watch) : undefined,
             record: request.record || 0,
             ...(request.memorySize ? { memorySize: request.memorySize } : {}),
+            ...(request.machineMemory ? { machineMemory: request.machineMemory } : {}),
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
             // `logCapacity`/`logBytes` raise the ring above its default when
@@ -1723,18 +1871,13 @@ export function createHarness(canvas, how = {}){
                 : undefined,
             // The translator's own settings for the run.
             cork: request.cork || undefined,
-            // Sampled guest execution, when asked for. A program that decides
-            // something inside its own code makes no host call to record, and the
-            // instruction pointer is then the only account of what it was doing --
-            // which is exactly the situation once a game reaches its own main loop.
-            sampling: request.sampling,
             quantum: request.quantum || undefined,
-            // Executors of the program's process: past one, its threads run at once.
-            executors: request.executors || undefined,
-            // Where they run, when a run names it (the kernel's `placement`), and
-            // the rest of createApp's `cpu` a run passes (`playPinned`, `freeHost`).
-            ...request.placement || request.cpu
-                ? { cpu: { ...request.placement ? { placement: request.placement } : {},
+            // The program's cores (past one, its threads run at once), where they
+            // run when a run names it (the kernel's `placement`), and the rest of
+            // createApp's `cpu` a run passes.
+            ...request.cores || request.placement || request.cpu
+                ? { cpu: { ...request.cores ? { cores: request.cores } : {},
+                    ...request.placement ? { placement: request.placement } : {},
                     ...request.cpu } }
                 : {},
             sample: request.profile || request.quantum ? recordSample : undefined,
@@ -1818,8 +1961,11 @@ export function createHarness(canvas, how = {}){
                 ...bundleStoreOptions(request),
             },
             // Seeded from the request when it carries files; nothing goes
-            // back out either way, the result carries what was written.
-            storage: request.files?.length ? ()=>seedFiles(request.files) : null,
+            // back out either way, the result carries what was written --
+            // unless the run saves its session where a launcher does
+            // (`session: 'opfs'`), which a fresh profile starts empty.
+            storage: request.session
+                ?? (request.files?.length ? ()=>seedFiles(request.files) : null),
             // This page has a device, in the only sense the engine cares about:
             // something reads the other end of the ring at the rate a device would.
             audio: { drained: true, ...request.audio ?? {} },
@@ -1861,6 +2007,24 @@ export function createHarness(canvas, how = {}){
 
         listen(app, collected);
         runningEvents = collected.events;
+        runningLifetimes = [];
+        const lifetimes = runningLifetimes;
+        const lifetimesFrom = Date.now();
+        for (const name of ['process-child', 'process-server', 'process-started',
+            'process-resumed', 'process-server-exit'])
+        {
+            app.on(name, (/** @type {any} */ told)=>{
+                if (lifetimes.length < LIMITS.lifetimes)
+                {
+                    const image = String(told?.image ?? '').split('\\').pop();
+                    const at = ((Date.now() - lifetimesFrom) / 1000).toFixed(1);
+                    const code = told?.code !== undefined ? ` code ${told.code}` : '';
+                    const command = told?.commandLine
+                        ? ` ${String(told.commandLine).slice(0, 160)}` : '';
+                    lifetimes.push(`${at} s ${name} ${image}${code}${command}`);
+                }
+            });
+        }
         scheduleKeyTimes(app, request);
         const stopPresses = schedulePresses(app, request, line=>{
             if (collected.events.length < LIMITS.events)
@@ -1924,9 +2088,17 @@ export function createHarness(canvas, how = {}){
                 rgba: toBase64(image.pixels) });
         }
         // A frame counted without its picture (the fake GPU's) has none to read back.
-        if (presentState.presented?.surface)
+        // A device lost by now (the GPU process gone) has no last frame to
+        // give, and the run's account -- its series above all -- is not lost
+        // with it: the report says the frame was not read.
+        const image = presentState.presented?.surface
+            ? await readBack(handle.device, presentState.presented.surface).catch(e=>{
+                result.frameError = String(e?.message ?? e);
+                return null;
+            })
+            : null;
+        if (presentState.presented?.surface && image)
         {
-            const image = await readBack(handle.device, presentState.presented.surface);
             // A live canvas is WebGPU's already and has the frame; a 2D context cannot be had.
             if (!request.live)
             {
@@ -1966,7 +2138,19 @@ export function createHarness(canvas, how = {}){
                 posted };
         }
 
-        const layers = app.diagnostics();
+        // The other executors answer their diagnostics between their slices, so a
+        // first ask, and a moment for the answers, before the one the report reads.
+        app.diagnostics();
+        await new Promise(resolve=>setTimeout(resolve, 500));
+        const facadeLayers = app.diagnostics();
+        const facadeFrames = facadeLayers.find((/** @type {any} */ entry)=>entry.name === 'log')
+            ?.metrics?.frames ?? 0;
+        const presenting = presentingProcess(await app.standing().catch(()=>[]), facadeFrames);
+        const layers = presenting.diagnostics ?? facadeLayers;
+        result.processes = presenting.processes;
+        // The run's, read once: its keeper is on the run's thread, whichever
+        // process the report is of.
+        result.runCache = app.runCache?.() ?? 'not measured: this engine reports no run cache';
         /** @param {string} name */
         const metrics = name=>layers.find((/** @type {any} */ entry)=>entry.name === name)
             ?.metrics ?? {};
@@ -1977,6 +2161,8 @@ export function createHarness(canvas, how = {}){
             ?.metrics?.staleAt ?? [];
         result.staleTrail = layers.find((/** @type {any} */ one)=>one.name === 'audio')
             ?.metrics?.staleTrail ?? [];
+        // The address space as the run left it: a fault's address read against it.
+        result.layout = metrics('memory').layout ?? [];
         result.instructions = metrics('cpu').instructions ?? null;
         // Whether the run had the executors it was given: how many slices ran
         // on the others, the most threads at once, and why none ran if they did not.
@@ -1993,7 +2179,10 @@ export function createHarness(canvas, how = {}){
                 ? JSON.parse(metrics('kernel').sharedTime) : metrics('kernel').sharedTime ?? null,
             remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
                 index: one.index, retired: one.retired ?? null, spent: one.spent ?? null,
-                said: one.said ?? null })),
+                said: one.said ?? null, interpretedFrom: one.interpretedFrom ?? null,
+                // Its own translator's account, less the lists a profile run fills.
+                cork: one.cork ? { ...one.cork, blockCounts: undefined, storeTrace: undefined }
+                    : null })),
         };
         result.threads = {
             byState: metrics('kernel').byState ?? {},
@@ -2005,6 +2194,8 @@ export function createHarness(canvas, how = {}){
         // is the difference between a trace and a list of numbers.
         const layout = metrics('memory').layout ?? [];
         const where = symboliser(layout);
+        // For the driver to name translated regions (`r004ea329`) in a CPU profile.
+        result.memoryLayout = layout;
         result.bridge = {
             sequence: metrics('bridge').sequence ?? [],
             hot: metrics('bridge').hot ?? [],
@@ -2056,6 +2247,10 @@ export function createHarness(canvas, how = {}){
             openglMs: graphics.seam ? { ring: graphics.seam.openglRingMs,
                 calls: graphics.seam.openglCallMs } : null,
             sentToWorker: graphics.worker?.sent ?? null,
+            // The messages the worker posted back by type, and the calls this
+            // thread waited on it for: with the batches, its messages both ways.
+            receivedFromWorker: graphics.worker?.received ?? null,
+            waitsOnWorker: graphics.worker?.waits ?? null,
             // Of those bytes, the guest memory copied in by what copied it, and
             // the calls whose records the batches hold, heaviest first.
             shippedToWorker: graphics.worker?.shipped ?? null,
@@ -2067,6 +2262,8 @@ export function createHarness(canvas, how = {}){
             handoff: graphics.worker?.handoff ?? null,
             dropped: graphics.worker?.dropped ?? null,
             latency: graphics.worker?.latency ?? null,
+            // What the worker's device holds, by kind (`webgpu/ledger.js`).
+            gpuMemory: graphics.worker?.gpuMemory ?? null,
             // Direct3D 8/9's guest block: why locks and routines reached the host.
             shadow: graphics.shadow ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
@@ -2117,22 +2314,26 @@ export function createHarness(canvas, how = {}){
 
         // What the program wrote. A game of this age keeps its own log, and it says
         // in plain words what it thought went wrong.
-        result.files = app.session.export().map((/** @type {any} */ file)=>({
-            path: file.path,
-            bytes: file.bytes.length,
-            truncated: file.bytes.length > LIMITS.file,
-            text: new TextDecoder('latin1')
-                .decode(file.bytes.subarray(0, LIMITS.file)),
-            // The bytes themselves, whole, for a run that will feed a file
-            // back in: the text above is a reading of it, not the file.
-            base64: request.wholeFiles ? toBase64(file.bytes) : undefined,
-        }));
+        // A file of a session laid under the writable layer that the program
+        // did not touch comes as `{ path, size, read }`, not its bytes: it is
+        // the session's, not what the program wrote, and is left out.
+        result.files = app.session.export().filter((/** @type {any} */ file)=>file.bytes)
+            .map((/** @type {any} */ file)=>({
+                path: file.path,
+                bytes: file.bytes.length,
+                truncated: file.bytes.length > LIMITS.file,
+                text: new TextDecoder('latin1')
+                    .decode(file.bytes.subarray(0, LIMITS.file)),
+                // The bytes themselves, whole, for a run that will feed a file
+                // back in: the text above is a reading of it, not the file.
+                base64: request.wholeFiles ? toBase64(file.bytes) : undefined,
+            }));
 
         result.failures = collected.failures;
         // The journal's tail, taken before the layer is disposed with the
         // rest of the machine: a category a run switched on has its last
         // records here and nowhere else once the run is over.
-        result.journal = app.log.recent(200);
+        result.journal = app.log.recent(request.journalLines ?? 200);
         result.missing = [...new Set(collected.missing)];
         result.output = collected.output;
         result.events = collected.events;
@@ -2145,6 +2346,9 @@ export function createHarness(canvas, how = {}){
         result.presentTimes = presentState.times.slice();
         result.steady = presentState.steady ?? null;
         result.series = presentState.series ?? [];
+        keepFrames(app, presentState);
+        result.frameRecords = [...(presentState.frameRecords ?? new Map()).values()]
+            .sort((one, two)=>one.index - two.index);
         // Guest memory as the run left it, where `--peek` asked: a flag or a
         // counter a program decides on without calling anything is otherwise
         // invisible from outside it.
@@ -2251,10 +2455,29 @@ export function createHarness(canvas, how = {}){
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
         journalRecent: count=>running ? running.log.recent(count) : [],
-        standing: async list=>(running
-            ? { processes: await standingOf(running), events: runningEvents,
-                desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }
-            : { processes: [], events: runningEvents, desktop: null, files: [] }),
+        // A text file of the volume read while the run goes on - the log a
+        // setup or a tool keeps of what it decided - its last `tail`
+        // characters, or null when there is no run or no such file.
+        /** @param {string} path @param {number} [tail] */
+        readFile: (path, tail = 65536)=>{
+            if (!running)
+            {
+                return null;
+            }
+            try
+            {
+                return textTail(running.files.read(path), tail);
+            }
+            catch {
+                return null;
+            }
+        },
+        standing: async(list, journal = 0)=>(running
+            ? { processes: await standingOf(running, journal), events: runningEvents,
+                lifetimes: runningLifetimes, desktop: desktopOf(running),
+                files: list ? filesUnder(running, list) : [] }
+            : { processes: [], events: runningEvents, lifetimes: runningLifetimes, desktop: null,
+                files: [] }),
         errors,
         get presents(){
             return { count: presentState.presents, gaps: presentState.gaps.slice() };

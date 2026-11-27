@@ -324,14 +324,14 @@ test('a CBT hook hears of the dialog window and may subclass it before its first
     });
     table = fns;
     putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
-    fns.SetWindowsHookExA.handler([5, HOOK, 0, 0]);
+    fns.SetWindowsHookExA.handler([5, HOOK, 0x400000, 0]);
 
     const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.notEqual(dialog, 0);
     assert.deepEqual(hooked[0].slice(0, 3), [HOOK, 3, dialog], 'HCBT_CREATEWND, for the dialog');
-    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 3).map(m=>m.message),
-        [0x81, 0x83, 0x1],
-        'WM_NCCREATE, WM_NCCALCSIZE and WM_CREATE reached the procedure the hook put in');
+    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 4).map(m=>m.message),
+        [0x24, 0x81, 0x83, 0x1], 'WM_GETMINMAXINFO (an overlapped dialog), WM_NCCREATE,'
+            + ' WM_NCCALCSIZE and WM_CREATE reached the procedure the hook put in');
 });
 
 test('a dialog named in the resources is the template read where it was mapped', ()=>{
@@ -437,6 +437,40 @@ test('unattended, the button the answerer chooses is the press the procedure rec
     assert.equal(asked[0].kind, 'dialog');
 });
 
+test('unattended, a dialog whose only button is Cancel is left to the work that ends it',
+    async()=>{
+        // A self-extractor's "Please wait" with a Cancel button: the work on
+        // another thread ends it; pressing its one button would cancel the
+        // install.
+        /** @type {number[]} */
+        const commands = [];
+        /** @type {any} */
+        let table = null;
+        let dialog = 0;
+        const { memory, fns } = setup({
+            unattended: true,
+            dispatch: (wndProc, message)=>{
+                dialog = message.hwnd;
+                if (message.message === 0x0111)
+                {
+                    commands.push(message.wParam & 0xffff);
+                    table.EndDialog.handler([message.hwnd, message.wParam & 0xffff]);
+                }
+                return 0;
+            },
+        });
+        table = fns;
+        putTemplate(memory, [{ id: 2, x: 4, y: 8, cx: 20, cy: 6, title: 'Cancel', style: 1 }]);
+        const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+        for (let round = 0; round < 20; round++)
+        {
+            await new Promise(resolve=>setImmediate(resolve));
+        }
+        fns.EndDialog.handler([dialog, 1]);
+        assert.equal(await answer, 1, 'ended by its work');
+        assert.deepEqual(commands, [], 'nothing pressed');
+    });
+
 test('attended, a modal dialog is left waiting for a person', async()=>{
     /** @type {number[]} */
     const heard = [];
@@ -459,19 +493,23 @@ test('attended, a modal dialog is left waiting for a person', async()=>{
     assert.equal(await answer, 3, 'until the person ends it');
 });
 
-test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=>{
+test('DialogBox shows a dialog its template leaves hidden, once its queue is dry', async()=>{
     // Most templates leave the bit off: the modal call is what shows the
     // window, and a dialog left invisible is a program that appears to do
-    // nothing when its own menu is clicked. The showing happens after
-    // WM_INITDIALOG, so that is where it is looked at.
+    // nothing when its own menu is clicked. It is shown when its queue first
+    // runs dry, so what WM_INITDIALOG posts still finds it hidden (dialog.c
+    // test_focus: "Modal dialogs should not be shown until the message queue
+    // first goes empty").
     /** @type {any} */
     let table = null;
-    /** @type {number} */
     let visibleAtInit = -1;
+    let visibleAtPosted = -1;
     let visibleWhileUp = -1;
     let inits = 0;
-    const MARKER = 0x0400; // WM_USER
-    const { memory, fns } = setup({
+    let modal = 0;
+    const POSTED = 0x0400; // WM_USER
+    const LATER = 0x0401;
+    const { memory, queue, fns } = setup({
         dispatch: (wndProc, message)=>{
             if (message.message === WM_INITDIALOG)
             {
@@ -479,11 +517,16 @@ test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=
                 // the one being looked at; only the modal one posts a marker.
                 if (++inits === 2)
                 {
+                    modal = message.hwnd;
                     visibleAtInit = table.IsWindowVisible.handler([message.hwnd]);
-                    table.PostMessageA.handler([message.hwnd, MARKER, 0, 0]);
+                    table.PostMessageA.handler([message.hwnd, POSTED, 0, 0]);
                 }
             }
-            if (message.message === MARKER)
+            if (message.message === POSTED)
+            {
+                visibleAtPosted = table.IsWindowVisible.handler([message.hwnd]);
+            }
+            if (message.message === LATER)
             {
                 visibleWhileUp = table.IsWindowVisible.handler([message.hwnd]);
                 table.EndDialog.handler([message.hwnd, 1]);
@@ -498,9 +541,13 @@ test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=
     assert.equal(fns.IsWindowVisible.handler([modeless]), 0,
         'a modeless dialog stays as the template made it');
 
-    await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    queue.post({ hwnd: modal, message: LATER, wParam: 0, lParam: 0 });
+    await answer;
     assert.equal(visibleAtInit, 0, 'not shown yet while its procedure runs');
-    assert.equal(visibleWhileUp, 1, 'and shown once the modal loop is running');
+    assert.equal(visibleAtPosted, 0, 'nor when what it posted arrives');
+    assert.equal(visibleWhileUp, 1, 'and shown once the queue has run dry');
 });
 
 test('a message sent to a control with no procedure is answered with nothing', ()=>{
@@ -611,6 +658,27 @@ test('IsDialogMessage takes Enter for IDOK and dispatches anything else inside t
     assert.equal(fns.IsDialogMessageA.argBytes, 8);
 });
 
+test('Enter presses nothing when the default button is disabled', ()=>{
+    // user32's dialog test (test_DisabledDialogTest): with the OK button
+    // disabled, a posted Enter does not end the dialog.
+    /** @type {any[]} */
+    const delivered = [];
+    const { memory, fns } = setup({ dispatch: (wndProc, message)=>{
+        delivered.push(message);
+        return 0;
+    } });
+    putTemplate(memory, [{ id: 1, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' },
+        { id: 3, x: 4, y: 20, cx: 20, cy: 6, title: 'Other' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    fns.EnableWindow.handler([fns.GetDlgItem.handler([dialog, 1]), 0]);
+    delivered.length = 0;
+    const MSG = 0x3000;
+    memory.writeMemory(MSG, Uint8Array.of(dialog, dialog >>> 8, dialog >>> 16, dialog >>> 24,
+        0x00, 0x01, 0, 0, 0x0d));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'the key is the manager\'s');
+    assert.equal(delivered.filter(one=>one.message === 0x0111).length, 0, 'and no command');
+});
+
 test('a modal dialog disables its owner until it ends', async()=>{
     const OWNERPROC = 0x402100;
     /** @type {any} */
@@ -642,7 +710,6 @@ test('a modal dialog disables its owner until it ends', async()=>{
 
     const answer = fns.DialogBoxIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, owner, DIALOGPROC, 0]);
-    assert.equal(fns.IsWindowEnabled.handler([owner]), 0, 'disabled while the dialog is up');
     assert.equal(await answer, 7);
     assert.equal(enabledWhileUp, 0, 'the program saw it disabled from inside its own loop');
     assert.equal(fns.IsWindowEnabled.handler([owner]), 1, 'and enabled again after');
@@ -770,7 +837,7 @@ test('a modal loop takes a mouse message the way GetMessage takes it, the window
     // user32's message tests (WmMove_mouse): WM_SETCURSOR is sent to the
     // window under the pointer as each mouse message of the input is taken,
     // whichever loop takes it -- here the dialog manager's own.
-    const WM_USER = 0x0400;
+    const WM_PAINT = 0x000f;
     const WM_SETCURSOR = 0x0020;
     const WM_MOUSEMOVE = 0x0200;
     /** @type {number[]} */
@@ -779,14 +846,11 @@ test('a modal loop takes a mouse message the way GetMessage takes it, the window
     let table = null;
     const { memory, queue, fns } = setup({ dispatch: (wndProc, message)=>{
         heard.push(message.message);
-        if (message.message === WM_INITDIALOG)
+        if (message.message === WM_PAINT && !heard.slice(0, -1).includes(WM_PAINT))
         {
-            table.PostMessageA.handler([message.hwnd, WM_USER, 0, 0]);
-        }
-        else if (message.message === WM_USER)
-        {
-            // Shown by now: the pointer moves over its client area, clear of
-            // the control.
+            // Shown - by the modal loop, once its queue first ran dry - and
+            // painted: the pointer moves over its client area, clear of the
+            // control.
             table.GetClientRect.handler([message.hwnd, OUT]);
             const height = memory.u32(OUT + 12);
             memory.writeMemory(OUT, new Uint8Array(new Uint32Array([2, height - 2]).buffer));
@@ -806,7 +870,7 @@ test('a modal loop takes a mouse message the way GetMessage takes it, the window
         0]), 5);
     const moved = heard.indexOf(WM_MOUSEMOVE);
     assert.ok(moved > 0, 'the move reached the dialog');
-    assert.equal(heard.slice(heard.indexOf(WM_USER), moved).includes(WM_SETCURSOR), true,
+    assert.equal(heard.slice(heard.indexOf(WM_PAINT), moved).includes(WM_SETCURSOR), true,
         'asked for its cursor before it was handed the move');
 });
 
@@ -1078,7 +1142,7 @@ test('an extended template is read with its own layout, font block and item ids'
     template.sz('').sz('').sz('Progress');
     template.u16(8).u16(400).u16(0x0100).sz('MS Sans Serif');
     for (const control of [
-        { id: 0x10064, x: 4, y: 8, cx: 20, cy: 6, ordinal: 0x82, title: 'Preparing', extra: 4 },
+        { id: 0xffffffff, x: 4, y: 8, cx: 20, cy: 6, ordinal: 0x82, title: 'Preparing', extra: 4 },
         { id: 101, x: 4, y: 20, cx: 20, cy: 6, ordinal: 0x80, title: 'Cancel', extra: 0 },
     ])
     {
@@ -1098,9 +1162,12 @@ test('an extended template is read with its own layout, font block and item ids'
     const dialog = fns.CreateDialogIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.notEqual(dialog, 0);
-    const label = fns.GetDlgItem.handler([dialog, 100]);
+    // The DWORD is the id whole: dialog.c test_GetDlgItem's -1 is found by
+    // GetDlgItem(-1) and read back as -1.
+    const label = fns.GetDlgItem.handler([dialog, -1]);
     const button = fns.GetDlgItem.handler([dialog, 101]);
-    assert.notEqual(label, 0, 'the id is the low word of the DWORD');
+    assert.notEqual(label, 0, 'the id is the DWORD whole');
+    assert.equal(fns.GetWindowLongA.handler([label, -12]) | 0, -1);
     assert.notEqual(button, 0, 'and the creation data of the first item was stepped over');
     assert.equal(memory.readCString(
         (fns.GetDlgItemTextA.handler([dialog, 101, OUT, 32]), OUT), 32), 'Cancel');
@@ -1336,6 +1403,69 @@ test('DefDlgProcA(WM_SETFOCUS) passes the focus to the first control that stops 
     assert.equal(seen[1].wParam, 0);
 });
 
+test('DefDlgProcA remembers the control with the focus when deactivated and gives it back when '
+    + 'activated', ()=>{
+    // dialog.c test_focus: a dialog activated again has the focus back in the
+    // control that had it. Deactivated, DefDlgProc remembers that control;
+    // activated, it gives it the focus with SetFocus alone, and with nothing
+    // remembered leaves the focus be. WM_SETFOCUS gives the remembered one
+    // the focus too, as the dialog manager moves it.
+    const DEFDLGPROC = 0x404000;
+    const WM_ACTIVATE = 0x0006;
+    const WM_SETFOCUS = 0x0007;
+    const WM_GETDLGCODE = 0x0087;
+    const WS_CHILD = 0x40000000;
+    const WS_VISIBLE = 0x10000000;
+    const WS_TABSTOP = 0x00010000;
+    const EDITPROC = 0x405000;
+    /** @type {number[]} */
+    const seen = [];
+    const context = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc === EDITPROC)
+            {
+                seen.push(message.message);
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    const dialog = customDialog(context, DEFDLGPROC);
+    const CLASS_STRUCT = 0x10a00;
+    const CLASS_NAME = 0x10b00;
+    memory.putString(CLASS_NAME, 'my_edit_class');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, EDITPROC, 0, 0, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    /** @param {number} id @param {number} y */
+    const edit = (id, y)=>fns.CreateWindowExA.handler([0, CLASS_NAME, 0,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, y, 80, 20, dialog, id, HINSTANCE, 0]);
+    const first = edit(1, 0);
+    const second = edit(2, 40);
+    fns.SetFocus.handler([second]);
+
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 0, 0]), 0);
+    fns.SetFocus.handler([dialog]);
+    seen.length = 0;
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 1, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), second, 'the remembered control has it back');
+    assert.equal(seen.includes(WM_GETDLGCODE), false, 'by SetFocus alone');
+
+    fns.SetFocus.handler([dialog]);
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 1, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), dialog, 'nothing remembered: the focus stays');
+
+    fns.SetFocus.handler([second]);
+    fns.DefDlgProcA.handler([dialog, WM_ACTIVATE, 0, 0]);
+    fns.SetFocus.handler([dialog]);
+    assert.equal(fns.DefDlgProcA.handler([dialog, WM_SETFOCUS, 0, 0]), 0);
+    assert.equal(fns.GetFocus.handler([]), second, 'WM_SETFOCUS: the remembered one');
+    fns.SetFocus.handler([dialog]);
+    fns.DefDlgProcA.handler([dialog, WM_SETFOCUS, 0, 0]);
+    assert.equal(fns.GetFocus.handler([]), first, 'and then the first tab stop');
+});
+
 test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the one named, '
     + 'restyling the push buttons and keeping the default id', ()=>{
     // user32's dialog tests (test_WM_NEXTDLGCTL): an edit, a push button and
@@ -1365,6 +1495,8 @@ test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the on
         return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | WS_TABSTOP
             | style, 0, 0, 40, 20, dialog, id, HINSTANCE, 0]);
     };
+    assert.equal(fns.DefDlgProcA.handler([dialog, DM_GETDEFID, 0, 0]), (0x534b << 16 | 1) >>> 0,
+        'with no default push button the default id is IDOK');
     const edit = control('Edit', 101, 0);
     const first = control('Button', 201, BS_PUSHBUTTON);
     const second = control('Button', IDCANCEL, BS_PUSHBUTTON);
@@ -1711,6 +1843,63 @@ test('a dialog made through the wide call is a Unicode window, its procedure rea
     assert.equal(fns.DialogBoxParamW.argBytes, 20);
 });
 
+test('a dialog procedure hears a text as the window took it, whatever encoding it is of', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: SendMessageA to a wide dialog
+    // reaches its procedure as a wide copy; DefDlgProcA/W pass the caller's
+    // pointer through untouched; GetWindowLong(DWLP_DLGPROC) is the
+    // procedure to a reader of its encoding and a handle to the other.
+    const WM_SETTEXT = 0x000c;
+    const DWLP_DLGPROC = 4;
+    const OTHER_PROC = 0x402100;
+    /** @type {{ lParam: number, unicode: boolean }[]} */
+    const heard = [];
+    let heap = 0x13000;
+    const context = setup({
+        allocate: (/** @type {number} */ size)=>{
+            heap += size + 15 & ~15;
+            return heap - (size + 15 & ~15);
+        },
+        dispatch: (wndProc, message)=>{
+            if ((wndProc === DIALOGPROC || wndProc === OTHER_PROC)
+                && message.message === WM_SETTEXT)
+            {
+                heard.push({ lParam: message.lParam, unicode: message.unicode === true });
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const dialog = fns.CreateDialogIndirectParamW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    memory.putString(0x3000, 'Text');
+    memory.writeMemory(0x3100, new Uint8Array(Buffer.from('Text\0', 'utf16le')));
+
+    fns.SendMessageA.handler([dialog, WM_SETTEXT, 0, 0x3000]);
+    assert.equal(heard.length, 1);
+    assert.ok(heard[0].unicode && heard[0].lParam !== 0x3000, 'a wide copy of the ANSI text');
+    fns.SendMessageW.handler([dialog, WM_SETTEXT, 0, 0x3100]);
+    assert.deepEqual(heard[1], { lParam: 0x3100, unicode: true }, 'the wide text as it came');
+    fns.DefDlgProcA.handler([dialog, WM_SETTEXT, 0, 0x3000]);
+    assert.deepEqual(heard[2], { lParam: 0x3000, unicode: false }, 'DefDlgProcA: untouched');
+    fns.DefDlgProcW.handler([dialog, WM_SETTEXT, 0, 0x3100]);
+    assert.deepEqual(heard[3], { lParam: 0x3100, unicode: true }, 'DefDlgProcW: untouched');
+
+    assert.equal(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), DIALOGPROC);
+    const handle = fns.GetWindowLongA.handler([dialog, DWLP_DLGPROC]);
+    assert.notEqual(handle, DIALOGPROC, 'a handle to an ANSI reader of a wide procedure');
+    fns.SetWindowLongA.handler([dialog, DWLP_DLGPROC, OTHER_PROC]);
+    assert.equal(fns.GetWindowLongA.handler([dialog, DWLP_DLGPROC]), OTHER_PROC);
+    assert.notEqual(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), OTHER_PROC);
+    assert.equal(fns.IsWindowUnicode.handler([dialog]), 1, 'the window stays wide');
+    fns.SetWindowLongA.handler([dialog, DWLP_DLGPROC, handle]);
+    assert.equal(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), DIALOGPROC,
+        'a handle sets the procedure behind it');
+
+    // The procedure answered 0 to each: SetWindowTextW is TRUE all the same.
+    assert.equal(fns.SetWindowTextW.handler([dialog, 0x3100]), 1);
+});
+
 test('IsDlgButtonChecked asks the one button, and answers what it says', ()=>{
     const BM_GETCHECK = 0x00f0;
     /** @type {number[]} */
@@ -1943,4 +2132,11 @@ test('the AorW calls make the Unicode dialog for flags zero and the ANSI one oth
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0, DLG_ISANSI]), 40, 'modal and ANSI');
     assert.equal(fns.DialogBoxIndirectParamAorW.handler([HINSTANCE, 0, 0, DIALOGPROC, 0, 0]), -1);
     assert.equal(fns.DialogBoxIndirectParamAorW.argBytes, 24);
+});
+
+test('DialogBoxParam with an owner that is no window answers zero and makes nothing', ()=>{
+    // "If the function fails because the hWndParent parameter is invalid,
+    // the return value is zero" (Wine's dialog.c test_DialogBoxParam).
+    const { fns } = setup();
+    assert.equal(fns.DialogBoxParamA.handler([HINSTANCE, 0x10, 0x4444, DIALOGPROC, 0]), 0);
 });

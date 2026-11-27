@@ -133,9 +133,21 @@ export function I(op, forms = '', flags = 'none', faults = 'none', cc){
     };
 }
 
+/**
+ * A group's slot whose meaning the ModRM byte's mod picks: one instruction
+ * with a memory operand, another with none.
+ */
+export class ByMod {
+    /** @param {Entry | null} memory @param {Entry | null} register */
+    constructor(memory, register){
+        this.memory = memory;
+        this.register = register;
+    }
+}
+
 /** A `/r` group: eight entries, null where the encoding is invalid. */
 export class Group {
-    /** @param {(Entry | null | typeof SYS)[]} entries */
+    /** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
     constructor(entries){
         if (entries.length !== 8)
         {
@@ -145,14 +157,14 @@ export class Group {
     }
 }
 
-/** @param {(Entry | null | typeof SYS)[]} entries */
-export const G = entries=>new Group(entries);
+/** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
+const G = entries=>new Group(entries);
 
 /** A `0F` entry whose meaning the mandatory prefix picks. */
 export class Prefixed {
     /**
-     * @param {{ ''?: Entry | Group, 66?: Entry | Group, f3?: Entry | Group,
-     *     f2?: Entry | Group }} variants
+     * @param {{ ''?: Entry | Group | ByMod, 66?: Entry | Group | ByMod,
+     *     f3?: Entry | Group | ByMod, f2?: Entry | Group | ByMod }} variants
      */
     constructor(variants){
         this.variants = variants;
@@ -160,7 +172,7 @@ export class Prefixed {
 }
 
 /** @param {ConstructorParameters<typeof Prefixed>[0]} variants */
-export const S = variants=>new Prefixed(variants);
+const S = variants=>new Prefixed(variants);
 
 /** An encoding a user-mode program has no business executing. */
 export const SYS = Symbol('not user mode');
@@ -230,11 +242,10 @@ for (let reg = 0; reg < 8; reg++)
 }
 ONE_BYTE[0x60] = I('pushad');
 ONE_BYTE[0x61] = I('popad');
-// bound's second operand is a memory pair (`Ma`) on paper, but the emulator's
-// decoder consumes the register form too -- it neither reads the pair nor
-// raises #BR -- and a lost thread running the entry vector's bytes reaches
-// exactly that form (`62 d0`). `Ev` decodes both; the model and the emitter
-// treat the whole instruction as the no-op the emulator makes of it.
+// bound's second operand is a memory pair (`Ma`) on paper, but a lost thread
+// running the entry vector's bytes reaches the register form (`62 d0`) too.
+// `Ev` decodes both; the model and the emitter treat the whole instruction as
+// a no-op, which neither reads the pair nor raises #BR.
 ONE_BYTE[0x62] = I('bound', 'Gv,Ev', 'none', 'trap');
 // arpl: legal at every privilege level, and in the corpus; it adjusts a
 // selector's requested privilege and says whether it did.
@@ -569,9 +580,13 @@ TWO_BYTE[0xa9] = I('pop', 'GS');
 TWO_BYTE[0xab] = I('bts', 'Ev,Gv', 'bt');
 TWO_BYTE[0xac] = I('shrd', 'Ev,Gv,Ib', 'shiftDouble');
 TWO_BYTE[0xad] = I('shrd', 'Ev,Gv,CL', 'shiftDouble');
+// The fences are the register forms of /5../7; the memory form of /7 is
+// clflush (CPUID's CLFSH), those of /5 and /6 xrstor and xsaveopt, which need
+// an XSAVE CPUID does not report.
 TWO_BYTE[0xae] = G([
     I('fxsave', 'M'), I('fxrstor', 'M'), I('ldmxcsr', 'Md'), I('stmxcsr', 'Md'),
-    SYS, I('lfence'), I('mfence'), I('sfence'),
+    SYS, new ByMod(null, I('lfence')), new ByMod(null, I('mfence')),
+    new ByMod(I('clflush', 'Mb'), I('sfence')),
 ]);
 TWO_BYTE[0xaf] = I('imul', 'Gv,Ev', 'mul');
 TWO_BYTE[0xb0] = I('cmpxchg', 'Eb,Gb', 'cmpxchg');
@@ -601,11 +616,11 @@ TWO_BYTE[0xc2] = S({
     '': I('cmpps', 'Vps,Wps,Ib'), 66: I('cmppd', 'Vpd,Wpd,Ib'), f3: I('cmpss', 'Vss,Wss,Ib'),
     f2: I('cmpsd', 'Vsd,Wsd,Ib'),
 });
-TWO_BYTE[0xc3] = I('movnti', 'Md,Gy');
+TWO_BYTE[0xc3] = I('movnti', 'My,Gy');
 TWO_BYTE[0xc4] = S({ '': I('pinsrw', 'Pq,Ew,Ib'), 66: I('pinsrw', 'Vdq,Ew,Ib') });
 TWO_BYTE[0xc5] = S({ '': I('pextrw', 'Gy,Nq,Ib'), 66: I('pextrw', 'Gy,Udq,Ib') });
 TWO_BYTE[0xc6] = S({ '': I('shufps', 'Vps,Wps,Ib'), 66: I('shufpd', 'Vpd,Wpd,Ib') });
-// rdrand: CPUID leaf 1 advertises it (the emulator's answer), so it is decoded;
+// rdrand: CPUID leaf 1 advertises it (`cpuid.js`), so it is decoded;
 // a memory operand is #UD, and it leaves CF set and the other five clear.
 TWO_BYTE[0xc7] = G([
     null, I('cmpxchg8b', 'Mq', 'cmpxchg8b'), null, null, null, null,
@@ -778,6 +793,82 @@ run(X87[7].reg, 0xe8, I('fucomip', 'ST0,STi', 'compareFloat'));
 run(X87[7].reg, 0xf0, I('fcomip', 'ST0,STi', 'compareFloat'));
 
 /**
+ * The three-byte maps `0F 38` and `0F 3A` (the SDM's Table A-4 and A-5): SSSE3
+ * on MMX and XMM registers, SSE4.1, SSE4.2's `pcmpgtq`, string compares and
+ * `crc32`, and `movbe`. `pblendvb`, `blendvps` and `blendvpd` name the mask they
+ * read, XMM0, as an operand of their own, and the string compares the registers
+ * they read and write (EAX, EDX and ECX, or XMM0), so whatever follows the
+ * operands sees them. `crc32` and `movbe` take a 66 prefix as an operand size
+ * (the decoder keeps it for them), every other form there as a mandatory prefix.
+ */
+export const THREE_BYTE_38 = new Array(256).fill(null);
+export const THREE_BYTE_3A = new Array(256).fill(null);
+/** The forms on MMX and on XMM registers alike: SSSE3's. */
+[
+    [0x00, 'pshufb'], [0x01, 'phaddw'], [0x02, 'phaddd'], [0x03, 'phaddsw'],
+    [0x04, 'pmaddubsw'], [0x05, 'phsubw'], [0x06, 'phsubd'], [0x07, 'phsubsw'],
+    [0x08, 'psignb'], [0x09, 'psignw'], [0x0a, 'psignd'], [0x0b, 'pmulhrsw'],
+    [0x1c, 'pabsb'], [0x1d, 'pabsw'], [0x1e, 'pabsd'],
+].forEach(([byte, op])=>{
+    THREE_BYTE_38[/** @type {number} */ (byte)] = S({ '': I(/** @type {string} */ (op), 'Pq,Qq'),
+        66: I(/** @type {string} */ (op), 'Vdq,Wdq') });
+});
+/** The 66 forms of SSE4.1 and SSE4.2 on two XMM operands. */
+[
+    [0x28, 'pmuldq'], [0x29, 'pcmpeqq'], [0x2b, 'packusdw'], [0x37, 'pcmpgtq'],
+    [0x38, 'pminsb'], [0x39, 'pminsd'], [0x3a, 'pminuw'], [0x3b, 'pminud'],
+    [0x3c, 'pmaxsb'], [0x3d, 'pmaxsd'], [0x3e, 'pmaxuw'], [0x3f, 'pmaxud'],
+    [0x40, 'pmulld'], [0x41, 'phminposuw'],
+].forEach(([byte, op])=>{
+    THREE_BYTE_38[/** @type {number} */ (byte)] = S({ 66: I(/** @type {string} */ (op), 'Vdq,Wdq') });
+});
+THREE_BYTE_38[0x10] = S({ 66: I('pblendvb', 'Vdq,Wdq,XMM0') });
+THREE_BYTE_38[0x14] = S({ 66: I('blendvps', 'Vdq,Wdq,XMM0') });
+THREE_BYTE_38[0x15] = S({ 66: I('blendvpd', 'Vdq,Wdq,XMM0') });
+// ptest sets ZF and CF from the two ands and clears the other four.
+THREE_BYTE_38[0x17] = S({ 66: I('ptest', 'Vdq,Wdq', { r: 0, w: ARITH_FLAGS, u: 0 }) });
+// The sign and zero extensions read as much of a memory source as they widen.
+[
+    ['bw', 'q'], ['bd', 'd'], ['bq', 'w'], ['wd', 'q'], ['wq', 'd'], ['dq', 'q'],
+].forEach(([widths, size], at)=>{
+    THREE_BYTE_38[0x20 + at] = S({ 66: I(`pmovsx${widths}`, `Vdq,W${size}`) });
+    THREE_BYTE_38[0x30 + at] = S({ 66: I(`pmovzx${widths}`, `Vdq,W${size}`) });
+});
+THREE_BYTE_38[0x2a] = S({ 66: I('movntdqa', 'Vdq,Mdq') });
+THREE_BYTE_38[0xf0] = S({ '': I('movbe', 'Gv,Mv'), f2: I('crc32', 'Gd,Eb') });
+THREE_BYTE_38[0xf1] = S({ '': I('movbe', 'Mv,Gv'), f2: I('crc32', 'Gd,Ev') });
+
+THREE_BYTE_3A[0x0f] = S({ '': I('palignr', 'Pq,Qq,Ib'), 66: I('palignr', 'Vdq,Wdq,Ib') });
+[
+    [0x08, 'roundps', 'Vps,Wps'], [0x09, 'roundpd', 'Vpd,Wpd'], [0x0a, 'roundss', 'Vss,Wss'],
+    [0x0b, 'roundsd', 'Vsd,Wsd'], [0x0c, 'blendps', 'Vps,Wps'], [0x0d, 'blendpd', 'Vpd,Wpd'],
+    [0x0e, 'pblendw', 'Vdq,Wdq'], [0x40, 'dpps', 'Vps,Wps'], [0x41, 'dppd', 'Vpd,Wpd'],
+    [0x42, 'mpsadbw', 'Vdq,Wdq'],
+].forEach(([byte, op, forms])=>{
+    THREE_BYTE_3A[/** @type {number} */ (byte)] = S({ 66: I(/** @type {string} */ (op), `${forms},Ib`) });
+});
+// The extracts write a general register whole, zero-extended, or as much
+// memory as the element; the inserts read a register's low element or as much.
+// A register operand of pextrb, pextrw and pinsrb is a dword one (its low
+// element), not the byte or word register its number would name.
+THREE_BYTE_3A[0x14] = S({ 66: new ByMod(I('pextrb', 'Eb,Vdq,Ib'), I('pextrb', 'Ed,Vdq,Ib')) });
+THREE_BYTE_3A[0x15] = S({ 66: new ByMod(I('pextrw', 'Ew,Vdq,Ib'), I('pextrw', 'Ed,Vdq,Ib')) });
+THREE_BYTE_3A[0x16] = S({ 66: I('pextrd', 'Ed,Vdq,Ib') });
+THREE_BYTE_3A[0x17] = S({ 66: I('extractps', 'Ed,Vdq,Ib') });
+THREE_BYTE_3A[0x20] = S({ 66: new ByMod(I('pinsrb', 'Vdq,Eb,Ib'), I('pinsrb', 'Vdq,Ed,Ib')) });
+THREE_BYTE_3A[0x21] = S({ 66: I('insertps', 'Vdq,Wd,Ib') });
+THREE_BYTE_3A[0x22] = S({ 66: I('pinsrd', 'Vdq,Ed,Ib') });
+// The string compares: every arithmetic flag written, AF and PF cleared.
+THREE_BYTE_3A[0x60] = S({ 66: I('pcmpestrm', 'Vdq,Wdq,Ib,EAX,EDX,XMM0',
+    { r: 0, w: ARITH_FLAGS, u: 0 }) });
+THREE_BYTE_3A[0x61] = S({ 66: I('pcmpestri', 'Vdq,Wdq,Ib,EAX,EDX,ECX',
+    { r: 0, w: ARITH_FLAGS, u: 0 }) });
+THREE_BYTE_3A[0x62] = S({ 66: I('pcmpistrm', 'Vdq,Wdq,Ib,XMM0',
+    { r: 0, w: ARITH_FLAGS, u: 0 }) });
+THREE_BYTE_3A[0x63] = S({ 66: I('pcmpistri', 'Vdq,Wdq,Ib,ECX',
+    { r: 0, w: ARITH_FLAGS, u: 0 }) });
+
+/**
  * Every operand form the tables use, so a test can check that the resolver
  * knows each one and the tables use nothing else.
  *
@@ -785,7 +876,7 @@ run(X87[7].reg, 0xf0, I('fcomip', 'ST0,STi', 'compareFloat'));
  */
 export function formsInUse(){
     const forms = new Set();
-    /** @param {Entry | Group | Prefixed | typeof SYS | null} entry */
+    /** @param {Entry | Group | ByMod | Prefixed | typeof SYS | null} entry */
     const visit = entry=>{
         if (entry === null || entry === SYS)
         {
@@ -794,6 +885,11 @@ export function formsInUse(){
         if (entry instanceof Group)
         {
             entry.entries.forEach(visit);
+        }
+        else if (entry instanceof ByMod)
+        {
+            visit(entry.memory);
+            visit(entry.register);
         }
         else if (entry instanceof Prefixed)
         {
@@ -806,6 +902,8 @@ export function formsInUse(){
     };
     ONE_BYTE.forEach(visit);
     TWO_BYTE.forEach(visit);
+    THREE_BYTE_38.forEach(visit);
+    THREE_BYTE_3A.forEach(visit);
     for (const map of X87)
     {
         map.mem.forEach(visit);

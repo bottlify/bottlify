@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
-import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
+import { LDR_DATA, LDR_ENTRY, PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
 import { createProcessors } from '../kernel32/processor.js';
 
@@ -43,13 +43,41 @@ function fakeHost({ blocks = true, arenaSize = 64 * 1024 * 1024 } = {}){
         bytes,
         view,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         teb: ()=>(blocks ? TEB_AT : 0),
         arena: { base: 0x400000, size: arenaSize },
     };
 }
+
+test('LdrFindEntryForAddress answers the loaded module whose image holds the address', ()=>{
+    const host = fakeHost();
+    const { view } = host;
+    const LDR = 0x2400;
+    const FIRST = 0x2500;
+    const SECOND = 0x2600;
+    const head = LDR + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST;
+    view.setUint32(PEB_AT + PEB.LDR, LDR, true);
+    // head -> FIRST -> SECOND -> head, by the load-order links.
+    view.setUint32(head, FIRST + LDR_ENTRY.IN_LOAD_ORDER_LINKS, true);
+    view.setUint32(FIRST + LDR_ENTRY.IN_LOAD_ORDER_LINKS, SECOND + LDR_ENTRY.IN_LOAD_ORDER_LINKS,
+        true);
+    view.setUint32(SECOND + LDR_ENTRY.IN_LOAD_ORDER_LINKS, head, true);
+    view.setUint32(FIRST + LDR_ENTRY.DLL_BASE, 0x400000, true);
+    view.setUint32(FIRST + LDR_ENTRY.SIZE_OF_IMAGE, 0x10000, true);
+    view.setUint32(SECOND + LDR_ENTRY.DLL_BASE, 0x10000000, true);
+    view.setUint32(SECOND + LDR_ENTRY.SIZE_OF_IMAGE, 0x2000, true);
+    const fns = createQueryFunctions(host);
+    const find = (/** @type {number} */ address)=>
+        fns.LdrFindEntryForAddress.handler([address, BUFFER]);
+    assert.equal(find(0x10001fff), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), SECOND, 'the image\'s last byte is in it');
+    assert.equal(find(0x400000), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), FIRST);
+    assert.equal(find(0x10002000), STATUS.NO_MORE_ENTRIES, 'just past the image');
+    assert.equal(fns.LdrFindEntryForAddress.handler([0x400000, 0]), STATUS.INVALID_PARAMETER);
+});
 
 test('RtlGetVersion reports what the process block holds', ()=>{
     // Not constants of its own: this is where Windows keeps the version, and a
@@ -91,7 +119,7 @@ test('RtlGetVersion answers each Windows the process block was built for', ()=>{
         });
         const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
         const fns = createQueryFunctions({
-            readMemory: (address, length)=>bytes.subarray(address, address + length),
+            readMemory: (address, length)=>bytes.slice(address, address + length),
             writeMemory: (address, data)=>bytes.set(data, address),
             teb: ()=>teb,
             arena: { base: 0x400000, size: 0x100000 },
@@ -177,6 +205,36 @@ test('data runs as code, permanently, and a program asking to change that is ref
         'any other class is taken');
 });
 
+test('the image file name is the program\'s path, natively or as Win32 names it', ()=>{
+    const native = '\\Device\\HarddiskVolume1\\App\\a.exe';
+    const host = { ...fakeHost(),
+        imagePath: ()=>({ win32: 'C:\\App\\a.exe', native }) };
+    const fns = createQueryFunctions(host);
+    const size = 8 + (native.length + 1) * 2;
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 27, BUFFER, 8, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no room for the characters');
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), size, 'and the size it needs');
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 27, BUFFER, size, 0]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), native.length * 2, 'Length');
+    assert.equal(host.view.getUint16(BUFFER + 2, true), native.length * 2 + 2, 'MaximumLength');
+    assert.equal(host.view.getUint32(BUFFER + 4, true), BUFFER + 8, 'the characters follow');
+    const text = String.fromCharCode(...new Uint16Array(host.bytes.slice(BUFFER + 8,
+        BUFFER + 8 + native.length * 2).buffer));
+    assert.equal(text, native);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 43, BUFFER, 0x100, 0]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), 'C:\\App\\a.exe'.length * 2, 'Win32\'s');
+    assert.equal(createQueryFunctions(fakeHost()).NtQueryInformationProcess.handler(
+        [-1, 27, BUFFER, 0x100, 0]), STATUS.INVALID_INFO_CLASS, 'without the path, unknown');
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 43, BUFFER, 8, 0]),
+        STATUS.INVALID_HANDLE, 'no handle names no process');
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 0, 0, 0, 0]),
+        STATUS.INFO_LENGTH_MISMATCH, 'a fixed class\'s length is checked before the handle');
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 0, BUFFER, 0x18, 0]),
+        STATUS.INVALID_HANDLE);
+});
+
 test('the length a class needs is reported even when the buffer is too small', ()=>{
     // This is the two-call protocol every caller of these uses: ask with nothing,
     // allocate what it was told, ask again. Withholding the length on the failing
@@ -238,6 +296,35 @@ test('the process reports the block a program would have found itself', ()=>{
     assert.equal(host.view.getUint32(BUFFER + 0x00, true), STATUS.PENDING,
         'a running process has no exit status yet');
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x18);
+    assert.equal(host.view.getUint32(BUFFER + 0x14, true), 0, 'nothing started it');
+
+    const child = { ...fakeHost(), processes: ()=>[
+        { id: 0x1234, parent: 0x2a4, path: 'C:\\child.exe', threads: [0x1238] }] };
+    createQueryFunctions(child).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+    assert.equal(child.view.getUint32(BUFFER + 0x14, true), 0x2a4,
+        'InheritedFromUniqueProcessId: the process that started it');
+
+    // Asked between its threads' turns - a parent's call made in it, a
+    // suspended child's first thread never having run - the process still
+    // knows its block and its id.
+    const between = { ...fakeHost(), teb: ()=>0, processBlock: ()=>PEB_AT, processId: 0x1234 };
+    createQueryFunctions(between).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+    assert.equal(between.view.getUint32(BUFFER + 0x04, true), PEB_AT, 'PebBaseAddress');
+    assert.equal(between.view.getUint32(BUFFER + 0x10, true), 0x1234, 'UniqueProcessId');
+});
+
+test('ProcessImageInformation is the program image\'s SECTION_IMAGE_INFORMATION', ()=>{
+    const information = new Uint8Array(48).fill(7);
+    const host = { ...fakeHost(), imageInformation: ()=>information };
+    const fns = createQueryFunctions(host);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 37, BUFFER, 47, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 37, BUFFER, 48, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.deepEqual([...host.bytes.slice(BUFFER, BUFFER + 48)], [...information]);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 48);
+    assert.equal(createQueryFunctions(fakeHost()).NtQueryInformationProcess.handler(
+        [-1, 37, BUFFER, 48, 0]), STATUS.INVALID_INFO_CLASS, 'no image placed, unknown');
 });
 
 test('there is no debugger, and the answer says so rather than declining', ()=>{
@@ -250,6 +337,63 @@ test('there is no debugger, and the answer says so rather than declining', ()=>{
     assert.equal(fns.NtQueryInformationProcess.handler([-1, 7, BUFFER, 4, RETURN_LENGTH]),
         STATUS.SUCCESS);
     assert.equal(host.view.getUint32(BUFFER, true), 0);
+});
+
+test('the debug classes answer what the debugger records, this process\'s and a child\'s', ()=>{
+    // Wine's ntdll info.c test_query_process_debug_port, _object_handle and
+    // _flags: a debuggee's port is -1 and its debug object is opened for the
+    // asker; ProcessDebugFlags is clear for DEBUG_ONLY_THIS_PROCESS or an
+    // attach, and stays clear after a detach.
+    const PORT = 7;
+    const OBJECT = 30;
+    const FLAGS = 31;
+    const object = { killOnClose: true };
+    const child = { debugged: { object }, noDebugInherit: true };
+    /** @type {any[]} */
+    const opened = [];
+    const host = {
+        ...fakeHost(),
+        debugState: (/** @type {any} */ asked)=>(asked
+            ? { debugged: Boolean(asked.debugged), object: asked.debugged?.object ?? null,
+                inherit: !asked.noDebugInherit }
+            : { debugged: false, object: null, inherit: true }),
+        openDebugObject: (/** @type {any} */ made)=>{
+            opened.push(made);
+            return 0x44;
+        },
+        processOf: (/** @type {number} */ handle)=>(handle === 0x40 ? child : null),
+    };
+    const fns = createQueryFunctions(host);
+    /** @param {number} handle @param {number} infoClass @param {number} [length] */
+    const ask = (handle, infoClass, length = 4)=>{
+        host.view.setUint32(BUFFER, 0xdeadbeef, true);
+        host.view.setUint32(RETURN_LENGTH, 0xdeadbeef, true);
+        const status = Number(fns.NtQueryInformationProcess.handler([handle, infoClass, BUFFER,
+            length, RETURN_LENGTH])) >>> 0;
+        return [status, host.view.getUint32(BUFFER, true),
+            host.view.getUint32(RETURN_LENGTH, true)];
+    };
+
+    assert.deepEqual(ask(-1, PORT), [STATUS.SUCCESS, 0, 4], 'no debugger: no port');
+    assert.deepEqual(ask(-1, OBJECT), [0xc0000353, 0, 4]);
+    assert.deepEqual(ask(-1, FLAGS), [STATUS.SUCCESS, 1, 4]);
+    assert.deepEqual(ask(0x40, PORT), [STATUS.SUCCESS, 0xffffffff, 4], 'a debuggee\'s');
+    assert.deepEqual(ask(0x40, OBJECT), [STATUS.SUCCESS, 0x44, 4]);
+    assert.deepEqual(opened, [object], 'its debug object, opened here');
+    assert.deepEqual(ask(0x40, FLAGS), [STATUS.SUCCESS, 0, 4]);
+    child.debugged = /** @type {any} */ (null);
+    assert.deepEqual(ask(0x40, FLAGS), [STATUS.SUCCESS, 0, 4], 'a detach leaves it set');
+    assert.deepEqual(ask(0x40, PORT), [STATUS.SUCCESS, 0, 4]);
+
+    // The probe comes first, the length after, and neither writes anything.
+    assert.deepEqual(ask(-1, OBJECT, 5), [STATUS.INFO_LENGTH_MISMATCH, 0xdeadbeef, 0xdeadbeef]);
+    /** @param {number[]} args */
+    const status = args=>Number(fns.NtQueryInformationProcess.handler(args)) >>> 0;
+    assert.equal(status([-1, OBJECT, BUFFER + 1, 1, 0]), STATUS.DATATYPE_MISALIGNMENT);
+    assert.equal(status([0, FLAGS, 0, 0, 0]), STATUS.INFO_LENGTH_MISMATCH,
+        'no handle: the length first');
+    assert.equal(status([0, FLAGS, 0, 4, 0]),
+        STATUS.INVALID_HANDLE);
 });
 
 test('argument sizes match what the guest compiled against', ()=>{
@@ -280,7 +424,7 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
     });
     const { teb } = blocks.createThreadBlock({ id: 1, stackBase: 0x3000, stackLimit: 0x2000 });
     const fns = createQueryFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         teb: ()=>teb,
         arena: { base: 0x400000, size: 0x100000 },
@@ -347,7 +491,9 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     const host = fakeHost();
     const fns = createQueryFunctions({
         ...host,
-        handleType: handle=>(handle === 0x44 ? 'event' : null),
+        handleType: handle=>(handle === 0x44 || handle === 0x4c ? 'event' : null),
+        // 0x4c was opened for SYNCHRONIZE | EVENT_MODIFY_STATE; 0x44 with every right.
+        handleAccess: handle=>(handle === 0x4c ? 0x00100002 : null),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     });
     assert.equal(fns.NtQueryObject.argBytes, 20);
@@ -357,8 +503,11 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38);
     assert.equal(host.view.getUint32(BUFFER + 4, true), 0x001fffff, 'every right');
     assert.equal(host.view.getUint32(BUFFER + 8, true), 1, 'one handle');
-    assert.ok(said.some(line=>line.startsWith('NtQueryObject: granted access')),
-        'the untracked access is reported');
+    assert.ok(said.some(line=>line.startsWith('NtQueryObject: handle and reference counts')),
+        'the untracked counts are reported');
+    assert.equal(fns.NtQueryObject.handler([0x4c, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), 0x00100002,
+        'the rights the handle was granted');
 
     assert.equal(fns.NtQueryObject.handler([0xffffffff, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS,
         'the current-process pseudo-handle names something without a table entry');
@@ -366,26 +515,57 @@ test('NtQueryObject answers the basic class for a handle that names something', 
         STATUS.INFO_LENGTH_MISMATCH);
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38, 'the size needed is still told');
     assert.equal(fns.NtQueryObject.handler([0x48, 0, BUFFER, 0x38, 0]), STATUS.INVALID_HANDLE);
-    assert.equal(fns.NtQueryObject.handler([0x44, 2, BUFFER, 0x100, 0]),
+    assert.equal(fns.NtQueryObject.handler([0x44, 4, BUFFER, 0x100, 0]),
         STATUS.INVALID_INFO_CLASS);
-    assert.ok(said.some(line=>line.includes('class 2')), 'a refused class is reported');
+    assert.ok(said.some(line=>line.includes('class 4')), 'a refused class is reported');
 });
 
-test('the debug-help queries are refused as unsupported and say so', ()=>{
+test('NtQueryObject names the type of the object a handle names (test_shared_resource,'
+    + ' d3d11.c: DxgkSharedResource)', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const host = fakeHost();
+    /** @type {Record<number, string>} */
+    const kinds = { 0x44: 'event', 0x48: 'dxgk-shared-resource', 0x4c: 'find', 0x50: 'mutex' };
+    const fns = createQueryFunctions({
+        ...host,
+        handleType: handle=>kinds[handle] ?? null,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    /** @param {number} handle */
+    const typeOf = handle=>{
+        const status = fns.NtQueryObject.handler([handle, 2, BUFFER, 0x100, RETURN_LENGTH]);
+        if (status !== STATUS.SUCCESS)
+        {
+            return status;
+        }
+        const length = host.view.getUint16(BUFFER, true);
+        const text = host.view.getUint32(BUFFER + 4, true);
+        assert.equal(text, BUFFER + 0x60, 'the name follows the structure');
+        assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x60 + length + 2);
+        return String.fromCharCode(...new Uint16Array(
+            host.bytes.slice(text, text + length).buffer));
+    };
+    assert.equal(typeOf(0x44), 'Event');
+    assert.equal(typeOf(0x48), 'DxgkSharedResource');
+    assert.equal(typeOf(0x50), 'Mutant');
+    assert.equal(typeOf(0xffffffff), 'Process', 'the current process');
+    assert.equal(typeOf(0x4c), STATUS.INVALID_HANDLE, 'a find handle is no kernel object');
+    assert.ok(said.some(line=>line.includes('find handle')), said.join());
+    assert.equal(typeOf(0x54), STATUS.INVALID_HANDLE, 'a handle that names nothing');
+    assert.equal(fns.NtQueryObject.handler([0x44, 2, BUFFER, 0x60, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no room for the name');
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x60 + 12, 'the size needed told');
+});
+
+test('a thread is not opened by id, and says so', ()=>{
     /** @type {string[]} */
     const said = [];
     const fns = /** @type {Record<string, any>} */ (createQueryFunctions({ ...fakeHost(),
         divergence: api=>said.push(api) }));
-    assert.deepEqual(['NtOpenThread', 'NtQueryInformationThread', 'RtlCreateQueryDebugBuffer',
-        'RtlDestroyQueryDebugBuffer', 'RtlQueryProcessDebugInformation']
-        .map(name=>fns[name].argBytes), [16, 20, 8, 4, 12]);
+    assert.equal(fns.NtOpenThread.argBytes, 16);
     assert.equal(fns.NtOpenThread.handler([0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(fns.NtQueryInformationThread.handler([0, 0, 0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(fns.RtlCreateQueryDebugBuffer.handler([0, 0]), 0, 'no buffer');
-    assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0]), STATUS.INVALID_PARAMETER);
-    assert.equal(fns.RtlDestroyQueryDebugBuffer.handler([0x1000]), STATUS.SUCCESS);
-    assert.equal(fns.RtlQueryProcessDebugInformation.handler([0, 0, 0]), STATUS.NOT_IMPLEMENTED);
-    assert.equal(said.length, 4);
+    assert.deepEqual(said, ['NtOpenThread']);
 });
 
 test('SystemProcessInformation chains the idle process and each process with its threads', ()=>{
@@ -430,4 +610,129 @@ test('the system file cache is sized by a well-formed request, and nothing else 
     assert.equal(fns.NtSetSystemInformation.handler([21, 0, 36]), STATUS.ACCESS_VIOLATION);
     assert.equal(fns.NtSetSystemInformation.handler([0, BUFFER, 0x2c]),
         STATUS.INVALID_INFO_CLASS);
+});
+
+test('a child\'s handle is answered by the child about itself, or from its record once gone',
+    async()=>{
+        // Wine's kernel32 process.c reads a child's PROCESS_BASIC_INFORMATION
+        // through its handle: its own id, its parent, its block, and its exit
+        // status once it has ended.
+        const host = /** @type {any} */ (fakeHost());
+        /** @type {any[]} */
+        const asked = [];
+        const answer = new Uint8Array(0x18);
+        new DataView(answer.buffer).setUint32(0x04, 0x7ffd0000, true);
+        new DataView(answer.buffer).setUint32(0x10, 0x2000, true);
+        const child = { id: 0x2000, parentId: 0x1234, exitCode: 259 };
+        host.processOf = (/** @type {number} */ handle)=>(handle === 0x40 ? child : null);
+        host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 0, error: null,
+                outs: [null, null, answer, null, new Uint8Array([0x18, 0, 0, 0])] });
+        };
+        const fns = createQueryFunctions(host);
+
+        assert.equal(await fns.NtQueryInformationProcess.handler(
+            [0x40, 0, BUFFER, 0x18, RETURN_LENGTH]), STATUS.SUCCESS);
+        assert.deepEqual(asked, [[child, { call: 'NtQueryInformationProcess',
+            args: [0xffffffff, 0, { out: 0x18 }, 0x18, { out: 4 }] }]]);
+        assert.equal(host.view.getUint32(BUFFER + 0x04, true), 0x7ffd0000, 'the child\'s block');
+        assert.equal(host.view.getUint32(BUFFER + 0x10, true), 0x2000);
+        assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x18);
+
+        // Ended: its record says what is left of it.
+        Object.assign(child, { completed: true, exitCode: 7 });
+        host.bytes.fill(0xcc, BUFFER, BUFFER + 0x18);
+        assert.equal(fns.NtQueryInformationProcess.handler([0x40, 0, BUFFER, 0x18, 0]),
+            STATUS.SUCCESS);
+        assert.deepEqual([0, 4, 0x10, 0x14].map(at=>host.view.getUint32(BUFFER + at, true)),
+            [7, 0, 0x2000, 0x1234], 'its code, no block, its id and its parent');
+        assert.equal(fns.NtQueryInformationProcess.handler([0x40, 7, BUFFER, 4, 0]),
+            STATUS.INVALID_INFO_CLASS, 'and nothing else');
+        assert.equal(asked.length, 1);
+    });
+
+test('NtQueryObject names a file under its volume device, an unnamed object nothing', ()=>{
+    const host = fakeHost();
+    const fns = createQueryFunctions({ ...host,
+        handleType: handle=>(handle === 0x44 ? 'file' : handle === 0x48 ? 'event' : null),
+        objectName: handle=>(handle === 0x44 ? '\\Device\\HarddiskVolume1\\a.txt' : null),
+    });
+    const name = '\\Device\\HarddiskVolume1\\a.txt';
+    const size = 8 + (name.length + 1) * 2;
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, 8, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), size, 'the room it takes');
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, size, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), name.length * 2);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), BUFFER + 8, 'the name right after it');
+    assert.equal(String.fromCharCode(...Array.from({ length: name.length },
+        (_, at)=>host.view.getUint16(BUFFER + 8 + at * 2, true))), name);
+
+    host.bytes.fill(0xcd, BUFFER, BUFFER + 8);
+    assert.equal(fns.NtQueryObject.handler([0x48, 1, BUFFER, 64, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.deepEqual([host.view.getUint32(BUFFER, true), host.view.getUint32(BUFFER + 4, true)],
+        [0, 0], 'no name: an empty string, no buffer');
+});
+
+test('SystemHandleInformation lists the process\'s kernel objects and tells its length', ()=>{
+    const host = fakeHost();
+    const event = {};
+    const handles = [
+        { handle: 0x40, type: 'event', object: event, access: 0x1f0003 },
+        { handle: 0x44, type: 'find', object: {}, access: null },
+        { handle: 0x48, type: 'event', object: event, access: null },
+        { handle: 0x4c, type: 'file', object: {}, access: 0x120089 },
+    ];
+    const fns = createQueryFunctions({ ...host, openHandles: ()=>handles, processId: 0x1234 });
+    const query = (/** @type {number} */ infoClass, /** @type {number} */ length)=>
+        fns.NtQuerySystemInformation.handler([infoClass, BUFFER, length, RETURN_LENGTH]);
+    const { view } = host;
+
+    // One entry's room is not three entries': the length is told, nothing written.
+    view.setUint32(BUFFER, 0xdeadbeef, true);
+    assert.equal(query(16, 20), STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(RETURN_LENGTH, true), 4 + 3 * 16, 'the find handle is no object');
+    assert.equal(view.getUint32(BUFFER, true), 0xdeadbeef);
+
+    assert.equal(query(16, 4 + 3 * 16), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), 3, 'the count');
+    const entry = (/** @type {number} */ index)=>BUFFER + 4 + index * 16;
+    assert.equal(view.getUint32(entry(0), true), 0x1234, 'the owner');
+    assert.equal(host.bytes[entry(0) + 4], 10, 'Event is the ninth type, numbered from two');
+    assert.equal(view.getUint16(entry(0) + 6, true), 0x40, 'the handle');
+    assert.equal(view.getUint32(entry(0) + 12, true), 0x1f0003, 'the access granted');
+    assert.equal(view.getUint32(entry(1) + 12, true), 0x1fffff, 'all of it, none narrowed');
+    assert.ok(view.getUint32(entry(0) + 8, true) >= 0x80000000, 'an address the system\'s');
+    assert.equal(view.getUint32(entry(1) + 8, true), view.getUint32(entry(0) + 8, true),
+        'two handles of one object name one address');
+    assert.notEqual(view.getUint32(entry(2) + 8, true), view.getUint32(entry(0) + 8, true));
+    assert.equal(host.bytes[entry(2) + 4], 29, 'File');
+    const fileObject = view.getUint32(entry(2) + 8, true);
+
+    // The extended table: two words, then 28-byte entries.
+    assert.equal(query(64, 8), STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(RETURN_LENGTH, true), 8 + 3 * 28);
+    assert.equal(query(64, 8 + 3 * 28), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), 3);
+    const wide = (/** @type {number} */ index)=>BUFFER + 8 + index * 28;
+    assert.equal(view.getUint32(wide(2), true), fileObject,
+        'the object at the address the short table gave it');
+    assert.equal(view.getUint32(wide(2) + 4, true), 0x1234);
+    assert.equal(view.getUint32(wide(2) + 8, true), 0x4c);
+    assert.equal(view.getUint32(wide(2) + 12, true), 0x120089);
+    assert.equal(view.getUint16(wide(2) + 18, true), 29);
+});
+
+test('NtQuerySystemInformation refuses a buffer off a ULONG\'s alignment, writing nothing', ()=>{
+    const host = fakeHost();
+    const fns = createQueryFunctions(host);
+    host.view.setUint32(RETURN_LENGTH, 0xdeadbeef, true);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER + 1, 44, RETURN_LENGTH]),
+        STATUS.DATATYPE_MISALIGNMENT);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0xdeadbeef);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER + 1, 0, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no length, no buffer to probe');
 });

@@ -15,6 +15,8 @@
  * checked against the same map.
  */
 
+import { guestFault } from './faults.js';
+
 /** What a region holds. Drives permissions and, later, diagnostics. */
 export const RegionKind = {
     /** The first megabyte: real-mode leftovers and our boot ROM. */
@@ -113,6 +115,12 @@ export function createRegionMap(){
             if (!(region.access in PERMITS))
             {
                 throw new Error(`Region "${region.name}" has unknown access "${region.access}"`);
+            }
+            // A name has one owner: `unregister` takes the first by name, and
+            // two regions of one name let one owner's release unmap the other's.
+            if (regions.some(candidate=>candidate.name === region.name))
+            {
+                throw new Error(`Region "${region.name}" is already registered`);
             }
             const clash = overlapping(region.base, region.size);
             if (clash)
@@ -244,20 +252,22 @@ export function createRegionMap(){
             const region = this.find(address);
             if (!region)
             {
-                throw new Error(
-                    `Unmapped ${mode} at 0x${address.toString(16)} (${length} bytes)`);
+                throw guestFault(
+                    `Unmapped ${mode} at 0x${address.toString(16)} (${length} bytes)`,
+                    address, length, mode);
             }
             if (address + length > region.base + region.size)
             {
-                throw new Error(
+                throw guestFault(
                     `${mode} of ${length} bytes at 0x${address.toString(16)}`
-                    + ` runs past the end of region "${region.name}"`);
+                    + ` runs past the end of region "${region.name}"`,
+                    region.base + region.size, length, mode);
             }
             if (!PERMITS[region.access][mode])
             {
-                throw new Error(
+                throw guestFault(
                     `Region "${region.name}" (${region.access}) does not permit ${mode}`
-                    + ` at 0x${address.toString(16)}`);
+                    + ` at 0x${address.toString(16)}`, address, length, mode);
             }
             return region;
         },
@@ -266,9 +276,9 @@ export function createRegionMap(){
          * Whether anything at this address could ever be executed.
          *
          * Asked by whoever writes on the host's behalf: a write into memory the
-         * guest can execute may be changing code the emulator has compiled, and
-         * has to say so. A write anywhere else cannot be, and paying the
-         * emulator's invalidation for it is pure loss.
+         * guest can execute may be changing code the translator has compiled,
+         * and has to say so. A write anywhere else cannot be, and paying the
+         * translator's invalidation for it is pure loss.
          *
          * @param {number} address
          * @returns {boolean} true when nothing is known, which is the safe answer.

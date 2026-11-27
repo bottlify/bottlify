@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { PIECE_SIZE, piecesOf } from './layers/filesystem/internal/memory-store.js';
 import {
     coalescedSaver, inflateRaw,
     normaliseSession, opfsSession, packSession, resolveStorage, unpackSession,
@@ -78,6 +79,8 @@ function fakeDirectory(){
     /** @type {Map<string, any>} */
     const entries = new Map();
     let writes = 0;
+    /** Whether the disk refuses writes for room, and the streams aborted after. */
+    const disk = { full: false, aborted: 0 };
     /** @returns {any} */
     const folder = ()=>{
         /** @type {Map<string, any>} */
@@ -100,12 +103,23 @@ function fakeDirectory(){
                         let written = new Uint8Array(0);
                         return {
                             /** @param {Uint8Array} chunk */
+                            // Appended at the stream's position, as the browser's does.
                             write: async chunk=>{
-                                written = chunk.slice();
+                                if (disk.full)
+                                {
+                                    throw new DOMException('full', 'QuotaExceededError');
+                                }
+                                const grown = new Uint8Array(written.length + chunk.length);
+                                grown.set(written);
+                                grown.set(chunk, written.length);
+                                written = grown;
                             },
                             close: async()=>{
                                 writes++;
                                 here.set(name, written);
+                            },
+                            abort: async()=>{
+                                disk.aborted++;
                             },
                         };
                     },
@@ -138,8 +152,31 @@ function fakeDirectory(){
             },
         };
     };
-    return { root: folder(), entries, writes: ()=>writes };
+    return { root: folder(), entries, writes: ()=>writes, disk };
 }
+
+test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
+    const { filesystemModule } = await import('./layers/filesystem/module.js');
+    const volume = /** @type {any} */ (await filesystemModule.create(undefined));
+    const handle = volume.open('C:\\big.bin',
+        { write: true, disposition: volume.Disposition.CREATE_NEW });
+    // The first piece and the third written, the second never: zeros.
+    volume.write(handle, new Uint8Array(PIECE_SIZE).fill(1));
+    volume.seek(handle, PIECE_SIZE * 2);
+    volume.write(handle, new Uint8Array([3, 3]));
+    volume.close(handle);
+    const files = volume.export();
+    await filesystemModule.dispose();
+    assert.equal([...files[0].parts()].length, 3, 'handed out as the store keeps it, a piece each');
+    const disk = fakeDirectory();
+    const store = opfsSession('pieces', async()=>disk.root);
+    await store.save({ files, registry: null });
+    const back = (await store.load()).files[0];
+    assert.equal(back.path, 'C:\\big.bin');
+    assert.equal(back.bytes.length, PIECE_SIZE * 2 + 2);
+    assert.deepEqual([back.bytes[0], back.bytes[PIECE_SIZE - 1], back.bytes[PIECE_SIZE],
+        back.bytes[PIECE_SIZE * 2 - 1], back.bytes[PIECE_SIZE * 2 + 1]], [1, 1, 0, 0, 3]);
+});
 
 test('a session in the origin file system is kept a file to each file and read back', async()=>{
     const disk = fakeDirectory();
@@ -159,6 +196,52 @@ test('a session in the origin file system is kept a file to each file and read b
     assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]).sort(),
         [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
 });
+
+test('a session read back whole reads each file\'s bytes once, never the entry whole', async()=>{
+    // Read whole and then cut from its head, an entry was held twice: the
+    // whole read and the copy of its bytes.
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    const big = new Uint8Array(1 << 20).fill(5);
+    await store.save({ files: [{ path: 'C:\\level.sav', bytes: big }], registry: null });
+    const read = Blob.prototype.arrayBuffer;
+    /** @type {number[]} */
+    const lengths = [];
+    Blob.prototype.arrayBuffer = function(){
+        lengths.push(this.size);
+        return read.call(this);
+    };
+    try
+    {
+        const back = await opfsSession('game', async()=>disk.root).load();
+        assert.equal(back.files[0].bytes.byteLength, big.length);
+        assert.equal(back.files[0].bytes.buffer.byteLength, big.length, 'a buffer of its own');
+    }
+    finally
+    {
+        Blob.prototype.arrayBuffer = read;
+    }
+    assert.ok(Math.max(...lengths) <= big.length, `reads of ${lengths.join(', ')} bytes`);
+});
+
+test('a save the disk refuses for room fails, its stream aborted, and the last save stays',
+    async()=>{
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([1]) }],
+            registry: null });
+        disk.disk.full = true;
+        await assert.rejects(store.save({ files: [{ path: 'C:\\save.dat',
+            bytes: new Uint8Array([2]) }], registry: null }), { name: 'QuotaExceededError' });
+        assert.equal(disk.disk.aborted, 1, 'the stream let go of, its copy with it');
+        disk.disk.full = false;
+        const back = await opfsSession('game', async()=>disk.root).load();
+        assert.deepEqual(back.files.map(file=>[...file.bytes]), [[1]]);
+        await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([3]) }],
+            registry: null });
+        assert.deepEqual((await store.load()).files.map(file=>[...file.bytes]), [[3]],
+            'the room back, the next save is written');
+    });
 
 test('a session cleared is gone whole, saved games and registry, and a clear of none is no error',
     async()=>{
@@ -223,6 +306,43 @@ test('a save after the first writes only what changed, and drops what was remove
     assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]),
         [[config.path, [2]]]);
     assert.deepEqual(back.registry, { a: 2 });
+});
+
+test('a file\'s record changed alone writes the links entry, not the file', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    const config = { path: 'C:\\config.cfg', bytes: new Uint8Array([1]) };
+    await store.save({ files: [config], registry: null });
+    const before = disk.writes();
+    const links = [{ owner: config.path, names: [], attributes: 0x21 }];
+    await store.save({ files: [config], registry: null, links },
+        [{ kind: 'named', path: config.path }]);
+    assert.equal(disk.writes() - before, 1, 'the links entry alone');
+    const back = await store.load();
+    assert.deepEqual(back.files.map(file=>file.path), [config.path], 'the file still there');
+    assert.deepEqual(back.links, links);
+});
+
+test('a run that read its session back saves only what changed at its first save', async()=>{
+    const disk = fakeDirectory();
+    const big = { path: 'C:\\big.save', bytes: bytes(1 << 20, 3) };
+    const config = { path: 'C:\\config.cfg', bytes: new Uint8Array([1]) };
+    await opfsSession('game', async()=>disk.root)
+        .save({ files: [big, config], registry: { a: 1 } });
+    const before = disk.writes();
+
+    const next = opfsSession('game', async()=>disk.root);
+    await next.load();
+    const config2 = { path: config.path, bytes: new Uint8Array([2]) };
+    const edit = { path: 'C:\\laid-over.ini', bytes: new Uint8Array([7]) };
+    await next.save({ files: [big, config2, edit], registry: { a: 1 } },
+        [{ kind: 'written', path: config.path }]);
+    assert.equal(disk.writes() - before, 3,
+        'the file changed, the file the folder had no entry for, and the registry');
+    const back = await opfsSession('game', async()=>disk.root).load();
+    assert.deepEqual(back.files.map(file=>[file.path, file.bytes.length]).sort(),
+        [[big.path, 1 << 20], [config.path, 1], [edit.path, 1]]);
+    assert.equal(back.files.find(file=>file.path === config.path)?.bytes[0], 2);
 });
 
 test('a session left as one packed file is read, and gone after the first save', async()=>{
@@ -358,7 +478,8 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     assert.equal(saved.length, 0, 'nothing saved before it does');
 
     timers.shift()?.();
-    assert.deepEqual(saved, [{ files: 1, changes: 3 }], 'one save carrying every change');
+    assert.deepEqual(saved, [{ files: 1, changes: 2 }],
+        'one save carrying every change, a file written twice named once');
 
     // Changes that arrive while the store is busy wait for it, then go as one.
     saver.note([{ kind: 'written', path: 'g' }]);
@@ -369,7 +490,7 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     await Promise.resolve();
     assert.equal(timers.length, 1, 'the next save waits its turn once the first is done');
     timers.shift()?.();
-    assert.deepEqual(saved.at(-1), { files: 2, changes: 2 }, 'the snapshot is taken at save time');
+    assert.deepEqual(saved.at(-1), { files: 2, changes: 1 }, 'the snapshot is taken at save time');
     assert.equal(saver.pending, 0);
 
     // A flush saves what is pending now, without the wait.
@@ -382,6 +503,61 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     assert.equal(saved.at(-1)?.changes, 1);
     stores.shift()?.resolve();
     await flushed;
+});
+
+test('a program that never stops writing gets a save no more than a tenth of the time', async()=>{
+    /** @type {number[]} */
+    const waits = [];
+    /** @type {(() => void)[]} */
+    const timers = [];
+    let now = 0;
+    /** @type {(() => void) | null} */
+    let finish = null;
+    const saver = coalescedSaver({
+        snapshot: ()=>({ files: [], registry: null }),
+        persist: ()=>new Promise(resolve=>{
+            finish = ()=>{
+                now += 400;
+                resolve(undefined);
+            };
+        }),
+        schedule: (fn, ms)=>{
+            waits.push(ms);
+            timers.push(fn);
+        },
+        clock: ()=>now,
+    });
+    saver.note([{ kind: 'registry' }]);
+    timers.shift()?.();
+    saver.note([{ kind: 'registry' }]);
+    /** @type {() => void} */ (/** @type {unknown} */ (finish))();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(waits, [250, 3600], 'a save of 400 ms waits nine times that before the next');
+});
+
+test('a save names each file once, by its last change, however many turns noted it', async()=>{
+    // The filesystem collapses a file's writes only within one turn of the
+    // machine; a save written over several turns arrives as several notes, and
+    // the store puts every file it is told of whole.
+    /** @type {(() => void)[]} */
+    const timers = [];
+    /** @type {any[][]} */
+    const saved = [];
+    const saver = coalescedSaver({
+        snapshot: ()=>({ files: [], registry: null }),
+        persist: (session, changes)=>saved.push(changes),
+        schedule: fn=>timers.push(fn),
+    });
+    saver.note([{ kind: 'written', path: 'a' }]);
+    saver.note([{ kind: 'registry' }, { kind: 'written', path: 'b' }]);
+    saver.note([{ kind: 'removed', path: 'a' }, { kind: 'registry' }]);
+    saver.note([{ kind: 'written', path: 'b' }]);
+    assert.equal(saver.pending, 3);
+    timers.shift()?.();
+    await Promise.resolve();
+    assert.deepEqual(saved, [[{ kind: 'removed', path: 'a' }, { kind: 'registry' },
+        { kind: 'written', path: 'b' }]]);
 });
 
 test('the origin\'s storage is asked to be kept once, and a refusal keeps the session working',
@@ -425,3 +601,91 @@ test('the origin\'s storage is asked to be kept once, and a refusal keeps the se
             }
         }
     });
+
+test('a file the volume keeps on its page file is saved a piece at a time, holes as zeroes',
+    async()=>{
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        /** @type {number[]} */
+        const asked = [];
+        const size = 2 * PIECE_SIZE + 3;
+        const paged = {
+            owner: {},
+            /** @param {number} index */
+            piece: index=>{
+                asked.push(index);
+                return index === 1 ? undefined
+                    : new Uint8Array(Math.min(PIECE_SIZE, size - index * PIECE_SIZE))
+                        .fill(index + 1);
+            },
+            read: ()=>{
+                throw new Error('read whole');
+            },
+            release: ()=>{},
+        };
+        const contents = { size, flat: null, pieces: [], paged };
+        const file = { path: 'C:\\big.pak', parts: ()=>piecesOf(contents) };
+        const madeWhole = ()=>{
+            throw new Error('made whole');
+        };
+        Object.defineProperty(file, 'bytes', { get: madeWhole });
+        assert.deepEqual(asked, [], 'nothing read before the writer reaches it');
+        const files = /** @type {any[]} */ ([file]);
+        await store.save({ files, registry: null });
+        assert.deepEqual(asked, [0, 1, 2]);
+        const back = await store.load();
+        const read = back.files[0].bytes;
+        assert.equal(read.length, size);
+        assert.deepEqual([read[0], read[PIECE_SIZE], read[2 * PIECE_SIZE + 2]], [1, 0, 3]);
+    });
+
+test('a session loaded lazily names its files and reads each when asked', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([7, 8]) }],
+        registry: { roots: [1] } });
+    const loaded = /** @type {any} */ (await store.load({ lazy: true }));
+    assert.deepEqual(loaded.registry, { roots: [1] });
+    assert.deepEqual(loaded.files.map((/** @type {any} */ file)=>[file.path, file.size]),
+        [['C:\\save.dat', 2]]);
+    assert.equal(loaded.files[0].bytes, undefined, 'nothing read up front');
+    assert.deepEqual([...await loaded.files[0].read()], [7, 8]);
+});
+
+test('a file loaded lazily is read a range at a time, and one handed back is kept as it is,'
+    + ' never read nor written again', async()=>{
+    const disk = fakeDirectory();
+    const big = { path: 'C:\\Data\\setup.cab',
+        bytes: new Uint8Array(3 << 20).map((unused, at)=>(at * 7 + (at >>> 20)) & 0xff) };
+    const save = { path: 'C:\\save.dat', bytes: new Uint8Array([1]) };
+    await opfsSession('game', async()=>disk.root).save({ files: [big, save], registry: null });
+
+    const store = opfsSession('game', async()=>disk.root);
+    const loaded = /** @type {any} */ (await store.load({ lazy: true }));
+    const cab = loaded.files.find((/** @type {any} */ file)=>file.path === big.path);
+    const middle = (1 << 20) - 2;
+    assert.deepEqual(await cab.read(middle, 4), big.bytes.subarray(middle, middle + 4),
+        'a range across a megabyte');
+    const read = cab.read;
+    let reads = 0;
+    cab.read = (/** @type {any[]} */ ...args)=>{
+        reads++;
+        return read(...args);
+    };
+
+    // A session laid under the volume hands back every file the program left
+    // alone as the store handed it: the first save writes the one it changed.
+    const before = disk.writes();
+    const save2 = { path: save.path, bytes: new Uint8Array([2]) };
+    await store.save({ files: [cab, save2], registry: null },
+        [{ kind: 'written', path: save.path }]);
+    assert.equal(disk.writes() - before, 1, 'the file written, nothing of the one handed back');
+    // A save that names no path writes everything it was handed - but not a
+    // file the folder holds already as it handed it out.
+    await store.save({ files: [cab, save2], registry: null });
+    assert.equal(disk.writes() - before, 2, 'the save written whole writes the one file again');
+    assert.equal(reads, 0, 'the file handed back was never read');
+    const back = await opfsSession('game', async()=>disk.root).load();
+    assert.deepEqual(back.files.map(file=>[file.path, file.bytes.length]).sort(),
+        [[big.path, 3 << 20], [save.path, 1]], 'and the folder still holds it');
+});

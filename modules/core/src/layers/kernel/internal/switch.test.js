@@ -133,3 +133,34 @@ test('a call parked before its stub\'s ret returns through that ret, and one pas
     switcher.switchTo(null, parked, { ...resume, inStub: false });
     assert.equal(resumed[2].eip, 0x401051);
 });
+
+test('a 64-bit call parked in its stub returns to a caller past 4 GiB whole', ()=>{
+    // An image a 64-bit program keeps at its own base past 4 GiB: the return
+    // quadword put back is the address, not its low dword beside whatever the
+    // park loop's high dword was.
+    const PARK = 0x1000;
+    const STUB = 0x2000;
+    const ESP = 0x8000;
+    /** @type {Map<number, number>} */
+    const bytes = new Map([[STUB, 0xc3]]);
+    /** @type {Map<number, number>} */
+    const words = new Map([[ESP, PARK], [ESP + 4, 0]]);
+    const memory = {
+        readU8: (/** @type {number} */ at)=>bytes.get(at) ?? 0,
+        readU16: (/** @type {number} */ at)=>(bytes.get(at) ?? 0) | (bytes.get(at + 1) ?? 0) << 8,
+        readU32: (/** @type {number} */ at)=>words.get(at) ?? 0,
+        writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>{ words.set(at, value); },
+    };
+    const cpu = { ...recordingCpu(), parkAddress: ()=>PARK, bits: ()=>64,
+        resumeContextAt: ()=>{} };
+    const switcher = createSwitcher({ cpu, memory });
+    const parked = { name: 'p', tebAddress: 0, context: { eip: STUB, reg32: [0, 0, 0, 0, ESP] } };
+    switcher.switchTo(null, parked,
+        { eip: 0x140001202, esp: ESP + 8, returnValue: 0, inStub: true });
+    assert.equal(words.get(ESP), 0x40001202);
+    assert.equal(words.get(ESP + 4), 1, 'its high dword too');
+    words.set(ESP, PARK);
+    words.set(ESP + 4, 1);
+    switcher.switchTo(null, parked, { eip: 0x401051, esp: ESP + 8, returnValue: 0, inStub: true });
+    assert.equal(words.get(ESP + 4), 0, 'and a caller below 4 GiB with its high dword clear');
+});

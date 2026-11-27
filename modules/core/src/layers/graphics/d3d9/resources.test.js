@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, offsetOfRect,
-    surfaceBytes, surfacePitch,
+    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, blockAligned,
+    offsetOfRect, pitchedRows, surfaceBytes, surfacePitch, tightRows,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
 import {
@@ -16,7 +16,7 @@ import {
     rectMoveOf, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
-import { fromHalf, toHalf } from './half.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 const SIZE = 128;
 const BYTES_PER_PIXEL = 4;
@@ -211,11 +211,13 @@ test('a partial lock reports the pixel it names, at an unchanged pitch', ()=>{
     assertFullyReleased(device);
 });
 
-test('a malformed lock rectangle is refused by this version, and the record left alone', ()=>{
+test('a malformed lock rectangle is refused in video memory, and the record left alone; in'
+    + ' other pools it is taken (test_surface_blocks, test_lockrect_invalid)', ()=>{
     /**
      * Shapes the later runtime rejects: empty, inverted, off either edge. A
-     * Direct3D 9 device refuses them before the lock is taken, so the caller's
-     * record keeps whatever it held and no unlock is owed.
+     * Direct3D 9 device refuses them in video memory before the lock is
+     * taken, so the caller's record keeps whatever it held and no unlock is
+     * owed; system, scratch and managed memory take them, as Windows XP did.
      */
     const malformed = [
         { left: 60, top: 60, right: 60, bottom: 68 },
@@ -229,9 +231,23 @@ test('a malformed lock rectangle is refused by this version, and the record left
     ];
     const device = createDevice();
     /** @type {{ surface?: any }} */
+    const scratch = {};
+    assert.equal(device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8,
+        D3DPOOL.SCRATCH, scratch), D3D_OK);
+    for (const rect of malformed)
+    {
+        const locked = { pBits: 7, Pitch: 7 };
+        assert.equal(scratch.surface.LockRect(locked, rect, 0), D3D_OK);
+        assert.equal(locked.pBits - scratch.surface.base,
+            rect.top * PITCH + rect.left * BYTES_PER_PIXEL, 'located as it was given');
+        assert.equal(scratch.surface.UnlockRect(), D3D_OK);
+    }
+    scratch.surface.release();
+
+    /** @type {{ surface?: any }} */
     const out = {};
     assert.equal(
-        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out),
+        device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out),
         D3D_OK);
 
     for (const rect of malformed)
@@ -362,6 +378,11 @@ test('GetDC answers for the formats GDI draws into, and refuses the rest untouch
             {
                 assert.equal(shown.format, layout);
             }
+            // The section says no image size, and a 16-bit one its masks.
+            assert.deepEqual([shown.sizeImage, shown.compression, shown.bitfields],
+                bitCount === 16
+                    ? [0, 3, layout === '565' ? [0xf800, 0x07e0, 0x001f] : [0x7c00, 0x03e0, 0x001f]]
+                    : [0, undefined, undefined]);
             assert.equal(surface.ReleaseDC(out.dc, gdi), D3D_OK);
             assert.equal(gdi.deleted[gdi.deleted.length - 1], out.dc);
         }
@@ -554,10 +575,58 @@ test('a level smaller than one block still costs a whole block', ()=>{
     assert.equal(surfaceBytes(D3DFMT.DXT5, 3, 9), 1 * 16 * 3);
 });
 
-test('an uncompressed format is measured exactly as it always was', ()=>{
+test('a DXTn top level must be whole blocks; ATI1 and ATI2 may be any size', ()=>{
+    // Wine's test_surface_blocks: the runtime size-checks the core block
+    // formats in every pool, not the drivers' ATI ones, which its lock tests
+    // then create at 257x257 and lock level by level.
+    assert.equal(blockAligned(D3DFMT.DXT1, 257, 257), false);
+    assert.equal(blockAligned(D3DFMT.DXT5, 8, 6), false);
+    assert.equal(blockAligned(D3DFMT.DXT1, 256, 8), true);
+    assert.equal(blockAligned(D3DFMT.ATI1, 257, 257), true);
+    assert.equal(blockAligned(D3DFMT.ATI2, 5, 7), true);
+    assert.equal(blockAligned(D3DFMT.A8R8G8B8, 3, 3), true);
+    assert.equal(surfaceBytes(D3DFMT.ATI1, 257, 257), 65 * 65 * 8);
+    assert.equal(surfacePitch(D3DFMT.ATI2, 257), 65 * 16);
+});
+
+test('an uncompressed row starts on four bytes', ()=>{
+    // Wine's d3d9 test_surface_alignment: a 5-pixel R5G6B5 row is 12 bytes.
     assert.equal(surfacePitch(D3DFMT.A8R8G8B8, 10), 40);
+    assert.equal(surfacePitch(D3DFMT.R5G6B5, 5), 12);
     assert.equal(surfaceBytes(D3DFMT.R5G6B5, 10, 4), 80);
-    assert.equal(surfaceBytes(D3DFMT.A8, 7, 3), 21);
+    assert.equal(surfaceBytes(D3DFMT.A8, 7, 3), 24);
+    // What an upload reads, and a read-back writes, is rows without the gap.
+    const pitched = Uint8Array.of(1, 2, 3, 0, 4, 5, 6, 0);
+    const tight = tightRows(pitched, D3DFMT.L8, 3, 2);
+    assert.deepEqual([...tight], [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual([...pitchedRows(tight, D3DFMT.L8, 3, 2)], [...pitched]);
+    const even = Uint8Array.of(1, 2, 3, 4);
+    assert.equal(tightRows(even, D3DFMT.L8, 4, 1), even, 'a width with no gap is the bytes');
+    assert.deepEqual([...tightRows(Uint8Array.of(1, 2, 3, 4, 5, 6), D3DFMT.L8, 3, 2, 3)],
+        [1, 2, 3, 4, 5, 6], 'a surface\'s own pitch');
+});
+
+test('a surface in the program\'s own memory has tight rows', ()=>{
+    // Wine's d3d9ex test_user_memory: an L8 texture 33 wide locks at 33.
+    const surface = createSurface({
+        type: SURFACE_TYPE.PLAIN, width: 33, height: 33, format: D3DFMT.L8,
+        pool: D3DPOOL.SYSTEMMEM, usage: 0, base: 0x1000, count: createReferenceCount(),
+        tight: true,
+    });
+    const locked = { pBits: 0, Pitch: 0 };
+    assert.equal(surface.LockRect(locked, { left: 1, top: 2, right: 3, bottom: 4 }, 0), D3D_OK);
+    assert.equal(locked.Pitch, 33);
+    assert.equal(locked.pBits - 0x1000, 2 * 33 + 1);
+    assert.equal(surface.UnlockRect(), D3D_OK);
+    const own = createSurface({
+        type: SURFACE_TYPE.PLAIN, width: 33, height: 33, format: D3DFMT.L8,
+        pool: D3DPOOL.SYSTEMMEM, usage: 0, base: 0x1000, count: createReferenceCount(),
+    });
+    assert.equal(own.pitch, 36, 'the runtime\'s own memory starts each row on four bytes');
+    const move = rectMoveOf(surface, { left: 0, top: 1, right: 33, bottom: 2 }, own,
+        { x: 0, y: 1 });
+    assert.deepEqual([move.from - 0x1000, move.fromPitch, move.to - 0x1000, move.toPitch],
+        [33, 33, 36, 36], 'a copy between them goes by each one\'s own');
 });
 
 test('a rectangle into a compressed surface is addressed by block', ()=>{
@@ -635,8 +704,11 @@ test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
     assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
 });
 
-test('packColour gives a wide format each channel as its fraction of 255, red first', ()=>{
-    // Red 255, green 0, blue 51 (0.2), alpha 128.
+test('packColour gives a wide format each channel as its fraction of 255, red first, in the'
+    + ' format\'s own precision', ()=>{
+    // Red 255, green 0, blue 51 (0.2), alpha 128: a 32-bit float keeps the
+    // fraction whole and a 16-bit one spreads the byte over both of its bytes
+    // (Wine's d3d9 test_colorfill).
     const colour = 0x80ff0033;
     const half = (/** @type {Uint8Array} */ bytes)=>[...new Uint16Array(bytes.buffer)];
     const float = (/** @type {Uint8Array} */ bytes)=>[...new Float32Array(bytes.buffer)];
@@ -645,12 +717,11 @@ test('packColour gives a wide format each channel as its fraction of 255, red fi
     assert.deepEqual(half(packColour(D3DFMT.G16R16F, colour)), [0x3c00, 0]);
     assert.deepEqual(half(packColour(D3DFMT.R16F, colour)), [0x3c00]);
     assert.deepEqual(float(packColour(D3DFMT.A32B32G32R32F, colour)),
-        [1, 0, fromHalf(toHalf(0.2)), fromHalf(toHalf(128 / 255))]);
+        [1, 0, Math.fround(51 / 255), Math.fround(128 / 255)]);
     assert.deepEqual(float(packColour(D3DFMT.G32R32F, colour)), [1, 0]);
     assert.deepEqual(float(packColour(D3DFMT.R32F, colour)), [1]);
-    const fraction = (/** @type {number} */ value)=>Math.round(fromHalf(toHalf(value)) * 0xffff);
     assert.deepEqual(half(packColour(D3DFMT.A16B16G16R16, colour)),
-        [0xffff, 0, fraction(0.2), fraction(128 / 255)]);
+        [0xffff, 0, 0x3333, 0x8080]);
     assert.deepEqual(half(packColour(D3DFMT.G16R16, colour)), [0xffff, 0]);
 });
 
@@ -693,6 +764,18 @@ test('writePixels turns a wide target\'s half floats into the format it was made
         writePixels(surface, pixels, (address, bytes)=>arrived.set(bytes, address - base));
         assert.deepEqual(decode(arrived), read.map(expected), `format ${format}`);
     }
+});
+
+test('writePixels keeps an L16 surface\'s red from the four halves a texel the GPU holds', ()=>{
+    const base = 0x4000;
+    const surface = createSurface({
+        type: SURFACE_TYPE.RENDER_TARGET, width: 2, height: 1, format: D3DFMT.L16,
+        pool: D3DPOOL.DEFAULT, usage: 0, base, lockable: true, count: createReferenceCount(),
+    });
+    const pixels = new Uint8Array(Uint16Array.from([1, 0, 0, 1, 0.5, 1, 1, 1], toHalf).buffer);
+    const arrived = new Uint8Array(4);
+    writePixels(surface, pixels, (address, bytes)=>arrived.set(bytes, address - base));
+    assert.deepEqual([...new Uint16Array(arrived.buffer)], [0xffff, 0x8000]);
 });
 
 /**
@@ -756,6 +839,11 @@ for (const { format, name, pack } of [
             {
                 const at = (y * width + x) * 4;
                 expected.push(...pack([...pixels.subarray(at, at + 4)]));
+            }
+            // Each row starts on four bytes: R5G6B5's ten are followed by two of nothing.
+            while (expected.length % pitch !== 0)
+            {
+                expected.push(0);
             }
         }
         assert.deepEqual([...arrived], expected);
@@ -957,9 +1045,10 @@ test('UpdateTexture carries a volume texture\'s dirty box, level by level and sl
         const managed = volume(D3DPOOL.MANAGED);
         assert.equal(device.UpdateTexture(source, managed), D3DERR_INVALIDCALL);
         assert.equal(device.UpdateTexture(managed, destination), D3DERR_INVALIDCALL);
+        // Levels of two sizes are taken, what overlaps carried (Wine's
+        // test_update_volumetexture, case 6).
         const larger = volume(D3DPOOL.DEFAULT, 2, 8);
-        assert.equal(device.UpdateTexture(source, larger), D3DERR_INVALIDCALL,
-            'levels of two sizes');
+        assert.equal(device.UpdateTexture(source, larger), D3D_OK, 'levels of two sizes');
         /** @type {{ texture?: any }} */
         const flat = {};
         assert.equal(device.CreateTexture(4, 4, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, flat),

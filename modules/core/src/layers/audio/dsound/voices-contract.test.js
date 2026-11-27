@@ -44,6 +44,18 @@ import {
     slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, SLOTS, GLOBAL_HEADER_INT32,
     ARENA_OFFSET, ARENA_BYTES, OUTPUT_RATE, STATE, STATE_OPEN, createSeam, mixBlock,
 } from '../output/mix.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
+
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
 
 const DEVICE_RATE = 48000;
 /** The quantum WebAudio asks a worklet for. */
@@ -104,14 +116,14 @@ async function machine(){
     const view = new DataView(bytes.buffer);
     let ms = 1000;
     let nextAddress = 0x10000;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {number} length */
         window: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
 
     /** @type {Map<number, { object: any, id: string, methods: any[] }>} */
     const owners = new Map();
@@ -145,7 +157,6 @@ async function machine(){
         now: ()=>ms,
         sampleRate: DEVICE_RATE,
         drained: true,
-        shared: true,
         allocate: (/** @type {number} */ size)=>{
             const address = nextAddress;
             nextAddress += (size + 0xfff) & ~0xfff;
@@ -202,13 +213,13 @@ async function machine(){
     };
 
     const table = mixer.table;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(BLOCK_FRAMES * 2);
     /** One device block, as the worklet's `process` makes it. */
     const deviceBlock = ()=>mixBlock({
@@ -425,15 +436,15 @@ test('a voice that does not loop plays once, whichever block its end falls in', 
     // different frame of the sound for each; one of them is the last frame.
     // One table for all of them, as the device has one: each voice closed
     // and its slot freed by the device before the next is opened.
-    const mixer = createMixer({ shared: true, sampleRate: DEVICE_RATE });
+    const mixer = createMixer({ sampleRate: DEVICE_RATE });
     const table = mixer.table;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = [{
-        header: new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES),
     }];
     const seams = [createSeam()];
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(BLOCK_FRAMES * 2);
     const deviceBlock = ()=>mixBlock({ global, slots, seams, block, blockFrames: BLOCK_FRAMES,
         outputRate: DEVICE_RATE, arena });

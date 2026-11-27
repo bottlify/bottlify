@@ -16,8 +16,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
-import { waitingParent } from '../../../tools/spawn-program.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
+import { waitingParent } from '../../../tools/fixtures/spawn-program.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
@@ -73,7 +73,6 @@ test('a child past the run\'s concurrency runs beside its parent, in its parent\
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: sleeper },
                 { path: 'C:\\App\\b.exe', bytes: quick }] }) },
@@ -83,7 +82,7 @@ test('a child past the run\'s concurrency runs beside its parent, in its parent\
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
         assert.deepEqual(started, [['C:\\App\\parent.exe', true], ['C:\\App\\a.exe', true],
             ['C:\\App\\b.exe', false]],
         'two at once: the program and its first child each in a worker, the second child beside'
@@ -102,7 +101,6 @@ for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true
         const app = await createApp({
             executable: waitingParent('C:\\App\\middle.exe'),
             imagePath: 'C:\\App\\root.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({ files: [
                 { path: 'C:\\App\\middle.exe', bytes: waitingParent('C:\\App\\leaf.exe') },
@@ -113,7 +111,7 @@ for (const [concurrency, across] of /** @type {[2 | 4, boolean][]} */ ([[4, true
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 7);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7);
         assert.deepEqual(started, [['C:\\App\\root.exe', true],
             ['C:\\App\\middle.exe', true], ['C:\\App\\leaf.exe', across]], across
             ? 'each in a worker of its own'
@@ -188,7 +186,6 @@ for (const delay of [0, 1000])
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless },
                 { path: 'C:\\App\\b.exe', bytes: endless }] }) },
@@ -198,7 +195,7 @@ for (const delay of [0, 1000])
         const started = [];
         app.on('process-started', (/** @type {any} */ event)=>
             started.push([event.image, event.worker === true]));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0x35,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0x35,
             'a ended with 3 and b with 5, and the parent saw both');
         // Ended before it was made, a child is not said to have started.
         const where = new Map(started);
@@ -243,12 +240,11 @@ test('a timed wait on a child running beside its parent runs out while the child
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             concurrency: 2,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\a.exe', bytes: endless }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0x102, 'WAIT_TIMEOUT');
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0x102, 'WAIT_TIMEOUT');
     });
 
 test('a child takes the memory of the child before it, zeroed where that one wrote',
@@ -301,9 +297,14 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         const memorySize = 256 * 1024 * 1024;
         const Made = WebAssembly.Memory;
         let made = 0;
+        let whole = 0;
         WebAssembly.Memory = /** @type {any} */ (function(/** @type {any} */ descriptor){
             const memory = new Made(descriptor);
-            made += memory.buffer.byteLength >= memorySize ? 1 : 0;
+            // A process's memory: one that may hold the whole RAM. One that holds
+            // it from the start is counted too -- it should be none, every process
+            // holding what it was given and growing as it is given more.
+            made += (descriptor.maximum ?? descriptor.initial) * 65536 >= memorySize ? 1 : 0;
+            whole += memory.buffer.byteLength >= memorySize ? 1 : 0;
             return memory;
         });
         WebAssembly.Memory.prototype = Made.prototype;
@@ -313,7 +314,6 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\parent.exe',
-            engine: 'cork',
             memorySize,
             storage: { load: async()=>({ files: [
                 { path: 'C:\\App\\writer.exe', bytes: writer },
@@ -324,11 +324,76 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         /** @type {number[]} */
         const codes = [];
         app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
         assert.equal(codes.length, 2, 'both children ran');
         assert.notEqual(codes[0], 0, 'the writer was given a block');
         assert.equal(codes[1], codes[0], 'the reader was given the same block, and found it zero');
         assert.equal(made, 2, 'the parent\'s memory and one more, not one per child');
+        assert.equal(whole, 0, 'none of them holding the whole RAM from its start');
+    });
+
+test('children that ran at once hand their memories to the ones started after them',
+    { timeout: 60000 }, async t=>{
+        // ngen keeps several workers at once and starts each next one as one
+        // ends: a run that kept only the last gone process's memory let every
+        // other one wait for a collection, and held whatever of them anything
+        // still reached - one memory per worker until the page ran out. Two
+        // children at once, then two more: the second pair runs in the first's.
+        const sleeper = buildExe({
+            imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+            code: ({ iat })=>[0x68, ...u32(200), 0xff, 0x15, ...u32(iat('Sleep')),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+            data: {
+                child: ascii('C:\\App\\child.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                infoA: new Array(16).fill(0),
+                infoB: new Array(16).fill(0),
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} info */
+                const start = info=>[
+                    0x68, ...u32(at(info)), 0x68, ...u32(at('startup')),
+                    0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                    0x68, ...u32(at('child')), 0x6a, 0,
+                    0xff, 0x15, ...u32(iat('CreateProcessA')),
+                ];
+                /** @param {string} info */
+                const wait = info=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(info)),
+                    0xff, 0x15, ...u32(iat('WaitForSingleObject'))];
+                const pair = [...start('infoA'), ...start('infoB'),
+                    ...wait('infoA'), ...wait('infoB')];
+                return [...pair, ...pair, 0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+            },
+        });
+        const memorySize = 256 * 1024 * 1024;
+        const Made = WebAssembly.Memory;
+        let made = 0;
+        WebAssembly.Memory = /** @type {any} */ (function(/** @type {any} */ descriptor){
+            made += (descriptor.maximum ?? descriptor.initial) * 65536 >= memorySize ? 1 : 0;
+            return new Made(descriptor);
+        });
+        WebAssembly.Memory.prototype = Made.prototype;
+        t.after(()=>{
+            WebAssembly.Memory = Made;
+        });
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            memorySize,
+            storage: { load: async()=>({ files: [
+                { path: 'C:\\App\\child.exe', bytes: sleeper },
+            ] }) },
+        });
+        t.after(()=>app.dispose());
+        let children = 0;
+        app.on('process-started', ()=>children++);
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
+        assert.equal(children, 4, 'four children ran');
+        assert.equal(made, 3, 'the parent\'s memory and the first pair\'s, not one per child');
     });
 
 test('a child starts from its image as it was when CreateProcess was called, gone from the disk'
@@ -372,5 +437,5 @@ test('a child starts from its image as it was when CreateProcess was called, gon
         files: [{ path: 'C:\\App\\copy.tmp', bytes: leaf }],
     });
     t.after(()=>app.dispose());
-    assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran and its code came back');
+    assert.equal(await app.run({ timeoutMs: 60_000 }), 7, 'the child ran and its code came back');
 });

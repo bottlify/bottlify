@@ -6,7 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGCLS_MULTIPLEUSE, REGCLS_SUSPENDED, createClassTable } from './remote.js';
+import {
+    REGCLS_MULTIPLEUSE, REGCLS_SUSPENDED, createClassTable, createRemoting,
+} from './remote.js';
+
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
 const CLSID = '{91814EC0-B5F0-11D2-80B9-00104B1F6CEA}';
 
@@ -103,3 +107,260 @@ test('an RPC endpoint is one process\'s: a second to claim it is refused, and it
     assert.equal(table.rpcServer('ncalrpc:three'), null);
     assert.equal(table.rpcServer('ncalrpc:one'), other, 'another process\'s stays');
 });
+
+/**
+ * One process's channel over a memory of its own, whose one object answers
+ * IUnknown's three and records the thread each call ran on.
+ *
+ * @param {{ exporter: string, worker?: boolean, window?: boolean,
+ *     modalPump?: (thread: unknown) => Promise<number>, windowsFor?: unknown[] }} options
+ *     `window`: each apartment's hidden window, its message handled at the next turn;
+ *     `windowsFor`: the thread each window was made for, as made
+ */
+function channel({ exporter, worker = true, window = false, modalPump, windowsFor = [] }){
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    const OBJECT = 0x1000;
+    view.setUint32(OBJECT, 0x2000, true);
+    [0x9000, 0x9001, 0x9002].forEach((method, slot)=>view.setUint32(0x2000 + slot * 4, method,
+        true));
+    let next = 0x4000;
+    const MTA = Symbol('MTA');
+    /** @type {[number, unknown][]} */
+    const calls = [];
+    /** @type {string[]} */
+    const reported = [];
+    let workers = 0;
+    const table = createClassTable();
+    const remoting = createRemoting({
+        table,
+        process: 'server',
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        heap: { allocate: size=>{
+            const at = next;
+            next += (size + 7) & ~7;
+            return at;
+        }, free: ()=>true },
+        call: async(method, args, thread)=>{
+            calls.push([method, thread]);
+            if (method === 0x9000)
+            {
+                view.setUint32(Number(args[2]), Number(args[0]), true);
+            }
+            return 0;
+        },
+        callerThread: ()=>exporter,
+        apartmentOf: thread=>(thread === 'sta' ? thread : MTA),
+        vtables: { publish: ()=>0 },
+        bstr: { allocate: ()=>0, free: ()=>true },
+        catalog: /** @type {any} */ ({}),
+        divergence: (_api, detail)=>reported.push(detail),
+        ...(window ? { apartmentWindow: (()=>{
+            /** @type {(message: number) => unknown} */
+            let handle = ()=>0;
+            return {
+                /** @param {(message: number) => unknown} handler @param {unknown} thread */
+                create: (handler, thread)=>{
+                    handle = handler;
+                    windowsFor.push(thread);
+                    return 7;
+                },
+                post: (/** @type {number} */ _window, /** @type {number} */ message)=>{
+                    setTimeout(()=>handle(message), 0);
+                },
+            };
+        })() } : {}),
+        ...(modalPump ? { modalPump } : {}),
+        ...(worker ? { worker: (/** @type {(thread: unknown) => Promise<void>} */ body)=>{
+            workers++;
+            void body('rpc thread');
+            return true;
+        } } : {}),
+    });
+    return { remoting, table, calls, reported, OBJECT, workers: ()=>workers };
+}
+
+test('a call for an object of the multithreaded apartment runs on a thread of the server\'s'
+    + ' own, however its exporting thread waits', async()=>{
+    // ole_server.c: a server that registered from the MTA and sits in
+    // WaitForSingleObject(INFINITE) still serves its clients, as COM's RPC
+    // threads serve the MTA.
+    const { remoting, table, calls, OBJECT, workers } = channel({ exporter: 'main' });
+    const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN,
+        'main');
+    calls.length = 0;
+    const endpoint = table.endpoint(reference.endpoint);
+    assert.ok(endpoint);
+    await endpoint.deliver({ kind: 'addref', object: reference.object });
+    const release = { kind: 'release', object: reference.object, count: 1 };
+    assert.deepEqual(await endpoint.deliver(release), { hr: 0 });
+    assert.equal(calls.length, 0, 'a count of two leaves the object held');
+    assert.deepEqual(await endpoint.deliver(release), { hr: 0 });
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'rpc thread'),
+        'the last release runs on the worker');
+    assert.equal(workers(), 1, 'one worker for the process, started with the first call');
+});
+
+test('a type description another apartment of the process asks for is handed over as itself',
+    async()=>{
+        // An InstallScript engine's IDispatch, served from its own apartment:
+        // its caller asks GetTypeInfo on another thread and is given the
+        // ITypeInfo, which holds no apartment's state, where it was refused.
+        const IID_ITYPEINFO = '{00020401-0000-0000-C000-000000000046}';
+        const { remoting, OBJECT } = channel({ exporter: 'sta' });
+        const reference = await remoting.exportReference(OBJECT, IID_ITYPEINFO, 'sta');
+        assert.equal(await remoting.importReference(reference, IID_ITYPEINFO, 'main'), OBJECT,
+            'the object itself, not a proxy');
+    });
+
+test('a single-threaded apartment\'s object is called on its own thread, never the worker\'s',
+    async()=>{
+        const { remoting, table, calls, reported, OBJECT, workers } = channel({ exporter: 'sta' });
+        const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN,
+            'sta');
+        calls.length = 0;
+        const endpoint = table.endpoint(reference.endpoint);
+        assert.equal((await endpoint?.deliver({ kind: 'release', object: reference.object,
+            count: 1 }))?.hr, 0x80010108 | 0,
+        'with no window to deliver through, RPC_E_DISCONNECTED');
+        assert.deepEqual(calls, []);
+        assert.equal(workers(), 0);
+        assert.match(reported.join('\n'), /no window/);
+    });
+
+test('an apartment\'s window is made for the apartment\'s thread, not the one the bridge has on'
+    + ' the processor', async()=>{
+    // Made past the awaits of a call being marshaled, as the processor's
+    // thread's, ngen's thread making its first export into mscorsvw sent its
+    // window's creation to a thread in no message loop, and never sent the call.
+    /** @type {unknown[]} */
+    const windowsFor = [];
+    const { remoting, OBJECT } = channel({ exporter: 'main', window: true, windowsFor });
+    await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'sta');
+    assert.deepEqual(windowsFor, ['sta']);
+});
+
+test('an export from the multithreaded apartment makes no window on any thread of it: its calls'
+    + ' go to the worker', async()=>{
+    // 3DMark06's SystemInfo service handed out an object while a thread of its
+    // multithreaded apartment was in a Sleep inside a call it served: the
+    // window was made as that thread's, and its creation's messages ran on it
+    // in the middle of its wait, where Windows runs nothing of the kind.
+    /** @type {unknown[]} */
+    const windowsFor = [];
+    const { remoting, table, calls, OBJECT } = channel({ exporter: 'main', window: true,
+        windowsFor });
+    const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'main');
+    assert.deepEqual(windowsFor, [], 'no window for a thread of the multithreaded apartment');
+    calls.length = 0;
+    const endpoint = table.endpoint(reference.endpoint);
+    await endpoint?.deliver({ kind: 'addref', object: reference.object });
+    assert.deepEqual(await endpoint?.deliver({ kind: 'release', object: reference.object,
+        count: 2 }), { hr: 0 });
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'rpc thread'),
+        'its calls run on the worker');
+    // Without a worker the exporting thread's window is the way in.
+    const without = channel({ exporter: 'main', window: true, worker: false, windowsFor });
+    await without.remoting.exportReference(without.OBJECT, IID_IUNKNOWN, 'main');
+    assert.deepEqual(windowsFor, ['main']);
+});
+
+test('a registered class object is held by the registration\'s count alone', async()=>{
+    // ole_server.c: once its clients are gone, a server's class object has
+    // the one count CoRegisterClassObject took; the channel takes none of
+    // its own until an activation hands the object out.
+    const { remoting, calls, OBJECT } = channel({ exporter: 'main' });
+    await remoting.registerClass(CLSID, OBJECT, REGCLS_MULTIPLEUSE, 7);
+    assert.deepEqual(calls, []);
+    assert.equal(await remoting.revokeClass(7), true);
+    assert.deepEqual(calls, [], 'and revoking it releases nothing the channel did not take');
+});
+
+test('the manager starts a service once: a second start finds it running, a class it serves is'
+    + ' waited for in that process, and once the process ends the service is stopped', async()=>{
+    /** @type {any[]} */
+    const launched = [];
+    /** @type {(code: number) => void} */
+    let end = ()=>{};
+    const table = createClassTable({ launch: request=>{
+        launched.push(request);
+        return { exited: new Promise(resolve=>{
+            end = resolve;
+        }) };
+    } });
+    assert.equal(table.serviceRunning('Svc'), false);
+    assert.equal(table.startService({ command: 'C:\\svc.exe', service: 'Svc' }, null), 'started');
+    assert.equal(table.serviceRunning('svc'), true, 'by its name in any case');
+    assert.equal(table.startService({ command: 'C:\\svc.exe', service: 'SVC' }, null), 'running');
+    const asked = table.serviceProcess({ command: 'C:\\svc.exe', service: 'Svc', clsid: '{C}' },
+        null);
+    assert.equal(asked?.fresh, false, 'COM asking for the class finds the process standing');
+    assert.equal(launched.length, 1, 'one process');
+    assert.deepEqual(launched[0], { command: 'C:\\svc.exe', service: 'Svc', clsid: '' });
+    end(0);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.equal(table.serviceRunning('Svc'), false, 'its process is gone');
+    assert.equal(createClassTable().startService({ command: 'C:\\svc.exe', service: 'Svc' }, null),
+        null, 'nothing here starts a process');
+});
+
+test('a call that comes in as the apartment\'s own outgoing call is answered is still run: the'
+    + ' modal loop ends, and the idle apartment takes it', async()=>{
+    // ngen.exe waited for good on BindToRuntimeWorker into mscorsvw.exe: the
+    // call was queued while mscorsvw's thread waited on a call of its own,
+    // that answer won the modal loop's race, and nothing ran the queue after.
+    /** @type {(value: any) => void} */
+    let answer = ()=>{};
+    /** @type {Promise<any> | null} */
+    let incoming = null;
+    /** @type {any} */
+    let endpoint = null;
+    /** @type {any} */
+    let reference = null;
+    const { remoting, table, calls, OBJECT } = channel({ exporter: 'sta', worker: false,
+        window: true, modalPump: async()=>{
+            if (incoming === null)
+            {
+                // Between the loop's looks: the call is queued, then the answer comes.
+                incoming = endpoint.deliver({ kind: 'release', object: reference.object,
+                    count: 1 });
+                answer({ hr: 0 });
+            }
+            return 0;
+        } });
+    reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'sta');
+    endpoint = table.endpoint(reference.endpoint);
+    const other = table.attach({ process: {}, alive: true, rundown: async()=>{},
+        deliver: ()=>new Promise(resolve=>{
+            answer = resolve;
+        }) });
+    calls.length = 0;
+    await remoting.releaseReference({ endpoint: other, object: 1 }, 'sta');
+    // Lost, it is never answered: the test's own timeout is the bound.
+    assert.deepEqual(await incoming, { hr: 0 }, 'the queued call ran once the loop had ended');
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'sta'),
+        'on the apartment\'s own thread');
+});
+
+test('diagnostics name a call sent and not answered, and one an apartment runs, with how long',
+    async()=>{
+        // What a stopped install is read from: ngen waiting on a call into a
+        // worker process, and that process's thread still inside it.
+        /** @type {(value: any) => void} */
+        let answer = ()=>{};
+        const { remoting, table } = channel({ exporter: 'main' });
+        const other = table.attach({ process: {}, alive: true, rundown: async()=>{},
+            deliver: ()=>new Promise(resolve=>{
+                answer = resolve;
+            }) });
+        const released = remoting.releaseReference({ endpoint: other, object: 1 }, 'main');
+        await Promise.resolve();
+        const during = remoting.diagnostics();
+        assert.equal(during.waitingOn.length, 1);
+        assert.deepEqual({ ...during.waitingOn[0], forMs: 0 },
+            { endpoint: other, alive: true, what: 'release', forMs: 0 });
+        answer({ hr: 0 });
+        await released;
+        assert.deepEqual(remoting.diagnostics().waitingOn, [], 'answered, it is gone');
+    });

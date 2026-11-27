@@ -21,7 +21,6 @@
 import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
 import { formRegion, formShared } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
-import { openArena } from './arena.js';
 
 /**
  * @typedef {Object} BuiltRegion
@@ -67,14 +66,14 @@ import { openArena } from './arena.js';
  */
 
 /**
- * @typedef {import('./arena.js').KeptFunction} KeptFunction
+ * @typedef {import('./kept.js').KeptFunction} KeptFunction
  */
 
 /**
  * Region functions already emitted, kept by the module's context, the region's
  * entry and hash, and what its job asked of the emitter (`jobKey`); a hit must
  * also match the region's `shapeOf`. Kept in this thread (`createEmitCache`) or
- * in the arena a process's translators share (`arenaEmitCache`).
+ * in the run's cache every thread of the run shares (`keptEmitCache`).
  *
  * @typedef {Object} EmitCache
  * @property {(signature: string) => string} context  what keys name a module's context by
@@ -155,51 +154,27 @@ export function createEmitCache(limit = 48 << 20){
 }
 
 /**
- * The functions a process's translators keep in its arena: what any of them
- * emitted, every other takes. The context goes into the key whole, as every
- * worker must name it alike.
- *
- * @param {SharedArrayBuffer} buffer  `createArena`'s
- * @returns {EmitCache & { arena: ReturnType<typeof openArena> }}
- */
-export function arenaEmitCache(buffer){
-    const arena = openArena(buffer);
-    /** @type {EmitCache & { arena: ReturnType<typeof openArena> }} */
-    const cache = {
-        arena, hits: 0,
-        context: signature=>signature,
-        take(key, shape){
-            const kept = arena.get(key, shape);
-            if (kept !== undefined)
-            {
-                cache.hits++;
-            }
-            return kept;
-        },
-        keep: (key, shape, kept)=>arena.set(key, shape, kept),
-    };
-    return cache;
-}
-
-/**
  * What a module's region functions read of the module besides their region: the
  * indices `prepareModule` hands out follow from these alone.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {NonNullable<Parameters<typeof emitBatch>[3]>} options
  * @param {Set<string>} leaveOut
  */
 function contextKey(layout, features, options, leaveOut){
     return JSON.stringify([layout.id ?? layout, features.simd, features.tailCalls,
-        features.defaultNaNNegative === true, options.undoLog === true, options.hash === true,
+        features.defaultNaNNegative === true, features.armHost === true,
+        features.wideLanes === true, options.hash === true,
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
-        options.wide === true, options.narrow === true, options.structure !== false,
+        options.wide === true, options.narrow === true,
         options.precise === true, options.place === true, options.profileCalls === true,
-        options.atomic === true, options.ordered === true,
-        options.resume === true, options.callReturn === true, options.emptySites === true,
+        options.atomic === true,
+        options.resume === true, options.callReturn === true,
         options.linkedCalls !== false, options.looseStacks === true,
-        options.checkReads === true, options.expansion != null, options.crossTailCalls !== false,
+        options.checkReads === true, options.expansion != null,
+        options.crossTailCalls !== false,
         options.callDepth ?? null, [...leaveOut].sort()]);
 }
 
@@ -290,6 +265,7 @@ function sameShape(kept, shape){
  * 219 ns a call where one module of them ran it at 6.
  *
  * @param {{ region: import('../region.js').Region, entryTop: number, checked?: boolean,
+ *     ownWindows?: boolean,
  *     copies?: boolean, precision?: import('../emit/region.js').X87Precision,
  *     floats?: boolean }[]} jobs  checked: an x87 region whose entries test nothing of the
  *     stack's shape; copies: the blocks inside a structured region's loops are entered
@@ -297,17 +273,21 @@ function sameShape(kept, shape){
  *     control its x87 is compiled for, the options' wide and narrow when not given; floats:
  *     compiled for single, its arithmetic on floats (`emitRegion`)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean, wideLanes?: boolean }} features
+ * @param {{ hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
- *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
- *     atomic?: boolean, ordered?: boolean,
- *     callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
+ *     precise?: boolean, profileCalls?: boolean, resume?: boolean,
+ *     atomic?: boolean,
+ *     callReturn?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
- *     expansion?: import('../emit/region.js').ExpansionNote | null }}
+ *     expansion?: import('../emit/region.js').ExpansionNote | null,
+ *     progress?: (index: number) => void }}
  *     [options]
+ *     progress: told the index of each job as its emitting begins (and, of a relink's, its
+ *     forming before that): a worker's sign of life to its runtime, and the job it is on;
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
  *     the module's range of the table plus i, a transfer into the range a direct tail call
@@ -325,21 +305,17 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         : new Set(options.leaveOut ?? []);
     const m = new ModuleBuilder();
     const context = prepareModule(m, layout, features, options.memory ?? {}, {
-        undoLog: options.undoLog === true,
         hash: options.hash === true,
         countTransfers: options.countTransfers === true,
         blockProfile: options.blockProfile === true,
         wide: options.wide === true,
         narrow: options.narrow === true,
-        structure: options.structure !== false,
         precise: options.precise === true,
         atomic: options.atomic === true,
-        ordered: options.ordered === true,
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,
         callReturn: options.callReturn === true,
-        emptySites: options.emptySites === true,
         linkedCalls: options.linkedCalls !== false,
         looseStacks: options.looseStacks === true,
         checkReads: options.checkReads === true,
@@ -356,7 +332,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
     const results = jobs.map((job, index)=>{
-        const { region, entryTop, checked, copies, precision, floats } = job;
+        options.progress?.(index);
+        const { region, entryTop, checked, copies, precision, floats, ownWindows } = job;
         try
         {
             const shape = cache === undefined ? null : shapeOf(region);
@@ -382,7 +359,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
                 const translation = emitRegion(context, region,
                     { entryTop, checked: checked === true, copies: copies === true,
                         ...(precision === undefined ? {} : { precision }),
-                        ...(floats === true ? { floats } : {}) });
+                        ...(floats === true ? { floats } : {}),
+                        ...(ownWindows === true ? { ownWindows } : {}) });
                 functionIndex = translation.functionIndex;
                 copiesIndex = translation.copiesIndex;
                 built = {
@@ -436,65 +414,114 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
 }
 
 /**
+ * The pages a relink forms over, read in place: the guest's memory (a
+ * SharedArrayBuffer when it went to a worker, so it is shared, not cloned),
+ * where its page 0 lies in it, and which pages the regions may read. A page
+ * the guest writes while they are formed fails the region's hash, or drops
+ * the region itself before the relink is applied (`relinkOne`).
+ *
+ * @typedef {{ buffer: ArrayBufferLike, at: number, pages: number[] }} RelinkPages
+ */
+
+/**
  * Regions already running, formed again from a copy of their pages and emitted
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
  * is answered as a failure (`changed`) and keeps the function it has. A job's
  * `targets` are the callees its indirect calls were predicted to (`callTargets`),
- * its `stops` the blocks its forming left to other regions (`entered`).
+ * its `formable` the pages it was formed over: each region is formed again over
+ * its own, as the runtime formed it. Told the pages of every region of the batch,
+ * one beside a page of stubs (which holds only regions entered there) went on
+ * into it, hashed otherwise and was answered `changed` -- its entry barren for
+ * good, as its bytes were never written: CLR's hottest functions in a .NET game.
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
+ *     ownWindows?: boolean,
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
- *         floats?: boolean, targets?: [number, number[]][], stops?: number[] }[],
- *     pages: [number, Uint8Array][], formable?: number[],
- *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
- *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
- *     `formable` the ones a region may span (all of `pages` when absent)
+ *         floats?: boolean, targets?: [number, number[]][], formable?: number[] }[],
+ *     pages?: [number, Uint8Array][], ram?: RelinkPages, formable?: number[],
+ *     form: { maxBlocks: number, leafCalls?: boolean,
+ *         helpers?: boolean | readonly import('../helpers.js').RuntimeHelper[] } }} relink
+ *     `pages` copies of every page forming read, or `ram` those pages where they lie,
+ *     `formable` the ones a job without its own may span (all of the given when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]
  * @param {EmitCache} [cache]
  * @returns {BuiltBatch}
  */
-export function relinkBatch({ jobs, pages, form, formable }, layout, features, options = {},
+export function relinkBatch({ jobs, pages, ram, form, formable }, layout, features, options = {},
     cache = undefined)
 {
-    const byPage = new Map(pages);
-    // The pages a region may be formed over: the regions' own, when the copies hold more
-    // that forming only read.
-    const formablePages = formable === undefined ? byPage : new Set(formable);
+    // The pages formed over: copies of them by page, or their numbers, read
+    // where they lie in the guest's memory (`RelinkPages`).
+    const byPage = ram === undefined ? new Map(pages) : null;
+    const given = byPage ?? new Set(/** @type {RelinkPages} */ (ram).pages);
+    const memory = ram === undefined ? null : new Uint8Array(ram.buffer);
+    // The pages a region may be formed over: its own, else the batch's, else the given.
+    const batchFormable = formable === undefined ? given : new Set(formable);
     // The page read last, kept: forming reads a region's bytes in runs.
     let lastPage = -1;
     /** @type {Uint8Array | undefined} */
     let lastBytes;
+    // Where the page read last starts in the guest's memory; -1 when it reads zeros.
+    let lastAt = -1;
     /** @param {number} address */
     const read = address=>{
         const page = address >>> 12;
         if (page !== lastPage)
         {
             lastPage = page;
-            lastBytes = byPage.get(page);
+            if (memory === null)
+            {
+                lastBytes = /** @type {Map<number, Uint8Array>} */ (byPage).get(page);
+            }
+            else
+            {
+                // A page past the memory -- an import slot that names nowhere -- is zeros.
+                const at = /** @type {RelinkPages} */ (ram).at + page * 4096;
+                lastAt = given.has(page) && at + 4096 <= memory.length ? at : -1;
+            }
+        }
+        if (memory !== null)
+        {
+            return lastAt < 0 ? 0 : memory[lastAt + (address & 0xfff)];
         }
         return lastBytes?.[address & 0xfff] ?? 0;
     };
-    // The pages the regions were formed over are the translatable ones: a page
-    // one of them was refused at is not among any region's pages.
-    /** @param {number} address */
-    const translatable = address=>formablePages.has(address >>> 12);
-    const shared = formShared();
-    const formed = jobs.map(job=>{
-        const stopped = new Set(job.stops ?? []);
+    // What forming found is shared between the regions told the same pages: a callee
+    // looked at for one is the same callee for the other only where both may form on it.
+    /** @type {Map<string, ReturnType<typeof formShared>>} */
+    const sharedBy = new Map();
+    const formed = jobs.map((job, index)=>{
+        options.progress?.(index);
+        const formablePages = job.formable === undefined ? batchFormable : new Set(job.formable);
+        const key = job.formable === undefined ? '' : [...job.formable].sort((a, b)=>a - b).join();
+        let shared = sharedBy.get(key);
+        if (shared === undefined)
+        {
+            shared = formShared();
+            sharedBy.set(key, shared);
+        }
+        // The pages the region was formed over are the translatable ones: a page
+        // it was refused at is not among them.
+        const translatable = (/** @type {number} */ address)=>formablePages.has(address >>> 12);
         const region = formRegion(read, job.entry, { ...form, translatable, shared,
-            entered: address=>stopped.has(address),
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
             ? { region, entryTop: job.entryTop, checked: job.checked === true,
                 copies: job.copies === true,
                 ...(job.precision === undefined ? {} : { precision: job.precision }),
-                ...(job.floats === true ? { floats: true } : {}) } : null;
+                ...(job.floats === true ? { floats: true } : {}),
+                ...(job.ownWindows === true ? { ownWindows: true } : {}) } : null;
     });
+    // The job being emitted by its place among the jobs asked for, not among the formed.
+    const asked = formed.flatMap((one, index)=>(one === null ? [] : [index]));
     const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
-        formed.filter(one=>one !== null)), layout, features, options, cache);
+        formed.filter(one=>one !== null)), layout, features,
+    options.progress === undefined ? options
+        : { ...options, progress: at=>options.progress?.(asked[at]) }, cache);
     let next = 0;
     const results = formed.map(one=>(one === null
         ? { ok: /** @type {const} */ (false), message: 'changed' }
@@ -508,8 +535,9 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
  * @param {import('../region.js').Region} region
  * @param {number} entryTop
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number,
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean, wideLanes?: boolean }} features
+ * @param {{ hash?: boolean, trapPort?: number,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltRegion}
  */

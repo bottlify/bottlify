@@ -11,8 +11,9 @@
  * the same bytes, and answer the program the same. Each scenario below runs
  * once on a device of its own and once through each way the recording reaches
  * its twin -- played at each call, held in batches the twin plays only when the
- * program waits on it, across a real port -- with the bytes an unlock let the
- * program write copied into the batch and lent in place. What is compared:
+ * program waits on it, across a root's rings read as their bells ring -- with
+ * the bytes an unlock let the program write copied into the batch and lent in
+ * place. What is compared:
  *
  * - every call's answer, awaited, and what it wrote into the structures it was
  *   given, the device's objects by the order they were first seen;
@@ -37,6 +38,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { carriedTo } from './ring-fixtures.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { createBorrower, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from '../d3d9/constants.js';
 import {
@@ -70,17 +73,37 @@ const FACE_NEGATIVE_X = 1;
  * The ways a recording reaches its twin.
  *
  * - `at once`: each call played as it is made (`playedAtOnce`);
- * - `held`: batches a sender posts, played only when the program waits on an
- *   answer or a scenario looks -- as late as the twin may play them;
- * - `port`: batches across a MessageChannel, as they cross to the worker;
- * - `lent`: either of the last two with the bytes an unlock let the program
- *   write lent in place out of shared guest memory (`lending.js`);
+ * - `held`: batches a sender sends through a root's rings (`ring.js`), played
+ *   only when the program waits on an answer or a scenario looks -- as late as
+ *   the twin may play them;
+ * - `ring`: the same rings read as their bells ring, as the worker reads them;
+ *   `small` and `parts` with rings whose batches outgrow the room they are
+ *   built in, go as parts and wait for room;
+ * - `lent`: held or ring with the bytes an unlock let the program write lent in
+ *   place out of shared guest memory (`lending.js`);
  * - `watched`: held, with an engine's write watch (`watchWrites`) that says
  *   every page of a range was written at every look -- the most it may say --
  *   so the recording sends pages as they are and compares nothing.
  */
-const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent',
-    'held, watched']);
+const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'held, watched', 'ring',
+    'ring, lent', 'ring, small', 'ring, parts']);
+
+/**
+ * The rings of the ways through them: the engine's own, and small ones whose
+ * batches outgrow the room they are built in, go as parts and wait for room.
+ */
+const RING_BYTES = { calls: CALLS_BYTES, replies: REPLIES_BYTES };
+const SMALL_RING_BYTES = { calls: 32 << 10, replies: 16 << 10 };
+/** One whose texture uploads past 256 KiB go as parts, the rest fitting without a wait. */
+const PARTS_RING_BYTES = { calls: 512 << 10, replies: 16 << 10 };
+
+/**
+ * What the rings' senders did over every run of a way, summed as each run
+ * closes: which of a record's paths the runs took (`openRingOut`'s figures).
+ *
+ * @type {Map<string, Record<string, number>>}
+ */
+const ringPaths = new Map();
 
 /** Turns of the event loop, for what crosses ports and settles in promises. */
 const turns = async(count = 8)=>{
@@ -182,7 +205,8 @@ function rig(version, way, caps = {}){
     gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
         submit(buffers);
         gpu.calls.push({ op: 'holds',
-            held: drawn.map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
+            held: drawn.filter(buffer=>!buffer.destroyed)
+                .map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
     };
     const services = {
         ...caps,
@@ -199,6 +223,8 @@ function rig(version, way, caps = {}){
     /** Plays what is held, for an answer the program waits on. */
     let release = ()=>{};
     let close = ()=>{};
+    /** The calls the played device was given, as text, since the last look. @type {string[]} */
+    const given = [];
     /** The guest bytes the batches carried, by what copied them; null where nothing is batched. @type {() => Record<string, number> | null} */
     let shipped = ()=>null;
     /** @type {any} */
@@ -237,6 +263,12 @@ function rig(version, way, caps = {}){
                 toSender({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
             },
         });
+        // Every call the played device is given, as it is given it.
+        const play = played.play;
+        played.play = (/** @type {any} */ call)=>{
+            given.push(JSON.stringify(plain(call)));
+            return play(call);
+        };
         if (way === 'at once')
         {
             toSender = message=>{
@@ -252,24 +284,20 @@ function rig(version, way, caps = {}){
         }
         else if (way.startsWith('held'))
         {
-            /** @type {any[]} */
-            const held = [];
-            const sender = createSender({
-                post: message=>held.push(message),
+            const carried = carriedTo(played, {
+                held: true,
+                served: true,
                 later: ()=>{},
                 now: ()=>0,
                 on: { wrote: memory.writeMemory, adopted: ()=>{} },
                 lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
             });
-            const receiver = createReceiver({ played, post: message=>sender.receive(message) });
+            const { sender, receiver, pump } = carried;
             counted = ()=>receiver.counted();
-            toSender = message=>sender.receive(message);
+            toSender = message=>receiver.post(message);
             release = ()=>{
                 sender.flush();
-                while (held.length > 0)
-                {
-                    receiver.receive(held.shift());
-                }
+                pump();
             };
             settle = async()=>{
                 for (let round = 0; round < 4; round++)
@@ -278,39 +306,53 @@ function rig(version, way, caps = {}){
                     await turns(2);
                 }
             };
+            close = carried.close;
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
-        else
+        else if (way.startsWith('ring'))
         {
-            const { port1, port2 } = new MessageChannel();
+            const bytes = way.endsWith('small') ? SMALL_RING_BYTES
+                : way.endsWith('parts') ? PARTS_RING_BYTES : RING_BYTES;
+            const rings = { calls: createRingMemory(bytes.calls),
+                replies: createRingMemory(bytes.replies) };
             const sender = createSender({
-                post: (message, transfer)=>port1.postMessage(message, transfer),
+                rings,
                 now: ()=>0,
                 on: { wrote: memory.writeMemory, adopted: ()=>{} },
                 lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
             });
-            const receiver = createReceiver({ played,
-                post: (message, transfer)=>port2.postMessage(message, transfer ?? []) });
+            const receiver = createReceiver({ played, rings });
             counted = ()=>receiver.counted();
-            toSender = message=>port2.postMessage(message);
-            port2.onmessage = event=>receiver.receive(event.data);
-            port1.onmessage = event=>sender.receive(event.data);
+            toSender = message=>receiver.post(message);
+            // A small ring's records wait for room a turn at a time.
             settle = async()=>{
                 sender.flush();
                 await turns(12);
+                for (let round = 0; round < 256 && ((sender.sent().waiting ?? 0) > 0
+                    || receiver.unread()); round++)
+                {
+                    await turns(2);
+                }
+                await turns(12);
             };
             close = ()=>{
-                port1.close();
-                port2.close();
+                const paths = ringPaths.get(way) ?? {};
+                for (const [key, value] of Object.entries(sender.sent()))
+                {
+                    paths[key] = (paths[key] ?? 0) + value;
+                }
+                ringPaths.set(way, paths);
+                sender.close();
+                receiver.close();
             };
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
     }
-    return { version, way, d3d, gpu, memory, settle, release, close, shipped };
+    return { version, way, d3d, gpu, memory, settle, release, close, shipped, given };
 }
 
 /**
@@ -467,7 +509,7 @@ function asked(calls){
 function runner(on){
     /** What the program saw, a line a call or a look. @type {string[]} */
     const seen = [];
-    /** What the GPU was asked before each look. @type {{ label: string, made: string[], stream: string[] }[]} */
+    /** What the GPU was asked before each look, and the calls the played device was given. @type {{ label: string, made: string[], stream: string[], calls: string[] }[]} */
     const looks = [];
     /** @type {WeakMap<object, string>} */
     const names = new WeakMap();
@@ -554,7 +596,7 @@ function runner(on){
          */
         async look(label){
             await on.settle();
-            looks.push({ label, ...asked(on.gpu.calls) });
+            looks.push({ label, ...asked(on.gpu.calls), calls: on.given.splice(0) });
             on.gpu.reset();
             seen.push(`${label}: memory ${createHash('sha1').update(on.memory.ram).digest('hex')}`);
         },
@@ -592,11 +634,25 @@ function parting(direct, played, what){
  * @param {(run: ReturnType<typeof runner>) => Promise<void>} scenario
  * @param {readonly string[]} [ways]
  * @param {object} [caps]
+ * @param {string} [against]  the run the ways are held to: the device that draws itself,
+ *     or one of the ways
+ * @param {boolean} [given]  what the played device was given compared, call by call,
+ *     in place of what the GPU was asked: what a transport decides, where the GPU's
+ *     stream also holds the twin's own turns
  * @returns {Promise<string[]>}
  */
-async function divergences(version, scenario, ways = WAYS, caps = {}){
-    const direct = runner(rig(version, 'direct', caps));
-    await scenario(direct);
+async function divergences(version, scenario, ways = WAYS, caps = {}, against = 'direct',
+    given = false)
+{
+    const direct = runner(rig(version, against, caps));
+    try
+    {
+        await scenario(direct);
+    }
+    finally
+    {
+        direct.on.close();
+    }
     /** @type {string[]} */
     const found = [];
     // A frame the GPU refused draws nothing, whichever side it is on, and
@@ -629,10 +685,12 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
         const count = Math.max(direct.looks.length, played.looks.length);
         for (let look = 0; look < count; look++)
         {
-            const one = direct.looks[look] ?? { label: '?', made: [], stream: [] };
-            const other = played.looks[look] ?? { label: '?', made: [], stream: [] };
-            const gpu = parting(one.made, other.made, `the objects the GPU made (${one.label})`)
-                ?? parting(one.stream, other.stream, `what the GPU was asked (${one.label})`);
+            const one = direct.looks[look] ?? { label: '?', made: [], stream: [], calls: [] };
+            const other = played.looks[look] ?? { label: '?', made: [], stream: [], calls: [] };
+            const gpu = given
+                ? parting(one.calls, other.calls, `what the played device was given (${one.label})`)
+                : parting(one.made, other.made, `the objects the GPU made (${one.label})`)
+                    ?? parting(one.stream, other.stream, `what the GPU was asked (${one.label})`);
             if (gpu)
             {
                 found.push(`[${way}] ${gpu}`);
@@ -1625,7 +1683,7 @@ async()=>{
             // across the worker.
             await run.call('GetData occlusion', async()=>{
                 let answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
-                for (let tries = 0; answer === 1 && tries < 1000; tries++)
+                while (answer === 1)
                 {
                     await new Promise(resolve=>setTimeout(resolve, 1));
                     answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
@@ -2922,7 +2980,7 @@ test('Direct3D 8: a target drawn into every frame and read back the frame after 
 
 test('Direct3D 9: an occlusion count the GPU has given reaches the recording unasked, and the'
     + ' program\'s first poll after it is answered with the count, not S_FALSE', async()=>{
-    for (const way of /** @type {const} */ (['held', 'port']))
+    for (const way of /** @type {const} */ (['held', 'ring']))
     {
         const { d3d, settle, close } = rig(9, way);
         try
@@ -2996,4 +3054,486 @@ test('Direct3D 8: a render target copied into an image surface answers the progr
     {
         close();
     }
+});
+
+test('Direct3D 9 and 8: a device let go of with its textures and buffers leaves nothing on the'
+    + ' GPU, made directly and played in the worker', async()=>{
+    for (const [version, way] of [9, 8].flatMap(one=>['direct', 'held', 'ring']
+        .map(each=>/** @type {[9 | 8, string]} */ ([one, each]))))
+    {
+        const on = rig(version, way);
+        /** Every texture the GPU made, in order. @type {any[]} */
+        const textures = [];
+        /** Every buffer the GPU made, in order. @type {any[]} */
+        const buffers = [];
+        const { createTexture, createBuffer } = on.gpu.device;
+        on.gpu.device.createTexture = (/** @type {any} */ descriptor)=>{
+            const one = createTexture(descriptor);
+            textures.push(one);
+            return one;
+        };
+        on.gpu.device.createBuffer = (/** @type {any} */ descriptor)=>{
+            const one = createBuffer(descriptor);
+            buffers.push(one);
+            return one;
+        };
+        /** @param {any[]} made */
+        const left = made=>made.filter(one=>!one.destroyed)
+            .map(one=>String(one.descriptor?.label ?? ''));
+        const run = runner(on);
+        /** One device's frame of four textures, the device let go of after it or kept. @param {string} label @param {boolean} keep */
+        const round = async(label, keep)=>{
+            const { device, vertices, indices } = version === 9 ? await device9(run)
+                : await device8(run);
+            const held = [];
+            for (let index = 0; index < 4; index++)
+            {
+                held.push(await makeTexture(run, device, `${label}.${index}`,
+                    { size: 64, levels: 3 }));
+            }
+            if (version === 9)
+            {
+                await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0,
+                    STRIDE));
+                await run.call('SetIndices', ()=>device.SetIndices(indices));
+                await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+            }
+            const draw = version === 9 ? drawQuad9 : drawQuad8;
+            for (let frame = 0; frame < (keep ? 2 : 1); frame++)
+            {
+                await run.call('BeginScene', ()=>device.BeginScene());
+                for (const [index, texture] of held.entries())
+                {
+                    await draw(run, device, `${label}.${index}`, texture, index);
+                }
+                await run.call('EndScene', ()=>device.EndScene());
+                await run.call('Present', ()=>device.Present(null, null, 0, null));
+                await run.look(`${label} frame ${frame}`);
+            }
+            if (keep)
+            {
+                return;
+            }
+            // Released while still bound: the device lets go of what it holds.
+            for (const texture of held)
+            {
+                await run.call('Release texture', ()=>texture.release());
+            }
+            await run.call('Release vertices', ()=>vertices.release());
+            await run.call('Release indices', ()=>indices.release());
+            await run.call('Release device', ()=>device.release());
+            await run.look(`${label} let go`);
+            assert.deepEqual(left(textures), [], `${version} ${way}, ${label}: no texture left`);
+        };
+        for (let index = 0; index < 3; index++)
+        {
+            await round(`device ${index}`, false);
+        }
+        const before = buffers.length;
+        await round('kept', true);
+        // The pool of uniform blocks is the backend's, shared by every device.
+        const kept = left(buffers.slice(0, before)).filter(label=>!label.startsWith('uniforms'));
+        assert.deepEqual(kept, [],
+            `${version} ${way}: no buffer of a device let go of, once the next drew`);
+        on.close();
+    }
+});
+
+/**
+ * A seeded stream of numbers (mulberry32): the same programs every run.
+ *
+ * @param {number} seed
+ */
+const seeded = seed=>{
+    let state = seed >>> 0;
+    /** @param {number} below @returns {number} */
+    return below=>{
+        state = (state + 0x6d2b79f5) >>> 0;
+        let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+        mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
+        return (((mixed ^ (mixed >>> 14)) >>> 0) % below);
+    };
+};
+
+/**
+ * A program made of a seed: buffers written through every kind of lock,
+ * textures of sizes from a few bytes to past what one record of a small
+ * ring holds, draws from buffers and from user memory, state set between
+ * them, occlusion counts waited for, render targets read back, presents and
+ * looks, in an order and with bytes the seed decides.
+ *
+ * @param {number} seed @param {number} steps
+ * @returns {(run: ReturnType<typeof runner>) => Promise<void>}
+ */
+const randomProgram = (seed, steps)=>async run=>{
+    const pick = seeded(seed);
+    const { device, vertices, indices } = await device9(run);
+    /** @type {{ buffer?: any }} */
+    const dynamic = {};
+    await run.call('CreateVertexBuffer dynamic', ()=>device.CreateVertexBuffer(16 * STRIDE,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_LIT, D3DPOOL.DEFAULT, dynamic), [dynamic]);
+    /** @type {{ query?: any }} */
+    const occlusion = {};
+    await run.call('CreateQuery occlusion', ()=>device.CreateQuery(D3DQUERYTYPE.OCCLUSION,
+        occlusion), [occlusion]);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    await run.call('GetBackBuffer', ()=>device.GetBackBuffer(0, 0, 0, back), [back]);
+    /** @type {{ surface?: any }} */
+    const readBack = {};
+    await run.call('CreateOffscreenPlainSurface read-back', ()=>device.CreateOffscreenPlainSurface(
+        32, 32, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, readBack), [readBack]);
+    await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+    await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+    await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0, STRIDE));
+    await run.call('SetIndices', ()=>device.SetIndices(indices));
+    /** @type {any[]} */
+    const textures = [await makeTexture(run, device, 'first', { seed })];
+    let inScene = false;
+    let frame = 0;
+    const scene = async()=>{
+        if (!inScene)
+        {
+            await run.call('BeginScene', ()=>device.BeginScene());
+            inScene = true;
+        }
+    };
+    const unscene = async()=>{
+        if (inScene)
+        {
+            await run.call('EndScene', ()=>device.EndScene());
+            inScene = false;
+        }
+    };
+    for (let step = 0; step < steps; step++)
+    {
+        const label = `${step}`;
+        switch (pick(9))
+        {
+            case 0:
+            {
+                // A texture of 4 to 256 texels a side: the largest is 256 KiB a level.
+                const size = 4 << pick(7);
+                textures.push(await makeTexture(run, device, `t${label}`,
+                    { size, levels: 1 + pick(2), seed: pick(200) }));
+                break;
+            }
+            case 1:
+            {
+                await scene();
+                await drawQuad9(run, device, label, textures[pick(textures.length)],
+                    pick(8) / 8);
+                break;
+            }
+            case 2:
+            {
+                // Written through the lock a dynamic buffer's draws take.
+                const flags = [D3DLOCK.DISCARD, D3DLOCK.NOOVERWRITE, 0][pick(3)];
+                const first = pick(4) * 4;
+                /** @type {{ pBits?: number }} */
+                const locked = {};
+                await run.call(`Lock dynamic ${label}`, ()=>dynamic.buffer.Lock(first * STRIDE,
+                    4 * STRIDE, locked, flags), [locked]);
+                writeVertices(run, /** @type {number} */ (locked.pBits), pick(64));
+                await run.call(`Unlock dynamic ${label}`, ()=>dynamic.buffer.Unlock());
+                await scene();
+                await run.call(`SetStreamSource dynamic ${label}`, ()=>device.SetStreamSource(0,
+                    dynamic.buffer, 0, STRIDE));
+                await run.call(`DrawPrimitive dynamic ${label}`, ()=>device.DrawPrimitive(
+                    D3DPT.TRIANGLESTRIP, first, 2));
+                await run.call(`SetStreamSource back ${label}`, ()=>device.SetStreamSource(0,
+                    vertices, 0, STRIDE));
+                break;
+            }
+            case 3:
+            {
+                await scene();
+                await run.call(`SetFVF rhw ${label}`, ()=>device.SetFVF(FVF_RHW));
+                await run.call(`DrawPrimitiveUP ${label}`, ()=>device.DrawPrimitiveUP(
+                    D3DPT.TRIANGLESTRIP, 2, screenQuad(1 + pick(32), 1 + pick(32),
+                        0xff000000 | pick(0xffffff)), STRIDE_RHW));
+                await run.call(`SetFVF lit ${label}`, ()=>device.SetFVF(FVF_LIT));
+                break;
+            }
+            case 4:
+            {
+                const [state, values] = /** @type {[number, number[]]} */ ([
+                    [D3DRS.ZENABLE, [0, 1]], [D3DRS.ALPHABLENDENABLE, [0, 1]],
+                    [D3DRS.TEXTUREFACTOR, [pick(0x7fffffff), 0xffffffff]],
+                    [D3DRS.CULLMODE, [1, 2, 3]]][pick(4)]);
+                await run.call(`SetRenderState ${state} ${label}`, ()=>device.SetRenderState(state,
+                    values[pick(values.length)]));
+                break;
+            }
+            case 5:
+            {
+                // A count the program waits for, polled as Wine's test polls it.
+                await scene();
+                await run.call(`Issue BEGIN ${label}`, ()=>occlusion.query.Issue(D3DISSUE.BEGIN));
+                await drawQuad9(run, device, `counted ${label}`, textures[0], 0);
+                await run.call(`Issue END ${label}`, ()=>occlusion.query.Issue(D3DISSUE.END));
+                /** @type {{ value?: number }} */
+                const counted = {};
+                await run.call(`GetData ${label}`, async()=>{
+                    let answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                    while (answer === 1)
+                    {
+                        await new Promise(resolve=>setTimeout(resolve, 1));
+                        answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                    }
+                    return answer;
+                }, [counted]);
+                break;
+            }
+            case 6:
+            {
+                // The back buffer's pixels, read back for the program to look at.
+                await unscene();
+                await run.call(`GetRenderTargetData ${label}`, ()=>device.GetRenderTargetData(
+                    back.surface, readBack.surface));
+                /** @type {{ pBits?: number, Pitch?: number }} */
+                const read = {};
+                await run.call(`LockRect read-back ${label}`, ()=>readBack.surface.LockRect(read,
+                    null, D3DLOCK.READONLY), [read]);
+                run.bytes(`read back ${label}`, /** @type {number} */ (read.pBits), 32 * 32 * 4);
+                await run.call(`UnlockRect read-back ${label}`, ()=>readBack.surface.UnlockRect());
+                break;
+            }
+            case 7:
+            {
+                await unscene();
+                await run.call(`Clear ${label}`, ()=>device.Clear(0, null,
+                    D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000 | pick(0xffffff), 1, 0));
+                break;
+            }
+            default:
+            {
+                await unscene();
+                await run.call(`Present ${label}`, ()=>device.Present());
+                if (pick(2) === 0)
+                {
+                    await run.call(`idle ${label}`, ()=>device.idle());
+                    await run.look(`frame ${frame++}`);
+                }
+                break;
+            }
+        }
+    }
+    await unscene();
+    await run.call('Present last', ()=>device.Present());
+    await run.call('idle', ()=>device.idle());
+    await run.look('last');
+    for (const [index, texture] of textures.entries())
+    {
+        await run.call(`Release texture ${index}`, ()=>texture.release());
+    }
+    for (const [name, object] of /** @type {[string, any][]} */ ([['dynamic', dynamic.buffer],
+        ['occlusion', occlusion.query], ['back', back.surface], ['read-back', readBack.surface],
+        ['vertices', vertices], ['indices', indices], ['device', device]]))
+    {
+        await run.call(`Release ${name}`, ()=>object.release());
+    }
+    await run.look('end');
+};
+
+/**
+ * A program made of a seed whose textures and vertex buffers come and go over
+ * many pages of guest memory, each made at an address none had before: each
+ * drawn from batches after it was written, a texture written again only in a
+ * rectangle long after its first unlock - the rest of it the twin's from
+ * then - and calls that read none of them between, each a batch of its own
+ * where every call is played as it is made. What the twin's mirror lets go of
+ * between batches (`createMirror`) is what nothing it holds lies on: a page it
+ * let go of too soon draws zeros here.
+ *
+ * @param {8 | 9} version @param {number} seed @param {number} steps
+ * @returns {(run: ReturnType<typeof runner>) => Promise<void>}
+ */
+const comingAndGoing = (version, seed, steps)=>async run=>{
+    const pick = seeded(seed);
+    const { device } = version === 9 ? await device9(run) : await device8(run);
+    const draw = version === 9 ? drawQuad9 : drawQuad8;
+    if (version === 9)
+    {
+        await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+        await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+    }
+    /** @param {any} buffer */
+    const stream = buffer=>(version === 9 ? device.SetStreamSource(0, buffer, 0, STRIDE)
+        : device.SetStreamSource(0, buffer, STRIDE));
+    /** @type {{ texture: any, size: number }[]} */
+    const textures = [{ texture: await makeTexture(run, device, 'first', { size: 32, seed }),
+        size: 32 }];
+    /** @type {{ buffer: any, first: number }[]} */
+    const buffers = [];
+    /** @type {{ buffer?: any }} */
+    const bound = {};
+    let made = 0;
+    for (let step = 0; step < steps; step++)
+    {
+        const label = `${step}`;
+        switch (pick(7))
+        {
+            case 0:
+            {
+                // 4 KiB to 64 KiB a level.
+                const size = 32 << pick(4);
+                textures.push({ texture: await makeTexture(run, device, `t${label}`,
+                    { size, levels: 1 + pick(2), seed: pick(200) }), size });
+                break;
+            }
+            case 1:
+            {
+                // 16 KiB to 96 KiB, a quad somewhere in it.
+                const length = (1 + pick(6)) * 16384 - (16384 % STRIDE);
+                /** @type {{ buffer?: any }} */
+                const out = {};
+                await run.call(`CreateVertexBuffer ${label}`, ()=>device.CreateVertexBuffer(length,
+                    0, FVF_LIT, D3DPOOL.MANAGED, out), [out]);
+                const first = pick(length / STRIDE - 4);
+                /** @type {{ pBits?: number }} */
+                const locked = {};
+                await run.call(`Lock ${label}`, ()=>out.buffer.Lock(0, 0, locked, 0), [locked]);
+                writeVertices(run, /** @type {number} */ (locked.pBits) + first * STRIDE,
+                    made++ % 60);
+                await run.call(`Unlock ${label}`, ()=>out.buffer.Unlock());
+                buffers.push({ buffer: out.buffer, first });
+                break;
+            }
+            case 2:
+            {
+                const { texture } = textures[pick(textures.length)];
+                await run.call(`BeginScene ${label}`, ()=>device.BeginScene());
+                if (buffers.length > 0 && pick(2) === 0)
+                {
+                    const { buffer, first } = buffers[pick(buffers.length)];
+                    bound.buffer = buffer;
+                    await run.call(`SetStreamSource ${label}`, ()=>stream(buffer));
+                    await run.call(`SetTexture ${label}`, ()=>device.SetTexture(0, texture));
+                    await run.call(`DrawPrimitive ${label}`, ()=>device.DrawPrimitive(
+                        D3DPT.TRIANGLESTRIP, first, 2));
+                }
+                else
+                {
+                    await draw(run, device, label, texture, pick(8) / 8);
+                }
+                await run.call(`EndScene ${label}`, ()=>device.EndScene());
+                break;
+            }
+            case 3:
+            {
+                // Let go of while unbound, the last texture kept.
+                await run.call(`SetTexture none ${label}`, ()=>device.SetTexture(0, null));
+                if (buffers.length > 0 && pick(2) === 0)
+                {
+                    const [{ buffer }] = buffers.splice(pick(buffers.length), 1);
+                    if (bound.buffer === buffer)
+                    {
+                        bound.buffer = null;
+                        await run.call(`SetStreamSource none ${label}`, ()=>stream(null));
+                    }
+                    await run.call(`Release buffer ${label}`, ()=>buffer.release());
+                }
+                else if (textures.length > 1)
+                {
+                    const [{ texture }] = textures.splice(pick(textures.length), 1);
+                    await run.call(`Release texture ${label}`, ()=>texture.release());
+                }
+                break;
+            }
+            case 4:
+            {
+                const { texture, size } = textures[pick(textures.length)];
+                const left = pick(size / 2);
+                const top = pick(size / 2);
+                await fillLevel(run, texture, `rect ${label}`, 0, pick(200), { size,
+                    rect: { left, top, right: left + 1 + pick(size / 2),
+                        bottom: top + 1 + pick(size / 2) } });
+                break;
+            }
+            case 5:
+            {
+                for (let call = 0; call < 1 + pick(4); call++)
+                {
+                    await run.call(`SetRenderState ${label}.${call}`, ()=>device.SetRenderState(
+                        D3DRS.TEXTUREFACTOR, pick(0x7fffffff)));
+                }
+                break;
+            }
+            default:
+            {
+                await run.call(`Present ${label}`, ()=>device.Present(null, null, 0, null));
+                await run.call(`idle ${label}`, ()=>device.idle());
+                await run.look(`step ${label}`);
+                break;
+            }
+        }
+    }
+    await run.call('Present last', ()=>device.Present(null, null, 0, null));
+    await run.call('idle', ()=>device.idle());
+    await run.look('last');
+    await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+    await run.call('SetStreamSource none', ()=>stream(null));
+    for (const [index, { texture }] of textures.entries())
+    {
+        await run.call(`Release texture ${index}`, ()=>texture.release());
+    }
+    for (const [index, { buffer }] of buffers.entries())
+    {
+        await run.call(`Release buffer ${index}`, ()=>buffer.release());
+    }
+    await run.look('end');
+};
+
+test('seeded Direct3D 9 and 8 programs whose textures and buffers come and go over many pages,'
+    + ' drawn batches after they were written, play what the device drew itself', async()=>{
+    for (const version of /** @type {const} */ ([9, 8]))
+    {
+        for (let seed = 1; seed <= 4; seed++)
+        {
+            const found = await divergences(version, comingAndGoing(version, seed, 60),
+                ['at once', 'held', 'held, lent', 'ring']);
+            assert.deepEqual(found, [], `Direct3D ${version}, seed ${seed}:\n${found.join('\n')}`);
+        }
+    }
+});
+
+/**
+ * The transports' gate: seeded random programs whose twin plays as late as
+ * it may (`held`) and as its rings' bells ring, every way held to the first --
+ * every call the played device was given, with its bytes, in its order, every
+ * answer and out-structure the program saw, and guest memory at every look.
+ * A transport that loses, reorders, cuts or misreads a batch, an answer or a
+ * write back parts here, whichever of its paths -- built in place, spilled, in
+ * parts, waiting for room -- the record took. What the GPU was asked is held
+ * to the device that draws itself by the scenarios above: in a program this
+ * free, where among a look's submits an upload lands is the twin's own turns.
+ */
+test('seeded random Direct3D 9 programs give the played device the same through every transport,'
+    + ' and answer the program the same', async()=>{
+    for (let seed = 1; seed <= 12; seed++)
+    {
+        const found = [
+            ...await divergences(9, randomProgram(seed, 40),
+                ['ring', 'ring, small', 'ring, parts'], {}, 'held', true),
+            ...await divergences(9, randomProgram(seed, 40), ['ring, lent'], {}, 'held, lent',
+                true),
+        ];
+        assert.deepEqual(found, [], `seed ${seed}:\n${found.join('\n')}`);
+    }
+});
+
+test('the rings\' ways took every path a record may: built in place, spilled out of its room,'
+    + ' sent as parts, and waiting for room', ()=>{
+    // Summed over every run of the tests above in this file: run alone, this
+    // one has nothing to look at and says so.
+    const small = ringPaths.get('ring, small');
+    const parts = ringPaths.get('ring, parts');
+    assert.ok(small && parts, 'the ways through the rings ran before this');
+    for (const path of ['inPlace', 'spilled', 'parts', 'waited'])
+    {
+        assert.ok(small[path] > 0, `a small ring's records took the path ${path}`);
+    }
+    assert.ok(parts.parts > 0 && parts.spilled > 0, 'the seeded programs\' uploads went as parts');
+    assert.equal(small.waiting + parts.waiting, 0, 'nothing was left waiting for room');
 });

@@ -29,33 +29,36 @@ import {
 } from './iids.js';
 import {
     D3DCLIPSTATUS, D3DDEVICEDESC7, D3DLIGHT7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC,
-    D3DVIEWPORT7, RECT, createFields,
+    D3DVIEWPORT7, RECT, createFields, floatsOf,
 } from './structs.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
+import { TEXTURE_FORMATS } from './texture-formats.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth } from '../ddraw/objects.js';
 import {
     D3DVBCAPS_DONOTCLIP, DDERR_INVALIDPARAMS, D3D_OK,
 } from '../d3d7/constants.js';
-import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D7_COMMANDS, clippedBy } from '../d3d7/commands.js';
-import { D3DTSS_MAX } from '../d3d7/constants.js';
-import { D3DTSS } from '../d3d8/constants.js';
+import { D3DTSS_ADDRESS, D3DTSS_MAX } from '../d3d7/constants.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
+import { createShadow, settledAfter } from './shadow.js';
+import { BUFFER, COMMAND, VERTEX_BUFFER7 } from './block.js';
 import {
-    BUFFER, COMMAND, DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7,
-    VIEWPORT_GUARD_8,
-    VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lock7Code, settledAfter, stageStateMirror, unlockCode,
-} from './shadow.js';
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
+    commandCode, stageStateMirror,
+} from './routines/command.js';
+import {
+    getRenderStateCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+} from './routines/getters.js';
+import { lock7Code, unlockCode } from './routines/locks.js';
 
 /**
  * The stage states Direct3D 7 takes, as a mask: those a stage has, through
  * TEXTURETRANSFORMFLAGS.
  */
 const STAGE_STATE_TYPES_7 = [...createDefaultStageStates(0).keys()]
-    .filter(type=>type >= 1 && type <= D3DTSS_MAX && type !== D3DTSS.ADDRESSW - 13)
+    .filter(type=>type >= 1 && type <= D3DTSS_MAX && type !== D3DTSS_ADDRESS)
     .reduce((mask, type)=>mask | 1 << type, 0) >>> 0;
 
 /**
@@ -86,7 +89,9 @@ export const LEGACY_DEVICE_COMMANDS = Object.freeze(Object.fromEntries(Object.en
     SetRenderState: {},
     SetTextureStageState: {},
     SetTransform: { within: [{ arg: 0, ranges: [[0, 2], [4, 0xffffffff]] }] },
-    SetTexture: {},
+    // Stage zero's texture sets the alpha TEXTUREMAPBLEND's MODULATE takes
+    // (`fixAlphaOp`), which the host makes and mirrors.
+    SetTexture: { within: [{ arg: 0, ranges: [[1, 7]] }] },
 }).map(([name, own])=>[name, { ...D3D7_COMMANDS.COMMANDS[name], ...own,
     slot: D3D7_COMMANDS.commandSlot(name),
     mirror: /** @type {Record<string, any>} */ (COMMAND_MIRRORS)[name] }])));
@@ -145,37 +150,13 @@ export function withoutStates(device, refused){
 import { loadTexture } from '../d3d7/load.js';
 import { D3DVOP, processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { guidBytes } from '../../../system/guid.js';
 
 /** What an enumeration callback answers to stop. */
 const DDENUMRET_CANCEL = 0;
 
 /** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
 const S_FALSE = 1;
-
-/**
- * @param {number} bitCount @param {number} red @param {number} green @param {number} blue
- * @param {number} alpha
- */
-const rgbFormat = (bitCount, red, green, blue, alpha)=>Object.freeze({
-    size: 0x20, flags: DDPF_RGB | (alpha !== 0 ? DDPF_ALPHAPIXELS : 0), fourCC: 0, bitCount,
-    redMask: red, greenMask: green, blueMask: blue, alphaMask: alpha,
-});
-
-/**
- * The texture formats EnumTextureFormats names: the ones the renderer uploads
- * (d3d7/device.js d3dFormatOf), each by its own masks, as a driver of the era
- * named them. A program picks its formats by those masks -- one with alpha for
- * what it blends, 5-5-5 or 4-4-4-4 -- and gives up when the one it looks for
- * is not offered.
- */
-const TEXTURE_FORMATS = Object.freeze([
-    rgbFormat(32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0),
-    rgbFormat(32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000),
-    rgbFormat(16, 0xf800, 0x07e0, 0x001f, 0),
-    rgbFormat(16, 0x7c00, 0x03e0, 0x001f, 0),
-    rgbFormat(16, 0x7c00, 0x03e0, 0x001f, 0x8000),
-    rgbFormat(16, 0x0f00, 0x00f0, 0x000f, 0xf000),
-]);
 
 /** The most vertices one draw may name (d3dtypes.h). */
 const D3DMAXNUMVERTICES = 0xffff;
@@ -189,34 +170,6 @@ const D3DMAXNUMVERTICES = 0xffff;
 const STRIDED_STREAMS = Object.freeze({
     position: [0, 0], blendWeight: [0, 12], normal: [1, 0], diffuse: [2, 0], specular: [3, 0],
 });
-
-/**
- * A GUID as its sixteen bytes, the way a program reads one out of a structure:
- * three little-endian integers and eight raw bytes.
- *
- * @param {string} guid
- * @returns {Uint8Array}
- */
-export function guidBytes(guid){
-    const hex = guid.replace(/[{}-]/g, '');
-    const word = (/** @type {number} */ from, /** @type {number} */ width)=>
-        parseInt(hex.slice(from, from + width), 16);
-    const out = new Uint8Array(16);
-    const data1 = word(0, 8);
-    out[0] = data1 & 0xff;
-    out[1] = (data1 >>> 8) & 0xff;
-    out[2] = (data1 >>> 16) & 0xff;
-    out[3] = data1 >>> 24;
-    out[4] = word(8, 4) & 0xff;
-    out[5] = word(8, 4) >>> 8;
-    out[6] = word(12, 4) & 0xff;
-    out[7] = word(12, 4) >>> 8;
-    for (let index = 0; index < 8; index++)
-    {
-        out[8 + index] = word(16 + index * 2, 2);
-    }
-    return out;
-}
 
 /**
  * @typedef {Object} Direct3D7Deps
@@ -237,7 +190,7 @@ export function guidBytes(guid){
  *     setters' code.
  * @property {Set<string>} [traps]  Guest routines kept as traps, by name or group
  *     (`getters`, `ring`).
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {number} [ringBytes]  A device's command ring's size (`shadow.js`).
  */
 
@@ -265,6 +218,8 @@ export function createDirect3D7Seam(
      * @type {Set<ReturnType<typeof createShadow>>}
      */
     const madeShadows = new Set();
+    /** The blocks of legacy devices (`shade`). @type {WeakSet<object>} */
+    const legacyShadows = new WeakSet();
     /** @param {any} device */
     const shadowOf = device=>(device ? shadows.get(device) : undefined);
     /**
@@ -441,11 +396,25 @@ export function createDirect3D7Seam(
      *     hr: number) => void>}
      */
     const MIRRORED = {
-        SetRenderState: (shadow, [state])=>shadow.remirror({ renderStates: [state >>> 0] }),
+        // A legacy device's own render states (TEXTUREMAPBLEND, TEXTUREHANDLE...)
+        // set stage states of the device under it: those are the device's again
+        // too, or a routine would find a stage state set already and drop it.
+        SetRenderState: (shadow, [state])=>shadow.remirror({ renderStates: [state >>> 0],
+            ...(legacyShadows.has(shadow) ? { stageStates: true } : {}) }),
         SetTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
         MultiplyTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
+        // D3DTSS_ADDRESS (12) sets U and V, which the block mirrors.
         SetTextureStageState: (shadow, [stage, type])=>shadow.remirror({
-            stageStates: [(stage & 0xffffff) << 8 | type & 0xff] }),
+            stageStates: (type === 12 ? [12, 13, 14] : [type])
+                .map(each=>(stage & 0xffffff) << 8 | each & 0xff) }),
+        // A legacy device's texture on stage zero sets that stage's alpha
+        // operation under TEXTUREMAPBLEND's MODULATE.
+        SetTexture: (shadow, [stage])=>{
+            if (legacyShadows.has(shadow) && stage === 0)
+            {
+                shadow.remirror({ stageStates: [4] });
+            }
+        },
         SetViewport: shadow=>shadow.remirror({ viewport: true }),
         SetRenderTarget: shadow=>shadow.remirror({ viewport: true }),
         ApplyStateBlock: shadow=>shadow.remirror(),
@@ -493,8 +462,10 @@ export function createDirect3D7Seam(
             ringBytes,
             allocate: /** @type {(bytes: number) => number} */ (allocate),
             readMemory: memory.windowMemory ?? memory.readMemory,
+            shared: memory.sharedMemory,
             readU32: memory.readU32,
             writeMemory: memory.writeMemory,
+            fillMemory: memory.fillMemory,
             device: legacy ? withoutStates(device, legacy.answersFor) : device,
             divergence,
             name: legacy ? 'IDirect3DDevice3' : 'IDirect3DDevice7',
@@ -547,6 +518,10 @@ export function createDirect3D7Seam(
         });
         shadows.set(device, shadow);
         madeShadows.add(shadow);
+        if (legacy)
+        {
+            legacyShadows.add(shadow);
+        }
         device.guestState = ()=>shadow.address();
         device.settleGuestRefs = ()=>shadow.sync();
         return shadow;
@@ -594,8 +569,12 @@ export function createDirect3D7Seam(
     const canEnumerate = ()=>callGuest !== undefined && scratchBlock() !== 0;
 
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
-    const readFloats = (pointer, count)=>new Float32Array(
-        memory.readMemory(pointer >>> 0, count * 4).slice().buffer);
+    const readFloats = (pointer, count)=>{
+        // Out of the window where there is one: `floatsOf` answers an array of
+        // its own, so a copy of the bytes first would be a second one.
+        const read = memory.windowMemory ?? memory.readMemory;
+        return floatsOf(read(pointer >>> 0, count * 4), count);
+    };
 
     /** @param {number} pointer @returns {import('../d3d7/device.js').Material} */
     const readMaterial = pointer=>{
@@ -1005,12 +984,12 @@ export function createDirect3D7Seam(
             /** @type {{ desc?: any }} */
             const held = {};
             buffer.GetVertexBufferDesc(held);
-            fields.writeStruct(out >>> 0, D3DVERTEXBUFFERDESC, {
-                dwSize: D3DVERTEXBUFFERDESC.SIZE,
-                dwCaps: held.desc.caps,
-                dwFVF: held.desc.fvf,
-                dwNumVertices: held.desc.numVertices,
-            });
+            // dwSize is the program's, read nor written (ddraw7 test_vb_desc
+            // reads back the zero it left there).
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwCaps, held.desc.caps);
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwFVF, held.desc.fvf);
+            fields.writeU32((out >>> 0) + D3DVERTEXBUFFERDESC.dwNumVertices,
+                held.desc.numVertices);
             return D3D_OK;
         },
         /** @param {any} buffer */
@@ -1077,9 +1056,10 @@ export function createDirect3D7Seam(
                 unlockCode(at, trap)),
         }).filter(([name])=>!traps.has(name) && !traps.has('locks')))
         : {};
+    // IUnknown is the buffer's own interface (Wine's ddraw7 test_vb_refcount).
     const bufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods,
-            bufferGuests),
+        { ...describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods,
+            bufferGuests), identity: true },
     ];
 
     // --- device ---
@@ -1165,6 +1145,8 @@ export function createDirect3D7Seam(
             /** @type {{ surface?: any }} */
             const held = {};
             device.GetRenderTarget(held);
+            // The model's reference is the IDirectDrawSurface7's to release.
+            held.surface.handedAs?.(IID_IDirectDrawSurface7);
             fields.writeU32(out >>> 0,
                 publisher.publish(held.surface, [], IID_IDirectDrawSurface7));
             return D3D_OK;
@@ -1395,6 +1377,7 @@ export function createDirect3D7Seam(
             const hr = device.GetTexture(stage >>> 0, held);
             if (hr === D3D_OK)
             {
+                held.surface?.handedAs?.(IID_IDirectDrawSurface7);
                 fields.writeU32(out >>> 0, held.surface
                     ? publisher.publish(held.surface, [], IID_IDirectDrawSurface7)
                     : 0);

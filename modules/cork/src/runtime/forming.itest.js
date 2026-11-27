@@ -9,11 +9,16 @@
  * calling one another, directly and through a register -- leaves and not,
  * `ret imm` with an argument pushed, a return moved past two bytes of its
  * caller, a thunk jumping on through a register, a store into another
- * function's code -- run interpreted alone, then translated with nothing formed in, with
- * leaves alone, with one, two and three levels of callees formed in
- * (`formDepth`), and with the callees of calls through a register sampled and
+ * function's code, a branch to a cold path far away that calls on -- run interpreted
+ * alone, then translated with nothing formed in, with leaves alone, with one, two and
+ * three levels of callees formed in (`formDepth`), with the cold paths followed into
+ * (`coldReach` 0), and with the callees of calls through a register sampled and
  * formed in behind a compare (`callTargets`). Everything a program observes
  * must come out the same: the registers, the flags, its data and its code.
+ *
+ * And a loop whose one call through a table goes to a different small function
+ * each turn, nine to forty of them (`spread`): those formed in behind their
+ * compares, the rest still wasm calls, against the interpreter.
  */
 
 import { test } from 'node:test';
@@ -24,6 +29,8 @@ const MAIN = 0x1000;
 const FUNCTIONS = 0x2000;
 const SPAN = 0x100;
 const DATA = 0x80000;
+/** Each function's cold path, `SPAN` apart, far past every reach (`coldReach`). */
+const COLD = 0x40000;
 const STACK = 0xf0000;
 const PROGRAMS = 120;
 
@@ -59,6 +66,8 @@ function program(seed){
     const returns = Array.from({ length: count }, ()=>[0, 0, 1, 2][pick(4)]);
     /** @type {[number, number[]][]} */
     const code = [];
+    /** Each function's cold paths, by its index. @type {Map<number, number[]>} */
+    const colds = new Map();
     for (let index = 0; index < count; index++)
     {
         const at = FUNCTIONS + index * SPAN;
@@ -67,7 +76,7 @@ function program(seed){
         for (let op = 0; op < ops; op++)
         {
             const callee = index + 1 + pick(count - index - 1);
-            const kind = pick(12);
+            const kind = pick(13);
             if (kind < 3 && callee < count)
             {
                 if (returns[callee] === 1)
@@ -111,6 +120,26 @@ function program(seed){
                 case 8: body.push(0x03, 0x1d, ...le32(DATA + 4 * pick(16))); break;
                 case 9: body.push(0x50, 0x5a); break;
                 case 10: body.push(0x83, 0xf8, pick(256), 0x7c, 0x01, 0x43); break;
+                case 11:
+                {
+                    // test cl, 7; jz COLD -- a branch to the function's cold path, far
+                    // away, taken one turn of the loop's eight (ecx is its count); the
+                    // path adds to ebx, may call a later function that returns plainly,
+                    // and jumps back after the branch.
+                    const path = COLD + index * SPAN + (colds.get(index)?.length ?? 0);
+                    body.push(0xf6, 0xc1, 0x07, 0x0f, 0x84);
+                    const back = at + body.length + 4;
+                    body.push(...le32(path - back));
+                    const out = [0x83, 0xc3, pick(256)];
+                    const plain = returns.findIndex((how, which)=>which > index && how === 0);
+                    if (plain > 0 && pick(2) === 0)
+                    {
+                        out.push(0xe8, ...le32(FUNCTIONS + plain * SPAN - (path + out.length + 5)));
+                    }
+                    out.push(0xe9, ...le32(back - (path + out.length + 5)));
+                    colds.set(index, [...colds.get(index) ?? [], ...out]);
+                    break;
+                }
                 default:
                     // mov byte [f + 2], imm8: another function's first add, rewritten.
                     body.push(0xc6, 0x05, ...le32(FUNCTIONS + pick(count) * SPAN + 2), pick(4));
@@ -129,6 +158,12 @@ function program(seed){
         }
         assert.ok(body.length <= SPAN, 'a function fits its span');
         code.push([at, body]);
+        const cold = colds.get(index);
+        if (cold !== undefined)
+        {
+            assert.ok(cold.length <= SPAN, 'its cold paths fit theirs');
+            code.push([COLD + index * SPAN, cold]);
+        }
     }
     // mov ecx, turns; L: push ecx; [push eax;] call f0; [inc eax; inc eax;] pop ecx;
     // dec ecx; jnz L; hlt
@@ -151,12 +186,16 @@ function program(seed){
     return { code, turns };
 }
 
+/** Instructions a slice of `run`: some fifty to a program. */
+const SLICE = 20_000;
+
 /**
  * What a program observes, run on a machine of `config`.
  *
  * @param {[number, number[]][]} code @param {Record<string, unknown>} config
+ * @param {(diagnostics: any) => void} [told]  the machine's diagnostics once it has run
  */
-async function run(code, config){
+async function run(code, config, told){
     const m = createMachine({ ramSize: 1 << 20, config: { hashSlots: 1 << 12, ...config } });
     try
     {
@@ -166,7 +205,20 @@ async function run(code, config){
         }
         m.setReg('esp', STACK);
         m.setReg('eip', MAIN);
-        const stop = await m.run({ maxInstructions: 5_000_000 });
+        // In slices, the runtime given its turn between them as a host gives it
+        // (`translatePending`): the machine's own run looks at the queue only after
+        // an exit to code not translated, and a call's samples are read at a look
+        // - with none past the program's first moments, the only calls sampled
+        // were the ones made while its callees were still being translated.
+        let stop = await m.run({ maxInstructions: SLICE });
+        let translated = stop.translated;
+        for (let ran = SLICE; stop.reason === 'limit' && ran < 5_000_000; ran += SLICE)
+        {
+            await m.runtime.translatePending();
+            stop = await m.run({ maxInstructions: SLICE });
+            translated += stop.translated;
+        }
+        told?.(m.diagnostics());
         return {
             stop: stop.reason,
             registers: ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi', 'eip']
@@ -174,7 +226,7 @@ async function run(code, config){
             flags: m.reg('eflags') & 0x8d5,
             data: [...m.read(DATA, 64)],
             code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
-            translated: stop.translated,
+            translated,
             reforms: m.diagnostics().reforms ?? 0,
         };
     }
@@ -191,6 +243,8 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
         'one level': { formDepth: 1, hotThreshold: 2 },
         'two levels': { formDepth: 2, hotThreshold: 2 },
         'three levels': { formDepth: 3, hotThreshold: 2 },
+        // Every callee's branch followed, its cold paths formed in with it.
+        'cold paths followed': { formDepth: 1, hotThreshold: 2, coldReach: 0 },
         // Calls through a register sampled and their callees formed in behind a
         // compare (`callTargets`), a site due at its first sample.
         'predicted calls': { formDepth: 1, hotThreshold: 2, callTargets: true, predictAfter: 1 },
@@ -217,4 +271,85 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
     }
     assert.ok(translated > 0, 'the translated paths ran translated code');
     assert.ok(reforms > 0, 'the predicted path formed regions again with their callees');
+});
+
+const TABLE = DATA + 0x400;
+const SPREADS = 24;
+
+/**
+ * A loop calling one of `count` small functions through a table of 64 slots, the
+ * slot the turn's count times an odd number, so the callees take turns evenly:
+ *
+ *     mov ecx, turns; L: mov ebx, ecx; imul ebx, ebx, odd; and ebx, 63; push ecx;
+ *     call [TABLE + ebx*4]; pop ecx; dec ecx; jnz L; hlt
+ *
+ * Each callee a few of: `add eax, imm8`, `xor [DATA + 4j], eax`, `add [DATA + 4j], edx`,
+ * `adc edx, imm8` (the carry the caller or the callee before left), `rol eax, n`,
+ * `test al, 1; jz +1; inc edx`; then `ret`.
+ *
+ * @param {number} seed
+ * @returns {{ code: [number, number[]][], count: number }}
+ */
+function spread(seed){
+    const next = random(seed);
+    const pick = (/** @type {number} */ n)=>Math.floor(next() * n);
+    const count = 9 + pick(32);
+    /** @type {[number, number[]][]} */
+    const code = [];
+    const callee = (/** @type {number} */ k)=>FUNCTIONS + k * 0x40;
+    for (let k = 0; k < count; k++)
+    {
+        const body = [];
+        for (let op = 2 + pick(4); op > 0; op--)
+        {
+            const slot = le32(DATA + 4 * pick(16));
+            body.push(...[
+                [0x83, 0xc0, pick(256)],
+                [0x31, 0x05, ...slot],
+                [0x01, 0x15, ...slot],
+                [0x83, 0xd2, pick(256)],
+                [0xc1, 0xc0, 1 + pick(7)],
+                [0xa8, 0x01, 0x74, 0x01, 0x42],
+            ][pick(6)]);
+        }
+        code.push([callee(k), [...body, 0xc3]]);
+    }
+    code.push([TABLE, Array.from({ length: 64 }, (_, slot)=>le32(callee(slot % count))).flat()]);
+    const turns = 40000 + pick(20000);
+    code.push([MAIN, [0xb9, ...le32(turns), 0x89, 0xcb, 0x6b, 0xdb, 1 + 2 * pick(32),
+        0x83, 0xe3, 0x3f, 0x51, 0xff, 0x14, 0x9d, ...le32(TABLE), 0x59, 0x49, 0x75, -20 & 0xff,
+        0xf4]]);
+    return { code, count };
+}
+
+test('a call spread over many small callees has those that pay formed in, and runs as the'
+    + ' interpreter runs it', async()=>{
+    const paths = {
+        // Due once there are four samples for each callee seen.
+        predicted: { hotThreshold: 2, callTargets: true, predictAfter: 4 },
+        'predicted, returns through the hash': { hotThreshold: 2, callTargets: true,
+            predictAfter: 4, callReturn: false },
+    };
+    let most = 0;
+    for (let seed = 1; seed <= SPREADS; seed++)
+    {
+        const { code, count } = spread(seed);
+        const { translated: ran, reforms: formed, ...expected } = await run(code,
+            { hotThreshold: 1e9 });
+        assert.equal(ran + formed, 0, 'the reference ran interpreted');
+        assert.equal(expected.stop, 'halt', `seed ${seed}: the program ends`);
+        for (const [name, config] of Object.entries(paths))
+        {
+            // The most callees one call had formed in.
+            let callees = 0;
+            const { translated, reforms, ...got } = await run(code, config, diagnostics=>{
+                callees = diagnostics.prediction?.callees ?? 0;
+            });
+            assert.deepEqual(got, expected, `seed ${seed}, ${name}: ${count} callees`);
+            assert.ok(translated > 0 && reforms > 0, `seed ${seed}, ${name}: formed again`);
+            assert.ok(callees <= 32, 'no more formed in than a call may have');
+            most = Math.max(most, callees);
+        }
+    }
+    assert.ok(most > 16, `a call had more than sixteen callees formed in (${most})`);
 });

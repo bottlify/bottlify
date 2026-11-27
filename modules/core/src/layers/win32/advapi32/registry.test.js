@@ -12,6 +12,7 @@ import {
     HKEY_CLASSES_ROOT,
     HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE,
+    PROFILE_LIST,
     REG_BINARY,
     REG_DWORD,
     REG_MULTI_SZ,
@@ -20,6 +21,7 @@ import {
     shellFolders,
 } from './registry.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
+import { USER_SID_TEXT } from './tokens.js';
 
 /** A root id no hive hosts, used to prove a save cannot invent one. */
 const HKEY_UNKNOWN_ROOT = 0x80000050;
@@ -54,6 +56,31 @@ test('the hive announces a burst of changes once, and a restore not at all', asy
     await Promise.resolve();
     assert.equal(announced, 1, 'and neither is deleting what was not there');
 });
+
+test('the machine\'s own writes are furnished and announce nothing; a program\'s announce',
+    async()=>{
+        // A layer laying the machine's own keys (setupapi's device classes, the
+        // first time the library is asked for) is putting the machine in place,
+        // as the hive's own furnishing does: a session that announced it would
+        // save a hive the program never wrote.
+        const hive = createHive();
+        let announced = 0;
+        hive.onChanged(()=>announced++);
+        const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+        const made = hive.asMachine(()=>{
+            const { key } = hive.create(local, 'SYSTEM\\Test\\Machine');
+            hive.setValue(key, 'Class', REG_SZ, Uint8Array.of(65, 0));
+            return key;
+        });
+        await Promise.resolve();
+        assert.equal(announced, 0, 'the machine\'s own keys are no change');
+        assert.equal(hive.getValue(made, 'Class')?.furnished, true,
+            'and what an installation\'s registry may replace');
+        hive.setValue(made, 'Class', REG_SZ, Uint8Array.of(66, 0));
+        await Promise.resolve();
+        assert.equal(announced, 1, 'the program writing over it is');
+        assert.equal(hive.getValue(made, 'Class')?.furnished, undefined, 'and no default any more');
+    });
 
 test('the predefined roots exist and nothing else does', ()=>{
     const hive = createHive();
@@ -102,6 +129,23 @@ test('the keys every machine carries are there before any program writes', ()=>{
     {
         assert.ok(hive.open(classes, name), name);
     }
+    // A package opened through the shell is msiexec's: Windows Installer's file types.
+    /** @param {string} path */
+    const classDefault = path=>{
+        const key = hive.open(classes, path);
+        assert.ok(key, path);
+        const found = hive.getValue(key, '');
+        return found && String.fromCharCode(...found.data).replace(/\0+$/, '');
+    };
+    assert.equal(classDefault('.msi'), 'Msi.Package');
+    assert.equal(classDefault('Msi.Package\\shell\\Open\\command'),
+        '"C:\\WINDOWS\\system32\\msiexec.exe" /i "%1" %*');
+    assert.equal(classDefault('Msi.Patch\\shell\\Open\\command'),
+        '"C:\\WINDOWS\\system32\\msiexec.exe" /p "%1" %*');
+    // OLE Automation's picture and font by name: shlwapi's clsid test asks
+    // CLSIDFromProgIDWrap for StdPicture.
+    assert.equal(classDefault('StdPicture\\CLSID'), '{0BE35204-8F91-11CE-9DE3-00AA004BB851}');
+    assert.equal(classDefault('StdFont\\CLSID'), '{0BE35203-8F91-11CE-9DE3-00AA004BB851}');
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
@@ -609,11 +653,77 @@ test('the processor key names the processor the engine gives', ()=>{
         assert.equal(value.type, REG_SZ);
         return new TextDecoder('latin1').decode(value.data).replace(/\0$/, '');
     };
-    assert.equal(nameOf(createHive()), 'Bottlify x86');
+    assert.equal(nameOf(createHive()), 'Bottlify Virtual CPU @ 3.00GHz', 'CPUID\'s brand');
     const named = createHive({ processorName: 'Bottlify Cork x86 v1.2.3' });
     assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
     // HARDWARE is the kernel's, written at every boot: a restored hive takes
     // this engine's name rather than keeping the last run's.
     named.fromJSON(createHive({ processorName: 'Other' }).toJSON());
     assert.equal(nameOf(named), 'Bottlify Cork x86 v1.2.3');
+});
+
+test('an installation\'s registry replaces a machine default, never what a program wrote', ()=>{
+    const ENVIRONMENT = 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment';
+    /** @param {ReturnType<typeof createHive>} hive */
+    const pathOf = hive=>{
+        const found = hive.getValue(machine(hive, ENVIRONMENT), 'Path');
+        return found && String.fromCharCode(...found.data).replace(/\0+$/, '');
+    };
+    // The installation: a setup added its folder to the system Path.
+    const installing = createHive();
+    installing.setValue(machine(installing, ENVIRONMENT), 'PATH', REG_SZ,
+        latin1(`C:\\Vendor\\Common;${pathOf(installing)}\0`));
+    const installed = installing.toJSON();
+
+    const fresh = createHive();
+    assert.equal(pathOf(fresh), 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem');
+    fresh.fillFromJSON(installed);
+    assert.equal(pathOf(fresh),
+        'C:\\Vendor\\Common;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
+        'the default gives way to what the installation wrote');
+
+    // A session that wrote its own Path keeps it over the installation's.
+    const session = createHive();
+    session.setValue(machine(session, ENVIRONMENT), 'Path', REG_SZ, latin1('C:\\Mine\0'));
+    const kept = createHive();
+    kept.fromJSON(session.toJSON());
+    kept.fillFromJSON(installed);
+    assert.equal(pathOf(kept), 'C:\\Mine');
+    // One that never touched it saves the default as one, and still gets the installation's.
+    const untouched = createHive();
+    untouched.fromJSON(createHive().toJSON());
+    untouched.fillFromJSON(installed);
+    assert.equal(pathOf(untouched)?.split(';')[0], 'C:\\Vendor\\Common');
+});
+
+test('Windows 7 and 10 name the .NET install root with the shim they carry; XP does not', ()=>{
+    /** @param {import('../kernel32/versions.js').WindowsName} name */
+    const root = name=>{
+        const hive = createHive({ windows: WINDOWS_VERSIONS[name] });
+        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+            'SOFTWARE\\Microsoft\\.NETFramework');
+        return key ? hive.getValue(key, 'InstallRoot')?.data ?? null : null;
+    };
+    assert.deepEqual(root('win7'), latin1('C:\\WINDOWS\\Microsoft.NET\\Framework\\\0'));
+    assert.deepEqual(root('win10'), root('win7'));
+    assert.equal(root('winxp'), null);
+});
+
+test('the profile list has the user\'s profile by its token\'s SID, where the shell keeps it', ()=>{
+    for (const name of /** @type {const} */ (['winxp', 'win7']))
+    {
+        const version = WINDOWS_VERSIONS[name];
+        const hive = createHive({ windows: version });
+        assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, `${PROFILE_LIST}\\${USER_SID_TEXT}`,
+            'ProfileImagePath'), shellFolders(version).Profile, name);
+        assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, `${PROFILE_LIST}\\S-1-5-18`,
+            'ProfileImagePath'), 'C:\\WINDOWS\\system32\\config\\systemprofile', name);
+    }
+    const xp = createHive({ windows: WINDOWS_VERSIONS.winxp });
+    assert.equal(valueOf(xp, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'ProfilesDirectory'),
+        'C:\\Documents and Settings');
+    const seven = createHive({ windows: WINDOWS_VERSIONS.win7 });
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'ProfilesDirectory'),
+        'C:\\Users');
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'Public'), 'C:\\Users\\Public');
 });

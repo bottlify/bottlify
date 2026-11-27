@@ -1,0 +1,395 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+-->
+<title>Cork stand</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+/* One column: what runs, the controls, then a table that fills as runs come back. */
+:root {
+    --bg: #f7f8f7; --panel: #eef1ef; --fg: #18201c; --muted: #5d6963; --line: #d9dfdb;
+    --accent: #1f6f5c; --on-accent: #ffffff; --ok: #237a45; --bad: #b42318; --warn: #94650b;
+    --text: system-ui, -apple-system, "Segoe UI", sans-serif; --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #121614; --panel: #1a201d; --fg: #e6ece8; --muted: #93a19a; --line: #2a332e;
+        --accent: #5fbfa3; --on-accent: #0c1411; --ok: #6fcf8f; --bad: #f2867e; --warn: #e2b55a;
+        color-scheme: dark;
+    }
+}
+:root[data-theme="dark"] {
+    --bg: #121614; --panel: #1a201d; --fg: #e6ece8; --muted: #93a19a; --line: #2a332e;
+    --accent: #5fbfa3; --on-accent: #0c1411; --ok: #6fcf8f; --bad: #f2867e; --warn: #e2b55a;
+    color-scheme: dark;
+}
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--text); }
+main { max-width: 980px; margin: 0 auto; padding-block: 24px 48px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 14px; }
+h1 { font-size: 22px; margin: 0; text-wrap: balance; }
+p { margin: 0; color: var(--muted); max-width: 72ch; }
+.arms { display: flex; flex-wrap: wrap; gap: 8px; }
+.arm { cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+    font: 13px/1.4 var(--mono); min-width: 0; overflow-wrap: anywhere; }
+.arm b { font-family: var(--text); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+select { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 4px; }
+#status { color: var(--muted); min-height: 1.5em; font-variant-numeric: tabular-nums; }
+.wrap { overflow-x: auto; min-width: 0; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 14px; }
+th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; font-family: var(--mono); font-size: 13px; }
+th { color: var(--muted); font-weight: 500; }
+td.work { text-align: left; white-space: normal; min-width: 12ch; }
+.ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+.muted { color: var(--muted); }
+#summary { display: grid; gap: 4px; font-size: 16px; }
+#error { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--bad); font: 13px/1.4 var(--mono); margin: 0; }
+#report { width: 100%; min-height: 8em; font: 12px/1.4 var(--mono); background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; box-sizing: border-box; }
+</style>
+<main>
+<h1>Cork stand</h1>
+<p>cork's micro workloads, 32-bit and x86-64, on the guest's own clock: every device translates and
+runs the same code. <b>Work</b> must read as recorded on every device; <b>MIPS</b> is this device's
+speed. With two builds, <b>B / A</b> is the second's speed against the first's, the median over the
+runs with the lowest and highest run beside it: green or red only where every run agrees. A whole
+run can land a few per cent apart from another when the browser optimises the code otherwise, so
+compare over several runs.</p>
+<div class="arms" id="arms"></div>
+<p id="device"></p>
+<div class="controls">
+    <button class="primary" id="run">Run</button>
+    <label for="runs">runs <select id="runs"><option>1</option><option>3</option><option selected>5</option><option>10</option></select></label>
+    <label for="bits">widths <select id="bits"><option value="32,64">32 and 64-bit</option>
+        <option value="32">32-bit</option><option value="64">64-bit</option></select></label>
+    <label for="rounds">rounds <select id="rounds"><option>5</option><option selected>7</option><option>11</option></select></label>
+    <label for="only">workloads <input id="only" size="22" placeholder="all (or e.g. calls4096,calls512)"></label>
+    <label for="warmMs">warm ms <input id="warmMs" size="6" placeholder="by regions"></label>
+    <button id="workOnly">Check the work</button>
+    <button id="copy" disabled>Copy report</button>
+</div>
+<div id="status">Press Run: one run of both widths takes about a minute a build on a laptop.</div>
+<div class="wrap"><table>
+    <thead id="head"></thead>
+    <tbody id="rows"></tbody>
+</table></div>
+<div id="summary"></div>
+<pre id="error"></pre>
+<textarea id="report" hidden readonly aria-label="the report"></textarea>
+</main>
+<script type="module">
+import { quantile } from './stand.js';
+
+const $ = id=>document.getElementById(id);
+const letter = at=>String.fromCharCode(65 + at);
+const device = {
+    userAgent: navigator.userAgent,
+    cores: navigator.hardwareConcurrency ?? null,
+    memoryGiB: navigator.deviceMemory ?? null,
+    crossOriginIsolated: globalThis.crossOriginIsolated === true,
+};
+$('device').textContent = `${device.userAgent} · ${device.cores ?? '?'} logical cores`
+    + (device.memoryGiB ? ` · ${device.memoryGiB} GiB` : '');
+
+// What builds run: `manifest.json` where build.mjs made this page, else the
+// checkout the page is served from.
+let manifest = { arms: [{ name: 'this checkout', url: './arm.js' }] };
+try
+{
+    const response = await fetch('manifest.json');
+    if (response.ok)
+    {
+        manifest = await response.json();
+    }
+}
+catch
+{
+    // A checkout's page has none.
+}
+// The arms run: every one, or those `?arms=` names; a box ticked or cleared
+// reloads the page with its set, the first ticked one the base.
+const picked = new URLSearchParams(location.search).get('arms')?.split(',') ?? null;
+const arms = manifest.arms.filter(arm=>picked === null || picked.includes(arm.name));
+for (const arm of manifest.arms)
+{
+    const box = document.createElement('label');
+    box.className = 'arm';
+    const tick = document.createElement('input');
+    tick.type = 'checkbox';
+    tick.checked = arms.includes(arm);
+    tick.onchange = ()=>{
+        const names = manifest.arms.filter(one=>(one === arm ? tick.checked
+            : arms.includes(one))).map(one=>one.name);
+        const address = new URL(location.href);
+        address.searchParams.set('arms', names.join(','));
+        location.href = address.href;
+    };
+    const at = arms.indexOf(arm);
+    const name = document.createElement('b');
+    name.textContent = at < 0 ? ` - · ${arm.name}` : ` ${letter(at)} · ${arm.name}`;
+    box.append(tick, name, document.createTextNode(arm.describe ? ` ${arm.describe}` : ''));
+    $('arms').append(box);
+}
+const headers = ['workload', 'bits', ...arms.map((_, at)=>`MIPS ${letter(at)}`),
+    ...arms.slice(1).map((_, at)=>`${letter(at + 1)} / A`), 'noise', 'work'];
+const head = document.createElement('tr');
+for (const text of headers)
+{
+    const th = document.createElement('th');
+    th.textContent = text;
+    head.append(th);
+}
+$('head').append(head);
+
+const median = values=>quantile(values, 0.5);
+const geomean = values=>Math.exp(values.reduce((sum, v)=>sum + Math.log(v), 0) / values.length);
+
+// What the worker asked of cork and of the collector in this browser.
+let settings = null;
+
+/** One run in a fresh worker; resolves with its rows. */
+const oneRun = (options, onProgress)=>new Promise((resolve, reject)=>{
+    const worker = new Worker(new URL('./stand.worker.js', import.meta.url), { type: 'module' });
+    const rows = [];
+    let total = 0;
+    worker.onerror = event=>{
+        worker.terminate();
+        reject(new Error(event.message ?? 'the stand\'s worker did not load'));
+    };
+    worker.onmessage = ({ data })=>{
+        if (data.error)
+        {
+            worker.terminate();
+            reject(new Error(data.error));
+            return;
+        }
+        if (data.total !== undefined)
+        {
+            total = data.total;
+        }
+        if (data.settings)
+        {
+            settings = data.settings;
+        }
+        if (data.row)
+        {
+            rows.push(data.row);
+        }
+        onProgress(data.row ?? null, rows.length, total, data.progress);
+        if (data.done !== undefined)
+        {
+            worker.terminate();
+            resolve(rows);
+        }
+    };
+    worker.postMessage({ arms, ...options });
+});
+
+/** What differs between the first and last arm's work, the largest changes first. */
+const workDiff = work=>{
+    const [a, b] = [work[0], work[work.length - 1]];
+    const keys = new Set([...Object.keys(a.mechanisms), ...Object.keys(b.mechanisms)]);
+    const changes = [...keys].map(key=>[key, a.mechanisms[key] ?? 0, b.mechanisms[key] ?? 0])
+        .filter(([, x, y])=>x !== y).sort((p, q)=>Math.abs(q[2] - q[1]) - Math.abs(p[2] - p[1]));
+    if (a.regions !== b.regions)
+    {
+        changes.unshift(['regions', a.regions, b.regions]);
+    }
+    return changes.slice(0, 3).map(([key, x, y])=>`${key} ${x}→${y}`).join(', ');
+};
+
+/** The table and the summary from every run so far. */
+function render(runs, workRows){
+    const names = (workRows.length ? workRows : runs[0] ?? []).map(row=>row.name);
+    $('rows').replaceChildren();
+    const ratiosByBits = { 32: [], 64: [] };
+    const mipsByBits = { 32: arms.map(()=>[]), 64: arms.map(()=>[]) };
+    for (const name of names)
+    {
+        const timed = runs.map(rows=>rows.find(row=>row.name === name)).filter(row=>row?.mips);
+        const workRow = workRows.find(row=>row.name === name);
+        const bits = (timed[0] ?? workRow).bits;
+        const cells = [[name], [bits]];
+        for (let arm = 0; arm < arms.length; arm++)
+        {
+            const value = timed.length ? median(timed.map(row=>row.mips[arm])) : null;
+            cells.push([value === null ? '–' : value.toFixed(0)]);
+            if (value !== null)
+            {
+                mipsByBits[bits][arm].push(value);
+            }
+        }
+        for (let arm = 1; arm < arms.length; arm++)
+        {
+            if (timed.length === 0)
+            {
+                cells.push(['–']);
+                continue;
+            }
+            const ratios = timed.map(row=>row.ratio[arm]);
+            const mid = median(ratios);
+            ratiosByBits[bits].push(ratios);
+            const span = ratios.length > 1
+                ? ` (${Math.min(...ratios).toFixed(3)}–${Math.max(...ratios).toFixed(3)})` : '';
+            // The ratio is time a virtual ms, B's over A's: below one B is faster.
+            const agreed = ratios.length > 1 && (Math.max(...ratios) < 1 || Math.min(...ratios) > 1);
+            cells.push([`${mid.toFixed(3)}${span}`, agreed ? (mid < 1 ? 'ok' : 'bad') : '']);
+        }
+        cells.push([timed.length ? `±${(median(timed.map(row=>row.noise)) * 100).toFixed(1)} %` : '–']);
+        if (!workRow)
+        {
+            cells.push(['–', 'work muted']);
+        }
+        else if (workRow.same === false)
+        {
+            cells.push([`${letter(arms.length - 1)} forms otherwise: ${workDiff(workRow.work)}`,
+                'work warn']);
+        }
+        else
+        {
+            cells.push(workRow.expected === null ? ['not recorded', 'work muted']
+                : workRow.expected ? ['as recorded', 'work ok'] : ['differs from the record', 'work bad']);
+        }
+        const tr = document.createElement('tr');
+        for (const [text, cls] of cells)
+        {
+            const td = document.createElement('td');
+            td.textContent = String(text);
+            if (cls)
+            {
+                td.className = cls;
+            }
+            tr.append(td);
+        }
+        $('rows').append(tr);
+    }
+    $('summary').replaceChildren();
+    for (const bits of [32, 64])
+    {
+        if (mipsByBits[bits][0].length === 0)
+        {
+            continue;
+        }
+        const speeds = mipsByBits[bits].map((values, at)=>`${letter(at)} ${geomean(values).toFixed(0)}`)
+            .join(' · ');
+        let text = `${bits}-bit, geometric mean: ${speeds} MIPS`;
+        if (arms.length > 1 && ratiosByBits[bits].length)
+        {
+            // Each run's geometric mean of its ratios, then their median and range.
+            const perRun = ratiosByBits[bits][0].map((_, run)=>geomean(ratiosByBits[bits]
+                .map(ratios=>ratios[run])));
+            text += ` · B / A time ${median(perRun).toFixed(3)}`
+                + (perRun.length > 1 ? ` (runs ${Math.min(...perRun).toFixed(3)}–${
+                    Math.max(...perRun).toFixed(3)})` : '');
+        }
+        const line = document.createElement('div');
+        line.textContent = text;
+        $('summary').append(line);
+    }
+}
+
+let report = null;
+async function start(timed){
+    const runs = timed ? Number($('runs').value) : 1;
+    // A narrower or longer run: workloads by their names' beginnings, and the virtual ms of
+    // guest work after the warm iterations at least (more for a workload of many regions).
+    const warmMs = Number($('warmMs').value);
+    const options = { bits: $('bits').value.split(',').map(Number), rounds: Number($('rounds').value),
+        timed, only: $('only').value.split(',').map(name=>name.trim()).filter(Boolean),
+        ...warmMs > 0 ? { warmMs } : {} };
+    for (const id of ['run', 'workOnly', 'copy'])
+    {
+        $(id).disabled = true;
+    }
+    $('error').textContent = '';
+    $('report').hidden = true;
+    window.standReport = null;
+    report = null;
+    const startedAt = performance.now();
+    const done = [];
+    let workRows = [];
+    try
+    {
+        for (let run = 0; run < runs; run++)
+        {
+            let step = '';
+            const rows = await oneRun({ ...options, work: run === 0 }, (row, count, total, at)=>{
+                step = at ?? (row ? '' : step);
+                $('status').textContent = `run ${run + 1} of ${runs} · ${count} of ${total} workloads`
+                    + ` · ${((performance.now() - startedAt) / 1000).toFixed(0)} s`
+                    + (step ? ` · ${step}` : '');
+                if (row && run === 0)
+                {
+                    workRows = [...workRows, row];
+                    render(done, workRows);
+                }
+            });
+            if (timed)
+            {
+                done.push(rows);
+            }
+            render(done, workRows);
+        }
+        const seconds = (performance.now() - startedAt) / 1000;
+        $('status').textContent = `${timed ? `${runs} runs` : 'the work'} in ${seconds.toFixed(0)} s`;
+        report = { at: new Date().toISOString(), device, arms, settings, options: { ...options, runs },
+            seconds,
+            work: workRows.map(({ name, bits, work, same, expected })=>({ name, bits, work, same,
+                expected })),
+            runs: done.map(rows=>rows.map(({ name, mips, ratio, noise, rounds, settling })=>({ name,
+                mips, ratio, noise, rounds, settling }))) };
+        window.standReport = report;
+    }
+    catch (e)
+    {
+        $('error').textContent = String(e?.message ?? e);
+        window.standReport = { error: $('error').textContent };
+    }
+    $('run').disabled = false;
+    $('workOnly').disabled = false;
+    $('copy').disabled = report === null;
+}
+// The fields may come filled from the page's address: `?only=calls4096,calls512&warmMs=5000`.
+{
+    const asked = new URLSearchParams(location.search);
+    $('only').value = asked.get('only') ?? '';
+    $('warmMs').value = asked.get('warmMs') ?? '';
+}
+$('run').onclick = ()=>start(true);
+$('workOnly').onclick = ()=>start(false);
+$('copy').onclick = ()=>{
+    const text = JSON.stringify(report);
+    // A frame that refuses the clipboard gets the report shown, selected.
+    const shown = ()=>{
+        $('report').hidden = false;
+        $('report').value = text;
+        $('report').select();
+        $('status').textContent = 'copy the selected report';
+    };
+    try
+    {
+        navigator.clipboard.writeText(text).then(()=>{
+            $('status').textContent = 'the report is on the clipboard';
+        }, shown);
+    }
+    catch
+    {
+        shown();
+    }
+};
+// What `serve.mjs --check` waits for before it presses a button.
+window.standReady = true;
+</script>

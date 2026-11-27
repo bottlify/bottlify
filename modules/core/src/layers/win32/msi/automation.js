@@ -69,7 +69,7 @@ const records = new WeakMap();
  * @param {(record: import('./record.js').Record) => string} format
  * @returns {ExternalObject}
  */
-export function recordObject(record, format){
+function recordObject(record, format){
     const object = hostObject({
         typeName: 'Record',
         members: {
@@ -103,7 +103,7 @@ export function recordObject(record, format){
  *
  * @param {unknown} value @returns {import('./record.js').Record | null}
  */
-export const recordOf = value=>(value && typeof value === 'object'
+const recordOf = value=>(value && typeof value === 'object'
     ? records.get(value) ?? null : null);
 
 /**
@@ -189,6 +189,7 @@ function databaseObject(db, format){
  * @property {(kind: number, record: import('./record.js').Record) => Promise<number> | number}
  *     message
  * @property {ExternalObject} installer
+ * @property {boolean} [deferred]  Run from the script: the one case MSIRUNMODE_SCHEDULED holds.
  */
 
 /**
@@ -243,6 +244,10 @@ export function sessionObject(engine, host){
             Mode: {
                 get: ([flag])=>{
                     const name = /** @type {Record<number, string>} */ (RUN_MODES)[integer(flag)];
+                    if (name === 'scheduled')
+                    {
+                        return Boolean(host.deferred);
+                    }
                     return Boolean(name
                         && /** @type {Record<string, boolean>} */ (session.mode)[name]);
                 },

@@ -1,4 +1,4 @@
-{"about":"Recorded loads for the pool driver test: at each point, the seconds since the start, the milliseconds the one translation worker was busy since the point before, and the regions queued. The bundles doom-3-demo (Doom3.exe) and tron-demo (Lithtech.exe), each started cold in node 22.22.0 on a 4-core x86-64 VM, cork2 f39364f2, one translation worker, tools/launch-probe.mjs --series; one run each.","doom3":[[2,1515,1688],
+{"about":"Recorded loads for the pool driver test: at each point, the seconds since the start, the milliseconds the one translation worker was busy since the point before, and the regions queued. The bundles doom-3-demo (Doom3.exe) and tron-demo (Lithtech.exe), each started cold in node 22.22.0 on a 4-core x86-64 VM, cork2 f39364f2, one translation worker, tools/translator/launch-probe.mjs --series; one run each.","doom3":[[2,1515,1688],
 [4,1640,798],
 [6,1447,621],
 [8,488,554],

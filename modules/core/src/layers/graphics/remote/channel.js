@@ -5,20 +5,30 @@
  */
 
 /**
- * The recorded calls carried across a port: the sender on the side the
- * program runs on, the receiver where the played device draws.
+ * The recorded calls carried to the played side and its answers back: the
+ * sender on the side the program runs on, the receiver where the played
+ * device draws, a root's two rings between them (`ring.js`).
  *
- * Calls go in batches, one message for every call made in a turn of the
- * sender's thread, written as they are made into one buffer that is
- * transferred rather than copied. A
- * call the caller waits for goes at once, and its answer comes back as a
- * promise; so does a present, which is answered at once unless the played
- * side has more than `framesAhead` presents still to finish, and then when it
- * has caught up -- the bound on how far behind the program the pictures are.
+ * Calls go in batches, every call made in a turn of the sender's thread
+ * built in place in the ring as it is made. A call the caller waits for goes
+ * at once, and its answer comes back as a promise; so does a present, which
+ * is answered at once unless the played side has more than `framesAhead`
+ * presents still to finish, and then when it has caught up -- the bound on
+ * how far behind the program the pictures are. A promise parks the program's
+ * thread, never the sender's: the ring never waits for room on this side.
  *
- * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
- * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
- *                      { type: 'presented', count }
+ * Sender to receiver:  a batch, as `wire.js` writes it (`KIND.BATCH`), with
+ *                      the time it was sent on the clock both threads read;
+ *                      a mark (`KIND.MARK`, `grew`): the guest's memory grew,
+ *                      its longer view sent by message, which the receiver
+ *                      waits for before it reads on
+ * Receiver to sender, each a value (`KIND.VALUE`):
+ *                      { type: 'answer', serial, answer, outs, counts? }
+ *                      { type: 'presented', count, times?, phases?, figures? }
+ *                                                      a present played: the frames' times
+ *                                                      (`WorkerFrameTimes`), where the thread's
+ *                                                      time went (`WorkerPhases`) and the
+ *                                                      played device's figures (`figures.js`)
  *                      { type: 'counts', counts }      occlusion counts the GPU has just
  *                                                      given, sent unasked
  *                      { type: 'diagnostics', diagnostics, phases?, latency? }
@@ -29,13 +39,32 @@
  *                                                      (`FrameLatencyState`)
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
- *                      { type: 'divergence', api, detail }
- *                      { type: 'lost' }                its GPU went away
+ *                      { type: 'divergence', api, detail, severity? }
  *                      { type: 'failed', message }     a call could not be played
  */
 
-import { WAIT, createWriter } from './wire.js';
+import { WAIT, createReader, createSite } from './wire.js';
 import { createLender } from './lending.js';
+import { KIND, openRingIn, openRingOut } from './ring.js';
+
+/** What a value said back is written with: nothing in it is a device's object. */
+const NO_REF = ()=>undefined;
+
+/**
+ * The strings the played side's ring back numbers, its keys and the names it
+ * repeats; past them a string goes where it stands. What it says may say
+ * something new every time -- a failure, a divergence -- and a table of every
+ * such text, both sides, would grow for the run.
+ */
+export const SAID_STRINGS = 1024;
+
+/**
+ * A root's two rings (`ring.js`): its calls to the played side, and what that
+ * side says back.
+ *
+ * @typedef {{ calls: import('@bottlify/cellar').RingMemory,
+ *     replies: import('@bottlify/cellar').RingMemory }} RootRings
+ */
 
 /** How many calls go between two readings of the clock for a batch the turn has kept too long. */
 const CHECKED_EVERY = 64;
@@ -59,6 +88,16 @@ const LENT_GAP_MS = 0.25;
  *     'batch-sweep': { count: number, ms: number } }} WorkerPhases
  */
 
+/**
+ * The played side's frames, summed since it began and sent with every present:
+ * how many finished, how long from their presenting call until their work was
+ * on the queue, the GPU's own share after that (`latency.js`), and how long
+ * the worker spent reading and playing batches. A reader places them in its
+ * own frames by the difference between two readings.
+ *
+ * @typedef {{ frames: number, toQueueMs: number, gpuMs: number, replayMs: number }}
+ *     WorkerFrameTimes
+ */
 /**
  * The bound on the frames the played side's GPU may still be drawing
  * (`latency.js`), as it stood: a present that queued one past it waited for
@@ -117,21 +156,47 @@ export function crossable(value, depth = 0){
 }
 
 /**
+ * Copies, in place of the views they hold, every array of bytes in a call's
+ * arguments, their arrays and their structures: what a call answered later
+ * fills or reads once the batch it came in is written over.
+ *
+ * @param {any[] | Record<string, any>} value
+ */
+function ownViews(value){
+    for (const key of Object.keys(value))
+    {
+        const member = /** @type {any} */ (value)[key];
+        if (ArrayBuffer.isView(member))
+        {
+            /** @type {any} */ (value)[key] = /** @type {any} */ (member).slice();
+        }
+        else if (member !== null && typeof member === 'object' && (Array.isArray(member)
+            || Object.getPrototypeOf(member) === Object.prototype))
+        {
+            ownViews(member);
+        }
+    }
+}
+
+/**
  * @typedef {Object} SenderEvents
  * @property {(address: number, bytes: Uint8Array) => void} [wrote]
  *     guest memory the played side wrote outside a call: a read-back's pixels
  * @property {(address: number, length: number) => void} [adopted]
  *     the same, written by the played side into shared guest memory itself
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {() => void} [lost]
  * @property {(message: string) => void} [failed]
+ * @property {(count: number) => void} [presented]  the played side played this many presents
  */
 
 /**
  * The program's side: the transport a recording writes to.
  *
  * @param {Object} options
- * @param {(message: any, transfer: Transferable[]) => void} options.post
+ * @param {RootRings} options.rings
+ * @param {boolean} [options.serve]  what comes back is read as it comes; false leaves it to
+ *     `take`, for a caller that drives both sides itself
  * @param {number} [options.framesAhead]  presents the played side may still owe before one waits
  * @param {(flush: () => void) => void} [options.later]  how a batch waits for the end of the turn
  * @param {SenderEvents} [options.on]
@@ -144,11 +209,12 @@ export function crossable(value, depth = 0){
  *     where the played side reads guest memory in place, the parts of a
  *     lending (`lending.js`) it was sent, and the smallest allocation it lends
  */
-export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {},
-    now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms),
+export function createSender({ rings, serve = true, framesAhead = 2, later = queueMicrotask,
+    on = {}, now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms),
     lending = null })
 {
-    const writer = createWriter();
+    const out = openRingOut(rings.calls);
+    const { writer } = out;
     const lender = lending && createLender({ ...lending, now });
     /**
      * The calls the program's thread waited on the played side for, by name:
@@ -194,6 +260,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let latency = null;
     /** What the worker's device held, as it said last (`ledger.js`). @type {any} */
     let gpuMemory = null;
+    /** The played side's frame times as of its last present (`WorkerFrameTimes`). */
+    /** @type {WorkerFrameTimes | null} */
+    let frameTimes = null;
+    /** The played device's figures as of its last present (`figures.js`). */
+    /** @type {import('../figures.js').FrameFigures | null} */
+    let deviceFigures = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -214,16 +286,19 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
     // A turn of the engine's loop ends in a microtask checkpoint, and a
     // program whose threads hand a lock back and forth takes thousands of
-    // turns a second: a batch a turn was a message a turn, each a copy and a
-    // post on this thread and a task on the other. The played side needs the
+    // turns a second: a batch a turn was a message a turn, each a post on
+    // this thread and a wake of the other. The played side needs the
     // calls before it is asked for an answer or a frame -- those send at once
     // -- and otherwise only soon enough to stay busy.
     let sentAt = -Infinity;
     let timed = false;
     /** Calls since the clock was last read. */
     let unchecked = 0;
-    /** The batches posted, and their bytes. */
+    /** The batches sent, their bytes, and what publishing them cost this thread. */
     const sent = { batches: 0, bytes: 0, ms: 0 };
+    /** What the receiver said back, by type. */
+    /** @type {Record<string, number>} */
+    const received = {};
     /**
      * Of those bytes, the guest memory copied into them, by what copied it --
      * what a lend of buffers, or of anything else, would have left in place --
@@ -240,6 +315,13 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      */
     const occlusion = { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0,
         sentAfterMs: 0, tripMs: 0, under: OCCLUSION_BOUNDS.map(()=>0) };
+    /**
+     * The counts the program gave up on -- issued again before they were
+     * told -- how long each was waited for, its polls and asks, the last
+     * OCCLUSION_TRACED with their events.
+     */
+    const abandoned = { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
+        /** @type {import('./replay.js').OcclusionEvent[][]} */ trace: [] };
     /** @type {((counts: import('./replay.js').OcclusionCount[]) => void)[]} */
     const countListeners = [];
     /** The last OCCLUSION_TRACED measurements' events, oldest first. */
@@ -255,12 +337,10 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             return;
         }
         sentAt = now();
-        const buffer = writer.take();
         sent.batches++;
-        sent.bytes += buffer.byteLength;
-        post({ type: 'calls', buffer, at: shared() }, [buffer]);
+        sent.bytes += out.publish(KIND.BATCH, shared());
         lender?.sent();
-        // What taking and posting the batch cost the program's thread.
+        // What publishing the batch cost the program's thread.
         sent.ms += now() - sentAt;
     };
     const due = ()=>{
@@ -292,6 +372,88 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             later(due);
         }
     };
+
+    /** @param {any} message  what the receiver said */
+    const receive = message=>{
+        const type = String(message?.type);
+        received[type] = (received[type] ?? 0) + 1;
+        switch (message?.type)
+        {
+            case 'answer':
+            {
+                const resolve = waiting.get(message.serial);
+                waiting.delete(message.serial);
+                resolve?.({ answer: message.answer, outs: message.outs ?? [],
+                    counts: message.counts }, {
+                    queued: message.queued, held: message.held,
+                    back: typeof message.at === 'number' ? shared() - message.at : undefined });
+                break;
+            }
+            case 'diagnostics':
+                diagnostics = message.diagnostics;
+                phases = message.phases ?? null;
+                latency = message.latency ?? null;
+                gpuMemory = message.gpuMemory ?? null;
+                told++;
+                hear();
+                break;
+            case 'counts':
+                for (const listener of countListeners)
+                {
+                    listener(message.counts);
+                }
+                break;
+            case 'presented':
+                presented = message.count;
+                frameTimes = message.times ?? frameTimes;
+                phases = message.phases ?? phases;
+                deviceFigures = message.figures ?? deviceFigures;
+                while (held.length > 0 && held[0].count <= presented)
+                {
+                    /** @type {{ release: () => void }} */ (held.shift()).release();
+                }
+                on.presented?.(presented);
+                break;
+            case 'wrote':
+                for (const { address, bytes, length } of message.writes)
+                {
+                    if (bytes)
+                    {
+                        on.wrote?.(address, bytes);
+                    }
+                    else
+                    {
+                        on.adopted?.(address, length);
+                    }
+                }
+                break;
+            case 'divergence':
+                on.divergence?.(message.api, message.detail, message.severity);
+                break;
+            case 'lost':
+                on.lost?.();
+                break;
+            case 'failed':
+                failure = String(message.message);
+                hear();
+                on.failed?.(failure);
+                break;
+            default:
+                break;
+        }
+    };
+    /** What the played side says back reads into values of their own: they outlive the record. */
+    const replies = createReader({ ref: NO_REF, service: NO_REF, owned: true });
+    const back = openRingIn(rings.replies, (kind, buffer, start, length)=>{
+        if (kind === KIND.VALUE)
+        {
+            receive(replies.value(buffer, length, start));
+        }
+    });
+    if (serve)
+    {
+        back.serve();
+    }
 
     return {
         writer,
@@ -393,78 +555,48 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             return new Promise(resolve=>listening.push({ until: asked, resolve }));
         },
 
-        /** @param {any} message  what the receiver posted */
-        receive(message){
-            switch (message?.type)
-            {
-                case 'answer':
-                {
-                    const resolve = waiting.get(message.serial);
-                    waiting.delete(message.serial);
-                    resolve?.({ answer: message.answer, outs: message.outs ?? [],
-                        counts: message.counts }, {
-                        queued: message.queued, held: message.held,
-                        back: typeof message.at === 'number' ? shared() - message.at : undefined });
-                    break;
-                }
-                case 'diagnostics':
-                    diagnostics = message.diagnostics;
-                    phases = message.phases ?? null;
-                    latency = message.latency ?? null;
-                    gpuMemory = message.gpuMemory ?? null;
-                    told++;
-                    hear();
-                    break;
-                case 'counts':
-                    for (const listener of countListeners)
-                    {
-                        listener(message.counts);
-                    }
-                    break;
-                case 'presented':
-                    presented = message.count;
-                    while (held.length > 0 && held[0].count <= presented)
-                    {
-                        /** @type {{ release: () => void }} */ (held.shift()).release();
-                    }
-                    break;
-                case 'wrote':
-                    for (const { address, bytes, length } of message.writes)
-                    {
-                        if (bytes)
-                        {
-                            on.wrote?.(address, bytes);
-                        }
-                        else
-                        {
-                            on.adopted?.(address, length);
-                        }
-                    }
-                    break;
-                case 'divergence':
-                    on.divergence?.(message.api, message.detail);
-                    break;
-                case 'lost':
-                    on.lost?.();
-                    break;
-                case 'failed':
-                    failure = String(message.message);
-                    hear();
-                    on.failed?.(failure);
-                    break;
-                default:
-                    break;
-            }
-        },
+        receive,
 
         /** Sends what the turn has made so far. */
         flush,
 
+        /**
+         * The guest's memory grew and the played side was sent the longer
+         * view as a message, `number` the how-manieth: it reads nothing sent
+         * after this before that message has come (`KIND.MARK`).
+         *
+         * @param {number} number
+         */
+        grew(number){
+            flush();
+            out.mark(number);
+        },
+
+        /** Takes what the played side has said and not been read yet. */
+        take: ()=>back.drain(),
+
+        /** Ends both rings: the played side ends the root, and nothing more comes back. */
+        close(){
+            out.close();
+            back.close();
+        },
+
+        /** Whether both rings are closed, by either side. */
+        closed: ()=>out.closed() && back.closed(),
+
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
 
-        /** The batches posted so far, and their bytes. */
-        sent: ()=>({ ...sent }),
+        /**
+         * The batches sent so far, their bytes, what publishing them cost
+         * this thread; the buffers the writer made and the batches that
+         * outgrew their buffer or their room (`made`, `grown`, `copied`,
+         * `spilled`: `createWriter`); and the ring's paths (`openRingOut`).
+         */
+        sent: ()=>({ ...sent, ...writer.figures(), ...out.figures() }),
+
+        /** What the played side said back so far, by type. */
+        received: ()=>({ ...received }),
 
         /**
          * A recording copied guest bytes into the batch.
@@ -518,8 +650,29 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
             occlusion.under[bound < 0 ? OCCLUSION_BOUNDS.length - 1 : bound]++;
         },
 
+        /**
+         * A count the program issued again before it was told.
+         *
+         * @param {number} ms @param {number} polls @param {number} asks
+         * @param {import('./replay.js').OcclusionEvent[]} events
+         */
+        abandoned(ms, polls, asks, events){
+            abandoned.count++;
+            abandoned.ms += ms;
+            abandoned.maxMs = Math.max(abandoned.maxMs, ms);
+            abandoned.polls += polls;
+            abandoned.asks += asks;
+            abandoned.trace.push(events);
+            if (abandoned.trace.length > OCCLUSION_TRACED)
+            {
+                abandoned.trace.shift();
+            }
+        },
+
         /** The occlusion counts told so far; see `occlusion` above. */
         occlusion: ()=>({ ...occlusion, ms: Math.round(occlusion.ms),
+            abandoned: { ...abandoned, ms: Math.round(abandoned.ms),
+                maxMs: Math.round(abandoned.maxMs), trace: abandoned.trace.slice() },
             maxMs: Math.round(occlusion.maxMs), sentAfterMs: Math.round(occlusion.sentAfterMs),
             tripMs: Math.round(occlusion.tripMs), under: occlusion.under.slice(),
             trace: occlusionTrace.slice() }),
@@ -549,8 +702,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
          */
         answers: ()=>`${told}/${asked}`,
 
-        /** Where the played side's time went, as it said with its last diagnostics; null before. */
+        /** Where the played side's time went, as it said with its last present or diagnostics; null before. */
         phases: ()=>phases,
+
+        /** The played device's figures as of its last present (`figures.js`), or null. */
+        figures: ()=>deviceFigures,
 
         /**
          * How far the played side's GPU ran behind its presents, as it said
@@ -560,6 +716,17 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** What the worker's device held with its last diagnostics, or null. */
         gpuMemory: ()=>gpuMemory,
+
+        /**
+         * The bytes the played root's mirror of the program's memory held
+         * with its last diagnostics (`createMirror`'s figures), or null
+         * before it answered one.
+         */
+        mirrored: ()=>(typeof diagnostics?.mirrored?.held === 'number'
+            ? diagnostics.mirrored.held : null),
+
+        /** The played side's frame times as of its last present, or null. */
+        frameTimes: ()=>frameTimes,
 
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
@@ -582,14 +749,46 @@ export { shared as sharedNow };
  * The played side.
  *
  * @param {Object} options
- * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>} options.played
- * @param {(message: any, transfer?: Transferable[]) => void} options.post
+ * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>
+ *     & { figures?: () => import('../figures.js').FrameFigures | null }} options.played
+ * @param {RootRings} options.rings
+ * @param {boolean} [options.serve]  batches are played as they come; false leaves them to
+ *     `take`, for a caller that drives both sides itself
+ * @param {(buffer: ArrayBufferLike, start: number, length: number) => void} [options.seen]
+ *     told of each batch before it is played, where it lies (a capture's)
+ * @param {(number: number) => boolean} [options.marked]  a mark the sender placed
+ *     among its batches (`grew`): false holds the reading until `resume`
  * @param {() => FrameLatencyState} [options.latency]  the bound the played device's
  *     presents wait on, where it has one
  * @param {() => any} [options.gpuMemory]  what the worker's device holds (`ledger.js`)
+ * @param {() => { frames: number, toQueueMs: number, gpuMs: number }} [options.times]
+ *     the finished frames' time so far (`latency.js`), sent with every present
  */
-export function createReceiver({ played, post, latency, gpuMemory }){
+export function createReceiver({ played, rings, serve = true, seen = ()=>{}, marked = ()=>true,
+    latency, gpuMemory, times })
+{
     let presented = 0;
+    /** What this side says goes back through the root's ring, in place where it fits. */
+    const say = openRingOut(rings.replies, { strings: SAID_STRINGS });
+    /**
+     * Each kind of message's place on the wire: one with the keys it had the
+     * time before goes as its shape's number and its values (`Site`).
+     *
+     * @type {Map<string, import('./wire.js').Site>}
+     */
+    const sites = new Map();
+    /** @param {any} message */
+    const post = message=>{
+        const kind = String(message?.type);
+        let site = sites.get(kind);
+        if (!site)
+        {
+            site = createSite();
+            sites.set(kind, site);
+        }
+        say.writer.value(message, NO_REF, 0, site);
+        say.publish(KIND.VALUE, shared());
+    };
     /** @type {WorkerPhases} */
     const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
         'batch-sweep': { count: 0, ms: 0 } };
@@ -612,8 +811,11 @@ export function createReceiver({ played, post, latency, gpuMemory }){
 
     /** @param {any} call @param {any} answered @param {number} queued @param {number} began */
     const reply = (call, answered, queued, began)=>{
+        // Taken now: the call is the reader's, read into again by the next
+        // record, and an answer may come later.
+        const serial = call.serial;
         /** @param {import('./replay.js').PlayedAnswer} settled */
-        const send = settled=>post({ type: 'answer', serial: call.serial,
+        const send = settled=>post({ type: 'answer', serial,
             answer: crossable(settled.answer), outs: crossable(settled.outs),
             counts: settled.counts, queued, held: shared() - began, at: shared() });
         if (answered instanceof Promise)
@@ -631,9 +833,106 @@ export function createReceiver({ played, post, latency, gpuMemory }){
         const done = held instanceof Promise ? held : Promise.resolve();
         presents = presents.then(()=>done).then(()=>{
             presented++;
-            post({ type: 'presented', count: presented });
+            // The few numbers a live view reads ride on the message every
+            // present sends anyway, so nobody has to ask the worker for them.
+            post({ type: 'presented', count: presented,
+                times: import.meta.BOTTLIFY_DIAGNOSTICS !== false && times
+                    ? { ...times(), replayMs: phases['batch-read'].ms } : undefined,
+                phases: phasesNow(), figures: played.figures?.() ?? undefined });
         }, fail);
     };
+
+    /**
+     * Plays a batch: the `length` bytes at `start` of the buffer -- the
+     * ring's, or a long batch's own -- sent at `sentAt`. `give` is told once
+     * nothing played from it views its bytes any longer; answers whether
+     * that was before this returned.
+     *
+     * @param {ArrayBufferLike} buffer @param {number} start @param {number} length
+     * @param {number | undefined} sentAt
+     * @param {() => void} give
+     * @returns {boolean}
+     */
+    const playBatch = (buffer, start, length, sentAt, give)=>{
+        if (failed)
+        {
+            give();
+            return true;
+        }
+        const arrived = shared();
+        const queued = typeof sentAt === 'number' ? arrived - sentAt : 0;
+        let given = false;
+        try
+        {
+            const swept = played.read(buffer, call=>{
+                // A call the caller waits for may be answered later, filling
+                // its arguments then: they must outlive the batch's bytes.
+                if (call.wait !== WAIT.NONE && call.a && buffer === rings.calls.data)
+                {
+                    ownViews(call.a);
+                }
+                const began = shared();
+                const answer = played.play(call);
+                if (call.m === 'diagnostics')
+                {
+                    post({ type: 'diagnostics', diagnostics: crossable(answer),
+                        phases: phasesNow(), latency: latency?.(), gpuMemory: gpuMemory?.() });
+                }
+                else if (call.wait === WAIT.ANSWER)
+                {
+                    reply(call, answer, queued, began);
+                }
+                else if (call.wait === WAIT.PACED)
+                {
+                    present(answer);
+                }
+            }, length, start);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            {
+                const ms = shared() - arrived;
+                const read = phases['batch-read'];
+                read.count++;
+                read.ms += ms;
+                read.selfMs += ms - (swept ?? 0);
+                if (swept !== undefined)
+                {
+                    phases['batch-sweep'].count++;
+                    phases['batch-sweep'].ms += swept;
+                }
+            }
+        }
+        catch (e){
+            fail(e);
+        }
+        played.spent(buffer, ()=>{
+            given = true;
+            give();
+        });
+        return given;
+    };
+
+    /** The root's ring of calls, read as its records come. */
+    const calls = openRingIn(rings.calls, (kind, buffer, start, length, number, sentAt)=>{
+        if (kind === KIND.MARK)
+        {
+            return marked(number);
+        }
+        if (kind !== KIND.BATCH)
+        {
+            return true;
+        }
+        seen(buffer, start, length);
+        let taking = true;
+        const now = playBatch(buffer, start, length, sentAt, ()=>{
+            if (!taking)
+            {
+                calls.resume();
+            }
+        });
+        taking = false;
+        return now;
+    });
+    const serving = serve ? calls.serve() : Promise.resolve();
 
     let countsDue = false;
     return {
@@ -657,50 +956,31 @@ export function createReceiver({ played, post, latency, gpuMemory }){
             });
         },
 
-        /** @param {any} message  what the sender posted */
-        receive(message){
-            if (message?.type !== 'calls' || failed)
-            {
-                return;
-            }
-            const arrived = shared();
-            const queued = typeof message.at === 'number' ? arrived - message.at : 0;
-            try
-            {
-                const swept = played.read(message.buffer, call=>{
-                    const began = shared();
-                    const answer = played.play(call);
-                    if (call.m === 'diagnostics')
-                    {
-                        post({ type: 'diagnostics', diagnostics: crossable(answer),
-                            phases: phasesNow(), latency: latency?.(), gpuMemory: gpuMemory?.() });
-                    }
-                    else if (call.wait === WAIT.ANSWER)
-                    {
-                        reply(call, answer, queued, began);
-                    }
-                    else if (call.wait === WAIT.PACED)
-                    {
-                        present(answer);
-                    }
-                });
-                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                {
-                    const ms = shared() - arrived;
-                    const read = phases['batch-read'];
-                    read.count++;
-                    read.ms += ms;
-                    read.selfMs += ms - (swept ?? 0);
-                    if (swept !== undefined)
-                    {
-                        phases['batch-sweep'].count++;
-                        phases['batch-sweep'].ms += swept;
-                    }
-                }
-            }
-            catch (e){
-                fail(e);
-            }
+        /**
+         * Says something to the sender unasked, as the played device does
+         * of what it wrote outside a call or where it parted from Windows.
+         */
+        post,
+
+        /** Reads on after a mark `marked` held the reading at. */
+        resume: ()=>calls.resume(),
+
+        /** Takes what the sender has sent and not been read yet. */
+        take: ()=>calls.drain(),
+
+        /** Whether a batch sent is not played yet, or held by an answer still to come. */
+        unread: ()=>calls.unread(),
+
+        /** Settles once the root's ring of calls is closed and read to its end. */
+        served: ()=>serving,
+
+        /** Ends both rings. */
+        close(){
+            calls.close();
+            say.close();
         },
+
+        /** Whether the ring of calls is closed, by either side: nothing more comes. */
+        closed: ()=>calls.closed(),
     };
 }

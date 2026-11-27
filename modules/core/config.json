@@ -1,7 +1,6 @@
 {
   "processor": {
-    "name": "Bottlify Cork x86",
-    "version": "1.6.16"
+    "name": "Bottlify Cork x86"
   },
   "qpc": {
     "frequency": 1000000000

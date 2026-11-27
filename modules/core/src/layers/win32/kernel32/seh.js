@@ -37,7 +37,16 @@
  *   handler run backwards. The context keeps the flags the fault had.
  */
 
-import { storeMachineStatus } from './machine-status.js';
+import { DBG_CONTINUE, DEBUG_EVENT } from './debug-events.js';
+import { privilegedAt, storeMachineStatus } from './machine-status.js';
+import { TEB } from './teb.js';
+import {
+    CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
+} from './fpu-context.js';
+import {
+    CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup,
+} from './debug-registers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
@@ -53,8 +62,8 @@ export const RECORD = Object.freeze({
 /**
  * CONTEXT, as a program sees it.
  *
- * Not the shape the emulator keeps -- that is an array of registers in the
- * processor's own order -- so every field here is a translation, and the
+ * Not the shape the engine keeps -- its state block holds the registers in
+ * the processor's own order -- so every field here is a translation, and the
  * offsets are the ones a handler was compiled against.
  */
 export const CONTEXT = Object.freeze({
@@ -89,7 +98,7 @@ export const CONTEXT = Object.freeze({
 export const SELECTORS = Object.freeze({ CODE: 0x1b, DATA: 0x23, FS: 0x3b, GS: 0 });
 
 /** CONTEXT_FULL: control, integer and segment registers. */
-export const CONTEXT_FULL = 0x00010007;
+const CONTEXT_FULL = 0x00010007;
 
 /** EFLAGS: the trap, direction and alignment-check flags. */
 export const EFLAGS_TF = 0x100;
@@ -136,7 +145,7 @@ export const EH_UNWINDING = 0x02;
 
 /** What a filter answers. */
 export const EXCEPTION_EXECUTE_HANDLER = 1;
-export const EXCEPTION_CONTINUE_SEARCH = 0;
+const EXCEPTION_CONTINUE_SEARCH = 0;
 
 /** Codes raised by the processor rather than by a program. */
 export const STATUS = Object.freeze({
@@ -144,6 +153,7 @@ export const STATUS = Object.freeze({
     ILLEGAL_INSTRUCTION: 0xc000001d,
     INTEGER_DIVIDE_BY_ZERO: 0xc0000094,
     PRIVILEGED_INSTRUCTION: 0xc0000096,
+    GUARD_PAGE_VIOLATION: 0x80000001,
     BREAKPOINT: 0x80000003,
     SINGLE_STEP: 0x80000004,
     FLOAT_DIVIDE_BY_ZERO: 0xc000008e,
@@ -174,7 +184,13 @@ const VECTOR_TO_STATUS = Object.freeze({
     16: STATUS.FLOAT_DIVIDE_BY_ZERO,
     17: STATUS.DATATYPE_MISALIGNMENT,
     19: STATUS.FLOAT_MULTIPLE_TRAPS,
+    0x2d: STATUS.BREAKPOINT,
 });
+
+/** `int 0x2d`, the kernel debugger's service call: eax the service, ecx and edx its arguments. */
+const DEBUG_SERVICE = 0x2d;
+/** BREAKPOINT_PRINT, BREAKPOINT_LOAD_SYMBOLS, BREAKPOINT_UNLOAD_SYMBOLS: nothing to raise without a debugger. */
+const SILENT_SERVICES = new Set([1, 3, 4]);
 
 /**
  * How much stack a dispatch reserves below the fault.
@@ -185,6 +201,11 @@ const VECTOR_TO_STATUS = Object.freeze({
  * given rather than on top of it.
  */
 const SCRATCH = RECORD.SIZE + CONTEXT.SIZE + 0x20;
+
+const PAGE_SIZE = 0x1000;
+
+/** How much of the stack above esp the last-chance trace shows, in bytes. */
+const STACK_TRACED = 0x1000;
 
 /** @param {number} value */
 const hex = value=>`0x${(value >>> 0).toString(16)}`;
@@ -200,6 +221,11 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {() => Record<string, number>} registers  EFLAGS among them
  *           (`eflags`) when the host can read them; without them a handler
  *           starts with the flags as they stand and continues with them.
+ * @property {(registers: Record<string, number>) => any} [continueAt]
+ *           An answer that sends the calling thread on at `registers`, its
+ *           `eip` and `esp` among them, instead of back to its call (the
+ *           bridge's `continueAt`): where RaiseException's caller goes once a
+ *           handler has said to continue.
  * @property {(value: number, registers: Record<string, number>) => any} answerWith
  *           An answer that returns `value` and sets `registers` on the
  *           calling thread as it resumes (the bridge's `answerWith`).
@@ -216,8 +242,20 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           that answers ExceptionContinueSearch. Without it the frame names
  *           no handler and every walk passes over it.
  * @property {() => any} [currentThread]
+ * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
+ *           images of a thread's x87 and SSE state, which a context carries.
+ * @property {{ touch: (address: number) => boolean,
+ *     commitGuard: (page: number) => boolean }} [guardPages]  The reservations'
+ *           guard pages (heap.js `GUARD_PAGES`): a refused touch of one takes
+ *           its guard away, and a stack grows by committing its next one.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
+ * @property {(report: import('./debug-events.js').DebugReport) => Promise<number>}
+ *     [debugReport]  This process's debugger, when its parent debugs it: told of an
+ *     exception first and again once nothing handled it, answering how to go on.
+ * @property {() => boolean} [debugged]  Whether a debugger hears this process now:
+ *     from its start, or since one attached; absent, whenever `debugReport` is given.
  *           Ends the process for an exception nothing handled, with the
  *           exception's code as its exit code -- what Windows does once the
  *           last-chance filter has had its say.
@@ -227,7 +265,7 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
 export const EXCEPTION_EXIT_UNWIND = 0x04;
 
 /** What a filter answers to have the faulting instruction run again. */
-export const EXCEPTION_CONTINUE_EXECUTION = -1;
+const EXCEPTION_CONTINUE_EXECUTION = -1;
 
 /**
  * @param {SehHost} host
@@ -254,6 +292,38 @@ export function createSeh(host){
     let topLevelFilter = 0;
 
     /**
+     * A refused touch of a guard page, as Windows answers it before any
+     * handler sees it: the page loses its guard; one inside the running
+     * thread's stack reservation (DeallocationStack to StackBase) becomes the
+     * stack's committed limit and the page below it the next guard page, and
+     * the touch runs again ('grown'), unless no page would be left between
+     * that guard and the reservation's bottom ('overflow',
+     * STATUS_STACK_OVERFLOW); anywhere else the touch is
+     * STATUS_GUARD_PAGE_VIOLATION ('guard'). Null for a page with no guard.
+     *
+     * @param {number} address
+     * @returns {'grown' | 'overflow' | 'guard' | null}
+     */
+    const guardTouched = address=>{
+        if (!host.guardPages?.touch(address))
+        {
+            return null;
+        }
+        const teb = host.teb() >>> 0;
+        const top = teb === 0 ? 0 : readU32(teb + TEB.STACK_BASE);
+        const bottom = teb === 0 ? 0 : readU32(teb + TEB.DEALLOCATION_STACK);
+        if (address < bottom || address >= top)
+        {
+            return 'guard';
+        }
+        const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        writeU32(teb + TEB.STACK_LIMIT, page);
+        const next = page - PAGE_SIZE;
+        return next >= bottom + PAGE_SIZE && host.guardPages.commitGuard(next)
+            ? 'grown' : 'overflow';
+    };
+
+    /**
      * Writes an exception record where a handler will look for it.
      *
      * @param {number} at
@@ -278,8 +348,22 @@ export function createSeh(host){
      * @param {Record<string, number>} registers
      */
     const writeContext = (at, registers)=>{
-        host.writeMemory(at, new Uint8Array(CONTEXT.SIZE));
-        writeU32(at + CONTEXT.FLAGS, CONTEXT_FULL);
+        // With the thread's x87 and SSE state, as Windows hands a handler the
+        // whole context: a handler that continues from the record, or from one
+        // it laid over it (a .NET runtime resuming a thread it had redirected
+        // for a collection), gets that state back (`continuation`).
+        // Read here, where the exception is met: the registers on the
+        // processor are the thread's own.
+        // The debug registers too: a handler reads Dr6 for what stopped the
+        // thread and may set Dr0-Dr3/Dr7 in the record it continues from.
+        const bytes = new Uint8Array(CONTEXT.SIZE);
+        const images = host.float?.images() ?? null;
+        writeFloatGroups(images, bytes, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
+        writeDebugGroup(host.currentThread?.(), bytes, CONTEXT_DEBUG_REGISTERS);
+        host.writeMemory(at, bytes);
+        writeU32(at + CONTEXT.FLAGS, (images === null ? CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS
+            : CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_FLOATING_POINT
+                | CONTEXT_EXTENDED_REGISTERS) >>> 0);
         for (const [field, name] of [
             [CONTEXT.EDI, 'edi'], [CONTEXT.ESI, 'esi'], [CONTEXT.EBX, 'ebx'],
             [CONTEXT.EDX, 'edx'], [CONTEXT.ECX, 'ecx'], [CONTEXT.EAX, 'eax'],
@@ -326,10 +410,31 @@ export function createSeh(host){
      *
      * @param {number} at  The context.
      * @param {number | undefined} flags  The thread's at the exception.
+     * @param {any} thread  Whose exception it is, which keeps the debug
+     *        registers the record names.
      */
-    const continuation = (at, flags)=>{
+    const continuation = (at, flags, thread)=>{
         /** @type {Record<string, number>} */
         const registers = readContext(at);
+        const debug = debugGroupOf(host.readMemory(at, CONTEXT.SIZE), readU32(at + CONTEXT.FLAGS));
+        if (debug !== null && thread)
+        {
+            setDebugRegisters(thread, debug, host.divergence, 'exception');
+        }
+        // The floating-point groups the record names go back with the rest,
+        // where the thread resumes: by then the registers on the processor
+        // may be another thread's (`resumeContextAt`'s `float`).
+        const groups = floatGroupsOf(host.readMemory(at, CONTEXT.SIZE),
+            readU32(at + CONTEXT.FLAGS));
+        if (groups !== null && host.float)
+        {
+            /** @type {any} */ (registers).float = groups;
+        }
+        else if (groups !== null)
+        {
+            host.divergence?.('exception',
+                "the floating-point registers of a handler's context are not put back");
+        }
         if (flags === undefined)
         {
             delete registers.eflags;
@@ -362,7 +467,8 @@ export function createSeh(host){
      * @param {any} thread  Whose chain. Named by every caller rather than taken
      *        to be the running thread: a dispatch that has awaited anything is
      *        no longer answering for the thread on the processor.
-     * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean }}
+     * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean,
+     *     broken?: number }}  `broken` the link a damaged walk stopped at
      */
     const chain = thread=>{
         /** @type {{ frame: number, handler: number }[]} */
@@ -373,17 +479,105 @@ export function createSeh(host){
         {
             if (!host.isMapped(at) || at <= previous)
             {
-                return { frames, damaged: true };
+                return { frames, damaged: true, broken: at };
             }
             frames.push({ frame: at, handler: readU32(at + 4) });
             previous = at;
             at = readU32(at);
             if (frames.length > 256)
             {
-                return { frames, damaged: true };
+                return { frames, damaged: true, broken: at };
             }
         }
         return { frames, damaged: false };
+    };
+
+    /**
+     * Where a damaged chain broke, for the trace: its frames, the link that
+     * left them, and the stack the thread block says the thread has - a frame
+     * on another thread's stack, or past this one's, is a stack overrun.
+     *
+     * @param {any} thread @param {{ frame: number }[]} frames @param {number} [broken]
+     */
+    const damagedAt = (thread, frames, broken)=>{
+        const teb = tebOf(thread);
+        return ` at ${hex(broken ?? 0)} after [${frames.map(one=>hex(one.frame)).join(' ')}],`
+            + ` stack ${hex(readU32(teb + 8))}..${hex(readU32(teb + 4))}`;
+    };
+
+    /**
+     * What a program handed its last-chance filter, in the trace: the
+     * exception, the registers its context holds, the thread's handler chain,
+     * and the words around every register that points at mapped memory - the
+     * frame a failed check was reading, the stack it stood on. A program that
+     * fails fast (a security cookie found overwritten) calls the filter and
+     * ends, and this is all that is left of the state it found broken.
+     *
+     * @param {number} pointers  EXCEPTION_POINTERS
+     */
+    const traceLastChance = pointers=>{
+        if (!host.trace)
+        {
+            return;
+        }
+        // Every read on its own: a page the memory calls mapped may still
+        // refuse a read - a stack's guard page, a range reserved and never
+        // committed - and one word refused is one word left out.
+        const word = (/** @type {number} */ at)=>{
+            try
+            {
+                return host.isMapped(at >>> 0) ? readU32(wholeAddress(at)) : null;
+            }
+            catch {
+                return null;
+            }
+        };
+        const shown = (/** @type {number | null} */ value)=>(value === null ? '-' : hex(value));
+        const record = word(pointers);
+        const context = word(pointers + 4);
+        const lines = [`last chance: code ${record === null ? '?' : shown(word(record))}`
+            + ` at ${record === null ? '?' : shown(word(record + RECORD.ADDRESS))}`];
+        if (context !== null)
+        {
+            const names = /** @type {const} */ (['EAX', 'EBX', 'ECX', 'EDX', 'ESI', 'EDI',
+                'EBP', 'ESP', 'EIP']);
+            const values = names.map(name=>word(context + CONTEXT[name]));
+            lines.push(names.map((name, at)=>`${name.toLowerCase()}=${shown(values[at])}`)
+                .join(' '));
+            for (const [at, value] of values.entries())
+            {
+                if (value !== null && value >= 64 && value <= 0xffffffbf
+                    && word(value) !== null)
+                {
+                    lines.push(`  [${names[at].toLowerCase()}-64] ${Array.from({ length: 32 },
+                        (_, index)=>shown(word(value - 64 + index * 4))).join(' ')}`);
+                }
+            }
+            // The stack above esp whole: a fail-fast's reason - a stack walker's state, the
+            // frame it judged - sits in the frames of the calls that gave up.
+            const esp = values[names.indexOf('ESP')];
+            if (esp !== null)
+            {
+                for (let row = 0; row < STACK_TRACED / 64; row++)
+                {
+                    const at = (esp + row * 64) >>> 0;
+                    lines.push(`  ${hex(at)}: ${Array.from({ length: 16 },
+                        (_, index)=>shown(word(at + index * 4))).join(' ')}`);
+                }
+            }
+        }
+        try
+        {
+            const thread = host.currentThread?.();
+            const { frames, damaged } = chain(thread);
+            lines.push(`  chain of ${thread?.name ?? 'the thread'}: ${frames.map(
+                ({ frame, handler })=>`${hex(frame)}>${hex(handler)}`).join(' ')}`
+                + `${damaged ? ' (damaged)' : ''}`);
+        }
+        catch (e){
+            lines.push(`  chain: not read (${String(e)})`);
+        }
+        host.trace(lines.join('\n'));
     };
 
     /**
@@ -455,7 +649,7 @@ export function createSeh(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const at = list.findIndex(one=>one.handle === (handle >>> 0));
+                const at = list.findIndex(one=>one.handle === wholeAddress(handle));
                 if (at < 0)
                 {
                     return 0;
@@ -490,22 +684,82 @@ export function createSeh(host){
         };
     };
 
+    /** Whether a debugger hears this process now. */
+    const debugging = ()=>Boolean(host.debugReport) && (host.debugged?.() ?? true);
+
+    /**
+     * Tells this process's debugger of an exception, the thread stopped until
+     * it answers: meanwhile the context the exception carries is the thread's
+     * (`debugStop`), which the debugger reads and may change. Null when no
+     * debugger debugs this process.
+     *
+     * A breakpoint the processor raised (`trap`, an int3's length) shows its
+     * debugger the thread past the instruction, as Windows' does - the
+     * address is the int3's, Eip the next - and goes on from there when
+     * continued; declined, the handlers see Eip at the int3 again.
+     *
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[],
+     *     trap?: number }} what
+     * @param {any} thread @param {number} context @param {boolean} firstChance
+     * @returns {Promise<number | null>}
+     */
+    const toDebugger = async(what, thread, context, firstChance)=>{
+        const report = host.debugReport;
+        if (!report || !debugging())
+        {
+            return null;
+        }
+        if (thread)
+        {
+            thread.debugStop = context;
+        }
+        const past = what.trap ?? 0;
+        if (past !== 0)
+        {
+            writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) + past);
+        }
+        try
+        {
+            const answer = await report({ code: DEBUG_EVENT.EXCEPTION,
+                threadId: (thread?.id ?? 0) >>> 0, exception: {
+                    code: what.code >>> 0, flags: what.flags ?? 0, address: what.address >>> 0,
+                    parameters: what.parameters ?? [], firstChance } });
+            if (past !== 0 && answer !== DBG_CONTINUE)
+            {
+                writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) - past);
+            }
+            return answer;
+        }
+        finally
+        {
+            if (thread)
+            {
+                thread.debugStop = null;
+            }
+        }
+    };
+
     /**
      * Walks the chain, calling every handler in order until one takes the
      * exception or the chain runs out.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
+     *     raisedFrom?: number, call?: string, trap?: number }} what  `raisedFrom` the
+     *     return address of RaiseException's caller, `call` the host function it was
+     *     met in, `trap` an int3's length (`toDebugger`)
      * @param {Record<string, number>} [given]  The registers at the exception,
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
      *        two of them.
+     * @param {Record<string, number>} [shown]  The context handlers are shown, when it
+     *        is not those registers: RaiseException shows its caller as it stands once
+     *        the call has returned.
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number>,
      *     record?: number, context?: number, top?: number, asked?: any, flags?: number }>}
      *     When nothing handled it, where the record and context were built,
      *     for the last-chance filter to be handed the same ones.
      */
-    const dispatch = async(what, given)=>{
+    const dispatch = async(what, given, shown)=>{
         const registers = given ?? host.registers();
         const flags = registers.eflags;
         const at = carve(registers);
@@ -515,7 +769,7 @@ export function createSeh(host){
             address: what.address >>> 0,
             parameters: what.parameters,
         });
-        writeContext(at.context, registers);
+        writeContext(at.context, shown ?? registers);
 
         // Whose fault this is, read before the walk. Each handler is guest
         // code and the loop turns between them, so from the second one onwards
@@ -524,40 +778,87 @@ export function createSeh(host){
 
         // The vectored handlers first, the whole process's, in their order,
         // each handed EXCEPTION_POINTERS below the record.
+        // A debuggee's debugger hears of it before any handler, and may
+        // take it: continued with DBG_CONTINUE, the thread goes on from the
+        // context as the debugger left it.
+        if (await toDebugger(what, asked, at.context, true) === DBG_CONTINUE)
+        {
+            return { handled: true, registers: continuation(at.context, flags, asked) };
+        }
+
         const pointers = (at.top - 8) >>> 0;
         writeU32(pointers, at.record);
         writeU32(pointers + 4, at.context);
         if (await callVectored(vectored.exception, pointers, asked, flags))
         {
             await callVectored(vectored.continue, pointers, asked, flags);
-            return { handled: true, registers: continuation(at.context, flags) };
+            return { handled: true, registers: continuation(at.context, flags, asked) };
         }
 
         // The asking thread's chain: after the vectored handlers the thread on
         // the processor, or the one an executor's call is answered for, may
         // be another, and its frames are not this exception's.
-        const { frames, damaged } = chain(asked);
+        const { frames, damaged, broken } = chain(asked);
         // A jump into the first page is a call through a null pointer, whose
         // return address -- the call's own place -- is the only lead.
         // A raised one's address is inside RaiseException; who raised it is
         // the call's return address.
-        const caller = what.raisedFrom !== undefined ? `, raised from ${hex(what.raisedFrom)}`
+        // Met in a host function, that function is named: its address is a
+        // trap's, which says nothing.
+        // The call's own bytes and the registers say which slot it went
+        // through (`ff 50 18` is [eax+0x18]) and whose table held the null.
+        const nullCall = ()=>{
+            const back = readU32(wholeAddress(registers.esp)) >>> 0;
+            const bytes = host.isMapped((back - 7) >>> 0)
+                ? ` (${[...host.readMemory(wholeAddress((back - 7) >>> 0), 7)]
+                    .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')}`
+                    + ` eax=${hex(registers.eax)} ecx=${hex(registers.ecx)}`
+                    + ` edx=${hex(registers.edx)} esi=${hex(registers.esi)}`
+                    + ` edi=${hex(registers.edi)})` : '';
+            return `, called from ${hex(back)}${bytes}`;
+        };
+        const caller = what.raisedFrom !== undefined
+            ? `${what.call ? ` in ${what.call}` : ''}, raised from ${hex(what.raisedFrom)}`
             : (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
-                ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
+                ? nullCall() : '';
         // An instruction the processor refused is named by its bytes: a
         // deliberate trap and an opcode the translator lacks look alike
         // otherwise.
         const refused = what.code === STATUS.ILLEGAL_INSTRUCTION
             && host.isMapped(what.address >>> 0)
-            ? ` (${[...host.readMemory(what.address >>> 0, 8)]
+            ? ` (${[...host.readMemory(wholeAddress(what.address), 8)]
                 .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')})` : '';
         // An access violation names the address it could not reach, and
         // whether it read or wrote there: what a caught one was after.
         const reached = what.code === STATUS.ACCESS_VIOLATION && what.parameters?.length === 2
             ? ` ${what.parameters[0] ? 'writing' : 'reading'} ${hex(what.parameters[1])}` : '';
-        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${reached}${refused}`
-            + `${caller}, `
-            + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
+        // A raised one's parameters say what it is: a .NET exception's first
+        // is its HRESULT, a C++ one's its object and its type's throw info.
+        const told = what.raisedFrom !== undefined && (what.parameters?.length ?? 0) > 0
+            ? ` [${(what.parameters ?? []).slice(0, 4).map(hex).join(' ')}]` : '';
+        // A refused access in the program's own code, with what the processor
+        // held: a process that ends on it leaves nothing else to read, and
+        // code a protection decrypts as it runs is not in the file to read.
+        /** @param {number} where @param {number} length */
+        const bytesAt = (where, length)=>(host.isMapped(where >>> 0)
+            ? [...host.readMemory(wholeAddress(where), length)]
+                .map(byte=>byte.toString(16).padStart(2, '0')).join(' ') : 'unmapped');
+        /** @param {number} index */
+        const stackWord = index=>{
+            const slot = (registers.esp + index * 4) >>> 0;
+            return host.isMapped(slot) ? hex(readU32(wholeAddress(slot))) : '?';
+        };
+        const state = reached && what.raisedFrom === undefined
+            ? ` (${['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp']
+                .map(name=>`${name}=${hex(registers[name])}`).join(' ')}`
+                + `, code ${bytesAt(what.address, 8)}`
+                + `, stack ${Array.from({ length: 12 }, (_, index)=>stackWord(index)).join(' ')})`
+            : '';
+        host.trace?.(`exception ${hex(what.code)}${told} at ${hex(what.address)}${reached}`
+            + `${state}${refused}${caller}, `
+            + `${frames.length} frame(s)`
+            + `${damaged ? `, chain damaged${damagedAt(asked, frames, broken)}` : ''}`
+            + ` on ${asked?.name ?? 'the thread'}`);
 
         // Windows calls each handler with a frame of its own at the head of
         // the chain, and the C runtime's catch counts on it: the frame
@@ -607,7 +908,7 @@ export function createSeh(host){
                     writeU32(pointers + 4, at.context);
                     await callVectored(vectored.continue, pointers, asked, flags);
                 }
-                return { handled: true, registers: continuation(at.context, flags) };
+                return { handled: true, registers: continuation(at.context, flags, asked) };
             }
             if (answer === Disposition.NESTED_EXCEPTION
                 || answer === Disposition.COLLIDED_UNWIND)
@@ -649,6 +950,12 @@ export function createSeh(host){
      *        it was called: the processor's registers are somebody else's by
      *        then, and a record carved below them lands on another stack.
      * @param {any} [options.thread]  Whose frames these are, for the same reason.
+     * @param {Record<string, number>} [options.shown]  The registers the
+     *        handlers' context shows, where they are not the ones the record
+     *        is carved below: RtlUnwind's caller as it stands once the call
+     *        returns.
+     * @returns {Promise<{ unwound: boolean, context: number }>}  `context`:
+     *        where the handlers' context lies, which they may have changed.
      */
     const unwind = async(targetFrame, address, options = {})=>{
         const asked = options.thread ?? host.currentThread?.();
@@ -656,7 +963,7 @@ export function createSeh(host){
         const registers = options.registers ?? host.registers();
         const record = options.record ?? 0;
         const at = carve(registers);
-        const target = targetFrame >>> 0;
+        const target = wholeAddress(targetFrame);
         const everything = target === 0 || target === END_OF_CHAIN;
         const flags = EH_UNWINDING | (everything ? EXCEPTION_EXIT_UNWIND : 0);
         let shown = at.record;
@@ -673,18 +980,21 @@ export function createSeh(host){
                 address,
             });
         }
-        writeContext(at.context, registers);
+        writeContext(at.context, options.shown ?? registers);
 
         // A target that is not on the chain is the program's mistake, and
         // taking every frame off on the way to not finding it would destroy
         // state the program still has. Nothing is unwound.
         if (!everything && !frames.some(({ frame })=>frame === target))
         {
-            return { unwound: false };
+            return { unwound: false, context: at.context };
         }
 
         const teb = tebOf(asked);
         let reached = everything;
+        host.trace?.(`unwind on ${asked?.name ?? 'the thread'} to ${everything ? 'the end'
+            : hex(target)}: ${frames.slice(0, frames.findIndex(({ frame })=>frame === target)
+            >>> 0).map(({ frame, handler })=>`${hex(frame)}>${hex(handler)}`).join(' ')}`);
         for (let index = 0; index < frames.length; index++)
         {
             const { frame, handler } = frames[index];
@@ -713,7 +1023,7 @@ export function createSeh(host){
                 writeU32(teb, next);
             }
         }
-        return { unwound: reached && !damaged };
+        return { unwound: reached && !damaged, context: at.context };
     };
 
     /**
@@ -727,7 +1037,17 @@ export function createSeh(host){
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
      */
     const lastChance = async(what, at)=>{
-        if (topLevelFilter !== 0)
+        // A debuggee's unhandled exception is its debugger's second chance,
+        // and the program's own filter is not asked, as Windows'
+        // UnhandledExceptionFilter declines when a debugger is attached.
+        if (debugging())
+        {
+            if (await toDebugger(what, at.asked, at.context, false) === DBG_CONTINUE)
+            {
+                return { handled: true, registers: continuation(at.context, at.flags, at.asked) };
+            }
+        }
+        else if (topLevelFilter !== 0)
         {
             const pointers = (at.top - 8) >>> 0;
             writeU32(pointers, at.record);
@@ -744,7 +1064,7 @@ export function createSeh(host){
             if (answer === EXCEPTION_CONTINUE_EXECUTION
                 && ((what.flags ?? 0) & EXCEPTION_NONCONTINUABLE) === 0)
             {
-                return { handled: true, registers: continuation(at.context, at.flags) };
+                return { handled: true, registers: continuation(at.context, at.flags, at.asked) };
             }
         }
         host.trace?.(`unhandled exception ${hex(what.code)} at ${hex(what.address)}`);
@@ -758,10 +1078,13 @@ export function createSeh(host){
      * raising call should do next. Nothing handled means the process ends.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
+     *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
+     *     RaiseException's caller, `call` the host function it was met in
+     * @param {Record<string, number>} [shown]  The context handlers are shown, when it
+     *     is not the registers on the processor (`dispatch`).
      */
-    const raise = async what=>{
-        const result = await dispatch(what);
+    const raise = async(what, shown)=>{
+        const result = await dispatch(what, undefined, shown);
         if (result.handled)
         {
             return result;
@@ -772,11 +1095,57 @@ export function createSeh(host){
         });
     };
 
+    /**
+     * Raises an exception at the host call running now, as RaiseException
+     * would have from there: one that continues gets the call back answering
+     * zero, with the context it continued from.
+     *
+     * @param {number} code @param {number} flags @param {number[]} parameters
+     * @param {string} [call]  the host function it was met in, for the trace
+     */
+    const raiseFromCall = (code, flags, parameters, call)=>{
+        const registers = host.registers();
+        return raise({
+            code: code >>> 0,
+            flags,
+            address: registers.eip,
+            parameters,
+            raisedFrom: readU32(wholeAddress(registers.esp)),
+            ...call ? { call } : {},
+        }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
+    };
+
     return {
         dispatch,
         raise,
         unwind,
         chain,
+
+        /**
+         * A guest access a host call made for the program and memory refused,
+         * raised as the access violation Windows raises at the DLL's own
+         * instruction: the program's handlers see STATUS_ACCESS_VIOLATION
+         * with whether it read (0), wrote (1) or executed (8) and where, and
+         * one that continues gets the call back answering zero. Unhandled,
+         * the process ends with it, as on Windows.
+         *
+         * @param {{ address: number, mode: 'read' | 'write' | 'execute', call?: string }} fault
+         * @returns {Promise<any>}
+         */
+        raiseAccess: fault=>raiseFromCall(STATUS.ACCESS_VIOLATION, 0,
+            [fault.mode === 'write' ? 1 : fault.mode === 'execute' ? 8 : 0, fault.address >>> 0],
+            fault.call),
+
+        /**
+         * An exception a host handler raises as Windows' function raises it
+         * (`win32/common/raise.js`): the code, flags and information given,
+         * at the call. Answered as RaiseException's is.
+         *
+         * @param {{ status: number, flags: number, parameters: number[], call?: string }} raised
+         * @returns {Promise<any>}
+         */
+        raiseException: raised=>raiseFromCall(raised.status,
+            raised.flags & EXCEPTION_NONCONTINUABLE, raised.parameters, raised.call),
 
         /**
          * Whether a processor exception is one a program can be handed.
@@ -806,8 +1175,33 @@ export function createSeh(host){
                     return { handled: true, registers: answered };
                 }
             }
-            const code =VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */
-                (fault.vector)];
+            // An instruction ring 3 may not run is a privileged one to the
+            // program, whichever fault the processor model raised for it.
+            const privileged = (fault.vector === 6 || fault.vector === 13)
+                && host.isMapped(registers.eip >>> 0)
+                && privilegedAt(host.readMemory, registers.eip >>> 0);
+            // The debug service with no debugger to serve it: the services
+            // that only tell a debugger something (a string, a module's
+            // symbols) go on one byte past the instruction - the system's
+            // return from the service skips it, which is why compilers put a
+            // breakpoint byte after `int 0x2d`; the rest are a breakpoint
+            // reported just after it, the service and its two arguments as
+            // parameters.
+            if (fault.vector === DEBUG_SERVICE && SILENT_SERVICES.has(registers.eax >>> 0))
+            {
+                return { handled: true, registers: { ...registers, eip: registers.eip + 1 >>> 0 } };
+            }
+            const guarded = fault.vector === 14 && fault.address !== undefined
+                ? guardTouched(fault.address >>> 0) : null;
+            if (guarded === 'grown')
+            {
+                return { handled: true, registers };
+            }
+            const code = privileged ? STATUS.PRIVILEGED_INSTRUCTION
+                : guarded === 'overflow' ? STATUS.STACK_OVERFLOW
+                    : guarded === 'guard' ? STATUS.GUARD_PAGE_VIOLATION
+                        : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (
+                            fault.vector)];
             if (code === undefined)
             {
                 return { handled: false };
@@ -816,19 +1210,24 @@ export function createSeh(host){
             // what address, because a handler is allowed to read them -- one
             // that commits the page it was refused and goes on reads both. A
             // protection fault has no address to give, and says so with -1.
-            const parameters = code === STATUS.ACCESS_VIOLATION
+            const parameters = fault.vector === 14 || code === STATUS.ACCESS_VIOLATION
                 ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
                     fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
-                : [];
-            const result = await dispatch({ code, address: registers.eip, parameters }, registers);
+                : fault.vector === DEBUG_SERVICE
+                    ? [registers.eax >>> 0, registers.ecx >>> 0, registers.edx >>> 0] : [];
+            // An int3 the debugger continues goes on past it (`toDebugger`).
+            const trap = fault.vector === 3 ? 1 : 0;
+            const result = await dispatch({ code, address: registers.eip, parameters,
+                ...trap ? { trap } : {} }, registers);
             if (result.handled)
             {
                 return result;
             }
             // The last chance, as for a raise -- except that a program with no
             // filter of its own ends with the fault reported rather than with
-            // an exit code, since the report is the only account of it.
-            if (topLevelFilter === 0)
+            // an exit code, since the report is the only account of it; a
+            // debuggee's debugger has its second chance first.
+            if (topLevelFilter === 0 && !debugging())
             {
                 return { handled: false };
             }
@@ -868,7 +1267,7 @@ export function createSeh(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([code, flags, count, args])=>{
-                    const from = args >>> 0;
+                    const from = wholeAddress(args);
                     const total = from === 0 ? 0 : Math.min(count >>> 0, 15);
                     /** @type {number[]} */
                     const parameters = [];
@@ -876,29 +1275,56 @@ export function createSeh(host){
                     {
                         parameters.push(readU32(from + at * 4));
                     }
-                    // The context a handler continued from is the caller's to
-                    // take back when it resumes: by the time the dispatch is
-                    // done the processor may be running somebody else.
+                    // The context handlers are shown is the caller's as it
+                    // stands once the call has returned - its return address,
+                    // its stack past the four arguments - which is what
+                    // RtlRaiseException captures. A handler that continues
+                    // goes on from that context whole, wherever it points, as
+                    // NtContinue does: left as it was, back in the caller; laid
+                    // over with another (a .NET runtime resuming a thread it
+                    // redirected for a collection lays the thread's saved
+                    // context there), at that one's Eip and Esp. Returned to the
+                    // caller with only the other registers taken, such a thread
+                    // went on in the runtime's stub with the frame pointer of
+                    // the code it was redirected from.
+                    const registers = host.registers();
+                    const esp = registers.esp >>> 0;
+                    const caller = { ...registers, eip: readU32(esp), esp: esp + 4 + 16 >>> 0 };
                     return raise({
                         code: code >>> 0,
                         flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
-                        address: host.registers().eip,
+                        address: registers.eip,
                         parameters,
-                        raisedFrom: readU32(host.registers().esp >>> 0),
-                    }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
+                        raisedFrom: caller.eip,
+                    }, caller).then(result=>(!result.registers ? 0
+                        : host.continueAt ? host.continueAt(result.registers)
+                            : host.answerWith(0, result.registers)));
                 },
             },
 
             /**
              * VOID RtlUnwind(PVOID TargetFrame, PVOID TargetIp,
              *                PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue)
+             *
+             * The handlers are shown the caller's context as it stands once
+             * the call returns - its return address, its stack past the four
+             * arguments, ReturnValue in Eax - and the call returns what Eax
+             * holds when they are done: a handler that changes it changes the
+             * answer (Wine's exception test, test_unwind). TargetIp is not
+             * where the caller goes on: the call returns to it as any does.
              */
             RtlUnwind: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([targetFrame, targetIp, record, returnValue])=>
-                    unwind(targetFrame >>> 0, targetIp >>> 0, { record: record >>> 0 })
-                        .then(()=>returnValue >>> 0),
+                handler: ([targetFrame, , record, returnValue])=>{
+                    const registers = host.registers();
+                    const esp = registers.esp >>> 0;
+                    const caller = { ...registers, eip: readU32(esp),
+                        esp: esp + 4 + 16 >>> 0, eax: wholeAddress(returnValue) };
+                    return unwind(wholeAddress(targetFrame), caller.eip,
+                        { record: wholeAddress(record), registers, shown: caller })
+                        .then(({ context })=>readU32(context + CONTEXT.EAX));
+                },
             },
 
             /**
@@ -908,11 +1334,12 @@ export function createSeh(host){
              * Answers with the one it replaces, because a caller chains to it.
              */
             SetUnhandledExceptionFilter: {
+                returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([filter])=>{
                     const previous = topLevelFilter;
-                    topLevelFilter = filter >>> 0;
+                    topLevelFilter = wholeAddress(filter);
                     return previous;
                 },
             },
@@ -924,18 +1351,37 @@ export function createSeh(host){
              * last-chance handler is where it writes its own crash report, and
              * declining to run it is declining the only account of the failure
              * anybody gets.
+             *
+             * Under a debugger - the process has a debug port, whatever the
+             * process block's BeingDebugged says - the exception is the
+             * debugger's second chance: no filter runs and the answer is
+             * EXCEPTION_CONTINUE_SEARCH (Wine's kernel32 debugger.c
+             * test_unhandled_exception_filter).
              */
             UnhandledExceptionFilter: {
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([pointers])=>{
+                    // A diagnostic: what it could not read is left out, and the
+                    // program's call goes on as if it had not looked.
+                    try
+                    {
+                        traceLastChance(wholeAddress(pointers));
+                    }
+                    catch (e){
+                        host.trace?.(`last chance: not traced (${String(e)})`);
+                    }
+                    if (debugging())
+                    {
+                        return EXCEPTION_CONTINUE_SEARCH;
+                    }
                     if (topLevelFilter === 0)
                     {
                         return EXCEPTION_EXECUTE_HANDLER;
                     }
                     return host.callGuest({
                         entry: topLevelFilter,
-                        args: [pointers >>> 0],
+                        args: [wholeAddress(pointers)],
                     }).then(answer=>answer | 0);
                 },
             },

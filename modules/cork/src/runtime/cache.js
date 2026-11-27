@@ -13,10 +13,11 @@
  *
  * A region is kept under its entry, the x87 top it is entered at and the
  * run's modes -- what a run knows before it forms it. What forming made of
- * it is in its record (`RegionShape`): where it stopped at other regions'
- * blocks and which callees it formed in depend on what the run had
- * translated by then, and a run that formed it otherwise forms it again as
- * the record says before it compares the bytes.
+ * it is in its record (`RegionShape`): which callees it formed in depend
+ * on what the run had sampled by then, and a run that formed it otherwise forms it again as
+ * the record says before it compares the bytes. A version of other bytes at
+ * the same entry - code the program patches as it runs - is kept beside it,
+ * under that key and its own bytes' hash.
  *
  * A record is the module's bytes behind a small header of what the
  * runtime needs to publish it without the emitter: the block starts and
@@ -28,7 +29,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 99;
+export const CACHE_VERSION = 177;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -37,15 +38,18 @@ const MAGIC = 0x4b524f43; // 'CORK'
  * the host's features and the settings that change the code it emits -- a
  * store taken with other ones must not answer.
  *
- * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {string} variant  the emitting settings, as the runtime names them
  */
 const flagsOf = (features, variant)=>(features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-')
-    + (features.defaultNaNNegative ? 'n' : '-') + variant;
+    + (features.defaultNaNNegative ? 'n' : '-') + (features.armHost ? 'a' : '')
+    + (features.wideLanes ? 'w' : '') + variant;
 
 /**
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string,
+ *     defaultNaNNegative?: boolean, wideLanes?: boolean,
+ *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string,
  *     entry: number, kept: string }} of  kept: what the region is kept under at its entry
  */
 export function cacheKey({ version, features, variant = '', layoutId, bundleId, entry, kept }){
@@ -79,7 +83,8 @@ export function moduleDigest(bytes){
  * other regions later never takes a record's name.
  *
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
+ *     defaultNaNNegative?: boolean, wideLanes?: boolean,
+ *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
  * @param {Uint8Array} bytes
  * @param {string} [digest]  `moduleDigest` of the bytes, where it was taken already (a
  *     translation worker takes it: over a module of megabytes it held the engine thread)
@@ -92,15 +97,19 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
 
 /**
  * What forming made of a stored region, and what it was compiled as: its
- * bytes' hash, the blocks it left to other regions (`stops`), by indirect
- * call the callees formed in (`targets`), its x87 precision and float
+ * bytes' hash, by indirect call the callees formed in (`targets`), its x87 precision and float
  * arithmetic, whether that precision is one its run moved the entry to
  * (`moved`), whether its entries test the x87 stack's shape (`checked`
- * not), and whether its loops' blocks have entries of their own (`copies`).
+ * not), whether each block tests its own windows (`ownWindows`: a region that kept
+ * leaving held for a window it does not reach), whether its loops' blocks have
+ * entries of their own (`copies`), and
+ * what publishing asks of the formed region (`summary`, `summary.js`), with
+ * which a later run takes it without forming the region.
  *
- * @typedef {{ hash: string, stops?: number[], targets?: [number, number[]][],
+ * @typedef {{ hash: string, targets?: [number, number[]][],
  *     wide?: boolean, narrow?: boolean, floats?: boolean, moved?: boolean,
- *     checked?: boolean, copies?: boolean }} RegionShape
+ *     checked?: boolean, ownWindows?: boolean, copies?: boolean,
+ *     summary?: import('./summary.js').RegionSummary }} RegionShape
  */
 
 /**
@@ -221,7 +230,7 @@ export function seedRecords(records, nameOf){
  * keep translations across starts.
  *
  * @returns {import('../../../core/src/layers/cpu/engine.js').TranslationStore
- *     & { size: () => number }}
+ *     & { size: () => number, append: (key: string, bytes: Uint8Array) => Promise<void> }}
  */
 export function memoryTranslationStore(){
     /** @type {Map<string, Uint8Array>} */
@@ -230,6 +239,14 @@ export function memoryTranslationStore(){
         get: async key=>records.get(key) ?? null,
         put: async(key, bytes)=>{
             records.set(key, bytes);
+        },
+        /** @param {string} key @param {Uint8Array} bytes */
+        append: async(key, bytes)=>{
+            const before = records.get(key);
+            const whole = new Uint8Array((before?.length ?? 0) + bytes.length);
+            whole.set(before ?? new Uint8Array(0));
+            whole.set(bytes, before?.length ?? 0);
+            records.set(key, whole);
         },
         size: ()=>records.size,
     };

@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 
 import { createPublisher } from './com.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID_ONE = '{00000001-0000-0000-C000-000000000046}';
 const IID_TWO = '{00000002-0000-0000-C000-000000000046}';
@@ -271,8 +272,8 @@ function overTheBridge(){
     const handlers = new Map();
     let next = 0x2000;
     const vtables = createVtables({
-        memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
-            /** @type {number} */ length)=>new Uint8Array(length) },
+        memory: withPointers({ writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+            /** @type {number} */ length)=>new Uint8Array(length) }),
         register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
             handlers.set(name, fn);
             return 0x1000 + handlers.size * 0x10;
@@ -304,8 +305,8 @@ test('an object whose last reference goes loses every interface pointer at the b
     const two = seam.publish(api, DESCRIPTORS, IID_TWO);
 
     assert.equal(call(IID_TWO, 'Release', two), 0);
-    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER);
-    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+    assert.equal(call(IID_ONE, 'AddRef', one), 0);
+    assert.equal(call(IID_TWO, 'AddRef', two), 0);
 });
 
 test('a generation reaching zero at the bridge leaves the others the program holds', ()=>{
@@ -329,11 +330,11 @@ test('a generation reaching zero at the bridge leaves the others the program hol
     const two = seam.publish(api, DESCRIPTORS, IID_TWO);
 
     assert.equal(call(IID_ONE, 'Release', one), 0);
-    assert.equal(call(IID_ONE, 'AddRef', one), E_POINTER, 'its own generation went');
+    assert.equal(call(IID_ONE, 'AddRef', one), 0, 'its own generation went');
     assert.equal(call(IID_TWO, 'AddRef', two), 2, 'the other is still the program\'s');
     assert.equal(call(IID_TWO, 'Release', two), 1);
     assert.equal(call(IID_TWO, 'Release', two), 0);
-    assert.equal(call(IID_TWO, 'AddRef', two), E_POINTER);
+    assert.equal(call(IID_TWO, 'AddRef', two), 0);
 });
 
 test('an object that says it outlives its count is not ended by reaching zero', ()=>{
@@ -378,3 +379,105 @@ test('an object with no Release is given back, every interface it was published 
     alone.unpublish(other);
     assert.equal(alone.objectAt(kept), null, 'with no bridge to tell, the way back still goes');
 });
+
+test('an interface counted in the host keeps AddRef and Release at their traps', ()=>{
+    // DirectDraw's clipper is called through released pointers and through
+    // 0xdeadbeef by Wine's tests; the guest count routine follows `this` to
+    // its count cell, the trap asks the bridge, which never published it.
+    const bytes = new Uint8Array(0x10000);
+    const view = new DataView(bytes.buffer);
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {Map<string, number>} */
+    const traps = new Map();
+    let next = 0x4000;
+    let code = 0x8000;
+    const vtables = createVtables({
+        memory: withPointers({
+            writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                view.setUint32(at, value, true),
+            readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
+            writeBytes: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                bytes.set(data, at),
+            readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
+                bytes.slice(at, at + length),
+        }),
+        register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
+            handlers.set(name, fn);
+            traps.set(name, 0x1000 + handlers.size * 0x10);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: {
+            allocate: (/** @type {number} */ size)=>{
+                const at = next;
+                next += (size + 15) & ~15;
+                return at;
+            },
+            allocateCode: (/** @type {number} */ size)=>{
+                const at = code;
+                code += (size + 15) & ~15;
+                return at;
+            },
+        },
+    });
+    const seam = createPublisher({
+        publishInterface: (object, id)=>vtables.publish(object, id),
+        unpublishInterface: (object, id)=>vtables.unpublish(object, id),
+    });
+    const slot = (/** @type {number} */ pointer, /** @type {number} */ index)=>
+        view.getUint32(view.getUint32(pointer, true) + index * 4, true);
+    const inGuest = seam.publish(counted(), [{ id: IID_ONE, methods: [] }], IID_ONE);
+    const inHost = seam.publish(counted(), [{ id: IID_TWO, methods: [], countedInHost: true }],
+        IID_TWO);
+
+    assert.ok(slot(inGuest, 1) >= 0x8000, 'the ordinary AddRef runs in the guest');
+    assert.ok(slot(inGuest, 2) >= 0x8000);
+    assert.equal(slot(inHost, 1), traps.get(`${IID_TWO}::AddRef`), 'counted in the host');
+    assert.equal(slot(inHost, 2), traps.get(`${IID_TWO}::Release`));
+    const addRef = handlers.get(`${IID_TWO}::AddRef`);
+    assert.equal(addRef.handler([inHost]), 2);
+    assert.equal(addRef.handler([0xdeadbeef]), 0, 'no references: refused, not followed');
+});
+
+test('what an object that went owes the program is made before its Release is answered',
+    async()=>{
+        // A program's object its private data held is let go of by its own
+        // Release, waited for, on the releasing thread (Wine's test_fpu_setup).
+        /** @type {Map<string, any>} */
+        const handlers = new Map();
+        let next = 0x2000;
+        const vtables = createVtables({
+            memory: withPointers({ writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+                /** @type {number} */ length)=>new Uint8Array(length) }),
+            register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
+                handlers.set(name, fn);
+                return 0x1000 + handlers.size * 0x10;
+            },
+            heap: { allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            } },
+        });
+        const THREAD = { name: 'main' };
+        const seam = createPublisher({
+            publishInterface: (object, id)=>vtables.publish(object, id),
+            unpublishInterface: (object, id)=>vtables.unpublish(object, id),
+            currentThread: ()=>THREAD,
+        });
+        /** @type {string[]} */
+        const heard = [];
+        const api = counted();
+        const pointer = seam.publish(api, DESCRIPTORS, IID_ONE);
+        seam.owe(async thread=>{
+            assert.equal(thread, THREAD);
+            heard.push('Release of the program\'s object');
+        });
+        const answer = handlers.get(`${IID_ONE}::Release`).handler([pointer]);
+        assert.equal(typeof answer?.then, 'function', 'the answer waits');
+        assert.deepEqual(heard, ['Release of the program\'s object']);
+        assert.equal(await answer, 0);
+        const other = seam.publish(counted(2), DESCRIPTORS, IID_ONE);
+        assert.equal(handlers.get(`${IID_ONE}::Release`).handler([other]), 1,
+            'with nothing owed, at once');
+    });

@@ -66,7 +66,8 @@
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
-    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, sampledWithOnes,
+    LIGHT_STRUCT, clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration,
+    functionDeclarations, lightingBody, processedCoordinate, sampledWithOnes, sphereMapOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -114,7 +115,7 @@ const SAMPLER_TYPE = Object.freeze({
 const COMPONENT = 'xyzw';
 
 /** Which bind group each stage's constants live in, and where the samplers go. */
-export const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
+const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
 
 /**
  * Where a vertex shader's samplers start in the sampler group: past the
@@ -142,6 +143,23 @@ export const HYBRID_CONSTANTS = Object.freeze({
     POINT: 47,
     POINT_SCALE: 48,
     COUNT: 49,
+});
+
+/**
+ * The rows a lit hybrid stage reads, from its `lightingRegister` on (past the
+ * clip planes): world and its inverse transpose as the fixed-function block
+ * packs them, the material's diffuse, ambient, specular and emissive, the
+ * scene's ambient, the eye with the specular power in w, then each enabled
+ * light's seven rows as `packLight` lays them.
+ */
+export const HYBRID_LIGHTING = Object.freeze({
+    WORLD: 0,
+    NORMAL_MATRIX: 4,
+    MATERIAL: 8,
+    AMBIENT: 12,
+    EYE: 13,
+    LIGHTS: 14,
+    LIGHT_ROWS: 7,
 });
 
 /** vs_1_x expp: 2^floor(x), the fraction of x, 2^x, and one. */
@@ -207,7 +225,7 @@ const isCoordinate = location=>location >= varyingLocation(D3DDECLUSAGE.TEXCOORD
  * @param {readonly string[]} sprites  Outputs a sprite's coordinate goes to.
  * @returns {string[]}
  */
-export function pointQuadLines(corner, size, limits, pixel, sprites){
+function pointQuadLines(corner, size, limits, pixel, sprites){
     return [
         '    var pointCorners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0),',
         '        vec2f(-1.0, 1.0), vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0));',
@@ -232,8 +250,22 @@ export const FOG_RANGE_LOCATION = 11;
  *
  * @param {number} location @param {boolean | undefined} flat
  */
-export const colourInterpolation = (location, flat)=>
+const colourInterpolation = (location, flat)=>
     (flat && location <= 1 ? ' @interpolate(flat)' : '');
+
+/**
+ * The rest of the usages in the order their pairs of locations follow the
+ * fog and point size's: packed, so the last is location 31, and those a pixel
+ * shader reads as varyings first, so DEPTH and SAMPLE fall below 28, the
+ * locations some GPUs pass between their stages (SwiftShader; Wine's d3d9
+ * pretransformed_varying_test). A position or a tessellation factor is seldom
+ * a varying at all.
+ *
+ * @type {readonly number[]}
+ */
+const OTHER_USAGES = [D3DDECLUSAGE.BLENDWEIGHT, D3DDECLUSAGE.BLENDINDICES, D3DDECLUSAGE.NORMAL,
+    D3DDECLUSAGE.TANGENT, D3DDECLUSAGE.BINORMAL, D3DDECLUSAGE.DEPTH, D3DDECLUSAGE.SAMPLE,
+    D3DDECLUSAGE.POSITION, D3DDECLUSAGE.TESSFACTOR, D3DDECLUSAGE.POSITIONT];
 
 /**
  * Where a varying of a given usage travels between the two stages: colours
@@ -254,7 +286,7 @@ export function varyingLocation(usage, index){
         case D3DDECLUSAGE.PSIZE:
             return 11;
         default:
-            return 12 + usage * 2 + Math.min(index, 1);
+            return 12 + Math.max(0, OTHER_USAGES.indexOf(usage)) * 2 + Math.min(index, 1);
     }
 }
 
@@ -283,11 +315,17 @@ export function varyingLocation(usage, index){
  *     writes (`varyingLocation`): what a fragment stage made for it may read.
  * @property {number[]} reads     A pixel stage's varyings, as the locations it
  *     reads: what the vertex stage paired with it has to write.
- * @property {{ index: number, type: string }[]} samplers
+ * @property {number[]} [targets]  A pixel stage's colour outputs past oC0, oC1 to oC3,
+ *     where it writes any: the render targets it draws into beside the first.
+ * @property {{ index: number, type: string, compared?: boolean }[]} samplers
+ *     `compared` for a shadow map's (`SamplerVariant.compared`).
  * @property {number} constants   How many float registers the shader reaches.
  * @property {number} [viewportRegister]
  * @property {number} [fogRegister]  A vertex shader carrying fog: the fog colour's
  *           register, with the table curve's range in the one after it.
+ * @property {boolean} [fogOver]  A vertex shader under table fog whose oFog
+ *           the curve runs over (decisions.md A43); without it the amount
+ *           carried is the shader's z times its w, for the depth.
  *     A vertex shader's: the float register past the ones it reads, where the
  *     viewport's scale is carried for the half-pixel move of its position.
  * @property {number} [alphaRegister]  A pixel shader under the alpha test:
@@ -300,6 +338,13 @@ export function varyingLocation(usage, index){
  * @property {number} [clipRegister]
  *     A vertex stage that clips: the first of the registers its user clip
  *     planes travel in, one a plane, past every other it reads.
+ * @property {number} [lightingRegister]
+ *     A lit fixed vertex stage (`fixedVertexStage`): the first of its
+ *     lighting rows, past the clip planes (`HYBRID_LIGHTING`).
+ * @property {number} [biasRegister]
+ *     A stage whose samplers bias their level of detail: the first of four
+ *     registers the biases travel in, sampler n in component n % 4 of register
+ *     n / 4 from it, past every other it reads.
  * @property {string | null} error
  */
 
@@ -310,7 +355,11 @@ export function varyingLocation(usage, index){
  *
  * @typedef {Object} SamplerVariant
  * @property {number} [lodBias]  D3DSAMP_MIPMAPLODBIAS, not zero: added to the
- *     level of detail of every read, implicit or explicit.
+ *     level of detail of every read, implicit or explicit. The translation reads
+ *     the value from a register the draw fills (`biasRegister`), so a program
+ *     that moves it a little every frame, as a streamed texture fades in, does
+ *     not make a module and a pipeline of every value.
+ * @property {string} [bias]  The translation's own: the register the bias is read from.
  * @property {number} [mirrorOnce]  The axes (1 u, 2 v, 4 w) addressed
  *     D3DTADDRESS_MIRRORONCE, whose GPU sampler clamps: a read folds the
  *     coordinate about zero first. Not of a cube map, whose faces are not
@@ -318,6 +367,16 @@ export function varyingLocation(usage, index){
  * @property {{ mask: number, colour: number }} [border]  The axes addressed
  *     D3DTADDRESS_BORDER, whose GPU sampler clamps, and D3DSAMP_BORDERCOLOR as
  *     a D3DCOLOR: a read outside [0, 1] on one of them is that colour.
+ * @property {'2d' | '3d'} [dimension]  The bound texture's, where the sampler
+ *     is declared the other of the two: the texture is declared and read as
+ *     it is, from the coordinate's first two or three components.
+ * @property {true} [compared]  A depth texture is bound, a shadow map: the
+ *     sampler is a comparison sampler and every read through it answers, in
+ *     each channel, whether the coordinate's z (over its w where the read
+ *     projects) is no further than the depth held at its x and y, as
+ *     Direct3D 9 hardware samples a depth texture (Wine's d3d9 visual.c
+ *     shadow_test). Its other properties do not apply: the comparison
+ *     sampler filters and addresses as the stage's state asks.
  */
 
 /**
@@ -359,9 +418,9 @@ const foldedCoordinate = (at, components, mask)=>{
  * @returns {string}
  */
 const variantRead = (pair, at, components, read, variant, addressed)=>{
-    const lodBias = variant?.lodBias ?? 0;
-    const plus = lodBias ? ` + ${literal(lodBias)}` : '';
-    const scale = lodBias ? ` * ${literal(2 ** lodBias)}` : '';
+    const lodBias = variant?.bias ?? (variant?.lodBias ? literal(variant.lodBias) : '');
+    const plus = lodBias ? ` + ${lodBias}` : '';
+    const scale = lodBias ? ` * exp2(${lodBias})` : '';
     const mask = addressed ? (variant?.mirrorOnce ?? 0) & ((1 << components) - 1) : 0;
     const folded = mask === 0 ? at : foldedCoordinate(at, components, mask);
     switch (read.how)
@@ -382,7 +441,7 @@ const variantRead = (pair, at, components, read, variant, addressed)=>{
                     + ` dpdy(${at})${scale})`;
             }
             return lodBias
-                ? `textureSampleBias(${pair}, ${at}, ${literal(lodBias)})`
+                ? `textureSampleBias(${pair}, ${at}, ${lodBias})`
                 : `textureSample(${pair}, ${at})`;
     }
 };
@@ -520,7 +579,7 @@ const FOUR_FLOATS = Object.freeze({ components: 4, scalar: 'f32', bgra: false })
  * @param {Object} options
  * @param {boolean} options.vertex
  * @param {number} options.constants   Float registers to declare.
- * @param {{ index: number, type: string }[]} options.samplers
+ * @param {{ index: number, type: string, compared?: boolean }[]} options.samplers
  * @param {string[]} options.inputFields    Lines inside the input structure.
  * @param {string[]} options.outputFields   Lines inside the output structure.
  * @param {boolean} [options.clipDistances]  Whether the stage writes clip distances.
@@ -542,9 +601,9 @@ function moduleHeader(options){
     const base = options.vertex ? VERTEX_SAMPLER_BINDING : 0;
     options.samplers.forEach((entry, at)=>{
         header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2})`
-            + ` var tex${entry.index}: ${entry.type};`);
+            + ` var tex${entry.index}: ${entry.compared ? 'texture_depth_2d' : entry.type};`);
         header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2 + 1})`
-            + ` var samp${entry.index}: sampler;`);
+            + ` var samp${entry.index}: ${entry.compared ? 'sampler_comparison' : 'sampler'};`);
     });
     const inName = options.vertex ? 'VsIn' : 'PsIn';
     const outName = options.vertex ? 'VsOut' : 'PsOut';
@@ -585,7 +644,9 @@ function returnsEarly(list){
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
- *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
+ *     points?: { sprite: boolean }, alphaTest?: number, srgbWrite?: boolean,
+ *     luminance?: boolean,
+ *     nanProbe?: boolean,
  *     tableFogOverDepth?: boolean, rectangleBump?: boolean, ones?: readonly number[],
  *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
@@ -617,6 +678,8 @@ function returnsEarly(list){
  *        reads sample, and `projectedBy` the component each stage's
  *        coordinates are divided by under D3DTTFF_PROJECTED ('' for none),
  *        which a 1.0 to 1.3 shader's reads honour.
+ *        `srgbWrite` encodes every colour the pixel shader writes from
+ *        linear to sRGB, as D3DRS_SRGBWRITEENABLE has Direct3D 9 write it.
  *        `ones` is, by sampler number (s#, or the stage a 1.x read names),
  *        the channels the texture bound there samples as one that the GPU's
  *        texture lacks (`sampledOnes` in `constants.js`); absent or zero, a
@@ -645,7 +708,7 @@ export function translateShader(parsed, options = {}){
     const usesParts = new Set();
     /** @type {ShaderInput[]} */
     const inputs = [];
-    /** @type {{ index: number, type: string }[]} */
+    /** @type {{ index: number, type: string, compared?: boolean }[]} */
     const samplers = [];
     /**
      * The semantic each numbered register was declared with: a vertex
@@ -950,6 +1013,18 @@ export function translateShader(parsed, options = {}){
         : `(${expression}).${components}`);
 
     /**
+     * A read of a shadow map (`SamplerVariant.compared`): the coordinate's z,
+     * held to [0, 1], against the depth at its x and y through the sampler's
+     * comparison, the answer in every channel. A depth texture has its one
+     * level, which is the level read, wherever the read is made.
+     *
+     * @param {number} index  The sampler's.
+     * @param {string} at  A vec4f expression, divided already where the read projects.
+     */
+    const comparedRead = (index, at)=>`vec4f(textureSampleCompareLevel(tex${index},`
+        + ` samp${index}, ${swizzled(at, 'xy')}, clamp(${swizzled(at, 'z')}, 0.0, 1.0)))`;
+
+    /**
      * A 1.x read of the texture bound at a stage, of the dimension the caller
      * says it has, at the leading components of `at` that dimension takes.
      *
@@ -957,17 +1032,23 @@ export function translateShader(parsed, options = {}){
      */
     const stageSample = (stage, at)=>{
         const dimension = options.stageDimensions?.[stage] ?? '2d';
+        const compared = options.sampling?.[stage]?.compared === true && dimension === '2d';
         if (!samplers.some(one=>one.index === stage))
         {
             samplers.push({
                 index: stage,
                 type: TEXTURE_TYPE[/** @type {keyof typeof TEXTURE_TYPE} */ (dimension)]
                     ?? TEXTURE_TYPE['2d'],
+                ...(compared ? { compared } : {}),
             });
+        }
+        if (compared)
+        {
+            return comparedRead(stage, at);
         }
         const components = dimension === '2d' ? 2 : 3;
         const coordinates = swizzled(at, components === 2 ? 'xy' : 'xyz');
-        const variant = options.sampling?.[stage];
+        const variant = biasedVariant(options.sampling?.[stage], stage);
         const addressed = dimension !== 'cube';
         return borderedRead(sampledWithOnes(variantRead(`tex${stage}, samp${stage}`, coordinates,
             components, { how: 'sample' }, variant, addressed), options.ones?.[stage]),
@@ -982,7 +1063,10 @@ export function translateShader(parsed, options = {}){
     const stageCoordinates = stage=>{
         pixelCoordinates.add(stage);
         const by = options.projectedBy?.[stage] ?? '';
-        return by ? `(in.t${stage} / in.t${stage}.${by})` : `in.t${stage}`;
+        // A zero divisor reads at the origin, as Windows does (Wine's d3d9
+        // test_texture_transform_flags).
+        return by ? `select(in.t${stage} / in.t${stage}.${by}, vec4f(0.0),`
+            + ` in.t${stage}.${by} == 0.0)` : `in.t${stage}`;
     };
 
     /**
@@ -1005,6 +1089,24 @@ export function translateShader(parsed, options = {}){
     const rowOf = (stage, read)=>{
         pixelCoordinates.add(stage);
         return `dot(in.t${stage}.xyz, ${swizzled(read, 'xyz')})`;
+    };
+
+    /** Whether a read takes its level bias from the bias registers (`_lodBias`). */
+    let biased = false;
+    /**
+     * A sampler's variant with its level bias read from the register the draw
+     * fills, four samplers a register, rather than written into the module.
+     *
+     * @param {SamplerVariant | undefined} variant @param {number} index
+     * @returns {SamplerVariant | undefined}
+     */
+    const biasedVariant = (variant, index)=>{
+        if (!variant?.lodBias)
+        {
+            return variant;
+        }
+        biased = true;
+        return { ...variant, bias: `c[_lodBias + ${index >> 2}].${COMPONENT[index & 3]}` };
     };
 
     /**
@@ -1092,11 +1194,17 @@ export function translateShader(parsed, options = {}){
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
         const components = coordinates.length;
         const project = (instruction.control & 0x1) !== 0;
+        if (entry.compared)
+        {
+            const whole = src(instruction, 0);
+            return comparedRead(entry.index, project ? `(${whole} / ${swizzled(whole, 'w')})`
+                : whole);
+        }
         const bias = (instruction.control & 0x2) !== 0;
         const at = project
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
             : `${src(instruction, 0)}.${coordinates}`;
-        const variant = options.sampling?.[entry.index];
+        const variant = biasedVariant(options.sampling?.[entry.index], entry.index);
         const addressed = entry.type !== 'texture_cube<f32>';
         /** @type {Parameters<typeof variantRead>[3]} */
         const read = how === 'level' ? { how: 'level', by: `${src(instruction, 0)}.w` }
@@ -1123,12 +1231,17 @@ export function translateShader(parsed, options = {}){
                 const declaration = /** @type {any} */ (instruction.declaration);
                 if (dest.type === REGISTER.SAMPLER)
                 {
-                    const type = SAMPLER_TYPE[declaration.samplerType];
+                    const crossed = options.sampling?.[dest.index]?.dimension;
+                    const type = crossed ? TEXTURE_TYPE[crossed]
+                        : SAMPLER_TYPE[declaration.samplerType];
                     if (!type)
                     {
                         fail(`sampler type ${declaration.samplerType} is not translated`);
                     }
-                    samplers.push({ index: dest.index, type: type ?? 'texture_2d<f32>' });
+                    const compared = options.sampling?.[dest.index]?.compared === true
+                        && (type ?? 'texture_2d<f32>') === 'texture_2d<f32>';
+                    samplers.push({ index: dest.index, type: type ?? 'texture_2d<f32>',
+                        ...(compared ? { compared } : {}) });
                 }
                 else if (dest.type === REGISTER.INPUT && vertex)
                 {
@@ -1779,6 +1892,7 @@ export function translateShader(parsed, options = {}){
     let viewportRegister;
     /** @type {number | undefined} */
     let fogRegister;
+    let fogOver = false;
     /** @type {number | undefined} */
     let pointRegister;
     /** A pixel shader under the alpha test: the reference's register. @type {number | undefined} */
@@ -1846,6 +1960,13 @@ export function translateShader(parsed, options = {}){
                 {
                     emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
                         `oD${output - 100}`);
+                    if (output === 100)
+                    {
+                        // The diffuse a shader below model 3 leaves unwritten
+                        // is one in every component (Wine's d3d9
+                        // test_uninitialized_varyings, test_default_diffuse).
+                        prologue.push('    out.oD0 = vec4f(1.0);');
+                    }
                     // Below model 3 a colour output leaves the shader held to
                     // [0, 1]; a model 3 output is whatever the shader wrote.
                     body.push(`    out.oD${output - 100} = saturate(out.oD${output - 100});`);
@@ -1865,7 +1986,8 @@ export function translateShader(parsed, options = {}){
             if (!outputs.includes(location))
             {
                 emits(location, `oX${location}`);
-                body.push(`    out.oX${location} = vec4f(0.0);`);
+                const diffuse = major < 3 && location === varyingLocation(D3DDECLUSAGE.COLOR, 0);
+                body.push(`    out.oX${location} = vec4f(${diffuse ? '1.0' : '0.0'});`);
             }
         }
         // Direct3D puts a pixel's centre on its integer coordinate and WebGPU
@@ -1901,16 +2023,21 @@ export function translateShader(parsed, options = {}){
             {
                 emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
             }
-            const amount = wrote ? 'out.oFog.x' : '0.0';
+            // Table fog over the depth carries the shader's z times its w
+            // in the amount's place (`tableFog` in the fixed function).
+            const table = carried === FOG_SOURCE.TABLE;
+            fogOver = table && wrote && options.tableFogOverDepth !== true;
+            const amount = table && !fogOver ? 'out.oPos.z * out.oPos.w'
+                : wrote ? 'out.oFog.x' : '0.0';
             body.push(`    out.oFog = vec4f(${amount}, c[${fogRegister}].rgb);`);
-            if (carried === FOG_SOURCE.TABLE)
+            if (table)
             {
                 outputFields.push(`    @location(${FOG_RANGE_LOCATION}) @interpolate(flat)`
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
                 // A w of 2 tells the pixel stage the curve runs over the
                 // shader's oFog rather than the depth (decisions.md A43).
-                const overFog = wrote && options.tableFogOverDepth !== true;
+                const overFog = fogOver;
                 body.push(`    out.o${FOG_RANGE_LOCATION} = ${overFog
                     ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
@@ -1923,8 +2050,14 @@ export function translateShader(parsed, options = {}){
                 ? [...emitted].filter(([location])=>isCoordinate(location))
                     .map(([, name])=>`out.${name}`)
                 : [];
-            body.push(...pointQuadLines('in.corner',
-                vertexOutputs.has(2) && major < 3 ? 'out.oPts.x' : `c[${pointRegister}].x`,
+            // A model 3 shader sizes its points through the output it
+            // declared PSIZE; below it, through oPts. Else the render state.
+            const sized = major >= 3
+                ? [...semantics].find(([, declaration])=>declaration.usage === D3DDECLUSAGE.PSIZE)
+                : undefined;
+            const size = sized ? `out.o${sized[0]}.x`
+                : vertexOutputs.has(2) && major < 3 ? 'out.oPts.x' : `c[${pointRegister}].x`;
+            body.push(...pointQuadLines('in.corner', size,
                 `c[${pointRegister}]`, `c[${viewportRegister}].xy`, sprites));
         }
         entry = 'vs_main';
@@ -1979,7 +2112,8 @@ export function translateShader(parsed, options = {}){
             // the curve reads its range from a module variable, since a
             // function cannot see the entry point's input.
             const amount = table
-                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.vPos.z, fogRange.w != 0.0),'
+                ? 'fogFactorOf(select(select(d3dRcp(in.vPos.w), in.fog.x * in.vPos.w,'
+                    + ' fogRange.w != 0.0),'
                     + ' in.fog.x, fogRange.w > 1.5))'
                 : 'in.fog.x';
             const fogLines = [
@@ -2034,6 +2168,30 @@ export function translateShader(parsed, options = {}){
                 '        discard;',
                 '    }');
         }
+        // D3DRS_SRGBWRITEENABLE: every colour written is encoded from linear
+        // to sRGB on its way out, alpha as it is -- the last thing before
+        // the target, after fog and the alpha test. Encoded here rather than
+        // through an sRGB view of the target, so the blend runs on the
+        // encoded values, as Direct3D 9 hardware blended.
+        if (options.srgbWrite === true)
+        {
+            // Colours only: -1 is the depth the shader writes, not a target.
+            for (const target of [...pixelOutputs].filter(output=>output >= 0).sort())
+            {
+                const at = body.indexOf(`    out.oC${target} = oC${target};`);
+                const c = `clamp(oC${target}.rgb, vec3f(0.0), vec3f(1.0))`;
+                body.splice(at < 0 ? body.length : at, 0,
+                    `    oC${target} = vec4f(select(1.055 * pow(${c}, vec3f(1.0 / 2.4)) - 0.055,`
+                    + ` 12.92 * ${c}, ${c} <= vec3f(0.0031308)), oC${target}.a);`);
+            }
+        }
+        // A luminance target keeps red for all three colours (Wine's d3d9
+        // pixelshader_blending_test, L8).
+        if (options.luminance === true && pixelOutputs.has(0))
+        {
+            const at = body.indexOf('    out.oC0 = oC0;');
+            body.splice(at < 0 ? body.length : at, 0, '    oC0 = vec4f(oC0.rrr, oC0.a);');
+        }
         entry = 'ps_main';
     }
 
@@ -2079,12 +2237,17 @@ export function translateShader(parsed, options = {}){
         }
         return constants === Infinity ? 224 : constants;
     })();
+    // The samplers' level biases follow every other register, four a register.
+    const biasRegister = biased ? reach : undefined;
+    const declared = biased ? reach + 4 : reach;
+    const nonFinite = [...defined.values()].some(value=>value.includes('_nonFinite'));
     const wgsl = [
         ...moduleHeader({
-            vertex, constants: reach, samplers, inputFields, outputFields,
+            vertex, constants: declared, samplers, inputFields, outputFields,
             clipDistances: vertex && options.clip?.distances === true,
         }),
         D3D_MATH,
+        ...(nonFinite ? [NON_FINITE] : []),
         ...fogCurve,
         ...(relativeDefs ? [
             'fn cAt(i: i32) -> vec4f {',
@@ -2099,6 +2262,7 @@ export function translateShader(parsed, options = {}){
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
         ...(alphaRegister === undefined ? [] : [`const _alphaRef = ${alphaRegister};`]),
         ...(clipRegister === undefined ? [] : [`const _clip = ${clipRegister};`]),
+        ...(biasRegister === undefined ? [] : [`const _lodBias = ${biasRegister};`]),
         vertex ? '@vertex' : '@fragment',
         `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
         `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
@@ -2111,13 +2275,17 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, outputs, reads, samplers, constants: reach,
+        wgsl, entry, inputs, outputs, reads, samplers, constants: declared,
         ...(viewportRegister === undefined ? {} : { viewportRegister }),
         ...(fogRegister === undefined ? {} : { fogRegister }),
+        ...(fogOver ? { fogOver } : {}),
         ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
         ...(clipRegister === undefined ? {} : { clipRegister }),
+        ...(biasRegister === undefined ? {} : { biasRegister }),
+        ...(!vertex && [...pixelOutputs].some(output=>output > 0)
+            ? { targets: [...pixelOutputs].filter(output=>output > 0).sort() } : {}),
         error,
     };
 }
@@ -2125,6 +2293,7 @@ export function translateShader(parsed, options = {}){
 /** D3DTSS_TCI_ modes a hybrid's vertex stage generates a coordinate under. */
 const TCI_CAMERASPACENORMAL = 0x10000;
 const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
+const TCI_SPHEREMAP = 0x40000;
 
 /**
  * A vertex stage for a draw that binds a pixel shader and no vertex shader:
@@ -2163,8 +2332,10 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
  *     points?: { sprite: boolean, scale: boolean },
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
- *     carried?: ({ set: number, transformed: boolean } | null)[],
- *     clipsBehindEye?: boolean }} [options]
+ *     carried?: ({ set: number, transform: number } | null)[],
+ *     clipsBehindEye?: boolean,
+ *     lighting?: import('../webgpu/internal/pipeline.js').LightingState | null,
+ *     specularEnable?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
@@ -2175,13 +2346,18 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        `clip`: the user clip planes, in the vertex's own space -- world
  *        planes through the world matrix, which the caller puts there -- one
  *        register each from `HYBRID_CONSTANTS.COUNT`. A pre-transformed
- *        vertex is not clipped. `carried`: per coordinate set, the vertex's
- *        set the stage of that number reads (its D3DTSS_TEXCOORDINDEX) and
- *        whether the stage's transform (`c[TRANSFORMS..]`) applies, for a
- *        stage that reads another set than its own or transforms it: the
- *        fixed function hands a pixel shader each stage's coordinates, not
- *        the declaration's sets by number. A two-component set goes through
- *        the matrix as (u, v, 1), so a translation is the third row.
+ *        vertex is not clipped. `carried`: per coordinate set the pixel
+ *        shader reads, the vertex's set the stage of that number reads (its
+ *        D3DTSS_TEXCOORDINDEX) and what its transform flags make of it
+ *        (`coordinateTransformOf`, the matrix in `c[TRANSFORMS..]`): the fixed function
+ *        hands a pixel shader each stage's coordinates, not the
+ *        declaration's sets by number, made as `processedCoordinate` says. A
+ *        pre-transformed vertex's set goes through as declared, through no
+ *        matrix. `lighting`: D3DRS_LIGHTING on, the lights and the colour
+ *        sources: the two colours the pixel shader reads are lit, in rows
+ *        from `lightingRegister` (`HYBRID_LIGHTING`); the specular is the
+ *        highlight only under `specularEnable` (D3DRS_SPECULARENABLE), the
+ *        vertex's own specular otherwise (Wine's d3d8 test_specular_shaders).
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2204,8 +2380,23 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let specularAlpha = '1.0';
     let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
     const carried = options.carried ?? [];
+    const pretransformed = elements.some(element=>element.usage === D3DDECLUSAGE.POSITIONT);
+    let hasNormal = false;
+    /** The diffuse and specular the vertex carries, by index. @type {Map<number, string>} */
+    const colours = new Map();
+    /** The stage's texture transform by columns. @param {number} stage */
+    const transformColumn = stage=>(/** @type {number} */ axis)=>
+        `c[${HYBRID_CONSTANTS.TRANSFORMS + stage * 4 + axis}]`;
     /** The declaration's coordinate sets by number, as read and as wide. @type {Map<number, { value: string, components: number }>} */
     const sets = new Map();
+    /**
+     * A pre-transformed vertex's other elements by the location of their usage:
+     * the fixed function hands them to a model 3 pixel shader that reads
+     * them as they are (Wine's d3d9 pretransformed_varying_test).
+     *
+     * @type {Map<number, string>}
+     */
+    const handedOn = new Map();
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -2228,10 +2419,17 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         else if (element.usage === D3DDECLUSAGE.NORMAL)
         {
             normal = `${value}.xyz`;
+            hasNormal = true;
         }
         else if (element.usage === D3DDECLUSAGE.PSIZE)
         {
             pointBase = `${value}.x`;
+        }
+        if (pretransformed && element.usage !== D3DDECLUSAGE.POSITIONT
+            && element.usage !== D3DDECLUSAGE.PSIZE && element.usage !== D3DDECLUSAGE.COLOR
+            && element.usage !== D3DDECLUSAGE.TEXCOORD)
+        {
+            handedOn.set(varyingLocation(element.usage, element.usageIndex), value);
         }
         else if (element.usage === D3DDECLUSAGE.TEXCOORD
             && ((generated[element.usageIndex] ?? 0) !== 0 || carried[element.usageIndex]))
@@ -2246,6 +2444,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex === 1)
             {
                 specularAlpha = `${value}.w`;
+            }
+            if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex < 2)
+            {
+                colours.set(element.usageIndex, value);
             }
             if (element.usage === D3DDECLUSAGE.TEXCOORD)
             {
@@ -2288,12 +2490,12 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
                 ? 'reflect(d3dNrm(cameraPosition), cameraNormal)'
-                : 'cameraPosition';
-        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
-        body.push(`    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
-            + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
+                : mode === TCI_SPHEREMAP
+                    ? sphereMapOf('reflect(d3dNrm(cameraPosition), cameraNormal)')
+                    : 'cameraPosition';
+        body.push(`    let generated${set} = vec4f(${coordinate}, 0.0);`,
+            `    out.o${location} = ${processedCoordinate(`generated${set}`, 3,
+                carried[set]?.transform ?? 0, transformColumn(set))};`);
     }
     for (const [stage, source] of carried.entries())
     {
@@ -2311,17 +2513,18 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             body.push(`    out.o${location} = vec4f(0.0);`);
             continue;
         }
-        if (!source.transformed)
+        if (pretransformed)
         {
             body.push(`    out.o${location} = ${from.value};`);
             continue;
         }
-        const extended = from.components <= 2 ? `vec4f(${from.value}.xy, 1.0, 0.0)` : from.value;
-        const row = HYBRID_CONSTANTS.TRANSFORMS + stage * 4;
-        body.push(`    let set${stage} = ${extended};`,
-            `    out.o${location} = vec4f(dot(c[${row}], set${stage}),`
-            + ` dot(c[${row + 1}], set${stage}), dot(c[${row + 2}], set${stage}),`
-            + ` dot(c[${row + 3}], set${stage}));`);
+        // Its missing components zero, not as the declaration fills them.
+        const count = Math.min(from.components, 4);
+        const kept = count >= 4 ? from.value
+            : `vec4f(${from.value}.${'xyz'.slice(0, count)}${', 0.0'.repeat(4 - count)})`;
+        body.push(`    let set${stage} = ${kept};`,
+            `    out.o${location} = ${processedCoordinate(`set${stage}`, count,
+                source.transform, transformColumn(stage))};`);
     }
     // The fog the fixed-function stage adds after the pixel shader, with the
     // colour beside it so a fogged pixel shader needs nothing but varyings to
@@ -2338,7 +2541,7 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         const wv = HYBRID_CONSTANTS.WORLD_VIEW;
         const camera = `(mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}])`
             + ` * vec4f(${vertex}, 1.0))`;
-        const amount = fogSource === FOG_SOURCE.TABLE ? '0.0'
+        const amount = fogSource === FOG_SOURCE.TABLE ? 'out.oPos.z * out.oPos.w'
             : vertexFog
                 ? `fogFactorOf(${options.rangeFog ? `length(${camera}.xyz)` : `abs(${camera}.z)`})`
                 : specularAlpha;
@@ -2350,6 +2553,55 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             + ` o${FOG_RANGE_LOCATION}: vec4f,`);
         outputs.push(FOG_RANGE_LOCATION);
         body.push(`    out.o${FOG_RANGE_LOCATION} = c[${HYBRID_CONSTANTS.FOG}];`);
+    }
+    const clipCount = options.clip && vertex ? options.clip.count : 0;
+    const lighting = options.lighting && vertex && !pretransformed ? options.lighting : null;
+    const lightingRegister = HYBRID_CONSTANTS.COUNT + clipCount;
+    if (lighting)
+    {
+        const row = (/** @type {number} */ offset)=>`c[${lightingRegister + offset}]`;
+        const matrix = (/** @type {number} */ offset)=>
+            `mat4x4f(${row(offset)}, ${row(offset + 1)}, ${row(offset + 2)}, ${row(offset + 3)})`;
+        const materials = ['materialDiffuse', 'materialAmbient', 'materialSpecular',
+            'materialEmissive'];
+        const name = (/** @type {string} */ colour)=>(colour === 'diffuse' ? 0 : 1);
+        body.push('    var litDiffuse = vec4f(0.0);', '    var litSpecular = vec4f(0.0);',
+            lightingBody(lighting,
+                colour=>(colour === 'normal' ? hasNormal : colours.has(name(colour))),
+                options.specularEnable === true, options.normalizeNormals === true,
+                colour=>/** @type {string} */ (colours.get(name(colour))), {
+                    position: /** @type {string} */ (vertex), normal,
+                    world: matrix(HYBRID_LIGHTING.WORLD),
+                    normalMatrix: matrix(HYBRID_LIGHTING.NORMAL_MATRIX),
+                    eye: row(HYBRID_LIGHTING.EYE), ambient: row(HYBRID_LIGHTING.AMBIENT),
+                    light: index=>{
+                        const first = HYBRID_LIGHTING.LIGHTS + index * HYBRID_LIGHTING.LIGHT_ROWS;
+                        return `Light(${Array.from({ length: HYBRID_LIGHTING.LIGHT_ROWS },
+                            (_, at)=>row(first + at)).join(', ')})`;
+                    },
+                    material: material=>row(HYBRID_LIGHTING.MATERIAL + materials.indexOf(material)),
+                    diffuse: 'litDiffuse', specular: 'litSpecular', specularOff: 'vec4f(0.0)',
+                }));
+        const lit = [
+            'litDiffuse',
+            options.specularEnable === true ? `vec4f(litSpecular.rgb, ${specularAlpha})`
+                : colours.get(1) ?? 'vec4f(0.0, 0.0, 0.0, 1.0)',
+        ];
+        for (const [index, value] of lit.entries())
+        {
+            const location = varyingLocation(D3DDECLUSAGE.COLOR, index);
+            if (!outputs.includes(location))
+            {
+                if (!alsoWrite.includes(location))
+                {
+                    continue;
+                }
+                outputFields.push(`    @location(${location})`
+                    + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
+                outputs.push(location);
+            }
+            body.push(`    out.o${location} = ${value};`);
+        }
     }
     for (const location of alsoWrite)
     {
@@ -2364,8 +2616,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             // adds v1 as nothing and scales by v1.a as nothing.
             const diffuse = location === varyingLocation(D3DDECLUSAGE.COLOR, 0);
             const specular = location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
-            body.push(`    out.o${location} = ${diffuse ? 'vec4f(1.0)'
-                : specular ? 'vec4f(0.0, 0.0, 0.0, 1.0)' : 'vec4f(0.0)'};`);
+            const none = diffuse ? 'vec4f(1.0)' : specular ? 'vec4f(0.0, 0.0, 0.0, 1.0)'
+                : 'vec4f(0.0)';
+            body.push(`    out.o${location} = ${handedOn.get(location) ?? none};`);
         }
     }
     if (options.points)
@@ -2397,12 +2650,16 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
         `    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${HYBRID_CONSTANTS.VIEWPORT}].zw`
             + ' * 0.5, out.oPos.zw);');
+    const constants = lighting ? lightingRegister + HYBRID_LIGHTING.LIGHTS
+        + lighting.lights.length * HYBRID_LIGHTING.LIGHT_ROWS
+        : HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0);
     const wgsl = [
         ...moduleHeader({
-            vertex: true, constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0), samplers: [],
+            vertex: true, constants, samplers: [],
             inputFields, outputFields, clipDistances: clip?.distances === true,
         }),
         D3D_MATH,
+        ...(lighting ? [LIGHT_STRUCT.trimEnd(), functionDeclarations(lighting, 0).trimEnd()] : []),
         // The fog curve over the fixed function's own range row.
         fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`, true).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
@@ -2425,17 +2682,31 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     ].join('\n');
     return {
         wgsl, entry: 'vs_main', inputs, outputs, reads: [], samplers: [],
-        constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0),
+        constants,
         ...(clip ? { clipRegister: HYBRID_CONSTANTS.COUNT } : {}),
+        ...(lighting ? { lightingRegister } : {}),
         error: position ? null : 'the declaration carries no position',
     };
 }
 
+/**
+ * Where a shader reads the values no WGSL literal spells: NaN, +Inf, -Inf.
+ * Read from a private variable, they are made when the shader runs rather
+ * than refused as a constant expression; a def of one in a shader keeps it
+ * (Wine's d3d9 fp_special_test).
+ */
+const NON_FINITE = 'var<private> _nonFinite: vec4u = vec4u(0x7fc00000u, 0x7f800000u,'
+    + ' 0xff800000u, 0u);';
+
 /** @param {number} value @returns {string} a WGSL float literal */
 function literal(value){
+    if (Number.isNaN(value))
+    {
+        return 'bitcast<f32>(_nonFinite.x)';
+    }
     if (!Number.isFinite(value))
     {
-        return '0.0';
+        return value > 0 ? 'bitcast<f32>(_nonFinite.y)' : 'bitcast<f32>(_nonFinite.z)';
     }
     const text = String(value);
     return text.includes('.') || text.includes('e') ? text : `${text}.0`;

@@ -29,7 +29,10 @@ import * as engine from '../../../../../cork/src/index.js';
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
 const CONFIG = {
     memorySize: 4 << 20, trapPort: 0xb077, entryVector: 0x7000, initialStack: 0x300000,
-    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true },
+    closedBelow: 0x10000, cork: { hotThreshold: 4, wasmInterpreter: true,
+        // Slices end by their instruction count alone, not by the time a busy
+        // machine let them take.
+        sliceMs: Infinity },
 };
 const CODE = 0x20000;
 const DATA = 0x100000;
@@ -78,8 +81,12 @@ function program(next){
     const forms = 3 + next(6);
     for (let form = 0; form < forms; form++)
     {
-        switch (next(12))
+        switch (next(13))
         {
+            case 12:
+                // push edx; lock cmpxchg8b [ebx+d]; pop edx (the rounds' count, which it takes)
+                body.push(0x52, 0xf0, 0x0f, 0xc7, 0x8b, ...u32(at(8)), 0x5a);
+                break;
             case 0: body.push(0x89, 0x83, ...u32(at(4))); break; // mov [ebx+d], eax
             case 1: body.push(0x88, 0x83, ...u32(at(1))); break; // mov [ebx+d], al
             case 2: body.push(0x66, 0x89, 0x83, ...u32(at(2))); break; // mov [ebx+d], ax
@@ -367,14 +374,19 @@ test('a copy kept by what the watch takes while another executor stores is the m
     try
     {
         // Until the loop runs translated on the other executor.
-        for (let warm = 0; warm < 200 && ((await remote.diagnostics())?.modules ?? 0) === 0;
-            warm++)
+        while (((await remote.diagnostics())?.modules ?? 0) === 0)
         {
             await run(16);
             await new Promise(resolve=>setTimeout(resolve, 5));
         }
         assert.ok(((await remote.diagnostics())?.modules ?? 0) > 0, 'translated there');
-        for (let index = 0; index < 8; index++)
+        // Eight runs, and on until a look has fallen inside a slice that
+        // stored: whether one does is how the machine interleaves the two
+        // threads, and a busy one let none of eight do so (eight busy loops
+        // beside the suite). Every run is held to a copy with no stale page; a
+        // clock that never holds a page runs on to the test's timeout.
+        const heldOnce = ()=>held > 0;
+        for (let index = 0; index < 8 || !heldOnce(); index++)
         {
             assert.deepEqual(await run(WIDE - 3), [], `run ${index}: no page of the copy is stale`);
         }

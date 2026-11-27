@@ -13,6 +13,7 @@ import {
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 const TOKEN_QUERY = 8;
 const TokenUser = 1;
 const TokenGroups = 2;
@@ -24,7 +25,11 @@ const NEEDED = 0x104;
 const BUFFER = 0x200;
 const SID = 0x600;
 
-function setup(/** @type {{ currentThread?: () => any }} */ extra = {}){
+/**
+ * @param {{ currentThread?: () => any, pipeClient?: (handle: number) => any,
+ *     pointerSize?: 4 | 8 }} [extra]
+ */
+function setup(extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -87,6 +92,42 @@ test('DuplicateToken hands a second token handle with the level it was given', (
     assert.deepEqual(errors, [ERROR_INVALID_HANDLE]);
 });
 
+test('DuplicateTokenEx makes the token kind asked for; SetTokenInformation moves its session', ()=>{
+    // A service starts a program in the user's session: a primary token
+    // duplicated from its own, moved to that session, handed to
+    // CreateProcessAsUser.
+    const { bytes, errors, fns, dword, table } = setup();
+    const TokenSessionId = 12;
+    const TokenType = 8;
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+    assert.equal(fns.DuplicateTokenEx.argBytes, 24);
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0x2000000, 0, 2, 1, NEEDED]), 1);
+    const primary = dword(NEEDED);
+    assert.notEqual(primary, token);
+    assert.equal(fns.GetTokenInformation.handler([primary, TokenType, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 1, 'TokenPrimary');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 3, 2, NEEDED]), 1);
+    assert.equal(table.get(dword(NEEDED))?.object.impersonationLevel, 3, 'SecurityDelegation');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 3, NEEDED]), 0, 'no third kind');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+
+    const SESSION = 0x300;
+    new DataView(bytes.buffer).setUint32(SESSION, 1, true);
+    assert.equal(fns.SetTokenInformation.argBytes, 16);
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenSessionId, SESSION, 4]), 1);
+    assert.equal(fns.GetTokenInformation.handler([primary, TokenSessionId, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 1, 'the session it was moved to');
+    assert.equal(fns.GetTokenInformation.handler([token, TokenSessionId, BUFFER, 4, OUT]), 1);
+    assert.equal(dword(BUFFER), 0, 'and the token it came from stays in the console\'s');
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenSessionId, SESSION, 2]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetTokenInformation.handler([primary, TokenType, SESSION, 4]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'a class only ever read');
+    assert.equal(fns.SetTokenInformation.handler([0x1234, TokenSessionId, SESSION, 4]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
 test('the sequence an installer asks whether it is an administrator with', ()=>{
     // OpenThreadToken has to fail with ERROR_NO_TOKEN and nothing else: that
     // is the code the program tests before it falls back to the process's
@@ -144,7 +185,6 @@ test('the owner, primary group, type and session of a token', ()=>{
     const TokenPrimaryGroup = 5;
     const TokenType = 8;
     const TokenSessionId = 12;
-    const ERROR_INVALID_PARAMETER = 87;
     const { bytes, errors, fns, dword } = setup();
     fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
     const token = dword(OUT);
@@ -199,7 +239,112 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     assert.deepEqual(errors, [], 'the last error is left alone');
     assert.deepEqual(Object.fromEntries(Object.entries(natives)
         .map(([name, entry])=>[name, entry.argBytes])),
-    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24 });
+    { RtlAreAllAccessesGranted: 8, RtlAreAnyAccessesGranted: 8, RtlMapGenericMask: 8,
+        NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtOpenThreadToken: 16,
+        NtOpenThreadTokenEx: 20, NtAdjustPrivilegesToken: 24,
+        NtSetSecurityObject: 12, NtQuerySecurityObject: 20, NtAccessCheck: 32,
+        NtDuplicateToken: 24 });
+});
+
+test('whether granted rights cover all the desired ones, or any', ()=>{
+    // advapi32's and ntdll's names for the one test (Wine's ntdll:rtl).
+    const { fns } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(fns.AreAllAccessesGranted.handler([0x7, 0x3]), 1);
+    assert.equal(fns.AreAllAccessesGranted.handler([0x1, 0x3]), 0);
+    assert.equal(fns.AreAnyAccessesGranted.handler([0x1, 0x3]), 1);
+    assert.equal(fns.AreAnyAccessesGranted.handler([0x4, 0x3]), 0);
+    assert.equal(natives.RtlAreAllAccessesGranted.handler([0x7, 0]), 1, 'nothing asked, all given');
+    assert.equal(natives.RtlMapGenericMask, fns.MapGenericMask);
+});
+
+test('NtDuplicateToken clones a token, its level from the SecurityQualityOfService', ()=>{
+    const { fns, dword, bytes, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+
+    // No OBJECT_ATTRIBUTES: an impersonation token at SecurityAnonymous (0).
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, OUT]), 0, 'STATUS_SUCCESS');
+    const anonymous = dword(OUT);
+    assert.notEqual(anonymous, token, 'a handle of its own');
+    assert.equal(table.get(anonymous)?.object?.impersonationLevel, 0);
+
+    // A SECURITY_QUALITY_OF_SERVICE at QOS naming SecurityIdentification (2),
+    // pointed at by the OBJECT_ATTRIBUTES at ATTR (its field at +20).
+    const ATTR = 0x700;
+    const QOS = 0x740;
+    bytes.fill(0, ATTR, ATTR + 24);
+    new DataView(bytes.buffer).setUint32(ATTR + 20, QOS, true);
+    new DataView(bytes.buffer).setUint32(QOS + 4, 2, true);
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 2, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, 2, 'SecurityIdentification');
+
+    // A primary token (type 1) carries no impersonation level at all.
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, ATTR, 0, 1, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object?.impersonationLevel, undefined);
+
+    assert.equal(natives.NtDuplicateToken.handler([0x1234, 0, 0, 0, 2, OUT]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtDuplicateToken.handler([token, 0, 0, 0, 2, 0]), 0xc0000005,
+        'nowhere to put it: STATUS_ACCESS_VIOLATION');
+});
+
+test('the native security calls set, query and check a kernel object, as NTSTATUS', ()=>{
+    // ntdll's NtSetSecurityObject/NtQuerySecurityObject keep and hand back
+    // the same descriptor the win32 pair do, and NtAccessCheck answers the
+    // walk as a status with an NTSTATUS *AccessStatus, not a BOOL.
+    const { bytes, fns, dword, table } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // A self-relative descriptor with a present DACL of one ACE allowing
+    // BUILTIN\Administrators 0x1 (as the win32 kernel-object test builds).
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 40);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0x80], sd + 2);
+    const dacl = sd + 20;
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl - sd, true);
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], dacl);
+
+    assert.equal(natives.NtSetSecurityObject.handler([0x9999, 0x4, sd]), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, 0]), 0xc0000005,
+        'no descriptor: STATUS_ACCESS_VIOLATION');
+    assert.equal(natives.NtSetSecurityObject.handler([0x40, 0x4, sd]), 0, 'STATUS_SUCCESS');
+
+    // Query it back on the other handle: sized first, then written.
+    const OUT_SIZE = 0x600;
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, 0, OUT_SIZE]),
+        0xc0000023, 'STATUS_BUFFER_TOO_SMALL');
+    const size = dword(OUT_SIZE);
+    assert.ok(size > 20);
+    assert.equal(natives.NtQuerySecurityObject.handler([0x44, 0x4, 0x800, size, OUT_SIZE]), 0);
+    const control = bytes[0x800 + 2] | bytes[0x800 + 3] << 8;
+    assert.equal(control & 0x8004, 0x8004, 'self-relative, with a DACL');
+    assert.equal(natives.NtQuerySecurityObject.handler([0x9999, 0x4, 0x800, size, OUT_SIZE]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+
+    // Check the token the setup grants against that descriptor. The mapping
+    // is identity; the granted mask and the NTSTATUS verdict are written out.
+    assert.equal(natives.NtOpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 0);
+    const token = dword(OUT);
+    const MAPPING = 0x900;
+    bytes.set([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x1f], MAPPING);
+    const GRANTED = 0xa00;
+    const STATUS = 0xa10;
+    const PRIV = 0xa20;
+    const PRIVLEN = 0xa80;
+    new DataView(bytes.buffer).setUint32(PRIVLEN, 0x40, true);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, STATUS]), 0, 'STATUS_SUCCESS: the check ran');
+    assert.equal(dword(STATUS), 0, 'STATUS_SUCCESS: access granted');
+    assert.equal(dword(GRANTED), 0x1);
+    assert.equal(natives.NtAccessCheck.handler([sd, token, 0x1, MAPPING, PRIV, PRIVLEN,
+        GRANTED, 0]), 0xc0000005, 'nowhere for the status: STATUS_ACCESS_VIOLATION');
 });
 
 test('CopySid copies a SID that fits and refuses one that does not', ()=>{
@@ -236,6 +381,9 @@ test('a privilege is looked up by its fixed number and granted on the process to
     bytes.set([...'SeNoSuchPrivilege\0'].map(c=>c.charCodeAt(0)), NAME);
     assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 0);
     assert.equal(errors.at(-1), 1313, 'ERROR_NO_SUCH_PRIVILEGE');
+    bytes.set([...'SeCreateSymbolicLinkPrivilege\0'].map(c=>c.charCodeAt(0)), NAME);
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 1, 'a Windows 7 name');
+    assert.equal(dword(LUID), 35);
 
     assert.equal(fns.OpenProcessToken.handler([0xffffffff, 0x28, TOKEN_OUT]), 1);
     const token = dword(TOKEN_OUT);
@@ -405,9 +553,38 @@ test('a denied ACE ahead of an allowed one keeps its rights from the account', (
 
     assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 1, SID]), 0);
     assert.equal(errors.at(-1), 1344, 'ERROR_ALLOTTED_SPACE_EXCEEDED');
-    assert.equal(fns.SetSecurityInfo.handler(), 0);
     assert.equal(fns.SetSecurityInfo.argBytes, 28);
-    assert.equal(fns.SetKernelObjectSecurity.handler(), 1);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x7777, 4, 0]), 0, 'no such object');
+    assert.equal(errors.at(-1), 6);
+});
+
+test('a kernel object keeps the DACL and the label set on it, for every handle onto it', ()=>{
+    const { bytes, fns, dword, table } = setup();
+    const object = {};
+    table.set(0x40, { type: 'event', object });
+    table.set(0x44, { type: 'event', object });
+    // An absolute descriptor at BUFFER: a present DACL of one ACE, and a SACL
+    // with a label (0x11) and an allowed ACE, of revision 3.
+    const sd = BUFFER;
+    bytes.fill(0, sd, sd + 20);
+    bytes[sd] = 1;
+    bytes.set([0x14, 0], sd + 2);
+    const dacl = 0x300;
+    const sacl = 0x380;
+    bytes.set([2, 0, 28, 0, 1, 0, 0, 0, 0, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], dacl);
+    bytes.set([3, 0, 48, 0, 2, 0, 0, 0, 0x11, 0, 20, 0, 1, 0, 0, 0,
+        1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0,
+        0, 0, 20, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], sacl);
+    new DataView(bytes.buffer).setUint32(sd + 12, sacl, true);
+    new DataView(bytes.buffer).setUint32(sd + 16, dacl, true);
+    assert.equal(fns.SetKernelObjectSecurity.handler([0x40, 0x4 | 0x10, sd]), 1);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x10, 0x500, 0x200, NEEDED]), 1);
+    const at = 0x500 + dword(0x500 + 12);
+    assert.deepEqual([bytes[at], bytes[at + 4]], [3, 1], 'the label alone, in its revision');
+    assert.equal(bytes[at + 8], 0x11);
+    assert.equal(fns.GetKernelObjectSecurity.handler([0x44, 0x4, 0x500, 0x200, NEEDED]), 1);
+    assert.equal(bytes[0x500 + dword(0x500 + 16) + 4], 1, 'the DACL set: one ACE');
 });
 
 test('GetKernelObjectSecurity sizes, then writes a self-relative descriptor of the parts asked '
@@ -580,6 +757,25 @@ test('GetAce points into the ACL at the ACE asked for, and refuses one past the 
     assert.equal(fns.GetAce.handler([ACL_AT, 0, OUT]), 0, 'not an ACL revision');
     assert.equal(fns.GetAce.handler([0, 0, OUT]), 0, 'no ACL');
     assert.deepEqual(errors, [87, 87, 87], 'ERROR_INVALID_PARAMETER');
+});
+
+test('DeleteAce takes one ACE out, moves the rest down, and refuses one past the last', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    const ACL_AT = 0x400;
+    assert.equal(fns.DeleteAce.argBytes, 8);
+    bytes.set(USERS, SID);
+    assert.equal(fns.InitializeAcl.handler([ACL_AT, 0x80, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAce.handler([ACL_AT, 2, 0x20019, SID]), 1);
+    bytes.set(EVERYONE, SID);
+    assert.equal(fns.AddAccessDeniedAce.handler([ACL_AT, 2, 0x10000, SID]), 1);
+
+    assert.equal(fns.DeleteAce.handler([ACL_AT, 0]), 1);
+    assert.equal(bytes[ACL_AT + 4], 1, 'one ACE left');
+    assert.equal(fns.GetAce.handler([ACL_AT, 0, OUT]), 1);
+    assert.equal(dword(OUT), ACL_AT + 8, 'the second moved to the first place');
+    assert.deepEqual([bytes[dword(OUT)], dword(dword(OUT) + 4)], [1, 0x10000]);
+    assert.equal(fns.DeleteAce.handler([ACL_AT, 1]), 0, 'past the last');
+    assert.deepEqual(errors, [87], 'ERROR_INVALID_PARAMETER');
 });
 
 test('LookupAccountSid names the well-known SIDs as XP does, and sizes as Windows sizes', ()=>{
@@ -910,6 +1106,17 @@ test('SetThreadToken gives a thread the impersonation token OpenThreadToken then
     assert.equal(fns.SetThreadToken.handler([BUFFER, 0]), 1, 'NULL reverts');
     assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
     assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+
+    // The native forms answer the same with a status, the last error left alone.
+    const natives = fns[TOKEN_NATIVES];
+    const before = errors.length;
+    assert.equal(natives.NtOpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]),
+        0xc000007c, 'STATUS_NO_TOKEN');
+    assert.equal(fns.SetThreadToken.handler([0, impersonation]), 1);
+    assert.equal(natives.NtOpenThreadTokenEx.handler([CURRENT_THREAD, TOKEN_QUERY, 0, 0, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object, table.get(impersonation)?.object);
+    assert.equal(natives.NtOpenThreadToken.handler([0x7777, TOKEN_QUERY, 0, OUT]), 0xc0000008);
+    assert.equal(errors.length, before, 'no last error from a native call');
 });
 
 test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it away', ()=>{
@@ -932,6 +1139,22 @@ test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it aw
     assert.equal(fns.ImpersonateSelf.argBytes, 4);
     assert.equal(fns.RevertToSelf.argBytes, 0);
     assert.equal(fns.SetThreadToken.argBytes, 8);
+});
+
+test('ImpersonateNamedPipeClient takes the client on once the server has read from it', ()=>{
+    /** @type {Record<number, 'none' | 'unknown' | 'client'>} */
+    const pipes = { 0x40: 'unknown', 0x44: 'client' };
+    const { errors, fns, table, dword } = setup({
+        pipeClient: (/** @type {number} */ handle)=>pipes[handle] ?? 'none' });
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x40]), 0);
+    assert.equal(errors.at(-1), 1368, 'ERROR_CANNOT_IMPERSONATE: nothing read yet');
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x48]), 0);
+    assert.equal(errors.at(-1), 6, 'no pipe\'s server end');
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x44]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    assert.equal(table.get(dword(OUT))?.object.impersonationLevel, 2, 'SecurityImpersonation');
+    assert.equal(fns.RevertToSelf.handler(), 1);
+    assert.equal(fns.ImpersonateNamedPipeClient.argBytes, 4);
 });
 
 test('a descriptor is read back through its getters, absolute or self-relative', ()=>{
@@ -1017,3 +1240,186 @@ test('ConvertStringSecurityDescriptorToSecurityDescriptor lays out the descripto
         assert.equal(convert([putWide(bytes, 0x300, 'D:(A;;GA;;;WD)'), 2, OUT, 0]), 0);
         assert.deepEqual(errors.filter(code=>code !== 0), [87, 1305]);
     });
+
+test('an ACL takes the highest revision an ACE was added with; one past the last stops it', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], SID); // S-1-1-0
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 3]), 1, 'revision 3 is one');
+    assert.equal(fns.InitializeAcl.handler([acl, 256, 2]), 1);
+    assert.equal(fns.AddAccessAllowedAceEx.handler([acl, 4, 0x4, 0x10, SID]), 1);
+    assert.equal(bytes[acl], 4);
+    assert.equal(bytes[acl + 8 + 1], 0x4, 'the ACE keeps its flags');
+    const ace = bytes.slice(acl + 8, acl + 8 + 20);
+    bytes.set(ace, 0x500);
+    assert.equal(fns.AddAce.handler([acl, 5, 0xffffffff, 0x500, 20]), 1);
+    assert.equal(bytes[acl], 5, 'written as given');
+    assert.equal(fns.AddAce.handler([acl, 2, 0xffffffff, 0x500, 20]), 0);
+    assert.equal(errors.at(-1), 87);
+});
+
+test('AddMandatoryAce takes only the three policies, as a label ACE', ()=>{
+    const { bytes, errors, fns } = setup();
+    const acl = 0x300;
+    bytes.set([1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0], SID); // S-1-16-4096
+    fns.InitializeAcl.handler([acl, 256, 2]);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 0x1234, SID]), 0);
+    assert.equal(errors.at(-1), 87);
+    assert.equal(fns.AddMandatoryAce.handler([acl, 2, 0, 1, SID]), 1);
+    assert.deepEqual([...bytes.subarray(acl + 8, acl + 12)], [0x11, 0, 20, 0]);
+});
+
+test('DuplicateTokenEx makes a primary token or an impersonation one, as asked', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 2, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 2, 'SecurityImpersonation');
+    assert.equal(fns.DuplicateTokenEx.handler([token, 0, 0, 2, 1, OUT]), 1);
+    assert.equal(fns.GetTokenInformation.handler([dword(OUT), 9, BUFFER, 4, NEEDED]), 0,
+        'a primary token has no impersonation level');
+    assert.equal(errors.at(-1), 87);
+});
+
+test('TokenPrivileges lists the held privileges, change-notify enabled', ()=>{
+    const { errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.GetTokenInformation.handler([token, 3, 0, 0, NEEDED]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    const count = (dword(NEEDED) - 4) / 12;
+    errors.length = 0;
+    assert.equal(fns.GetTokenInformation.handler([token, 3, BUFFER, dword(NEEDED), NEEDED]), 1);
+    assert.equal(errors.length, 0, 'a success leaves the last error alone');
+    assert.equal(dword(BUFFER), count);
+    const changeNotify = Array.from({ length: count }, (_, at)=>BUFFER + 4 + at * 12)
+        .find(at=>dword(at) === 23);
+    assert.ok(changeNotify !== undefined);
+    assert.equal(dword(changeNotify + 8), 3);
+});
+
+test('the default DACL can be set to none, and is answered so', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 0]), 0);
+    assert.equal(errors.at(-1), 24, 'ERROR_BAD_LENGTH');
+    assert.equal(fns.SetTokenInformation.handler([token, 6, 0, 4]), 0);
+    assert.equal(errors.at(-1), 998, 'ERROR_NOACCESS');
+    bytes.fill(0, BUFFER, BUFFER + 4);
+    assert.equal(fns.SetTokenInformation.handler([token, 6, BUFFER, 4]), 1);
+    assert.equal(fns.GetTokenInformation.handler([token, 6, BUFFER, 64, NEEDED]), 1);
+    assert.equal(dword(BUFFER), 0);
+    assert.equal(dword(NEEDED), 4);
+});
+
+test('AccessCheck reads a self-relative descriptor; a null DACL grants the mapping\'s all', ()=>{
+    const { bytes, fns, dword } = setup();
+    fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]);
+    const token = dword(OUT);
+    const { bytes: descriptor } = selfRelativeDescriptor({ dacl: null });
+    bytes.set(descriptor, BUFFER);
+    const mapping = 0x500;
+    [0x120001, 0x120002, 0x120004, 0x1f0001]
+        .forEach((value, at)=>new DataView(bytes.buffer).setUint32(mapping + at * 4, value, true));
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    assert.equal(fns.IsValidSecurityDescriptor.handler([BUFFER]), 1);
+    assert.equal(fns.AccessCheck.handler([BUFFER, token, 0x02000000, mapping, 0x580, NEEDED,
+        0x5c0, 0x5c4]), 1);
+    assert.equal(dword(0x5c4), 1);
+    assert.equal(dword(0x5c0), 0x1f0001);
+});
+
+test('LookupAccountName finds a service account by the name without its space', ()=>{
+    const { bytes, fns, dword } = setup();
+    bytes.set([...'LocalService'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    new DataView(bytes.buffer).setUint32(NEEDED, 64, true);
+    new DataView(bytes.buffer).setUint32(0x5f0, 64, true);
+    assert.equal(fns.LookupAccountNameA.handler([0, 0x300, SID, NEEDED, 0x400, 0x5f0, 0x5f4]), 1);
+    assert.deepEqual([...bytes.subarray(SID, SID + 12)], [1, 1, 0, 0, 0, 0, 0, 5, 19, 0, 0, 0]);
+    assert.equal(dword(0x5f4), 5, 'SidTypeWellKnownGroup');
+});
+
+test('ConvertStringSidToSid reads hex anywhere, and wants a sub-authority', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    bytes.set([...'S-0x1-0XC-0x1a'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUT), dword(OUT) + 12)],
+        [1, 1, 0, 0, 0, 0, 0, 12, 26, 0, 0, 0]);
+    bytes.set([...'S-1-5'].map(c=>c.charCodeAt(0)).concat(0), 0x300);
+    assert.equal(fns.ConvertStringSidToSidA.handler([0x300, OUT]), 0);
+    assert.equal(errors.at(-1), 1337);
+});
+
+test('SaferCreateLevel opens a level, SaferComputeTokenFromLevel makes a token at it', ()=>{
+    // Steam's client starts programs with a token computed at the normal
+    // user's level; one that restricts nothing may be asked for as no token.
+    const { errors, fns, dword, table } = setup();
+    const SAFER_SCOPEID_USER = 2;
+    const SAFER_LEVELID_NORMALUSER = 0x20000;
+    const SAFER_LEVELID_FULLYTRUSTED = 0x40000;
+    const SAFER_TOKEN_NULL_IF_EQUAL = 1;
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, 1,
+        OUT, 0]), 1);
+    const level = dword(OUT);
+    assert.equal(table.get(level)?.type, 'saferLevel');
+    assert.equal(fns.SaferComputeTokenFromLevel.handler([level, 0, NEEDED, 0, 0]), 1);
+    assert.equal(table.get(dword(NEEDED))?.type, 'token');
+    assert.equal(table.get(dword(NEEDED))?.object.process, CURRENT_PROCESS,
+        'made from the process\'s own when none is given');
+
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, SAFER_LEVELID_FULLYTRUSTED, 1,
+        OUT, 0]), 1);
+    assert.equal(fns.SaferComputeTokenFromLevel.handler([dword(OUT), 0, NEEDED,
+        SAFER_TOKEN_NULL_IF_EQUAL, 0]), 1);
+    assert.equal(dword(NEEDED), 0, 'fully trusted changes nothing: no token');
+
+    assert.equal(fns.SaferCreateLevel.handler([3, SAFER_LEVELID_NORMALUSER, 1, OUT, 0]), 0);
+    assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, 0x1234, 1, OUT, 0]), 0);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.SaferCloseLevel.handler([level]), 1);
+});
+
+test('a 64-bit process\'s token information has pointers a quadword wide: TOKEN_OWNER\'s SID'
+    + ' after 8, SID_AND_ATTRIBUTES 16 bytes, TOKEN_GROUPS\' entries from 8', ()=>{
+    const { bytes, fns, dword } = setup({ pointerSize: 8 });
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+    /** The quadword at `at`, as the 64-bit program reads its pointer. @param {number} at */
+    const quad = at=>dword(at) + dword(at + 4) * 2 ** 32;
+    const TokenOwner = 4;
+    const TokenIntegrityLevel = 25;
+
+    for (const [tokenClass, fixed] of [[TokenOwner, 8], [5, 8], [TokenUser, 16],
+        [TokenIntegrityLevel, 16]])
+    {
+        bytes.fill(0xdd, BUFFER, BUFFER + 0x100);
+        assert.equal(fns.GetTokenInformation.handler([token, tokenClass, 0, 0, NEEDED]), 0);
+        const needed = dword(NEEDED);
+        assert.equal(fns.GetTokenInformation.handler([token, tokenClass, BUFFER, needed, NEEDED]),
+            1, `class ${tokenClass}`);
+        assert.equal(quad(BUFFER), BUFFER + fixed, `class ${tokenClass}: its SID after ${fixed}`
+            + ' bytes, the pointer whole');
+        assert.equal(bytes[BUFFER + fixed], 1, `class ${tokenClass}: a SID there, revision 1`);
+        assert.equal(needed, fixed + 8 + 4 * bytes[BUFFER + fixed + 1],
+            `class ${tokenClass}: as many bytes as the structure and its SID`);
+    }
+    // TOKEN_MANDATORY_LABEL's attributes are at 8, after the pointer.
+    assert.equal(fns.GetTokenInformation.handler([token, TokenIntegrityLevel, BUFFER, 0x100,
+        NEEDED]), 1);
+    assert.equal(dword(BUFFER + 8) & 0x20, 0x20, 'SE_GROUP_INTEGRITY at 8');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenGroups, 0, 0, NEEDED]), 0);
+    const needed = dword(NEEDED);
+    assert.equal(fns.GetTokenInformation.handler([token, TokenGroups, BUFFER, needed, NEEDED]), 1);
+    const count = dword(BUFFER);
+    assert.ok(count >= 2);
+    for (let at = 0; at < count; at++)
+    {
+        const sid = quad(BUFFER + 8 + at * 16);
+        assert.ok(sid >= BUFFER + 8 + count * 16 && sid < BUFFER + needed,
+            `group ${at}: its SID after the entries, inside the buffer`);
+        assert.equal(dword(BUFFER + 8 + at * 16 + 8) & 0x4, 0x4, `group ${at}: enabled, at 8`);
+    }
+});

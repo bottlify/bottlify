@@ -42,6 +42,9 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
     // The pipeline blends alpha with its own factors under
     // D3DRS_SEPARATEALPHABLENDENABLE, so the device says so.
     assert.equal(words.PrimitiveMiscCaps & 0x00020000, 0x00020000);
+    // Pre-transformed vertices are clipped under D3DRS_CLIPPING, so the
+    // device says D3DPMISCCAPS_CLIPTLVERTS (Wine's d3d9 depth_clamp_test).
+    assert.equal(words.PrimitiveMiscCaps & 0x00000200, 0x00000200);
     // Each D3DDTCAPS bit claimed is a type the programmable path has a vertex
     // format for: bit 0 is UBYTE4 (5), bit n past it is D3DDECLTYPE 7 + n.
     assert.notEqual(words.DeclTypes & 0x2, 0, 'UBYTE4N');
@@ -57,15 +60,19 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
     assert.equal(words.DeclTypes & ~0x3ff, 0);
 });
 
-test('the device claims full-screen blending, any texture size and stream offsets', ()=>{
+test('the device claims full-screen blending, any texture size, stream offsets and'
+    + ' stretches from textures', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
     // D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD: ALPHABLENDENABLE holds however the chain presents.
     assert.equal(words.Caps3 & 0x20, 0x20);
-    // D3DPTEXTURECAPS_NONPOW2CONDITIONAL without POW2: no texture size is refused.
-    assert.equal(words.TextureCaps & 0x100, 0x100);
+    // Neither D3DPTEXTURECAPS_POW2 nor NONPOW2CONDITIONAL: no texture size is
+    // refused or held to clamping.
+    assert.equal(words.TextureCaps & 0x100, 0);
     assert.equal(words.TextureCaps & 0x2, 0);
     // D3DDEVCAPS2_STREAMOFFSET: SetStreamSource's offset is read.
     assert.equal(words.DevCaps2 & 0x1, 0x1);
+    // D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES: a target texture's level is a StretchRect source.
+    assert.equal(words.DevCaps2 & 0x10, 0x10);
 });
 
 test('a device that runs no shader says so with the version macros at zero', ()=>{
@@ -147,10 +154,12 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.PrimitiveMiscCaps & (0x00000400 | 0x00008000), 0x00008400,
         'TSSARGTEMP and PERSTAGECONSTANT, the generated cascade\'s registers');
     assert.equal(words.MaxVolumeExtent, 256);
-    assert.equal(words.NumSimultaneousRTs, 1);
+    assert.equal(words.NumSimultaneousRTs, 4, 'oC0 to oC3');
     assert.equal(words.StretchRectFilterCaps, 0x03000300,
         'point and linear, minifying and magnifying');
     assert.equal(words.MaxAnisotropy, 16, 'WebGPU\'s ceiling');
+    assert.equal(words.SrcBlendCaps & words.DestBlendCaps & 0x2000, 0x2000,
+        'D3DPBLENDCAPS_BLENDFACTOR: D3DRS_BLENDFACTOR is the pass\'s blend constant');
     assert.equal(words.Caps2 & 0x00020000, 0, 'no full-screen gamma');
     assert.equal(words.Caps2 & 0x40000000, 0x40000000,
         'D3DCAPS2_CANAUTOGENMIPMAP: the renderer makes the levels');

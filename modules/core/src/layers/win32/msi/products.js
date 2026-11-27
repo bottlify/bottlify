@@ -20,16 +20,18 @@
  */
 
 import { INSTALLSTATE } from './session.js';
-import { squashGuid, unsquashGuid, valueText } from './registration.js';
+import { squashGuid, valueText } from './registration.js';
 import { decodeShellLink } from '../common/shell-link.js';
 import { createMd5 } from '../crypto/digest.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { REG_EXPAND_SZ, REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { BASE85 } from './system.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
@@ -155,6 +157,11 @@ export function decomposeDescriptor(descriptor){
  * @property {import('./registration.js').Hive} hive
  * @property {any} files
  * @property {(path: string) => string} fullPath
+ * @property {(path: string) => any} statPath
+ *     The entry a program's path names; null for none, a path that names
+ *     nothing (an empty one) among them.
+ * @property {(path: string) => Promise<Uint8Array | null>} readPath
+ *     The bytes of the file a program's path names, or null.
  * @property {(wide: boolean) => (address: number) => string | null} reader
  * @property {(wide: boolean, text: string, buffer: number, size: number) => number} putString
  * @property {(wide: boolean, text: string, buffer: number) => void} putFixed
@@ -566,7 +573,7 @@ export function createProductFunctions(context){
             }
             if ((date >>> 0) !== 0)
             {
-                context.writeMemory(date >>> 0, new Uint8Array(2));
+                context.writeMemory(wholeAddress(date), new Uint8Array(2));
             }
             return ERROR_SUCCESS;
         }),
@@ -767,14 +774,19 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await context.readFile(context.fullPath(name));
+            // An empty path names no directory to look in.
+            if (name === '')
+            {
+                return ERROR_PATH_NOT_FOUND;
+            }
+            const bytes = await context.readPath(name);
             if (!bytes)
             {
                 return ERROR_FILE_NOT_FOUND;
             }
             const md5 = createMd5();
             md5.update(bytes);
-            context.writeMemory((hash >>> 0) + 4, md5.digest());
+            context.writeMemory(wholeAddress(hash) + 4, md5.digest());
             return ERROR_SUCCESS;
         }),
         ...both('MsiGetFileSignatureInformation', 20, wide=>([path, flags, certificate])=>{
@@ -785,7 +797,7 @@ export function createProductFunctions(context){
                 return E_INVALIDARG | 0;
             }
             writeU32(certificate, 0);
-            const stat = context.files.stat(context.fullPath(name));
+            const stat = context.statPath(name);
             return (!stat || stat.exists === false ? HRESULT_FILE_NOT_FOUND
                 : TRUST_E_NOSIGNATURE) | 0;
         }),
@@ -796,7 +808,7 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const bytes = await context.readFile(context.fullPath(path));
+            const bytes = await context.readPath(path);
             const link = bytes ? decodeShellLink(bytes) : null;
             const parts = link?.darwinId ? decomposeDescriptor(link.darwinId) : null;
             if (!parts)
@@ -961,7 +973,7 @@ export function createProductFunctions(context){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const stat = context.files.stat(context.fullPath(name));
+            const stat = context.statPath(name);
             if (!stat || stat.exists === false)
             {
                 return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
@@ -1595,7 +1607,7 @@ export function createProductFunctions(context){
             // msi.dll's own string table: none of its strings is carried here.
             if ((buffer >>> 0) !== 0 && (room | 0) > 0)
             {
-                context.writeMemory(buffer >>> 0, new Uint8Array(2));
+                context.writeMemory(wholeAddress(buffer), new Uint8Array(2));
             }
             return 0;
         }),
@@ -1699,4 +1711,4 @@ export function createProductFunctions(context){
 /** MsiSourceListGetInfo and SetInfo for a property they do not know. */
 const ERROR_UNKNOWN_PROPERTY_SOURCE = 1608;
 
-export { unsquashGuid, GUID_CHARS };
+export { GUID_CHARS };

@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
 /**
  * dbghelp — the debug help library, on a machine with no symbol files.
  *
@@ -17,6 +20,10 @@
  */
 
 const ERROR_INVALID_ADDRESS = 487;
+/** The signatures an image begins with: MZ, and PE with two zero bytes. */
+const IMAGE_DOS_SIGNATURE = 0x5a4d;
+const IMAGE_NT_SIGNATURE = 0x00004550;
+const ERROR_NOT_SUPPORTED = 50;
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_PATH_NOT_FOUND = 3;
@@ -72,6 +79,7 @@ const WALK_STARTED = 0x4b4c4157;
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           EDX, for a DWORD64 answer: the high half of an x86 address is zero.
  * @property {(address: number) => string} [readCString]
+ * @property {(address: number) => string} [readWide]
  * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null,
  *     mkdir: (path: string) => boolean, currentDirectory?: () => string }} [files]
  *           The volume, for MakeSureDirectoryPathExists.
@@ -79,16 +87,19 @@ const WALK_STARTED = 0x4b4c4157;
 
 /**
  * @param {DbghelpHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => number }>}
+ * @returns {Record<string, { argBytes: number, quadwords?: number[], returns?: string,
+ *     handler: (args: number[]) => number }>}
  */
 export function createDbghelpFunctions(host){
     let options = SYMOPT_UNDNAME;
+    /** The symbol search path SymSetSearchPathW was given. */
+    let searchPath = '';
 
     /** @param {number} address @returns {number | null} */
     const readU32 = address=>{
         try
         {
-            const bytes = host.readMemory(address >>> 0, 4);
+            const bytes = host.readMemory(wholeAddress(address), 4);
             if (bytes.length < 4)
             {
                 return null;
@@ -101,9 +112,88 @@ export function createDbghelpFunctions(host){
         }
     };
 
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        host.writeMemory(wholeAddress(address), Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
+            value >>> 16 & 0xff, value >>> 24 & 0xff));
+    };
+
+    /**
+     * Where an image's data directory lies (IMAGE_DIRECTORY_ENTRY_*), read
+     * from its own headers: as the loader placed it, or, for an image read as
+     * a file, through the section the directory's RVA falls in. Its size and
+     * that section's header go where asked; anything that is not an image, a
+     * directory past the ones it has or one it leaves empty is NULL.
+     *
+     * @param {number} base @param {number} mapped @param {number} entry
+     * @param {number} sizeOut @param {number} sectionOut  0 where not asked for
+     */
+    const directoryEntry = (base, mapped, entry, sizeOut, sectionOut)=>{
+        const at = wholeAddress(base);
+        if (sectionOut)
+        {
+            writeU32(sectionOut, 0);
+        }
+        if (at === 0 || ((readU32(at) ?? 0) & 0xffff) !== IMAGE_DOS_SIGNATURE)
+        {
+            return 0;
+        }
+        const nt = (at + (readU32(at + 0x3c) ?? 0)) >>> 0;
+        if (readU32(nt) !== IMAGE_NT_SIGNATURE)
+        {
+            return 0;
+        }
+        const optional = nt + 24;
+        const magic = (readU32(optional) ?? 0) & 0xffff;
+        const wide = magic === 0x20b;
+        if (!wide && magic !== 0x10b)
+        {
+            return 0;
+        }
+        const count = readU32(optional + (wide ? 108 : 92)) ?? 0;
+        const index = entry & 0xffff;
+        if (index >= count)
+        {
+            return 0;
+        }
+        const directory = optional + (wide ? 112 : 96) + index * 8;
+        const rva = readU32(directory) ?? 0;
+        if (rva === 0)
+        {
+            return 0;
+        }
+        if (sizeOut)
+        {
+            writeU32(sizeOut, readU32(directory + 4) ?? 0);
+        }
+        const headersSize = readU32(optional + 60) ?? 0;
+        if ((mapped & 0xff) !== 0 || rva < headersSize)
+        {
+            return (at + rva) >>> 0;
+        }
+        const header = readU32(nt + 4) ?? 0;
+        const sections = header >>> 16;
+        const first = optional + ((readU32(nt + 20) ?? 0) & 0xffff);
+        for (let n = 0; n < sections; n++)
+        {
+            const section = first + n * 40;
+            const start = readU32(section + 12) ?? 0;
+            const raw = readU32(section + 16) ?? 0;
+            if (rva >= start && rva < start + raw)
+            {
+                if (sectionOut)
+                {
+                    writeU32(sectionOut, section >>> 0);
+                }
+                return (at + rva - start + (readU32(section + 20) ?? 0)) >>> 0;
+            }
+        }
+        return 0;
+    };
+
     /** @param {number} address */
     const moduleBase = address=>{
-        const at = address >>> 0;
+        const at = wholeAddress(address);
         const module = host.modules()
             .find(each=>at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0));
         return module ? module.base >>> 0 : 0;
@@ -122,6 +212,22 @@ export function createDbghelpFunctions(host){
     };
 
     /**
+     * SymLoadModule64's answer: the DWORD64 base it was given (its dwords at
+     * 4 and 5), whole; 0 and ERROR_MOD_NOT_FOUND for none.
+     *
+     * @param {number[]} args
+     */
+    const loadedAt = args=>{
+        const [low, high] = [args[4] >>> 0, args[5] >>> 0];
+        if (low === 0 && high === 0)
+        {
+            return fail(0, ERROR_MOD_NOT_FOUND);
+        }
+        host.setRegisters?.({ edx: high });
+        return low;
+    };
+
+    /**
      * One frame a call along the EBP chain, in the layout given. The first
      * call reports the frame the caller filled in from the context; each later
      * one steps to the caller's frame. The walk ends, FALSE, where the chain
@@ -136,7 +242,7 @@ export function createDbghelpFunctions(host){
         {
             return fail(0, ERROR_INVALID_PARAMETER);
         }
-        const at = frameAddress >>> 0;
+        const at = wholeAddress(frameAddress);
         const field = (/** @type {number} */ offset)=>readU32(at + offset) ?? 0;
         let pc = field(layout.AddrPC);
         let frame = field(layout.AddrFrame);
@@ -211,12 +317,12 @@ export function createDbghelpFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0 || !host.readCString || !host.files)
+                if (wholeAddress(pointer) === 0 || !host.readCString || !host.files)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
                 const files = host.files;
-                const given = host.readCString(pointer >>> 0).replace(/\//g, '\\');
+                const given = host.readCString(wholeAddress(pointer)).replace(/\//g, '\\');
                 const absolute = /^[A-Za-z]:\\/.test(given) ? given
                     : `${(files.currentDirectory?.() ?? 'C:\\').replace(/\\$/, '')}\\${given}`;
                 const parts = absolute.split('\\');
@@ -250,9 +356,88 @@ export function createDbghelpFunctions(host){
 
         /** BOOL SymInitialize(HANDLE hProcess, PCSTR UserSearchPath, BOOL fInvadeProcess) */
         SymInitialize: { argBytes: 12, handler: ()=>1 },
+        /** BOOL SymInitializeW(HANDLE hProcess, PCWSTR UserSearchPath, BOOL fInvadeProcess) */
+        SymInitializeW: { argBytes: 12, handler: ()=>1 },
+
+        /**
+         * BOOL SymSetSearchPathW(HANDLE hProcess, PCWSTR SearchPath) and the getter:
+         * where symbols would be looked for. None are read here; the path set is
+         * kept for the getter, an empty one where none was set.
+         */
+        SymSetSearchPathW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, path])=>{
+                searchPath =
+                    wholeAddress(path) === 0 ? '' : host.readWide?.(wholeAddress(path)) ?? '';
+                return 1;
+            },
+        },
+        /** BOOL SymGetSearchPathW(HANDLE hProcess, PWSTR SearchPath, DWORD SearchPathLength) */
+        SymGetSearchPathW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, out, room])=>{
+                if (wholeAddress(out) === 0 || (room >>> 0) < searchPath.length + 1)
+                {
+                    return fail(0, ERROR_INVALID_PARAMETER);
+                }
+                host.writeMemory(wholeAddress(out),
+                    utf16z(searchPath));
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD64 SymLoadModuleExW(HANDLE hProcess, HANDLE hFile, PCWSTR ImageName,
+         *     PCWSTR ModuleName, DWORD64 BaseOfDll, DWORD DllSize, PMODLOAD_DATA Data,
+         *     DWORD Flags), and SymLoadModuleEx and SymLoadModule64 beside it: the base,
+         *     as SymLoadModule answers, whole - the high half for EDX, a 64-bit
+         *     caller's RAX past 2 GiB.
+         */
+        SymLoadModuleExW: {
+            argBytes: 36,
+            quadwords: [4],
+            handler: loadedAt,
+        },
+        SymLoadModuleEx: {
+            argBytes: 36,
+            quadwords: [4],
+            handler: loadedAt,
+        },
+        SymLoadModule64: {
+            argBytes: 28,
+            quadwords: [4],
+            handler: loadedAt,
+        },
+        /** BOOL SymUnloadModule64(HANDLE hProcess, DWORD64 BaseOfDll) */
+        SymUnloadModule64: { argBytes: 12, quadwords: [1], handler: ()=>1 },
+        /** BOOL SymRefreshModuleList(HANDLE hProcess) */
+        SymRefreshModuleList: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL SymFromAddrW(HANDLE, DWORD64 Address, PDWORD64 Displacement,
+         *     PSYMBOL_INFOW Symbol) and SymGetLineFromAddrW64: no symbol, no line.
+         */
+        SymFromAddrW: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymGetLineFromAddrW64: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /** BOOL SymCleanup(HANDLE hProcess) */
         SymCleanup: { argBytes: 4, handler: ()=>1 },
+
+        /**
+         * BOOL MiniDumpWriteDump(HANDLE hProcess, DWORD ProcessId, HANDLE hFile,
+         *     MINIDUMP_TYPE DumpType, PMINIDUMP_EXCEPTION_INFORMATION,
+         *     PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION)
+         *
+         * No minidump is written here: FALSE, as a dump that could not be
+         * made answers, which a crash handler reports and goes on from. Called
+         * only once a program has crashed, and the engine's own record of the
+         * fault is the one that says what happened.
+         */
+        MiniDumpWriteDump: { argBytes: 28, handler: ()=>fail(0, ERROR_NOT_SUPPORTED) },
 
         /**
          * DWORD SymLoadModule(HANDLE hProcess, HANDLE hFile, PCSTR ImageName,
@@ -283,7 +468,7 @@ export function createDbghelpFunctions(host){
          * PVOID SymFunctionTableAccess(HANDLE hProcess, DWORD AddrBase): an x86
          * image has no function tables, and no symbols means no frame data.
          */
-        SymFunctionTableAccess: { argBytes: 8, handler: ()=>0 },
+        SymFunctionTableAccess: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
 
         /**
          * BOOL SymGetSymFromAddr(HANDLE hProcess, DWORD Address,
@@ -320,6 +505,7 @@ export function createDbghelpFunctions(host){
         /** DWORD64 SymGetModuleBase64(HANDLE hProcess, DWORD64 qwAddr) */
         SymGetModuleBase64: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([, address, high])=>{
                 const base = (high >>> 0) === 0 ? moduleBase(address) : 0;
@@ -328,19 +514,21 @@ export function createDbghelpFunctions(host){
         },
 
         /** PVOID SymFunctionTableAccess64(HANDLE hProcess, DWORD64 AddrBase): none on x86. */
-        SymFunctionTableAccess64: { argBytes: 12, handler: ()=>0 },
+        SymFunctionTableAccess64: { returns: 'pointer', argBytes: 12, quadwords: [1],
+            handler: ()=>0 },
 
         /**
          * BOOL SymFromAddr(HANDLE hProcess, DWORD64 Address, PDWORD64 Displacement,
          *     PSYMBOL_INFO Symbol): no symbol is known.
          */
-        SymFromAddr: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymFromAddr: { argBytes: 20, quadwords: [1], handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /**
          * BOOL SymGetLineFromAddr64(HANDLE hProcess, DWORD64 qwAddr,
          *     PDWORD pdwDisplacement, PIMAGEHLP_LINE64 Line): no line is known.
          */
-        SymGetLineFromAddr64: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymGetLineFromAddr64: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /**
          * BOOL SymGetModuleInfo64(HANDLE hProcess, DWORD64 qwAddr,
@@ -351,19 +539,21 @@ export function createDbghelpFunctions(host){
          */
         SymGetModuleInfo64: {
             argBytes: 16,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([, address, high, info])=>{
-                const at = address >>> 0;
+                const at = wholeAddress(address);
                 const module = (high >>> 0) === 0 ? host.modules().find(each=>
                     at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0)) : null;
-                if (!module || (info >>> 0) === 0)
+                if (!module || wholeAddress(info) === 0)
                 {
                     return fail(0, module ? ERROR_INVALID_PARAMETER : ERROR_MOD_NOT_FOUND);
                 }
                 const out = new DataView(new ArrayBuffer(12));
                 out.setUint32(0, module.base >>> 0, true);
                 out.setUint32(MODULE64.ImageSize - MODULE64.BaseOfImage, module.size >>> 0, true);
-                host.writeMemory((info >>> 0) + MODULE64.BaseOfImage, new Uint8Array(out.buffer));
+                host.writeMemory(wholeAddress(info) + MODULE64.BaseOfImage,
+                    new Uint8Array(out.buffer));
                 return 1;
             },
         },
@@ -387,6 +577,33 @@ export function createDbghelpFunctions(host){
         SearchTreeForFile: { argBytes: 12, handler: ()=>fail(0, ERROR_FILE_NOT_FOUND) },
 
         /**
+         * PVOID ImageDirectoryEntryToData(PVOID Base, BOOLEAN MappedAsImage,
+         *     USHORT DirectoryEntry, PULONG Size)
+         *
+         * What a crash reporter reads an image's import or export table
+         * through.
+         */
+        ImageDirectoryEntryToData: {
+            returns: 'pointer',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([base, mapped, entry, size])=>
+                directoryEntry(base, mapped, entry, wholeAddress(size), 0),
+        },
+
+        /**
+         * PVOID ImageDirectoryEntryToDataEx(PVOID Base, BOOLEAN MappedAsImage,
+         *     USHORT DirectoryEntry, PULONG Size, PIMAGE_SECTION_HEADER *FoundHeader)
+         */
+        ImageDirectoryEntryToDataEx: {
+            returns: 'pointer',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([base, mapped, entry, size, found])=>
+                directoryEntry(base, mapped, entry, wholeAddress(size), wholeAddress(found)),
+        },
+
+        /**
          * DWORD UnDecorateSymbolName(PCSTR name, PSTR outputString, DWORD maxStringLength,
          *     DWORD flags)
          *
@@ -398,13 +615,13 @@ export function createDbghelpFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, output, size])=>{
-                const text = host.readCString?.(name >>> 0) ?? '';
-                if (text.startsWith('?') || (output >>> 0) === 0 || (size >>> 0) === 0)
+                const text = host.readCString?.(wholeAddress(name)) ?? '';
+                if (text.startsWith('?') || wholeAddress(output) === 0 || (size >>> 0) === 0)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
                 const kept = text.slice(0, (size >>> 0) - 1);
-                host.writeMemory(output >>> 0,
+                host.writeMemory(wholeAddress(output),
                     Uint8Array.from(`${kept}\0`, c=>c.charCodeAt(0) & 0xff));
                 return kept.length;
             },

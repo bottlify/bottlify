@@ -30,7 +30,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -40,7 +40,7 @@ const u32 = value=>[
 /** @param {string} text */
 const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 
-/** @typedef {import('../../../tools/make-pe.mjs').AsmPart} Part */
+/** @typedef {import('../../../tools/fixtures/make-pe.mjs').AsmPart} Part */
 
 /** Who reported. */
 const TAG = Object.freeze({
@@ -173,7 +173,7 @@ async function run(executable, libraries, cores){
     const app = await createApp({
         executable,
         imagePath: 'C:\\App\\tls.exe',
-        cpu: { cores, eager: true },
+        cpu: { cores },
         files: Object.entries({ 'log.dll': logLibrary(), ...libraries })
             .map(([name, bytes])=>({ path: `C:\\App\\${name}`, bytes })),
     });
@@ -452,3 +452,73 @@ for (const cores of [1, 2])
             `both threads ended before FreeLibrary: ${text}`);
     });
 }
+
+/** What the crowded program finds wrong, as bits of its exit code. */
+const CROWDED = Object.freeze({ LOAD: 1, INDEX: 2, BLOCK: 4, TEMPLATE: 8 });
+
+/**
+ * Takes TlsAlloc slots until one past the first 64 comes back, as a program
+ * with many threads of its own does, then loads runtime.dll: it must load,
+ * at the loader's own index -- 0, no other image holding thread-local
+ * storage, whatever TlsAlloc has handed out -- and this thread's copy of its
+ * block must be there through the compiler's fs:[0x2c] sequence, starting as
+ * the template.
+ */
+function crowdedProgram(){
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': ['TlsAlloc', 'LoadLibraryA', 'GetProcAddress', 'ExitProcess'],
+            'log.dll': ['note'],
+        },
+        codeSize: 0x100,
+        data: { library: cString('runtime.dll'), blockName: cString('block'),
+            slotName: cString('slot'), handle: u32(0) },
+        code: ({ iat, at })=>{
+            /** @param {string} name */
+            const callApi = name=>[0xff, 0x15, ...u32(iat(name))];
+            /** @param {number} bit */
+            const fail = bit=>[0x81, 0xcb, ...u32(bit)]; //  or ebx, bit
+            return assemble([
+                0x31, 0xdb, //                                          xor ebx, ebx
+                { label: 'take' },
+                ...callApi('TlsAlloc'),
+                0x83, 0xf8, 0x40, { jump: 'jb', to: 'take' }, //        cmp eax, 64; jb take
+                0x68, ...u32(at('library')), ...callApi('LoadLibraryA'),
+                0xa3, ...u32(at('handle')), //                          mov [handle], eax
+                0x85, 0xc0, { jump: 'jnz', to: 'loaded' },
+                ...fail(CROWDED.LOAD), { jump: 'jmp', to: 'end' },
+                { label: 'loaded' },
+                0x68, ...u32(at('slotName')), 0x50, ...callApi('GetProcAddress'),
+                0xff, 0xd0, //                                          call eax
+                0x85, 0xc0, { jump: 'jz', to: 'first' }, ...fail(CROWDED.INDEX),
+                { label: 'first' },
+                0x68, ...u32(at('blockName')), 0xff, 0x35, ...u32(at('handle')),
+                ...callApi('GetProcAddress'),
+                0xff, 0xd0, //                                          call eax
+                0x85, 0xc0, { jump: 'jnz', to: 'block' },
+                ...fail(CROWDED.BLOCK), { jump: 'jmp', to: 'end' },
+                { label: 'block' },
+                0x81, 0x38, ...u32(MARK), //                            cmp dword [eax], MARK
+                { jump: 'jz', to: 'end' }, ...fail(CROWDED.TEMPLATE),
+                { label: 'end' },
+                0x53, ...callApi('ExitProcess'), //                     push ebx
+            ]);
+        },
+    });
+}
+
+test('a library loaded at run time when the program holds the first 64 TlsAlloc slots loads'
+    + ' at the loader\'s own index, reached through fs:[0x2c]', { timeout: 120_000 }, async()=>{
+    // The Steam client's own libraries take more than 64 slots before it
+    // loads one with thread-local storage of its own. The image's index is
+    // the loader's numbering, not one of TlsAlloc's slots, so how many of
+    // those are held does not move it.
+    const { code, entries } = await run(crowdedProgram(), {
+        'runtime.dll': library({ imageBase: 0x13000000, tag: TAG.RUNTIME,
+            tlsTag: TAG.RUNTIME_TLS, marker: 'runtime', accessors: true }),
+    }, 1);
+    assert.equal(code, 0, Object.entries(CROWDED).filter(([, bit])=>code & bit)
+        .map(([what])=>what).join(', '));
+    assert.deepEqual(entries.slice(0, 2).map(call),
+        [`${TAG.RUNTIME_TLS}/${DLL_PROCESS_ATTACH}/0`, `${TAG.RUNTIME}/${DLL_PROCESS_ATTACH}/0`]);
+});

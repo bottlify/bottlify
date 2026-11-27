@@ -18,13 +18,21 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createForwards } from './forwards.js';
 import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, isSeparator,
-    rootOf }
+    rootOf, statPath }
     from './path.js';
+import { createDataBlockFunctions } from './datablocks.js';
+import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
+import { createUsKeyFunctions } from './uskey.js';
+import { createCharacterFunctions } from './characters.js';
+import { createUiFunctions } from './ui.js';
+import { createStreams } from './stream.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
 import { createUrlFunctions } from './url.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
@@ -34,11 +42,19 @@ const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const ERROR_SUCCESS = 0;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const REG_EXPAND_SZ = 2;
+const MAXIMUM_ALLOWED = 0x02000000;
+/** RegGetValue's restriction to a string, an expandable one expanded. */
+const RRF_RT_REG_SZ = 0x2;
 const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_READ = 0x20019;
 
 const S_OK = 0;
+const S_FALSE = 1;
 const E_INVALIDARG = 0x80070057;
+/** PathMatchSpecEx's flags. */
+const PMSF_MULTIPLE = 0x1;
+const PMSF_DONT_STRIP_SPACES = 0x10000;
 
 /**
  * Hue, luminance and saturation each run from 0 to 240 here, against 255 for
@@ -101,7 +117,7 @@ const leadingInteger = (text, flags)=>{
  * @param {[number, number, number, number]} version  major, minor, build, QFE
  * @returns {number} an HRESULT
  */
-export function answerDllVersion(memory, info, [major, minor, build, qfe]){
+function answerDllVersion(memory, info, [major, minor, build, qfe]){
     if (info === 0 || !memory.readMemory)
     {
         return E_INVALIDARG;
@@ -132,13 +148,15 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
 
 /**
  * @typedef {Object} ShlwapiHost
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its STATSTG is wider.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} [readWideString]
  *           Reads a UTF-16 argument. Absent in a build that cannot, and the
  *           W spellings then fail as they would for an argument they could
  *           not read.
- * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null }} [files]
+ * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null,
+ *     list?(path: string): unknown[] }} [files]
  *           The volume, for the functions that ask what a path names. Absent,
  *           every path names nothing.
  * @property {(path: string) => string} [fullPath]
@@ -163,6 +181,12 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  * @property {(code: number) => void} [setLastError]
  *           For the calls that set one: PathCanonicalize refusing a missing
  *           argument. Absent, the last error is left as it was.
+ * @property {(steps: Generator<{ entry: number, args: number[] }, any, number>) => any} [drive]
+ *           Runs a handler's calls into the guest: the COM helpers call
+ *           methods of the program's own objects. Absent, they answer E_NOTIMPL.
+ * @property {(object: any, iid: string) => number} [publish]
+ *           Hands the program an object of shlwapi's own, as a pointer: the
+ *           streams of SHCreateStreamOnFile and SHCreateMemStream.
  */
 
 /**
@@ -302,32 +326,22 @@ const hueToChannel = (low, high, hue)=>{
 
 /**
  * @param {ShlwapiHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any,
+ *     returns?: string }>}
  *     Every export by name: the table is built from parts whose names are made
  *     from a stem and a spelling, which no narrower type can list.
  */
 export function createShlwapiFunctions(host){
     /** @param {number} address */
     const pathAt = address=>
-        (address >>> 0) === 0 ? null : host.readCString(address >>> 0, MAX_LENGTH);
+        (address >>> 0) === 0 ? null : host.readCString(wholeAddress(address), MAX_LENGTH);
 
     /** @param {number} address */
     const widePathAt = address=>((address >>> 0) === 0 || !host.readWideString
-        ? null : host.readWideString(address >>> 0, MAX_LENGTH));
+        ? null : host.readWideString(wholeAddress(address), MAX_LENGTH * 2));
 
     /** In the ANSI page a path is read in. @param {string} text */
     const narrow = text=>encodeAnsi(`${text}\0`);
-
-    /** @param {string} text */
-    const wide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        return bytes;
-    };
 
     /**
      * PathCombine for either width. The destination may be one of the two
@@ -346,7 +360,7 @@ export function createShlwapiFunctions(host){
                 return 0;
             }
             const result = combine(read(directory), read(file));
-            host.writeMemory(destination >>> 0, encode(result ?? ''));
+            host.writeMemory(wholeAddress(destination), encode(result ?? ''));
             return result === null ? 0 : destination >>> 0;
         },
     });
@@ -392,7 +406,7 @@ export function createShlwapiFunctions(host){
             const text = compactPath(path, limit >>> 0, part=>measure(hdc >>> 0, part));
             if (text !== path)
             {
-                host.writeMemory(pointer >>> 0, encode(text));
+                host.writeMemory(wholeAddress(pointer), encode(text));
             }
             return 1;
         },
@@ -433,7 +447,7 @@ export function createShlwapiFunctions(host){
             const start = path === null ? 0 : fileNameStart(path);
             if (path !== null && start > 0)
             {
-                host.writeMemory(pointer >>> 0, encode(path.slice(start)));
+                host.writeMemory(wholeAddress(pointer), encode(path.slice(start)));
             }
             return 0;
         },
@@ -462,7 +476,7 @@ export function createShlwapiFunctions(host){
             {
                 return 0;
             }
-            host.writeMemory(pointer >>> 0, encode(result));
+            host.writeMemory(wholeAddress(pointer), encode(result));
             return 1;
         },
     });
@@ -479,6 +493,30 @@ export function createShlwapiFunctions(host){
     });
 
     /**
+     * PathMatchSpecEx for either width.
+     *
+     * @param {(address: number) => string | null} read
+     */
+    const pathMatchSpecEx = read=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([file, spec, flags])=>{
+            const path = read(file);
+            const masks = read(spec);
+            if (path === null || masks === null)
+            {
+                return E_INVALIDARG;
+            }
+            const items = (flags & PMSF_MULTIPLE) !== 0 ? masks.split(';') : [masks];
+            const strip = (flags & PMSF_DONT_STRIP_SPACES) === 0;
+            return items.some(item=>{
+                const mask = strip ? item.replace(/^ +/, '') : item;
+                return mask === '*.*' || wildcard(path, mask);
+            }) ? S_OK : S_FALSE;
+        },
+    });
+
+    /**
      * PathIsDirectory for either width: the directory attribute of what the
      * path names, which is what Windows answers with, or 0 for a file or for
      * nothing there.
@@ -489,13 +527,31 @@ export function createShlwapiFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([pointer])=>{
+            const entry = statPath(host, read(pointer));
+            return entry?.exists && entry.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+        },
+    });
+
+    /**
+     * PathIsDirectoryEmpty for either width: TRUE for a directory with nothing
+     * in it; FALSE for one with anything, for a file and for nothing there. A
+     * setup asks it of the folder it unpacked into before it takes the folder
+     * away.
+     *
+     * @param {(address: number) => string | null} read
+     */
+    const pathIsDirectoryEmpty = read=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
             const path = read(pointer);
-            if (!path || !host.files || !host.fullPath)
+            const entry = statPath(host, path);
+            if (!entry?.exists || !entry.isDirectory || !host.files?.list || !host.fullPath)
             {
                 return 0;
             }
-            const entry = host.files.stat(host.fullPath(path));
-            return entry?.exists && entry.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+            return host.files.list(host.fullPath(/** @type {string} */ (path))).length === 0
+                ? 1 : 0;
         },
     });
 
@@ -503,7 +559,8 @@ export function createShlwapiFunctions(host){
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
+            host.writeMemory(wholeAddress(address), new Uint8Array([value & 0xff,
+                value >>> 8 & 0xff]));
         }
     };
 
@@ -596,7 +653,7 @@ export function createShlwapiFunctions(host){
             }
             const answer = new DataView(new ArrayBuffer(8));
             answer.setBigInt64(0, value, true);
-            host.writeMemory(out >>> 0, new Uint8Array(answer.buffer, 0, bytes));
+            host.writeMemory(wholeAddress(out), new Uint8Array(answer.buffer, 0, bytes));
             return 1;
         },
     });
@@ -621,16 +678,98 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /**
+     * The copies between the two widths and within one (SHAnsiToUnicode,
+     * SHUnicodeToAnsi, SHAnsiToAnsi, SHUnicodeToUnicode): as much of the
+     * source as fits with its terminator, no character cut in two, and the
+     * characters written - the terminator counted - as the answer; nothing
+     * written and 0 for no room at all. A NULL source is the empty string.
+     *
+     * @param {(address: number) => string | null} read
+     * @param {(text: string) => Uint8Array} encode  one character, unterminated
+     * @param {number} unit  the bytes a character of the destination takes
+     */
+    const copyText = (read, encode, unit)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([source, destination, room])=>{
+            const limit = room | 0;
+            if (limit <= 0 || (destination >>> 0) === 0)
+            {
+                return 0;
+            }
+            const text = read(source) ?? '';
+            /** @type {number[]} */
+            const bytes = [];
+            let written = 0;
+            for (const char of text)
+            {
+                const piece = encode(char);
+                if (bytes.length + piece.length + unit > limit * unit)
+                {
+                    break;
+                }
+                bytes.push(...piece);
+                written += piece.length / unit;
+            }
+            bytes.push(...new Array(unit).fill(0));
+            host.writeMemory(wholeAddress(destination), Uint8Array.from(bytes));
+            return written + 1;
+        },
+    });
+    /**
+     * SHRegGetPath for either width.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const registryPath = width=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: async([key, subKey, value, path])=>{
+            if (!host.advapi32 || !host.allocate)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const size = host.allocate(4);
+            try
+            {
+                const bytes = MAX_PATH * (width === 'W' ? 2 : 1);
+                host.writeMemory(size, Uint8Array.of(bytes & 0xff, bytes >>> 8, 0, 0));
+                return /** @type {number} */ (await host.advapi32()[`RegGetValue${width}`]
+                    .handler([key, subKey, value, RRF_RT_REG_SZ, 0, path, size])) >>> 0;
+            }
+            finally
+            {
+                host.free?.(size);
+            }
+        },
+    });
+    /** @param {string} char */
+    const ansiChar = char=>encodeAnsi(char);
+    /** @param {string} char */
+    const wideChar = char=>utf16z(char).subarray(0, char.length * 2);
+
     const widths = createWidths(host);
     const unattached = createRefusals(host)('SHAutoComplete', { argBytes: 8, answer: S_OK,
         why: 'no autocompletion: the edit control is left as it is' });
+    const unregisteredTemplate = createRefusals(host)('SHRegisterValidateTemplate', {
+        argBytes: 8, answer: S_OK,
+        why: 'no folder web view template is registered: there are no folder views' });
 
-    return {
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any,
+        returns?: string }>} */
+    const table = {
         ...(host.library ? createForwards(host.library, host.divergence) : {}),
         ...createPathFunctions(host, widths),
         ...createStringFunctions(host, widths),
         ...createUrlFunctions(host, widths),
         ...createRegistryHelpers(host),
+        ...createUsKeyFunctions(host),
+        ...createCharacterFunctions(host, widths),
+        ...createUiFunctions(host, widths),
+        ...createOrdinalFunctions(host),
+        ...createStreams(host),
+        ...createDataBlockFunctions(host),
 
         /**
          * HRESULT SHAutoComplete(HWND hwndEdit, DWORD dwFlags)
@@ -670,11 +809,85 @@ export function createShlwapiFunctions(host){
         StrToInt64ExA: strToIntEx(pathAt, 8),
         StrToInt64ExW: strToIntEx(widePathAt, 8),
 
+        /** int SHAnsiToUnicode(LPCSTR pszSrc, LPWSTR pwszDst, int cwchBuf) */
+        SHAnsiToUnicode: copyText(pathAt, wideChar, 2),
+        /** int SHUnicodeToAnsi(LPCWSTR pwszSrc, LPSTR pszDst, int cchBuf) */
+        SHUnicodeToAnsi: copyText(widePathAt, ansiChar, 1),
+        /** int SHAnsiToAnsi(LPCSTR pszSrc, LPSTR pszDst, int cchBuf) */
+        SHAnsiToAnsi: copyText(pathAt, ansiChar, 1),
+        /** int SHUnicodeToUnicode(LPCWSTR pwzSrc, LPWSTR pwzDst, int cwchBuf) */
+        SHUnicodeToUnicode: copyText(widePathAt, wideChar, 2),
+
+        /**
+         * LSTATUS SHRegGetValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue,
+         *   SRRFLAGS srrfFlags, DWORD *pdwType, void *pvData, DWORD *pcbData)
+         *
+         * RegGetValue's work: the SRRF flags are its RRF ones, bit for bit.
+         */
+        SHRegGetValueA: through('RegGetValueA', 28),
+        /** LSTATUS SHRegGetValueW(HKEY, LPCWSTR, LPCWSTR, SRRFLAGS, DWORD *, void *, DWORD *) */
+        SHRegGetValueW: through('RegGetValueW', 28),
+
+        /**
+         * LSTATUS SHRegGetPathA(HKEY hKey, LPCSTR pcszSubKey, LPCSTR pcszValue,
+         *   LPSTR pszPath, DWORD dwFlags)
+         *
+         * A path the registry keeps, into a buffer of MAX_PATH characters: a
+         * string value, its environment variables expanded where it is
+         * REG_EXPAND_SZ - RegGetValue's answer for RRF_RT_REG_SZ. The flags
+         * are reserved.
+         */
+        SHRegGetPathA: registryPath('A'),
+        /** LSTATUS SHRegGetPathW(HKEY, LPCWSTR, LPCWSTR, LPWSTR, DWORD) */
+        SHRegGetPathW: registryPath('W'),
+
+        /**
+         * LSTATUS SHCopyKeyA(HKEY hkeySrc, LPCSTR pszSrcSubKey, HKEY hkeyDest, DWORD fReserved)
+         *
+         * The subkey's values and every key beneath it into the destination:
+         * RegCopyTree's work, the reserved word not passed on.
+         */
+        SHCopyKeyA: { argBytes: 16, handler: (/** @type {number[]} */ args)=>
+            through('RegCopyTreeA', 12).handler(args.slice(0, 3)) },
+        /** LSTATUS SHCopyKeyW(HKEY, LPCWSTR, HKEY, DWORD) */
+        SHCopyKeyW: { argBytes: 16, handler: (/** @type {number[]} */ args)=>
+            through('RegCopyTreeW', 12).handler(args.slice(0, 3)) },
+
+        /**
+         * HKEY SHRegDuplicateHKey(HKEY hKey)
+         *
+         * A second handle on the same key, which the caller closes on its
+         * own: RegOpenKeyEx of no subkey; NULL when it cannot be had.
+         */
+        SHRegDuplicateHKey: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([key])=>{
+                if (!host.advapi32 || !host.allocate || !host.readMemory)
+                {
+                    return 0;
+                }
+                const out = host.allocate(4);
+                try
+                {
+                    const status = /** @type {number} */ (await host.advapi32().RegOpenKeyExW
+                        .handler([key, 0, 0, MAXIMUM_ALLOWED, out])) >>> 0;
+                    return status === ERROR_SUCCESS
+                        ? new DataView(host.readMemory(out, 4).slice().buffer).getUint32(0, true)
+                        : 0;
+                }
+                finally
+                {
+                    host.free?.(out);
+                }
+            },
+        },
+
         /** HRESULT DllGetVersion(DLLVERSIONINFO *pdvi) */
         DllGetVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([info])=>answerDllVersion(host, info >>> 0, SHLWAPI_VERSION),
+            handler: ([info])=>answerDllVersion(host, wholeAddress(info), SHLWAPI_VERSION),
         },
 
         /**
@@ -703,10 +916,10 @@ export function createShlwapiFunctions(host){
         SHDeleteValueW: through('RegDeleteKeyValueW', 12),
 
         /** LPSTR PathFindExtensionA(LPCSTR pszPath) */
-        PathFindExtensionA: pathFindExtension(pathAt, 1),
+        PathFindExtensionA: { ...pathFindExtension(pathAt, 1), returns: 'pointer' },
 
         /** LPWSTR PathFindExtensionW(LPCWSTR pszPath) */
-        PathFindExtensionW: pathFindExtension(widePathAt, 2),
+        PathFindExtensionW: { ...pathFindExtension(widePathAt, 2), returns: 'pointer' },
 
         /**
          * BOOL PathCompactPathA(HDC hDC, LPSTR pszPath, UINT dx)
@@ -717,13 +930,13 @@ export function createShlwapiFunctions(host){
         PathCompactPathA: pathCompactPath(pathAt, narrow),
 
         /** BOOL PathCompactPathW(HDC hDC, LPWSTR pszPath, UINT dx) */
-        PathCompactPathW: pathCompactPath(widePathAt, wide),
+        PathCompactPathW: pathCompactPath(widePathAt, utf16z),
 
         /** LPSTR PathFindFileNameA(LPCSTR pszPath) */
-        PathFindFileNameA: pathFindFileName(pathAt, 1),
+        PathFindFileNameA: { ...pathFindFileName(pathAt, 1), returns: 'pointer' },
 
         /** LPWSTR PathFindFileNameW(LPCWSTR pszPath) */
-        PathFindFileNameW: pathFindFileName(widePathAt, 2),
+        PathFindFileNameW: { ...pathFindFileName(widePathAt, 2), returns: 'pointer' },
 
         /**
          * BOOL PathIsDirectoryA(LPCSTR pszPath)
@@ -733,25 +946,32 @@ export function createShlwapiFunctions(host){
         PathIsDirectoryW: pathIsDirectory(widePathAt),
 
         /**
+         * BOOL PathIsDirectoryEmptyA(LPCSTR pszPath)
+         * BOOL PathIsDirectoryEmptyW(LPCWSTR pszPath)
+         */
+        PathIsDirectoryEmptyA: pathIsDirectoryEmpty(pathAt),
+        PathIsDirectoryEmptyW: pathIsDirectoryEmpty(widePathAt),
+
+        /**
          * LPSTR PathCombineA(LPSTR pszDest, LPCSTR pszDir, LPCSTR pszFile)
          * LPWSTR PathCombineW(LPWSTR, LPCWSTR, LPCWSTR)
          */
-        PathCombineA: pathCombine(pathAt, narrow),
-        PathCombineW: pathCombine(widePathAt, wide),
+        PathCombineA: { ...pathCombine(pathAt, narrow), returns: 'pointer' },
+        PathCombineW: pathCombine(widePathAt, utf16z),
 
         /**
          * BOOL PathAppendA(LPSTR pszPath, LPCSTR pszMore)
          * BOOL PathAppendW(LPWSTR, LPCWSTR)
          */
         PathAppendA: pathAppend(pathAt, narrow),
-        PathAppendW: pathAppend(widePathAt, wide),
+        PathAppendW: pathAppend(widePathAt, utf16z),
 
         /**
          * void PathStripPathA(LPSTR pszPath)
          * void PathStripPathW(LPWSTR pszPath)
          */
         PathStripPathA: pathStripPath(pathAt, narrow),
-        PathStripPathW: pathStripPath(widePathAt, wide),
+        PathStripPathW: pathStripPath(widePathAt, utf16z),
 
         /**
          * BOOL PathMatchSpecA(LPCSTR pszFile, LPCSTR pszSpec)
@@ -759,6 +979,16 @@ export function createShlwapiFunctions(host){
          */
         PathMatchSpecA: pathMatchSpec(pathAt),
         PathMatchSpecW: pathMatchSpec(widePathAt),
+
+        /**
+         * HRESULT PathMatchSpecExA(LPCSTR pszFile, LPCSTR pszSpec, DWORD dwFlags)
+         *
+         * S_OK for a match and S_FALSE for none. PMSF_NORMAL takes the spec
+         * as one mask; PMSF_MULTIPLE as a `;` list, each mask's leading
+         * spaces skipped unless PMSF_DONT_STRIP_SPACES says not to.
+         */
+        PathMatchSpecExA: pathMatchSpecEx(pathAt),
+        PathMatchSpecExW: pathMatchSpecEx(widePathAt),
 
         /**
          * void ColorRGBToHLS(COLORREF clrRGB, WORD *pwHue, WORD *pwLuminance,
@@ -827,6 +1057,141 @@ export function createShlwapiFunctions(host){
                 return (channel(hue + HLSMAX / 3) | channel(hue) << 8
                     | channel(hue - HLSMAX / 3) << 16) >>> 0;
             },
+        },
+    };
+
+    /**
+     * One of user32's or gdi32's own calls, or null without the library.
+     *
+     * @param {string} library @param {string} name @param {number[]} args
+     */
+    const call = (library, name, args)=>{
+        const entry = host.library?.(library)?.[name];
+        return entry ? /** @type {number} */ (entry.handler(args)) : null;
+    };
+
+    /**
+     * SHRegSetPath for either width: the path written as REG_EXPAND_SZ with
+     * the start PathUnExpandEnvStrings puts a variable back for, or as it is.
+     *
+     * @param {import('./text.js').Width} width
+     */
+    const registrySetPath = width=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([key, subKey, value, path])=>{
+            const suffix = width.wide ? 'W' : 'A';
+            const text = width.read(path);
+            const scratch = host.allocate?.(MAX_PATH * width.unit) ?? 0;
+            if (text === null || !scratch)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            try
+            {
+                const unexpanded = table[`PathUnExpandEnvStrings${suffix}`].handler([path, scratch,
+                    MAX_PATH]) ? width.read(scratch) ?? text : text;
+                host.writeMemory(scratch, width.sz(unexpanded));
+                return table[`SHSetValue${suffix}`].handler([key, subKey, value, REG_EXPAND_SZ,
+                    scratch, (unexpanded.length + 1) * width.unit]);
+            }
+            finally
+            {
+                host.free?.(scratch);
+            }
+        },
+    });
+
+    return {
+        ...table,
+
+        /**
+         * LSTATUS SHRegSetPathA(HKEY hKey, LPCSTR pcszSubKey, LPCSTR pcszValue,
+         *     LPCSTR pcszPath, DWORD dwFlags)
+         */
+        SHRegSetPathA: registrySetPath(widths.A),
+        SHRegSetPathW: registrySetPath(widths.W),
+
+        /**
+         * COLORREF ColorAdjustLuma(COLORREF clrRGB, int n, BOOL fScale)
+         *
+         * The luminance moved by n tenths of a percent: of the luminance the
+         * colour has with fScale, of the whole range without, held in range;
+         * hue and saturation kept.
+         */
+        ColorAdjustLuma: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([rgb, amount, scale])=>{
+                const scratch = (amount | 0) === 0 ? 0 : host.allocate?.(8) ?? 0;
+                if (!scratch || !host.readMemory)
+                {
+                    return wholeAddress(rgb);
+                }
+                try
+                {
+                    table.ColorRGBToHLS.handler([rgb, scratch, scratch + 2, scratch + 4]);
+                    const words = host.readMemory(scratch, 6);
+                    const hue = words[0] | words[1] << 8;
+                    const luminance = words[2] | words[3] << 8;
+                    const saturation = words[4] | words[5] << 8;
+                    const base = (scale | 0) !== 0 ? luminance : HLSMAX;
+                    const moved = Math.max(0, Math.min(HLSMAX,
+                        luminance + Math.trunc(base * (amount | 0) / 1000)));
+                    return table.ColorHLSToRGB.handler([hue, moved, saturation]);
+                }
+                finally
+                {
+                    host.free?.(scratch);
+                }
+            },
+        },
+
+        /**
+         * HPALETTE SHCreateShellPalette(HDC hdc)
+         *
+         * The halftone palette of the context, gdi32's own.
+         */
+        SHCreateShellPalette: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hdc])=>call('GDI32.dll', 'CreateHalftonePalette', [hdc]) ?? 0,
+        },
+
+        /**
+         * BOOL IsInternetESCEnabled(void)
+         *
+         * Internet Explorer's Enhanced Security Configuration is a server's
+         * alone: off.
+         */
+        IsInternetESCEnabled: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * BOOL SHIsLowMemoryMachine(DWORD dwType)
+         *
+         * Whether the machine has too little memory for Internet Explorer 4's
+         * features, the only question it is asked: never, here.
+         */
+        SHIsLowMemoryMachine: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * HRESULT SHRegisterValidateTemplate(LPCWSTR filename, BOOL unknown)
+         *
+         * Registers a web view template as trusted for Explorer's folder views,
+         * which this machine does not show: S_OK, and said once.
+         */
+        SHRegisterValidateTemplate: unregisteredTemplate,
+
+        /**
+         * FARPROC DelayLoadFailureHook(LPCSTR pszDllName, LPCSTR pszProcName)
+         *
+         * kernel32's own.
+         */
+        DelayLoadFailureHook: {
+            returns: 'pointer',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>call('KERNEL32.dll', 'DelayLoadFailureHook', args) ?? 0,
         },
     };
 }

@@ -6,9 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject, createComRegistry } from './objects.js';
 import { createOleFunctions, createTaskAllocator } from './functions.js';
+import { guestOver } from '../common/guest.fixture.js';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 
 const S_OK = 0x00000000;
@@ -106,6 +107,7 @@ function fakeHost(){
 
     const host = {
         bytes,
+        guest: guestOver(bytes),
         threads,
         published,
         /** @type {{ pointer: () => number } | undefined} */
@@ -211,9 +213,11 @@ function fakeHost(){
  * @param {Object} [options]
  * @param {string[]} [options.interfaces]  Which IIDs the class answers to.
  * @param {boolean} [options.taskAllocator]  Whether the process has an IMalloc to give.
+ * @param {4 | 8} [options.pointerSize]  8 for a 64-bit process.
  */
-function setup({ interfaces = [IID_TEST], taskAllocator = true } = {}){
+function setup({ interfaces = [IID_TEST], taskAllocator = true, pointerSize = 4 } = {}){
     const host = fakeHost();
+    /** @type {any} */ (host).pointerSize = pointerSize;
     if (taskAllocator)
     {
         host.taskAllocator = createTaskAllocator({
@@ -961,6 +965,21 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoGetMalloc: 8,
         StringFromGUID2: 12,
         CoTreatAsClass: 8,
+        CoGetTreatAsClass: 8,
+        CoRegisterInitializeSpy: 8,
+        CoRevokeInitializeSpy: 8,
+        CoRegisterMallocSpy: 4,
+        CoRevokeMallocSpy: 0,
+        CreateObjrefMoniker: 8,
+        FmtIdToPropStgName: 8,
+        PropStgNameToFmtId: 8,
+        StgCreatePropSetStg: 12,
+        StgCreatePropStg: 24,
+        StgOpenPropStg: 20,
+        OleCreateDefaultHandler: 16,
+        OleCreateEmbeddingHelper: 24,
+        OleMetafilePictFromIconAndLabel: 16,
+        OleSetAutoConvert: 8,
         ProgIDFromCLSID: 8,
         StgCreateDocfile: 16,
         StgOpenStorage: 24,
@@ -1087,7 +1106,8 @@ function withGuestCalls(options){
     view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
     for (let slot = 0; slot < 5; slot++)
     {
-        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+        view.setUint32(GUEST_VTABLE + slot * (options?.pointerSize ?? 4),
+            METHOD_BASE + slot * 0x10, true);
     }
     /** @type {{ slot: number, args: number[] }[]} */
     const calls = [];
@@ -1173,6 +1193,47 @@ test('CoCreateInstanceEx makes the object once and asks it for every interface i
         [[CREATED, S_OK], [0, 0x80004002], [CREATED, S_OK]]);
         assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 16], [IID_ARG, RESULTS + 28]],
             'the first interface is the one it was made with, the rest asked of it');
+    });
+
+test('a 64-bit process\'s MULTI_QI holds its interface eight bytes in and its answer at 16',
+    async()=>{
+        const { fns, host, view } = withGuestCalls({ pointerSize: 8 });
+        await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+        view.setUint32(CREATED, GUEST_VTABLE, true);
+        /** @type {number[][]} */
+        const asked = [];
+        /** @param {number} entry @param {number[]} args */
+        const call = async(entry, args)=>{
+            const slot = (entry - METHOD_BASE) / 0x10;
+            if (slot === 3)
+            {
+                view.setUint32(args[3], CREATED, true);
+                return S_OK;
+            }
+            if (slot === 0)
+            {
+                asked.push(args.slice(1));
+                if (args[1] === IID_OTHER_ARG)
+                {
+                    return 0x80004002;
+                }
+                view.setUint32(args[2], CREATED, true);
+            }
+            return S_OK;
+        };
+        /** @type {any} */ (host).call = call;
+        const RESULTS = 0x7000;
+        host.bytes.fill(0, RESULTS, RESULTS + 48);
+        [IID_ARG, IID_OTHER_ARG].forEach((iid, index)=>{
+            view.setUint32(RESULTS + index * 24, iid, true);
+            view.setUint32(RESULTS + index * 24 + 16, 0xbeef, true);
+        });
+        assert.equal(await fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 2,
+            RESULTS]), 0x00080012, 'CO_S_NOTALLINTERFACES');
+        assert.deepEqual([0, 1].map(index=>[host.u32(RESULTS + index * 24 + 8),
+            host.u32(RESULTS + index * 24 + 16)]), [[CREATED, S_OK], [0, 0x80004002]]);
+        assert.equal(host.u32(RESULTS + 4), 0, 'the IID\'s upper half is not the interface');
+        assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 32]]);
     });
 
 test('a single-threaded apartment keeps one message filter and hands back the one replaced',
@@ -1632,8 +1693,11 @@ test('CoIsOle1Class, CoFileTimeNow and CLSIDFromProgIDEx answer as their documen
         const OUT = 0x1600;
         const before = (BigInt(Date.now()) + 11644473600000n) * 10000n;
         assert.equal(fns.CoFileTimeNow.handler([OUT]), S_OK);
+        const after = (BigInt(Date.now()) + 11644473600000n + 1n) * 10000n;
         const stamp = BigInt(host.u32(OUT)) | (BigInt(host.u32(OUT + 4)) << 32n);
-        assert.ok(stamp >= before && stamp - before < 100000000n, 'now, in 100ns from 1601');
+        // Between the clock's readings either side of the call: however long a
+        // busy machine took over it, never more nor less than it did.
+        assert.ok(stamp >= before && stamp < after, 'now, in 100ns from 1601');
         assert.equal(fns.CoFileTimeNow.handler([0]) >>> 0, E_INVALIDARG);
         host.putWide(STRING_BUFFER, 'No.Such.Class');
         assert.equal(fns.CLSIDFromProgIDEx.handler([STRING_BUFFER, GUID_OUT]) >>> 0,
@@ -1717,4 +1781,222 @@ test('ReleaseStgMedium deletes a GDI object through gdi32 when ole32 can call it
     await fns.ReleaseStgMedium.handler([MEDIUM]);
     assert.equal(called[0], `GDI32.dll!DeleteObject(${0x6000})`);
     assert.match(called[1], /^KERNEL32\.dll!DeleteFileW\(/);
+});
+
+test('CoGetTreatAsClass answers the class itself until one emulates it', ()=>{
+    // compobj.c test_TreatAsClass: S_FALSE and the same class with no
+    // emulation, the emulator's class once CoTreatAsClass names one, and
+    // taking away an emulation that is not there fails as a write.
+    const { host } = setup();
+    host.hive = createHive();
+    const fns = createOleFunctions(host);
+    const OUT = 0x1040;
+    const NEW_ARG = 0x1060;
+    const replacement = '{66666666-7777-8888-9999-AAAAAAAAAAAA}';
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(replacement)), NEW_ARG);
+    const read = ()=>formatGuid(host.bytes.slice(OUT, OUT + GUID_SIZE));
+
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_FALSE);
+    assert.equal(read(), CLSID_TEST);
+    assert.equal(fns.CoGetTreatAsClass.handler([0, OUT]) >>> 0, 0x80070057);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, 0]) >>> 0, 0x80070057);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, CLSID_ARG]) >>> 0, 0x80040151,
+        'REGDB_E_WRITEREGDB: there is no emulation to take away');
+
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), S_OK);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_OK);
+    assert.equal(read(), replacement);
+    host.bytes.set(/** @type {Uint8Array} */ (parseGuid(GUID_NULL)), NEW_ARG);
+    assert.equal(fns.CoTreatAsClass.handler([CLSID_ARG, NEW_ARG]), S_OK);
+    assert.equal(fns.CoGetTreatAsClass.handler([CLSID_ARG, OUT]), S_FALSE);
+    assert.equal(read(), CLSID_TEST);
+});
+
+/**
+ * A program's spy at GUEST_OBJECT: QueryInterface answers itself, and every
+ * call is recorded by its slot.
+ */
+function withSpy(){
+    const context = setup();
+    const { host } = context;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
+    for (let slot = 0; slot < 7; slot++)
+    {
+        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+    }
+    /** @type {{ slot: number, args: number[] }[]} */
+    const calls = [];
+    /** @param {number} entry @param {number[]} args */
+    const answer = async(entry, args)=>{
+        const slot = (entry - METHOD_BASE) / 0x10;
+        calls.push({ slot, args });
+        if (slot === 0)
+        {
+            view.setUint32(args[2], args[0], true);
+        }
+        // PostInitialize answers the HRESULT it was given.
+        return slot === 4 ? args[1] : 0;
+    };
+    /** @type {any} */ (host).call = answer;
+    const TEB = 0x7000;
+    view.setUint32(TEB + 0x24, 0x1234, true);
+    host.threads.first.tebAddress = TEB;
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    return { ...context, fns, calls, view };
+}
+
+test('an initialize spy is told of each CoInitializeEx and CoUninitialize on its thread', async()=>{
+    // compobj.c test_IInitializeSpy: the cookie is the spy's slot and the
+    // thread's id; Pre and Post run around each call, PostInitialize's
+    // answer is the call's, and a revoked spy's slot is the next one given.
+    const { fns, calls, view, host } = withSpy();
+    const COOKIE = 0x1200;
+    assert.equal((await fns.CoRegisterInitializeSpy.handler([0, COOKIE])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, 0])) >>> 0, 0x80070057);
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE]), S_OK);
+    assert.deepEqual([view.getUint32(COOKIE, true), view.getUint32(COOKIE + 4, true)], [0, 0x1234]);
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE + 8]), S_OK);
+    assert.equal(view.getUint32(COOKIE + 8, true), 1);
+
+    calls.length = 0;
+    assert.equal(await fns.CoInitializeEx.handler([0, COINIT_APARTMENTTHREADED]), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [3, 3, 4, 4]);
+    assert.deepEqual(calls[0].args, [GUEST_OBJECT, COINIT_APARTMENTTHREADED, 0]);
+    assert.deepEqual(calls[2].args, [GUEST_OBJECT, S_OK, COINIT_APARTMENTTHREADED, 1]);
+
+    calls.length = 0;
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([0, 0x1234]), S_OK);
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([0, 0x1234]) >>> 0, 0x80070057,
+        'once');
+    assert.equal(await fns.CoRevokeInitializeSpy.handler([1, 0x9999]) >>> 0, 0x80070057,
+        'and only from its own thread');
+    await fns.CoUninitialize.handler();
+    assert.deepEqual(calls.map(call=>call.slot), [2, 5, 6], 'the release, then the one left');
+    assert.deepEqual(calls[1].args, [GUEST_OBJECT, 1]);
+    assert.deepEqual(calls[2].args, [GUEST_OBJECT, 0]);
+    assert.equal(host.threads.first.ole32, null);
+
+    assert.equal(await fns.CoRegisterInitializeSpy.handler([GUEST_OBJECT, COOKIE]), S_OK);
+    assert.equal(view.getUint32(COOKIE, true), 0, 'the empty slot is taken again');
+});
+
+test('a malloc spy is one for the process, registered once and revoked once', async()=>{
+    // compobj.c test_IMallocSpy.
+    const { fns, calls } = withSpy();
+    assert.equal((await fns.CoRegisterMallocSpy.handler([0])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRevokeMallocSpy.handler()) >>> 0, 0x800401fb, 'CO_E_OBJNOTREG');
+    assert.equal(await fns.CoRegisterMallocSpy.handler([GUEST_OBJECT]), S_OK);
+    assert.equal(calls[0].slot, 0, 'held by its IMallocSpy');
+    assert.equal((await fns.CoRegisterMallocSpy.handler([0])) >>> 0, 0x80070057);
+    assert.equal((await fns.CoRegisterMallocSpy.handler([GUEST_OBJECT])) >>> 0, 0x800401fc,
+        'CO_E_OBJISREG');
+    calls.length = 0;
+    assert.equal(await fns.CoRevokeMallocSpy.handler(), S_OK);
+    assert.deepEqual(calls.map(call=>call.slot), [2]);
+    assert.equal((await fns.CoRevokeMallocSpy.handler()) >>> 0, 0x800401fb);
+});
+
+test('a registered clipboard format crosses to another machine by the name user32 gives it',
+    ()=>{
+        // usrmarshal.c test_marshal_CLIPFORMAT: the name read through
+        // GetClipboardFormatNameW, rather than DV_E_CLIPFORMAT raised.
+        const { host } = setup();
+        const FLAGS = 0x1200;
+        const FORMAT = 0x1210;
+        const name = 'MyFormat';
+        /** @param {string} library @param {string} fn @param {number[]} args */
+        const system = (library, fn, args)=>{
+            if (library !== 'USER32.dll' || fn !== 'GetClipboardFormatNameW')
+            {
+                return null;
+            }
+            for (let index = 0; index < name.length; index++)
+            {
+                host.bytes[args[1] + index * 2] = name.charCodeAt(index);
+                host.bytes[args[1] + index * 2 + 1] = 0;
+            }
+            return name.length;
+        };
+        /** @type {any} */ (host).system = system;
+        const fns = /** @type {any} */ (createOleFunctions(host));
+        const view = new DataView(host.bytes.buffer);
+        view.setUint32(FLAGS, (0x10 << 16) | 2, true);
+        view.setUint16(FORMAT, 0xc000, true);
+        assert.equal(fns.CLIPFORMAT_UserSize.handler([FLAGS, 1, FORMAT]),
+            12 + 12 + (name.length + 1) * 2, 'the number, then the name as a string');
+    });
+
+test('CoGetObject calls back as its caller, whichever thread runs while it waits', async()=>{
+    const { host } = setup();
+    const { first, second } = host.threads;
+    /** @type {unknown[]} */
+    const threads = [];
+    /** @type {any} */ (host).answering = (/** @type {any} */ thread, /** @type {() => any} */ fn)=>{
+        const before = host.currentThread();
+        host.run(thread);
+        try
+        {
+            return fn();
+        }
+        finally
+        {
+            host.run(before);
+        }
+    };
+    // Every guest call waits, and the scheduler hands the processor to the
+    // other thread meanwhile: what a handler reads as its caller after that
+    // is the wrong thread.
+    /** @param {number} entry @param {number[]} args @param {unknown} thread */
+    const call = async(entry, args, thread)=>{
+        threads.push(thread);
+        await Promise.resolve();
+        host.run(second);
+        return 0;
+    };
+    /** @type {any} */ (host).call = call;
+    // Our own objects get a vtable inside this memory, so a call on one is a
+    // guest call the test sees.
+    const view = new DataView(host.bytes.buffer);
+    const publish = host.vtables.publish;
+    /** @type {Map<number, number>} */
+    const placed = new Map();
+    let next = 0xc000;
+    host.vtables.publish = (object, interfaceId)=>{
+        const pointer = publish(object, interfaceId);
+        if (pointer !== 0 && !placed.has(pointer))
+        {
+            placed.set(pointer, next);
+            view.setUint32(next, next + 4, true);
+            for (let slot = 0; slot < 32; slot++)
+            {
+                view.setUint32(next + 4 + slot * 4, METHOD_BASE + slot * 0x10, true);
+            }
+            next += 0x100;
+        }
+        return placed.get(pointer) ?? 0;
+    };
+    const fns = createOleFunctions(/** @type {any} */ (host));
+    initialize(fns, COINIT_APARTMENTTHREADED);
+    const NAME = 0x2000;
+    const OPTIONS = 0x2400;
+    host.putWide(NAME, 'Elevation:Administrator!new:{F21AABF7-4F63-48FB-9524-822429922224}\0');
+    view.setUint32(OPTIONS, 16, true);
+    host.run(first);
+    await fns.CoGetObject.handler([NAME, OPTIONS, IID_ARG, PPV]);
+    assert.ok(threads.length > 1, 'it calls into the guest more than once');
+    assert.ok(threads.every(thread=>thread === first),
+        `every call the caller's: ${threads.map(thread=>(thread === first ? 'first' : 'other'))}`);
+});
+
+test('CoFileTimeNow reads the machine\'s wall clock, as GetSystemTimeAsFileTime does', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    // 2026-01-01T00:00:00Z: 13 410 547 200 000 ms after the FILETIME epoch.
+    host.now = ()=>Date.UTC(2026, 0, 1);
+    const fns = createOleFunctions(host);
+    const out = 0x6000;
+    assert.equal(fns.CoFileTimeNow.handler([out]), 0);
+    const view = new DataView(host.readMemory(out, 8).slice().buffer);
+    const ticks = view.getBigUint64(0, true);
+    assert.equal(ticks, (BigInt(Date.UTC(2026, 0, 1)) + 11644473600000n) * 10000n);
 });

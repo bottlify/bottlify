@@ -5,11 +5,12 @@
  */
 
 /**
- * A float compare (`fcomi`, `comiss`) whose flags only the branch after it
- * reads is that branch: the flags are never made. Every condition, over
- * ordered and unordered operands, against what the processor's flags give --
- * fused where both ways on write the flags before anything reads them, and
- * made as before where one way reads them.
+ * A float compare (`fcomi`, `comiss`) is the branch after it: the branch
+ * compares the operands. Every condition, over ordered and unordered
+ * operands, against what the processor's flags give -- where both ways on
+ * write the flags before anything reads them, the flags are never made; where
+ * one way reads them, they wait in the record as the operands' bits
+ * (`Kind.FCMP`) and the read compares again.
  */
 
 import { test } from 'node:test';
@@ -39,8 +40,8 @@ const PAIRS = [[1, 2], [2, 1], [1.5, 1.5], [NaN, 1], [1, NaN], [-0, 0]];
  * Runs `compare` over a (at DATA) and c (at DATA+4), then `jcc` to a block
  * that sets ecx to 1, the fall-through setting it to 0. `after` is what both
  * ways do next: an `add ecx, 0` writes every flag before the halt reads
- * them, so the compare is the branch; an `adc` reads CF, so the flags are
- * made.
+ * them, so the compare is the branch alone; an `adc` reads CF, from the
+ * compare's record.
  *
  * @param {number[]} compare @param {number} cc @param {number[]} values
  * @param {boolean} readAfter
@@ -71,7 +72,7 @@ const COMISS = [0xf3, 0x0f, 0x10, 0x05, ...at(DATA), 0xf3, 0x0f, 0x10, 0x0d, ...
 for (const [name, compare] of /** @type {[string, number[]][]} */ ([
     ['fcomip', FCOMIP], ['comiss', COMISS]]))
 {
-    test(`${name} and every condition after it, fused and made`, {
+    test(`${name} and every condition after it, its flags unread and read after`, {
         skip: name === 'comiss' && !features().simd && 'no simd',
     }, ()=>{
         for (let cc = 0; cc < 16; cc++)
@@ -83,8 +84,8 @@ for (const [name, compare] of /** @type {[string, number[]][]} */ ([
                 assert.equal(fused.fused, 1, `${name} j${cc.toString(16)}: fused`);
                 assert.equal(fused.ecx, expected, `${name} ${a} ${c} j${cc.toString(16)}`);
                 const made = run(compare, cc, [a, c], true);
-                assert.equal(made.fused, 0, 'the flags are read after: made');
-                // adc ecx, 0 adds CF: the flags the compare made, where the
+                assert.equal(made.fused, 1, 'the branch compares, the flags read after it too');
+                // adc ecx, 0 adds CF: the flags the compare left, where the
                 // branch did not change them.
                 assert.equal(made.ecx, expected + (flagsOf(a, c).cf ? 1 : 0),
                     `${name} ${a} ${c} j${cc.toString(16)} with the flags read after`);

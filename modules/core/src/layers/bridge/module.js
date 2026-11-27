@@ -6,7 +6,7 @@
 
 import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
-import { createDispatcher } from './internal/dispatch.js';
+import { createDispatcher, unsignedAddress } from './internal/dispatch.js';
 import { createCallbacks } from './internal/callback.js';
 import { driven, isDriven, stepsThroughPromises } from './internal/drive.js';
 import { createVtables } from './internal/vtable.js';
@@ -30,6 +30,9 @@ import { createVtables } from './internal/vtable.js';
  * report keeps.
  */
 const DETAILED_IN_TABLE = 256;
+
+/** The hooks the published table (`bridge.hooks`) has rows for; a sidecar binds a few. */
+const HOOK_ROWS = 64;
 
 const CONTINUATION = Symbol('continuation');
 
@@ -64,6 +67,29 @@ const RETURNING = Symbol('returning');
  */
 const isReturning = value=>typeof value === 'object' && value !== null
     && value[RETURNING] === true;
+
+/**
+ * A host call's failure as the run reports it: the call by name and the
+ * first place in our code it was thrown from, before what was thrown. A
+ * report that carried the message alone ("Offset is outside the bounds of
+ * the DataView") named no function of the hundreds a process calls.
+ *
+ * @param {unknown} thrown @param {string} call
+ * @returns {Error}
+ */
+const named = (thrown, call)=>{
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    if (/** @type {any} */ (error).hostCall === undefined)
+    {
+        // The first frame with a file and a line: the engine's own builtins
+        // (DataView.prototype.getUint32) say nothing about which code.
+        const at = error.stack?.split('\n').find(line=>/^\s+at .*:\d+:\d+\)?$/.test(line))?.trim()
+            .replace(/^at /, '');
+        Object.assign(error, { hostCall: call });
+        error.message = `${call}: ${error.message}${at ? ` (at ${at})` : ''}`;
+    }
+    return error;
+};
 
 /** The bridge layer's module for one graph; see `defaultModules`. */
 export function createBridgeModule(){
@@ -181,6 +207,18 @@ export function createBridgeModule(){
             state.callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
 
             /**
+             * An answer that comes after its call returned to the dispatcher, as
+             * the thread's resume takes it: a quadword whole, an address of a
+             * 64-bit caller's zero-extended (`zeroExtends`, a bigint the resume
+             * writes into RAX whole), any other dword by its sign.
+             *
+             * @param {number | bigint} value @param {boolean} zeroExtends
+             * @returns {number | bigint}
+             */
+            const lateAnswer = (value, zeroExtends)=>(typeof value === 'bigint' ? value
+                : zeroExtends ? BigInt(unsignedAddress(value)) : value | 0);
+
+            /**
              * A handler that has not finished: the thread is stopped, and told where
              * to pick up its own code once the answer arrives.
              *
@@ -196,7 +234,7 @@ export function createBridgeModule(){
                 const thread = kernel.currentThread();
                 // Everything wanted of the frame is taken now: it describes this
                 // call only until the dispatcher's next one.
-                const { name, restingStack, hostReturn } = frame;
+                const { name, restingStack, hostReturn, zeroExtends } = frame;
                 record({ t: 'park', name, thread: thread?.name });
                 // Where it returns to was read before the handler ran: a handler
                 // that called the guest back has since written over that part of
@@ -216,13 +254,15 @@ export function createBridgeModule(){
                             state.callbacks.finish(thread, value.value | 0, value.registers);
                             return;
                         }
-                        state.callbacks.finish(thread, value | 0);
+                        // A quadword answered whole (an LRESULT handed on) goes
+                        // back whole; a dword as the function's type has it.
+                        state.callbacks.finish(thread, lateAnswer(value, zeroExtends));
                     },
                     // Nothing above is waiting on this promise, so a handler that
                     // throws would otherwise vanish and leave the guest parked
                     // forever. Whoever is driving the machine asks for this.
                     (/** @type {Error} */ error)=>{
-                        state.failure ??= error;
+                        state.failure ??= named(error, name);
                     });
             };
 
@@ -239,7 +279,7 @@ export function createBridgeModule(){
              */
             const driveNow = (token, frame)=>{
                 const thread = kernel.currentThread();
-                const { name, restingStack, hostReturn, freeStack } = frame;
+                const { name, restingStack, hostReturn, freeStack, zeroExtends } = frame;
                 record({ t: 'drive', name, thread: thread?.name });
                 state.drive.call = name;
                 // From the call's first guest routine to its answer: the steps'
@@ -281,7 +321,7 @@ export function createBridgeModule(){
                         // As a promise's rejection: whoever drives the machine is
                         // told, and the thread waits on an answer that never comes.
                         kernel.holdThread();
-                        state.failure ??= /** @type {Error} */ (e);
+                        state.failure ??= named(e, name);
                         return;
                     }
                     if (!next.done)
@@ -316,7 +356,7 @@ export function createBridgeModule(){
                         }
                         return;
                     }
-                    state.callbacks.finishNow(thread, value | 0);
+                    state.callbacks.finishNow(thread, lateAnswer(value, zeroExtends));
                 }
                 // The first call from where the call in flight left the stack;
                 // the rest from where it rests, as `callGuest` builds them.
@@ -328,7 +368,7 @@ export function createBridgeModule(){
                 }
                 catch (e){
                     kernel.holdThread();
-                    state.failure ??= /** @type {Error} */ (e);
+                    state.failure ??= named(e, name);
                     return;
                 }
                 if (answered !== undefined)
@@ -357,19 +397,42 @@ export function createBridgeModule(){
                     return answered;
                 },
                 lastErrorOffset: config?.lastErrorOffset,
+                divergence: config?.divergence,
                 traceStrings: config?.traceStrings ?? false,
                 callPhases: config?.callPhases ?? false,
                 onCall: config?.onCall,
                 wantsCall: config?.wantsCall,
                 // Where the time a host call takes is accounted. Nested inside the
                 // guest phase the driver opens, so what is left as the guest's own
-                // self time is the emulator executing and this is our code -- which
+                // self time is the guest's code executing and this is ours -- which
                 // is the only division that answers a question about speed.
                 profiler: /** @type {any} */ (host.requireApi('log')),
                 // The same journal, for the record of a slot hook's crossings
                 // under `call.hook` -- off by default like every call area.
                 journal: /** @type {any} */ (host.requireApi('log')),
             });
+
+            // The hooks' own totals, copied into a table once a frame for a
+            // reader elsewhere (the log keeper): a handful of rows, and none at
+            // all while no hook is bound.
+            const log = /** @type {any} */ (host.requireApi('log'));
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                && typeof log.metrics?.table === 'function')
+            {
+                const table = log.metrics.table('bridge', 'hooks',
+                    { rows: HOOK_ROWS, columns: ['name', 'calls', 'ms'] });
+                log.metrics.onFrame(()=>{
+                    const hooks = state.dispatcher.hooks();
+                    const rows = Math.min(hooks.length, HOOK_ROWS);
+                    for (let row = 0; row < rows; row++)
+                    {
+                        table.set(row, 0, log.intern(hooks[row].name));
+                        table.set(row, 1, hooks[row].calls);
+                        table.set(row, 2, hooks[row].ms);
+                    }
+                    table.used(rows);
+                });
+            }
 
             /**
              * Whether this instance is still open. A trap that fires after
@@ -378,6 +441,25 @@ export function createBridgeModule(){
              * table that answers for nobody.
              */
             const live = ()=>!state.disposed;
+
+            /** Calls made to COM methods with no implementation, by method. */
+            const comMissing = new Map();
+            /**
+             * A COM method an interface has a slot for and no implementation of,
+             * called: a warning, as a missing import is, the first time and every
+             * 256th with its count -- a program may call one every frame.
+             *
+             * @param {string} label  the interface's IID and the method's name
+             */
+            const comUnimplemented = label=>{
+                const count = (comMissing.get(label) ?? 0) + 1;
+                comMissing.set(label, count);
+                if (count === 1 || count % 256 === 0)
+                {
+                    /** @type {any} */ (host.requireApi('log')).write('warn', 'unimplemented',
+                        '{0} answered E_NOTIMPL, call {1}', label, count);
+                }
+            };
 
             // Claimed here rather than by whoever assembles the process: a trap that
             // reached anything but the bridge would be a call nobody marshalled.
@@ -448,6 +530,25 @@ export function createBridgeModule(){
                  *     Whether the function can set the thread's last error, which
                  *     the trace reads after each call that can. A COM method
                  *     cannot, and says so.
+                 * @param {number[]} [fn.quadwords]
+                 *     Where an argument counted as two dwords begins, which an
+                 *     x86-64 caller passes in one slot (the dispatcher's
+                 *     `readLongCall`).
+                 * @param {Record<number, 'f32' | 'f64'>} [fn.floats]
+                 *     The float and double arguments by their first dword,
+                 *     which an x86-64 caller passes among its first four in
+                 *     XMM registers.
+                 * @param {Record<number, number>} [fn.structs]
+                 *     The structures wider than eight bytes passed by value, by
+                 *     their first dword and their size in dwords, which an
+                 *     x86-64 caller passes by a pointer to a copy.
+                 * @param {string} [fn.returns]  The answer is an address, zero-extended
+                 *     into a 64-bit caller's RAX (`HostFunction.returns`).
+                 * @param {number[]} [fn.addresses]  The dwords that carry an address the
+                 *     handler takes whole from a 64-bit caller (`HostFunction.addresses`).
+                 * @param {number[]} [fn.sizes]  The dwords that carry a size, which a
+                 *     64-bit caller's past a dword makes the largest dword
+                 *     (`HostFunction.sizes`).
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -456,7 +557,8 @@ export function createBridgeModule(){
                     name,
                     {
                         convention = Convention.STDCALL, argBytes, handler,
-                        preserveResult = false, lastError = true,
+                        preserveResult = false, lastError = true, quadwords, floats, structs,
+                        returns, addresses, sizes,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -475,10 +577,44 @@ export function createBridgeModule(){
                     state.callbacks.reserve();
                     const { id, address } = cpu.registerTrap(
                         name, calleeCleanup(convention, argBytes), { preserveResult });
-                    state.dispatcher.register(id,
-                        { name, convention, argBytes, handler, lastError });
+                    state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
+                        ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {},
+                        ...structs ? { structs } : {}, ...returns ? { returns } : {},
+                        ...addresses ? { addresses } : {}, ...sizes ? { sizes } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
+                },
+
+                /**
+                 * The high half of a quadword the handler running now answers:
+                 * EDX for a 32-bit caller, RAX's upper half for a 64-bit one,
+                 * where the handler cannot reach it itself -- the bridge writes
+                 * RAX whole once the handler is done.
+                 *
+                 * @param {number} value
+                 */
+                answerHigh(value){
+                    if (cpu.bits?.() === 64)
+                    {
+                        state.dispatcher.answerHigh(value);
+                        return;
+                    }
+                    cpu.writeReg32('edx', value >>> 0);
+                },
+
+                /**
+                 * The few guest instructions a 64-bit process's callbacks start
+                 * at, which load the x64 convention's four argument registers
+                 * whole (`LONG_CALL_CODE` in `internal/callback.js`): whoever
+                 * owns guest code memory places them, when the first callback
+                 * is made.
+                 *
+                 * @param {(code: Uint8Array) => number} place  Writes the code
+                 *     into executable guest memory and answers its address,
+                 *     zero when there is no room.
+                 */
+                placeLongCall(place){
+                    state.callbacks.placeLongCall(place);
                 },
 
                 /**
@@ -669,7 +805,12 @@ export function createBridgeModule(){
                  *
                  * @param {Object} call
                  * @param {number} call.entry
-                 * @param {number[]} [call.args]
+                 * @param {(number | bigint)[]} [call.args]
+                 *   Each a dword, which a 64-bit process takes widened by its sign
+                 *   as JavaScript holds it -- an address given unsigned (`>>> 0`)
+                 *   zero-extended, an LPARAM or a handle of -1 sign-extended -- or a
+                 *   bigint, a quadword whole (an argument that came in whole, its
+                 *   high half from `args.high`); a 32-bit process takes its low dword.
                  * @param {any} [call.thread]
                  *   Whose stack to build the frame on. Defaults to the thread on
                  *   the processor, which is right only while the host call that is
@@ -792,6 +933,23 @@ export function createBridgeModule(){
                 }),
 
                 /**
+                 * Where a host call's refused guest access, or an exception a
+                 * handler raised, goes: raised in the guest -- the access
+                 * violation as Windows raises it inside the DLL -- by whoever
+                 * dispatches exceptions; this layer does not. Without one,
+                 * either ends the run.
+                 *
+                 * @param {((raised: import('./internal/dispatch.js').GuestRaise)
+                 *     => Promise<number>) | null} raise
+                 */
+                onGuestFault(raise){
+                    if (live() && state.dispatcher)
+                    {
+                        state.dispatcher.guestFault = raise;
+                    }
+                },
+
+                /**
                  * Holds the running thread while a processor exception it took is
                  * offered to its handlers, the way a host call holds it while it
                  * waits: the thread is sent to the park loop from the vector's
@@ -829,7 +987,7 @@ export function createBridgeModule(){
                             state.callbacks.finish(thread, value | 0);
                         },
                         (/** @type {Error} */ error)=>{
-                            state.failure ??= error;
+                            state.failure ??= named(error, where.name);
                         });
                 },
 
@@ -853,6 +1011,8 @@ export function createBridgeModule(){
                     state.vtables = createVtables({
                         memory,
                         heap,
+                        unimplemented: comUnimplemented,
+                        long: ()=>cpu.bits?.() === 64,
                         register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                             this.register(name, fn),
                     });
@@ -907,6 +1067,16 @@ export function createBridgeModule(){
                 suspended: ()=>live() ? state.callbacks.pendingCalls() : 0,
 
                 /**
+                 * How many threads wait on a suspended call's answer from the
+                 * host. Fewer than `suspended` while a call runs guest code it
+                 * called back, whose thread is at work rather than waiting.
+                 */
+                waitingOnHost: ()=>live() ? state.callbacks.waitingOnHost() : 0,
+
+                /** The host call that suspended last, or '' when none has. */
+                lastSuspended: ()=>live() ? state.callbacks.lastSuspended() : '',
+
+                /**
                  * Settles when the next suspended call answers: what a driver loop
                  * with nothing else to do waits on, so it wakes when the machine
                  * can move rather than on a schedule of its own. Resolves at once
@@ -954,6 +1124,19 @@ export function createBridgeModule(){
 
                 /** Where the guest was last sent by us, newest last. */
                 recentlyStarted: ()=>live() ? state.callbacks.recentlyStarted() : [],
+
+                /**
+                 * Where a routine the host called back returns to on the guest
+                 * side, by the stack its frame left once undone: the call into
+                 * the host that made the callback. What a 64-bit exception
+                 * walk crosses a host call by; null when `stack` is no
+                 * callback's return.
+                 *
+                 * @param {any} thread @param {number} stack
+                 * @returns {{ rip: number, rsp: number } | null}
+                 */
+                callbackCaller: (thread, stack)=>(live() && thread
+                    ? state.callbacks.callerOf(thread, stack >>> 0) : null),
 
                 /**
                  * The recorded session: every event at this seam, in order.
@@ -1035,6 +1218,20 @@ export function createBridgeModule(){
                     if (live())
                     {
                         state.dispatcher.placed(address, name);
+                    }
+                },
+
+                /**
+                 * Names a span's addresses as a report asks for them, rather than
+                 * one by one ahead of time: a module's thousands of exports.
+                 *
+                 * @param {number} base @param {number} size
+                 * @param {(address: number) => string | null} nameAt
+                 */
+                labelSpan: (base, size, nameAt)=>{
+                    if (live())
+                    {
+                        state.dispatcher.placedSpan(base, size, nameAt);
                     }
                 },
 

@@ -634,21 +634,3 @@ export function tanh(x){
     }
     return x < 0 ? -result : result;
 }
-
-const floatScratch = new DataView(new ArrayBuffer(4));
-
-/**
- * A float's bits as the compiler writes them. ECMAScript lets a NaN stored
- * into a float32 take any NaN pattern, and x86 and ARM engines differ in the
- * sign; one quiet NaN is written for all of them.
- *
- * @param {number} value
- */
-export function float32Bits(value){
-    if (Number.isNaN(value))
-    {
-        return 0x7fc00000;
-    }
-    floatScratch.setFloat32(0, value, true);
-    return floatScratch.getUint32(0, true);
-}

@@ -26,6 +26,7 @@ import { D3DPRESENT_PARAMETERS8, D3DPRESENT_PARAMETERS9, createFields } from './
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpengl } from '../opengl/exports.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
@@ -34,7 +35,7 @@ function machine(){
     const bytes = new Uint8Array(0x10000);
     let next = 0x100;
 
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -49,7 +50,7 @@ function machine(){
             bytes[at + 2] = value >>> 16 & 0xff;
             bytes[at + 3] = value >>> 24 & 0xff;
         },
-    };
+    });
 
     /** Trap ids, so a published slot can be called the way a guest would. */
     /** @type {Map<number, any>} */
@@ -79,12 +80,12 @@ function machine(){
         memory,
         registered,
         /** The graphics services shape: readMemory/writeMemory. */
-        services: {
+        services: withPointers({
             /** @param {number} at @param {number} length */
             readMemory: (at, length)=>bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
             writeMemory: (at, value)=>bytes.set(value, at),
-        },
+        }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
 
@@ -151,8 +152,9 @@ test('a program reaches Direct3D through a library, not by asking for an object'
     const { libraries } = seamed();
 
     assert.deepEqual(Object.keys(libraries.libraries).sort(),
-        ['D3D10.dll', 'D3D10_1.dll', 'D3D8.dll', 'D3D9.dll', 'DDRAW.dll', 'DXGI.dll',
-            'GLU32.dll', 'OPENGL32.dll', 'vulkan-1.dll']);
+        ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'D3D8.dll', 'D3D9.dll', 'D3DCOMPILER_47.dll',
+            'D3DCompiler_43.dll', 'DDRAW.dll', 'DXGI.dll', 'GLU32.dll', 'OPENGL32.dll',
+            'vulkan-1.dll']);
     assert.equal(libraries.libraries['D3D8.dll'].Direct3DCreate8.argBytes, 4,
         'one argument, the SDK version');
 });
@@ -789,6 +791,12 @@ test('Direct3D 8 validates a shader by its version token, and never has messages
     box.memory.writeU32(code, 0xffff0200);
     assert.equal(d3d8.ValidatePixelShader.handler([code, 0, 0, 0]), E_FAIL);
     assert.equal(d3d8.ValidatePixelShader.argBytes, 16);
+    // No code is refused, and the errors pointer is left (Wine's d3d8
+    // test_validate_ps); a vertex shader's gets a string.
+    const untouched = 0x9400;
+    box.memory.writeU32(untouched, 0xcafeface);
+    assert.equal(d3d8.ValidatePixelShader.handler([0, 0, 1, untouched]), E_FAIL);
+    assert.equal(box.memory.readU32(untouched), 0xcafeface);
 });
 
 test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stream through', ()=>{
@@ -801,9 +809,14 @@ test('Direct3DShaderValidatorCreate9 hands out a validator that answers the stre
     assert.notEqual(validator, 0);
     // Begin(callback, context, arg3), Instruction(file, line, tokens, count), End().
     assert.deepEqual([3, 4, 5].map(slot=>box.argBytesOf(validator, slot)), [16, 20, 4]);
+    // A ps_3_0 version token, then the end token (shader-validator.test.js
+    // holds what it judges).
+    box.memory.writeU32(0x100, 0xffff0300);
+    box.memory.writeU32(0x104, 0x0000ffff);
     assert.equal(box.call(validator, 3, [0, 0, 0]), 0);
-    assert.equal(box.call(validator, 4, [0, 0, 0x100, 3]), 0);
+    assert.equal(box.call(validator, 4, [0, 0, 0x100, 1]), 0);
     assert.equal(box.call(validator, 4, [0, 0, 0x100, 0]) >>> 0, 0x80004005, 'no tokens');
+    assert.equal(box.call(validator, 4, [0, 0, 0x104, 1]), 0);
     assert.equal(box.call(validator, 5), 0);
     assert.equal(box.call(validator, 2), 0, 'the last reference released');
 });
@@ -830,4 +843,41 @@ test('D3D8.dll\'s DebugSetMute is there, a call that does nothing', ()=>{
     const entry = libraries.libraries['D3D8.dll'].DebugSetMute;
     assert.equal(entry.argBytes, 0);
     assert.equal(entry.handler([]), 0);
+});
+
+test('a Direct3D 8 Present is paced by the device presenting, not by the device made last', ()=>{
+    // As in Direct3D 9: a probe device made after the one a program draws with,
+    // presenting unpaced, leaves the first one's vertical sync as it was.
+    const box = machine();
+    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    let clock = 0;
+    const seam = createDirect3D8Seam({
+        publisher,
+        memory: box.services,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
+        now: ()=>clock,
+        waitUntil: (/** @type {number} */ deadline, /** @type {number} */ hr)=>{
+            clock = Math.max(clock, deadline);
+            return hr;
+        },
+    });
+    const root = seam.publishRoot(createDirect3D8());
+    const fields = createFields(box.services);
+    const COPY_VSYNC = 4;
+    const DISCARD = 1;
+    /** @param {number} swapEffect @param {number} out */
+    const create = (swapEffect, out)=>{
+        fields.writeStruct(0x8000, D3DPRESENT_PARAMETERS8, { BackBufferWidth: 64,
+            BackBufferHeight: 64, BackBufferFormat: 22, BackBufferCount: 1,
+            SwapEffect: swapEffect, Windowed: 1, EnableAutoDepthStencil: 0 });
+        box.call(root, 3 + IDIRECT3D8_SLOTS.length - 1, [0, 1, 0, 0x40, 0x8000, out]);
+        return box.memory.readU32(out);
+    };
+    const device = create(COPY_VSYNC, 0x8100);
+    const probe = create(DISCARD, 0x8104);
+    const present = 3 + IDIRECT3DDEVICE8_SLOTS.findIndex(([name])=>name === 'Present');
+    box.call(probe, present, [0, 0, 0, 0]);
+    assert.equal(seam.presentPacing().interval, '0x80000000', 'the probe presents unpaced');
+    box.call(device, present, [0, 0, 0, 0]);
+    assert.equal(seam.presentPacing().interval, '0x1', 'the device it draws with, at its own');
 });

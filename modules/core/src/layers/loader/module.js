@@ -111,7 +111,7 @@ function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, 
     }
 
     // A code-page write: the region is executable, so this routes through the
-    // emulator's own physical write and invalidates whatever was compiled
+    // engine's own physical write and invalidates whatever was compiled
     // from the bytes underneath -- it happens once, at bind time, before the
     // program's first instruction, so nothing is compiled yet to discard. The
     // same protect/write/protect discipline `app.js`'s `debug.hook` uses, even
@@ -153,7 +153,7 @@ function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, 
 export function createLoaderModule(){
     // What this graph's loader has loaded and bound. Every graph is given module
     // objects of its own (`defaultModules`), so a child's images are not its parent's.
-    /** @type {{ base: number, entryPoint: number, unresolved: string[] }[]} */
+    /** @type {{ name?: string, base: number, entryPoint: number, unresolved: string[] }[]} */
     let loaded = [];
     /** @type {{ bound: string[], refused: string[], pending: string[] }} */
     let hookResults = { bound: [], refused: [], pending: [] };
@@ -174,6 +174,41 @@ export function createLoaderModule(){
             // what this one has.
             hookResults = { bound: [], refused: [], pending: [] };
 
+            /**
+             * A synthesised image written at `base`: its code read-only and
+             * executable, its variables, where it has any, writable beside it.
+             *
+             * @param {ReturnType<typeof synthesiseModule>} module
+             * @param {number} base @param {string} region
+             */
+            const writeModule = (module, base, region)=>{
+                const codeSize = module.dataRva || module.size;
+                memory.register({
+                    name: region,
+                    base,
+                    size: codeSize,
+                    kind: memory.RegionKind.IMAGE,
+                    // Written once, at assembly, and executable from then on:
+                    // the exports are jumps and the guest runs them.
+                    access: memory.Access.READ_WRITE_EXECUTE,
+                });
+                memory.writeBytes(base, module.bytes.subarray(0, codeSize));
+                memory.protect(region, memory.Access.READ_EXECUTE);
+                if (module.dataRva !== 0)
+                {
+                    // The variables are written by the program and by the
+                    // library's own functions alike, as a real `.data` is.
+                    memory.register({
+                        name: `${region} .data`,
+                        base: base + module.dataRva,
+                        size: module.size - module.dataRva,
+                        kind: memory.RegionKind.IMAGE,
+                        access: memory.Access.READ_WRITE,
+                    });
+                    memory.writeBytes(base + module.dataRva, module.bytes.subarray(module.dataRva));
+                }
+            };
+
             return {
                 /**
                  * Maps an executable and binds its imports.
@@ -185,11 +220,12 @@ export function createLoaderModule(){
                  * @param {ImportResolver}
                  *     [options.missing]  Where a call to an import nothing claims should land.
                  * @param {string} [options.name]  Region name, for diagnostics.
-                 * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken.
+                 * @param {32 | 64} [options.bits]  The process's machine; an image
+                 *     of the other is refused (`parsePe`). i386 when not given.
                  * @returns {{ base: number, entryPoint: number, unresolved: string[] }}
                  */
-                load(file, { resolveImport, base, missing, name = 'image', wide = false }){
-                    const image = buildImage(file, { resolveImport, base, missing, wide });
+                load(file, { resolveImport, base, missing, name = 'image', bits = 32 }){
+                    const image = buildImage(file, { resolveImport, base, missing, bits });
                     // Both tables. A delay-load slot left as the linker wrote it is
                     // resolved by the program's own helper, which walks an export
                     // directory by hand and refuses an address it does not believe;
@@ -231,10 +267,11 @@ export function createLoaderModule(){
                  * @param {Object} options
                  * @param {number} [options.base]
                  * @param {string} [options.name]
+                 * @param {32 | 64} [options.bits]  The process's machine, as `load`'s.
                  * @returns {any} the mapped image, to be handed back to `bind`
                  */
-                map(file, { base, name = 'image' }){
-                    const image = mapImage(file, base);
+                map(file, { base, name = 'image', bits = 32 }){
+                    const image = mapImage(file, base, { bits });
 
                     memory.register({
                         name,
@@ -309,50 +346,124 @@ export function createLoaderModule(){
                  * @param {number} options.base
                  * @param {import('./internal/synth.js').SynthExport[]} options.exports
                  * @param {string} [options.entryPoint]  The export that is its DllMain.
+                 * @param {boolean} [options.long]  For an x86-64 process.
+                 * @param {string} [options.region]  Its region's name, where a
+                 *        second library of the same name is synthesised beside it.
+                 * @param {Uint8Array} [options.headers]  The real library's own headers
+                 *        (`installedHeaders`), laid over the synthesised ones.
+                 * @param {boolean} [options.later]  Its span held and its bytes
+                 *        written only at `place()`: the same bytes, made again.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
-                 *   ordinalOf: (name: string) => number | null }}
+                 *   ordinalOf: (name: string) => number | null,
+                 *   addressOfOrdinal: (ordinal: number) => number | null,
+                 *   entries: () => [string, number][],
+                 *   placed: () => boolean, place: () => void }}
                  */
-                synthesise({ name, base, exports, entryPoint }){
-                    const module = synthesiseModule({ name, base, exports, entryPoint });
-                    const codeSize = module.dataRva || module.size;
-
-                    memory.register({
-                        name,
-                        base,
-                        size: codeSize,
-                        kind: memory.RegionKind.IMAGE,
-                        // Written once, at assembly, and executable from then on:
-                        // the exports are jumps and the guest runs them.
-                        access: memory.Access.READ_WRITE_EXECUTE,
-                    });
-                    memory.writeBytes(base, module.bytes.subarray(0, codeSize));
-                    memory.protect(name, memory.Access.READ_EXECUTE);
-                    if (module.dataRva !== 0)
+                synthesise(options){
+                    const { name, base, exports, entryPoint, long, headers } = options;
+                    const later = options.later ?? false;
+                    const region = options.region ?? name;
+                    const built = ()=>{
+                        const module = synthesiseModule({ name, base, exports, entryPoint, long });
+                        // The real library's own headers, where its file is
+                        // installed (`installedHeaders`): within the headers' page.
+                        if (headers)
+                        {
+                            module.bytes.set(headers, 0);
+                        }
+                        return module;
+                    };
+                    /** @param {ReturnType<typeof synthesiseModule>} module */
+                    const write = module=>writeModule(module, base, region);
+                    const module = built();
+                    // Placed later (`later`): its span held now, so nothing else
+                    // is given those addresses, its bytes not kept - they are
+                    // made again from the same exports when it is placed.
+                    const pending = later ? `${region} (not placed)` : null;
+                    if (pending)
                     {
-                        // The variables are written by the program and by the
-                        // library's own functions alike, as a real `.data` is.
-                        memory.register({
-                            name: `${name} .data`,
-                            base: base + module.dataRva,
-                            size: module.size - module.dataRva,
-                            kind: memory.RegionKind.IMAGE,
-                            access: memory.Access.READ_WRITE,
-                        });
-                        memory.writeBytes(base + module.dataRva,
-                            module.bytes.subarray(module.dataRva));
+                        memory.register({ name: pending, base, size: module.size,
+                            kind: memory.RegionKind.RESERVED, access: memory.Access.NONE });
+                    }
+                    else
+                    {
+                        write(module);
                     }
 
                     const entryAddress = module.entryPointRva === 0
                         ? 0 : base + module.entryPointRva;
                     const record = { base, entryPoint: entryAddress, unresolved: [], name };
                     loaded.push(record);
+                    let placed = !later;
                     return {
                         base,
                         size: module.size,
                         entryPoint: entryAddress,
                         addressOf: module.addressOf,
                         ordinalOf: module.ordinalOf,
+                        addressOfOrdinal: module.addressOfOrdinal,
+                        entries: module.entries,
+                        /** Whether its bytes are in guest memory. */
+                        placed: ()=>placed,
+                        /** Writes its bytes where its span was held; nothing once it has. */
+                        place: ()=>{
+                            if (placed)
+                            {
+                                return;
+                            }
+                            placed = true;
+                            memory.unregister(/** @type {string} */ (pending));
+                            write(built());
+                        },
+                    };
+                },
+
+                /**
+                 * Holds a system module's span for a module laid out before -
+                 * by an earlier process of the machine - whose exports are made
+                 * only when it is placed: nothing is built until then. place()
+                 * makes them (`exportsAt`), synthesises the image at `base` and
+                 * writes it, and refuses one that does not come out the size laid
+                 * out: the addresses every process was handed would be wrong.
+                 *
+                 * @param {{ name: string, base: number, size: number, entryPoint: number,
+                 *     long?: boolean, region?: string,
+                 *     exportsAt: () => { exports: import('./internal/synth.js').SynthExport[],
+                 *         entryPoint?: string, headers?: Uint8Array } }} options
+                 * @returns {{ placed: () => boolean,
+                 *     place: () => ReturnType<typeof synthesiseModule> | null }}
+                 */
+                hold({ name, base, size, entryPoint, long, region = name, exportsAt }){
+                    const pending = `${region} (not placed)`;
+                    memory.register({ name: pending, base, size,
+                        kind: memory.RegionKind.RESERVED, access: memory.Access.NONE });
+                    loaded.push({ base, entryPoint, unresolved: [], name });
+                    let placed = false;
+                    return {
+                        placed: ()=>placed,
+                        place: ()=>{
+                            if (placed)
+                            {
+                                return null;
+                            }
+                            placed = true;
+                            const made = exportsAt();
+                            const module = synthesiseModule({ name, base, exports: made.exports,
+                                entryPoint: made.entryPoint, long });
+                            if (module.size !== size)
+                            {
+                                throw new Error(`loader: ${name} came out ${module.size} bytes,`
+                                    + ` laid out as ${size}`);
+                            }
+                            if (made.headers)
+                            {
+                                module.bytes.set(made.headers, 0);
+                            }
+                            memory.unregister(pending);
+                            writeModule(module, base, region);
+                            return module;
+                        },
                     };
                 },
 
@@ -476,6 +587,9 @@ export function createLoaderModule(){
                 status: 'ready',
                 metrics: {
                     images: loaded.length,
+                    // Where each image lies, as [name, base]: what reads a block
+                    // profile back to its code (tools/translator/cork-calls.mjs).
+                    bases: loaded.map(record=>[record.name ?? '', record.base]),
                     // An import nothing implements is not fatal at load time, so the
                     // list is the only place it surfaces before the guest calls it.
                     unresolved: loaded.flatMap(image=>image.unresolved),

@@ -17,18 +17,23 @@
  * Behind a proxy, `--address-header` names the header carrying the client's
  * address (Cloudflare's `cf-connecting-ip`), which the per-address limit then
  * counts by; `--resume-seconds` is how long a peer whose link dropped is kept
- * for its client to come back to.
+ * for its client to come back to. `--proxy http://host:port` makes every
+ * connection to the outside through that HTTP proxy's CONNECT, for a relay
+ * whose machine has no other way out. `--log` prints every connection and
+ * name a peer asked for, with what the policy said: which hosts a program
+ * reaches is what an allowlist is written from.
  */
 
 import { createRelayServer } from './index.js';
 import { parseIp } from '../protocol.js';
+import { proxyDialer } from './tunnel.js';
 
 /** @param {string[]} argv */
 export function parseArguments(argv){
     /** @type {{ port: number, host: string, allow: string[], origins: string[],
-     *     addressHeader: string, resumeSeconds: number }} */
+     *     addressHeader: string, resumeSeconds: number, proxy: string, log: boolean }} */
     const parsed = { port: 8787, host: '0.0.0.0', allow: [], origins: [],
-        addressHeader: '', resumeSeconds: 10 };
+        addressHeader: '', resumeSeconds: 10, proxy: '', log: false };
     for (let at = 0; at < argv.length; at++)
     {
         const value = argv[at + 1];
@@ -38,6 +43,15 @@ export function parseArguments(argv){
             case '--host': parsed.host = String(value); at++; break;
             case '--allow': parsed.allow.push(String(value)); at++; break;
             case '--origin': parsed.origins.push(String(value)); at++; break;
+            case '--log': parsed.log = true; break;
+            case '--proxy':
+                if (!/^http:\/\/[^/]+\/?$/.test(String(value)))
+                {
+                    throw new Error(`--proxy wants http://host:port, not ${value}`);
+                }
+                parsed.proxy = String(value);
+                at++;
+                break;
             case '--address-header':
                 parsed.addressHeader = String(value).toLowerCase();
                 at++;
@@ -101,8 +115,18 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '
         port: options.port,
         host: options.host,
         origins: options.origins.length > 0 ? options.origins : undefined,
-        policy: request=>permits(options.allow, request.host),
+        policy: request=>{
+            const allowed = permits(options.allow, request.host);
+            if (options.log)
+            {
+                process.stdout.write(`${new Date().toISOString()} ${request.room}`
+                    + ` ${request.protocol} ${request.host}:${request.port ?? ''}`
+                    + ` ${allowed ? 'allowed' : 'refused'}\n`);
+            }
+            return allowed;
+        },
         resumeWindowMs: options.resumeSeconds * 1000,
+        ...(options.proxy ? { dial: proxyDialer(options.proxy) } : {}),
         ...(options.addressHeader ? {
             addressOf: (/** @type {import('node:http').IncomingMessage} */ request)=>
                 String(request.headers[options.addressHeader]

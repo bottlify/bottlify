@@ -16,7 +16,7 @@
  *
  *     '{"head":{},"calls":{"bundle":"head","cork":{"callTargets":true}}}'
  *
- *   --variants x87,sse    which builds (default both)
+ *   --variants x87,sse    which builds: x87, sse, x64 (default x87,sse)
  *   --only a,b,c          workloads to run (default all)
  *   --reps n              runs of each, the fastest kept (default 2)
  *   --out file.jsonl      one JSON line per run
@@ -30,7 +30,7 @@
  * it: such a run measures the start. Ten times them leaves a few per cent of
  * that, and what is left is the translated code's own rate.
  *
- * The browser is CDP_TEST_CHROME or the first `tools/cdp_test/browser.mjs`
+ * The browser is CDP_TEST_CHROME or the first `tools/lib/browser.mjs`
  * finds. The configurations are interleaved and their order turned round every
  * rep, so a drift in the machine's speed falls on all of them alike.
  */
@@ -51,7 +51,7 @@ const ITERATIONS = /** @type {Record<string, number>} */ ({
 /** A job with no answer by then is run once more, and counted a failure if it fails again. */
 const JOB_LIMIT_MS = 120_000;
 
-const tool = (/** @type {string} */ name)=>import(pathToFileURL(join(REPO, 'tools/cdp_test', name)).href);
+const tool = (/** @type {string} */ name)=>import(pathToFileURL(join(REPO, 'tools/lib', name)).href);
 const { CdpEndpoint } = await tool('cdp.mjs');
 const { serveStatic } = await tool('server.mjs');
 const { launchWithGpu, shutdown } = await tool('browser.mjs');
@@ -68,10 +68,23 @@ const reps = Number(flag('--reps', '2'));
 const out = flag('--out', '');
 const jsFlags = flag('--js-flags', '');
 const scale = Number(flag('--scale', '1'));
-const PELOAD = join(BIN, 'peload');
-const haveNative = existsSync(PELOAD);
+/** The loader that runs a build on the processor: the x64 one is a PE32+. @param {string} variant */
+const loaderOf = variant=>join(BIN, variant === 'x64' ? 'peload64' : 'peload');
+/** @param {string} variant */
+const haveNative = variant=>existsSync(loaderOf(variant));
 /** @type {Record<string, Record<string, string>>} */
 const expected = JSON.parse(readFileSync(resolve(HERE, '../expected.json'), 'utf8'));
+// A bundle not built is a worker the page cannot load, which the browser reports
+// with no message at all: say so before anything runs.
+const unbuilt = [...new Set(labels.map(label=>configs[label].bundle ?? label))]
+    .filter(bundle=>!existsSync(join(HERE, 'bundles', bundle, 'worker.js')));
+if (unbuilt.length !== 0)
+{
+    console.error(`no bundle ${unbuilt.join(', ')}: make it first, e.g.\n`
+        + `    node modules/cork/bench/browser/build.mjs '${JSON.stringify(
+            Object.fromEntries(unbuilt.map(bundle=>[bundle, '.'])))}'`);
+    process.exit(1);
+}
 if (out)
 {
     writeFileSync(out, '');
@@ -111,7 +124,7 @@ const nativeSums = new Map();
  * @param {string} variant @param {string} workload @param {number} iterations
  */
 function native(variant, workload, iterations){
-    const result = spawnSync(PELOAD, [join(BIN, `bench-${variant}.exe`), workload,
+    const result = spawnSync(loaderOf(variant), [join(BIN, `bench-${variant}.exe`), workload,
         String(iterations)], { encoding: 'utf8' });
     const ns = /native-ns (\d+)/.exec(result.stderr);
     const line = /^\S+ \d+ ([0-9a-f]{8})/m.exec(result.stdout);
@@ -218,7 +231,7 @@ try
             {
                 const iterations = ITERATIONS[workload] * scale;
                 const at = `${variant} ${workload}`;
-                if (haveNative)
+                if (haveNative(variant))
                 {
                     const processor = native(variant, workload, iterations);
                     nativeSums.set(at, processor.checksum);
@@ -282,7 +295,7 @@ const rate = (label, key)=>{
         ? fastest.get(`${labels[0]} ${key}`)?.instructions ?? 0 : run?.instructions ?? 0;
     return run ? instructions / run.ms / 1000 : 0;
 };
-const columns = haveNative ? [...labels, 'native'] : labels;
+const columns = variants.some(haveNative) ? [...labels, 'native'] : labels;
 /** @param {number} value @param {number} first @param {number} i */
 const cell = (value, first, i)=>
     `${Math.round(value)}${i ? ` (${(value / first).toFixed(2)}x)` : ''}`.padStart(16);

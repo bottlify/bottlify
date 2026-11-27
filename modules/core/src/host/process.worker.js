@@ -15,12 +15,13 @@
  * ring pacing, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
- * is told `{ type: 'start', end, volume, graphics, display, options, run }` --
+ * is told `{ type: 'start', end, volume, graphics, display, memories, options, run }` --
  * its side of the link, the run's volume memory (`volume-link.js`), its way in
  * to the run's graphics worker and the port its surfaces' pictures go out on
- * (or null), the process as
+ * (or null), the memories of gone processes it may run in, the process as
  * `createApp` takes it, how long it may run -- and answers
- * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message, diagnostics }`.
+ * `{ type: 'exited', code, diagnostics, memories }` (the memories it leaves, for the
+ * run's next process), or `{ type: 'failed', message, diagnostics }`.
  */
 
 import { createApp, createMacrotask } from '../app.js';
@@ -31,6 +32,9 @@ import { ringPacing } from './ring-pacing.js';
 import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
+import { handedFiles } from '../system/inherited-files.js';
+import { remoteCacheReader } from '../process/run-cache.js';
+import { relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -39,6 +43,26 @@ if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 
 /** How often a process with work to do gives its event loop a turn, as the engine's worker does. */
 const YIELD_MS = 4;
+
+/**
+ * This worker's own JavaScript heap, in MiB: a worker that runs out of it is
+ * ended by its host with nothing said by the program, so its growth is the
+ * only warning. Node answers for the worker's isolate, Chrome for the page's;
+ * where neither does, `measured: false`, never a zero.
+ */
+const heapNow = ()=>{
+    const mb = (/** @type {number} */ bytes)=>Math.round(bytes / 1048576);
+    const usage = /** @type {any} */ (globalThis).process?.memoryUsage?.();
+    if (usage)
+    {
+        return { measured: true, usedMb: mb(usage.heapUsed), totalMb: mb(usage.heapTotal),
+            externalMb: mb(usage.external), arrayBuffersMb: mb(usage.arrayBuffers) };
+    }
+    const memory = /** @type {any} */ (globalThis.performance)?.memory;
+    return memory ? { measured: true, usedMb: mb(memory.usedJSHeapSize),
+        totalMb: mb(memory.totalJSHeapSize), limitMb: mb(memory.jsHeapSizeLimit) }
+        : { measured: false };
+};
 
 /**
  * The pictures of this process's surfaces, sent on `port` as the graphics
@@ -54,25 +78,6 @@ const sendFrames = port=>{
     return (/** @type {{ pixels: Uint8Array }} */ frame)=>port.postMessage(
         { type: 'frame', ...frame, frameIndex: ++frameIndex }, [frame.pixels.buffer]);
 };
-
-/**
- * The files the parent handed this process as its output and error: named by
- * path, at the position the parent's open file holds, which a write here
- * reads and moves across the link.
- *
- * @param {Record<string, { path: string }> | undefined} named
- * @param {(target: string, method: string, args: any[]) => any} ask
- */
-const standardFilesOf = (named, ask)=>named && Object.fromEntries(Object.entries(named)
-    .map(([which, { path }])=>[which, {
-        path,
-        get position(){
-            return ask('standard', 'position', [which]);
-        },
-        set position(at){
-            ask('standard', 'setPosition', [which, at]);
-        },
-    }]));
 
 /**
  * What a report reads, as data that crosses to another thread; where reading
@@ -99,13 +104,18 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
- *     windowCells?: Int32Array | null }} start
- * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
+ *     windowCells?: Int32Array | null, memories?: any[],
+ *     cache?: { shared: any, segments: (SharedArrayBuffer | null)[] } | null }} start
+ *     `memories`: the run's memories of gone processes (`SpareMemory`) the
+ *     process takes from, and puts its own back into as it goes
+ * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any,
+ *     journal?: { time: number, text: string }[] | null }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */
 export async function serveProcess(start){
-    const { end, volume, graphics, display, options, run, windowCells = null } = start;
+    const { end, volume, graphics, display, options, run, windowCells = null,
+        memories = [], cache = null } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -118,6 +128,12 @@ export async function serveProcess(start){
      * @type {number | null}
      */
     let terminated = null;
+    /** Settled once the process is made, or failed to be: what an ask waits on. */
+    /** @type {(value?: unknown) => void} */
+    let madeNow = ()=>{};
+    const made = new Promise(resolve=>{
+        madeNow = resolve;
+    });
     // What the page asks of the process it drives, as it would of a machine on
     // its own thread: pausing it, and looking inside it; and its parent's
     // TerminateProcess, which may come while it is still being made -- in
@@ -130,9 +146,26 @@ export async function serveProcess(start){
             terminated ??= code;
             app?.terminate(code);
         },
+        // A call its parent makes in it, answered once it is made.
+        ask: (/** @type {any} */ call)=>made.then(()=>app?.answerCall(call) ?? null),
     };
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
+    // The run's cache, read here in place, its keeper asked across the link.
+    const cacheReader = cache === null ? null : remoteCacheReader(cache, {
+        ask: (method, args)=>ask('cache', method, args),
+        call: (method, args)=>link.call('cache', method, args),
+    });
+    // And passed on to the process's executors, each a reader of its own.
+    const cacheRelay = cache === null ? null : relayedJoin(cache);
+    if (cacheReader !== null)
+    {
+        cacheReaders.add(cacheReader);
+    }
+    if (cacheRelay !== null)
+    {
+        cacheReaders.add(cacheRelay);
+    }
     const system = remoteSystem(ask, handlers, (target, method, args)=>
         link.call(target, method, args), volume, windowCells);
     // A wait on another process's object ended there: its word comes in
@@ -162,12 +195,45 @@ export async function serveProcess(start){
     };
     /** The machine's tables, and what it waited on the system for. */
     const tables = ()=>[...app.diagnostics(),
-        { name: 'link', status: 'ready', metrics: link.diagnostics() }];
+        { name: 'link', status: 'ready', metrics: link.diagnostics() },
+        { name: 'heap', status: 'ready', metrics: heapNow() }];
     /** The tables as data, or a table that says why they could not be read: a
      * report that loses them unsaid looks like a process that had none. */
     const plainTables = ()=>plainOf(tables, message=>[{ name: 'diagnostics', status: 'error',
         metrics: { error: message } }]);
-    handlers.report = { diagnostics: ()=>(app ? plainTables() : null) };
+    handlers.report = {
+        diagnostics: ()=>(app ? plainTables() : null),
+        // The last frames its process presented, each with its phases: what a
+        // tool reads of a slow frame, from the worker that made it.
+        frames: (/** @type {number} */ count)=>(app ? plainOf(()=>app.log.frames(count),
+            ()=>null) : null),
+        // Bytes of its memory: what a tool reads of a loop a profile named.
+        read: (/** @type {number} */ address, /** @type {number} */ length)=>
+            (app ? app.debug.read(address, length) : null),
+        // Every process standing in this worker, its own first with the
+        // worker's tables: a child started beside it here runs on this
+        // thread, and a status of the worker alone says nothing of it.
+        standing: async(/** @type {number} */ journal = 0)=>{
+            if (!app)
+            {
+                return null;
+            }
+            const [own, ...beside] = await app.standing({ journal });
+            /** @param {any} each */
+            const lines = each=>(each.journal ? { journal: plainOf(()=>each.journal) } : {});
+            // Its own process's tables, not the facade's: the facade speaks for
+            // the child started last.
+            const ownTables = plainOf(()=>[...own.diagnostics,
+                { name: 'link', status: 'ready', metrics: link.diagnostics() },
+                { name: 'heap', status: 'ready', metrics: heapNow() }],
+            message=>[{ name: 'diagnostics', status: 'error', metrics: { error: message } }]);
+            return [{ image: own.image, diagnostics: ownTables, ...lines(own) },
+                ...beside.map((/** @type {any} */ each)=>({
+                    image: each.image, diagnostics: plainOf(()=>each.diagnostics,
+                        message=>[{ name: 'diagnostics', status: 'error',
+                            metrics: { error: message } }]), ...lines(each) }))];
+        },
+    };
     handlers.facade = {
         /** @param {string} path  a member of the machine, `debug.read` @param {any[]} args */
         call: async(path, args)=>{
@@ -192,7 +258,12 @@ export async function serveProcess(start){
     {
         app = await createApp({
             ...options,
-            standardFiles: standardFilesOf(options.standardFiles, ask),
+            spareMemories: memories,
+            // The open files it inherited, at the position the parent's opens
+            // hold, which a read or write here reads and moves across the link.
+            inheritedFiles: handedFiles(options.inheritedFiles,
+                handle=>ask('inherited', 'position', [handle]),
+                (handle, at)=>ask('inherited', 'setPosition', [handle, at])),
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
                 display: display ? sendFrames(display) : undefined },
             system,
@@ -207,23 +278,36 @@ export async function serveProcess(start){
             // The translator rings the link's bell after each batch it posts, so
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
+            ...cacheReader === null ? {}
+                : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null } },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'
                     ? remoteStore({ ask: (method, args)=>ask('store', method, args),
-                        call: (method, args)=>link.call('store', method, args) })
+                        call: (method, args)=>link.call('store', method, args),
+                        post: toRun ?? undefined })
                     : options.cork?.config?.store,
-                doorbell: { posted, bell: link.bell } } },
+                doorbell: { posted, bell: link.bell.memory } } },
             pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
                 macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
-                posted, pendingMs: options.pendingYieldMs }),
+                posted }),
         });
     }
     catch (e){
+        madeNow();
+        if (cacheRelay !== null)
+        {
+            cacheReaders.delete(cacheRelay);
+        }
+        if (cacheReader !== null)
+        {
+            cacheReaders.delete(cacheReader);
+        }
         link.close();
         await serving;
         throw e;
     }
+    madeNow();
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
     if (terminated !== null)
@@ -231,15 +315,17 @@ export async function serveProcess(start){
         app.terminate(terminated);
     }
     lendings.apply = ()=>{
-        for (const { type, port, token } of lendings.splice(0))
+        // Each to the process it names: this worker's own, or a child
+        // beside it here.
+        for (const { type, port, token, process } of lendings.splice(0))
         {
             if (type === 'translator')
             {
-                app.lendTranslator(port, token);
+                app.lendTranslatorTo(process, port, token);
             }
             else
             {
-                app.recallTranslator(token);
+                app.recallTranslatorFrom(process, token);
             }
         }
     };
@@ -260,11 +346,20 @@ export async function serveProcess(start){
         return { code, diagnostics: plainTables(),
             // What an installer's output is sorted against, read while the
             // machine that knows it still stands.
-            systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []) };
+            systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []),
+            journal: journalOf(app, options) };
     }
     finally
     {
         await app.dispose();
+        if (cacheRelay !== null)
+        {
+            cacheReaders.delete(cacheRelay);
+        }
+        if (cacheReader !== null)
+        {
+            cacheReaders.delete(cacheReader);
+        }
         link.close();
         await serving;
         graphics?.postMessage({ type: 'close' });
@@ -274,6 +369,21 @@ export async function serveProcess(start){
 }
 
 /**
+ * The tail of the process's own journal, where the run asked for calls to be
+ * traced: its ring is this worker's, and the run's journal holds none of its
+ * calls, so a trace of a process that failed in a worker of its own would say
+ * nothing of what it called. Null when nothing is traced.
+ *
+ * @param {any} app @param {any} options
+ * @returns {{ time: number, text: string }[] | null}
+ */
+const journalOf = (app, options)=>{
+    const traced = Object.values(options.log?.categories ?? {}).includes('trace');
+    return traced ? plainOf(()=>app.log.recent(options.log?.capacity ?? 4096)
+        .map((/** @type {any} */ entry)=>({ time: entry.time, text: String(entry.text) }))) : null;
+};
+
+/**
  * The pool's lendings and recalls, in the order they came, and what hands them
  * to the machine once it stands.
  * @type {any[] & { apply?: () => void }}
@@ -281,28 +391,54 @@ export async function serveProcess(start){
 const lendings = [];
 
 /**
+ * What posts a message to the thread that started this worker, the run's,
+ * once bound: a message, unlike the link, can carry a compiled module.
+ *
+ * @type {((message: any) => void) | null}
+ */
+let toRun = null;
+
+/** The readers of the run's cache in this worker, and what passes it on to its executors, each told of the segments the keeper makes and lets go. @type {Set<{ adopt: (message: any) => void }>} */
+const cacheReaders = new Set();
+
+/**
  * @param {(handler: (data: any) => void) => void} listen
  * @param {(message: any) => void} send
  */
-const bind = (listen, send)=>listen(data=>{
-    // A worker of the run's translation pool, lent to this process or asked
-    // back: taken by the machine, or kept until the machine is built.
-    if (data?.type === 'translator' || data?.type === 'recall')
-    {
-        lendings.push(data);
-        lendings.apply?.();
-        return;
-    }
-    if (data?.type !== 'start')
-    {
-        return;
-    }
-    serveProcess(data).then(
-        ({ code, diagnostics, systemLibraries })=>
-            send({ type: 'exited', code, diagnostics, systemLibraries }),
-        (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
-            diagnostics: e?.diagnostics ?? null }));
-});
+const bind = (listen, send)=>{
+    toRun = send;
+    listen(data=>{
+        // A worker of the run's translation pool, lent to this process or asked
+        // back: taken by the machine, or kept until the machine is built.
+        if (data?.type === 'cache')
+        {
+            for (const reader of cacheReaders)
+            {
+                reader.adopt(data.message);
+            }
+            return;
+        }
+        if (data?.type === 'translator' || data?.type === 'recall')
+        {
+            lendings.push(data);
+            lendings.apply?.();
+            return;
+        }
+        if (data?.type !== 'start')
+        {
+            return;
+        }
+        // What the process ran in and left goes back with its exit: the run's
+        // next process takes it rather than a memory of its own.
+        const memories = Array.isArray(data.memories) ? data.memories : [];
+        serveProcess({ ...data, memories }).then(
+            ({ code, diagnostics, systemLibraries, journal })=>
+                send({ type: 'exited', code, diagnostics, systemLibraries, journal,
+                    memories: memories.splice(0) }),
+            (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
+                diagnostics: e?.diagnostics ?? null }));
+    });
+};
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')
 {

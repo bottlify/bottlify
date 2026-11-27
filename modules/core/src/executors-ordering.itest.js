@@ -22,7 +22,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -114,7 +114,7 @@ for (const seed of SEEDS)
     test(`a message passed through plain stores arrives whole on two executors (seed `
         + `0x${seed.toString(16)}, ${length} words)`, { timeout: 120_000 }, async()=>{
         const app = await createApp({ executable: buildProgram(seed, length),
-            cpu: { cores: 2, eager: true } });
+            cpu: { cores: 2 } });
         try
         {
             const errors = await app.run({ timeoutMs: 90_000 });

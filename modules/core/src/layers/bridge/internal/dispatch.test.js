@@ -6,15 +6,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { Convention } from './conventions.js';
 import { createParking, isParkedCall } from './parking.js';
 import { createDispatcher } from './dispatch.js';
+import { longMachine as machine64 } from './long-machine.fixture.js';
 import { WRITER_COLUMNS, createWriterAccount } from '../../memory/internal/writers.js';
 import { createTable, readTable } from '../../log/internal/table.js';
 
 /**
  * A CPU and an address space stood in for, so these tests are about marshalling
- * and about where a result goes -- not about an emulator.
+ * and about where a result goes -- not about an engine.
  *
  * @param {Object} [options]
  * @param {number} [options.esp]
@@ -914,7 +916,7 @@ test('a write into guest memory is charged to the call in flight, however it nes
     // against the layer that will answer it rather than against a spy.
     /** @type {string[]} */
     const words = [];
-    const table = createTable({ rows: 8, columns: WRITER_COLUMNS, shared: false });
+    const table = createTable({ rows: 8, columns: WRITER_COLUMNS });
     const account = createWriterAccount({
         table,
         intern: text=>{
@@ -1524,7 +1526,7 @@ test('a register file lent by the cpu carries ESP and EAX, and one that reads em
     assert.deepEqual(byName, [], 'neither register asked for by name');
     assert.equal(lent, 1);
 
-    // What an emulator growing its memory does to the view it lent.
+    // What a memory that grows does to the view lent over it.
     const moved = new Int32Array(8);
     moved[4] = 0x3000;
     /** @type {any} */ (file.buffer).transfer();
@@ -1787,6 +1789,38 @@ test('the report counts every call by function and charges each the host time sa
     assert.ok(report.hostMs >= 0);
 });
 
+test('a function\'s host time is its timed calls weighed by its own calls, not the sampling rate',
+    ()=>{
+        // Every call timed: three of 2 ms are 6 ms, where a weight of
+        // TRAP_SAMPLE read them as 192 -- what made a call a few times a
+        // second look like a fifth of the second.
+        // On the test's own clock: a handler's 2 ms is 2 ms however loaded
+        // the machine running the test is.
+        let clock = 0;
+        const m = machine({ now: ()=>clock });
+        m.dispatcher.sampleInterval = ()=>1;
+        m.dispatcher.untilSample = 1;
+        const spin = ()=>{
+            clock += 2;
+            return 0;
+        };
+        m.dispatcher.register(1, { name: 'X!Busy', ...STDCALL, argBytes: 0, handler: spin });
+        m.dispatcher.register(2, { name: 'X!Never', ...STDCALL, argBytes: 0, handler: ()=>0 });
+        for (let call = 0; call < 3; call++)
+        {
+            m.dispatcher.dispatch(1);
+        }
+        const busy = m.dispatcher.diagnostics().byFunction
+            .find((/** @type {string} */ row)=>row.startsWith('X!Busy '));
+        const ms = Number(/ (\d+)ms/.exec(String(busy))?.[1]);
+        assert.equal(ms, 6, String(busy));
+        // One never timed is not measured, rather than none.
+        m.dispatcher.sampleInterval = ()=>1000;
+        m.dispatcher.untilSample = 1000;
+        m.dispatcher.dispatch(2);
+        assert.ok(m.dispatcher.diagnostics().byFunction.includes('X!Never 1 untimed'));
+    });
+
 test('a function called too often a second is named, in the report and once in the journal', ()=>{
     // A program that starts going to the host for ever -- polling a query
     // that will not answer, spinning on a message -- shows as it starts.
@@ -1849,4 +1883,446 @@ test('a function kept out of the ring of recent calls is counted but not kept th
     dispatcher.dispatch(1);
     assert.equal(dispatcher.detailed().at(-1).name, 'USER32.dll!ShowWindow',
         'and none, once cleared');
+});
+
+/**
+ * A 64-bit machine (`long-machine.fixture.js`) with these registers set.
+ *
+ * @param {Record<string, bigint>} [registers]
+ */
+const longMachine = (registers = {})=>machine64({ registers });
+
+test('a 64-bit caller finds a quadword the handler answers in two halves whole in RAX', ()=>{
+    // GetTickCount64, _lseeki64, _atoi64: the 32-bit way of answering a
+    // quadword is EDX:EAX, and a 64-bit caller reads RAX alone. Sign-extending
+    // EAX instead would lose any high half and invent one for a low half
+    // with its top bit set.
+    const { dispatcher, r } = longMachine({ rcx: 7n, r11: 0xffffffffn });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Wide', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen.push(args.slice());
+            dispatcher.answerHigh(1);
+            return 0x80000000;
+        } });
+    dispatcher.register(2, { name: 'X!Narrow', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+    dispatcher.register(3, { name: 'X!Unsigned', ...STDCALL, argBytes: 0,
+        handler: ()=>0x80000000 });
+
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[7, -1]], 'RCX and the RDX the stub kept in R11, each a dword');
+    assert.equal(r.get('rax'), 0x180000000n);
+    dispatcher.dispatch(2);
+    assert.equal(r.get('rax'), 0xffffffffffffffffn, 'a dword answer is sign-extended');
+    dispatcher.dispatch(3);
+    assert.equal(r.get('rax'), 0xffffffff80000000n,
+        'and the high half one call gave is not the next call\'s');
+});
+
+test('a 64-bit caller finds an address zero-extended in RAX, any other dword sign-extended', ()=>{
+    // VirtualAlloc, HeapAlloc, malloc above 2 GiB: an address widened by its
+    // sign is 0xFFFFFFFF_9xxxxxxx, which faults on first use. A HANDLE of -1
+    // is INVALID_HANDLE_VALUE whole only sign-extended.
+    const { dispatcher, r } = longMachine();
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 });
+    dispatcher.register(2, { name: 'X!Open', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+    dispatcher.register(3, { name: 'X!AllocSigned', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 | 0 });
+    dispatcher.register(4, { name: 'X!Small', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1000 });
+    dispatcher.dispatch(1);
+    assert.equal(r.get('rax'), 0x90000000n);
+    dispatcher.dispatch(2);
+    assert.equal(r.get('rax'), 0xffffffffffffffffn);
+    dispatcher.dispatch(3);
+    assert.equal(r.get('rax'), 0x90000000n, 'an address the handler computed with | 0 too');
+    dispatcher.dispatch(4);
+    assert.equal(r.get('rax'), 0x1000n);
+    // strrchr into a string the program keeps past 4 GiB: the handler answers
+    // the address it was handed whole, and RAX holds all of it.
+    dispatcher.register(5, { name: 'X!Within', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1_4000_3010 });
+    dispatcher.dispatch(5);
+    assert.equal(r.get('rax'), 0x1_4000_3010n);
+});
+
+test('a size past a dword reaches its handler as the largest dword, never as its low half', ()=>{
+    // malloc(4 GiB + 16) in a 64-bit program: sixteen bytes handed back would be
+    // written past at once. The handler refuses the largest dword as too large.
+    const { dispatcher } = longMachine({ rcx: 0x1_0000_0010n, r11: 0x40n, r8: 0x1_0000_0000n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 12, sizes: [0, 1],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.map(each=>each >>> 0)), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0xffffffff, 0x40, 0]],
+        'a declared size past a dword, one within it, and an undeclared argument as ever');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        addresses: [1], sizes: [1], handler: ()=>0 }), /sizes/, 'an address is no size');
+});
+
+test('an undeclared address past 4 GiB a handler takes as its low dword is a loss, said once',
+    ()=>{
+        // ReadFile into a block a wide window gave out past 4 GiB, its handler
+        // reading the buffer's low dword: the bytes would land 4 GiB below.
+        /** @type {string[][]} */
+        const said = [];
+        const { dispatcher } = machine64({
+            registers: { rcx: 0x44n, r11: 0x1_2000_0000n, r8: 0x0000_0001_0000_0010n,
+                r9: 0xffffffff_fffffff0n },
+            divergence: (api, detail, kind)=>said.push([api, detail, kind ?? '']) });
+        dispatcher.register(1, { name: 'X!Read', ...STDCALL, argBytes: 16, handler: ()=>0 });
+        dispatcher.register(2, { name: 'X!Whole', ...STDCALL, argBytes: 16,
+            // As win32's `pointerArg` reads one.
+            /** @param {any} args */
+            handler: args=>args.high[1] + args.high[2] });
+        dispatcher.register(3, { name: 'X!Declared', ...STDCALL, argBytes: 16,
+            addresses: [1], sizes: [2], handler: ()=>0 });
+        dispatcher.dispatch(1);
+        dispatcher.dispatch(1);
+        dispatcher.dispatch(2);
+        dispatcher.dispatch(3);
+        assert.deepEqual(said, [['X!Read', 'argument 1, 0x120000000, an address past 4 GiB'
+            + ' taken as its low dword', 'loss']], 'once, the first one cut; a handle, a sign\'s'
+            + ' ones, a half read whole and one declared are none');
+    });
+
+test('a call that waits says whether its answer is an address, for the resume to widen it', ()=>{
+    // An allocation that waits (a file mapped once its blocks are fetched):
+    // the answer comes after the dispatcher has gone on, and RAX must take it
+    // as the call in place would - an address by zeros, a handle by its sign.
+    /** @type {boolean[]} */
+    const said = [];
+    const { dispatcher } = machine64({ suspend: (answer, frame)=>said.push(frame.zeroExtends) });
+    dispatcher.register(1, { name: 'X!MapLater', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>Promise.resolve(0x90000000) });
+    dispatcher.register(2, { name: 'X!OpenLater', ...STDCALL, argBytes: 0,
+        handler: ()=>Promise.resolve(-1) });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.deepEqual(said, [true, false]);
+});
+
+test('an argument declared an address is handed whole where its high half names one', ()=>{
+    // CreateThread's start routine and parameter in an image a 64-bit program
+    // keeps past 4 GiB: whole to a handler that declares them. Any other high
+    // half - none, a sign's ones, what a caller left above an int - leaves the
+    // dword every handler has always had, and so does an undeclared argument.
+    const { dispatcher } = longMachine({ rcx: 0x140001740n, r11: 0xffffffff_fffffffen,
+        r8: 0xdeadbeef_00000007n, r9: 0x140003010n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Start', ...STDCALL, argBytes: 16, addresses: [0, 1, 2],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x140001740, -2, 7, 0x40003010]]);
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Wide', ...STDCALL, argBytes: 12,
+        quadwords: [1], addresses: [2], handler: ()=>0 }), /addresses/,
+    'half of a quadword is no address');
+    assert.throws(()=>dispatcher.register(3, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        addresses: [2], handler: ()=>0 }), /addresses/, 'nor a dword past the arguments');
+});
+
+test('a quadword argument is one x64 slot, split into the two dwords the handler reads', ()=>{
+    // _lseeki64(int fd, __int64 offset, int origin): four dwords to a 32-bit
+    // handler, three arguments to an x86-64 caller -- RCX, RDX and R8.
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 0x100000005n, r8: 2n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Seek', ...STDCALL, argBytes: 16, quadwords: [1],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[3, 5, 1, 2]]);
+
+    // Past the four registers a quadword is a stack slot whole, its high half
+    // the slot's second dword.
+    const stack = longMachine({ rcx: 1n, r11: 2n, r8: 3n, r9: 4n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 5], [0x8030, 0xfffffffe],
+        [0x8034, 0xffffffff], [0x8038, 7]]);
+    /** @type {any} */ (stack.dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    stack.dispatcher.register(2, { name: 'X!Late', ...STDCALL, argBytes: 32, quadwords: [5],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    stack.dispatcher.dispatch(2);
+    assert.deepEqual(seen[1], [1, 2, 3, 4, 5, -2, -1, 7]);
+
+    assert.throws(()=>dispatcher.register(3, { name: 'X!Short', ...STDCALL, argBytes: 8,
+        quadwords: [1], handler: ()=>0 }), /quadwords/, 'a quadword needs two dwords');
+});
+
+test('a float or a double among the first four is read from the XMM register of its slot', ()=>{
+    // _jn(int n, double x): ECX, then XMM1 -- the second slot's register,
+    // whatever the first holds -- read into the two dwords the 32-bit handler
+    // takes it in. powf(float, float): XMM0 and XMM1, a dword each.
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 0x55n });
+    /** @type {Map<number, number[]>} */
+    const xmm = new Map([[0, [0x40490fdb, 7, 7, 7]], [1, [0x54442d18, 0x400921fb, 9, 9]]]);
+    /** @type {any} */ (dispatcher).cpu.readXmm = (/** @type {number} */ index)=>
+        Uint32Array.from(xmm.get(index) ?? [0, 0, 0, 0]);
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!_jn', ...STDCALL, argBytes: 12, floats: { 1: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen[0], [3, 0x54442d18, 0x400921fb]);
+
+    dispatcher.register(2, { name: 'X!powf', ...STDCALL, argBytes: 8,
+        floats: { 0: 'f32', 1: 'f32' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(2);
+    assert.deepEqual(seen[1], [0x40490fdb, 0x54442d18], 'one dword each, the low lane');
+
+    // Past the four registers a float is its stack slot, as any argument is,
+    // and a double the slot's two dwords; the slots after a double come one
+    // earlier than the dwords say.
+    const stack = longMachine({ rcx: 1n, r11: 2n, r8: 3n, r9: 4n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 0x3f800000], [0x8030, 0x11],
+        [0x8034, 0x40000000], [0x8038, 7]]);
+    /** @type {any} */ (stack.dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    /** @type {any} */ (stack.dispatcher).cpu.readXmm = ()=>Uint32Array.of(0, 0, 0, 0);
+    stack.dispatcher.register(3, { name: 'X!Late', ...STDCALL, argBytes: 32,
+        floats: { 4: 'f32', 5: 'f64' },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    stack.dispatcher.dispatch(3);
+    assert.deepEqual(seen[2], [1, 2, 3, 4, 0x3f800000, 0x11, 0x40000000, 7]);
+
+    assert.throws(()=>dispatcher.register(4, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        floats: { 1: 'f64' }, handler: ()=>0 }), /f64/, 'a double needs two dwords');
+    assert.throws(()=>dispatcher.register(5, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        quadwords: [0], floats: { 0: 'f64' }, handler: ()=>0 }), /f64/,
+    'and is not a quadword besides');
+});
+
+test('a structure passed by value is a pointer in one x64 slot, read into its dwords', ()=>{
+    // MFTRegister(CLSID clsid, GUID category, ...): each GUID four dwords to a
+    // 32-bit handler, a pointer to the caller's copy to an x86-64 one -- in a
+    // register among the first four, on the stack past them.
+    const { dispatcher } = longMachine({ rcx: 0x9000n, r11: 0x9010n, r8: 0x55n, r9: 0x66n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 0x9020],
+        [0x9000, 1], [0x9004, 2], [0x9008, 3], [0x900c, 4],
+        [0x9010, 5], [0x9014, 6], [0x9018, 7], [0x901c, 8],
+        [0x9020, 9], [0x9024, 10], [0x9028, 11], [0x902c, 12]]);
+    /** @type {any} */ (dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Guids', ...STDCALL, argBytes: 56,
+        structs: { 0: 4, 4: 4, 10: 4 },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen[0], [1, 2, 3, 4, 5, 6, 7, 8, 0x55, 0x66, 9, 10, 11, 12]);
+
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Short', ...STDCALL, argBytes: 8,
+        structs: { 0: 4 }, handler: ()=>0 }), /structure/,
+    'a structure wider than the arguments is refused');
+});
+
+/** A refused guest access, as memory throws it. @param {'read' | 'write'} mode */
+const guestAccess = mode=>Object.assign(new Error(`Unmapped ${mode} at 0x0`),
+    { code: 'GUEST_ACCESS', address: 0, length: 4, mode });
+
+test('a refused guest access is raised in the guest; any other error stops the run', ()=>{
+    // Windows faults inside the DLL on a pointer that is not there and the
+    // program's handlers see STATUS_ACCESS_VIOLATION; an error of our own is
+    // a host bug, and is never turned into the program's exception.
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!lstrcpyA', argBytes: 4,
+        handler: ()=>{
+            throw guestAccess('write');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Broken', argBytes: 4,
+        handler: ()=>{
+            throw new TypeError('Cannot read properties of undefined');
+        } });
+    m.dispatcher.register(3, { ...STDCALL, name: 'KERNEL32.dll!Path', argBytes: 4,
+        handler: ()=>{
+            throw Object.assign(new Error('An empty path names nothing'), { code: 'INVALID_PATH' });
+        } });
+
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(fault=>[fault.code, fault.mode]), [['GUEST_ACCESS', 'write']]);
+    assert.equal(suspended.length, 1, 'the call waits on the exception\'s dispatch');
+
+    assert.throws(()=>m.dispatcher.dispatch(2), TypeError);
+    assert.throws(()=>m.dispatcher.dispatch(3), /An empty path/);
+    assert.equal(raised.length, 1, 'neither was raised in the guest');
+
+    // Nobody to raise it: the refusal ends the run, as before.
+    m.dispatcher.guestFault = null;
+    assert.throws(()=>m.dispatcher.dispatch(1), /Unmapped write/);
+});
+
+test('a refused guest access after a handler waited is raised the same way', async()=>{
+    const m = machine({ args: [0] });
+    /** @type {any[]} */
+    const suspended = [];
+    m.dispatcher.suspend = answer=>suspended.push(answer);
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = fault=>{
+        raised.push(fault);
+        return Promise.resolve(7);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!ReadFile', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw guestAccess('read');
+        } });
+    m.dispatcher.register(2, { ...STDCALL, name: 'KERNEL32.dll!Late', argBytes: 4,
+        handler: async()=>{
+            await null;
+            throw new RangeError('Invalid typed array length: -1');
+        } });
+    m.dispatcher.dispatch(1);
+    assert.equal(await suspended[0], 7, 'answered as the raise answers');
+    assert.equal(raised[0].mode, 'read');
+    m.dispatcher.dispatch(2);
+    await assert.rejects(suspended[1], RangeError);
+});
+
+test('an exception a handler raises on purpose goes to the guest the same way', ()=>{
+    // InitializeCriticalSectionEx's STATUS_INVALID_HANDLE and the like: the
+    // handler throws the exception Windows' function raises.
+    const m = machine({ args: [0] });
+    m.dispatcher.suspend = ()=>{};
+    /** @type {any[]} */
+    const raised = [];
+    m.dispatcher.guestFault = what=>{
+        raised.push(what);
+        return Promise.resolve(0);
+    };
+    m.dispatcher.register(1, { ...STDCALL, name: 'KERNEL32.dll!InitializeCriticalSectionEx',
+        argBytes: 4, handler: ()=>{
+            throw Object.assign(new Error('raised'),
+                { code: 'GUEST_EXCEPTION', status: 0xc0000008, flags: 0, parameters: [] });
+        } });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(raised.map(what=>[what.code, what.status]), [['GUEST_EXCEPTION', 0xc0000008]]);
+});
+
+test('a frame chain through a region nothing may read ends there, rather than faulting', ()=>{
+    // An EBP a program uses as a plain register, pointing into the engine's
+    // range of a growing memory: a sampled crossing's chain stopped the run.
+    const regions = [
+        { name: 'stack', base: 0x200000, size: 0x100000, access: 'rw' },
+        { name: 'engine', base: 0x3c00000, size: 0x3de0000, access: 'none' },
+    ];
+    const words = new Map([[0x2ff000, 0x4000000], [0x2ff004, 0x401234]]);
+    const dispatcher = createDispatcher({ cpu: {}, parking: null, memory: {
+        find: (/** @type {number} */ at)=>regions.find(one=>at >= one.base
+            && at < one.base + one.size),
+        readU32: (/** @type {number} */ at)=>{
+            if (at >= 0x3c00000 && at < 0x79e0000)
+            {
+                throw new Error(`Region "engine" (none) does not permit read at ${at}`);
+            }
+            return words.get(at) ?? 0;
+        },
+    } });
+    dispatcher.frameChain(0x2ff000);
+    assert.equal(dispatcher.chainFirst, 0x401234, 'the first frame read');
+    assert.equal(dispatcher.chainSecond, 0, 'the second, in the engine\'s range, ends the chain');
+    dispatcher.frameChain(0x4000000);
+    assert.equal(dispatcher.chainFirst, 0, 'an EBP inside it names no caller');
+});
+
+test('a 64-bit call hands each argument\'s high dword beside it, for a pointer past 4 GiB', ()=>{
+    // A wide window's image at 0x140000000 passes pointers into itself: RCX
+    // one of them, R11 (RDX) a plain dword whose high half is zero.
+    const { dispatcher } = longMachine({ rcx: 0x140001234n, r11: 5n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Pointer', ...STDCALL, argBytes: 8,
+        /** @param {number[] & { high?: number[] }} args */
+        handler: args=>{
+            seen.push([args[0], args[1], ...(args.high ?? []).slice(0, 2)]);
+            return 0;
+        } });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x40001234, 5, 1, 0]]);
+});
+
+test('a function is checked when it is registered and its record made at its first call', ()=>{
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 4n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Add', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    assert.equal(/** @type {any} */ (dispatcher).functions[1], undefined,
+        'no record until it is called');
+    assert.equal(dispatcher.lookup(1)?.name, 'X!Add', 'its declaration is there to look up');
+    assert.throws(()=>dispatcher.register(1, { name: 'X!Again', ...STDCALL, argBytes: 0,
+        handler: ()=>0 }), /already implemented/, 'an id taken before its first call');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Bad', ...STDCALL, argBytes: 8,
+        quadwords: [1], handler: ()=>0 }), /quadwords/, 'a broken declaration refused at once');
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[3, 4]]);
+    const made = /** @type {{ calls: number } | undefined} */ (
+        /** @type {any} */ (dispatcher).functions.at(1));
+    assert.equal(made?.calls, 1, 'made, and counting');
+    assert.equal(dispatcher.diagnostics().implemented, 1);
+});
+
+test('an address in a span named by asking is named when a report asks, and only then', ()=>{
+    const { dispatcher } = longMachine({});
+    let asked = 0;
+    dispatcher.placedSpan(0x10000, 0x1000,
+        address=>(asked++, address === 0x10010 ? 'X!One' : null));
+    dispatcher.placed(0x20000, 'Y!Two');
+    assert.equal(asked, 0);
+    assert.equal(dispatcher.symbolize(0x10010), 'X!One');
+    assert.equal(dispatcher.symbolize(0x10020), null);
+    assert.equal(dispatcher.symbolize(0x20000), 'Y!Two');
+    assert.equal(dispatcher.symbolize(0x11000), null, 'past the span');
+    assert.equal(asked, 2);
+});
+
+test('the second a crossing closes weighs every function without making a thing per '
+    + 'function', async()=>{
+    // Run once a second, the weighing stays in the interpreter, where walking
+    // the table of functions -- tens of thousands of ids, most of them holes
+    // -- by an iterator made a result object for every one of them.
+    const clock = { at: 0 };
+    const { dispatcher } = machine({ now: ()=>clock.at });
+    for (let id = 1; id <= 20000; id += 3)
+    {
+        dispatcher.register(id, { name: `USER32.dll!F${id}`, ...STDCALL, argBytes: 0,
+            handler: ()=>0 });
+        // A function joins the table at its first call.
+        dispatcher.dispatch(id);
+    }
+    const bytes = await bytesPerCall(()=>{
+        clock.at += 1000;
+        dispatcher.measureRates();
+        // As few as a game makes in a minute: it is never compiled hot.
+    }, { calls: 8 });
+    assert.ok(bytes < 2048, `${bytes} bytes a second weighed`);
 });

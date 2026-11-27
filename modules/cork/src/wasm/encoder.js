@@ -157,12 +157,91 @@ const ATOMICS = Object.freeze(Object.fromEntries(
         .flatMap(([operation, base])=>[[`${operation}_i32`, [base, 2]],
             [`${operation}_i64`, [base + 1, 3]], [`${operation}_i32_8`, [base + 2, 0]],
             [`${operation}_i32_16`, [base + 3, 1]]])));
+/**
+ * The type of the value a store of `kind` writes: `i32_8` an i32, `f64` an f64.
+ *
+ * @param {string} kind
+ */
+const valueOf = kind=>(kind.startsWith('i64') ? ValType.i64 : kind.startsWith('f32')
+    ? ValType.f32 : kind.startsWith('f64') ? ValType.f64 : ValType.i32);
 /** A float constant's little-endian bytes, written here and copied out. */
 const FLOAT_BYTES = new Uint8Array(8);
 const FLOAT_VIEW = new DataView(FLOAT_BYTES.buffer);
 /** v128 memory access, as SIMD opcodes: `v128.load` and `v128.store`. */
 const SIMD_LOAD = 0;
 const SIMD_STORE = 11;
+/** `v128.and`. */
+const SIMD_AND = 78;
+/**
+ * The lane and zero-extending vector accesses by opcode as a wide window
+ * makes them on an engine that misreads them there (`Body.simdScalar`): the
+ * scalar access, whether it stores, and the splat (with the bytes of its first
+ * lane kept, `zero`) or the lane's replace or extract.
+ * @type {Map<number, { kind: string, store: boolean, zero?: number, lane: number }>}
+ */
+export const SIMD_SCALAR = new Map([
+    [92, { kind: 'i32', store: false, zero: 4, lane: 17 }],
+    [93, { kind: 'i64', store: false, zero: 8, lane: 18 }],
+    [84, { kind: 'i32_8u', store: false, lane: 23 }],
+    [85, { kind: 'i32_16u', store: false, lane: 26 }],
+    [86, { kind: 'i32', store: false, lane: 28 }],
+    [87, { kind: 'i64', store: false, lane: 30 }],
+    [88, { kind: 'i32_8', store: true, lane: 22 }],
+    [89, { kind: 'i32_16', store: true, lane: 25 }],
+    [90, { kind: 'i32', store: true, lane: 27 }],
+    [91, { kind: 'i64', store: true, lane: 29 }],
+]);
+
+/** A body's touched locals before it touches one: shared, never written. */
+const UNTOUCHED = new Uint8Array(0);
+/** Up to how many bytes `insertFrom` copies a piece by hand. */
+const SMALL_COPY = 32;
+
+/**
+ * The buffers of big bodies done with (`Body.release`), by size, for the next body that
+ * grows that big: a region's function is written into tens of kilobytes, and a batch of
+ * them made and dropped one buffer a region and more as each grew. A body's bytes past its
+ * length are never read, so a buffer is taken as it was left.
+ * @type {Map<number, Uint8Array[]>}
+ */
+const SPARE = new Map();
+/** The least buffer kept, and how many of a size: as many as bodies grow at once. */
+const SPARE_LEAST = 1024;
+const SPARE_KEPT = 4;
+
+/**
+ * A buffer of at least `size` bytes: a spare one where one of its size is kept, a power of
+ * two from `SPARE_LEAST` on.
+ *
+ * @param {number} size
+ */
+function bufferOf(size){
+    if (size < SPARE_LEAST)
+    {
+        return new Uint8Array(size);
+    }
+    const whole = 2 ** Math.ceil(Math.log2(size));
+    return SPARE.get(whole)?.pop() ?? new Uint8Array(whole);
+}
+
+/** A buffer no body writes any more, kept for `bufferOf`. @param {Uint8Array} buffer */
+function spare(buffer){
+    const size = buffer.length;
+    if (size < SPARE_LEAST || (size & size - 1) !== 0)
+    {
+        return;
+    }
+    let kept = SPARE.get(size);
+    if (kept === undefined)
+    {
+        kept = [];
+        SPARE.set(size, kept);
+    }
+    if (kept.length < SPARE_KEPT)
+    {
+        kept.push(buffer);
+    }
+}
 
 /**
  * An instruction stream, with the block nesting checked as it is written.
@@ -182,20 +261,45 @@ export class Body {
      */
     constructor(capacity = 64){
         /** @type {Uint8Array} */
-        this.buffer = new Uint8Array(capacity);
+        this.buffer = bufferOf(capacity);
         /** Bytes written. */
         this.length = 0;
         this.depth = 0;
-        /** By local index: 1 when the body reads or writes it, 2 when it writes it. */
-        this.touched = new Uint8Array(64);
+        /** By local index: 1 when the body reads or writes it, 2 when it writes it; made at
+         * the first local touched, as a region makes a body for every way out and most
+         * touch none. */
+        this.touched = UNTOUCHED;
         /** Where the branches marked unlikely start, in bytes. @type {number[]} */
         this.hints = [];
         /**
          * Where the locals written from now on are added too, when given: the
          * region emitter's account of what each block writes.
-         * @type {Set<number> | null}
+         * @type {import('./local-set.js').LocalSet | null}
          */
         this.written = null;
+        /**
+         * Where the locals read before this point's code wrote them are added
+         * too, when given, and the locals it wrote at `mustDepth` -- code no
+         * branch inside the block skips -- into `must`: the region emitter's
+         * account of what a block needs from before it (`planPaths`).
+         * @type {import('./local-set.js').LocalSet | null}
+         */
+        this.exposed = null;
+        /** @type {import('./local-set.js').LocalSet | null} */
+        this.must = null;
+        this.mustDepth = -1;
+        /**
+         * A wide window's guest accesses (cork's `wideLayout`), when given: an
+         * access marked `guest` goes to `memory`, a `memory64` one, at the i64
+         * address the local `whole` holds with the i32 it was given for its low
+         * half (`widenGuest`), the value a store writes kept meanwhile in
+         * `scratch(type)`; `lanes` where the engine reads and writes the lane and
+         * zero-extending vector accesses there as they are (`wideLanes`), else
+         * each is made its scalar access (`simdScalar`).
+         * @type {{ memory: number, whole: number, scratch: (type: number) => number,
+         *     lanes?: boolean } | null}
+         */
+        this.guest = null;
     }
 
     /** Whether the body reads or writes a local. @param {number} index */
@@ -212,7 +316,7 @@ export class Body {
     touch(index, how){
         if (index >= this.touched.length)
         {
-            const grown = new Uint8Array(Math.max(index + 1, this.touched.length * 2));
+            const grown = new Uint8Array(Math.max(index + 1, 64, this.touched.length * 2));
             grown.set(this.touched);
             this.touched = grown;
         }
@@ -220,6 +324,14 @@ export class Body {
         if (how === 3)
         {
             this.written?.add(index);
+            if (this.depth === this.mustDepth)
+            {
+                this.must?.add(index);
+            }
+        }
+        else if (this.must !== null && !this.must.has(index))
+        {
+            this.exposed?.add(index);
         }
     }
 
@@ -239,14 +351,28 @@ export class Body {
 
     /** @param {number} count */
     grow(count){
-        let size = this.buffer.length * 2;
+        // From one byte at least: a released body's buffer is empty.
+        let size = Math.max(1, this.buffer.length * 2);
         while (size < this.length + count)
         {
             size *= 2;
         }
-        const grown = new Uint8Array(size);
+        const grown = bufferOf(size);
         grown.set(this.buffer.subarray(0, this.length));
+        spare(this.buffer);
         this.buffer = grown;
+    }
+
+    /**
+     * The body is done with, its bytes taken (`toBytes`): its buffer goes to the next body
+     * that grows as big, and this one is left empty, writing into a buffer of its own if
+     * written again.
+     */
+    release(){
+        spare(this.buffer);
+        this.buffer = new Uint8Array(0);
+        this.length = 0;
+        return this;
     }
 
     /** @param {number} value */
@@ -318,28 +444,42 @@ export class Body {
     }
 
     /**
-     * Other bodies put in at the places this one kept for them, in one pass:
-     * what `insert` of each would leave, from the last place to the first,
-     * where each `insert` moved the whole rest of the body along.
+     * Pieces of another body put in at the places this one kept for them, in one pass:
+     * what `insert` of each would leave, from the last place to the first, where each
+     * `insert` moved the whole rest of the body along. The pieces are written one after
+     * another into `source`, so a body with hundreds of them makes no body of each.
      *
-     * @param {{ at: number, body: Body }[]} pieces  by place, and where two share one,
-     *     in the order they are to follow each other
+     * @param {Body} source
+     * @param {readonly number[]} places  three numbers a piece: its place in this body,
+     *     and where it starts and ends in `source`; by place, and where two share one, in
+     *     the order they are to follow each other
      */
-    insertAll(pieces){
+    insertFrom(source, places){
         let added = 0;
-        for (const { body } of pieces)
+        for (let i = 0; i < places.length; i += 3)
         {
-            added += body.length;
+            added += places[i + 2] - places[i + 1];
         }
-        const out = new Uint8Array(Math.max(this.buffer.length, this.length + added));
+        const out = bufferOf(Math.max(this.buffer.length, this.length + added));
+        const { buffer } = source;
+        const own = this.buffer;
+        const pieceHints = source.hints;
         /** @type {number[]} */
         const hints = [];
         let from = 0;
         let written = 0;
         let hint = 0;
-        for (const { at, body } of pieces)
+        for (let i = 0; i < places.length; i += 3)
         {
-            out.set(this.buffer.subarray(from, at), written);
+            const at = places[i];
+            const start = places[i + 1];
+            const end = places[i + 2];
+            // By hand, as the pieces: a view of what lies between two places, made for
+            // each, was most of what the insert made.
+            for (let k = from; k < at; k++)
+            {
+                out[written + k - from] = own[k];
+            }
             // The body's own hints before the ones at its place: an insert puts
             // what was there after what it puts in.
             for (; hint < this.hints.length && this.hints[hint] < at; hint++)
@@ -348,18 +488,34 @@ export class Body {
             }
             written += at - from;
             from = at;
-            out.set(body.buffer.subarray(0, body.length), written);
-            for (const one of body.hints)
+            if (end - start <= SMALL_COPY)
             {
-                hints.push(one + written);
+                // Most pieces are a few loads or stores: copied by hand, not through a view
+                // made of each.
+                for (let k = start; k < end; k++)
+                {
+                    out[written + k - start] = buffer[k];
+                }
             }
-            written += body.length;
+            else
+            {
+                out.set(buffer.subarray(start, end), written);
+            }
+            for (let k = 0; k < pieceHints.length; k++)
+            {
+                if (pieceHints[k] >= start && pieceHints[k] < end)
+                {
+                    hints.push(pieceHints[k] - start + written);
+                }
+            }
+            written += end - start;
         }
-        out.set(this.buffer.subarray(from, this.length), written);
+        out.set(own.subarray(from, this.length), written);
         for (; hint < this.hints.length; hint++)
         {
             hints.push(this.hints[hint] + written - from);
         }
+        spare(own);
         this.buffer = out;
         this.length += added;
         this.hints = hints;
@@ -395,11 +551,105 @@ export class Body {
      * lane index.
      *
      * @param {number} opcode
-     * @param {{ align: number, offset: number, lane?: number }} memarg  align as its log2
+     * @param {{ align: number, offset: number, lane?: number, memory?: number,
+     *     guest?: boolean }} memarg  align as its log2; `guest` as `load`'s
      */
-    simdMem(opcode, { align, offset, lane }){
-        this.byte(0xfd).u32(opcode).u32(align).u32(offset);
+    simdMem(opcode, { align, offset, lane, memory, guest = false }){
+        const scalar = SIMD_SCALAR.get(opcode);
+        if (guest && this.guest !== null && !this.guest.lanes && scalar !== undefined)
+        {
+            return this.simdScalar(opcode, scalar, offset, lane ?? 0);
+        }
+        // A lane's load or store, and a whole store, take the vector above the address.
+        memory = guest ? this.guestAddress(lane !== undefined || opcode === SIMD_STORE
+            ? ValType.v128 : undefined, memory) : memory;
+        this.byte(0xfd).u32(opcode).memarg(align, offset, memory);
         return lane === undefined ? this : this.byte(lane);
+    }
+
+    /**
+     * A wide window's lane and zero-extending vector access as the scalar access
+     * and the lane operation it comes to, on an engine that misreads the access
+     * itself there (`wideLanes`, false): V8 12 (node 22.21) read a `load64_zero`,
+     * `load32_zero` or lane load from a `memory64` memory at a computed address
+     * past 4 GiB as zeros, where its scalar loads read the bytes there. Seven
+     * machine instructions more a `movss` load than the access alone.
+     *
+     * @param {number} opcode @param {{ kind: string, store: boolean, zero?: number,
+     *     lane: number }} scalar  the access, and the splat or the lane's replace or
+     *     extract @param {number} offset @param {number} lane
+     */
+    simdScalar(opcode, scalar, offset, lane){
+        const wide = /** @type {NonNullable<Body['guest']>} */ (this.guest);
+        const type = scalar.kind.startsWith('i64') ? ValType.i64 : ValType.i32;
+        if (scalar.zero !== undefined)
+        {
+            // A splat of the value, its first lane kept.
+            const mask = new Array(16).fill(0).fill(0xff, 0, scalar.zero);
+            this.load(/** @type {keyof typeof LOADS} */ (scalar.kind), { offset, guest: true });
+            return this.simd(scalar.lane).v128const(mask).simd(SIMD_AND);
+        }
+        const held = wide.scratch(ValType.v128);
+        this.localSet(held);
+        if (scalar.store)
+        {
+            this.localGet(held).simd(scalar.lane).byte(lane);
+            return this.store(/** @type {keyof typeof STORES} */ (scalar.kind),
+                { offset, guest: true });
+        }
+        const value = wide.scratch(type);
+        this.load(/** @type {keyof typeof LOADS} */ (scalar.kind), { offset, guest: true })
+            .localSet(value);
+        return this.localGet(held).localGet(value).simd(scalar.lane).byte(lane);
+    }
+
+    /**
+     * A guest access's address made the wide window's (`guest`), the i32 below
+     * the `above` value (none for a load) widened and its high half put in;
+     * answers the memory the access goes to. 4 GiB's guest leaves it as it is.
+     *
+     * @param {number | undefined} above  the type of the value over the address
+     * @param {number | undefined} memory
+     * @returns {number | undefined}
+     */
+    guestAddress(above, memory){
+        const wide = this.guest;
+        if (wide === null)
+        {
+            return memory;
+        }
+        const scratch = above === undefined ? -1 : wide.scratch(above);
+        if (scratch >= 0)
+        {
+            this.localSet(scratch);
+        }
+        this.widenGuest();
+        if (scratch >= 0)
+        {
+            this.localGet(scratch);
+        }
+        return wide.memory;
+    }
+
+    /**
+     * The i32 guest address on the stack as a wide window's i64 one: `whole`
+     * (`guest`) with the i32 for its low half; as it is in 4 GiB. What a helper
+     * given a guest address takes in a wide window.
+     *
+     * Written as `whole ^ zext(wrap(whole) ^ address)`, not as the high half
+     * or-ed in: where the i32 is `whole`'s own low half - an address computed
+     * once and used as it is, the usual access - the engine sees one value
+     * xor-ed with itself and the access takes `whole` as it stands, where the
+     * halves cut apart and put together again cost it three instructions an
+     * access.
+     */
+    widenGuest(){
+        if (this.guest === null)
+        {
+            return this;
+        }
+        const { whole } = this.guest;
+        return this.localGet(whole).op(0xa7).op(0x73).op(0xad).localGet(whole).op(0x85);
     }
 
     unreachable(){
@@ -526,37 +776,61 @@ export class Body {
     }
 
     /**
-     * @param {keyof typeof LOADS} kind
-     * @param {{ offset?: number, align?: number }} [options]  `align` as log2; natural by default.
+     * A memarg: the alignment's log2 and the offset, and a memory other than
+     * the first (multi-memory) as the alignment's bit 6 and the memory's index.
+     *
+     * @param {number} align @param {number} offset @param {number} [memory]
      */
-    load(kind, { offset = 0, align } = {}){
+    memarg(align, offset, memory){
+        return memory ? this.u32(align | 0x40).u32(memory).u32(offset)
+            : this.u32(align).u32(offset);
+    }
+
+    /**
+     * @param {keyof typeof LOADS} kind
+     * @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options]
+     *     `align` as log2, natural by default; `memory` the module's memory, the first by
+     *     default; `guest` for an access to the guest's RAM at an i32 address, which a wide
+     *     window makes its own (`guestAddress`)
+     */
+    load(kind, { offset = 0, align, memory, guest = false } = {}){
         const [opcode, natural] = LOADS[kind];
-        return this.byte(opcode).u32(align ?? natural).u32(offset);
+        memory = guest ? this.guestAddress(undefined, memory) : memory;
+        return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
     /**
      * @param {keyof typeof STORES} kind
-     * @param {{ offset?: number, align?: number }} [options]
+     * @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options]
      */
-    store(kind, { offset = 0, align } = {}){
+    store(kind, { offset = 0, align, memory, guest = false } = {}){
         const [opcode, natural] = STORES[kind];
-        return this.byte(opcode).u32(align ?? natural).u32(offset);
+        memory = guest ? this.guestAddress(valueOf(kind), memory) : memory;
+        return this.byte(opcode).memarg(align ?? natural, offset, memory);
     }
 
     /**
      * An atomic access (`ATOMICS`): sequentially consistent, and a trap where
      * the address is not a multiple of its width -- the caller tests that first.
      *
-     * @param {string} kind @param {{ offset?: number }} [options]
+     * @param {string} kind
+     * @param {{ offset?: number, memory?: number, guest?: boolean }} [options]
      */
-    atomic(kind, { offset = 0 } = {}){
+    atomic(kind, { offset = 0, memory, guest = false } = {}){
         const entry = ATOMICS[/** @type {keyof typeof ATOMICS} */ (kind)];
         if (entry === undefined)
         {
             throw new Error(`encoder: no such atomic (${kind})`);
         }
+        if (guest && this.guest !== null && kind.startsWith('cmpxchg'))
+        {
+            // Two values over the address: no wide window's code makes one yet.
+            throw new Error(`encoder: ${kind} into a wide window's RAM`);
+        }
         const [opcode, natural] = entry;
-        return this.byte(0xfe).u32(opcode).u32(natural).u32(offset);
+        memory = guest ? this.guestAddress(kind.startsWith('load') ? undefined
+            : valueOf(kind.replace(/^[a-z]+_/, '')), memory) : memory;
+        return this.byte(0xfe).u32(opcode).memarg(natural, offset, memory);
     }
 
     /** `atomic.fence`: every access before it is seen before any after it. */
@@ -564,14 +838,16 @@ export class Body {
         return this.byte(0xfe).u32(0x03).byte(0);
     }
 
-    /** @param {{ offset?: number, align?: number }} [options] */
-    loadV128({ offset = 0, align = 4 } = {}){
-        return this.byte(0xfd).u32(SIMD_LOAD).u32(align).u32(offset);
+    /** @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options] */
+    loadV128({ offset = 0, align = 4, memory, guest = false } = {}){
+        memory = guest ? this.guestAddress(undefined, memory) : memory;
+        return this.byte(0xfd).u32(SIMD_LOAD).memarg(align, offset, memory);
     }
 
-    /** @param {{ offset?: number, align?: number }} [options] */
-    storeV128({ offset = 0, align = 4 } = {}){
-        return this.byte(0xfd).u32(SIMD_STORE).u32(align).u32(offset);
+    /** @param {{ offset?: number, align?: number, memory?: number, guest?: boolean }} [options] */
+    storeV128({ offset = 0, align = 4, memory, guest = false } = {}){
+        memory = guest ? this.guestAddress(ValType.v128, memory) : memory;
+        return this.byte(0xfd).u32(SIMD_STORE).memarg(align, offset, memory);
     }
 
     /** @param {number} value */
@@ -581,7 +857,20 @@ export class Body {
 
     /** @param {bigint} value */
     i64const(value){
-        return this.op(0x42, leb128s64(value));
+        // A value an i32 holds has the same signed LEB128 at 64 bits: written as one,
+        // with no BigInt made a byte and no array of the bytes.
+        if (value >= -0x80000000 && value <= 0x7fffffff)
+        {
+            return this.byte(0x42).s32(Number(value));
+        }
+        const bytes = leb128s64(value);
+        this.reserve(1 + bytes.length);
+        this.buffer[this.length++] = 0x42;
+        for (const byte of bytes)
+        {
+            this.buffer[this.length++] = byte;
+        }
+        return this;
     }
 
     /** @param {number} value */
@@ -685,10 +974,11 @@ export class ModuleBuilder {
 
     /**
      * @param {string} module @param {string} field
-     * @param {{ min: number, max?: number, shared?: boolean }} limits  in pages
+     * @param {{ min: number, max?: number, shared?: boolean, index64?: boolean }} limits  in
+     *     pages; `index64` for a `memory64` memory, addressed with i64
      */
-    importMemory(module, field, { min, max, shared = false }){
-        const flag = (max === undefined ? 0 : 1) | (shared ? 2 : 0);
+    importMemory(module, field, { min, max, shared = false, index64 = false }){
+        const flag = (max === undefined ? 0 : 1) | (shared ? 2 : 0) | (index64 ? 4 : 0);
         const limits = [flag, ...leb128u(min), ...(max === undefined ? [] : leb128u(max))];
         this.imports.push([...name(module), ...name(field), 0x02, ...limits]);
         return this;
@@ -769,15 +1059,38 @@ export class ModuleBuilder {
     }
 
     /**
+     * A function's index handed out before its body is written, for a function
+     * written first that calls it: `function` with `at` writes it there. Until
+     * then it is a function of that type that traps, so a module whose writer
+     * failed between the two is still whole.
+     *
+     * @param {number} typeIndex
+     * @returns {number} the function index
+     */
+    reserveFunction(typeIndex){
+        const index = this.importedFunctions + this.functions.length;
+        this.functions.push({ typeIndex, locals: [], body: Uint8Array.of(0x00, 0x0b), hints: [] });
+        return index;
+    }
+
+    /**
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
      * @param {Uint8Array} body  from `Body.toBytes()`
-     * @param {{ exportAs?: string, hints?: number[] }} [options]  hints: the body's `hints`
+     * @param {{ exportAs?: string, hints?: number[], at?: number }} [options]  hints: the
+     *     body's `hints`; at: an index `reserveFunction` handed out, written here
      * @returns {number} the function index
      */
-    function(typeIndex, locals, body, { exportAs, hints = [] } = {}){
-        const index = this.importedFunctions + this.functions.length;
-        this.functions.push({ typeIndex, locals, body, hints });
+    function(typeIndex, locals, body, { exportAs, hints = [], at = undefined } = {}){
+        const index = at ?? this.importedFunctions + this.functions.length;
+        if (at === undefined)
+        {
+            this.functions.push({ typeIndex, locals, body, hints });
+        }
+        else
+        {
+            this.functions[at - this.importedFunctions] = { typeIndex, locals, body, hints };
+        }
         if (exportAs !== undefined)
         {
             this.exports.push([...name(exportAs), 0x00, ...leb128u(index)]);
@@ -960,8 +1273,10 @@ export class ModuleBuilder {
         {
             // The custom `name` section, last: its function-names subsection (1)
             // maps indices to names.
+            // In the order of the indices, as the section has them: a function
+            // written into a reserved index is named after the ones above it.
             const map = leb128u(this.functionNames.length);
-            for (const [index, functionName] of this.functionNames)
+            for (const [index, functionName] of [...this.functionNames].sort((a, b)=>a[0] - b[0]))
             {
                 append(append(map, leb128u(index)), name(functionName));
             }

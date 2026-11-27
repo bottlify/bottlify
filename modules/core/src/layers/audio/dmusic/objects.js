@@ -22,13 +22,14 @@
  */
 
 import { createComObject } from '../../win32/ole32/objects.js';
-import { readGuid, writeGuid, GUID_NULL } from '../../win32/ole32/guid.js';
+import { readGuid, writeGuid, GUID_NULL } from '../../../system/guid.js';
 import { parseSegment, parseWave, musicToMs, PPQ } from './riff.js';
 import { createPlayer, volumeToGain } from './player.js';
 import {
     WAVEFORMATEX, IID_IDirectSoundBuffer, IID_IDirectSoundBuffer8, IID_IKsPropertySet,
 } from '../dsound/seam.js';
 import * as ids from './ids.js';
+import { utf16z } from '../../win32/common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -56,7 +57,12 @@ const STREAM_SEEK_END = 2;
  * One vtable slot as a table declares it: its name, the bytes it pops
  * including the interface pointer, and the handler that answers it.
  *
- * @typedef {[string, number, ((object: any, args: number[]) => any)?]} ComMethodEntry
+ * The fourth element is how a slot's wide arguments travel at 64 bits, by
+ * their first dword counting `this`: a REFERENCE_TIME or an __int64 by value
+ * is one slot there and two dwords here (the bridge's `quadwords`).
+ *
+ * @typedef {[string, number, ((object: any, args: number[]) => any)?,
+ *     { quadwords?: number[] }?]} ComMethodEntry
  */
 
 /**
@@ -94,7 +100,8 @@ function u32(value){
 function describe(id, methods){
     return {
         id,
-        methods: methods.map(([name, argBytes, invoke])=>({ name, argBytes, invoke })),
+        methods: methods.map(([name, argBytes, invoke, marshal])=>({ name, argBytes, invoke,
+            ...marshal })),
     };
 }
 
@@ -152,12 +159,7 @@ export function createDirectMusic(host){
         {
             return;
         }
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         memory.writeBytes(address >>> 0, bytes);
     };
     /** @param {number} address @returns {string | null} */
@@ -1621,7 +1623,7 @@ export function createDirectMusic(host){
             }],
             ['PlaySegment', 24, (_, [source, flags, lo, hi, out])=>playSegment(
                 source, apiOf(source), flags >>> 0, join64(lo, hi), out,
-                host.callerThread?.())],
+                host.callerThread?.()), { quadwords: [3] }],
             ['Stop', 20, (_, [source, state])=>{
                 if ((state >>> 0) !== 0)
                 {
@@ -1675,7 +1677,7 @@ export function createDirectMusic(host){
                 }
                 writeU32(out, Math.floor(join64(lo, hi) / 10000));
                 return S_OK;
-            }],
+            }, { quadwords: [1] }],
             ['IsPlaying', 12, (_, [segment, state])=>{
                 const a = (state >>> 0) !== 0 ? apiOf(state) : null;
                 const b = (segment >>> 0) !== 0 ? apiOf(segment) : null;
@@ -1792,7 +1794,7 @@ export function createDirectMusic(host){
             ['AdjustTime', 12, (_, [lo, hi, out])=>{
                 writeU64(out, join64(lo, hi));
                 return S_OK;
-            }],
+            }, { quadwords: [1] }],
             ['CloseDown', 4, ()=>{
                 player.stopAll();
                 primary = null;
@@ -1805,7 +1807,7 @@ export function createDirectMusic(host){
                 }
                 writeU64(out, join64(lo, hi));
                 return S_OK;
-            }],
+            }, { quadwords: [1] }],
             ['MIDIToMusic', 24, ()=>E_NOTIMPL],
             ['MusicToMIDI', 24, ()=>E_NOTIMPL],
             ['TimeToRhythm', 28, ()=>E_NOTIMPL],
@@ -1832,7 +1834,7 @@ export function createDirectMusic(host){
             }],
             ['PlaySegmentEx', 40, (_, [source, , , flags, lo, hi, out])=>playSegment(
                 source, apiOf(source), flags >>> 0, join64(lo, hi), out,
-                host.callerThread?.())],
+                host.callerThread?.()), { quadwords: [5] }],
             ['StopEx', 20, (_, [item])=>{
                 if ((item >>> 0) === 0)
                 {
@@ -1841,7 +1843,7 @@ export function createDirectMusic(host){
                     return S_OK;
                 }
                 return stopVoice(apiOf(item));
-            }],
+            }, { quadwords: [2] }],
             ['ClonePMsg', 12, ()=>E_NOTIMPL],
             ['CreateAudioPath', 16, (_, [, , out])=>{
                 if ((out >>> 0) === 0)

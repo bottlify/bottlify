@@ -25,6 +25,7 @@
 
 import { createImageListIcons } from './imagelist-icon.js';
 import { createImageLists } from './imagelist.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** ILHEAD's fields and its packed size. */
 const ILHEAD = Object.freeze({
@@ -34,6 +35,10 @@ const ILHEAD = Object.freeze({
 const IMAGELIST_MAGIC = 0x4c49;
 const IMAGELIST_VERSION = 0x101;
 /** How many images a row of a written bitmap holds. */
+const S_OK = 0;
+const E_FAIL = 0x80004005 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
+
 const TILE_COLUMNS = 4;
 
 /** BITMAPFILEHEADER: 'BM', then the sizes, packed to two bytes. */
@@ -110,7 +115,7 @@ const bitmapFile = dib=>{
  * @param {import('./imagelist.js').ImageListHost} host
  * @param {ReturnType<typeof import('./imagelist.js').createImageLists>} lists
  */
-export function createImageListStreams(host, lists){
+function createImageListStreams(host, lists){
     /**
      * Whether everything a stream is used through is here: guest memory to
      * hold its bytes, and a way to call its methods.
@@ -252,7 +257,7 @@ export function createImageListStreams(host, lists){
         release: address=>host.release?.(address),
     };
 
-    return {
+    const functions = {
         /**
          * BOOL ImageList_Write(HIMAGELIST himl, LPSTREAM pstm)
          *
@@ -267,7 +272,7 @@ export function createImageListStreams(host, lists){
                 // Named before anything is awaited: past the first call into
                 // the stream the thread on the processor is somebody else.
                 const thread = host.callerThread?.();
-                if ((stream >>> 0) === 0 || !ready('ImageList_Write'))
+                if (wholeAddress(stream) === 0 || !ready('ImageList_Write'))
                 {
                     return 0;
                 }
@@ -283,12 +288,31 @@ export function createImageListStreams(host, lists){
                 }
                 for (const piece of pieces)
                 {
-                    if (!(await writeStream(stream >>> 0, piece, thread)))
+                    if (!(await writeStream(wholeAddress(stream), piece, thread)))
                     {
                         return 0;
                     }
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * HRESULT ImageList_WriteEx(HIMAGELIST himl, DWORD dwFlags, LPSTREAM pstm)
+         *
+         * ImageList_Write as an HRESULT. ILP_DOWNLEVEL asks for the 5.82
+         * library's form, which is the one form written here.
+         */
+        ImageList_WriteEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: async([handle, , stream])=>{
+                if (wholeAddress(stream) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const written = await functions.ImageList_Write.handler([handle, stream]);
+                return written ? S_OK : E_FAIL;
             },
         },
 
@@ -305,11 +329,11 @@ export function createImageListStreams(host, lists){
             /** @param {number[]} args */
             handler: async([stream])=>{
                 const thread = host.callerThread?.();
-                if ((stream >>> 0) === 0 || !ready('ImageList_Read'))
+                if (wholeAddress(stream) === 0 || !ready('ImageList_Read'))
                 {
                     return 0;
                 }
-                const head = await readStream(stream >>> 0, ILHEAD.SIZE, thread);
+                const head = await readStream(wholeAddress(stream), ILHEAD.SIZE, thread);
                 if (!head)
                 {
                     return 0;
@@ -329,9 +353,9 @@ export function createImageListStreams(host, lists){
                 {
                     return 0;
                 }
-                const image = await readDib(stream >>> 0, thread);
+                const image = await readDib(wholeAddress(stream), thread);
                 const masked = (fields.flags & ILC_MASK) !== 0;
-                const mask = image && masked ? await readDib(stream >>> 0, thread) : null;
+                const mask = image && masked ? await readDib(wholeAddress(stream), thread) : null;
                 if (!image || (masked && !mask))
                 {
                     return 0;
@@ -340,6 +364,7 @@ export function createImageListStreams(host, lists){
             },
         },
     };
+    return functions;
 }
 
 /**

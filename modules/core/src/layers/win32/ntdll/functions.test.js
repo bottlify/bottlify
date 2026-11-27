@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { HEAP_USER_INFO } from '../kernel32/heap.js';
 import { createNtdllFunctions } from './functions.js';
 import { STATUS } from './status.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
@@ -28,7 +29,7 @@ function fakeHost({ registers = true } = {}){
     const written = {};
 
     /** @param {number} address @param {number} length */
-    const readMemory = (address, length)=>bytes.subarray(address, address + length);
+    const readMemory = (address, length)=>bytes.slice(address, address + length);
     /** @param {number} address @param {Uint8Array} data */
     const writeMemory = (address, data)=>bytes.set(data, address);
 
@@ -94,6 +95,46 @@ function fakeHost({ registers = true } = {}){
     };
 }
 
+test('the default locales are kernel32\'s, the flag a BOOLEAN, and setting another is said', ()=>{
+    const host = fakeHost();
+    /** @type {string[]} */
+    const said = [];
+    const fns = createNtdllFunctions({ ...host,
+        kernel32: { ...host.kernel32,
+            GetUserDefaultLCID: { argBytes: 0, handler: ()=>0x0409 },
+            GetSystemDefaultLCID: { argBytes: 0, handler: ()=>0x0419 } },
+        divergence: (/** @type {string} */ api)=>void said.push(api) });
+    const view = new DataView(host.bytes.buffer);
+    const OUT = 0x200;
+    assert.equal(fns.NtQueryDefaultLocale.handler([1, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0409, 'the user\'s');
+    assert.equal(fns.NtQueryDefaultLocale.handler([0x100, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0419, 'the system\'s: only the low byte counts');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0409]), STATUS.SUCCESS);
+    assert.deepEqual(said, [], 'the default set again is nothing to say');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0809]), STATUS.SUCCESS);
+    assert.deepEqual(said, ['NtSetDefaultLocale'], 'another is not installed');
+});
+
+test('NtQueryObject names a kernel object under its session\'s object directory', ()=>{
+    // om.c: an event made as "wine_test" is \Sessions\1\BaseNamedObjects\wine_test,
+    // one made with no name has an empty name, not a refusal.
+    const host = fakeHost();
+    const fns = createNtdllFunctions({ ...host,
+        handleType: handle=>(handle === 0x44 || handle === 0x48 ? 'event' : null),
+        namedObjectName: handle=>(handle === 0x44 ? 'wine_test' : null),
+    });
+    const BUFFER = 0x800;
+    const expected = '\\Sessions\\1\\BaseNamedObjects\\wine_test';
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, 0x200, 0]), 0);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint16(BUFFER, true), expected.length * 2);
+    assert.equal(String.fromCharCode(...Array.from({ length: expected.length },
+        (_, at)=>view.getUint16(BUFFER + 8 + at * 2, true))), expected);
+    assert.equal(fns.NtQueryObject.handler([0x48, 1, BUFFER, 0x200, 0]), 0);
+    assert.equal(view.getUint16(BUFFER, true), 0, 'no name: an empty string');
+});
+
 test('the heap family is the very entry kernel32 exports, not a copy of it', ()=>{
     // A program allocates through RtlAllocateHeap and frees through HeapFree in
     // the same breath. Two allocators would each refuse the other's pointers, and
@@ -123,6 +164,71 @@ test('the aliases carry the argument sizes the guest compiled against', ()=>{
     assert.equal(fns.RtlSizeHeap.argBytes, 12);
     assert.equal(fns.RtlEnterCriticalSection.argBytes, 4);
     assert.equal(fns.RtlUnwind.argBytes, 16);
+});
+
+test('a native call answers a pointer it cannot reach with STATUS_ACCESS_VIOLATION', ()=>{
+    // The kernel probes what a system call is handed; the same pointer handed
+    // to a user-mode Rtl function faults there.
+    const host = fakeHost();
+    const unreachable = Object.assign(new Error('no page'), { code: 'GUEST_ACCESS' });
+    const fns = createNtdllFunctions({ ...host, writeMemory: (address, data)=>{
+        if (address >= 0x1000)
+        {
+            throw unreachable;
+        }
+        host.writeMemory(address, data);
+    } });
+    assert.equal(fns.NtQuerySystemInformation.handler([35, 0x2000, 2, 0]),
+        STATUS.ACCESS_VIOLATION);
+    assert.equal(fns.ZwQuerySystemInformation.handler([35, 0x2000, 2, 0]),
+        STATUS.ACCESS_VIOLATION, 'under its Zw name too');
+    assert.throws(()=>fns.RtlFillMemoryUlong.handler([0x2000, 4, 1]), /no page/,
+        'a user-mode Rtl function faults');
+});
+
+test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtQuerySystemInformation.handler([35, 0x100, 2, 0x110]), STATUS.SUCCESS);
+    assert.deepEqual([...host.bytes.subarray(0x100, 0x102)], [0, 1]);
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0x100, 8, 0x110]),
+        STATUS.INFO_LENGTH_MISMATCH, 'a pointer wide, exactly');
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0x100, 4, 0x110]), STATUS.SUCCESS);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x100, true), 0x80000000);
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0, 4, 0x110]),
+        STATUS.ACCESS_VIOLATION, 'nowhere to put it');
+});
+
+test('SystemFileCacheInformation is whole, or its three ULONGs to a buffer short of it', ()=>{
+    // Wine's info.c test_query_cache: Windows 7 gives a short buffer the head.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    for (const [given, answer, told] of [[128, STATUS.SUCCESS, 36], [36, STATUS.SUCCESS, 36],
+        [35, STATUS.SUCCESS, 12], [12, STATUS.SUCCESS, 12], [11, STATUS.INFO_LENGTH_MISMATCH, 12]])
+    {
+        view.setUint32(0x110, 0xdeadbeef, true);
+        assert.equal(fns.NtQuerySystemInformation.handler([21, 0x100, given, 0x110]), answer,
+            `${given} bytes`);
+        assert.equal(view.getUint32(0x110, true), told, `${given} bytes told`);
+    }
+});
+
+test('SystemProcessorBrandString is CPUID\'s 48 bytes and a terminator', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions({ ...host, processorName: 'Test CPU @ 1.00GHz' });
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x180, 0xdeadbeef, true);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 48, 0x180]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 64, 0x180]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x100, 0x112)), 'Test CPU @ 1.00GHz');
+    assert.deepEqual([...host.bytes.subarray(0x112, 0x131)], new Array(31).fill(0),
+        'padded with NULs to 48 and terminated');
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x101, 64, 0x180]),
+        STATUS.DATATYPE_MISALIGNMENT);
 });
 
 test('unwinding is the walk kernel32 already drives', ()=>{
@@ -256,13 +362,24 @@ test('a kernel32 entry\'s native calls are published under their own names', ()=
     // NtQueueApcThread and NtTestAlert are built over the APC queues, which
     // only kernel32's table holds, and ride on QueueUserAPC's entry.
     const host = fakeHost();
-    const native = { argBytes: 20, handler: ()=>0 };
+    let reach = true;
+    const native = { argBytes: 20, handler: ()=>{
+        if (!reach)
+        {
+            throw Object.assign(new Error('unreachable'), { code: 'GUEST_ACCESS' });
+        }
+        return 0;
+    } };
     Object.assign(host.kernel32, {
         QueueUserAPC: { argBytes: 12, handler: ()=>1, natives: { NtQueueApcThread: native } },
     });
     const fns = createNtdllFunctions(host);
-    assert.equal(fns.NtQueueApcThread, native);
+    assert.equal(fns.NtQueueApcThread.argBytes, 20);
+    assert.equal(fns.NtQueueApcThread.handler([]), 0, 'the call is kernel32\'s');
     assert.ok(!('QueueUserAPC' in fns), 'the entry itself stays kernel32\'s');
+    // Probed as every native call is: a pointer it cannot reach is a status.
+    reach = false;
+    assert.equal(fns.NtQueueApcThread.handler([]), 0xc0000005, 'STATUS_ACCESS_VIOLATION');
 });
 
 test('RtlWalkHeap is HeapWalk answered as a status, its end STATUS_NO_MORE_ENTRIES', ()=>{
@@ -372,26 +489,40 @@ test('NtQuerySystemTime is GetSystemTimeAsFileTime answered as a status', ()=>{
 });
 
 test('a heap block keeps a user value and user flags, and a pointer no block is refused', ()=>{
-    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap.
+    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap,
+    // over the record kernel32's heap keeps for a block (HEAP_USER_INFO).
     const host = fakeHost();
     /** @type {number[]} */
     const errors = [];
+    /** @type {Map<number, { value: number, flags: number }>} */
+    const kept = new Map();
     host.kernel32 = /** @type {any} */ ({ ...host.kernel32,
-        HeapValidate: { argBytes: 12, handler: (/** @type {number[]} */ [, , block])=>
-            (block === 0x2000 ? 1 : 0) },
+        /** @param {number} heap @param {number} block @param {boolean} make */
+        [HEAP_USER_INFO]: (heap, block, make)=>{
+            if (block !== 0x2000)
+            {
+                return null;
+            }
+            if (!kept.has(block) && make)
+            {
+                kept.set(block, { value: 0, flags: 0 });
+            }
+            return kept.get(block) ?? { value: undefined, flags: 0 };
+        },
         SetLastError: { argBytes: 4, handler: (/** @type {number[]} */ [code])=>errors.push(code) },
     });
     const fns = createNtdllFunctions(host);
     const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x180, 0xdeadbeef, true);
     assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]), 1);
-    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0, 0x200]);
-    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0xdeadbeef]), 1);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0xdeadbeef, 0],
+        'a block nothing was kept for: no flags, and its value left unwritten');
+    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0x1234]), 1);
     assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0, 0x1000]), 0,
         'a flag no program may set');
-    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0x800]), 1);
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0xa00]), 1);
     fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]);
-    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)],
-        [0xdeadbeef, 0xa00]);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0x1234, 0xa00]);
     assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x3000, 0x180, 0x184]), 0,
         'no block there');
     assert.deepEqual(errors, [87, 87]);
@@ -408,15 +539,117 @@ test('the debugging calls are in the table, and the process calls only over kern
 
     const more = /** @type {Record<string, any>} */ (host.kernel32);
     for (const name of ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
-        'SizeofResource'])
+        'SizeofResource', 'OpenThread', 'GetProcessId', 'GetThreadId'])
     {
         more[name] = { argBytes: 4, handler: ()=>0 };
     }
     const full = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
     for (const name of ['NtResumeThread', 'ZwResumeThread', 'NtOpenProcess', 'ZwOpenProcess',
         'RtlFindMessage', 'RtlCreateProcessParameters', 'RtlDestroyProcessParameters',
-        'RtlCreateUserProcess'])
+        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess', 'NtGetNextProcess',
+        'NtGetNextThread'])
     {
         assert.equal(typeof full[name]?.handler, 'function', name);
+    }
+});
+
+test('ntdll\'s printers are the runtime\'s own, the wide one with them', ()=>{
+    // Wine's shlwapi test_printf_format checks wnsprintf against ntdll's two.
+    const host = fakeHost();
+    const printer = { convention: 'cdecl', argBytes: 12 + 4 * 32, handler: ()=>0 };
+    Object.assign(host.crt, { _snprintf: printer, _snwprintf: { ...printer } });
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns._snprintf, /** @type {any} */ (host.crt)._snprintf);
+    assert.equal(fns._snwprintf, /** @type {any} */ (host.crt)._snwprintf,
+        'msvcrt\'s formatting, entry and convention');
+});
+
+test('ntdll\'s wide conversions and character classes are the runtime\'s own', ()=>{
+    // Windows' ntdll exports them beside the narrow ones; Wine's ntdll:string
+    // looked each up and called through the null it got back. The number-to-text
+    // family, the case changes and the classes are ntdll's own (`crt.js`).
+    const host = fakeHost();
+    const names = ['_wtoi', 'wcstol', '_snprintf_s'];
+    for (const name of names)
+    {
+        Object.assign(host.crt, { [name]: { convention: 'cdecl', argBytes: 8, handler: ()=>0 } });
+    }
+    const fns = createNtdllFunctions(host);
+    for (const name of names)
+    {
+        assert.equal(fns[name], /** @type {any} */ (host.crt)[name], name);
+    }
+    for (const name of ['_itow', '_i64tow', 'towlower', '_wcsupr', 'iswalpha', '_wcsnicmp'])
+    {
+        assert.notEqual(fns[name], undefined, name);
+    }
+});
+
+test('the status an error was made from is the thread\'s to read back', ()=>{
+    const host = { ...fakeHost(), teb: ()=>0x400 };
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.RtlGetLastNtStatus.argBytes, 0);
+    assert.equal(fns.RtlNtStatusToDosError.handler([0xc0000034 | 0]), 2);
+    assert.equal(fns.RtlGetLastNtStatus.handler([]) >>> 0, 0xc0000034,
+        'kept in TEB.LastStatusValue');
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x400 + 0xbf4, true), 0xc0000034);
+});
+
+test('the current user\'s key path names the user\'s SID under \\REGISTRY\\USER', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.RtlFormatCurrentUserKeyPath.handler([0x40]), STATUS.SUCCESS);
+    const view = new DataView(host.bytes.buffer);
+    const length = view.getUint16(0x40, true);
+    assert.equal(view.getUint16(0x42, true), length + 2, 'room for the terminator');
+    assert.equal(view.getUint32(0x44, true), 0x900, 'from the process heap');
+    const text = new TextDecoder('utf-16le').decode(host.bytes.subarray(0x900, 0x900 + length));
+    assert.match(text, /^\\REGISTRY\\USER\\S-1-5-21-\d+-\d+-\d+-1000$/);
+    assert.deepEqual(host.allocations, [PROCESS_HEAP]);
+});
+
+test('NtOpenKeyEx is NtOpenKey with the open options it knows', async()=>{
+    const { REGISTRY_NATIVES } = await import('../advapi32/functions.js');
+    /** @type {number[][]} */
+    const opened = [];
+    const host = { ...fakeHost(), advapi32: { [REGISTRY_NATIVES]: { entries: {
+        NtOpenKey: { argBytes: 12, handler: (/** @type {number[]} */ args)=>{
+            opened.push(args);
+            return 0;
+        } },
+    } } } };
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtOpenKeyEx.argBytes, 16);
+    assert.equal(fns.NtOpenKeyEx.handler([0x10, 0x20019, 0x30, 0x8]), 0);
+    assert.deepEqual(opened, [[0x10, 0x20019, 0x30]]);
+    assert.equal(fns.NtOpenKeyEx.handler([0x10, 0x20019, 0x30, 0x1]) >>> 0,
+        STATUS.INVALID_PARAMETER);
+    assert.equal(fns.ZwOpenKeyEx, fns.NtOpenKeyEx);
+});
+
+test('the processors\' performance records add up to GetSystemTimes\' times', ()=>{
+    // Wine's kernel32 time.c test_GetSystemTimes subtracts GetSystemTimes'
+    // times from the records' sums, unsigned: a share rounded down made the
+    // sum the smaller and the difference enormous.
+    const host = fakeHost();
+    const times = [1_000_003n, 1_000_003n, 7n];
+    const kernel32 = { ...host.kernel32, GetSystemTimes: { argBytes: 12,
+        handler: (/** @type {number[]} */ pointers)=>{
+            pointers.forEach((at, field)=>new DataView(host.bytes.buffer)
+                .setBigUint64(at, times[field], true));
+            return 1;
+        } } };
+    const processors = /** @type {any} */ ({ count: ()=>4 });
+    const fns = createNtdllFunctions({ ...host, kernel32, processors });
+    assert.equal(fns.NtQuerySystemInformation.handler([8, 0x100, 48 * 4, 0]), STATUS.SUCCESS);
+    const view = new DataView(host.bytes.buffer);
+    for (const [field, whole] of times.entries())
+    {
+        let sum = 0n;
+        for (let one = 0; one < 4; one++)
+        {
+            sum += view.getBigUint64(0x100 + one * 48 + field * 8, true);
+        }
+        assert.equal(sum, whole);
     }
 });

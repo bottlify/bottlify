@@ -22,6 +22,8 @@ export { createWebSocketServer, Connection } from './websocket.js';
 // Whether the relay may open a connection to a host outside its rooms, for a
 // server that hosts the relay itself.
 export { permits } from './cli.js';
+// A relay whose only way out is an HTTP proxy dials through it.
+export { connectThrough, proxyDialer } from './tunnel.js';
 
 /**
  * @typedef {import('./relay.js').RelayOptions & {

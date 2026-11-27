@@ -27,8 +27,8 @@ function fakeMemory(size = 0x10000){
 }
 
 /**
- * The emulator's memory as the accessors see it, with the paths it offers kept
- * apart: `writePhysical` is the one that tells the emulator's compiler about a
+ * The engine's memory as the accessors see it, with the paths it offers kept
+ * apart: `writePhysical` is the one that tells the translator about a
  * page it may have translated, `writeData` and `fillData` the ones that go
  * straight into memory. The log of which path a call took is the only way to
  * see the difference from outside, since all three leave the same bytes.
@@ -105,6 +105,16 @@ test('a layout that overlaps is refused when it is registered', ()=>{
         kind: RegionKind.STACK, access: Access.READ_WRITE,
     });
     assert.deepEqual(regions.list().map(r=>r.name), ['code', 'data', 'stack']);
+});
+
+test('a name is registered once: unregistering by it cannot take another owner\'s region', ()=>{
+    const regions = mapWithCode();
+    assert.throws(
+        ()=>regions.register({
+            name: 'code', base: 0x8000, size: 0x1000,
+            kind: RegionKind.IMAGE, access: Access.READ_EXECUTE,
+        }),
+        /"code" is already registered/);
 });
 
 test('a region given back is gone from every answer, and its span can be registered again', ()=>{
@@ -311,7 +321,7 @@ test('a read is a snapshot, not a window onto guest memory', ()=>{
     const before = accessors.readBytes(0x2000, 4);
     accessors.writeBytes(0x2000, new Uint8Array([9, 9, 9, 9]));
 
-    // The emulator hands back a subarray of its own memory. A caller holding
+    // The engine hands back a subarray of its own memory. A caller holding
     // one has a value that changes under it -- read two ranges, write one, and
     // the other has silently moved, which is how a swap turns into a copy.
     assert.deepEqual([...before], [1, 2, 3, 4]);
@@ -365,6 +375,9 @@ test('a string read copies the string, not the region it sits in', ()=>{
     bytes.set([0x41, 0x00, 0x42, 0x00, 0x00, 0x00], 0x4000); // "AB" as UTF-16LE
     assert.equal(accessors.readWideString(0x4000, size), 'AB');
     assert.equal(accessors.scanWideString(0x4000, size), 2, 'its length in units, no text');
+    // Half a surrogate pair is a unit like any other in a Windows string.
+    bytes.set([0x41, 0x00, 0x00, 0xd8, 0x42, 0x00, 0x00, 0x00], 0x4100);
+    assert.equal(accessors.readWideString(0x4100, size), 'A\ud800B');
     assert.throws(()=>accessors.readCString(0x2000, 8), /No NUL within 8 bytes/);
 });
 
@@ -510,7 +523,7 @@ test('a fill over executable memory goes the way a write there does', ()=>{
     const regions = mapWithPages();
     const accessors = createAccessors({ raw, regions });
 
-    // Whatever the emulator has translated for a page it may execute has to be
+    // Whatever the translator has made of a page the guest may execute has to be
     // discarded, and the write path is what discards it. A fill that went
     // straight into memory there would leave the old translation running.
     accessors.writeBytes(0x8000, new Uint8Array(16).fill(0x90));
@@ -754,4 +767,108 @@ test('with a reader the dword reads are its own: over a boundary word by word, r
     assert.deepEqual(machine, [], 'every word out of the RAM the machine lends');
     assert.throws(()=>accessors.readU32sInto(0x9000, 1, [0]), /Unmapped read/);
     assert.throws(()=>accessors.readU32(0x9000), /Unmapped read/);
+});
+
+test('an address above 2 GiB handed over signed names the same guest bytes', ()=>{
+    // A large-address-aware program's heap lies above 0x80000000. Arguments
+    // cross the bridge signed, and a page rounded with `&` comes out signed:
+    // (0x8067b001 + 0xfff) & ~0xfff is -0x7f984000, the page 0x8067c000.
+    const HIGH = 0x8067c000;
+    const bytes = new Uint8Array(0x2000);
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address - HIGH, address - HIGH + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address - HIGH),
+    };
+    const regions = createRegionMap();
+    regions.register({ name: 'heap', base: HIGH, size: 0x2000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE });
+    const accessors = createAccessors({ raw, regions });
+    const signed = HIGH | 0;
+    assert.equal(signed < 0, true);
+
+    accessors.writeU32(signed, 0xcafebabe);
+    assert.equal(accessors.readU32(HIGH), 0xcafebabe, 'written at the unsigned address');
+    assert.equal(accessors.readU32(signed), 0xcafebabe);
+    accessors.writeBytes(signed + 4, Uint8Array.of(0x41, 0, 0x42, 0, 0, 0));
+    assert.equal(accessors.readWideString(signed + 4), 'AB');
+    assert.equal(accessors.readCString(signed + 4), 'A');
+    accessors.fillBytes(signed, 0, 4);
+    assert.deepEqual([...accessors.readBytes(signed, 4)], [0, 0, 0, 0]);
+    const words = [0];
+    accessors.readU32sInto(signed + 4, 1, words);
+    assert.equal(words[0], 0x420041);
+});
+
+test('a dword the host stores into data goes as one word, no bytes made; into code, as bytes'
+    + ' the translator is told of', ()=>{
+    const raw = fakeMemory();
+    /** @type {[number, number][]} */
+    const words = [];
+    /** @type {number[]} */
+    const written = [];
+    const regions = mapWithCode();
+    regions.register({
+        name: 'patched', base: 0x4000, size: 0x1000,
+        kind: RegionKind.IMAGE, access: Access.READ_WRITE_EXECUTE,
+    });
+    const accessors = createAccessors({
+        raw: {
+            ...raw,
+            writePhysical: (address, data)=>{
+                written.push(address);
+                raw.bytes.set(data, address);
+            },
+            writeU32Data: (address, value)=>{
+                words.push([address, value >>> 0]);
+                new DataView(raw.bytes.buffer).setUint32(address, value, true);
+            },
+        },
+        regions,
+    });
+    accessors.writeU32(0x2010, 0xcafebabe);
+    assert.deepEqual(words, [[0x2010, 0xcafebabe]], 'data: one word');
+    assert.deepEqual(written, [], 'and no bytes');
+    assert.equal(accessors.readU32(0x2010), 0xcafebabe);
+    accessors.writeU32(0x4010, 7);
+    assert.deepEqual(written, [0x4010], 'code the guest may run: through the write that tells');
+    assert.equal(words.length, 1);
+    assert.throws(()=>accessors.writeU32(0x1010, 1), /write/i, 'a read-only region still refuses');
+    assert.equal(words.length, 1);
+});
+
+test('a string is decoded where it lies in shared memory, ANSI and UTF-16, with no copy of'
+    + ' its bytes', ()=>{
+    const shared = new Uint8Array(new SharedArrayBuffer(0x10000));
+    let copies = 0;
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            const view = shared.subarray(address, address + length);
+            // A copy of what was read is what this test is to catch.
+            view.slice = (/** @type {any[]} */ ...args)=>{
+                copies++;
+                return Uint8Array.prototype.slice.apply(view, /** @type {any} */ (args));
+            };
+            return view;
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>shared.set(data, address),
+    };
+    const accessors = createAccessors({ raw, regions: mapWithCode() });
+    // "Café €1" in windows-1252: 0xe9 is Latin-1, 0x80 the euro sign.
+    shared.set([0x43, 0x61, 0x66, 0xe9, 0x20, 0x80, 0x31, 0], 0x2000);
+    assert.equal(accessors.readCString(0x2000), 'Café €1');
+    // A wide string at an odd address and at an even one, a lone surrogate kept.
+    const units = [0x0048, 0xd800, 0x0069, 0];
+    for (const at of [0x2101, 0x2200])
+    {
+        units.forEach((unit, i)=>{
+            shared[at + i * 2] = unit & 0xff;
+            shared[at + i * 2 + 1] = unit >>> 8;
+        });
+        assert.equal(accessors.readWideString(at), 'H\ud800i', `at 0x${at.toString(16)}`);
+    }
+    assert.equal(copies, 0, 'nothing copied out to be decoded');
 });

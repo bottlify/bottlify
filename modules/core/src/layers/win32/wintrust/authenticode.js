@@ -25,8 +25,8 @@
 
 import { childrenOf, contents, DerError, expect, readOid, TAG } from '../crypto/der.js';
 import {
-    checkSigner, parseSignedData, parseSignerInfo, PKCS7, signedContent, signerCertificate,
-    signingTime,
+    checkSigner, checkTimeStampToken, parseSignedData, parseSignerInfo, PKCS7, signedContent,
+    signerCertificate, signingTime,
 } from '../crypto/pkcs7.js';
 import { isSelfIssued, isSignedBy, sameBytes, USAGE } from '../crypto/x509.js';
 import { readSubject } from './subject.js';
@@ -64,6 +64,10 @@ const MAX_CHAIN = 16;
  * @property {number} now            Milliseconds since 1970: the machine's time.
  * @property {boolean} [hashOnly]    WTD_HASH_ONLY_FLAG: the file's digest alone.
  * @property {boolean} [lifetime]    WTD_LIFETIME_SIGNING_FLAG: judged now, timestamp or not.
+ * @property {(chain: Uint8Array[], time: number) => void} [signerChain]  Told the signer's
+ *     chain, its certificates as encoded from the signer's own to the root, and the time it
+ *     is judged at, once the signature holds: what a verification's provider data lays out
+ *     for the caller.
  */
 
 /**
@@ -135,7 +139,7 @@ const allowsUsage = (chain, usage)=>chain.every(certificate=>
  * @param {number} time
  * @param {string} usage
  */
-export function judgeChain(leaf, pool, roots, time, usage){
+function judgeChain(leaf, pool, roots, time, usage){
     const { chain, status } = buildChain(leaf, pool, roots);
     if (status !== TRUST.OK)
     {
@@ -176,10 +180,11 @@ function statedDigest(content){
  *
  * @param {Uint8Array} bytes
  * @param {TrustOptions} options
+ * @param {import('./subject.js').Subject | null} [subject]  the file as a subject,
+ *     read beforehand where reading it waits (an installer database's)
  * @returns {number}
  */
-export function verifyAuthenticode(bytes, options){
-    const subject = readSubject(bytes);
+export function verifyAuthenticode(bytes, options, subject = readSubject(bytes)){
     if (!subject)
     {
         return TRUST.TRUST_E_SUBJECT_FORM_UNKNOWN;
@@ -271,6 +276,43 @@ export function verifyAuthenticode(bytes, options){
             || certificate.extendedKeyUsage?.includes(USAGE.LIFETIME_SIGNING);
         time = lifetime ? options.now : stamped;
     }
+    else
+    {
+        // A time-stamp token (RFC 3161), as Microsoft has stamped its
+        // signatures since the PKCS #9 countersignature went out of use.
+        const token = signer.unauthenticated.get(PKCS7.RFC3161_TIME_STAMP)?.[0];
+        if (token)
+        {
+            let stamp;
+            try
+            {
+                stamp = checkTimeStampToken(token, signer.encryptedDigest);
+            }
+            catch (e){
+                if (e instanceof DerError)
+                {
+                    return TRUST.TRUST_E_TIME_STAMP;
+                }
+                throw e;
+            }
+            if (stamp.result !== 'ok' || stamp.time === null || !stamp.authority)
+            {
+                return TRUST.TRUST_E_COUNTER_SIGNER;
+            }
+            const timestamp = judgeChain(stamp.authority,
+                [...stamp.certificates, ...signed.certificates], options.roots, stamp.time,
+                USAGE.TIME_STAMPING);
+            if (timestamp !== TRUST.OK)
+            {
+                return timestamp;
+            }
+            const lifetime = options.lifetime
+                || certificate.extendedKeyUsage?.includes(USAGE.LIFETIME_SIGNING);
+            time = lifetime ? options.now : stamp.time;
+        }
+    }
+    options.signerChain?.(buildChain(certificate, signed.certificates, options.roots).chain
+        .map(one=>one.encoded), time);
     return judgeChain(certificate, signed.certificates, options.roots, time, USAGE.CODE_SIGNING);
 }
 

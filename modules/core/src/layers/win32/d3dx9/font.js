@@ -9,6 +9,7 @@ import { writeTextMetrics, writeTextMetricsW } from '../gdi32/structs.js';
 import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { SPRITE } from './sprite.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXFont: text drawn on the program's device, as D3DX draws it -- each
@@ -22,7 +23,7 @@ import { readToTerminator } from '../common/scan-windows.js';
  * measures without drawing.
  */
 
-export const IID_ID3DXFONT = '{D79DBB70-5F21-4D36-BBC2-FF525C213CDC}';
+const IID_ID3DXFONT = '{D79DBB70-5F21-4D36-BBC2-FF525C213CDC}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -371,11 +372,11 @@ export function createFonts(host, sprites){
     // end of what the program allocated is not read past.
     /** @param {number} at @param {number} count  -1: to the NUL. */
     const ansi = (at, count)=>[...(count < 0 ? readToTerminator(host, at, 1, 4096).bytes
-        : host.readMemory(at >>> 0, count))];
+        : host.readMemory(wholeAddress(at), count))];
     /** @param {number} at @param {number} count */
     const wide = (at, count)=>{
         const bytes = count < 0 ? readToTerminator(host, at, 2, 2048).bytes
-            : host.readMemory(at >>> 0, count * 2).slice();
+            : host.readMemory(wholeAddress(at), count * 2).slice();
         return [...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1)];
     };
 
@@ -402,7 +403,7 @@ export function createFonts(host, sprites){
                 bytes[24 + i] = c.charCodeAt(0) & 0xff;
             }
         });
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
 
     /** @param {any} state @param {number} at @param {boolean} isWide */

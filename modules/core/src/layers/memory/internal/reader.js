@@ -36,6 +36,8 @@
 
 /** How many validated spans a reader keeps: a call's stack, its thread's block, its data. */
 const SPANS = 4;
+/** The first address `>>> 2` cannot name: past it a dword goes by the view. */
+const LOW = 2 ** 32;
 
 export class DwordReader {
     /** @param {ReaderRegions} regions @param {ReaderMachine} machine */
@@ -150,7 +152,8 @@ export class DwordReader {
             }
             this.data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
             this.words = bytes.byteOffset % 4 === 0
-                ? new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2)
+                ? new Int32Array(bytes.buffer, bytes.byteOffset,
+                    Math.floor(bytes.byteLength / 4))
                 : new Int32Array(0);
         }
         return this.data;
@@ -169,7 +172,9 @@ export class DwordReader {
         {
             this.manyAt = span;
             const words = this.words;
-            if ((address & 3) === 0 && (address >>> 2) + count <= words.length)
+            // `>>> 2` names the dword of an address below 4 GiB only: a wide
+            // window's address past it goes by the view, which takes it whole.
+            if ((address & 3) === 0 && address < LOW && (address >>> 2) + count <= words.length)
             {
                 const first = address >>> 2;
                 for (let word = 0; word < count; word++)
@@ -238,7 +243,8 @@ export class DwordReader {
         if (data !== null && span >= 0)
         {
             this.oneAt = span;
-            const word = (address & 3) === 0 ? this.words[address >>> 2] : undefined;
+            const word = (address & 3) === 0 && address < LOW ? this.words[address >>> 2]
+                : undefined;
             if (word !== undefined)
             {
                 return word >>> 0;

@@ -20,6 +20,9 @@ import { GL } from './constants.js';
 
 const DATA = 0x2000;
 
+/** Context methods that serve a family of entry points under a name of their own. */
+const ENTRY_METHODS = new Set(['uniform', 'uniformMatrix', 'bindFramebuffer']);
+
 /** @param {unknown} value */
 const plain = value=>(ArrayBuffer.isView(value)
     ? [...(/** @type {any} */ (value))]
@@ -51,7 +54,7 @@ function logged(){
                     get(target, key){
                         const value = /** @type {any} */ (target)[key];
                         if (typeof value !== 'function' || typeof key !== 'string'
-                            || !key.startsWith('gl'))
+                            || !(key.startsWith('gl') || ENTRY_METHODS.has(key)))
                         {
                             return value;
                         }
@@ -81,7 +84,7 @@ const word = i=>WORDS[i % WORDS.length];
 
 test('every call the ring carries is made as its entry point makes it', ()=>{
     const { bytes, log, table, context } = logged();
-    const floats = new Float32Array(16).map((unused, i)=>i * 0.5 + 0.25);
+    const floats = new Float32Array(160).map((unused, i)=>i * 0.5 + 0.25);
     bytes.set(new Uint8Array(floats.buffer), DATA);
     for (const [name, entry] of Object.entries(GL_COMMANDS.COMMANDS))
     {
@@ -123,3 +126,35 @@ test('every call the ring carries is made as its entry point makes it', ()=>{
         }
     }
 });
+
+test('a parameter vector reaches the context as the record\'s floats; a list keeps a copy',
+    ()=>{
+        /** @param {number[]} values */
+        const recordOf = values=>{
+            const record = new Uint32Array(2 + 3 + values.length);
+            record.set([GL_COMMANDS.commandSlot('glLightfv'), record.byteLength, GL.LIGHT0,
+                GL.DIFFUSE]);
+            new Float32Array(record.buffer, (2 + 3) * 4).set(values);
+            return record;
+        };
+        const ring = recordOf([0.25, 0.5, 0.75, 1]);
+        /** @type {any[]} */
+        const seen = [];
+        assert.equal(GL_COMMANDS.runCommands(/** @type {any} */ ({
+            glLightfv: (/** @type {any[]} */ ...args)=>seen.push(args[2]),
+        }), new Uint8Array(ring.buffer), [], ()=>{}), 1);
+        assert.ok(seen[0] instanceof Float32Array, 'the floats as they were read, no array');
+        assert.deepEqual([...seen[0]], [0.25, 0.5, 0.75, 1]);
+
+        // Compiled into a list, the values are the list's: the next record,
+        // read into the same floats, does not reach what the list plays.
+        const { context } = logged();
+        const made = context();
+        made.glNewList(1, GL.COMPILE);
+        GL_COMMANDS.runCommands(made, new Uint8Array(ring.buffer), [], ()=>{});
+        made.glEndList();
+        GL_COMMANDS.runCommands(made, new Uint8Array(recordOf([0, 0, 0, 0]).buffer), [], ()=>{});
+        assert.deepEqual(made.glGetLightfv(GL.LIGHT0, GL.DIFFUSE), [0, 0, 0, 0]);
+        made.glCallList(1);
+        assert.deepEqual(made.glGetLightfv(GL.LIGHT0, GL.DIFFUSE), [0.25, 0.5, 0.75, 1]);
+    });

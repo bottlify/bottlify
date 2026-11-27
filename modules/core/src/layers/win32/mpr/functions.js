@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * mpr -- the network provider router, behind which this machine has no network.
  *
@@ -134,7 +136,7 @@ export function createNetworkFunctions(host){
             enumerations.add(handle);
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, handle, true);
-            host.writeMemory(out >>> 0, bytes);
+            host.writeMemory(wholeAddress(out), bytes);
             return NO_ERROR;
         },
     };
@@ -230,7 +232,7 @@ export function createNetworkFunctions(host){
         WNetCancelConnectionA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name])=>answer((name >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+            handler: ([name])=>answer(wholeAddress(name) === 0 ? ERROR_INVALID_ADDRESS
                 : ERROR_NOT_CONNECTED),
         },
 
@@ -244,7 +246,7 @@ export function createNetworkFunctions(host){
         WNetUseConnectionA: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([, resource])=>answer((resource >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+            handler: ([, resource])=>answer(wholeAddress(resource) === 0 ? ERROR_INVALID_ADDRESS
                 : ERROR_NO_NETWORK),
         },
 

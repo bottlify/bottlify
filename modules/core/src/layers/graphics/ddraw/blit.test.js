@@ -15,7 +15,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_KEYDEST, DDBLT_KEYSRC,
-    DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED,
+    DDBLT_WAIT, DDERR_INVALIDPARAMS, DDERR_INVALIDRECT, DDERR_UNSUPPORTED, DDBLT_ROP, DDBLT_DDFX,
+    DDBLTFX_MIRRORLEFTRIGHT, DDBLTFX_MIRRORUPDOWN, DDERR_NORASTEROPHW, ROP,
 } from './constants.js';
 import { blt, bltFast, readPixel, writePixel } from './blit.js';
 
@@ -394,4 +395,169 @@ test('a fill, a copy and a source-keyed copy with nothing clipped land as the cl
             assert.deepEqual(runs[0], runs[1], `${bytesPerPixel} bytes a pixel, trial ${trial}`);
         }
     }
+});
+
+test('a raster operation: BLACKNESS and WHITENESS fill without a source, SRCCOPY copies, '
+    + 'any other is refused', ()=>{
+    const memory = ram();
+    const dest = surface(BASE, 2, 2, 2);
+    number(memory, dest);
+    assert.equal(blt({ memory, dest, flags: DDBLT_ROP, fx: { rop: ROP.WHITENESS } }), 0);
+    assert.deepEqual(grid(memory, dest), [[0xffff, 0xffff], [0xffff, 0xffff]]);
+    assert.equal(blt({ memory, dest, flags: DDBLT_ROP, fx: { rop: ROP.BLACKNESS },
+        destRect: { left: 1, top: 0, right: 2, bottom: 2 } }), 0);
+    assert.deepEqual(grid(memory, dest), [[0xffff, 0], [0xffff, 0]]);
+    const src = surface(BASE + 0x40, 2, 2, 2);
+    number(memory, src);
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx: { rop: ROP.SRCCOPY } }), 0);
+    assert.deepEqual(grid(memory, dest), [[1, 2], [3, 4]]);
+    // SRCINVERT, which nothing here makes.
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx: { rop: 0x00660046 } }),
+        DDERR_NORASTEROPHW);
+    assert.deepEqual(grid(memory, dest), [[1, 2], [3, 4]], 'and nothing is written');
+});
+
+test('the effects a blit makes: mirrored either way or both, stretched too; any other is refused',
+    ()=>{
+        const memory = ram();
+        const src = surface(BASE, 3, 2, 1);
+        number(memory, src);
+        const dest = surface(BASE + 0x40, 3, 2, 1);
+        const mirrored = (/** @type {number} */ ddfx, /** @type {any} */ to = dest)=>{
+            assert.equal(blt({ memory, dest: to, src, flags: DDBLT_DDFX, fx: { ddfx } }), 0);
+            return grid(memory, to);
+        };
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT), [[3, 2, 1], [6, 5, 4]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORUPDOWN), [[4, 5, 6], [1, 2, 3]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT | DDBLTFX_MIRRORUPDOWN),
+            [[6, 5, 4], [3, 2, 1]]);
+        assert.deepEqual(mirrored(DDBLTFX_MIRRORLEFTRIGHT, surface(BASE + 0x80, 6, 2, 1)),
+            [[3, 3, 2, 2, 1, 1], [6, 6, 5, 5, 4, 4]], 'stretched and mirrored');
+        assert.deepEqual(mirrored(0), [[1, 2, 3], [4, 5, 6]], 'no effect is a copy');
+        // DDBLTFX_ROTATE90.
+        assert.equal(blt({ memory, dest, src, flags: DDBLT_DDFX, fx: { ddfx: 0x00000200 } }),
+            DDERR_UNSUPPORTED);
+    });
+
+test('a rectangle past the surface is cut by a clipper, the source with it; without one refused',
+    ()=>{
+        const memory = ram();
+        const src = surface(BASE, 4, 2, 1);
+        number(memory, src);
+        const dest = surface(BASE + 0x40, 4, 2, 1);
+        const destRect = { left: -2, top: 0, right: 2, bottom: 2 };
+        assert.equal(blt({ memory, dest, src, flags: 0, destRect }), DDERR_INVALIDRECT);
+        const clipList = [{ left: 0, top: 0, right: 4, bottom: 2 }];
+        assert.equal(blt({ memory, dest, src, flags: 0, destRect, clipList }), 0);
+        assert.deepEqual(grid(memory, dest), [[3, 4, 0, 0], [7, 8, 0, 0]],
+            'the source columns that land on the surface');
+        assert.equal(blt({ memory, dest, src, flags: 0, clipList,
+            destRect: { left: 8, top: 0, right: 12, bottom: 2 } }), 0, 'wholly off: nothing');
+    });
+
+test('a fill or raster operation is checked before its rectangles: it needs its DDBLTFX, a fill'
+    + ' takes no source, a colour fill no raster operation (test_color_fill)', ()=>{
+    const memory = ram();
+    const dest = surface(BASE, 4, 4, 4);
+    const src = surface(BASE + 0x100, 4, 4, 4);
+    const DEPTHFILL = 0x02000000;
+    const inverted = { left: 3, top: 3, right: 1, bottom: 1 };
+    const outside = { left: 0, top: 0, right: 5, bottom: 5 };
+    const fx = { fillColor: 0x11223344, rop: ROP.WHITENESS };
+    for (const flags of [DDBLT_COLORFILL, DDBLT_ROP, DEPTHFILL])
+    {
+        assert.equal(blt({ memory, dest, flags, fx, fxGiven: false }), DDERR_INVALIDPARAMS);
+    }
+    assert.equal(blt({ memory, dest, src, destRect: inverted, flags: DDBLT_COLORFILL, fx }),
+        DDERR_INVALIDPARAMS, 'a source, before the inverted rectangle');
+    assert.equal(blt({ memory, dest, src, srcRect: inverted, flags: DDBLT_COLORFILL, fx }),
+        DDERR_INVALIDPARAMS);
+    assert.equal(blt({ memory, dest, destRect: outside, flags: DDBLT_COLORFILL | DDBLT_ROP, fx }),
+        DDERR_INVALIDPARAMS);
+    assert.equal(blt({ memory, dest, srcRect: inverted, flags: DDBLT_COLORFILL, fx }), 0,
+        'a source rectangle with no source is not read');
+    // A raster operation that reads no source still checks the one it is given.
+    for (const srcRect of [inverted, outside])
+    {
+        assert.equal(blt({ memory, dest, src, srcRect, flags: DDBLT_ROP, fx }), DDERR_INVALIDRECT);
+    }
+    assert.equal(blt({ memory, dest, src, flags: DDBLT_ROP, fx }), 0);
+    // A copy with no source, before its inverted rectangle (test_blt).
+    assert.equal(blt({ memory, dest, destRect: inverted, flags: 0 }), DDERR_INVALIDPARAMS);
+    // Both fills on a colour surface: the colour fill is made.
+    assert.equal(blt({ memory, dest, flags: DDBLT_COLORFILL | DEPTHFILL, fx }), 0);
+    assert.equal(readPixel(memory, dest, 2, 2), 0x11223344);
+    // A depth buffer takes a raster fill, and refuses a colour fill whatever else is asked.
+    const depth = { ...surface(BASE + 0x200, 2, 2, 2), depth: true };
+    assert.equal(blt({ memory, dest: depth, flags: DDBLT_ROP, fx: { rop: ROP.WHITENESS } }), 0);
+    assert.deepEqual(grid(memory, depth), [[0xffff, 0xffff], [0xffff, 0xffff]]);
+    assert.equal(blt({ memory, dest: depth, flags: DDBLT_COLORFILL | DEPTHFILL, fx }),
+        DDERR_INVALIDPARAMS);
+});
+
+test('a copy into DXTn blocks encodes the blocks it touched and leaves the rest'
+    + ' (test_compressed_surface_stretch)', ()=>{
+    const memory = ram(0x1000);
+    // 8x8 DXT1: four blocks of eight bytes, all 0xab.
+    const dest = { ...surface(BASE, 8, 8, 0, 16), compressed: /** @type {const} */ ('dxt1') };
+    memory.bytes.fill(0xab, BASE, BASE + 32);
+    // 2x2 of A1R5G5B5 opaque blue, stretched into the dest's (2,2)-(4,4).
+    const src = { ...surface(BASE + 0x100, 2, 2, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0x8000 } };
+    for (let k = 0; k < 4; k++)
+    {
+        writePixel(memory, src, k & 1, k >> 1, 0x801f);
+    }
+    assert.equal(blt({ memory, dest, src, flags: 0,
+        destRect: { left: 2, top: 2, right: 4, bottom: 4 } }), 0);
+    assert.deepEqual([...memory.bytes.subarray(BASE + 8, BASE + 32)], new Array(24).fill(0xab),
+        'blocks 1 to 3 untouched');
+    const view = new DataView(memory.bytes.buffer);
+    const c0 = view.getUint16(BASE, true);
+    const c1 = view.getUint16(BASE + 2, true);
+    const indices = view.getUint32(BASE + 4, true);
+    // Texel (2,2) is index 10 of the block: its colour is pure blue.
+    const picked = (indices >>> 20) & 3;
+    assert.equal(picked === 0 ? c0 : picked === 1 ? c1 : -1, 0x001f);
+});
+
+test('a copy between the same colours, the source without alpha, moves the bits as they are'
+    + ' (test_surface_format_conversion_alpha)', ()=>{
+    const memory = ram();
+    const x1 = { ...surface(BASE, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0 } };
+    const a1 = { ...surface(BASE + 0x40, 2, 1, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0x8000 } };
+    writePixel(memory, x1, 0, 0, 0x03e0);
+    writePixel(memory, x1, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: x1, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x03e0, 0x001f]], 'the top bit stays clear');
+    // With alpha on the source side the alpha is converted as before.
+    const r5g6b5 = { ...surface(BASE + 0x80, 2, 1, 2),
+        channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
+    writePixel(memory, r5g6b5, 0, 0, 0x07e0);
+    writePixel(memory, r5g6b5, 1, 0, 0x001f);
+    assert.equal(blt({ memory, dest: a1, src: r5g6b5, flags: 0 }), 0);
+    assert.deepEqual(grid(memory, a1), [[0x83e0, 0x801f]], 'another layout is made opaque');
+});
+
+test('blocks decoded into a format without alpha fill its unused bits with the texels\' alpha'
+    + ' (test_surface_format_conversion_alpha)', ()=>{
+    const memory = ram();
+    // One DXT1 block, every texel colour 0 = pure blue, opaque.
+    const block = new Uint8Array([0x1f, 0x00, 0x00, 0x00, 0, 0, 0, 0]);
+    memory.bytes.set(block, BASE);
+    const src = { ...surface(BASE, 4, 4, 0, 8), compressed: /** @type {const} */ ('dxt1') };
+    const rgbx = { ...surface(BASE + 0x100, 4, 4, 4),
+        channels: { red: 0xff0000, green: 0xff00, blue: 0xff, alpha: 0 } };
+    assert.equal(blt({ memory, dest: rgbx, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, rgbx, 0, 0) >>> 0, 0xff0000ff);
+    const x1 = { ...surface(BASE + 0x200, 4, 4, 2),
+        channels: { red: 0x7c00, green: 0x3e0, blue: 0x1f, alpha: 0 } };
+    assert.equal(blt({ memory, dest: x1, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, x1, 3, 3), 0x801f);
+    const r5g6b5 = { ...surface(BASE + 0x280, 4, 4, 2),
+        channels: { red: 0xf800, green: 0x7e0, blue: 0x1f, alpha: 0 } };
+    assert.equal(blt({ memory, dest: r5g6b5, src, flags: 0 }), 0);
+    assert.equal(readPixel(memory, r5g6b5, 0, 0), 0x001f, 'no bits to spare');
 });

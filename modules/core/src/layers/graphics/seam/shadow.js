@@ -51,438 +51,18 @@
  * flag every routine checks first, and leaves to the trap.
  */
 
+import { D3DPOOL, D3DUSAGE, FORMAT_INFO, surfacePitch } from '../d3d8/constants.js';
+import { dword } from './routines/assemble.js';
 import {
-    D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DFMT, D3DPOOL, D3DUSAGE, FORMAT_INFO, surfacePitch,
-} from '../d3d8/constants.js';
-
-/** The one depth format with a stencil the devices take a stencil clear on. */
-const D3DFMT_D24S8 = D3DFMT.D24S8;
-/** D3DUSAGE_RENDERTARGET. */
-const D3DUSAGE_RENDERTARGET = 0x1;
-
-/**
- * The block takes pages of its own. The routines that write it are guest
- * code the emulator compiles, and a write into a page that holds compiled
- * code makes the emulator discard everything compiled for that page -- so a
- * block laid right after the routines, out of the same heap, would have every
- * SetRenderState throw the routines away and run them interpreted after.
- */
-const PAGE = 4096;
-const PAGES = 2;
-
-/** Byte offsets within the block. */
-export const SHADOW = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    /**
-     * The command ring (`commandCode`): where it is, how many bytes it
-     * holds, and how many of them the guest has written -- zero where the
-     * device has none, which sends every command to the host. The host
-     * keeps how far it has read; the guest only ever adds to the head.
-     */
-    COMMANDS: 4,
-    COMMAND_BYTES: 8,
-    COMMAND_HEAD: 12,
-    /**
-     * Raised by a draw the ring holds, cleared by the host when it takes the
-     * ring: while it is up, a lock in the guest that may overwrite what a
-     * draw reads is the host's.
-     */
-    DRAWS_PENDING: 16,
-    /** Buffer locks and unlocks taken in the guest, counted by the routines. */
-    LOCK_CALLS: 20,
-    UNLOCK_CALLS: 24,
-    /** How many buffer blocks the ring holds: raised by an unlock, zeroed by the host. */
-    RING_HEAD: 28,
-    /** The buffers unlocked since the host last looked, as their block addresses. */
-    RING: 32,
-    RING_CAPACITY: 64,
-    /** 256 dwords, one per D3DRENDERSTATETYPE below 256. */
-    RENDER_STATES: 32 + 64 * 4,
-    RENDER_STATE_COUNT: 256,
-    /**
-     * A bit per render state the device answers for, set by the host when it
-     * mirrors: the getter answers those from the block and leaves the rest,
-     * which the device refuses, to the host.
-     */
-    RENDER_STATE_VALID: 288 + 256 * 4,
-    /** 28 matrices of 16 floats: types 0..23 as they are, then WORLD..WORLD3. */
-    TRANSFORMS: 1312 + 256 / 8,
-    TRANSFORM_SLOTS: 28,
-    /** 8 stages of 32 dwords, one per D3DTEXTURESTAGESTATETYPE below 32. */
-    STAGE_STATES: 1344 + 28 * 64,
-    STAGE_COUNT: 8,
-    STAGE_STATE_STRIDE: 32,
-    /** The viewport, as D3DVIEWPORT8 and 9 both lay it out: six dwords. */
-    VIEWPORT: 3136 + 8 * 32 * 4,
-    /** 16 samplers of 16 dwords, one per D3DSAMPLERSTATETYPE below 16. */
-    SAMPLER_STATES: 4160 + 6 * 4,
-    SAMPLER_COUNT: 16,
-    SAMPLER_STATE_STRIDE: 16,
-    /**
-     * What a draw needs of the device's state (`DRAW`), kept by the routines
-     * that change it and written by the host after each of its own entries.
-     */
-    DRAWABLE: 5208,
-    /** The render target's size, for a viewport that must lie within it. */
-    TARGET_WIDTH: 5212,
-    TARGET_HEIGHT: 5216,
-    /** How many user clip planes the device has. */
-    CLIP_PLANES: 5220,
-    /**
-     * Values the host has seen the device take where whether it takes one
-     * is a matter of the value alone (`validated`): a vertex format, a
-     * shader's handle. Two tables, one per kind of value; zero is an empty slot.
-     */
-    VALIDATED: 5224,
-    VALIDATED_TABLES: 2,
-    VALIDATED_SLOTS: 8,
-    /**
-     * The buffers the lock routine locked last, as their block addresses,
-     * each at its count of locks modulo the capacity (a power of two): what
-     * the host has to look at for a lock held across its entry.
-     */
-    LOCK_RING: 5224 + 2 * 8 * 4,
-    LOCK_RING_CAPACITY: 16,
-    /**
-     * Zero while the device's TestCooperativeLevel answers D3D_OK, written
-     * by the host after each of its entries: the guest's answers that, and a
-     * lost device is the host's.
-     */
-    COOPERATIVE: 5288 + 16 * 4,
-    /**
-     * Set by the host when the device records for one that draws elsewhere,
-     * or draws nothing: a copy between two of its render targets is then the
-     * GPU's whatever it stretches, and the guest's StretchRect may answer it.
-     */
-    ELSEWHERE: 5352 + 4,
-    /**
-     * Vertex formats the device has drawn with and how wide a vertex of
-     * each is, eight pairs, written by the host: what a draw by pointer with
-     * its format as an argument (Direct3D 7's) copies is its vertices times
-     * that width, and a format not here is the host's.
-     */
-    FVF_STRIDES: 5352 + 8,
-    FVF_STRIDE_PAIRS: 8,
-    /**
-     * The state blocks a device of Direct3D 8 or 7 holds, by token, a bit
-     * each below `STATE_BLOCK_TOKENS`, written by the host: what an Apply or a
-     * Capture by token in the ring may name. And beside them, the blocks that
-     * hold what a draw's checks read (`FLAG_DRAW_STALE`).
-     */
-    STATE_BLOCKS: 5424,
-    STATE_BLOCK_DRAWS: 5424 + 32,
-    STATE_BLOCK_TOKENS: 256,
-    /**
-     * The device's lock, as Direct3D's runtime takes its critical section
-     * round every call of a device made multithreaded: a command routine and
-     * Lock and Unlock in the guest take it with `xchg` (`HELD_GUEST`) and a
-     * routine that finds it taken leaves for the host; the host takes it
-     * (`HELD_HOST`) while it reads or writes the words the routines change.
-     * With threads on several executors a routine otherwise ran beside the
-     * host's reading of its words -- an unlock record or a locked range lost,
-     * a flag or a mirror written over -- and two routines beside each other.
-     * A routine lets it go before it leaves for the host, and before it
-     * writes through a pointer of the program's.
-     */
-    HELD: 5424 + 64,
-    /**
-     * Direct3D 8's vertex shader -- a handle or a vertex format -- and pixel
-     * shader, as GetVertexShader and GetPixelShader answer them: kept by the
-     * setters' command routines and written by the host after each of its
-     * entries, which sets `SHADERS_VALID` when the device says what they are.
-     */
-    SHADERS: 5424 + 68,
-    SHADERS_VALID: 5424 + 76,
-    /**
-     * The render target and the depth surface as GetRenderTarget and
-     * GetDepthStencilSurface answer them: each a pair of the pointer the
-     * program was handed for it and the word its count is kept in. Written by
-     * the host after each of its entries; a bit of `TARGETS_VALID` says which
-     * pair is the device's -- a target set in the ring clears its own, and a
-     * depth pair of zeros with its bit set is no depth surface.
-     */
-    TARGETS: 5424 + 80,
-    TARGETS_VALID: 5424 + 96,
-    /**
-     * Why routines left for the host, counted by the routines as they leave:
-     * the device's lock taken by the host or a routine on another executor;
-     * the command ring with no room; a command whose arguments the routine
-     * leaves to the host. Each a call that plays the ring on the process's
-     * executor, which a counter of host calls cannot tell apart.
-     */
-    LEFT_HELD: 5424 + 100,
-    LEFT_FULL: 5424 + 104,
-    LEFT_CHECKS: 5424 + 108,
-    /**
-     * The bytes the guest's moves of a buffer copied from the storage left
-     * into the new one (`moveCopyCode`), as two words, low then high.
-     */
-    MOVE_COPIED: 5424 + 112,
-    SIZE: 5424 + 120,
-};
-
-/** Byte offsets within a query's block. */
-export const QUERY = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    /** Its D3DQUERYTYPE. */
-    TYPE: 4,
-    /**
-     * An occlusion query's count as the guest's GetData answers it, written
-     * by the host: 0 the host's to ask for, 1 asked for and not back (the
-     * guest answers S_FALSE), 2 back, in COUNT.
-     */
-    STATE: 8,
-    COUNT: 12,
-    /**
-     * How many more polls the guest answers S_FALSE before one goes to the
-     * host, which looks for the count as it did before (`POLLS_BETWEEN`).
-     */
-    BUDGET: 16,
-    SIZE: 20,
-};
-/**
- * The polls of an occlusion count asked for that the guest answers between
- * two the host does: the host's look is what brings a count in where the
- * guest alone spun on S_FALSE -- the Gothic 3 demo stopped there.
- */
-export const POLLS_BETWEEN = 128;
-
-/**
- * A function `scripts/guest-code` compiled, as bytes placed at `at`: its
- * `return host()` goes to `trap`, the method's own.
- *
- * @param {{ code: Uint8Array, host?: number }} compiled @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function compiledAt(compiled, at, trap){
-    const bytes = compiled.code.slice();
-    if (compiled.host !== undefined)
-    {
-        // An address after `mov eax`, else a displacement from the end of the jump.
-        new DataView(bytes.buffer).setUint32(compiled.host, bytes[compiled.host - 1] === 0xb8
-            ? trap >>> 0 : (trap - (at + compiled.host + 4)) >>> 0, true);
-    }
-    return bytes;
-}
-
-/** Who holds `SHADOW.HELD`: a routine in the guest, or the host. */
-export const HELD_GUEST = 1;
-export const HELD_HOST = 2;
-
-/** The bits of `SHADOW.DRAWABLE`. */
-export const DRAW = Object.freeze({
-    /** Between BeginScene and EndScene. */
-    SCENE: 1,
-    /** A vertex format or declaration a draw can read. */
-    DECLARED: 2,
-    /** Stream zero holds a buffer a draw can read from. */
-    STREAM: 4,
-    /** An index buffer is set. */
-    INDEXED: 8,
-    /** A depth surface is set. */
-    DEPTH: 16,
-    /** And it holds a stencil. */
-    STENCIL: 32,
-});
-
-/** A command's head: the method's slot, and the record's length in bytes, its own included. */
-export const COMMAND = { SLOT: 0, BYTES: 4, ARGS: 8 };
-
-/** Byte offsets within a buffer's block, which the device's block points at through a ring. */
-export const BUFFER = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    /** Where the buffer's bytes are, and how many. */
-    BASE: 4,
-    LENGTH: 8,
-    /** Whether a lock is held, through either path. */
-    LOCKED: 12,
-    /** The range locked since the host last looked, as a union; empty when equal. */
-    FROM: 16,
-    TO: 20,
-    /** The D3DLOCK flags of those locks, or-ed, and `LOCK_IN_PLACE`. */
-    LOCK_FLAGS: 24,
-    /** The device's block, for the counters and the ring. */
-    DEVICE: 28,
-    /**
-     * Set by the host when what was unlocked may be lent to the graphics
-     * worker (`remote/lending.js`) and read there later: a lock that may
-     * write over it is the host's, which claims the bytes first.
-     */
-    LENT: 32,
-    /**
-     * Set by the routine that put the block on the device's ring, cleared by
-     * the host that empties it: a buffer already there is not put there
-     * again, since the host settles the union of its ranges once whatever
-     * number of unlocks named it.
-     */
-    QUEUED: 36,
-    /**
-     * A dynamic buffer's other storages (`d3d8/storages.js`), zero for none,
-     * and whether the guest may move the buffer onto each: set by the host
-     * when it adds one, and again once the device has moved off it and
-     * nothing it plays or lent reads it; cleared by the lock routine that
-     * moves the buffer onto it for a DISCARD under draws the ring holds
-     * (`lockCode`), which leaves the storage it moved off in its place.
-     */
-    SPARES: 40,
-    SPARE_FREE: 48,
-    SPARE_COUNT: 2,
-    SIZE: 56,
-};
-
-/**
- * Byte offsets within a texture's block, which answers for its levels.
- *
- * A level's surface is one object however often it is asked for, so the
- * pointer a program is handed for it never changes -- and a program of this
- * era asks for one before every copy and every lock, hundreds of times a
- * frame, for a pointer it was already given. The table is filled by the host
- * the first time a level is asked for, because that is when the surface is
- * made and published; after that the answer is in the guest's own memory.
- */
-export const TEXTURE = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    /** How many levels the texture has; a level past them is refused here. */
-    LEVEL_COUNT: 4,
-    /**
-     * Where the texture's count is kept in the guest (`seam/com.js`,
-     * `createCountCells`), which the routine takes the reference a level
-     * owes in; zero sends every level to the host.
-     */
-    COUNT: 8,
-    /** A pointer per level, zero for one the host has not published yet. */
-    LEVELS: 12,
-    LEVEL_SLOTS: 16,
-    /**
-     * The device's block, whose ring the texture's AddDirtyRect and
-     * AddDirtyBox write into; zero sends them to the host.
-     */
-    DEVICE: 12 + 16 * 4,
-    /** The top level's extent, which a dirty rectangle or box may not leave. */
-    WIDTH: 80,
-    HEIGHT: 84,
-    DEPTH: 88,
-    /** A level's block (`LEVEL`) per level, zero for one the guest does not lock. */
-    LOCKS: 92,
-    SIZE: 92 + 16 * 4,
-};
-
-/**
- * Byte offsets within a surface's block: its description, which nothing
- * changes while the surface lives, so GetDesc is answered from it.
- */
-export const SURFACE = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    /** D3DSURFACE_DESC, as the version lays it out: eight words. */
-    DESC: 4,
-    DESC_WORDS: 8,
-    /**
-     * The texture it is a level or face of, as a number of the shadow's own,
-     * zero for none: two levels of one texture are one texture to the GPU.
-     */
-    CONTAINER: 4 + 8 * 4,
-    /** Its block as a level the guest locks (`LEVEL`), zero for none. */
-    LEVEL: 4 + 8 * 4 + 4,
-    SIZE: 4 + 8 * 4 + 8,
-};
-
-/**
- * Byte offsets within the block of a level the guest locks: a surface of a
- * texture, a volume of a volume texture, or a surface of its own. Its bytes
- * are guest memory at one address whatever is locked of them, so a lock is
- * an address worked out and a lock remembered, which the host replays on the
- * level at its next entry; the words the buffers' are where a buffer's block
- * has them.
- */
-export const LEVEL = {
-    /** Bit 0 set by the host: take the slow path. */
-    FLAGS: 0,
-    BASE: 4,
-    /** Whether a lock is held, through either path. */
-    LOCKED: BUFFER.LOCKED,
-    /** A lock the guest took that the host has not replayed yet: the next is the host's. */
-    TAKEN: 16,
-    ROW_PITCH: 20,
-    /** That lock's D3DLOCK flags. */
-    LOCK_FLAGS: BUFFER.LOCK_FLAGS,
-    DEVICE: BUFFER.DEVICE,
-    SLICE_PITCH: 32,
-    /** On the device's ring of blocks to settle (`SHADOW.RING`), until the host empties it. */
-    QUEUED: BUFFER.QUEUED,
-    WIDTH: 40,
-    HEIGHT: 44,
-    DEPTH: 48,
-    TEXEL_BYTES: 52,
-    /**
-     * Set when a draw may read the level: a lock in the guest then waits for
-     * the draws in the ring, as a buffer's does. One in system memory is
-     * never drawn from.
-     */
-    SAMPLED: 56,
-    /** Whether that lock named a box, and the box, as D3DBOX lays it out. */
-    BOXED: 60,
-    BOX: 64,
-    SIZE: 64 + 6 * 4,
-};
-
-/**
- * Byte offsets within a Direct3D 7 vertex buffer's block: a buffer's block
- * (`BUFFER`), which the guest's Lock and Unlock keep once a device's block
- * has taken it (`adoptBuffer`, its DEVICE word), and after it how many
- * vertices the buffer holds -- what a draw from it in the ring is refused for.
- */
-export const VERTEX_BUFFER7 = {
-    /** Whether a lock is held, through either path. */
-    LOCKED: BUFFER.LOCKED,
-    /** How many vertices it holds, which a draw's range may not pass. */
-    VERTICES: BUFFER.SIZE,
-    SIZE: BUFFER.SIZE + 4,
-};
-
-export const FLAG_SLOW_PATH = 1;
-/**
- * Bit 1, set by a state block's Apply in the ring: what the block mirrors may
- * be what the device held before it, so the getters go to the host, which
- * plays the ring, mirrors what the applied blocks hold and clears the bit.
- * The setters and draws go on through the ring.
- */
-export const FLAG_STALE = 2;
-/**
- * Bit 2, set beside it by the Apply of a block holding what a draw's checks
- * read (`SHADOW.DRAWABLE`): a vertex format or declaration, a stream, the
- * indices. The draws wait for the host then; after any other block's they
- * go on through the ring, which the effects' blocks of render states,
- * textures, shaders and constants are.
- */
-export const FLAG_DRAW_STALE = 4;
-
-/**
- * The command ring's size, and how near its end the host starts it over:
- * more than the longest record a routine writes, so that a routine that
- * found no room is always followed by a start over.
- */
-export const COMMAND_RING_BYTES = 64 * 1024;
-/**
- * A Direct3D 8 or 9 device's: it holds a frame. A ring that fills sends its
- * next call to the host, a pause of the program that compares again every
- * dynamic buffer the draws read, and a frame of Call of Duty 4's first level
- * writes some 13 000 records.
- */
-export const DEVICE_RING_BYTES = 1024 * 1024;
-
-/**
- * How long the host waits for a routine to let the device's lock go before it
- * takes it anyway: a routine holds it for some instructions, and only one
- * whose thread faulted inside it -- through a pointer of the program's --
- * never lets it go.
- */
-const HELD_WAIT_MS = 200;
-const COMMAND_SLACK = 20 * 1024;
+    BUFFER, COMMAND, COMMAND_RING_BYTES, COMMAND_SLACK, D3DFMT_D24S8, D3DLOCK_DISCARD,
+    D3DLOCK_NOOVERWRITE, D3DLOCK_READONLY, D3DUSAGE_DYNAMIC, D3DUSAGE_RENDERTARGET,
+    DEVICE_RING_BYTES, DRAW, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, HELD_HOST, HELD_WAIT_MS,
+    LEVEL, LOCK_IN_PLACE, PAGE, PAGES, QUERY, SHADOW, SURFACE, TEXTURE, VERTEX_BUFFER7, WORLD_SLOT,
+    WORLD_TYPE, ZERO_WORD, replayedFlags, transformSlot, transformType,
+} from './block.js';
+import { RECT_BYTES, usagesOf } from './routines/command.js';
+import { indexedBytes } from '../d3d8/commands.js';
+import { ANSWERED_TRANSFORMS } from './routines/getters.js';
 
 /**
  * Writes an empty command ring into a block: `ring` is pages of its own,
@@ -511,6 +91,8 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  * @param {(address: number) => number} deps.readWord
  * @param {(address: number, words: number) => Uint32Array} deps.readWords
  * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ * @param {(address: number, value: number, length: number) => void} [deps.fillMemory]
+ *     the memory's fill: the ring zeroed with no buffer of zeros
  * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
  * @param {(detail: string) => void} deps.refuse
  * @param {number} [deps.bytes]  the ring's size, `COMMAND_RING_BYTES` unless given
@@ -519,14 +101,51 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  * @param {(address: number) => number} [deps.loadU32]  the memory's atomic read: a
  *     record's length, which the routines publish with `xchg`, read so the record's
  *     words and what the program wrote before the call are seen after it
+ * @param {() => Uint8Array | null} [deps.shared]  the RAM over shared memory, byte 0 at
+ *     address 0 (the memory layer's `shared`): the block and the ring read where they
+ *     lie, the records handed on as the RAM's own bytes
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, take, refuse,
+    const { block, ring, writeMemory, fillMemory, take, refuse,
         bytes = COMMAND_RING_BYTES, compareExchangeU32 } = deps;
-    const lengthAt = deps.loadU32 ?? readWord;
+    /**
+     * The RAM's words and bytes where the block and the ring lie in shared
+     * memory, made once: a window of the memory per word read and per take,
+     * each a view and a view of words over it, was the largest share of the
+     * engine's garbage in a menu of Doom 3. A shared buffer is never taken
+     * back, and one the memory grew into still holds every byte it held.
+     */
+    const ram = deps.shared?.() ?? null;
+    const inPlace = ram !== null && (ram.byteOffset & 3) === 0
+        && ram.byteLength >= Math.max(block + SHADOW.SIZE, ring + bytes);
+    const ramWords = inPlace ? new Int32Array(ram.buffer, ram.byteOffset, ram.byteLength >>> 2)
+        : null;
+    /** @param {number} address */
+    const wordAt = address=>(ramWords !== null ? Atomics.load(ramWords, address >>> 2) >>> 0
+        : deps.readWord(address));
+    const readWord = ramWords !== null ? wordAt : deps.readWord;
+    const lengthAt = ramWords !== null ? wordAt : deps.loadU32 ?? deps.readWord;
+    /**
+     * The ring's words from `from`, `count` of them: in place, the word at
+     * `from + i` being `ramWords[base + i]`, or read through the memory.
+     *
+     * @param {number} from @param {number} count
+     * @returns {{ words: Uint32Array | Int32Array, base: number }}
+     */
+    const ringWords = (from, count)=>(ramWords !== null
+        ? { words: ramWords, base: (ring + from) >>> 2 }
+        : { words: deps.readWords(ring + from, count), base: 0 });
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
+    /**
+     * Zeroes to start the ring over with where the memory cannot fill, made
+     * once: a buffer the length of what was read, made at every turn of the
+     * ring, was the most garbage a frame of Direct3D made.
+     *
+     * @type {Uint8Array | null}
+     */
+    let zeroes = null;
     return {
         /**
          * @param {() => void} [before]  run once the ring is found to hold calls,
@@ -573,9 +192,16 @@ export function createCommandReader(deps){
             }
             if (whole > 0)
             {
-                const words = readWords(ring + tail, whole);
                 before?.();
-                taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+                if (ram !== null && ramWords !== null)
+                {
+                    taken += take(ram.subarray(ring + tail, ring + tail + whole * 4));
+                }
+                else
+                {
+                    const words = deps.readWords(ring + tail, whole);
+                    taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+                }
             }
             tail += whole * 4;
             if (tail === head && head > bytes - COMMAND_SLACK)
@@ -585,7 +211,15 @@ export function createCommandReader(deps){
                 // another executor may have taken space since the head was read
                 // here: the head goes back only from where it was read, as one
                 // compare-and-swap, and otherwise the next take starts it over.
-                writeMemory(ring, new Uint8Array(head));
+                if (fillMemory)
+                {
+                    fillMemory(ring, 0, head);
+                }
+                else
+                {
+                    zeroes ??= new Uint8Array(bytes);
+                    writeMemory(ring, zeroes.subarray(0, head));
+                }
                 if (compareExchangeU32 === undefined)
                 {
                     writeMemory(block + SHADOW.COMMAND_HEAD, zero);
@@ -611,10 +245,11 @@ export function createCommandReader(deps){
             {
                 return false;
             }
-            const words = readWords(ring + tail, (head - tail) >>> 2);
-            for (let at = 0; at < words.length; at++)
+            const count = (head - tail) >>> 2;
+            const { words, base } = ringWords(tail, count);
+            for (let at = 0; at < count; at++)
             {
-                if (test(words[at]))
+                if (test(words[base + at] >>> 0))
                 {
                     return true;
                 }
@@ -632,11 +267,12 @@ export function createCommandReader(deps){
             {
                 return 0;
             }
-            const words = readWords(ring + tail, (head - tail) >>> 2);
+            const count = (head - tail) >>> 2;
+            const { words, base } = ringWords(tail, count);
             let records = 0;
-            for (let at = 0; at < words.length;)
+            for (let at = 0; at < count;)
             {
-                const length = words[at + (COMMAND.BYTES >>> 2)] >>> 2;
+                const length = words[base + at + (COMMAND.BYTES >>> 2)] >>> 2;
                 if (length < (COMMAND.ARGS >>> 2))
                 {
                     break;
@@ -648,2755 +284,6 @@ export function createCommandReader(deps){
         },
     };
 }
-
-/** What the host clears a word of the block with; never written to. */
-const ZERO_WORD = new Uint8Array(4);
-
-/** D3DUSAGE_DYNAMIC. */
-const D3DUSAGE_DYNAMIC = 0x200;
-
-/** A lock for reading has nothing to remember; the host takes it. */
-const D3DLOCK_READONLY = 0x10;
-/**
- * A lock that promises not to overwrite what a draw already made reads: the
- * one a buffer may take in the guest while the command ring holds a draw --
- * unless it discards as well, which promises nothing of the kind.
- */
-const D3DLOCK_NOOVERWRITE = 0x1000;
-const D3DLOCK_DISCARD = 0x2000;
-/**
- * Or-ed into a buffer block's LOCK_FLAGS by the lock routine for a lock that
- * is not NOOVERWRITE alone (`lockCode`), and taken off by the host that
- * replays it: a DISCARD or a lock with neither flag, taken in the guest only
- * while the ring holds no draw, renames what draws read -- those made before
- * it from the old bytes, those after from the new -- so its replay comes
- * before the ring's next run, and the buffer may not move onto another
- * storage until then, which holds the replay back until after the run. Not a
- * D3DLOCK flag; the replay leaves it off.
- */
-export const LOCK_IN_PLACE = 0x80000000;
-
-/**
- * The flags the host replays a buffer block's locks with: what the routines
- * or-ed in since it last looked, less `LOCK_IN_PLACE`, and with a DISCARD
- * among them the DISCARD alone. One lock with both DISCARD and NOOVERWRITE
- * is a NOOVERWRITE (Wine's `wined3d_resource_sanitise_map_flags`), which
- * renames nothing; or-ed, the two are a DISCARD taken in place and the
- * NOOVERWRITE locks after it, and the replay has to rename as the DISCARD
- * did, or a ring started over is written into the copy the frames still
- * queued for the GPU draw from. A rename keeps what the copy held, so a
- * program's own lock with both flags loses nothing by it.
- *
- * @param {number} flags  a block's LOCK_FLAGS
- */
-export const replayedFlags = flags=>((flags & D3DLOCK_DISCARD) !== 0
-    ? flags & ~(LOCK_IN_PLACE | D3DLOCK_NOOVERWRITE) : flags & ~LOCK_IN_PLACE);
-
-/** D3DTS_WORLD is 256 and WORLD1..3 follow it; they take the slots after TEXTURE7. */
-const WORLD_TYPE = 256;
-const WORLD_SLOT = 24;
-
-/** @param {number} type @returns {number} the slot, or -1 for a type the block does not hold */
-export function transformSlot(type){
-    if (type >= 0 && type < WORLD_SLOT)
-    {
-        return type;
-    }
-    if (type >= WORLD_TYPE && type < WORLD_TYPE + 4)
-    {
-        return WORLD_SLOT + (type - WORLD_TYPE);
-    }
-    return -1;
-}
-
-/** @param {number} slot */
-export function transformType(slot){
-    return slot < WORLD_SLOT ? slot : WORLD_TYPE + (slot - WORLD_SLOT);
-}
-
-/** @param {number} value @returns {number[]} */
-const dword = value=>[
-    value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-];
-
-/**
- * Lays out a routine whose branches name their targets, so that no
- * displacement is counted by hand: a part is bytes, a label, or a branch
- * `{ jcc, to }` that becomes two bytes once every label has a position --
- * or five or six, `jmp`/`jcc rel32`, when it says `near`. A short branch
- * that cannot be reached with a byte is a mistake in the routine and is
- * refused rather than truncated.
- *
- * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
- * @returns {Uint8Array}
- */
-function assemble(parts){
-    /** @param {{ jcc: number, near?: boolean }} branch */
-    const sizeOf = branch=>(!branch.near ? 2 : branch.jcc === 0xeb ? 5 : 6);
-    /** @type {Map<string, number>} */
-    const labels = new Map();
-    let at = 0;
-    for (const part of parts)
-    {
-        if (Array.isArray(part))
-        {
-            at += part.length;
-        }
-        else if ('label' in part)
-        {
-            labels.set(part.label, at);
-        }
-        else
-        {
-            at += sizeOf(part);
-        }
-    }
-    /** @type {number[]} */
-    const out = [];
-    for (const part of parts)
-    {
-        if (Array.isArray(part))
-        {
-            out.push(...part);
-        }
-        else if ('jcc' in part)
-        {
-            const target = labels.get(part.to);
-            if (target === undefined)
-            {
-                throw new Error(`shadow: no label ${part.to}`);
-            }
-            if (part.near)
-            {
-                const rel = target - (out.length + sizeOf(part));
-                const opcode = part.jcc === 0xeb ? [0xe9] : [0x0f, part.jcc + 0x10];
-                out.push(...opcode, ...dword(rel | 0));
-                continue;
-            }
-            const rel = target - (out.length + 2);
-            if (rel < -128 || rel > 127)
-            {
-                throw new Error(`shadow: branch to ${part.to} does not fit a byte`);
-            }
-            out.push(part.jcc, rel & 0xff);
-        }
-    }
-    return new Uint8Array(out);
-}
-
-/** `jmp rel32` from `from` to `to`. @param {number} from @param {number} to */
-const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
-
-/**
- * What every routine starts with: the object's block into ECX, and the two
- * cases that are the host's whatever the call -- no block, or the host's flag.
- *
- *     mov ecx, [esp+4]            ; this
- *     mov ecx, [ecx+4]            ; the block
- *     test ecx, ecx
- *     jz slow                     ; no block: the host's
- *     test dword [ecx], 1         ; the host wants the slow path?
- *     jnz slow
- *
- * @param {string} [slow]  The label those two cases go to.
- * @returns {(number[] | { jcc: number, to: string })[]}
- */
-const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
-    [0x8b, 0x4c, 0x24, 0x04],                                // mov ecx, [esp+4]
-    [0x8b, 0x49, 0x04],                                      // mov ecx, [ecx+4]
-    [0x85, 0xc9],                                            // test ecx, ecx
-    { jcc: 0x74, to: slow },                                 // jz slow
-    [0xf7, 0x01, ...dword(flags)],                           // test dword [ecx], flags
-    { jcc: 0x75, to: slow },                                 // jnz slow
-];
-
-/**
- * Counts a routine's leaving for the host in a word of the device's block,
- * `base` a ModR/M register number: a locked increment, as routines on other
- * executors count into the same word.
- *
- *     lock inc dword [base+word]
- *
- * @param {number} base @param {number} word
- */
-const countLeft = (base, word)=>[0xf0, 0xff, 0x80 | base, ...dword(word)];
-
-/** Each `takeHeld` its own label. */
-let heldSites = 0;
-
-/**
- * Takes the device's lock (`SHADOW.HELD`) with the device's block in `base`
- * (a ModR/M register number), or leaves for `busy` -- the host -- when it is
- * held: by the host, or a routine on another executor, counted (`LEFT_HELD`).
- *
- *     mov eax, HELD_GUEST
- *     xchg [base+HELD], eax
- *     test eax, eax
- *     jz got
- *     lock inc dword [base+LEFT_HELD]
- *     jmp busy
- *   got:
- *
- * @param {number} base @param {string} busy
- * @returns {(number[] | { jcc: number, to: string, near?: boolean } | { label: string })[]}
- */
-const takeHeld = (base, busy)=>{
-    const got = `held${heldSites++}`;
-    return [
-        [0xb8, ...dword(HELD_GUEST)],                        // mov eax, HELD_GUEST
-        [0x87, 0x80 | base, ...dword(SHADOW.HELD)],          // xchg [base+HELD], eax
-        [0x85, 0xc0],                                        // test eax, eax
-        { jcc: 0x74, to: got },                              // jz got
-        countLeft(base, SHADOW.LEFT_HELD),                   // lock inc dword [base+LEFT_HELD]
-        { jcc: 0xeb, to: busy, near: true },                 // jmp busy
-        { label: got },
-    ];
-};
-
-
-/**
- * Lets the device's lock go, the device's block in `base`, with a locked
- * instruction rather than a `mov`: on several executors it is an atomic store,
- * whose order the host's taking of the lock reads everything the routine wrote
- * under it after. A plain store gives no such order where the host reorders
- * stores (arm64): the host found the lock free and the record, the buffer's
- * block or the vertices the program wrote before the call not yet there.
- * Every site's next instructions read no flags.
- *
- *     lock and dword [base+HELD], 0
- *
- * @param {number} base
- */
-const letHeldGo = base=>[0xf0, 0x83, 0xa0 | base, ...dword(SHADOW.HELD), 0x00];
-
-/** ModR/M register numbers. */
-const ECX = 1;
-const EDX = 2;
-const EBX = 3;
-
-/** A getter's prologue: a block the ring may have made stale is the host's too. */
-const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
-
-/**
- * The prologue of a function rather than a method: the block is the calling
- * thread's, in its TEB where Windows keeps the thread's current OpenGL
- * context (`GlContext`), written by the host when a context is made current.
- *
- *     mov ecx, fs:[TEB_GL_CONTEXT]
- *     test ecx, ecx
- *     jz slow                     ; no context current: the host's
- *     test dword [ecx], 1
- *     jnz slow
- *
- * @param {string} [slow]
- * @returns {(number[] | { jcc: number, to: string })[]}
- */
-const threadPrologue = (slow = 'slow')=>[
-    [0x64, 0x8b, 0x0d, ...dword(TEB_GL_CONTEXT)],            // mov ecx, fs:[disp]
-    [0x85, 0xc9],                                            // test ecx, ecx
-    { jcc: 0x74, to: slow },                                 // jz slow
-    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
-    { jcc: 0x75, to: slow },                                 // jnz slow
-];
-
-/**
- * The prologue of a texture's AddDirtyRect or AddDirtyBox: the object's block
- * is the texture's (`TEXTURE`), which the rectangle or box must lie within,
- * not empty along any axis, as the device takes one; then the device's block,
- * whose ring the record goes into, is the routine's. None -- all of the
- * texture -- is the host's, and so is one the checks refuse, which the host
- * refuses. Unsigned compares refuse a negative edge with the rest.
- *
- *     mov ecx, [esp+4]
- *     mov ecx, [ecx+4]            ; the texture's block
- *     test ecx, ecx
- *     jz slow
- *     test dword [ecx], 1
- *     jnz slow
- *     mov eax, [esp+8]            ; the rectangle or box
- *     test eax, eax
- *     jz slow
- *     mov edx, [eax+8]            ; right
- *     cmp edx, [ecx+WIDTH]
- *     ja slow
- *     cmp [eax], edx              ; left
- *     jae slow
- *     (bottom and top against HEIGHT, [back and front against DEPTH])
- *     mov ecx, [ecx+DEVICE]
- *     test ecx, ecx
- *     jz slow
- *     test dword [ecx], 1
- *     jnz slow
- *
- * @param {'rect' | 'box'} kind @param {string} slow
- * @returns {(number[] | { jcc: number, to: string })[]}
- */
-const dirtyPrologue = (kind, slow)=>[
-    ...prologue(slow),
-    [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-    [0x85, 0xc0],                                            // test eax, eax
-    { jcc: 0x74, to: slow },                                 // jz slow
-    ...[[8, 0, TEXTURE.WIDTH], [12, 4, TEXTURE.HEIGHT],
-        ...(kind === 'box' ? [[20, 16, TEXTURE.DEPTH]] : [])].flatMap(([far, near, extent])=>[
-        [0x8b, 0x50, far],                                   // mov edx, [eax+far]
-        [0x3b, 0x51, extent],                                // cmp edx, [ecx+extent]
-        { jcc: 0x77, to: slow },                             // ja slow
-        [0x39, 0x50, near],                                  // cmp [eax+near], edx
-        { jcc: 0x73, to: slow },                             // jae slow
-    ]),
-    [0x8b, 0x49, TEXTURE.DEVICE],                            // mov ecx, [ecx+76]
-    [0x85, 0xc9],                                            // test ecx, ecx
-    { jcc: 0x74, to: slow },                                 // jz slow
-    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
-    { jcc: 0x75, to: slow },                                 // jnz slow
-];
-
-/** Where a thread's block is in its TEB: the slot Windows keeps its GL context in. */
-export const TEB_GL_CONTEXT = 0xbf0;
-
-/**
- * A routine's bytes: its body, then a jump for each of `exits` -- a label the
- * body branches to, and the address outside it the label goes on to -- and
- * last the jump to the trap its slow label lands on.
- *
- * @param {number} at @param {number} trap
- * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
- * @param {Record<string, number>} [exits]
- */
-const routine = (at, trap, parts, exits = {})=>{
-    const names = Object.keys(exits);
-    const body = assemble([...parts,
-        ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }]);
-    names.forEach((name, i)=>{
-        const from = body.length - (names.length - i) * 5;
-        body.set(jump(at + from, exits[name]), from);
-    });
-    return new Uint8Array([...body, ...jump(at + body.length, trap)]);
-};
-
-/**
- * HRESULT GetRenderState(this, D3DRENDERSTATETYPE state, DWORD *value), as
- * guest code: the block holds what the device holds for every state the
- * device answers for, the guest's own writes included, so the answer is read
- * there. A state the device refuses, a null pointer and the host's flag go
- * to the host.
- *
- *     (prologue)
- *     mov eax, [esp+8]            ; state
- *     cmp eax, 256
- *     jae slow
- *     bt [ecx + RENDER_STATE_VALID], eax
- *     jnc slow                    ; a state the device refuses
- *     mov edx, [esp+12]           ; value
- *     test edx, edx
- *     jz slow
- *     mov eax, [ecx + eax*4 + RENDER_STATES]
- *     mov [edx], eax
- *     xor eax, eax                ; D3D_OK
- *     ret 12
- *   slow:
- *     jmp trap
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function getRenderStateCode(at, trap){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)], // bt [ecx+disp], eax
-        { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x84, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov eax, [ecx+eax*4+disp]
-        [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 12, 0x00],                                        // ret 12
-    ]);
-}
-
-/**
- * HRESULT Lock(this, UINT offset, UINT size, BYTE** out, DWORD flags), as
- * guest code for a vertex or index buffer. The address handed back is the
- * buffer's own storage; what is remembered is the range, as a union with
- * what was locked before the host last looked, and the flags.
- *
- * The cases left to the host: the device's lock held (`SHADOW.HELD`), a lock
- * of the buffer already held (the host refuses it), a lock for reading, an
- * empty or out-of-range lock, a null out-pointer -- and, while the device's
- * command ring holds a draw the host has not made, any lock but NOOVERWRITE
- * alone: the bytes that draw reads are the buffer's until then, and the host
- * makes it before it takes the lock. A DISCARD with it promises nothing about
- * those bytes, and the buffer has one storage. So too while what was unlocked
- * may be lent to the graphics worker: the host claims it before the program
- * writes over it. The device's lock is let go before the program's pointer is
- * written, which may fault.
- *
- * Unless, for a DISCARD alone, the buffer has another storage the host has let
- * go of (`SPARES`, `SPARE_FREE`; `renameSlot` given): then the buffer moves
- * onto it here, the move goes into the device's command ring (`Buffer.Rename`,
- * the buffer's pointer and the storage) for the host to make after the draws
- * before it, the storage left takes the spare's place, and the lock goes on as
- * a NOOVERWRITE of the new storage -- the flags the host replays it with. Not
- * while a lock the host replays before the ring's run is in the block
- * (`LOCK_IN_PLACE`, which the lock sets for anything but NOOVERWRITE alone),
- * nor for a lock the host refuses: the move would hold that replay back past
- * the draws after it, or move a buffer whose lock failed.
- *
- * What the buffer held outside the lock comes along (`copyAt`, `moveCopyCode`):
- * the host's DISCARD keeps the buffer's storage, as a driver hands the same
- * memory back once the GPU is done with it, and a program may draw after a
- * DISCARD what it wrote before it past the range it locked -- from a storage
- * that held another lap's bytes there, had the move left them. Inside the
- * lock the program writes; a DISCARD of the whole buffer copies nothing. The
- * copy is code a slice may end inside, which this routine is not, so the
- * routine goes on to it once the lock is taken, the storage left in the slot
- * of `this`.
- *
- *     mov edx, [ecx+DEVICE]
- *     (take the device's lock through EDX, or slow)
- *     cmp dword [ecx+LOCKED], 0
- *     jne held
- *     test dword [esp+20], READONLY
- *     jnz held
- *     cmp dword [edx+DRAWS_PENDING], 0
- *     jne guarded
- *     cmp dword [ecx+LENT], 0
- *     je free
- *   guarded:
- *     mov eax, [esp+20]
- *     and eax, NOOVERWRITE | DISCARD
- *     cmp eax, NOOVERWRITE
- *     je free
- *     cmp eax, DISCARD            ; with renameSlot, else jmp held
- *     jne held
- *     test dword [ecx+LOCK_FLAGS], LOCK_IN_PLACE
- *     jnz held
- *     mov eax, [esp+12]           ; the checks at `free`, before the move
- *     test eax, eax
- *     jnz sizedMove
- *     mov eax, [ecx+LENGTH]
- *     sub eax, [esp+8]
- *   sizedMove:
- *     test eax, eax
- *     jz held
- *     add eax, [esp+8]
- *     jc held
- *     cmp eax, [ecx+LENGTH]
- *     ja held
- *     cmp dword [esp+16], 0
- *     je held
- *     cmp dword [ecx+SPARE_FREE], 0
- *     jne first
- *     cmp dword [ecx+SPARE_FREE+4], 0
- *     je held
- *     mov eax, 4
- *     jmp move
- *   first:
- *     xor eax, eax
- *   move:
- *     push ebx
- *     push esi
- *     mov ebx, eax                ; which spare, as a byte offset
- *     cmp dword [edx+COMMANDS], 0
- *     je full
- *   reserve:                      ; the record: slot, 16, this, storage
- *     mov eax, [edx+COMMAND_HEAD]
- *     lea esi, [eax+16]
- *     cmp esi, [edx+COMMAND_BYTES]
- *     ja full
- *     lock cmpxchg [edx+COMMAND_HEAD], esi
- *     jne reserve
- *     add eax, [edx+COMMANDS]
- *     mov dword [eax+SLOT], renameSlot
- *     mov esi, [esp+12]           ; this, two words further for the pushes
- *     mov [eax+ARGS], esi
- *     mov esi, [ecx+ebx+SPARES]
- *     mov [eax+ARGS+4], esi
- *     xchg esi, [ecx+BASE]        ; the move: the storage left in the spare's place
- *     mov [ecx+ebx+SPARES], esi
- *     mov [esp+12], esi           ; and in the slot of this, for the copy
- *     mov dword [ecx+ebx+SPARE_FREE], 0
- *     mov dword [ecx+LENT], 0     ; the new storage was never lent
- *     mov dword [eax+BYTES], 16   ; the record counts from here
- *     mov dword [esp+28], NOOVERWRITE
- *     pop esi
- *     pop ebx
- *     jmp free
- *   full:
- *     pop esi
- *     pop ebx
- *     jmp held
- *   free:
- *     mov eax, [esp+8]            ; offset
- *     mov edx, [esp+12]           ; size
- *     test edx, edx
- *     jnz sized
- *     mov edx, [ecx+LENGTH]       ; zero: to the end
- *     sub edx, eax
- *   sized:
- *     test edx, edx
- *     jz held
- *     add edx, eax                ; end
- *     jc held
- *     cmp edx, [ecx+LENGTH]
- *     ja held
- *     cmp dword [esp+16], 0
- *     je held
- *     jmp take
- *   held:                         ; the host's, the device let go first
- *     mov eax, [ecx+DEVICE]
- *     mov dword [eax+HELD], 0
- *     jmp slow
- *   take:
- *     push ebx
- *     mov ebx, [ecx+TO]
- *     cmp ebx, [ecx+FROM]
- *     jne merge                   ; a range is pending: widen it
- *     mov [ecx+FROM], eax
- *     mov [ecx+TO], edx
- *     jmp merged
- *   merge:
- *     cmp eax, [ecx+FROM]
- *     jae keepFrom
- *     mov [ecx+FROM], eax
- *   keepFrom:
- *     cmp edx, ebx
- *     jbe merged
- *     mov [ecx+TO], edx
- *   merged:
- *     mov ebx, [esp+24]           ; flags, one word further for the push
- *     mov edx, ebx
- *     and edx, NOOVERWRITE | DISCARD
- *     cmp edx, NOOVERWRITE
- *     je alone
- *     or ebx, LOCK_IN_PLACE
- *   alone:
- *     or [ecx+LOCK_FLAGS], ebx
- *     add eax, [ecx+BASE]
- *     mov dword [ecx+LOCKED], 1
- *     mov ebx, [ecx+DEVICE]
- *     mov edx, [ebx+LOCK_CALLS]   ; EAX is the address, for the out pointer
- *     and edx, LOCK_RING_CAPACITY - 1
- *     mov [ebx + edx*4 + LOCK_RING], ecx
- *     inc dword [ebx+LOCK_CALLS]
- *     mov dword [ebx+HELD], 0
- *     mov ebx, [esp+20]           ; out
- *     mov [ebx], eax
- *     pop ebx
- *     mov edx, [esp+4]            ; this, or the storage a move left (with renameSlot)
- *     cmp edx, [ecx+SPARES]
- *     je moved
- *     cmp edx, [ecx+SPARES+4]
- *     je moved
- *     xor eax, eax
- *     ret 20
- *   moved:
- *     jmp copyAt                  ; EAX the address handed out
- *
- * @param {number} at @param {number} trap
- * @param {number} [renameSlot]  `Buffer.Rename`'s slot in the device's ring; without it a
- *     DISCARD under draws or over lent bytes is always the host's
- * @param {number} [copyAt]  where `moveCopyCode` is, with `renameSlot`
- * @returns {Uint8Array}
- */
-export function lockCode(at, trap, renameSlot, copyAt){
-    if (renameSlot !== undefined && copyAt === undefined)
-    {
-        throw new Error('shadow: a lock routine that moves a buffer needs the copy it goes on to');
-    }
-    /** The move onto a spare storage, for a DISCARD alone: the comment's, from `guarded`. */
-    const move = renameSlot === undefined ? [{ jcc: 0xeb, to: 'held' }] : [
-        [0x3d, ...dword(D3DLOCK_DISCARD)],                       // cmp eax, 0x2000
-        { jcc: 0x75, to: 'held' },                               // jne held
-        [0xf7, 0x41, BUFFER.LOCK_FLAGS, ...dword(LOCK_IN_PLACE)], // test dword [ecx+24], imm
-        { jcc: 0x75, to: 'held' },                               // jnz held
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x75, to: 'sizedMove' },                          // jnz sizedMove
-        [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
-        [0x2b, 0x44, 0x24, 0x08],                                // sub eax, [esp+8]
-        { label: 'sizedMove' },
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'held' },                               // jz held
-        [0x03, 0x44, 0x24, 0x08],                                // add eax, [esp+8]
-        { jcc: 0x72, to: 'held' },                               // jc held
-        [0x3b, 0x41, BUFFER.LENGTH],                             // cmp eax, [ecx+8]
-        { jcc: 0x77, to: 'held' },                               // ja held
-        [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
-        { jcc: 0x74, to: 'held' },                               // je held
-        [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+48], 0
-        { jcc: 0x75, to: 'first' },                              // jne first
-        [0x83, 0x79, BUFFER.SPARE_FREE + 4, 0x00],               // cmp dword [ecx+52], 0
-        { jcc: 0x74, to: 'held' },                               // je held
-        [0xb8, ...dword(4)],                                     // mov eax, 4
-        { jcc: 0xeb, to: 'move' },                               // jmp move
-        { label: 'first' },
-        [0x31, 0xc0],                                            // xor eax, eax
-        { label: 'move' },
-        [0x53, 0x56],                                            // push ebx; push esi
-        [0x89, 0xc3],                                            // mov ebx, eax
-        [0x83, 0xba, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [edx+disp], 0
-        { jcc: 0x74, to: 'full' },                               // je full
-        { label: 'reserve' },
-        [0x8b, 0x82, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [edx+disp]
-        [0x8d, 0x70, COMMAND.ARGS + 8],                          // lea esi, [eax+16]
-        [0x3b, 0xb2, ...dword(SHADOW.COMMAND_BYTES)],            // cmp esi, [edx+disp]
-        { jcc: 0x77, to: 'full' },                               // ja full
-        [0xf0, 0x0f, 0xb1, 0xb2, ...dword(SHADOW.COMMAND_HEAD)], // lock cmpxchg [edx+disp], esi
-        { jcc: 0x75, to: 'reserve' },                            // jne reserve
-        [0x03, 0x82, ...dword(SHADOW.COMMANDS)],                 // add eax, [edx+disp]
-        [0xc7, 0x40, COMMAND.SLOT, ...dword(renameSlot)],        // mov dword [eax], slot
-        [0x8b, 0x74, 0x24, 0x0c],                                // mov esi, [esp+12]
-        [0x89, 0x70, COMMAND.ARGS],                              // mov [eax+8], esi
-        [0x8b, 0x74, 0x19, BUFFER.SPARES],                       // mov esi, [ecx+ebx+40]
-        [0x89, 0x70, COMMAND.ARGS + 4],                          // mov [eax+12], esi
-        [0x87, 0x71, BUFFER.BASE],                               // xchg esi, [ecx+4]
-        [0x89, 0x74, 0x19, BUFFER.SPARES],                       // mov [ecx+ebx+40], esi
-        [0x89, 0x74, 0x24, 0x0c],                                // mov [esp+12], esi
-        [0xc7, 0x44, 0x19, BUFFER.SPARE_FREE, ...dword(0)],      // mov dword [ecx+ebx+48], 0
-        [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
-        // The record whole, published with `xchg` as every record's length is.
-        [0xbe, ...dword(COMMAND.ARGS + 8)],                      // mov esi, 16
-        [0x87, 0x70, COMMAND.BYTES],                             // xchg [eax+4], esi
-        [0xc7, 0x44, 0x24, 0x1c, ...dword(D3DLOCK_NOOVERWRITE)], // mov dword [esp+28], 0x1000
-        [0x5e, 0x5b],                                            // pop esi; pop ebx
-        { jcc: 0xeb, to: 'free' },                               // jmp free
-        { label: 'full' },
-        [0x5e, 0x5b],                                            // pop esi; pop ebx
-        { jcc: 0xeb, to: 'held' },                               // jmp held
-    ];
-    const parts = [
-        ...prologue('early'),
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
-        ...takeHeld(EDX, 'slow'),
-        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
-        { jcc: 0x75, to: 'held' },                               // jne held
-        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_READONLY)],    // test dword [esp+20], 0x10
-        { jcc: 0x75, to: 'held' },                               // jnz held
-        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
-        { jcc: 0x75, to: 'guarded' },                            // jne guarded
-        [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
-        { jcc: 0x74, to: 'free' },                               // je free
-        { label: 'guarded' },
-        [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
-        [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
-        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x74, to: 'free' },                               // je free
-        ...move,
-        { label: 'free' },
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x75, to: 'sized' },                              // jnz sized
-        [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
-        [0x29, 0xc2],                                            // sub edx, eax
-        { label: 'sized' },
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'held' },                               // jz held
-        [0x01, 0xc2],                                            // add edx, eax
-        { jcc: 0x72, to: 'held' },                               // jc held
-        [0x3b, 0x51, BUFFER.LENGTH],                             // cmp edx, [ecx+8]
-        { jcc: 0x77, to: 'held' },                               // ja held
-        [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
-        { jcc: 0x74, to: 'held' },                               // je held
-        { jcc: 0xeb, to: 'take' },                               // jmp take
-        { label: 'held' },
-        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
-        letHeldGo(0),                                            // mov dword [eax+HELD], 0
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'take' },
-        [0x53],                                                  // push ebx
-        [0x8b, 0x59, BUFFER.TO],                                 // mov ebx, [ecx+20]
-        [0x3b, 0x59, BUFFER.FROM],                               // cmp ebx, [ecx+16]
-        { jcc: 0x75, to: 'merge' },                              // jne merge
-        [0x89, 0x41, BUFFER.FROM],                               // mov [ecx+16], eax
-        [0x89, 0x51, BUFFER.TO],                                 // mov [ecx+20], edx
-        { jcc: 0xeb, to: 'merged' },                             // jmp merged
-        { label: 'merge' },
-        [0x3b, 0x41, BUFFER.FROM],                               // cmp eax, [ecx+16]
-        { jcc: 0x73, to: 'keepFrom' },                           // jae keepFrom
-        [0x89, 0x41, BUFFER.FROM],                               // mov [ecx+16], eax
-        { label: 'keepFrom' },
-        [0x39, 0xda],                                            // cmp edx, ebx
-        { jcc: 0x76, to: 'merged' },                             // jbe merged
-        [0x89, 0x51, BUFFER.TO],                                 // mov [ecx+20], edx
-        { label: 'merged' },
-        [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
-        [0x89, 0xda],                                            // mov edx, ebx
-        [0x81, 0xe2, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and edx, 0x3000
-        [0x81, 0xfa, ...dword(D3DLOCK_NOOVERWRITE)],             // cmp edx, 0x1000
-        { jcc: 0x74, to: 'alone' },                              // je alone
-        [0x81, 0xcb, ...dword(LOCK_IN_PLACE)],                   // or ebx, imm
-        { label: 'alone' },
-        [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
-        [0x03, 0x41, BUFFER.BASE],                               // add eax, [ecx+4]
-        [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
-        [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
-        [0x8b, 0x93, ...dword(SHADOW.LOCK_CALLS)],               // mov edx, [ebx+disp]
-        [0x83, 0xe2, SHADOW.LOCK_RING_CAPACITY - 1],             // and edx, 15
-        [0x89, 0x8c, 0x93, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+edx*4+disp], ecx
-        [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
-        letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
-        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
-        [0x89, 0x03],                                            // mov [ebx], eax
-        [0x5b],                                                  // pop ebx
-        ...(renameSlot === undefined ? [] : [
-            [0x8b, 0x54, 0x24, 0x04],                            // mov edx, [esp+4]
-            [0x3b, 0x51, BUFFER.SPARES],                         // cmp edx, [ecx+40]
-            { jcc: 0x74, to: 'moved' },                          // je moved
-            [0x3b, 0x51, BUFFER.SPARES + 4],                     // cmp edx, [ecx+44]
-            { jcc: 0x74, to: 'moved' },                          // je moved
-        ]),
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x14, 0x00],                                      // ret 20
-    ];
-    if (renameSlot === undefined)
-    {
-        return routine(at, trap, parts);
-    }
-    // The move puts the checks further from their targets than a byte reaches.
-    return routine(at, trap, parts.map(part=>(
-        'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)),
-    { moved: /** @type {number} */ (copyAt) });
-}
-
-/**
- * The rest of a Lock whose routine moved the buffer (`lockCode`): what the
- * buffer held outside the lock, copied from the storage left into the new
- * one, and counted in the device's block (`MOVE_COPIED`). Code a slice may
- * end inside, as the routine is not: a copy of most of a buffer of hundreds
- * of kilobytes is more than the steps that finish a routine take. The lock is
- * taken and the device's lock let go of already; nothing else writes either
- * storage while the program holds the lock, and the new one's pages are the
- * GPU's to upload from here as draws reach them, whenever the ring's move is
- * made. Entered with EAX the address handed out, ECX the buffer's block, and
- * the storage left in the slot of `this`.
- *
- *     push esi
- *     push edi
- *     push ebx
- *     mov edx, [ecx+LENGTH]
- *     mov ebx, [esp+24]           ; size, three words further for the pushes
- *     test ebx, ebx
- *     jnz sized
- *     mov ebx, edx
- *     sub ebx, [esp+20]           ; zero: to the end
- *   sized:
- *     mov edi, eax
- *     sub edi, [esp+20]           ; the new storage
- *     mov esi, [esp+16]           ; the storage left
- *     sub edx, ebx                ; the bytes outside the lock
- *     mov eax, [ecx+DEVICE]
- *     lock add [eax+MOVE_COPIED], edx
- *     jnc counted
- *     lock inc dword [eax+MOVE_COPIED+4]
- *   counted:
- *     mov ecx, [esp+20]           ; offset: the bytes before the lock
- *     cld
- *     rep movsb
- *     add esi, ebx
- *     add edi, ebx                ; past the lock
- *     mov ecx, edx
- *     sub ecx, [esp+20]           ; the bytes after it
- *     rep movsb
- *     pop ebx
- *     pop edi
- *     pop esi
- *     xor eax, eax
- *     ret 20
- *
- * @returns {Uint8Array}
- */
-export function moveCopyCode(){
-    return assemble([
-        [0x56, 0x57, 0x53],                                      // push esi; push edi; push ebx
-        [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
-        [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
-        [0x85, 0xdb],                                            // test ebx, ebx
-        { jcc: 0x75, to: 'sized' },                              // jnz sized
-        [0x89, 0xd3],                                            // mov ebx, edx
-        [0x2b, 0x5c, 0x24, 0x14],                                // sub ebx, [esp+20]
-        { label: 'sized' },
-        [0x89, 0xc7],                                            // mov edi, eax
-        [0x2b, 0x7c, 0x24, 0x14],                                // sub edi, [esp+20]
-        [0x8b, 0x74, 0x24, 0x10],                                // mov esi, [esp+16]
-        [0x29, 0xda],                                            // sub edx, ebx
-        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
-        [0xf0, 0x01, 0x90, ...dword(SHADOW.MOVE_COPIED)],        // lock add [eax+disp], edx
-        { jcc: 0x73, to: 'counted' },                            // jnc counted
-        [0xf0, 0xff, 0x80, ...dword(SHADOW.MOVE_COPIED + 4)],    // lock inc dword [eax+disp]
-        { label: 'counted' },
-        [0x8b, 0x4c, 0x24, 0x14],                                // mov ecx, [esp+20]
-        [0xfc],                                                  // cld
-        [0xf3, 0xa4],                                            // rep movsb
-        [0x01, 0xde],                                            // add esi, ebx
-        [0x01, 0xdf],                                            // add edi, ebx
-        [0x89, 0xd1],                                            // mov ecx, edx
-        [0x2b, 0x4c, 0x24, 0x14],                                // sub ecx, [esp+20]
-        [0xf3, 0xa4],                                            // rep movsb
-        [0x5b, 0x5f, 0x5e],                                      // pop ebx; pop edi; pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x14, 0x00],                                      // ret 20
-    ]);
-}
-
-/**
- * HRESULT Lock(this, DWORD flags, void **out, DWORD *size), as guest code for
- * a Direct3D 7 vertex buffer: `lockCode`'s, of the whole buffer, as this
- * version locks one -- its storage handed back and its length written where
- * `size` points, if it points anywhere. A buffer no device's block has taken
- * yet (DEVICE zero) is the host's, and so is every case `lockCode` leaves it.
- * The DDLOCK flags it is given mean what D3DLOCK's do: READONLY,
- * NOOVERWRITE and DISCARDCONTENTS are the same bits.
- *
- *     mov edx, [ecx+DEVICE]
- *     test edx, edx
- *     jz slow
- *     (take the device's lock through EDX, or slow)
- *     cmp dword [ecx+LOCKED], 0
- *     jne held
- *     test dword [esp+8], READONLY
- *     jnz held
- *     cmp dword [edx+DRAWS_PENDING], 0
- *     jne guarded
- *     cmp dword [ecx+LENT], 0
- *     je free
- *   guarded:
- *     mov eax, [esp+8]
- *     and eax, NOOVERWRITE | DISCARD
- *     cmp eax, NOOVERWRITE
- *     jne held
- *   free:
- *     cmp dword [esp+12], 0
- *     jne take
- *   held:
- *     mov eax, [ecx+DEVICE]
- *     mov dword [eax+HELD], 0
- *     jmp slow
- *   take:
- *     push ebx
- *     mov dword [ecx+FROM], 0     ; the whole buffer, which no pending range passes
- *     mov eax, [ecx+LENGTH]
- *     mov [ecx+TO], eax
- *     mov ebx, [esp+12]           ; flags, one word further for the push
- *     or [ecx+LOCK_FLAGS], ebx
- *     mov dword [ecx+LOCKED], 1
- *     mov ebx, [ecx+DEVICE]
- *     mov edx, [ebx+LOCK_CALLS]
- *     and edx, LOCK_RING_CAPACITY - 1
- *     mov [ebx + edx*4 + LOCK_RING], ecx
- *     inc dword [ebx+LOCK_CALLS]
- *     mov dword [ebx+HELD], 0
- *     mov ebx, [esp+20]           ; size
- *     test ebx, ebx
- *     jz unsized
- *     mov [ebx], eax
- *   unsized:
- *     mov eax, [ecx+BASE]
- *     mov ebx, [esp+16]           ; out
- *     mov [ebx], eax
- *     pop ebx
- *     xor eax, eax
- *     ret 16                      ; the object and its three arguments
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function lock7Code(at, trap){
-    return routine(at, trap, [
-        ...prologue('early'),
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow', near: true },                   // jz slow
-        ...takeHeld(EDX, 'slow'),
-        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
-        { jcc: 0x75, to: 'held' },                               // jne held
-        [0xf7, 0x44, 0x24, 0x08, ...dword(D3DLOCK_READONLY)],    // test dword [esp+8], 0x10
-        { jcc: 0x75, to: 'held' },                               // jnz held
-        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
-        { jcc: 0x75, to: 'guarded' },                            // jne guarded
-        [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
-        { jcc: 0x74, to: 'free' },                               // je free
-        { label: 'guarded' },
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
-        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x75, to: 'held' },                               // jne held
-        { label: 'free' },
-        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
-        { jcc: 0x75, to: 'take' },                               // jne take
-        { label: 'held' },
-        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
-        letHeldGo(0),                                            // mov dword [eax+HELD], 0
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'take' },
-        [0x53],                                                  // push ebx
-        [0xc7, 0x41, BUFFER.FROM, ...dword(0)],                  // mov dword [ecx+16], 0
-        [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
-        [0x89, 0x41, BUFFER.TO],                                 // mov [ecx+20], eax
-        [0x8b, 0x5c, 0x24, 0x0c],                                // mov ebx, [esp+12]
-        [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
-        [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
-        [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
-        [0x8b, 0x93, ...dword(SHADOW.LOCK_CALLS)],               // mov edx, [ebx+disp]
-        [0x83, 0xe2, SHADOW.LOCK_RING_CAPACITY - 1],             // and edx, 15
-        [0x89, 0x8c, 0x93, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+edx*4+disp], ecx
-        [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
-        letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
-        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
-        [0x85, 0xdb],                                            // test ebx, ebx
-        { jcc: 0x74, to: 'unsized' },                            // jz unsized
-        [0x89, 0x03],                                            // mov [ebx], eax
-        { label: 'unsized' },
-        [0x8b, 0x41, BUFFER.BASE],                               // mov eax, [ecx+4]
-        [0x8b, 0x5c, 0x24, 0x10],                                // mov ebx, [esp+16]
-        [0x89, 0x03],                                            // mov [ebx], eax
-        [0x5b],                                                  // pop ebx
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
-}
-
-/**
- * HRESULT Unlock(this), as guest code. The buffer's block goes on the
- * device's ring for the host to find, once until the host empties it; the
- * device's lock held, a full ring, or no lock to release, is the host's.
- *
- *     mov edx, [ecx+DEVICE]
- *     (take the device's lock through EDX, or slow)
- *     cmp dword [ecx+LOCKED], 0
- *     je held
- *     cmp dword [ecx+QUEUED], 0
- *     jne queued                  ; on the ring already
- *     mov eax, [edx+RING_HEAD]
- *     cmp eax, RING_CAPACITY
- *     jae held
- *     mov [edx + eax*4 + RING], ecx
- *     inc dword [edx+RING_HEAD]
- *     mov dword [ecx+QUEUED], 1
- *   queued:
- *     mov dword [ecx+LOCKED], 0
- *     inc dword [edx+UNLOCK_CALLS]
- *     mov dword [edx+HELD], 0
- *     xor eax, eax
- *     ret 4
- *   held:
- *     mov dword [edx+HELD], 0     ; and on to the host
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function unlockCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
-        // A Direct3D 7 buffer no device's block has taken yet: the host's.
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        ...takeHeld(EDX, 'slow'),
-        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
-        { jcc: 0x74, to: 'held' },                               // je held
-        [0x83, 0x79, BUFFER.QUEUED, 0x00],                       // cmp dword [ecx+36], 0
-        { jcc: 0x75, to: 'queued' },                             // jne queued
-        [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
-        [0x3d, ...dword(SHADOW.RING_CAPACITY)],                  // cmp eax, 64
-        { jcc: 0x73, to: 'held' },                               // jae held
-        [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
-        [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
-        [0xc7, 0x41, BUFFER.QUEUED, ...dword(1)],                // mov dword [ecx+36], 1
-        { label: 'queued' },
-        [0xc7, 0x41, BUFFER.LOCKED, ...dword(0)],                // mov dword [ecx+12], 0
-        [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
-        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x04, 0x00],                                      // ret 4
-        { label: 'held' },
-        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-    ]);
-}
-
-/**
- * The level a texture's or a surface's lock names, its block into ECX
- * (`LEVEL`), from the object's block the prologue left there: a texture's
- * table of them (`TEXTURE.LOCKS`) at the level its first argument names, or
- * a surface's own. No block, or the host's flag on it, leaves for `slow`.
- *
- *   texture:
- *     mov eax, [esp+8]            ; level
- *     cmp eax, [ecx+LEVEL_COUNT]
- *     jae slow                    ; the host refuses it
- *     cmp eax, LEVEL_SLOTS
- *     jae slow
- *     mov ecx, [ecx + eax*4 + LOCKS]
- *   surface:
- *     mov ecx, [ecx+LEVEL]
- *   both:
- *     test ecx, ecx
- *     jz slow
- *     test dword [ecx], 1
- *     jnz slow
- *
- * @param {'texture' | 'surface'} find @param {string} slow
- * @returns {(number[] | { jcc: number, to: string })[]}
- */
-const findLevel = (find, slow)=>[
-    ...(find === 'texture'
-        ? [
-            [0x8b, 0x44, 0x24, 0x08],                            // mov eax, [esp+8]
-            [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                   // cmp eax, [ecx+4]
-            { jcc: 0x73, to: slow },                             // jae slow
-            [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],               // cmp eax, 16
-            { jcc: 0x73, to: slow },                             // jae slow
-            [0x8b, 0x8c, 0x81, ...dword(TEXTURE.LOCKS)],         // mov ecx, [ecx+eax*4+disp]
-        ]
-        : [[0x8b, 0x49, SURFACE.LEVEL]]),                        // mov ecx, [ecx+40]
-    [0x85, 0xc9],                                                // test ecx, ecx
-    { jcc: 0x74, to: slow },                                     // jz slow
-    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                      // test dword [ecx], 1
-    { jcc: 0x75, to: slow },                                     // jnz slow
-];
-
-/**
- * HRESULT LockRect(this, [UINT level,] D3DLOCKED_RECT *out, const RECT *rect,
- * DWORD flags) of a texture or a surface, and HRESULT LockBox(this, UINT
- * level, D3DLOCKED_BOX *out, const D3DBOX *box, DWORD flags) of a volume
- * texture, as guest code for a level with a block (`LEVEL`). The address
- * handed back is the level's own bytes at the rectangle or box, which is
- * kept with the flags for the host to replay the lock with at its next
- * entry; the block goes on the device's ring of blocks to settle at once,
- * so a lock held across an entry is the host's from then on too.
- *
- * The cases left to the host: the device's lock held, a lock of the level
- * already held, one the host has not replayed yet (a second would leave it
- * one box to replay for two), a null out-pointer, a full ring, a rectangle
- * or box that is empty or leaves the level -- which the
- * versions answer differently -- and, for a level a draw may read, a draw in
- * the device's command ring the host has not made: it reads the bytes the
- * program would write over. The device's lock is let go before the
- * program's out-pointer is written, which may fault.
- *
- *     (the object's block, then the level's: slow)
- *     mov edx, [ecx+DEVICE]
- *     (take the device's lock through EDX, or slow)
- *     cmp dword [ecx+LOCKED], 0
- *     jne held
- *     cmp dword [ecx+TAKEN], 0
- *     jne held
- *     cmp dword [ecx+SAMPLED], 0
- *     je unsampled
- *     cmp dword [edx+DRAWS_PENDING], 0
- *     jne held
- *   unsampled:
- *     cmp dword [ecx+QUEUED], 0
- *     jne room
- *     cmp dword [edx+RING_HEAD], RING_CAPACITY
- *     jae held
- *   room:
- *     cmp dword [esp+out], 0
- *     je held
- *     push ebx; push esi; push edi
- *     mov esi, [esp+rect+12]
- *     xor ebx, ebx                ; the byte offset of what is locked
- *     mov [ecx+BOXED], ebx
- *     test esi, esi
- *     jz take                     ; all of it
- *     (right <= WIDTH, left < right, bottom <= HEIGHT, top < bottom,
- *      [back <= DEPTH, front < back], unsigned: or refused)
- *     ebx = left*TEXEL_BYTES + top*ROW_PITCH [+ front*SLICE_PITCH]
- *     (the rectangle or box into BOX, a rectangle one slice deep)
- *     mov dword [ecx+BOXED], 1
- *   take:
- *     mov eax, [esp+flags+12]
- *     mov [ecx+LOCK_FLAGS], eax
- *     mov dword [ecx+LOCKED], 1
- *     mov dword [ecx+TAKEN], 1
- *     mov edx, [ecx+DEVICE]
- *     cmp dword [ecx+QUEUED], 0
- *     jne queued
- *     mov eax, [edx+RING_HEAD]
- *     mov [edx + eax*4 + RING], ecx
- *     inc dword [edx+RING_HEAD]
- *     mov dword [ecx+QUEUED], 1
- *   queued:
- *     mov dword [edx+HELD], 0
- *     mov eax, ebx
- *     add eax, [ecx+BASE]
- *     mov edi, [esp+out+12]
- *     (ROW_PITCH [, SLICE_PITCH], then the address, into [edi])
- *     pop edi; pop esi; pop ebx
- *     xor eax, eax
- *     ret 4*args
- *   refused:
- *     pop edi; pop esi; pop ebx
- *   held:
- *     mov eax, [ecx+DEVICE]
- *     mov dword [eax+HELD], 0     ; and on to the host
- *
- * @param {number} at @param {number} trap
- * @param {{ find: 'texture' | 'surface', box?: boolean }} kind  a box only for a texture
- * @returns {Uint8Array}
- */
-export function lockLevelCode(at, trap, { find, box = false }){
-    // Where the out-pointer, the rectangle or box and the flags are on entry.
-    const out = find === 'texture' ? 12 : 8;
-    const rect = out + 4;
-    const flags = out + 8;
-    /** `mov eax, [esi+from]; mov [ecx+to], eax`. @param {number} from @param {number} to */
-    const copy = (from, to)=>[[0x8b, 0x46, from], [0x89, 0x41, to]];
-    return routine(at, trap, [
-        ...prologue('early'),
-        ...findLevel(find, 'early'),
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'early' },                              // jz early
-        ...takeHeld(EDX, 'slow'),
-        [0x83, 0x79, LEVEL.LOCKED, 0x00],                        // cmp dword [ecx+12], 0
-        { jcc: 0x75, to: 'held', near: true },                   // jne held
-        [0x83, 0x79, LEVEL.TAKEN, 0x00],                         // cmp dword [ecx+16], 0
-        { jcc: 0x75, to: 'held', near: true },                   // jne held
-        [0x83, 0x79, LEVEL.SAMPLED, 0x00],                       // cmp dword [ecx+56], 0
-        { jcc: 0x74, to: 'unsampled' },                          // je unsampled
-        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
-        { jcc: 0x75, to: 'held', near: true },                   // jne held
-        { label: 'unsampled' },
-        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
-        { jcc: 0x75, to: 'room' },                               // jne room
-        [0x81, 0xba, ...dword(SHADOW.RING_HEAD), ...dword(SHADOW.RING_CAPACITY)], // cmp [edx+d], 64
-        { jcc: 0x73, to: 'held', near: true },                   // jae held
-        { label: 'room' },
-        [0x83, 0x7c, 0x24, out, 0x00],                           // cmp dword [esp+out], 0
-        { jcc: 0x74, to: 'held', near: true },                   // je held
-        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
-        [0x8b, 0x74, 0x24, rect + 12],                           // mov esi, [esp+rect+12]
-        [0x31, 0xdb],                                            // xor ebx, ebx
-        [0x89, 0x59, LEVEL.BOXED],                               // mov [ecx+60], ebx
-        [0x85, 0xf6],                                            // test esi, esi
-        { jcc: 0x74, to: 'take', near: true },                   // jz take
-        [0x8b, 0x46, 0x08],                                      // mov eax, [esi+8]: right
-        [0x3b, 0x41, LEVEL.WIDTH],                               // cmp eax, [ecx+40]
-        { jcc: 0x77, to: 'refused', near: true },                // ja refused
-        [0x39, 0x06],                                            // cmp [esi], eax: left
-        { jcc: 0x73, to: 'refused', near: true },                // jae refused
-        [0x8b, 0x46, 0x0c],                                      // mov eax, [esi+12]: bottom
-        [0x3b, 0x41, LEVEL.HEIGHT],                              // cmp eax, [ecx+44]
-        { jcc: 0x77, to: 'refused', near: true },                // ja refused
-        [0x39, 0x46, 0x04],                                      // cmp [esi+4], eax: top
-        { jcc: 0x73, to: 'refused', near: true },                // jae refused
-        ...(box
-            ? [
-                [0x8b, 0x46, 0x14],                              // mov eax, [esi+20]: back
-                [0x3b, 0x41, LEVEL.DEPTH],                       // cmp eax, [ecx+48]
-                { jcc: 0x77, to: 'refused', near: true },        // ja refused
-                [0x39, 0x46, 0x10],                              // cmp [esi+16], eax: front
-                { jcc: 0x73, to: 'refused', near: true },        // jae refused
-            ]
-            : []),
-        [0x8b, 0x1e],                                            // mov ebx, [esi]
-        [0x0f, 0xaf, 0x59, LEVEL.TEXEL_BYTES],                   // imul ebx, [ecx+52]
-        [0x8b, 0x46, 0x04],                                      // mov eax, [esi+4]
-        [0x0f, 0xaf, 0x41, LEVEL.ROW_PITCH],                     // imul eax, [ecx+20]
-        [0x01, 0xc3],                                            // add ebx, eax
-        ...(box
-            ? [
-                [0x8b, 0x46, 0x10],                              // mov eax, [esi+16]
-                [0x0f, 0xaf, 0x41, LEVEL.SLICE_PITCH],           // imul eax, [ecx+32]
-                [0x01, 0xc3],                                    // add ebx, eax
-            ]
-            : []),
-        ...[0, 4, 8, 12].flatMap(offset=>copy(offset, LEVEL.BOX + offset)),
-        ...(box
-            ? [...copy(16, LEVEL.BOX + 16), ...copy(20, LEVEL.BOX + 20)]
-            : [
-                [0xc7, 0x41, LEVEL.BOX + 16, ...dword(0)],       // mov dword [ecx+80], 0
-                [0xc7, 0x41, LEVEL.BOX + 20, ...dword(1)],       // mov dword [ecx+84], 1
-            ]),
-        [0xc7, 0x41, LEVEL.BOXED, ...dword(1)],                  // mov dword [ecx+60], 1
-        { label: 'take' },
-        [0x8b, 0x44, 0x24, flags + 12],                          // mov eax, [esp+flags+12]
-        [0x89, 0x41, LEVEL.LOCK_FLAGS],                          // mov [ecx+24], eax
-        [0xc7, 0x41, LEVEL.LOCKED, ...dword(1)],                 // mov dword [ecx+12], 1
-        [0xc7, 0x41, LEVEL.TAKEN, ...dword(1)],                  // mov dword [ecx+16], 1
-        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
-        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
-        { jcc: 0x75, to: 'queued' },                             // jne queued
-        [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
-        [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
-        [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
-        [0xc7, 0x41, LEVEL.QUEUED, ...dword(1)],                 // mov dword [ecx+36], 1
-        { label: 'queued' },
-        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-        [0x89, 0xd8],                                            // mov eax, ebx
-        [0x03, 0x41, LEVEL.BASE],                                // add eax, [ecx+4]
-        [0x8b, 0x7c, 0x24, out + 12],                            // mov edi, [esp+out+12]
-        [0x8b, 0x51, LEVEL.ROW_PITCH],                           // mov edx, [ecx+20]
-        [0x89, 0x17],                                            // mov [edi], edx
-        ...(box
-            ? [
-                [0x8b, 0x51, LEVEL.SLICE_PITCH],                 // mov edx, [ecx+32]
-                [0x89, 0x57, 0x04],                              // mov [edi+4], edx
-                [0x89, 0x47, 0x08],                              // mov [edi+8], eax
-            ]
-            : [[0x89, 0x47, 0x04]]),                             // mov [edi+4], eax
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, flags, 0x00],                                     // ret: this and the arguments
-        { label: 'refused' },
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
-        { label: 'held' },
-        [0x8b, 0x41, LEVEL.DEVICE],                              // mov eax, [ecx+28]
-        letHeldGo(0),                                            // mov dword [eax+HELD], 0
-    ]);
-}
-
-/**
- * HRESULT UnlockRect(this, [UINT level]) of a texture or a surface, and
- * HRESULT UnlockBox(this, UINT level) of a volume texture, as guest code for
- * a level with a block: the buffers' Unlock (`unlockCode`), less their count
- * of unlocks, which a level's lock does not keep either.
- *
- * @param {number} at @param {number} trap
- * @param {{ find: 'texture' | 'surface' }} kind
- * @returns {Uint8Array}
- */
-export function unlockLevelCode(at, trap, { find }){
-    return routine(at, trap, [
-        ...prologue('early'),
-        ...findLevel(find, 'early'),
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'early' },                              // jz early
-        ...takeHeld(EDX, 'slow'),
-        [0x83, 0x79, LEVEL.LOCKED, 0x00],                        // cmp dword [ecx+12], 0
-        { jcc: 0x74, to: 'held' },                               // je held
-        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
-        { jcc: 0x75, to: 'queued' },                             // jne queued
-        [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
-        [0x3d, ...dword(SHADOW.RING_CAPACITY)],                  // cmp eax, 64
-        { jcc: 0x73, to: 'held' },                               // jae held
-        [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
-        [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
-        [0xc7, 0x41, LEVEL.QUEUED, ...dword(1)],                 // mov dword [ecx+36], 1
-        { label: 'queued' },
-        [0xc7, 0x41, LEVEL.LOCKED, ...dword(0)],                 // mov dword [ecx+12], 0
-        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, find === 'texture' ? 8 : 4, 0x00],                // ret 8 or 4
-        { label: 'held' },
-        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-    ]);
-}
-
-/**
- * The tail a routine answers an argument out of range with: the refusal the
- * interface documents, without a crossing to fetch it.
- *
- *   invalid:
- *     mov eax, D3DERR_INVALIDCALL
- *     ret n
- *
- * @param {number} popped
- * @returns {(number[] | { label: string })[]}
- */
-const invalidTail = popped=>[
-    { label: 'invalid' },
-    [0xb8, ...dword(D3DERR_INVALIDCALL)],                        // mov eax, D3DERR_INVALIDCALL
-    [0xc2, popped, 0x00],                                        // ret n
-];
-
-/** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */
-const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
-/** Direct3D 7's: WORLD, VIEW, PROJECTION, WORLD1..3 and TEXTURE0..7. */
-const TRANSFORMS_7 = (0x7e | 0xff << 16) >>> 0;
-
-/**
- * HRESULT GetTransform(this, D3DTRANSFORMSTATETYPE type, D3DMATRIX *), as
- * guest code: the matrix of every type the device answers for is in the
- * block, the guest's own writes included and the host's own changes mirrored
- * there, so it is copied out of the type's slot. A type the device refuses, a
- * null pointer and the host's flag go to the host.
- *
- *     (prologue)
- *     mov eax, [esp+8]            ; type
- *     cmp eax, 24
- *     jb low
- *     sub eax, 232                ; WORLD..WORLD3 -> 24..27
- *     cmp eax, 24
- *     jb slow
- *     cmp eax, 28
- *     jae slow
- *     jmp slot
- *   low:
- *     mov edx, ANSWERED_TRANSFORMS
- *     bt edx, eax
- *     jnc slow
- *   slot:
- *     mov edx, [esp+12]           ; the matrix
- *     test edx, edx
- *     jz slow
- *     push esi
- *     push edi
- *     mov edi, edx
- *     mov esi, eax
- *     shl esi, 6
- *     lea esi, [ecx + esi + TRANSFORMS]
- *     mov ecx, 16
- *     rep movsd
- *     pop edi
- *     pop esi
- *     xor eax, eax
- *     ret 12
- *   slow:
- *     jmp trap
- *
- * Direct3D 7's numbers are their own slots, all below 24 (`TRANSFORM_MIRROR_7`):
- * a type from 24 is the host's, and the types answered are that version's.
- *
- * @param {number} at @param {number} trap @param {boolean} [version7]
- * @returns {Uint8Array}
- */
-export function getTransformCode(at, trap, version7 = false){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
-        { jcc: 0x72, to: 'low' },                                // jb low
-        ...(version7 ? [] : [
-            [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],           // sub eax, 232
-            [0x3d, ...dword(WORLD_SLOT)],                        // cmp eax, 24
-            { jcc: 0x72, to: 'slow' },                           // jb slow
-            [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],            // cmp eax, 28
-            { jcc: 0x73, to: 'slow' },                           // jae slow
-            { jcc: 0xeb, to: 'slot' },                           // jmp slot
-        ]),
-        ...(version7 ? [{ jcc: 0xeb, to: 'slow' }] : []),        // jmp slow
-        { label: 'low' },
-        [0xba, ...dword(version7 ? TRANSFORMS_7 : ANSWERED_TRANSFORMS)], // mov edx, imm32
-        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
-        { jcc: 0x73, to: 'slow' },                               // jnc slow
-        { label: 'slot' },
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56],                                                  // push esi
-        [0x57],                                                  // push edi
-        [0x89, 0xd7],                                            // mov edi, edx
-        [0x89, 0xc6],                                            // mov esi, eax
-        [0xc1, 0xe6, 0x06],                                      // shl esi, 6
-        [0x8d, 0xb4, 0x31, ...dword(SHADOW.TRANSFORMS)],         // lea esi, [ecx+esi+disp]
-        [0xb9, ...dword(16)],                                    // mov ecx, 16
-        [0xf3, 0xa5],                                            // rep movsd
-        [0x5f],                                                  // pop edi
-        [0x5e],                                                  // pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-    ]);
-}
-
-/**
- * HRESULT GetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
- * type, DWORD *value), as guest code: a type the version has is kept in the
- * block, where the setter's command routine writes it (`stageStateMirror`)
- * and the host mirrors every change it makes itself, so the answer is read
- * there. A stage past the block, a type the version has not got, a null
- * pointer and the host's flag go to the host.
- *
- *     (prologue)
- *     mov eax, [esp+12]           ; type
- *     cmp eax, 32
- *     jae slow
- *     mov edx, types
- *     bt edx, eax
- *     jnc slow
- *     mov eax, [esp+8]            ; stage
- *     cmp eax, 8
- *     jae slow
- *     shl eax, 5
- *     add eax, [esp+12]
- *     mov edx, [esp+16]           ; value
- *     test edx, edx
- *     jz slow
- *     mov eax, [ecx + eax*4 + STAGE_STATES]
- *     mov [edx], eax
- *     xor eax, eax
- *     ret 16
- *   slow:
- *     jmp trap
- *
- * @param {number} at @param {number} trap
- * @param {number} types  The version's stage state types below 32, a bit each.
- * @returns {Uint8Array}
- */
-export function getTextureStageStateCode(at, trap, types){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xba, ...dword(types)],                                 // mov edx, imm32
-        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
-        { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xc1, 0xe0, 0x05],                                      // shl eax, 5
-        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
-        [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
-}
-
-/**
- * HRESULT GetViewport(this, D3DVIEWPORT *out), as guest code: the block
- * holds the device's viewport, which SetViewport's routine keeps and the
- * host mirrors whenever it changes it itself (a render target, a reset, a
- * state block). A null pointer and the host's flag go to the host.
- *
- *     (prologue)
- *     mov edx, [esp+8]            ; out
- *     test edx, edx
- *     jz slow
- *     push esi
- *     push edi
- *     lea esi, [ecx + VIEWPORT]
- *     mov edi, edx
- *     mov ecx, 6
- *     rep movsd
- *     pop edi
- *     pop esi
- *     xor eax, eax                ; D3D_OK
- *     ret 8
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function getViewportCode(at, trap){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56, 0x57],                                            // push esi; push edi
-        [0x8d, 0xb1, ...dword(SHADOW.VIEWPORT)],                 // lea esi, [ecx+disp]
-        [0x89, 0xd7],                                            // mov edi, edx
-        [0xb9, ...dword(6)],                                     // mov ecx, 6
-        [0xf3, 0xa5],                                            // rep movsd
-        [0x5f, 0x5e],                                            // pop edi; pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
-}
-
-/**
- * Direct3D 8's SetVertexShader or SetPixelShader as its command routine keeps
- * it: the argument, as the getter answers it (`SHADOW.SHADERS`).
- *
- *     mov eax, [esp+8]
- *     mov [ecx + SHADERS + 4*which], eax
- *
- * @param {0 | 1} which  vertex, pixel
- */
-export const shaderMirror = which=>Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x89, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],          // mov [ecx+disp], eax
-]);
-
-/**
- * HRESULT GetVertexShader(this, DWORD *handle) or GetPixelShader of Direct3D
- * 8, as guest code: the shader out of the device's block, once the host has
- * written it there. A null pointer goes to the host, which refuses it.
- *
- *     (prologue)
- *     cmp dword [ecx + SHADERS_VALID], 0
- *     je slow
- *     mov edx, [esp+8]            ; handle
- *     test edx, edx
- *     jz slow
- *     mov eax, [ecx + SHADERS + 4*which]
- *     mov [edx], eax
- *     xor eax, eax                ; D3D_OK
- *     ret 8
- *
- * @param {number} at @param {number} trap @param {0 | 1} which  vertex, pixel
- * @returns {Uint8Array}
- */
-export function getShaderCode(at, trap, which){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x83, 0xb9, ...dword(SHADOW.SHADERS_VALID), 0x00],      // cmp dword [ecx+disp], 0
-        { jcc: 0x74, to: 'slow' },                               // je slow
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],      // mov eax, [ecx+disp]
-        [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
-}
-
-/** D3DERR_NOTFOUND: no depth surface is set. */
-const D3DERR_NOTFOUND = 0x88760866;
-
-/**
- * HRESULT GetRenderTarget(this, [DWORD index,] IDirect3DSurface **out) or
- * GetDepthStencilSurface(this, IDirect3DSurface **out), as guest code: the
- * pointer the program was handed for the surface, out of the device's block
- * (`SHADOW.TARGETS`) once the host has said the pair there is the device's,
- * and the reference the call owes taken in the word the surface counts in. A
- * count at zero -- the step the host takes, a first reference -- a null
- * out-pointer, an index but the first and a pair the host has not written go
- * to the host. A depth pair of zeros is no depth surface: the out-pointer is
- * cleared, as the host clears it, and the answer is D3DERR_NOTFOUND.
- *
- *     (prologue)
- *     [cmp dword [esp+8], 0       ; Direct3D 9's index
- *      jne slow]
- *     mov edx, [esp+out]
- *     test edx, edx
- *     jz slow
- *     (take the device's lock through ECX, or slow)
- *     test dword [ecx+TARGETS_VALID], bit
- *     jz held
- *     push ebx
- *     mov ebx, [ecx + pair + 4]   ; the count's word
- *     mov eax, [ecx + pair]       ; the pointer
- *     test eax, eax
- *     jz none
- *     test ebx, ebx
- *     jz busy
- *   retry:
- *     mov eax, [ebx]
- *     test eax, eax
- *     jz busy                     ; at zero: the host's
- *     lea edx, [eax+1]
- *     lock cmpxchg [ebx], edx
- *     jne retry
- *     mov eax, [ecx + pair]
- *     pop ebx
- *     mov dword [ecx+HELD], 0     ; let go before the program's pointer
- *     mov edx, [esp+out]
- *     mov [edx], eax
- *     xor eax, eax                ; D3D_OK
- *     ret n
- *   none:                         ; the depth pair only; a target's is the host's
- *     pop ebx
- *     mov dword [ecx+HELD], 0
- *     mov edx, [esp+out]
- *     mov dword [edx], 0
- *     mov eax, D3DERR_NOTFOUND
- *     ret n
- *   busy:
- *     pop ebx
- *   held:
- *     mov dword [ecx+HELD], 0
- *     jmp slow
- *
- * @param {number} at @param {number} trap
- * @param {{ depth: boolean, indexed: boolean }} which  the depth surface or the
- *     target; whether the call names the target by index (Direct3D 9's)
- * @returns {Uint8Array}
- */
-export function getTargetCode(at, trap, { depth, indexed }){
-    const out = indexed ? 0x0c : 0x08;
-    const popped = indexed ? 12 : 8;
-    const pair = SHADOW.TARGETS + (depth ? 8 : 0);
-    return routine(at, trap, [
-        ...prologue('early'),
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        ...(indexed ? [
-            [0x83, 0x7c, 0x24, 0x08, 0x00],                      // cmp dword [esp+8], 0
-            { jcc: 0x75, to: 'slow', near: true },               // jne slow
-        ] : []),
-        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow', near: true },                   // jz slow
-        ...takeHeld(ECX, 'slow'),
-        [0xf7, 0x81, ...dword(SHADOW.TARGETS_VALID), ...dword(depth ? 2 : 1)], // test [ecx+d], bit
-        { jcc: 0x74, to: 'held', near: true },                   // jz held
-        [0x53],                                                  // push ebx
-        [0x8b, 0x99, ...dword(pair + 4)],                        // mov ebx, [ecx+disp]
-        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: depth ? 'none' : 'busy', near: true },  // jz none
-        [0x85, 0xdb],                                            // test ebx, ebx
-        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
-        { label: 'retry' },
-        [0x8b, 0x03],                                            // mov eax, [ebx]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
-        [0x8d, 0x50, 0x01],                                      // lea edx, [eax+1]
-        [0xf0, 0x0f, 0xb1, 0x13],                                // lock cmpxchg [ebx], edx
-        { jcc: 0x75, to: 'retry' },                              // jne retry
-        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
-        [0x5b],                                                  // pop ebx
-        letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
-        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
-        [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, popped, 0x00],                                    // ret n
-        ...(depth ? [
-            { label: 'none' },
-            [0x5b],                                              // pop ebx
-            letHeldGo(ECX),                                      // mov dword [ecx+HELD], 0
-            [0x8b, 0x54, 0x24, out],                             // mov edx, [esp+out]
-            [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0
-            [0xb8, ...dword(D3DERR_NOTFOUND)],                   // mov eax, D3DERR_NOTFOUND
-            [0xc2, popped, 0x00],                                // ret n
-        ] : []),
-        { label: 'busy' },
-        [0x5b],                                                  // pop ebx
-        { label: 'held' },
-        letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
-    ]);
-}
-
-/**
- * HRESULT GetDesc(this, D3DSURFACE_DESC *out), as guest code for a surface:
- * the description out of the surface's block. A null pointer is the host's.
- *
- *     (prologue)
- *     mov edx, [esp+8]            ; out
- *     test edx, edx
- *     jz slow
- *     push esi
- *     push edi
- *     lea esi, [ecx + DESC]
- *     mov edi, edx
- *     mov ecx, 8
- *     rep movsd
- *     pop edi
- *     pop esi
- *     xor eax, eax                ; D3D_OK
- *     ret 8
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function getSurfaceDescCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56, 0x57],                                            // push esi; push edi
-        [0x8d, 0x71, SURFACE.DESC],                              // lea esi, [ecx+4]
-        [0x89, 0xd7],                                            // mov edi, edx
-        [0xb9, ...dword(SURFACE.DESC_WORDS)],                    // mov ecx, 8
-        [0xf3, 0xa5],                                            // rep movsd
-        [0x5f, 0x5e],                                            // pop edi; pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
-}
-
-/** The sampler state types a device answers for: D3DSAMP_ADDRESSU (1) to DMAPOFFSET (13). */
-const SAMPLER_STATE_TYPES = 0x3ffe;
-
-/**
- * HRESULT GetSamplerState(this, DWORD sampler, D3DSAMPLERSTATETYPE type,
- * DWORD *value), as guest code: the value, for one of the sixteen pixel
- * samplers and a type the device answers for. A displacement or vertex
- * sampler, a type it refuses and a null pointer go to the host.
- *
- *     (prologue)
- *     mov eax, [esp+12]           ; type
- *     cmp eax, 16
- *     jae slow
- *     mov edx, SAMPLER_STATE_TYPES
- *     bt edx, eax
- *     jnc slow
- *     mov eax, [esp+8]            ; sampler
- *     cmp eax, 16
- *     jae slow
- *     shl eax, 4
- *     add eax, [esp+12]
- *     mov edx, [esp+16]           ; value
- *     test edx, edx
- *     jz slow
- *     mov eax, [ecx + eax*4 + SAMPLER_STATES]
- *     mov [edx], eax
- *     xor eax, eax
- *     ret 16
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function getSamplerStateCode(at, trap){
-    return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x3d, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],           // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xba, ...dword(SAMPLER_STATE_TYPES)],                   // mov edx, imm32
-        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
-        { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                  // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0xc1, 0xe0, 0x04],                                      // shl eax, 4
-        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x84, 0x81, ...dword(SHADOW.SAMPLER_STATES)],     // mov eax, [ecx+eax*4+disp]
-        [0x89, 0x02],                                            // mov [edx], eax
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
-}
-
-/**
- * HRESULT GetSurfaceLevel(this, UINT level, IDirect3DSurface8** out), as
- * guest code for a texture. The pointer is the one the host published for
- * that level, out of the texture's own block; a level the texture has not
- * got is refused here, as the interface refuses it.
- *
- * The reference the call owes is taken in the word the texture's count is
- * kept in, which its levels share: the program holds the texture, so the
- * count is not at zero and taking one is no crossing of it. A level the host
- * has not published yet reads zero and goes to the host, which makes the
- * surface and fills the slot in.
- *
- *     mov ecx, [esp+4]            ; this
- *     mov ecx, [ecx+4]            ; the block
- *     test ecx, ecx
- *     jz slow
- *     test dword [ecx], 1
- *     jnz slow
- *     mov eax, [esp+8]            ; level
- *     cmp eax, [ecx+LEVEL_COUNT]
- *     jae invalid                 ; no such level
- *     cmp eax, LEVEL_SLOTS
- *     jae slow                    ; a level the table does not hold
- *     mov edx, [ecx + eax*4 + LEVELS]
- *     test edx, edx
- *     jz slow                     ; not published yet
- *     mov ecx, [ecx + COUNT]
- *     test ecx, ecx
- *     jz slow                     ; a count the host keeps
- *     mov eax, [esp+12]           ; out
- *     test eax, eax
- *     jz slow                     ; a null out-pointer is the host's to refuse
- *     mov [eax], edx
- *     lock inc dword [ecx]
- *     xor eax, eax                ; D3D_OK
- *     ret 12
- *
- * @param {number} at @param {number} trap
- * @returns {Uint8Array}
- */
-export function getSurfaceLevelCode(at, trap){
-    return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                       // cmp eax, [ecx+4]
-        { jcc: 0x73, to: 'invalid' },                            // jae invalid
-        [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],                   // cmp eax, 16
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        [0x8b, 0x94, 0x81, ...dword(TEXTURE.LEVELS)],            // mov edx, [ecx+eax*4+disp]
-        [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x49, TEXTURE.COUNT],                             // mov ecx, [ecx+8]
-        [0x85, 0xc9],                                            // test ecx, ecx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x89, 0x10],                                            // mov [eax], edx
-        [0xf0, 0xff, 0x01],                                      // lock inc dword [ecx]
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-        ...invalidTail(12),
-    ]);
-}
-
-/**
- * A shape's surface arguments and the usage each must have (`surfaceUsage`).
- *
- * @param {CommandShape} shape
- * @returns {readonly { arg: number, mask: number, nullable?: boolean }[]}
- */
-export const usagesOf = shape=>{
-    const usage = shape.surfaceUsage;
-    return usage === undefined ? [] : 'arg' in usage ? [usage] : usage;
-};
-
-/**
- * What a command routine checks before it takes a call, so that a call it
- * answers D3D_OK for is one the device takes: the arguments the device
- * refuses by their value, and the state it refuses a call in that the block
- * keeps. Whatever fails leaves for the host through `out`; nothing is
- * written before.
- *
- * @param {CommandShape} shape
- * @param {(argument: number) => number} at  where an argument is on entry
- * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
- */
-function commandChecks(shape, at){
-    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
-    const parts = [];
-    if (shape.needs)
-    {
-        parts.push(
-            [0x8b, 0x81, ...dword(SHADOW.DRAWABLE)],             // mov eax, [ecx+DRAWABLE]
-            [0x25, ...dword(shape.needs)],                       // and eax, needs
-            [0x3d, ...dword(shape.needs)],                       // cmp eax, needs
-            { jcc: 0x75, to: 'out', near: true });               // jne out
-    }
-    if (shape.refuses)
-    {
-        parts.push(
-            [0xf7, 0x81, ...dword(SHADOW.DRAWABLE), ...dword(shape.refuses)], // test [..], m
-            { jcc: 0x75, to: 'out', near: true });               // jnz out
-    }
-    (shape.within ?? []).forEach(({ arg, ranges }, index)=>{
-        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
-        for (const [low, high] of ranges)
-        {
-            parts.push(
-                [0x89, 0xc2],                                    // mov edx, eax
-                [0x81, 0xea, ...dword(low)],                     // sub edx, low
-                [0x81, 0xfa, ...dword((high - low) >>> 0)],      // cmp edx, high-low
-                { jcc: 0x76, to: `within${index}` });            // jbe within
-        }
-        parts.push(
-            { jcc: 0xeb, to: 'out', near: true },                // jmp out
-            { label: `within${index}` });
-    });
-    if (shape.refusedWhen)
-    {
-        const { arg, equals, flagsOf, mask } = shape.refusedWhen;
-        parts.push(
-            [0x81, 0x7c, 0x24, at(arg), ...dword(equals)],       // cmp dword [esp+arg], equals
-            { jcc: 0x75, to: 'paired' },                         // jne paired
-            [0xf7, 0x44, 0x24, at(flagsOf), ...dword(mask)],     // test dword [esp+flags], mask
-            { jcc: 0x75, to: 'out', near: true },                // jnz out
-            { label: 'paired' });
-    }
-    if (shape.span !== undefined && shape.count)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, at(shape.span)],                  // mov eax, [esp+start]
-            [0x03, 0x44, 0x24, at(shape.count.arg)],             // add eax, [esp+count]
-            { jcc: 0x72, to: 'out', near: true },                // jc out
-            [0x3d, ...dword(shape.count.most)],                  // cmp eax, most
-            { jcc: 0x77, to: 'out', near: true });               // ja out
-    }
-    if (shape.below)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, at(shape.below.arg)],             // mov eax, [esp+arg]
-            [0x3b, 0x81, ...dword(shape.below.word)],            // cmp eax, [ecx+word]
-            { jcc: 0x73, to: 'out', near: true });               // jae out
-    }
-    usagesOf(shape).forEach(({ arg, mask, nullable = false }, index)=>{
-        parts.push(
-            [0x8b, 0x44, 0x24, at(arg)],                         // mov eax, [esp+arg]
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: nullable ? `usable${index}` : 'out', near: true }, // jz usable / out
-            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            // test dword [eax + DESC + Usage], mask
-            [0xf7, 0x80, ...dword(SURFACE.DESC + 8), ...dword(mask)],
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            { label: `usable${index}` });
-    });
-    if (shape.token !== undefined)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, at(shape.token)],                 // mov eax, [esp+token]
-            [0x3d, ...dword(SHADOW.STATE_BLOCK_TOKENS)],         // cmp eax, 256
-            { jcc: 0x73, to: 'out', near: true },                // jae out
-            [0x0f, 0xa3, 0x81, ...dword(SHADOW.STATE_BLOCKS)],   // bt [ecx+STATE_BLOCKS], eax
-            { jcc: 0x73, to: 'out', near: true });               // jnc out: none held
-    }
-    if (shape.vertexRange)
-    {
-        const { buffer, start, count } = shape.vertexRange;
-        parts.push(
-            [0x8b, 0x44, 0x24, at(buffer)],                      // mov eax, [esp+buffer]
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x83, 0x78, VERTEX_BUFFER7.LOCKED, 0x00],           // cmp dword [eax+LOCKED], 0
-            { jcc: 0x75, to: 'out', near: true },                // jne out
-            [0x8b, 0x54, 0x24, at(start)],                       // mov edx, [esp+start]
-            [0x03, 0x54, 0x24, at(count)],                       // add edx, [esp+count]
-            { jcc: 0x72, to: 'out', near: true },                // jc out
-            [0x3b, 0x50, VERTEX_BUFFER7.VERTICES],               // cmp edx, [eax+VERTICES]
-            { jcc: 0x77, to: 'out', near: true });               // ja out
-    }
-    if (shape.flagNeeds)
-    {
-        const { arg, pairs } = shape.flagNeeds;
-        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
-        pairs.forEach(([flag, bits], index)=>{
-            parts.push(
-                [0xa9, ...dword(flag)],                          // test eax, flag
-                { jcc: 0x74, to: `unflagged${index}`, near: true }, // jz unflagged
-                [0x8b, 0x91, ...dword(SHADOW.DRAWABLE)],         // mov edx, [ecx+DRAWABLE]
-                [0x81, 0xe2, ...dword(bits)],                    // and edx, bits
-                [0x81, 0xfa, ...dword(bits)],                    // cmp edx, bits
-                { jcc: 0x75, to: 'out', near: true },            // jne out
-                { label: `unflagged${index}` });
-        });
-    }
-    if (shape.validated)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, at(shape.validated.arg)],         // mov eax, [esp+arg]
-            [0xa9, ...dword(shape.validated.when)],              // test eax, when
-            { jcc: 0x74, to: 'validated', near: true });         // jz validated
-        const table = SHADOW.VALIDATED
-            + (shape.validated.table ?? 0) * SHADOW.VALIDATED_SLOTS * 4;
-        for (let index = 0; index < SHADOW.VALIDATED_SLOTS; index++)
-        {
-            parts.push(
-                [0x3b, 0x81, ...dword(table + 4 * index)],       // cmp eax, [ecx+slot]
-                { jcc: 0x74, to: 'validated', near: true });     // je validated
-        }
-        parts.push(
-            { jcc: 0xeb, to: 'out', near: true },                // jmp out
-            { label: 'validated' });
-    }
-    return parts;
-}
-
-/**
- * A method a command routine takes: what the record holds, how much of what
- * the method reads through a pointer is copied with it, and what else the
- * routine does in the guest.
- *
- * @typedef {Object} CommandShape
- * @property {number} slot  the method's slot, which names it to the host
- * @property {number} args  its arguments, `this` not counted
- * @property {number} [pointer]  the argument pointing at what the method reads
- * @property {number} [bytes]  how many bytes that is, or else
- * @property {{ arg: number, shift: number, most: number }} [count]  the argument
- *     counting its elements, `1 << shift` bytes each, at most `most` of them
- * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
- *     or the vertices a draw by pointer names -- `count` of them, a whole
- *     number of primitives of `type` -- each as wide as `fvf` is in
- *     `SHADOW.FVF_STRIDES`: at most `most` bytes
- * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
- *     or the vertices a draw's primitives span, of the type and count those
- *     arguments give, `stride` bytes each: at most `most` bytes
- * @property {boolean} [self]  the record's first argument is the object's own
- *     pointer -- a method of an object of the device's that is not the device
- * @property {boolean} [stale]  the call may change what the block mirrors
- *     (`FLAG_STALE`)
- * @property {boolean} [staleDraws]  and what a draw's checks read too
- *     (`FLAG_DRAW_STALE`)
- * @property {'empty' | 'any'} [nullable]  the pointer may be null, and is
- *     then recorded as null with nothing copied: with a count of zero alone
- *     ('empty'), or whatever the count ('any')
- * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
- *     } [mirror]  guest code run first, with the block in ECX, that keeps what
- *     a getter in the guest reads current; it may leave for the host through
- *     `out`, and leaves ECX and the stack as it found them
- * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
- *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
- * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]  arguments
- *     the device takes only within ranges, inclusive and unsigned; any other is the host's
- * @property {{ arg: number, equals: number, flagsOf: number, mask: number }} [refusedWhen]
- *     a pair the device refuses: an argument of one value while another has a bit of
- *     `mask` -- the host's
- * @property {number} [span]  the argument that starts what `count` counts: the
- *     two together may not reach past `count.most`
- * @property {{ arg: number, word: number }} [below]  an argument the device takes
- *     only below a word of the block the host keeps
- * @property {{ arg: number, when: number, table?: number }} [validated]  an argument
- *     the device takes or not by its value alone: one with a bit of `when` is
- *     taken here only if the host has seen the device take it, in that table
- *     of `SHADOW.VALIDATED`
- * @property {{ arg: number, mask: number, nullable?: boolean }
- *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]  an
- *     argument the device takes only as a surface whose usage has a bit of `mask`, read
- *     from the surface's block (`SURFACE`, the word after its interface): a surface
- *     with no block is the host's, and so is a null one unless `nullable`; or several
- * @property {number} [token]  an argument the device takes only as the token of a
- *     state block it holds (`SHADOW.STATE_BLOCKS`): with `stale`, the block's
- *     apply is one a draw waits for the host after when the block holds what
- *     its checks read (`SHADOW.STATE_BLOCK_DRAWS`)
- * @property {{ buffer: number, start: number, count: number }} [vertexRange]  a Direct3D 7
- *     vertex buffer argument and the range of its vertices a draw reads: taken only for a
- *     buffer with a block (`VERTEX_BUFFER7`), not locked, holding the range whole
- * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]  flags of
- *     an argument the device takes only with `DRAW` bits: for each pair, an argument
- *     with a bit of the first needs every bit of the second
- * @property {number} [needs]  the `DRAW` bits the device must have for the call
- * @property {number} [refuses]  and those it must not
- * @property {boolean} [fresh]  the call reads what a state block applied in the
- *     ring may have changed (`FLAG_DRAW_STALE`), and waits for the host when it may have
- * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
- *     what it reads waits for the host to make it
- * @property {boolean} [thread]  a function rather than a method: no `this`, and
- *     the block is the calling thread's (`threadPrologue`)
- * @property {'rect' | 'box'} [dirty]  a texture's AddDirtyRect or AddDirtyBox, its
- *     object's block a texture's (`dirtyPrologue`)
- */
-
-/**
- * A call as guest code that writes it into the device's command ring for the
- * host to make at its next entry -- the arguments, and a copy of what a
- * pointer argument points at, with the pointer made to point at the copy.
- * The program is told D3D_OK; what the host would refuse it refuses then,
- * and reports. A null pointer, a count past `most`, a full ring, a device
- * without one and whatever `mirror` declines are the host's now.
- *
- * Space is taken with `lock cmpxchg` on the head, so two threads never take
- * the same bytes, and a record counts once its length -- written last -- is
- * there: a host entry between any two instructions of a routine reads the
- * records before it and stops at one not yet whole. A device's routine runs
- * under the device's lock (`SHADOW.HELD`), its checks and mirrors with it,
- * and leaves for the host when it finds the lock held; a function's runs on
- * the calling thread's own context and takes none.
- *
- *     (prologue; no ring: early)  (the device's lock, or early)
- *     ...  bits  ...  mirror  ...  pointer and count checks (out: the lock let go)
- *     push ebx; push esi; push edi
- *     mov ebx, ecx                ; the block
- *     lea esi, [edx + ARGS + 4*args]   ; the record's length; EDX the copy's
- *   reserve:
- *     mov eax, [ebx+COMMAND_HEAD]
- *     lea edi, [eax+esi]
- *     cmp edi, [ebx+COMMAND_BYTES]
- *     ja full
- *     lock cmpxchg [ebx+COMMAND_HEAD], edi
- *     jne reserve
- *     add eax, [ebx+COMMANDS]     ; the record
- *     mov edi, eax
- *     mov dword [edi], slot
- *     (each argument into [edi+ARGS+4*i]; the pointer as the copy's address)
- *     [mov esi, source; lea edi, [edi+ARGS+4*args]; mov ecx, edx; shr ecx, 2;
- *      rep movsd; mov edi, eax; lea esi, [edx + ARGS + 4*args]]
- *     mov [edi+BYTES], esi        ; whole
- *     [mov dword [ebx+DRAWS_PENDING], 1]
- *     mov dword [ebx+HELD], 0
- *     pop edi; pop esi; pop ebx
- *     xor eax, eax
- *     ret 4+4*args
- *   full:
- *     mov dword [ebx+HELD], 0
- *     pop edi; pop esi; pop ebx
- *     jmp slow
- *
- * @param {number} at @param {number} trap @param {CommandShape} shape
- * @returns {Uint8Array}
- */
-export function commandCode(at, trap, shape){
-    const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
-        draws = false, thread = false, self = false, stale = false, staleDraws = false,
-        nullable = false, fresh = false } = shape;
-    if (nullable && !count)
-    {
-        throw new Error('shadow: a pointer that may be null is counted by an argument');
-    }
-    const header = COMMAND.ARGS + 4 * args;
-    // A copy counted in bytes need not be whole dwords: the record is rounded
-    // up and the tail copied a byte at a time, never read past.
-    const ragged = count !== undefined && count.shift < 2;
-    /** ESI = the record's length, the copy's bytes in EDX: whole dwords, or rounded up. */
-    const recordLength = ragged
-        ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
-        : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
-    if (self && (thread || count || choose || vertices || shape.fvfVertices))
-    {
-        throw new Error('shadow: a record of the object itself copies no more than a structure');
-    }
-    if (shape.dirty && !self)
-    {
-        throw new Error('shadow: a dirty region is a call of the texture itself');
-    }
-    // What the routine pops: the record's arguments, the object's own pointer
-    // among them when it is the first.
-    const popped = self ? args - 1 : args;
-    // An argument's place on the stack, past the object's own when the record names it first.
-    const shift = self ? 1 : 0;
-    if (pointer >= 0 && !count && !choose && !vertices && !shape.fvfVertices
-        && (bytes <= 0 || (bytes & 3) !== 0))
-    {
-        throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
-    }
-    // Where argument i is on entry, and once three registers are pushed:
-    // past `this` for a method, at once for a function.
-    const entry = thread ? 4 : 8;
-    const pushed = entry + 12;
-    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
-    const parts = [
-        ...(thread ? threadPrologue('early')
-            : shape.dirty ? dirtyPrologue(shape.dirty, 'early')
-                : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH)),
-        [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
-        { jcc: 0x74, to: 'early' },                              // je early
-        { jcc: 0xeb, to: 'body' },                               // jmp body
-        { label: 'early' },
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'body' },
-        // A device's; a thread's own context (OpenGL) is no other thread's.
-        ...(thread ? [] : takeHeld(ECX, 'early')),
-        ...commandChecks(shape, argument=>entry + 4 * (argument - (self ? 1 : 0))),
-        ...mirror,
-    ];
-    if (pointer >= 0)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * (pointer - shift)],   // mov eax, [esp+entry+4p]
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
-    }
-    if (choose)
-    {
-        parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * choose.arg],          // mov eax, [esp+entry+4c]
-            [0xba, ...dword(choose.otherwise)]);                 // mov edx, otherwise
-        choose.cases.forEach(([value, size], index)=>parts.push(
-            [0x3d, ...dword(value)],                             // cmp eax, value
-            { jcc: 0x75, to: `case${index}` },                   // jne next
-            [0xba, ...dword(size)],                              // mov edx, size
-            { label: `case${index}` }));
-    }
-    else if (shape.fvfVertices)
-    {
-        // So many vertices as whole primitives of the type -- a point or
-        // more, an even number of two or more, two or more, a multiple of
-        // three, three or more -- each as wide as the format's entry in the
-        // block says; a format with none, or a copy past `most`, is the host's.
-        const { type, fvf, count: vertexCount, most } = shape.fvfVertices;
-        parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * type],                // mov eax, [esp+entry+4t]
-            [0x8b, 0x54, 0x24, entry + 4 * vertexCount],         // mov edx, [esp+entry+4c]
-            [0x85, 0xd2],                                        // test edx, edx
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
-            { jcc: 0x77, to: 'out', near: true },                // ja out
-            [0x83, 0xf8, 0x01],                                  // cmp eax, 1
-            { jcc: 0x74, to: 'counted', near: true },            // je counted: points
-            [0x83, 0xf8, 0x02],                                  // cmp eax, 2
-            { jcc: 0x75, to: 'notLines' },                       // jne notLines
-            [0xf6, 0xc2, 0x01],                                  // test dl, 1
-            { jcc: 0x75, to: 'out', near: true },                // jnz out: odd
-            { label: 'notLines' },
-            [0x83, 0xf8, 0x03],                                  // cmp eax, 3
-            { jcc: 0x77, to: 'notStrip' },                       // ja notStrip
-            [0x83, 0xfa, 0x02],                                  // cmp edx, 2
-            { jcc: 0x72, to: 'out', near: true },                // jb out
-            { jcc: 0xeb, to: 'counted', near: true },            // jmp counted
-            { label: 'notStrip' },
-            [0x83, 0xf8, 0x06],                                  // cmp eax, 6
-            { jcc: 0x77, to: 'out', near: true },                // ja out: no such type
-            [0x83, 0xfa, 0x03],                                  // cmp edx, 3
-            { jcc: 0x72, to: 'out', near: true },                // jb out
-            [0x83, 0xf8, 0x04],                                  // cmp eax, 4
-            { jcc: 0x75, to: 'counted', near: true },            // jne counted
-            // A multiple of three: n times the inverse of three modulo 2^32 is
-            // at most a third of the range exactly when it is.
-            [0x69, 0xc2, ...dword(0xaaaaaaab)],                  // imul eax, edx, 0xaaaaaaab
-            [0x3d, ...dword(0x55555555)],                        // cmp eax, 0x55555555
-            { jcc: 0x77, to: 'out', near: true },                // ja out
-            { label: 'counted' },
-            [0x8b, 0x44, 0x24, entry + 4 * fvf]);                // mov eax, [esp+entry+4f]
-        for (let index = 0; index < SHADOW.FVF_STRIDE_PAIRS; index++)
-        {
-            parts.push(
-                [0x3b, 0x81, ...dword(SHADOW.FVF_STRIDES + 8 * index)], // cmp eax, [ecx+fvf i]
-                { jcc: 0x75, to: `stride${index}` },             // jne next
-                [0x8b, 0x81, ...dword(SHADOW.FVF_STRIDES + 8 * index + 4)], // mov eax, [ecx+width]
-                { jcc: 0xeb, to: 'strided', near: true },        // jmp strided
-                { label: `stride${index}` });
-        }
-        parts.push(
-            { jcc: 0xeb, to: 'out', near: true },                // jmp out: a format not drawn yet
-            { label: 'strided' },
-            [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0xa8, 0x03],                                        // test al, 3
-            { jcc: 0x75, to: 'out', near: true },                // jnz out
-            [0x3d, ...dword(most)],                              // cmp eax, most
-            { jcc: 0x77, to: 'out', near: true },                // ja out
-            [0x0f, 0xaf, 0xd0],                                  // imul edx, eax
-            [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
-            { jcc: 0x77, to: 'out', near: true });               // ja out
-    }
-    else if (vertices)
-    {
-        // How many vertices the primitives span, by type (`vertexCountOf`),
-        // times the stride: an unknown type, no primitives, a stride that is
-        // not whole dwords or a copy past `most` bytes is the host's.
-        /** @type {[number, number[][]][]} */
-        const steps = [
-            [1, []],                                             // POINTLIST: n
-            [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
-            [3, [[0x42]]],                                       // LINESTRIP: inc edx
-            [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
-            [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
-            [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
-        ];
-        parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * vertices.type],       // mov eax, [esp+entry+4t]
-            [0x8b, 0x54, 0x24, entry + 4 * vertices.count],      // mov edx, [esp+entry+4c]
-            [0x85, 0xd2],                                        // test edx, edx
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
-            { jcc: 0x77, to: 'out', near: true },                // ja out
-            ...steps.flatMap(([type], index)=>[
-                [0x83, 0xf8, type],                              // cmp eax, type
-                { jcc: 0x74, to: `type${index}` }]),             // je typeN
-            { jcc: 0xeb, to: 'out', near: true },                // jmp out
-            ...steps.flatMap(([, step], index)=>[
-                { label: `type${index}` },
-                ...step,
-                { jcc: 0xeb, to: 'stride', near: true }]),       // jmp stride
-            { label: 'stride' },
-            [0x8b, 0x44, 0x24, entry + 4 * vertices.stride],     // mov eax, [esp+entry+4s]
-            [0xa8, 0x03],                                        // test al, 3
-            { jcc: 0x75, to: 'out', near: true },                // jnz out
-            [0x3d, ...dword(vertices.most)],                     // cmp eax, most
-            { jcc: 0x77, to: 'out', near: true },                // ja out
-            [0x0f, 0xaf, 0xd0],                                  // imul edx, eax
-            [0x85, 0xd2],                                        // test edx, edx
-            { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
-            { jcc: 0x77, to: 'out', near: true });               // ja out
-    }
-    else if (count)
-    {
-        parts.push(
-            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
-            [0x85, 0xd2],                                        // test edx, edx
-            { jcc: 0x74, to: 'out' },                            // jz out
-            [0x81, 0xfa, ...dword(count.most)],                  // cmp edx, most
-            { jcc: 0x77, to: 'out' },                            // ja out
-            [0xc1, 0xe2, count.shift]);                          // shl edx, shift
-    }
-    else
-    {
-        parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
-    }
-    if (nullable === 'empty' && count)
-    {
-        // No pointer is no elements: a count with it is the host's to refuse.
-        parts.push(
-            { jcc: 0xeb, to: 'take' },                           // jmp take
-            { label: 'none' },
-            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
-            [0x85, 0xd2],                                        // test edx, edx
-            { jcc: 0x75, to: 'out' });                           // jnz out
-    }
-    else if (nullable)
-    {
-        // No pointer copies nothing, whatever the count says.
-        parts.push(
-            { jcc: 0xeb, to: 'take' },                           // jmp take
-            { label: 'none' },
-            [0x31, 0xd2]);                                       // xor edx, edx
-    }
-    parts.push(
-        { jcc: 0xeb, to: 'take' },                               // jmp take
-        { label: 'out' },
-        ...(thread ? [] : [letHeldGo(ECX),                       // mov dword [ecx+HELD], 0
-            countLeft(ECX, SHADOW.LEFT_CHECKS)]),                // lock inc dword [ecx+LEFT_CHECKS]
-        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
-        { label: 'take' },
-        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
-        [0x89, 0xcb],                                            // mov ebx, ecx
-        ...recordLength,
-        { label: 'reserve' },
-        [0x8b, 0x83, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [ebx+disp]
-        [0x8d, 0x3c, 0x30],                                      // lea edi, [eax+esi]
-        [0x3b, 0xbb, ...dword(SHADOW.COMMAND_BYTES)],            // cmp edi, [ebx+disp]
-        { jcc: 0x77, to: 'full', near: true },                   // ja full
-        [0xf0, 0x0f, 0xb1, 0xbb, ...dword(SHADOW.COMMAND_HEAD)], // lock cmpxchg [ebx+disp], edi
-        { jcc: 0x75, to: 'reserve' },                            // jne reserve
-        [0x03, 0x83, ...dword(SHADOW.COMMANDS)],                 // add eax, [ebx+disp]
-        [0x89, 0xc7],                                            // mov edi, eax
-        [0xc7, 0x07, ...dword(slot)]);                           // mov dword [edi], slot
-    for (let arg = 0; arg < args; arg++)
-    {
-        if (arg === pointer && nullable)
-        {
-            parts.push(
-                [0x8b, 0x44, 0x24, pushed + 4 * (arg - shift)],  // mov eax, [esp+pushed+4p]
-                [0x85, 0xc0],                                    // test eax, eax
-                { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
-                [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
-                { label: 'null' });
-        }
-        else
-        {
-            parts.push(arg === pointer
-                ? [0x8d, 0x87, ...dword(header)]                 // lea eax, [edi+header]
-                : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))]); // mov eax, [esp+..]
-        }
-        parts.push([0x89, 0x47, COMMAND.ARGS + 4 * arg]);        // mov [edi+8+4i], eax
-    }
-    if (pointer >= 0)
-    {
-        parts.push(
-            [0x89, 0xf8],                                        // mov eax, edi
-            [0x8b, 0x74, 0x24, pushed + 4 * (pointer - shift)],  // mov esi, [esp+pushed+4p]
-            [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
-            [0x89, 0xd1],                                        // mov ecx, edx
-            [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
-            [0xf3, 0xa5],                                        // rep movsd
-            ...(ragged ? [
-                [0x89, 0xd1],                                    // mov ecx, edx
-                [0x83, 0xe1, 0x03],                              // and ecx, 3
-                [0xf3, 0xa4],                                    // rep movsb
-            ] : []),
-            [0x89, 0xc7],                                        // mov edi, eax
-            ...recordLength);
-    }
-    // The length last, with `xchg`: an atomic store on several executors, so a
-    // host that reads it with an atomic load finds the record's words, and the
-    // bytes the program wrote before the call, there with it.
-    parts.push([0x87, 0x77, COMMAND.BYTES]);                     // xchg [edi+4], esi
-    if (draws)
-    {
-        parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
-    }
-    if (stale && shape.token !== undefined)
-    {
-        // As the token's block says: what the draws' checks read too, or not.
-        parts.push(
-            [0x8b, 0x44, 0x24, pushed + 4 * shape.token],        // mov eax, [esp+token]
-            [0x0f, 0xa3, 0x83, ...dword(SHADOW.STATE_BLOCK_DRAWS)], // bt [ebx+disp], eax
-            [0x19, 0xc0],                                        // sbb eax, eax
-            [0x83, 0xe0, FLAG_DRAW_STALE],                       // and eax, 4
-            [0x83, 0xc8, FLAG_STALE],                            // or eax, 2
-            [0xf0, 0x09, 0x03]);                                 // lock or [ebx], eax
-    }
-    else if (stale)
-    {
-        parts.push([0xf0, 0x83, 0x0b,                            // lock or dword [ebx], 2|4
-            staleDraws ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE]);
-    }
-    parts.push(
-        ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
-        [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
-        { label: 'full' },
-        ...(thread ? [] : [letHeldGo(EBX),                       // mov dword [ebx+HELD], 0
-            countLeft(EBX, SHADOW.LEFT_FULL)]),                  // lock inc dword [ebx+LEFT_FULL]
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
-        { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
-    return routine(at, trap, parts);
-}
-
-/**
- * What a command routine for SetRenderState keeps in the block for
- * GetRenderState in the guest: the value, for a state the block holds; any
- * other state is the host's.
- */
-export const RENDER_STATE_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],                 // cmp eax, 256
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)],     // bt [ecx+disp], eax
-    { jcc: 0x73, to: 'out', near: true },                        // jnc out: one the device refuses
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.RENDER_STATES)],          // mov [ecx+eax*4+disp], edx
-]);
-
-/** The same for SetTransform: the matrix into its type's slot. */
-export const TRANSFORM_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
-    { jcc: 0x72, to: 'low' },                                    // jb low
-    [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],                   // sub eax, 232
-    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
-    { jcc: 0x72, to: 'out', near: true },                        // jb out
-    [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                    // cmp eax, 28
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    { jcc: 0xeb, to: 'slot' },                                   // jmp slot
-    { label: 'low' },
-    // A type below WORLD that Direct3D 8 refuses is the host's to refuse.
-    [0xba, ...dword(ANSWERED_TRANSFORMS)],                       // mov edx, imm32
-    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
-    { jcc: 0x73, to: 'out', near: true },                        // jnc out
-    { label: 'slot' },
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
-    [0x85, 0xd2],                                                // test edx, edx
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x56, 0x57],                                                // push esi; push edi
-    [0x89, 0xd6],                                                // mov esi, edx
-    [0x89, 0xc7],                                                // mov edi, eax
-    [0xc1, 0xe7, 0x06],                                          // shl edi, 6
-    [0x8d, 0xbc, 0x39, ...dword(SHADOW.TRANSFORMS)],             // lea edi, [ecx+edi+disp]
-    [0x89, 0xca],                                                // mov edx, ecx
-    [0xb9, ...dword(16)],                                        // mov ecx, 16
-    [0xf3, 0xa5],                                                // rep movsd
-    [0x89, 0xd1],                                                // mov ecx, edx
-    [0x5f, 0x5e],                                                // pop edi; pop esi
-]);
-
-/**
- * The same for Direct3D 7's SetTransform: its types are its own -- WORLD 1,
- * WORLD1..3 4..6, VIEW 2, PROJECTION 3, TEXTURE0..7 16..23 -- and each goes
- * into the slot of its number, as the shadow reads them back
- * (`transformType`); any other type is the host's to refuse.
- */
-export const TRANSFORM_MIRROR_7 = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0xba, ...dword(TRANSFORMS_7)],                              // mov edx, imm32
-    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
-    { jcc: 0x73, to: 'out', near: true },                        // jnc out
-    ...TRANSFORM_MIRROR.slice(TRANSFORM_MIRROR.findIndex(part=>'label' in part
-        && part.label === 'slot') + 1),
-]);
-
-/** The same for SetViewport: the six dwords into the block. */
-export const VIEWPORT_MIRROR = Object.freeze([
-    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
-    [0x85, 0xd2],                                                // test edx, edx
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x56, 0x57],                                                // push esi; push edi
-    [0x89, 0xd6],                                                // mov esi, edx
-    [0x8d, 0xb9, ...dword(SHADOW.VIEWPORT)],                     // lea edi, [ecx+disp]
-    [0x89, 0xca],                                                // mov edx, ecx
-    [0xb9, ...dword(6)],                                         // mov ecx, 6
-    [0xf3, 0xa5],                                                // rep movsd
-    [0x89, 0xd1],                                                // mov ecx, edx
-    [0x5f, 0x5e],                                                // pop edi; pop esi
-]);
-
-/**
- * The same for a SetRenderTarget, after its checks have found the surface a
- * target with a block: the viewport a new target brings -- all of it, depths
- * 0 and 1 -- and the target's size, from the surface's description. The
- * surface is the argument at `[esp+at]`: Direct3D 9's second, 8's first.
- * The target GetRenderTarget answers with is the host's to say again: the
- * routine knows the pointer but not the word the surface counts in.
- *
- * @param {number} at
- */
-export const renderTargetMirror = at=>Object.freeze([
-    [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfe],          // and dword [ecx+disp], ~1
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
-    [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
-    [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 8)],                 // mov [ecx+viewport W], edx
-    [0x89, 0x91, ...dword(SHADOW.TARGET_WIDTH)],                 // mov [ecx+target W], edx
-    [0x8b, 0x90, ...dword(SURFACE.DESC + 28)],                   // mov edx, [eax+Height]
-    [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 12)],                // mov [ecx+viewport H], edx
-    [0x89, 0x91, ...dword(SHADOW.TARGET_HEIGHT)],                // mov [ecx+target H], edx
-    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT), ...dword(0)],        // X 0
-    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 4), ...dword(0)],    // Y 0
-    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 16), ...dword(0)],   // MinZ 0
-    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
-]);
-export const RENDER_TARGET_MIRROR = renderTargetMirror(0x0c);
-
-/** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
-const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
-/** `and dword [ecx+DRAWABLE], ~bits`. @param {number} bits */
-const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
-
-/**
- * What Direct3D 9's StretchRect has to be for the guest to take it: no
- * rectangles, so each is its surface whole; two surfaces with blocks, not the
- * same one and not levels of one texture, both render targets in the default
- * pool; and a device that records for one drawing elsewhere (`ELSEWHERE`),
- * which copies or stretches between two such surfaces on the GPU, whatever
- * their sizes and formats. The filter is the routine's `within`.
- */
-export const STRETCH_GUARD = Object.freeze([
-    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out: a source rectangle
-    [0x83, 0x7c, 0x24, 0x14, 0x00],                              // cmp dword [esp+20], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out: a target rectangle
-    [0x83, 0xb9, ...dword(SHADOW.ELSEWHERE), 0x00],              // cmp dword [ecx+disp], 0
-    { jcc: 0x74, to: 'out', near: true },                        // je out
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the source
-    [0x85, 0xc0],                                                // test eax, eax
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
-    [0x85, 0xc0],                                                // test eax, eax
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]: the target
-    [0x85, 0xd2],                                                // test edx, edx
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x52, 0x04],                                          // mov edx, [edx+4]: its block
-    [0x85, 0xd2],                                                // test edx, edx
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x39, 0xd0],                                                // cmp eax, edx
-    { jcc: 0x74, to: 'out', near: true },                        // je out: the same surface
-    [0x83, 0x78, SURFACE.DESC + 12, 0x00],                       // cmp dword [eax+Pool], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out
-    [0x83, 0x7a, SURFACE.DESC + 12, 0x00],                       // cmp dword [edx+Pool], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out
-    [0xf7, 0x40, SURFACE.DESC + 8, ...dword(D3DUSAGE_RENDERTARGET)], // test [eax+Usage], RT
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0xf7, 0x42, SURFACE.DESC + 8, ...dword(D3DUSAGE_RENDERTARGET)], // test [edx+Usage], RT
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x40, SURFACE.CONTAINER],                             // mov eax, [eax+CONTAINER]
-    [0x85, 0xc0],                                                // test eax, eax
-    { jcc: 0x74, to: 'stretchApart' },                           // jz apart
-    [0x3b, 0x42, SURFACE.CONTAINER],                             // cmp eax, [edx+CONTAINER]
-    { jcc: 0x74, to: 'out', near: true },                        // je out: one texture
-    { label: 'stretchApart' },
-]);
-
-/** Where `STRETCH_GUARD` loads the target, and where it reads the source's texture. */
-const STRETCH_TARGET = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
-    && part[1] === 0x54);
-const STRETCH_CONTAINER = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
-    && part[1] === 0x40 && part[2] === SURFACE.CONTAINER);
-
-/**
- * What Direct3D 8's CopyRects has to be for the guest to take it, as Direct3D
- * 9's StretchRect (`STRETCH_GUARD`): no rectangles, so the source travels
- * whole; two render targets in the default pool with blocks, not the same one
- * and not levels of one texture, of one format and one size -- a copy cannot
- * stretch -- and a device that records for one drawing elsewhere, which
- * copies between them on the GPU.
- */
-export const COPY_GUARD_8 = Object.freeze([
-    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out: rectangles
-    ...STRETCH_GUARD.slice(4, STRETCH_TARGET),                    // ELSEWHERE, the source
-    [0x8b, 0x54, 0x24, 0x14],                                    // mov edx, [esp+20]: the target
-    ...STRETCH_GUARD.slice(STRETCH_TARGET + 1, STRETCH_CONTAINER), // its block, pools, usages
-    // One format and one size, a word at a time: the source's block again in EAX.
-    ...[0, 24, 28].flatMap(offset=>[
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x8b, 0x40, 0x04],                                      // mov eax, [eax+4]
-        [0x8b, 0x40, SURFACE.DESC + offset],                     // mov eax, [eax+DESC+o]
-        [0x3b, 0x42, SURFACE.DESC + offset],                     // cmp eax, [edx+DESC+o]
-        { jcc: 0x75, to: 'out', near: true },                    // jne out
-    ]),
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]
-    [0x8b, 0x40, SURFACE.CONTAINER],                             // mov eax, [eax+CONTAINER]
-    [0x85, 0xc0],                                                // test eax, eax
-    { jcc: 0x74, to: 'copyApart' },                              // jz apart
-    [0x3b, 0x42, SURFACE.CONTAINER],                             // cmp eax, [edx+CONTAINER]
-    { jcc: 0x74, to: 'out', near: true },                        // je out: one texture
-    { label: 'copyApart' },
-]);
-
-/**
- * The same for a depth surface set -- Direct3D 9's SetDepthStencilSurface,
- * 8's SetRenderTarget -- after its checks have found the surface a depth
- * surface with a block, or none: whether a depth surface is set and whether
- * it holds a stencil, which Clear's checks read; and that the surface
- * GetDepthStencilSurface answers with is the host's to say again. The surface
- * is the argument at `[esp+at]`.
- *
- * @param {number} at
- */
-export const depthStencilMirror = at=>Object.freeze([
-    [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfd],          // and dword [ecx+disp], ~2
-    unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
-    [0x85, 0xc0],                                                // test eax, eax
-    { jcc: 0x74, to: 'depth' },                                  // jz depth
-    markDrawable(DRAW.DEPTH),
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
-    [0x81, 0xb8, ...dword(SURFACE.DESC), ...dword(D3DFMT_D24S8)], // cmp [eax+Format], D24S8
-    { jcc: 0x75, to: 'depth' },                                  // jne depth
-    markDrawable(DRAW.STENCIL),
-    { label: 'depth' },
-]);
-export const DEPTH_STENCIL_MIRROR = depthStencilMirror(0x08);
-
-/**
- * The same for SetSamplerState: the value into its sampler's slot. A sampler
- * or a type past the block is the host's.
- */
-export const SAMPLER_STATE_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                      // cmp eax, 16
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
-    [0x81, 0xfa, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],         // cmp edx, 16
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0xc1, 0xe0, 0x04],                                          // shl eax, 4
-    [0x01, 0xd0],                                                // add eax, edx
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.SAMPLER_STATES)],         // mov [ecx+eax*4+disp], edx
-]);
-
-/**
- * What a viewport must be for Direct3D 9 to take it: a width and a height, and
- * a corner that is not negative. It may reach past the target.
- */
-export const VIEWPORT_GUARD_9 = Object.freeze([
-    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
-    [0x85, 0xd2],                                                // test edx, edx
-    { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x83, 0x3a, 0x00],                                          // cmp dword [edx], 0
-    { jcc: 0x7c, to: 'out', near: true },                        // jl out
-    [0x83, 0x7a, 0x04, 0x00],                                    // cmp dword [edx+4], 0
-    { jcc: 0x7c, to: 'out', near: true },                        // jl out
-    [0x83, 0x7a, 0x08, 0x00],                                    // cmp dword [edx+8], 0
-    { jcc: 0x74, to: 'out', near: true },                        // je out
-    [0x83, 0x7a, 0x0c, 0x00],                                    // cmp dword [edx+12], 0
-    { jcc: 0x74, to: 'out', near: true },                        // je out
-]);
-
-/** And for Direct3D 8, which takes only a viewport within the render target. */
-export const VIEWPORT_GUARD_8 = Object.freeze([
-    ...VIEWPORT_GUARD_9,
-    [0x8b, 0x42, 0x08],                                          // mov eax, [edx+8]
-    [0x03, 0x02],                                                // add eax, [edx]
-    { jcc: 0x72, to: 'out', near: true },                        // jc out
-    [0x3b, 0x81, ...dword(SHADOW.TARGET_WIDTH)],                 // cmp eax, [ecx+disp]
-    { jcc: 0x77, to: 'out', near: true },                        // ja out
-    [0x8b, 0x42, 0x0c],                                          // mov eax, [edx+12]
-    [0x03, 0x42, 0x04],                                          // add eax, [edx+4]
-    { jcc: 0x72, to: 'out', near: true },                        // jc out
-    [0x3b, 0x81, ...dword(SHADOW.TARGET_HEIGHT)],                // cmp eax, [ecx+disp]
-    { jcc: 0x77, to: 'out', near: true },                        // ja out
-]);
-
-/**
- * What the routines that change the state a draw needs keep in the block for
- * the draws' routines (`SHADOW.DRAWABLE`): the same answer the device would
- * give, from the arguments the call carries. The host writes what the device
- * holds after each of its own entries, so a call it made is accounted for too.
- */
-export const DRAWABLE_MIRRORS = Object.freeze({
-    /** BeginScene: in a scene. */
-    BeginScene: Object.freeze([markDrawable(DRAW.SCENE)]),
-    /** EndScene: out of it. */
-    EndScene: Object.freeze([unmarkDrawable(DRAW.SCENE)]),
-    /**
-     * Direct3D 9's SetFVF: no format changes nothing; any other is a format a
-     * draw reads if it has a position.
-     */
-    SetFVF: Object.freeze([
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'drawn' },                              // jz drawn
-        unmarkDrawable(DRAW.DECLARED),
-        [0xa8, 0x0e],                                            // test al, XYZ|XYZRHW|...
-        { jcc: 0x74, to: 'drawn' },                              // jz drawn
-        markDrawable(DRAW.DECLARED),
-        { label: 'drawn' },
-    ]),
-    /** SetVertexDeclaration: a declaration is one a draw reads, none is none. */
-    SetVertexDeclaration: Object.freeze([
-        unmarkDrawable(DRAW.DECLARED),
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
-        { jcc: 0x74, to: 'drawn' },                              // je drawn
-        markDrawable(DRAW.DECLARED),
-        { label: 'drawn' },
-    ]),
-    /**
-     * Direct3D 8's SetVertexShader: a shader's handle, or a format with a
-     * position, is something a draw reads.
-     */
-    SetVertexShader8: Object.freeze([
-        unmarkDrawable(DRAW.DECLARED),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0xa9, ...dword(D3DFVF_RESERVED0)],                      // test eax, RESERVED0
-        { jcc: 0x75, to: 'declared' },                           // jnz declared
-        [0xa8, 0x0e],                                            // test al, 0x0e
-        { jcc: 0x74, to: 'drawn' },                              // jz drawn
-        { label: 'declared' },
-        markDrawable(DRAW.DECLARED),
-        { label: 'drawn' },
-    ]),
-    /**
-     * Direct3D 9's SetStreamSource: stream zero is drawn from when it has a
-     * buffer, a stride and an offset whose remainder past whole strides is a
-     * whole number of four bytes, where WebGPU can bind a vertex buffer.
-     */
-    SetStreamSource9: Object.freeze([
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
-        { jcc: 0x75, to: 'drawn' },                              // jne drawn
-        unmarkDrawable(DRAW.STREAM),
-        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
-        { jcc: 0x74, to: 'drawn' },                              // je drawn
-        [0x83, 0x7c, 0x24, 0x14, 0x00],                          // cmp dword [esp+20], 0
-        { jcc: 0x74, to: 'drawn' },                              // je drawn
-        [0x8b, 0x44, 0x24, 0x10],                                // mov eax, [esp+16]
-        [0x31, 0xd2],                                            // xor edx, edx
-        [0xf7, 0x74, 0x24, 0x14],                                // div dword [esp+20]
-        [0xf6, 0xc2, 0x03],                                      // test dl, 3
-        { jcc: 0x75, to: 'drawn' },                              // jnz drawn
-        markDrawable(DRAW.STREAM),
-        { label: 'drawn' },
-    ]),
-    /** Direct3D 8's: stream zero is drawn from when it has a buffer. */
-    SetStreamSource8: Object.freeze([
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
-        { jcc: 0x75, to: 'drawn' },                              // jne drawn
-        unmarkDrawable(DRAW.STREAM),
-        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
-        { jcc: 0x74, to: 'drawn' },                              // je drawn
-        markDrawable(DRAW.STREAM),
-        { label: 'drawn' },
-    ]),
-    /** SetIndices: an index buffer, or none. */
-    SetIndices: Object.freeze([
-        unmarkDrawable(DRAW.INDEXED),
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
-        { jcc: 0x74, to: 'drawn' },                              // je drawn
-        markDrawable(DRAW.INDEXED),
-        { label: 'drawn' },
-    ]),
-    /** A draw from the program's memory leaves stream zero unset; the indices stay. */
-    DrawPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM)]),
-});
-
-/**
- * The same for SetTextureStageState, given the types the version has: the
- * value into its stage's slot. A stage past the block, or a type it does not
- * hold, is the host's.
- *
- * @param {number} types
- */
-export const stageStateMirror = types=>[
-    [0x8b, 0x44, 0x24, 0x0c],                                    // mov eax, [esp+12]
-    [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],                 // cmp eax, 32
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0xba, ...dword(types)],                                     // mov edx, imm32
-    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
-    { jcc: 0x73, to: 'out', near: true },                        // jnc out
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x3d, ...dword(SHADOW.STAGE_COUNT)],                        // cmp eax, 8
-    { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0xc1, 0xe0, 0x05],                                          // shl eax, 5
-    [0x03, 0x44, 0x24, 0x0c],                                    // add eax, [esp+12]
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
-    [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],           // mov [ecx+eax*4+disp], edx
-];
 
 /**
  * @typedef {Object} ShadowBuffer
@@ -3472,9 +359,13 @@ export function settledAfter(shadow, call){
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
  * @property {(out: { viewport?: any }) => number} [GetViewport]
+ * @property {(out: { rect?: ScissorRect }) => number} [GetScissorRect]
+ * @property {(out: { parameters?: any }) => number} [GetCreationParameters]
  * @property {(sampler: number, type: number, out: { value?: number }) => number
  *     } [GetSamplerState]
  * @property {() => ShadowRingState} [ringState]
+ *
+ * @typedef {{ left: number, top: number, right: number, bottom: number }} ScissorRect
  *
  * @typedef {Object} ShadowRingState  What the command routines check a call against.
  * @property {number} drawable  the `DRAW` bits the device has
@@ -3512,9 +403,14 @@ export function settledAfter(shadow, call){
  *     May answer with the guest's own bytes rather than a copy; nothing here
  *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     A run of one byte value, with no buffer made for it: the command ring
+ *     started over with zeros.
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, for the words looked at on every call: a view
  *     per call was a measured share of a frame.
+ * @property {() => Uint8Array | null} [shared]  the RAM over shared memory, byte 0 at
+ *     address 0: the command ring read where it lies (`createCommandReader`)
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *     A dword swapped only if it holds `expected`, indivisible against the
  *     guest's threads on the process's other executors; answers what it held.
@@ -3525,7 +421,7 @@ export function settledAfter(shadow, call){
  *     handed for a surface and the word its count is kept in, zeros for one it
  *     was not handed or whose count the host keeps: the targets the guest's
  *     getters answer with (`SHADOW.TARGETS`)
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {string} [name]  The device interface a refusal names.
  * @property {ShadowCommands} [commands]  The methods the device's command
  *     ring carries (`commandCode`), and how the host makes one: a device
@@ -3691,7 +587,9 @@ export function createShadow(deps){
         // Two pages, so that a whole page is ours whichever boundary the
         // allocation straddles.
         const span = deps.allocate(bytes + PAGE);
-        return span === 0 ? 0 : (span + PAGE - 1) & ~(PAGE - 1);
+        // Unsigned: a block above 2 GB is a key of the host's maps, and the
+        // guest hands it back as the unsigned word it reads.
+        return span === 0 ? 0 : ((span + PAGE - 1) & ~(PAGE - 1)) >>> 0;
     };
     /** @param {number} bytes @returns {number} a span out of the resource pages, or 0 */
     const carve = bytes=>{
@@ -3928,6 +826,7 @@ export function createShadow(deps){
         {
             return;
         }
+        mirrorScissor();
         const words = new Uint32Array((SHADOW.LOCK_RING - SHADOW.DRAWABLE) / 4);
         words[0] = state.drawable;
         words[1] = state.targetWidth;
@@ -4001,6 +900,34 @@ export function createShadow(deps){
             deps.writeMemory(address + SHADOW.TARGETS, dwordsBytes([...target ?? [0, 0],
                 ...depth ?? [0, 0], (target ? 1 : 0) | (depth ? 2 : 0)]));
         }
+    };
+
+    /** Direct3D 9's scissor rectangle, as GetScissorRect answers it. */
+    const mirrorScissor = ()=>{
+        /** @type {{ rect?: { left: number, top: number, right: number, bottom: number } }} */
+        const out = {};
+        if (typeof device.GetScissorRect !== 'function' || device.GetScissorRect(out) !== 0
+            || !out.rect)
+        {
+            return;
+        }
+        const { left, top, right, bottom } = out.rect;
+        deps.writeMemory(address + SHADOW.SCISSOR, dwordsBytes([left >>> 0, top >>> 0,
+            right >>> 0, bottom >>> 0]));
+    };
+
+    /** What GetCreationParameters answers in the guest, once: it never changes. */
+    const mirrorCreation = ()=>{
+        /** @type {{ parameters?: any }} */
+        const held = {};
+        if (typeof device.GetCreationParameters !== 'function'
+            || device.GetCreationParameters(held) !== 0 || !held.parameters)
+        {
+            return;
+        }
+        const { AdapterOrdinal, DeviceType, hFocusWindow, BehaviorFlags } = held.parameters;
+        deps.writeMemory(address + SHADOW.CREATION, dwordsBytes([AdapterOrdinal >>> 0,
+            DeviceType >>> 0, hFocusWindow >>> 0, BehaviorFlags >>> 0]));
     };
 
     const mirror = ()=>{
@@ -4190,6 +1117,25 @@ export function createShadow(deps){
         }
     };
 
+    /** Ranges the guest unlocked, as `settle` met them: sent, or why not. */
+    const settled = { sent: 0, unknown: 0, released: 0, unattached: 0 };
+    /**
+     * A range the guest unlocked that reaches no buffer of the device: said
+     * as a loss, since a draw from it reads bytes never sent.
+     *
+     * @param {number} block @param {'unknown' | 'released'} why
+     */
+    const unsent = (block, why)=>{
+        if (readWord(block + BUFFER.TO) <= readWord(block + BUFFER.FROM))
+        {
+            return;
+        }
+        settled[why]++;
+        deps.divergence?.('IDirect3DVertexBuffer::Unlock', why === 'unknown'
+            ? 'a range unlocked in the guest is of a block this device does not know'
+            : 'a range unlocked in the guest is of a buffer its program released', 'loss');
+    };
+
     /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
@@ -4202,11 +1148,13 @@ export function createShadow(deps){
         const entry = blocks.get(block);
         if (!entry)
         {
+            unsent(block, 'unknown');
             return;
         }
         if (entry.buffer.refCount <= 0)
         {
             // Released by the program with an unlock still on the ring.
+            unsent(block, 'released');
             blocks.delete(block);
             return;
         }
@@ -4260,6 +1208,7 @@ export function createShadow(deps){
             }
             deps.writeMemory(block + BUFFER.FROM, new Uint8Array(12));
             markLent(block);
+            settled.sent++;
         }
         if (entry.hostLocked && !locked)
         {
@@ -4276,9 +1225,8 @@ export function createShadow(deps){
      * read it. A buffer is settled at its unlock, and a host entry while it
      * was still locked -- another call between two quads of one lock -- made
      * the ring's draws of it before what they read was there.
-     * ponytail: dynamic buffers and those the guest has unlocked once are
-     * looked at; any other held across an entry on its first lock is settled
-     * at its unlock.
+     * Dynamic buffers, those the guest has unlocked once, and those its lock
+     * routine named since the last look are looked at.
      */
     const settleHeld = ()=>{
         // Every lock taken and every one let go of is counted -- by the
@@ -4305,10 +1253,19 @@ export function createShadow(deps){
         }
         else if (taken > 0)
         {
+            // A buffer locked for the first time and drawn from before its
+            // unlock reads what is written so far, as one locked again does
+            // (Wine's d3d9 test_draw_mapped_buffer): from here on it is one
+            // the guest locks itself.
             const ring = readWords(address + SHADOW.LOCK_RING, SHADOW.LOCK_RING_CAPACITY);
             for (let n = heldSince; n !== locks; n = (n + 1) >>> 0)
             {
-                heldLocks.add(ring[n & (SHADOW.LOCK_RING_CAPACITY - 1)]);
+                const block = ring[n & (SHADOW.LOCK_RING_CAPACITY - 1)];
+                heldLocks.add(block);
+                if (blocks.has(block))
+                {
+                    lockedInGuest.add(block);
+                }
             }
         }
         heldSince = locks;
@@ -4416,6 +1373,8 @@ export function createShadow(deps){
     const flagWord = new Uint32Array(1);
     const flagBytes = new Uint8Array(flagWord.buffer);
 
+    /** What settleUnlocked read: the two counts, a word of room, the ring. */
+    const settledWords = new Uint32Array(3 + SHADOW.RING_CAPACITY);
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;
 
@@ -4428,16 +1387,21 @@ export function createShadow(deps){
      */
     const settleUnlocked = heads=>{
         const count = Math.min(heads, SHADOW.RING_CAPACITY);
-        const words = readWords(address + SHADOW.LOCK_CALLS, 3 + count).slice();
-        if (words.length < 3 + count)
+        const read = readWords(address + SHADOW.LOCK_CALLS, 3 + count);
+        if (read.length < 3 + count)
         {
             // No memory to read -- a machine that has stopped.
             return;
         }
+        // Copied before the writes below change what was read, into a buffer
+        // kept for it: this runs at every sync, and a copy each was garbage.
+        settledWords.set(read);
+        const words = settledWords;
         lockCalls = words[0];
         unlockCalls = words[1];
-        for (const buffer of words.subarray(3))
+        for (let at = 3; at < 3 + count; at++)
         {
+            const buffer = words[at];
             deps.writeMemory(buffer + BUFFER.QUEUED, ZERO_WORD);
             const level = levels.get(buffer);
             if (level)
@@ -4581,6 +1545,7 @@ export function createShadow(deps){
             if (address !== 0)
             {
                 deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
+                mirrorCreation();
                 mirror();
                 // Pages of its own, as the block's are: the routines write it
                 // on every command.
@@ -4589,7 +1554,8 @@ export function createShadow(deps){
                 {
                     placeCommandRing(address, commands, deps.writeMemory, ringBytes);
                     commandReader = createCommandReader({ block: address, ring: commands,
-                        readWord, readWords, writeMemory: deps.writeMemory,
+                        readWord, readWords, shared: deps.shared, writeMemory: deps.writeMemory,
+                        fillMemory: deps.fillMemory,
                         compareExchangeU32: deps.compareExchangeU32, loadU32: deps.loadU32,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
                         refuse: detail=>refuse(`${name}::commands`, detail),
@@ -4640,7 +1606,7 @@ export function createShadow(deps){
      * of it (`remirror`).
      *
      * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-     *     stageStates?: true | Iterable<number>, viewport?: boolean,
+     *     stageStates?: true | Iterable<number>, viewport?: boolean, scissor?: boolean,
      *     samplerStates?: Iterable<number> }} [touched]
      */
     const remirrorNow = touched=>{
@@ -4664,6 +1630,10 @@ export function createShadow(deps){
         if (touched.viewport)
         {
             mirrorViewport();
+        }
+        if (touched.scissor)
+        {
+            mirrorScissor();
         }
         for (const key of touched.samplerStates ?? [])
         {
@@ -4739,7 +1709,7 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     stageStates?: true | Iterable<number>, viewport?: boolean,
+         *     stageStates?: true | Iterable<number>, viewport?: boolean, scissor?: boolean,
          *     samplerStates?: Iterable<number> }} [touched]  stage states by
          *     (stage << 8) | type, or every one of them (true); sampler states
          *     by (sampler << 8) | type
@@ -4943,6 +1913,7 @@ export function createShadow(deps){
             deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
             describe(block + SURFACE.DESC);
             deps.writeMemory(block + SURFACE.LEVEL, dwordBytes(levelBlocks.get(surface) ?? 0));
+            deps.writeMemory(block + SURFACE.OWNER, dwordBytes(address));
             const container = /** @type {{ container?: object }} */ (surface).container;
             if (container)
             {
@@ -5114,6 +2085,10 @@ export function createShadow(deps){
             {
                 holding(()=>settle(block));
             }
+            else
+            {
+                settled.unattached++;
+            }
         },
 
         /**
@@ -5206,6 +2181,8 @@ export function createShadow(deps){
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },
+            // Ranges unlocked in the guest: sent to the device, or lost and why.
+            settled: { ...settled },
             // And the bytes those moves copied in the guest (`moveCopyCode`).
             moved: { ...moved, copied: address === 0 ? 0
                 : readWord(address + SHADOW.MOVE_COPIED)
@@ -5266,7 +2243,9 @@ export function guestWords(memory){
  * @typedef {Object} GuestWords
  * @property {(at: number) => number} u32
  * @property {(at: number, value: number) => void} setU32
- * @property {(at: number, length: number) => Uint8Array} read
+ * @property {(at: number, length: number) => Uint8Array} read  bytes handed straight
+ *     to `write`, with nothing run between: a copy of its own (the memory layer's
+ *     readBytes) or a view (which write takes as TypedArray#set does, overlap and all)
  * @property {(at: number, bytes: Uint8Array) => void} write
  * @property {(at: number, expected: number, value: number) => number} [compareExchangeU32]
  *     the word's value before, swapped for `value` where it was `expected`: atomic, where
@@ -5276,10 +2255,25 @@ export function guestWords(memory){
 /**
  * A mirror as the host keeps it (`HOST_MIRRORS`): the x86 one's work on the
  * block, from the call's arguments (`this` not among them); false where the
- * x86 one goes to the host.
+ * x86 one goes to the host, 'same' where it answers with no record (`storeState`).
  *
- * @typedef {(memory: GuestWords, block: number, args: number[]) => boolean} HostMirror
+ * @typedef {(memory: GuestWords, block: number, args: number[]) => boolean | 'same'} HostMirror
  */
+
+/**
+ * `storeState` as the host keeps it.
+ *
+ * @param {GuestWords} m @param {number} block @param {number} at @param {number} value
+ * @returns {true | 'same'}
+ */
+const storeStateWord = (m, block, at, value)=>{
+    if ((m.u32(block + SHADOW.FLAGS) & FLAG_STALE) === 0 && m.u32(at) === value)
+    {
+        return 'same';
+    }
+    m.setU32(at, value);
+    return true;
+};
 
 /**
  * Whether bit `index` of the bit string at `at` is set, as `bt` reads one.
@@ -5297,6 +2291,24 @@ const drawable = (m, block, clear, set)=>m.setU32(block + SHADOW.DRAWABLE,
     ((m.u32(block + SHADOW.DRAWABLE) & ~clear) | set) >>> 0);
 
 /**
+ * `rectWithin` as the host checks it: no rectangle, or one within the
+ * surface whose block is `owner` and not empty, its words unsigned.
+ *
+ * @param {GuestWords} m @param {number} rect @param {number} owner
+ */
+const hostRectWithin = (m, rect, owner)=>{
+    if (rect === 0)
+    {
+        return true;
+    }
+    const right = m.u32(rect + 8);
+    const bottom = m.u32(rect + 12);
+    return m.u32(rect) < right && m.u32(rect + 4) < bottom
+        && right <= m.u32(owner + SURFACE.DESC + 24)
+        && bottom <= m.u32(owner + SURFACE.DESC + 28);
+};
+
+/**
  * The mirrors of `RENDER_STATE_MIRROR` and its kin, in JavaScript: what the
  * host does in place of a command routine (`appendCommand`) keeps the block
  * as the routine would, which the gate holds them to, input by input.
@@ -5309,8 +2321,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.RENDER_STATES + 4 * state, value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.RENDER_STATES + 4 * state, value);
     },
     /** @type {HostMirror} */
     transform: (m, block, [type, matrix])=>{
@@ -5334,7 +2345,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.write(block + SHADOW.TRANSFORMS + slot * 64, m.read(matrix, 64).slice());
+        m.write(block + SHADOW.TRANSFORMS + slot * 64, m.read(matrix, 64));
         return true;
     },
     /** @type {HostMirror} */
@@ -5344,11 +2355,19 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.write(block + SHADOW.VIEWPORT, m.read(viewport, 24).slice());
+        m.write(block + SHADOW.VIEWPORT, m.read(viewport, 24));
         return true;
     },
     /** @type {HostMirror} */
-    renderTarget: (m, block, [, surface])=>{
+    renderTarget: (m, block, [index, surface])=>{
+        if (index !== 0)
+        {
+            return true;
+        }
+        if (surface === 0)
+        {
+            return false;
+        }
         const desc = m.u32(surface + 4) + SURFACE.DESC;
         const width = m.u32(desc + 24);
         const height = m.u32(desc + 28);
@@ -5360,13 +2379,32 @@ export const HOST_MIRRORS = Object.freeze({
         m.setU32(block + SHADOW.VIEWPORT + 4, 0);
         m.setU32(block + SHADOW.VIEWPORT + 16, 0);
         m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
+        m.setU32(block + SHADOW.SCISSOR, 0);
+        m.setU32(block + SHADOW.SCISSOR + 4, 0);
+        m.setU32(block + SHADOW.SCISSOR + 8, width);
+        m.setU32(block + SHADOW.SCISSOR + 12, height);
         m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~1);
+        const cell = m.u32(surface + 8);
+        if (cell !== 0)
+        {
+            m.setU32(block + SHADOW.TARGETS + 4, cell);
+            m.setU32(block + SHADOW.TARGETS, surface);
+            m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) | 1);
+        }
+        return true;
+    },
+    /** @type {HostMirror} */
+    scissor: (m, block, [rect])=>{
+        if (rect === 0)
+        {
+            return false;
+        }
+        m.write(block + SHADOW.SCISSOR, m.read(rect, 16));
         return true;
     },
     /** @type {HostMirror} */
     stretch: (m, block, [source, sourceRect, target, targetRect])=>{
-        if (sourceRect !== 0 || targetRect !== 0 || m.u32(block + SHADOW.ELSEWHERE) === 0
-            || source === 0 || target === 0)
+        if (m.u32(block + SHADOW.ELSEWHERE) === 0 || source === 0 || target === 0)
         {
             return false;
         }
@@ -5380,7 +2418,8 @@ export const HOST_MIRRORS = Object.freeze({
             return false;
         }
         const container = m.u32(from + SURFACE.CONTAINER);
-        return container === 0 || container !== m.u32(to + SURFACE.CONTAINER);
+        return (container === 0 || container !== m.u32(to + SURFACE.CONTAINER))
+            && hostRectWithin(m, sourceRect, from) && hostRectWithin(m, targetRect, to);
     },
     /** @type {HostMirror} */
     depthStencil: (m, block, [surface])=>{
@@ -5389,6 +2428,13 @@ export const HOST_MIRRORS = Object.freeze({
                 ? DRAW.STENCIL : 0);
         drawable(m, block, DRAW.DEPTH | DRAW.STENCIL, depth);
         m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~2);
+        const cell = surface === 0 ? 0 : m.u32(surface + 8);
+        if (surface === 0 || cell !== 0)
+        {
+            m.setU32(block + SHADOW.TARGETS + 12, cell);
+            m.setU32(block + SHADOW.TARGETS + 8, surface);
+            m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) | 2);
+        }
         return true;
     },
     /** Direct3D 8's CopyRects, as `COPY_GUARD_8` takes it. @type {HostMirror} */
@@ -5410,8 +2456,8 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.SAMPLER_STATES + 4 * ((sampler << 4) + type), value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.SAMPLER_STATES + 4 * ((sampler << 4) + type),
+            value);
     },
     /** @param {number} types @returns {HostMirror} */
     stageState: types=>(m, block, [stage, type, value])=>{
@@ -5420,8 +2466,8 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.setU32(block + SHADOW.STAGE_STATES + 4 * ((stage << 5) + type), value);
-        return true;
+        return storeStateWord(m, block, block + SHADOW.STAGE_STATES + 4 * ((stage << 5) + type),
+            value);
     },
     /** @type {HostMirror} */
     beginScene: (m, block)=>{
@@ -5643,7 +2689,7 @@ export function createLevelLocks({ shadowOf, twinCopies }){
  * came. A function or a state block's method (`thread`, `self`) is not one
  * this takes.
  *
- * @param {GuestWords} m @param {CommandShape} shape
+ * @param {GuestWords} m @param {import('./routines/command.js').CommandShape} shape
  * @param {HostMirror | undefined} mirror  the routine's mirror, as the host keeps it
  * @param {number[]} call  the interface pointer, then the arguments
  * @returns {number | undefined}
@@ -5690,7 +2736,7 @@ export function appendCommand(m, shape, mirror, call){
  * `appendCommand`'s work past the device's lock: the routine's checks, its
  * mirror and its record.
  *
- * @param {GuestWords} m @param {CommandShape} shape
+ * @param {GuestWords} m @param {import('./routines/command.js').CommandShape} shape
  * @param {HostMirror | undefined} mirror @param {number} block @param {number[]} a
  * @returns {number | undefined}
  */
@@ -5754,7 +2800,18 @@ function recordCommand(m, shape, mirror, block, a){
         const surface = a[usage.arg];
         const owner = surface === 0 ? 0 : m.u32(surface + 4);
         if (surface === 0 ? !usage.nullable
-            : owner === 0 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+            : owner === 0 || m.u32(owner + SURFACE.OWNER) !== block
+                || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+        {
+            return undefined;
+        }
+    }
+    if (shape.depthCovers && a[shape.depthCovers.depth] !== 0)
+    {
+        const depth = m.u32(a[shape.depthCovers.depth] + 4);
+        const target = m.u32(a[shape.depthCovers.target] + 4);
+        if ([24, 28].some(side=>m.u32(depth + SURFACE.DESC + side)
+            < m.u32(target + SURFACE.DESC + side)))
         {
             return undefined;
         }
@@ -5776,9 +2833,15 @@ function recordCommand(m, shape, mirror, block, a){
         }
     }
     const size = copiedBytes(shape, a, pointer, bytes);
-    if (size === null || (mirror && !mirror(m, block, a)))
+    if (size === null)
     {
         return undefined;
+    }
+    const mirrored = mirror?.(m, block, a) ?? true;
+    if (mirrored !== true)
+    {
+        // A call the mirror found changes nothing is answered with no record.
+        return mirrored === 'same' ? 0 : undefined;
     }
     const header = COMMAND.ARGS + 4 * args;
     const length = count !== undefined && count.shift < 2 ? (size + header + 3) & ~3
@@ -5791,15 +2854,34 @@ function recordCommand(m, shape, mirror, block, a){
     m.setU32(block + SHADOW.COMMAND_HEAD, head + length);
     const record = (m.u32(block + SHADOW.COMMANDS) + head) >>> 0;
     m.setU32(record + COMMAND.SLOT, slot);
+    const rects = shape.rects ?? [];
+    const indexed = shape.indexedVertices;
+    const copied = indexed ? indexedBytes(a[indexed.type], a[indexed.count], a[indexed.format],
+        a[indexed.minIndex] + a[indexed.vertices], a[indexed.stride]) : null;
     for (let arg = 0; arg < args; arg++)
     {
-        m.setU32(record + COMMAND.ARGS + 4 * arg, arg === pointer
-            ? (a[arg] === 0 ? 0 : record + header) : a[arg]);
+        const rect = rects.indexOf(arg);
+        const copy = rect >= 0 ? record + header + RECT_BYTES * rect : record + header;
+        m.setU32(record + COMMAND.ARGS + 4 * arg, indexed && copied && arg === indexed.indices
+            ? record + header : indexed && copied && arg === indexed.data
+                ? record + header + copied.at
+                : arg === pointer || rect >= 0 ? (a[arg] === 0 ? 0 : copy) : a[arg]);
     }
     if (pointer >= 0 && size > 0)
     {
-        m.write(record + header, m.read(a[pointer], size).slice());
+        m.write(record + header, m.read(a[pointer], size));
     }
+    if (indexed && copied)
+    {
+        m.write(record + header, m.read(a[indexed.indices], copied.indices));
+        m.write(record + header + copied.at, m.read(a[indexed.data], copied.vertices));
+    }
+    rects.forEach((arg, rect)=>{
+        if (a[arg] !== 0)
+        {
+            m.write(record + header + RECT_BYTES * rect, m.read(a[arg], RECT_BYTES));
+        }
+    });
     m.setU32(record + COMMAND.BYTES, length);
     if (draws)
     {
@@ -5829,7 +2911,7 @@ const ARGUMENTS = /** @type {number[]} */ (new Array(16).fill(0));
  * How many bytes a command routine copies of what the call points at, as it
  * works it out; null where it goes to the host.
  *
- * @param {CommandShape} shape @param {number[]} a @param {number} pointer @param {number} bytes
+ * @param {import('./routines/command.js').CommandShape} shape @param {number[]} a @param {number} pointer @param {number} bytes
  * @returns {number | null}
  */
 function copiedBytes(shape, a, pointer, bytes){
@@ -5845,6 +2927,26 @@ function copiedBytes(shape, a, pointer, bytes){
     if (choose)
     {
         return choose.cases.find(([value])=>value === a[choose.arg])?.[1] ?? choose.otherwise;
+    }
+    const indexed = shape.indexedVertices;
+    if (indexed)
+    {
+        const { most } = indexed;
+        const n = a[indexed.count];
+        const type = a[indexed.type];
+        const format = a[indexed.format];
+        const stride = a[indexed.stride];
+        const reach = a[indexed.minIndex] + a[indexed.vertices];
+        if (a[indexed.indices] === 0 || a[indexed.data] === 0 || n === 0 || n > most
+            || !(type >= 1 && type <= 6) || (format !== 101 && format !== 102)
+            || (stride & 3) !== 0 || stride === 0 || stride > most
+            || reach > 0xffffffff || reach === 0 || reach > most)
+        {
+            return null;
+        }
+        const copied = indexedBytes(type, n, format, reach, stride);
+        return copied.vertices > most || copied.at + copied.vertices > most ? null
+            : copied.at + copied.vertices;
     }
     if (vertices)
     {
@@ -5869,5 +2971,6 @@ function copiedBytes(shape, a, pointer, bytes){
         const n = a[count.arg];
         return n === 0 || n > count.most ? null : (n << count.shift) >>> 0;
     }
-    return pointer >= 0 ? bytes : 0;
+    return pointer >= 0 ? bytes : RECT_BYTES * (shape.rects?.length ?? 0);
 }
+

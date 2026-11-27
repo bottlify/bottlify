@@ -6,8 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
+import { createGlobalMemory } from '../kernel32/moveable.js';
+import { callLong } from '../../bridge/internal/long-machine.fixture.js';
 import { parseCompoundFile, serializeCompoundFile, createRoot } from './cfb.js';
 import {
     IID_IENUMSTATSTG, IID_ISEQUENTIALSTREAM, IID_ISTORAGE, IID_ISTREAM, STGM,
@@ -130,7 +132,8 @@ function fakeFiles(){
     };
 }
 
-function setup(){
+/** @param {{ pointerSize?: 4 | 8 }} [width]  The process's, 4 when not given. */
+function setup(width = {}){
     const bytes = new Uint8Array(0x40000);
     /** @type {string[]} */
     const reported = [];
@@ -182,7 +185,7 @@ function setup(){
         fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
-        /** @param {number} entry @param {number[]} args */
+        /** @param {number} entry @param {(number | bigint)[]} args */
         call: (entry, args)=>{
             const fn = guestEntries.get(entry);
             if (!fn)
@@ -190,7 +193,7 @@ function setup(){
                 return Promise.reject(new Error(`no guest code at 0x${entry.toString(16)}`));
             }
             guestCalls.push(`${entry.toString(16)}(${args.map(a=>a.toString(16)).join(',')})`);
-            return Promise.resolve(fn(args));
+            return Promise.resolve(fn(/** @type {number[]} */ (args)));
         },
         guestCalls,
         /** @param {number} address */
@@ -244,6 +247,17 @@ function setup(){
             assert.ok(method, `${name} is not in the table`);
             return method.invoke(record.object, args);
         },
+        /**
+         * Calls a method as a 64-bit program does, through the bridge's x64 path.
+         *
+         * @param {number} pointer @param {string} name
+         * @param {Parameters<typeof callLong>[2]} machine
+         */
+        callLong_(pointer, name, machine){
+            const record = records.get(pointer);
+            const method = record.methods.find((/** @type {any} */ m)=>m.name === name);
+            return callLong(method, record.object, machine);
+        },
         /** @param {number} pointer */
         release(pointer){
             const record = records.get(pointer);
@@ -277,6 +291,7 @@ function setup(){
         /** The docfile at PATH, parsed. */
         document: ()=>parseCompoundFile(
             /** @type {Uint8Array} */ (host.files.files.get(PATH.toUpperCase()))),
+        ...width,
     };
     const fns = createStorageFunctions(host);
     /** @type {(pointer: number, name: string, args: number[]) => any} */
@@ -380,6 +395,54 @@ test('streams and storages written through the objects come back through the fil
     assert.deepEqual(read(host.u32(OUT3), 100), Uint8Array.of(1, 2, 3, 4));
     assert.equal(call(reopened, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
     assert.equal(formatGuid(host.bytes.subarray(STAT + 48, STAT + 64)), CLSID_A);
+});
+
+test('a 64-bit program seeks a stream: the LARGE_INTEGER one slot, the origin after it', ()=>{
+    // IStream::Seek(LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER *position):
+    // this in RCX, the move whole in RDX, the origin in R8, the pointer in R9.
+    const { host, fns, write } = setup();
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    write(stream, Uint8Array.of(1, 2, 3, 4, 5));
+    const answer = host.callLong_(stream, 'Seek', {
+        registers: { rcx: BigInt(stream), r11: 0xfffffffffffffffen, r8: 2n, r9: BigInt(OUT2) },
+    });
+    assert.equal(answer, S_OK, 'END - 2, its origin read from R8');
+    assert.equal(host.u32(OUT2), 3);
+    assert.equal(host.u32(OUT2 + 4), 0);
+});
+
+test('Stat fills a STATSTG laid out for the process, past the padding at 64 bits', ()=>{
+    // A 64-bit STATSTG has its pointer eight bytes wide and its ULARGE_INTEGER
+    // aligned to eight: type at 8, cbSize at 16, grfMode at 48, clsid at 56,
+    // and 80 bytes in all, where a 32-bit one has them at 4, 8, 40 and 48 in
+    // 72. A worker that sized the interface it marshaled into an HGlobal stream
+    // read a cbSize of 0 at 16 and sent nothing.
+    for (const [pointerSize, at] of /** @type {const} */ ([
+        [4, { type: 4, size: 8, mode: 40, clsid: 48, bytes: 72 }],
+        [8, { type: 8, size: 16, mode: 48, clsid: 56, bytes: 80 }]]))
+    {
+        const { host, fns, write, call, createDocfile } = setup({ pointerSize });
+        assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+        const stream = host.u32(OUT);
+        write(stream, new Uint8Array(0x48));
+        host.bytes.fill(0xcc, STAT, STAT + 96);
+        assert.equal(call(stream, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+        assert.equal(host.u32(STAT + at.type), STGTY_STREAM, `type at ${at.type} (${pointerSize})`);
+        assert.equal(host.u32(STAT + at.size), 0x48, `cbSize at ${at.size} (${pointerSize})`);
+        assert.equal(host.u32(STAT + at.size + 4), 0);
+        assert.equal(host.u32(STAT + at.mode) & 3, STGM.READWRITE, `grfMode at ${at.mode}`);
+        assert.equal(host.bytes[STAT + at.bytes - 1], 0, 'the whole structure is written');
+        assert.equal(host.bytes[STAT + at.bytes], 0xcc, 'and nothing past it');
+
+        const root = createDocfile();
+        host.putGuid(GUID_AT, CLSID_A);
+        assert.equal(call(root, 'SetClass', [GUID_AT]), S_OK);
+        assert.equal(call(root, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+        assert.equal(host.u32(STAT + at.type), STGTY_STORAGE);
+        assert.equal(formatGuid(host.bytes.subarray(STAT + at.clsid, STAT + at.clsid + 16)),
+            CLSID_A, `clsid at ${at.clsid} (${pointerSize})`);
+    }
 });
 
 test('a stream reads short at its end, seeks from three origins, grows and shrinks', ()=>{
@@ -679,12 +742,135 @@ test('docfile modes: what is refused, what is reported, what is a temporary', ()
     host.release(host.u32(OUT));
     assert.equal(host.files.stat('C:\\App\\gone.stg'), null);
 
-    assert.equal(fns.StgCreateDocfileOnILockBytes.handler([0x1, RW, 0, OUT]),
-        STG_E_INVALIDFUNCTION);
-    assert.equal(fns.StgOpenStorageOnILockBytes.handler([0x1, 0, RW, 0, 0, OUT]),
+    assert.equal(fns.StgCreateDocfileOnILockBytes.handler([0, RW, 0, OUT]),
         STG_E_INVALIDFUNCTION);
     assert.equal(host.u32(OUT), 0);
 });
+
+test('a docfile in a program\'s ILockBytes is read from it and written back through it',
+    async()=>{
+        // storage32.c test_custom_lockbytes: written whole when committed;
+        // locked when it says it can be, its LockRegion's refusal the
+        // create's, and a header someone else overwrote is not written over.
+        const { host, fns } = setup();
+        /** @type {{ contents: Uint8Array, locks: number, lockHr: number, locked: number }} */
+        const array = { contents: new Uint8Array(0), locks: 0, lockHr: 0, locked: 0 };
+        const lockBytes = host.guestObject([
+            ()=>0, ()=>2, ()=>1,
+            ([, offset, , buffer, length, count])=>{
+                const data = array.contents.subarray(offset, offset + length);
+                host.bytes.set(data, buffer);
+                host.putU32(count, data.length);
+                return 0;
+            },
+            ([, offset, , buffer, length, count])=>{
+                const grown = new Uint8Array(Math.max(array.contents.length, offset + length));
+                grown.set(array.contents);
+                grown.set(host.bytes.subarray(buffer, buffer + length), offset);
+                array.contents = grown;
+                host.putU32(count, length);
+                return 0;
+            },
+            ()=>0,
+            ([, size])=>{
+                const resized = new Uint8Array(size);
+                resized.set(array.contents.subarray(0, size));
+                array.contents = resized;
+                return 0;
+            },
+            ()=>{
+                array.locked++;
+                return array.lockHr;
+            },
+            ()=>0,
+            ([, stat])=>{
+                host.putU32(stat + 8, array.contents.length);
+                host.putU32(stat + 44, array.locks);
+                return 0;
+            },
+        ]);
+        const signature = ()=>new DataView(array.contents.buffer).getUint32(0, true);
+        assert.equal(await fns.StgCreateDocfileOnILockBytes.handler(
+            [lockBytes, STGM.CREATE | RW, 0, OUT]), S_OK);
+        assert.equal(signature(), 0xe011cfd0);
+        const storage = host.u32(OUT);
+        array.contents.fill(0);
+        assert.equal(await host.call_(storage, 'Commit', [0]), S_OK, 'Commit');
+        assert.equal(signature(), 0xe011cfd0);
+        assert.equal(array.locked, 0, 'an array that cannot lock is not locked');
+        host.release(storage);
+
+        assert.equal(await fns.StgOpenStorageOnILockBytes.handler([lockBytes, 0, RW, 0, 0, OUT]),
+            S_OK, 'and it opens again from what was written');
+        host.release(host.u32(OUT));
+
+        array.locks = 7;
+        assert.equal(await fns.StgCreateDocfileOnILockBytes.handler(
+            [lockBytes, STGM.CREATE | RW, 0, OUT]), S_OK);
+        assert.equal(array.locked, 1);
+        array.contents.fill(0);
+        assert.equal((await host.call_(host.u32(OUT), 'Commit', [0])) >>> 0, 0x800300fb,
+            'STG_E_INVALIDHEADER');
+        assert.equal(signature(), 0);
+        host.release(host.u32(OUT));
+        array.lockHr = STG_E_INVALIDFUNCTION;
+        assert.equal(await fns.StgCreateDocfileOnILockBytes.handler(
+            [lockBytes, STGM.CREATE | RW, 0, OUT]), STG_E_INVALIDFUNCTION);
+    });
+
+test('the last Release of a docfile in a program\'s ILockBytes lets go of it before it returns',
+    async()=>{
+        // storage32.c test lock bytes: the program counts its references the
+        // moment the storage's last Release comes back, so its own Release
+        // is waited on there, as the write-back before it is.
+        const { host, fns } = setup();
+        let contents = new Uint8Array(0);
+        let released = 0;
+        const lockBytes = host.guestObject([
+            ()=>0, ()=>2,
+            ()=>{
+                released++;
+                return 1;
+            },
+            ([, offset, , buffer, length, count])=>{
+                const data = contents.subarray(offset, offset + length);
+                host.bytes.set(data, buffer);
+                host.putU32(count, data.length);
+                return 0;
+            },
+            ([, offset, , buffer, length, count])=>{
+                const grown = new Uint8Array(Math.max(contents.length, offset + length));
+                grown.set(contents);
+                grown.set(host.bytes.subarray(buffer, buffer + length), offset);
+                contents = grown;
+                host.putU32(count, length);
+                return 0;
+            },
+            ()=>0,
+            ([, size])=>{
+                const resized = new Uint8Array(size);
+                resized.set(contents.subarray(0, size));
+                contents = resized;
+                return 0;
+            },
+            ()=>0, ()=>0,
+            ([, stat])=>{
+                host.putU32(stat + 8, contents.length);
+                return 0;
+            },
+        ]);
+        assert.equal(await fns.StgCreateDocfileOnILockBytes.handler(
+            [lockBytes, STGM.CREATE | RW, 0, OUT]), S_OK);
+        const storage = host.objectAt(host.u32(OUT));
+        assert.equal(released, 0, 'held while the storage is open');
+        // What the vtable's Release does with a last reference: wait on
+        // lastRelease, then drop the count.
+        assert.equal(storage.refCount, 1);
+        await storage.lastRelease?.();
+        assert.equal(released, 1, 'let go of inside the Release the program waits on');
+        storage.release();
+        assert.equal(released, 1, 'and only once');
+    });
 
 test('a memory stream lives in a global block the program can lock', ()=>{
     const { host, fns, call } = setup();
@@ -1041,4 +1227,104 @@ test('StgOpenStorageEx opens a docfile as StgOpenStorage does, in the formats th
     assert.equal(open.handler([NAME, RO, 5, 0, 0, 0, IID_AT, OUT]), STG_E_FILENOTFOUND);
     assert.equal(open.handler([NAME, RO, 5, 0, 0, 0, IID_AT, 0]), 0x80030009 | 0,
         'STG_E_INVALIDPOINTER');
+});
+
+test('a simple-mode docfile holds streams alone, each made once, and none shorter than 4096',
+    ()=>{
+        // storage32.c test_simple.
+        const { host, fns } = setup();
+        const SIMPLE = 0x8000000;
+        const STREAM = 0x1800;
+        const STATSTG_AT = 0x1900;
+        host.putWide(NAME, PATH);
+        assert.equal(fns.StgCreateDocfile.handler([NAME, SIMPLE | CREATE_MODE, 0, OUT]), S_OK);
+        const storage = host.u32(OUT);
+        host.putWide(NAME + 0x100, 'Stg');
+        assert.equal(host.call_(storage, 'CreateStorage', [NAME + 0x100, RW, 0, 0, STREAM]),
+            STG_E_INVALIDFUNCTION);
+        host.putWide(NAME + 0x100, 'Small');
+        assert.equal(host.call_(storage, 'CreateStream',
+            [NAME + 0x100, RW | STGM.CREATE, 0, 0, STREAM]), STG_E_INVALIDFLAG);
+        assert.equal(host.call_(storage, 'CreateStream', [NAME + 0x100, RW, 0, 0, STREAM]), S_OK);
+        const stream = host.u32(STREAM);
+        host.putWide(0x2000, 'foo');
+        assert.equal(host.call_(stream, 'Write', [0x2000, 3, 0]), S_OK);
+        assert.equal(host.call_(stream, 'Stat', [STATSTG_AT, 1]), S_OK);
+        assert.equal(host.u32(STATSTG_AT + 8), 3, 'its size is where it has been written to');
+        host.release(stream);
+        host.release(storage);
+        const small = host.document()?.children.get('SMALL');
+        assert.equal(small?.data.length, 4096);
+    });
+
+test('a docfile opened direct single-writer is read beside it, and its writer holds a lock',
+    ()=>{
+        // storage32.c test_direct_swmr.
+        const { host, fns } = setup();
+        const SWMR = 0x400000;
+        host.putWide(NAME, PATH);
+        assert.equal(fns.StgCreateDocfile.handler([NAME, CREATE_MODE, 0, OUT]), S_OK);
+        host.release(host.u32(OUT));
+        assert.equal(fns.StgOpenStorage.handler(
+            [NAME, 0, SWMR | STGM.READ | STGM_SHARE_DENY_NONE, 0, 0, OUT]), S_OK);
+        const reader = host.objectAt(host.u32(OUT));
+        assert.equal(reader?.interfaceFor('{0E6D4D92-6738-11CF-9608-00AA00680DB4}'), null);
+        host.release(host.u32(OUT));
+        assert.equal(fns.StgOpenStorage.handler(
+            [NAME, 0, SWMR | STGM.READWRITE | STGM.SHARE_DENY_WRITE, 0, 0, OUT]), S_OK);
+        assert.ok(host.objectAt(host.u32(OUT))
+            ?.interfaceFor('{0E6D4D92-6738-11CF-9608-00AA00680DB4}'));
+        host.release(host.u32(OUT));
+    });
+
+test('a memory stream over a moveable handle grows its block under the same handle', ()=>{
+    // CreateStreamOnHGlobal of GlobalAlloc(GMEM_MOVEABLE): the handle is an
+    // entry of kernel32's table, its block found and grown through it.
+    const { host, fns, call } = setup();
+    const memory = createGlobalMemory({
+        allocate: bytes=>host.heap.allocate(bytes),
+        free: address=>host.heap.free(address),
+        block: address=>{
+            const found = host.heap.block(address);
+            return found ? { address, size: found.size } : null;
+        },
+        reallocate: (block, wanted)=>{
+            const moved = host.heap.allocate(wanted);
+            const kept = Math.min(block.size, wanted);
+            host.bytes.copyWithin(moved, block.address, block.address + kept);
+            host.heap.free(block.address);
+            return moved;
+        },
+        zero: (address, length)=>host.bytes.fill(0, address, address + length),
+        writeMemory: (address, data)=>host.bytes.set(data, address),
+        setLastError: ()=>{},
+        userInfo: new Map(),
+    });
+    /** @type {any} */ (host).globalMemory = ()=>memory;
+
+    const handle = memory.global.allocate(0x2, 3);
+    assert.equal(handle % 8, 4, 'a moveable handle');
+    host.bytes.set(Uint8Array.of(7, 8, 9), memory.pointer(handle));
+    assert.equal(fns.CreateStreamOnHGlobal.handler([handle, 0, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    assert.equal(call(stream, 'Read', [BUFFER, 10, COUNT]), S_OK);
+    assert.equal(host.u32(COUNT), 3, 'the handle\'s block is the stream');
+    assert.deepEqual(host.bytes.slice(BUFFER, BUFFER + 3), Uint8Array.of(7, 8, 9));
+
+    const data = new Uint8Array(500).map((_, index)=>index & 0xff);
+    host.bytes.set(data, BUFFER);
+    assert.equal(call(stream, 'Write', [BUFFER, data.length, COUNT]), S_OK);
+    assert.equal(fns.GetHGlobalFromStream.handler([stream, OUT2]), S_OK);
+    assert.equal(host.u32(OUT2), handle, 'the same handle after it grew');
+    const at = memory.pointer(handle);
+    assert.deepEqual(host.bytes.slice(at + 3, at + 503), data, 'its block holds the bytes');
+    host.release(stream);
+    assert.ok(memory.has(handle), 'kept, as asked');
+
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const made = host.u32(OUT);
+    assert.equal(fns.GetHGlobalFromStream.handler([made, OUT2]), S_OK);
+    assert.equal(host.u32(OUT2) % 8, 4, 'one it makes is moveable, as Windows makes it');
+    assert.equal(call(made, 'Write', [BUFFER, 0, COUNT]), S_OK, 'nothing written into nothing');
+    host.release(made);
 });

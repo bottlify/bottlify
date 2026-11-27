@@ -4,10 +4,14 @@
  * See LICENSE for details
  */
 
+import { imageHeaders } from './image-protection.fixture.js';
+import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions }
-    from './heap.js';
+import {
+    GUARD_PAGES, IMAGE_MAPPED, RELEASE_PART, TABLES, arenaRegion, createAddressIndex,
+    createHeapAllocator, createHeapFunctions,
+} from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
@@ -35,13 +39,16 @@ const MBI = {
 const GRANULARITY = 64 * 1024;
 const GMEM_MOVEABLE = 0x0002;
 const GMEM_ZEROINIT = 0x0040;
+const GMEM_MODIFY = 0x0080;
+const GMEM_DISCARDABLE = 0x0100;
+const GMEM_DDESHARE = 0x2000;
 
 const ARENA = { base: 0x1000, size: 0x4000 };
 /** For the VirtualAlloc tests: room for several whole allocation granules. */
 const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
 
 /**
- * Guest memory, as the emulator's own is: zero until something writes.
+ * Guest memory, as the engine's own is: zero until something writes.
  *
  * The fixture holds that premise rather than contradicting it, because it is
  * what the allocator's zeroing rests on -- a pre-dirtied arena would describe a
@@ -75,7 +82,7 @@ function fakeHost(arena = ARENA){
             bytes.fill(0xaa, address, address + length);
         },
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         setLastError: ()=>{},
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
@@ -622,6 +629,34 @@ test('VirtualFree releases whole reservations only', ()=>{
     assert.equal(fns.VirtualFree.handler([address, 0, MEM_RELEASE]), 0, 'released once, no more');
 });
 
+test('a release of part of an allocation splits it, what is left keeping its pages', ()=>{
+    // Wine's ntdll virtual.c test_NtFreeVirtualMemory: the pages released
+    // go, each side is an allocation of its own, committed, protected and
+    // holding what it held.
+    const { fns, host } = recording();
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_COMMIT | MEM_RESERVE, 0x04]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, PAGE_SIZE, 0x02, base]), 1);
+    host.bytes[base + 0x2000] = 0x5a;
+    const part = /** @type {any} */ (fns)[RELEASE_PART];
+    assert.equal(part(base + 0x1000, PAGE_SIZE), 1);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, 0x100, MBI.SIZE]), MBI.SIZE);
+        const view = new DataView(host.bytes.buffer);
+        return [MBI.AllocationBase, MBI.RegionSize, MBI.State, MBI.Protect]
+            .map(field=>view.getUint32(0x100 + field, true));
+    };
+    assert.deepEqual(query(base), [base, PAGE_SIZE, 0x1000, 0x04], 'its own allocation');
+    assert.equal(query(base + 0x1000)[2], 0x10000, 'the released page is free');
+    assert.deepEqual(query(base + 0x2000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x04]);
+    assert.deepEqual(query(base + 0x3000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x02],
+        'its protection kept');
+    assert.equal(host.bytes[base + 0x2000], 0x5a, 'and what it held');
+    assert.equal(fns.VirtualFree.handler([base, 0, MEM_RELEASE]), 1, 'the first part, whole');
+    assert.equal(fns.VirtualFree.handler([base + 0x2000, 0, MEM_RELEASE]), 1, 'the rest');
+    assert.equal(part(base, 0x20000), 0, 'nothing allocated there any more');
+});
+
 test('VirtualAlloc at a chosen address only succeeds where we already have it', ()=>{
     const { fns } = setup();
     const address = fns.VirtualAlloc.handler([0, PAGE_SIZE * 2, MEM_RESERVE, 0x04]);
@@ -647,6 +682,52 @@ function recording(arena = RESERVING_ARENA){
     } };
     return { host, errors, fns: createHeapFunctions(host) };
 }
+
+test('a commit the machine has no memory for is refused, and leaves nothing behind', ()=>{
+    const { host, errors } = recording();
+    // Room up to the arena's second granule and no further.
+    const limit = RESERVING_ARENA.base + GRANULARITY;
+    const fns = createHeapFunctions({ ...host, reach: (/** @type {number} */ end)=>end <= limit });
+    const COMMITMENT_LIMIT = 1455;
+
+    // Reserving costs nothing; a commit inside the reservation past the room is refused.
+    const reserved = fns.VirtualAlloc.handler([0, 3 * GRANULARITY, MEM_RESERVE, 0x04]);
+    assert.equal(reserved, RESERVING_ARENA.base);
+    assert.equal(fns.VirtualAlloc.handler([reserved, GRANULARITY, MEM_COMMIT, 0x04]), reserved);
+    assert.equal(fns.VirtualAlloc.handler([reserved + GRANULARITY, PAGE_SIZE, MEM_COMMIT, 0x04]),
+        0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualFree.handler([reserved, 0, MEM_RELEASE]), 1);
+
+    // Reserved and committed at once, with no address and with one: refused
+    // whole, the span free for a reservation after.
+    assert.equal(fns.VirtualAlloc.handler([0, 2 * GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]),
+        0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualAlloc.handler([RESERVING_ARENA.base, 2 * GRANULARITY,
+        MEM_RESERVE | MEM_COMMIT, 0x04]), 0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualAlloc.handler([RESERVING_ARENA.base, 4 * GRANULARITY, MEM_RESERVE,
+        0x04]), RESERVING_ARENA.base, 'nothing of the refused commits holds the arena');
+});
+
+test('a heap block the machine has no memory for says so, not that the arena was full', ()=>{
+    // .NET's ngen ran out at 5 GB of machine with 770 MB of its arena free,
+    // and the report named only the free arena: the cause was not in it.
+    const limit = RESERVING_ARENA.base + GRANULARITY;
+    /** @type {string[]} */
+    const said = [];
+    const fns = createHeapFunctions({ ...fakeHost(), arena: RESERVING_ARENA,
+        allocator: createHeapAllocator({ ...RESERVING_ARENA,
+            reach: (/** @type {number} */ end)=>end <= limit }),
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>{
+            said.push(`${api}: ${detail}`);
+        } });
+    const heap = fns.GetProcessHeap.handler();
+    assert.equal(fns.HeapAlloc.handler([heap, 0, 2 * GRANULARITY]), 0);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /^HeapAlloc: \d+ bytes refused: the machine's memory has no room/);
+});
 
 test('the allocator places a block at a chosen address only when all of it is free', ()=>{
     const allocator = createHeapAllocator({ base: 0x10000, size: 0x40000 });
@@ -698,6 +779,23 @@ test('VirtualAlloc refuses a type that asks for nothing, or MEM_RESET with more'
 
     assert.notEqual(fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_COMMIT | MEM_TOP_DOWN, 0x04]), 0,
         'a hint nothing here acts on is not a reason to refuse');
+});
+
+test('a reservation past the end of user address space is an invalid parameter, said nowhere', ()=>{
+    // Windows refuses it the same way: no divergence to report.
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {string[]} */
+    const said = [];
+    const fns = createHeapFunctions({ ...fakeHost(RESERVING_ARENA),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            said.push(`${api}: ${detail}`) });
+    assert.equal(fns.VirtualAlloc.handler([0xffee0000, GRANULARITY, MEM_RESERVE, 0x04]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0x7ffe0000, 2 * GRANULARITY, MEM_RESERVE, 0x04]), 0,
+        'one that runs over the end too');
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+    assert.deepEqual(said, []);
 });
 
 test('MEM_RESET keeps the pages and what is in them, inside a reservation only', ()=>{
@@ -782,29 +880,111 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.VirtualFree.argBytes, 12);
 });
 
-test('a global allocation is already the pointer a caller has to lock for', ()=>{
-    // The 16-bit inheritance: moveable memory was a handle you locked into a
-    // pointer. Win32 made them the same thing, but programs still write the
-    // lock/unlock pairs and those still have to balance.
-    const { fns } = setup();
+test('a moveable allocation is an entry of the handle table, locked into its block', ()=>{
+    // Windows' layout, which programs read through the handle and Wine's heap
+    // test reads whole: two words, flags then the block, the handle the
+    // second's address; in use 1, moveable 2, the lock count from bit 16.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(ARENA), setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const entry = (/** @type {number} */ handle)=>
+        [view.getUint32(handle - 4, true), view.getUint32(handle, true)];
 
     const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
-    assert.notEqual(handle, 0);
-    assert.equal(fns.GlobalLock.handler([handle]), handle, 'locking moves nothing');
-    assert.equal(fns.GlobalUnlock.handler([handle]), 1);
+    assert.equal(handle % 8, 4, 'a pointer past an alignment of two, where no block starts');
+    const [flags, block] = entry(handle);
+    assert.equal(flags, 0x3);
+    assert.equal(fns.HeapSize.handler([fns.GetProcessHeap.handler(), 0, block]), 64);
+    assert.equal(fns.GlobalLock.handler([handle]), block, 'locking hands out the block');
+    assert.equal(fns.GlobalLock.handler([handle]), block);
+    assert.deepEqual(entry(handle), [0x20003, block]);
+    assert.equal(fns.GlobalFlags.handler([handle]), 2, 'the lock count');
+    assert.equal(fns.GlobalHandle.handler([block]), handle, 'the block knows its handle');
     assert.equal(fns.GlobalSize.handler([handle]), 64);
+    assert.equal(fns.GlobalUnlock.handler([handle]), 1, 'still locked');
+    assert.equal(fns.GlobalUnlock.handler([handle]), 0, 'the last unlock');
+    assert.equal(errors.at(-1), 0, 'answered with ERROR_SUCCESS');
+    assert.equal(fns.GlobalUnlock.handler([handle]), 0);
+    assert.equal(errors.at(-1), 158, 'and once more, ERROR_NOT_LOCKED');
+
+    assert.equal(fns.GlobalFree.handler([handle]), 0);
+    assert.notEqual(entry(handle)[0], 0, 'a freed entry links to the next free one');
+    assert.equal(entry(handle)[1], 0);
+    assert.equal(fns.GlobalFree.handler([handle]), handle, 'freeing it twice fails');
+    assert.equal(errors.at(-1), 6);
+    assert.equal(fns.GlobalFlags.handler([handle]), 0x8000);
+    assert.equal(fns.GlobalLock.handler([handle]), 0);
+});
+
+test('a moveable allocation of nothing is discarded, and one asked discardable says so', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(ARENA), setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+
+    const empty = fns.GlobalAlloc.handler([GMEM_MOVEABLE | GMEM_DISCARDABLE, 0]);
+    assert.equal(view.getUint32(empty - 4, true), 0xf, 'in use, moveable, discardable, discarded');
+    assert.equal(fns.GlobalFlags.handler([empty]), 0x4000 | 0x100);
+    assert.equal(fns.LocalFlags.handler([empty]), 0x4000 | 0x0f00,
+        'LMEM_DISCARDABLE in its spelling');
+    assert.equal(fns.GlobalLock.handler([empty]), 0);
+    assert.equal(errors.at(-1), 157, 'ERROR_DISCARDED');
+    assert.equal(fns.GlobalSize.handler([empty]), 0);
+    assert.equal(fns.GlobalReAlloc.handler([empty, 16, GMEM_MOVEABLE]), empty,
+        'given a block again');
+    assert.equal(view.getUint32(empty - 4, true), 0x7);
+    assert.equal(fns.GlobalSize.handler([empty]), 16);
+    assert.equal(fns.GlobalReAlloc.handler([empty, 0, GMEM_MOVEABLE]), empty, 'and discarded');
+    assert.equal(view.getUint32(empty, true), 0);
+
+    const shared = fns.GlobalAlloc.handler([GMEM_MOVEABLE | GMEM_DISCARDABLE | GMEM_DDESHARE, 1]);
+    assert.equal(view.getUint32(shared - 4, true), 0x8007);
+    assert.equal(fns.GlobalFlags.handler([shared]), 0x2000 | 0x100);
+});
+
+test('a locked moveable block moves only when asked, and a fixed one turns moveable', ()=>{
+    const { host, fns } = setup();
+    const view = new DataView(host.bytes.buffer);
+    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 12]);
+    const block = fns.GlobalLock.handler([handle]);
+    host.writeMemory(block, new Uint8Array([1, 2, 3, 4]));
+    assert.equal(fns.GlobalReAlloc.handler([handle, 4096, 0]), 0, 'locked, it may not move');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 0, GMEM_MOVEABLE]), 0, 'nor be discarded');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 4096, GMEM_MOVEABLE]), handle, 'unless asked');
+    const moved = view.getUint32(handle, true);
+    assert.deepEqual([...host.bytes.subarray(moved, moved + 4)], [1, 2, 3, 4]);
+    assert.equal(fns.GlobalHandle.handler([moved]), handle, 'the handle went with the block');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 16, GMEM_MODIFY | GMEM_DISCARDABLE]), handle);
+    assert.equal(view.getUint32(handle - 4, true) & 0xffff, 0x7, 'GMEM_MODIFY made it discardable');
+
+    const fixed = fns.GlobalAlloc.handler([0, 16]);
+    assert.equal(fns.GlobalReAlloc.handler([fixed, 0, GMEM_MODIFY]), fixed,
+        'GMEM_MODIFY alone: as it was');
+    const converted = fns.GlobalReAlloc.handler([fixed, 0, GMEM_MODIFY | GMEM_MOVEABLE]);
+    assert.equal(converted % 8, 4, 'a handle now');
+    assert.equal(fns.GlobalLock.handler([converted]), fixed, 'over the same block');
+    assert.equal(fns.GlobalSize.handler([converted]), 16);
+    const local = fns.LocalAlloc.handler([0, 16]);
+    assert.equal(fns.LocalReAlloc.handler([local, 0, GMEM_MODIFY | GMEM_MOVEABLE]), local,
+        'LocalReAlloc leaves a fixed block fixed');
+    assert.equal(fns.LocalFlags.handler([local]), 0);
 });
 
 test('GlobalWire and GlobalFix lock a block, GlobalUnWire and GlobalUnfix unlock it', ()=>{
     // The 16-bit calls a heap library still looks up: each the lock or the
-    // unlock it stood for, and a block here never moves.
+    // unlock it stood for.
     const { fns } = setup();
     const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
-    assert.equal(fns.GlobalWire.handler([handle]), handle);
-    assert.equal(fns.GlobalUnWire.handler([handle]), 1);
-    assert.equal(fns.GlobalFix.handler(), 0);
-    assert.equal(fns.GlobalUnfix.handler(), 0);
-    assert.equal(fns.GlobalWire.handler([handle + 0x10000]), 0, 'no block, no pointer');
+    const block = fns.GlobalWire.handler([handle]);
+    assert.notEqual(block, 0);
+    assert.equal(fns.GlobalFix.handler([handle]), 0);
+    assert.equal(fns.GlobalFlags.handler([handle]), 2);
+    assert.equal(fns.GlobalUnfix.handler([handle]), 0);
+    assert.equal(fns.GlobalUnWire.handler([handle]), 0, 'the last unlock');
+    assert.equal(fns.GlobalWire.handler([handle + 0x10000]), 0, 'no entry, no pointer');
     assert.deepEqual([fns.GlobalWire, fns.GlobalFix, fns.GlobalUnWire, fns.GlobalUnfix]
         .map(fn=>fn.argBytes), [4, 4, 4, 4]);
 });
@@ -877,17 +1057,17 @@ test('a global block grows in place when it can and moves only when allowed to',
     assert.deepEqual([...host.bytes.subarray(moved, moved + 4)], [1, 2, 3, 4],
         'the data went with it');
     assert.equal(all(host.bytes.subarray(moved + 8, moved + 4096), 0), true, 'the tail is zeroed');
-    assert.equal(fns.GlobalLock.handler([handle]), 0, 'the old block is gone');
+    assert.equal(fns.GlobalSize.handler([handle]), 0, 'the old block is gone');
     assert.equal(fns.GlobalReAlloc.argBytes, 12);
 });
 
-test('a live global block has no flags and a stranger is GMEM_INVALID_HANDLE', ()=>{
+test('a live fixed block has no flags and a stranger is GMEM_INVALID_HANDLE', ()=>{
     const { fns } = setup();
-    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 16]);
+    const handle = fns.GlobalAlloc.handler([0, 16]);
     assert.equal(fns.GlobalFlags.handler([handle]), 0);
     assert.equal(fns.GlobalFlags.handler([0x1234]), 0x8000);
     assert.equal(fns.GlobalFlags.argBytes, 4);
-    assert.equal(fns.LocalFlags, fns.GlobalFlags, 'LocalFlags is the same call');
+    assert.equal(fns.LocalFlags.argBytes, 4);
 });
 
 test('HeapSummary adds up the heap\'s live blocks, and wants its own size first', ()=>{
@@ -1027,7 +1207,9 @@ test('a refused allocation says what was asked and what was left', ()=>{
     assert.equal(fns.VirtualAlloc.handler([0, ARENA.size * 2, 0x1000, 4]), 0);
     assert.equal(reports.length, 2);
     assert.equal(reports[0][0], 'HeapAlloc');
-    assert.match(reports[0][1], /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks$/);
+    assert.match(reports[0][1],
+        /^\d+ bytes refused: the arena has \d+ largest free of \d+ free, \d+ used in 1 blocks \(heap 0x[0-9a-f]+ \d+ in 1\)$/,
+        'with who holds what');
     assert.equal(reports[1][0], 'VirtualAlloc');
 });
 
@@ -1066,8 +1248,28 @@ test('FlushInstructionCache succeeds, because a program that has written code ch
     const { fns } = setup();
     // A runtime writes a thunk, flushes, and jumps into it. Failure here is a
     // reason not to jump, and the processor already notices a written code page.
-    assert.equal(fns.FlushInstructionCache.handler(), 1);
+    assert.equal(fns.FlushInstructionCache.handler([0xffffffff, 0x401000, 16]), 1);
     assert.equal(fns.FlushInstructionCache.argBytes, 12);
+});
+
+test('the pages of COM\'s method tables are writable data to VirtualQuery and VirtualProtect, the'
+    + ' rest of the arena readable, writable and executable (ddraw1 test_vtbl_protection)', ()=>{
+    const host = fakeHost();
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    const tables = allocator.allocate(0x2000, { owner: TABLES });
+    const other = allocator.allocate(0x100);
+    const buffer = allocator.allocate(0x40);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const protection = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, buffer, MBI.SIZE]), MBI.SIZE);
+        return view.getUint32(buffer + MBI.Protect, true);
+    };
+    assert.equal(protection(tables + 0x10), 0x04, 'PAGE_READWRITE');
+    assert.equal(protection(other), 0x40, 'PAGE_EXECUTE_READWRITE');
+    assert.equal(fns.VirtualProtect.handler([tables, 0x10, 0x40, buffer]), 1);
+    assert.equal(view.getUint32(buffer, true), 0x04, 'the old protection, as it was told');
 });
 
 test('VirtualQuery on a gap outside the arena answers the whole run up to the next region', ()=>{
@@ -1113,6 +1315,296 @@ test('VirtualQuery on a mapped image answers MEM_IMAGE from the image base', ()=
     assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x700000 - 0x6d4000);
     assert.equal(view.getUint32(buffer + MBI.State, true), MEM_COMMIT);
     assert.equal(view.getUint32(buffer + MBI.Type, true), 0x1000000);
+});
+
+test('a loaded image answers each section\'s protection, and keeps what VirtualProtect gives it',
+    ()=>{
+        // Wine's kernel32:loader: headers read-only, code PAGE_EXECUTE_READ,
+        // data copy-on-write, a page no section covers closed; the whole
+        // allocated PAGE_EXECUTE_WRITECOPY as MEM_IMAGE; a writable protection
+        // given is its copy-on-write form (test_section_access's table:
+        // PAGE_EXECUTE_READWRITE reads back PAGE_EXECUTE_WRITECOPY).
+        const base = 0x400000;
+        const headers = imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
+            [0x3000, 0x1800, 0xc0000040]]);
+        const host = regionHost([{ base, size: 0x5000, kind: 'image' }]);
+        const read = host.readMemory;
+        host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>(
+            at >= base && at < base + 0x1000 ? headers.slice(at - base, at - base + length)
+                : read(at, length));
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        /** @param {number} address */
+        const query = address=>{
+            assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+            return [MBI.BaseAddress, MBI.AllocationBase, MBI.AllocationProtect, MBI.RegionSize,
+                MBI.Protect, MBI.Type].map(field=>view.getUint32(buffer + field, true));
+        };
+        assert.deepEqual(query(base + 0x10), [base, base, 0x80, 0x1000, 0x02, 0x1000000]);
+        assert.deepEqual(query(base + 0x1234), [base + 0x1000, base, 0x80, 0x1000, 0x20,
+            0x1000000]);
+        assert.deepEqual(query(base + 0x2000).slice(3, 5), [0x1000, 0x01]);
+        assert.deepEqual(query(base + 0x3000).slice(3, 5), [0x2000, 0x08]);
+
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x40, buffer + 0x40]), 1);
+        assert.equal(view.getUint32(buffer + 0x40, true), 0x20, 'the section\'s, handed back');
+        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x80]);
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x20, buffer + 0x40]), 1);
+        assert.equal(view.getUint32(buffer + 0x40, true), 0x80, 'what it was given, a copy');
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x04, buffer + 0x40]), 1);
+        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x08]);
+        assert.equal(fns.VirtualProtect.handler([base + 0x4000, 0x2000, 0x04, buffer + 0x40]),
+            0, 'past the image\'s end');
+    });
+
+test('a commit over a loaded image is refused with ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader test_Loader: an image's pages are its own, as a
+    // view's are; a commit over them is no reservation's.
+    const { host, errors } = recording();
+    const allocator = createHeapAllocator(host.arena);
+    const own = createHeapFunctions({ ...host, allocator });
+    const base = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    assert.equal(own.VirtualAlloc.handler([base, 0x1000, MEM_COMMIT, 0x02]), 0);
+    assert.equal(errors.at(-1), 5);
+});
+
+test('an image loaded again where one was answers its own sections, not the protections given'
+    + ' the one before', ()=>{
+    // Wine's kernel32:loader writes one DLL over and over, a section's
+    // characteristics changed each time and nothing else: each load is at
+    // the same base with the same stamp, and is a new image.
+    const host = fakeHost({ base: 0x10000, size: 0x40000 });
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    // The answers' buffer is a block of its own: the images take the arena's.
+    const buffer = allocator.allocate(0x100);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} characteristics */
+    const load = characteristics=>{
+        const base = allocator.allocate(0x3000, { alignment: 0x10000, owner: 'image' });
+        host.writeMemory(base, imageHeaders(0x3000, [[0x1000, 0x1000, characteristics]]));
+        return base;
+    };
+    /** @param {number} address */
+    const protection = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return view.getUint32(buffer + MBI.Protect, true);
+    };
+    const first = load(0x60000020);
+    assert.equal(fns.VirtualProtect.handler([first + 0x1000, 0x10, 0x02, buffer + 0x40]), 1);
+    assert.equal(protection(first + 0x1000), 0x02, 'what VirtualProtect gave it');
+    allocator.free(first);
+    const second = load(0x20000020);
+    assert.equal(second, first, 'the same base');
+    assert.equal(protection(second + 0x1000), 0x10, 'its own section, PAGE_EXECUTE');
+});
+
+test('a loaded image\'s copy-on-write page written after its mapping is the process\'s own,'
+    + ' read-write', ()=>{
+    // Wine's kernel32:loader (test_section_access): a write to a writable
+    // section of a loaded DLL turns its page from PAGE_WRITECOPY to
+    // PAGE_READWRITE, that page only; the loader's own writes before the
+    // image is mapped are its making.
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const watched = [];
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            watched.push([from, length]);
+            marks.clear();
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        },
+    };
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    const buffer = allocator.allocate(0x100);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>view.getUint32(buffer + field, true));
+    };
+    const base = allocator.allocate(0x5000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
+        [0x2000, 0x3000, 0xc0000040]]));
+    marks.add((base + 0x2000) >>> 12);
+    /** @type {any} */ (fns)[IMAGE_MAPPED](base);
+    assert.deepEqual(watched, [[base, 0x5000]], 'watched from its mapping');
+    assert.deepEqual(query(base + 0x2000), [0x3000, 0x08], 'the loader\'s writes are no copy');
+
+    marks.add((base + 0x3000) >>> 12);
+    assert.deepEqual(query(base + 0x2000), [0x1000, 0x08]);
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'written: its own copy');
+    assert.deepEqual(query(base + 0x4000), [0x1000, 0x08]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 1, 0x08, buffer + 0x40]), 1);
+    assert.equal(view.getUint32(buffer + 0x40, true), 0x04, 'the old protection, the copy\'s');
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'a copy stays read-write');
+    assert.deepEqual(query(base + 0x1000), [0x1000, 0x20], 'code is no copy');
+
+    // An image with nothing copy-on-write is not watched.
+    const plain = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(plain, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    /** @type {any} */ (fns)[IMAGE_MAPPED](plain);
+    assert.equal(watched.length, 1);
+});
+
+test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',
+    ()=>{
+        // A packer walks the space with `address += RegionSize` up to an image at
+        // 0x140000000: an answer with the high half dropped sent it back below 4 GiB.
+        const regions = [{ base: 0x10000, size: 0x1000 },
+            { base: 0x40000000, size: 0x20000, kind: 'reserved' },
+            { base: 0x140000000, size: 0x20000, kind: 'image' }];
+        const host = { ...regionHost(regions), pointerSize: 8,
+            mappedTop: ()=>0x140020000 };
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        const quad = (/** @type {number} */ at)=>Number(view.getBigUint64(buffer + at, true));
+        /** @param {number} address */
+        const query = address=>fns.VirtualQuery.handler(Object.assign(
+            [address >>> 0, buffer, 48], { high: [Math.floor(address / 2 ** 32), 0, 0] }));
+
+        assert.equal(query(0x140001234), 48);
+        assert.equal(quad(0), 0x140001000, 'BaseAddress whole');
+        assert.equal(quad(8), 0x140000000, 'AllocationBase, the image\'s');
+        assert.equal(quad(24), 0x1f000, 'RegionSize to the image\'s end');
+        assert.equal(view.getUint32(buffer + 32, true), MEM_COMMIT);
+        assert.equal(view.getUint32(buffer + 40, true), 0x1000000, 'MEM_IMAGE');
+
+        assert.equal(query(0x80000000), 48);
+        assert.equal(quad(24), 0x140000000 - 0x80000000, 'the gap up to the image, in one');
+
+        assert.equal(query(0x40001000), 48);
+        assert.equal(view.getUint32(buffer + 32, true), MEM_RESERVE,
+            'a region kept from everything is reserved, not the image');
+
+        assert.equal(query(0x140030000), 0, 'past the highest region the space ends');
+    });
+
+test('HeapWalk names the heap as a region and then each busy block by address', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const heap = fns.HeapCreate.handler([0, 0, 0]);
+    const second = fns.HeapAlloc.handler([heap, 0, 300]);
+    const first = fns.HeapAlloc.handler([heap, 0, 5]);
+    const process = fns.GetProcessHeap.handler();
+    const moveable = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 24]);
+    const entry = fns.HeapAlloc.handler([process, HEAP_ZERO_MEMORY, 28]);
+    /** One step: the entry's fields, or null with the walk's end. */
+    const step = (/** @type {number} */ of)=>(fns.HeapWalk.handler([of, entry]) === 0 ? null : {
+        lpData: view.getUint32(entry, true), cbData: view.getUint32(entry + 4, true),
+        overhead: view.getUint8(entry + 8), flags: view.getUint16(entry + 10, true),
+        union: [0, 1, 2, 3].map(i=>view.getUint32(entry + 12 + i * 4, true)),
+    });
+
+    const region = step(heap);
+    assert.equal(region?.flags, 1, 'PROCESS_HEAP_REGION first');
+    assert.equal(region?.lpData, heap);
+    assert.equal(region?.union[2], Math.min(first, second), 'its first block');
+    const blocks = [step(heap), step(heap)];
+    assert.deepEqual(blocks.map(each=>each?.lpData), [first, second].sort((x, y)=>x - y),
+        'by address');
+    assert.deepEqual(blocks.map(each=>each?.flags), [4, 4], 'PROCESS_HEAP_ENTRY_BUSY');
+    assert.equal(blocks.find(each=>each?.lpData === first)?.cbData, 5, 'the size asked');
+    assert.equal(blocks.find(each=>each?.lpData === first)?.overhead, 8 + 3,
+        'the header and the rounding');
+    assert.equal(step(heap), null);
+    assert.equal(errors.at(-1), 259, 'ERROR_NO_MORE_ITEMS');
+
+    // A moveable block says so and names its handle.
+    view.setUint32(entry, 0, true);
+    const found = [];
+    for (let each = step(process); each; each = step(process))
+    {
+        found.push(each);
+    }
+    const block = view.getUint32(moveable, true);
+    const ours = found.find(each=>each.lpData === block);
+    assert.equal(ours?.flags, 0x14, 'busy and moveable');
+    assert.equal(ours?.union[0], moveable, 'Block.hMem');
+
+    view.setUint32(entry, 0x12345, true);
+    assert.equal(fns.HeapWalk.handler([heap, entry]), 0);
+    assert.equal(errors.at(-1), 87, 'an entry that is none of the heap\'s');
+    assert.equal(fns.HeapWalk.handler([0x777, entry]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+});
+
+test('GlobalLock hands back fixed memory that can be read, a heap block or not', ()=>{
+    // LoadResource's HGLOBAL is a pointer into the image, and programs lock it
+    // as the 16-bit API had them do; Wine's resource test does the same.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f2000
+            ? { base: 0x7f0000, length: 0x2000, writable: false, sections: [
+                { start: 0, end: 0x1000, protect: 0x02 },
+                { start: 0x1000, end: 0x2000, protect: 0x01 }] } : null) };
+    const fns = createHeapFunctions(host);
+    assert.equal(fns.GlobalLock.handler([0x7f0010]), 0x7f0010, 'a readable resource');
+    assert.equal(fns.LocalLock.handler([0x7f0010]), 0x7f0010, 'in either spelling');
+    assert.deepEqual(errors, []);
+    assert.equal(fns.GlobalLock.handler([0x7f1010]), 0, 'a page closed to reading');
+    assert.equal(fns.GlobalLock.handler([0x900000]), 0, 'nothing mapped');
+    assert.equal(fns.GlobalLock.handler([0]), 0);
+    assert.deepEqual(errors, [6, 6, 6], 'ERROR_INVALID_HANDLE');
+});
+
+test('VirtualQuery on a view of a section answers MEM_MAPPED, as long as the view', ()=>{
+    // A program opening a section another made learns its size this way.
+    const host = { ...fakeHost(),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f3000
+            ? { base: 0x7f0000, length: 0x2100, writable: true } : null) };
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+    assert.equal(fns.VirtualQuery.handler([0x7f1234, buffer, MBI.SIZE]), MBI.SIZE);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x7f1000);
+    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0x7f0000);
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x2000,
+        'to the view\'s last page, rounded up');
+    assert.equal(view.getUint32(buffer + MBI.Protect, true), 0x04, 'PAGE_READWRITE');
+    assert.equal(view.getUint32(buffer + MBI.Type, true), 0x40000, 'MEM_MAPPED');
+});
+
+test('VirtualQuery on an image\'s view answers MEM_IMAGE, each section with its protection', ()=>{
+    // The CLR maps an assembly with SEC_IMAGE and asks after its pages so.
+    const host = { ...fakeHost(),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f4000
+            ? { base: 0x7f0000, length: 0x4000, writable: false,
+                sections: [{ start: 0x1000, end: 0x3000, protect: 0x20 },
+                    { start: 0x3000, end: 0x4000, protect: 0x08 }] } : null) };
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const ask = at=>{
+        fns.VirtualQuery.handler([at, buffer, MBI.SIZE]);
+        return ['BaseAddress', 'AllocationBase', 'AllocationProtect', 'RegionSize', 'Protect',
+            'Type'].map(field=>view.getUint32(buffer + /** @type {any} */ (MBI)[field], true));
+    };
+    assert.deepEqual(ask(0x7f0010), [0x7f0000, 0x7f0000, 0x80, 0x1000, 0x02, 0x1000000],
+        'the headers, read-only');
+    assert.deepEqual(ask(0x7f2010), [0x7f2000, 0x7f0000, 0x80, 0x1000, 0x20, 0x1000000],
+        'the code, to its end');
+    assert.deepEqual(ask(0x7f3000), [0x7f3000, 0x7f0000, 0x80, 0x1000, 0x08, 0x1000000],
+        'the data, written as a copy');
 });
 
 test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
@@ -1191,8 +1683,272 @@ function arenaQuery(){
             protect: view.getUint32(buffer + MBI.Protect, true),
         };
     };
-    return { fns, query };
+    return { fns, query, memory: { view } };
 }
+
+test('a guard page is closed to the processor until its first touch takes the guard away', ()=>{
+    // Wine's kernel32:virtual (test_guard_page): PAGE_GUARD reads back until
+    // the page is touched, a touch takes it away for good, VirtualLock over
+    // it fails once with STATUS_GUARD_PAGE_VIOLATION, and a stack commits
+    // its next guard page below the one it touched.
+    /** @type {[number, number, boolean][]} */
+    const access = [];
+    /** @type {number[]} */
+    const errors = [];
+    const host = {
+        ...fakeHost(RESERVING_ARENA),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        /** @param {number} address @param {number} length @param {boolean} open */
+        pageAccess: (address, length, open)=>{
+            if (length > 0)
+            {
+                access.push([address, length, open]);
+            }
+            return true;
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const guard = /** @type {any} */ (fns)[GUARD_PAGES];
+    const base = fns.VirtualAlloc.handler([0, 0x4000, MEM_RESERVE, 4]);
+    assert.equal(fns.VirtualAlloc.handler([base + 0x3000, 0x1000, MEM_COMMIT, 0x104]),
+        base + 0x3000);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, false], 'closed, guarded');
+    assert.equal(guard.touch(base + 0x2000), false, 'a reserved page has no guard');
+    assert.equal(guard.touch(base + 0x3abc), true);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, true], 'opened by the touch');
+    assert.equal(guard.touch(base + 0x3abc), false, 'once');
+    const old = 0x100;
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 0x1000, 4, old]), 1);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(old, true), 4, 'the guard gone');
+
+    assert.equal(guard.commitGuard(base + 0x2000), true, 'the stack\'s next guard page');
+    assert.deepEqual(access.at(-1), [base + 0x2000, 0x1000, false]);
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 0);
+    assert.equal(errors.at(-1), 0x80000001, 'STATUS_GUARD_PAGE_VIOLATION');
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 1, 'the guard is gone');
+    assert.equal(guard.touch(base + 0x2000), false);
+});
+
+test('a view\'s pages take a protection within what the view was mapped for', ()=>{
+    // Wine's kernel32:virtual (test_mapping): VirtualQuery answers a view
+    // with the protection it was mapped with until VirtualProtect gives a
+    // page another, which must be within the view's access (else
+    // ERROR_INVALID_PARAMETER), a run split where it changes; a commit over
+    // a file's view is ERROR_ACCESS_DENIED, over a page-file section's view
+    // it gives a protection within the view's (else ERROR_INVALID_PARAMETER);
+    // PAGE_NOACCESS closes a page to the processor.
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {[number, number, boolean][]} */
+    const access = [];
+    /** @type {any} */
+    let view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02,
+        pages: new Map() };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x82000 ? view : null),
+        /** @param {number} address @param {number} length @param {boolean} open */
+        pageAccess: (address, length, open)=>{
+            access.push([address, length, open]);
+            return true;
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.AllocationProtect, MBI.RegionSize, MBI.State, MBI.Protect, MBI.Type]
+            .map(field=>data.getUint32(0x100 + field, true));
+    };
+    assert.deepEqual(query(0x80000), [0x02, 0x2000, MEM_COMMIT, 0x02, 0x40000]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x04, 0x200]), 0, 'not writable');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1, 'its own copy');
+    assert.equal(data.getUint32(0x200, true), 0x02, 'the old protection');
+    assert.deepEqual(query(0x80000), [0x02, 0x1000, MEM_COMMIT, 0x02, 0x40000]);
+    assert.deepEqual(query(0x81000), [0x02, 0x1000, MEM_COMMIT, 0x08, 0x40000]);
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, PAGE_NOACCESS, 0x200]), 1);
+    assert.deepEqual(access.at(-1), [0x80000, 0x1000, false], 'closed');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 0x3000, PAGE_NOACCESS, 0x200]), 0,
+        'past the view');
+
+    for (const protection of [0x02, 0x08])
+    {
+        assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, protection]), 0);
+        assert.equal(errors.at(-1), 5, 'a file\'s view: ERROR_ACCESS_DENIED');
+    }
+
+    view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02, anonymous: true,
+        pages: new Map([[0x80000, PAGE_NOACCESS]]) };
+    assert.equal(fns.VirtualAlloc.handler([0x80010, 0xff0, MEM_COMMIT, 0x08]), 0x80000);
+    assert.deepEqual(access.at(-1), [0x80000, 0x1000, true], 'opened');
+    assert.deepEqual(query(0x80000), [0x02, 0x1000, MEM_COMMIT, 0x08, 0x40000]);
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x04]), 0,
+        'not writable');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+});
+
+test('a written copy-on-write page is the process\'s own, read-write', ()=>{
+    // Wine's kernel32:virtual (test_mapping): after a write to a
+    // PAGE_WRITECOPY page VirtualQuery answers it PAGE_READWRITE, a run of its
+    // own, and PAGE_EXECUTE_WRITECOPY turns PAGE_EXECUTE_READWRITE; asked to
+    // be copy-on-write again, a copied page stays read-write. The engine's
+    // watch stands in for cork's page marks: a page is written when the test
+    // says so, a watch sees what is written after it begins, and take answers
+    // each page once.
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const watched = [];
+    /** @type {any} */
+    const view = { base: 0x80000, length: 0x3000, writable: false, protect: 0x02,
+        pages: new Map(), copies: { watch: undefined } };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: ()=>{},
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x83000 ? view : null),
+        pageAccess: ()=>true,
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            watched.push([from, length]);
+            marks.clear();
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>data.getUint32(0x100 + field, true));
+    };
+
+    // A read-only view's page written before it was copy-on-write is no copy.
+    marks.add(0x80);
+    assert.equal(fns.VirtualProtect.handler([0x80000, 0x3000, 0x08, 0x200]), 1);
+    assert.deepEqual(watched, [[0x80000, 0x3000]], 'watched from the first copy-on-write page');
+    assert.deepEqual(query(0x80000), [0x3000, 0x08]);
+
+    marks.add(0x81);
+    assert.deepEqual(query(0x80000), [0x1000, 0x08]);
+    assert.deepEqual(query(0x81000), [0x1000, 0x04], 'written: its own copy');
+    assert.deepEqual(query(0x82000), [0x1000, 0x08]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x04, 'the old protection, the copy\'s');
+    assert.deepEqual(query(0x81000), [0x1000, 0x04], 'a copy stays read-write');
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x02, 0x200]), 1);
+    assert.deepEqual(query(0x81000), [0x1000, 0x02], 'and takes any other protection');
+    assert.equal(watched.length, 1, 'one watch for the view');
+
+    // An executable copy-on-write page turns executable read-write.
+    view.protect = 0x20;
+    assert.equal(fns.VirtualProtect.handler([0x82000, 1, 0x80, 0x200]), 1);
+    marks.add(0x82);
+    assert.deepEqual(query(0x82000), [0x1000, 0x40]);
+
+    // Where the engine cannot tell writes the page keeps its protection.
+    const blind = { ...view, copies: { watch: null }, pages: new Map() };
+    const fnsBlind = createHeapFunctions({ ...host, viewAt: ()=>blind });
+    marks.add(0x80);
+    assert.equal(fnsBlind.VirtualProtect.handler([0x80000, 1, 0x08, 0x200]), 1);
+    assert.equal(fnsBlind.VirtualQuery.handler([0x80000, 0x100, MBI.SIZE]), MBI.SIZE);
+    assert.equal(data.getUint32(0x100 + MBI.Protect, true), 0x08);
+});
+
+test('VirtualQuery of a copy-on-write view looks at the writes of the run it answers, not the'
+    + ' view', ()=>{
+    // A 4096-page copy-on-write view, one page written: a query of it takes
+    // the marks of its own page and the next, and one past the written page
+    // takes only around it, so a look costs what its answer covers.
+    const PAGES = 4096;
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number} */
+    let looked = 0;
+    /** @type {any} */
+    const view = { base: 0x1000000, length: PAGES * PAGE_SIZE, writable: false, protect: 0x08,
+        pages: new Map(), copies: { watch: {
+            take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                looked += Math.ceil(bytes / PAGE_SIZE);
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            },
+        } } };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: ()=>{},
+        viewAt: (/** @type {number} */ at)=>(at >= view.base && at < view.base + view.length
+            ? view : null),
+        pageAccess: ()=>true,
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        looked = 0;
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>data.getUint32(0x100 + field, true));
+    };
+    const written = (view.base >>> 12) + 10;
+    marks.add(written);
+    assert.deepEqual(query(written * PAGE_SIZE), [PAGE_SIZE, 0x04], 'its own copy');
+    assert.ok(looked <= 2, `${looked} pages looked at for a run of one`);
+    assert.deepEqual(query(view.base), [10 * PAGE_SIZE, 0x08]);
+    assert.ok(looked <= 2 * 10 + 1, `${looked} pages looked at for a run of ten`);
+    assert.deepEqual(query((written + 1) * PAGE_SIZE), [(PAGES - 11) * PAGE_SIZE, 0x08],
+        'the rest of the view, still copy-on-write');
+});
+
+test('an image\'s view answers its sections and takes any protection, writes as copies', ()=>{
+    // Wine's kernel32:virtual (test_mapping, SEC_IMAGE): the view's
+    // AllocationProtect is PAGE_EXECUTE_WRITECOPY and its type MEM_IMAGE,
+    // the headers read-only and each section its own protection; any
+    // protection is taken, a writable one as its copy-on-write form; a
+    // commit over it is ERROR_ACCESS_DENIED.
+    /** @type {number[]} */
+    const errors = [];
+    const view = { base: 0x80000, length: 0x3000, writable: false, protect: 0x80,
+        anonymous: false, pages: new Map(),
+        sections: [{ start: 0x1000, end: 0x2000, protect: 0x20 },
+            { start: 0x2000, end: 0x3000, protect: 0x08 }] };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x83000 ? view : null),
+        pageAccess: ()=>true,
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.AllocationProtect, MBI.RegionSize, MBI.Protect, MBI.Type]
+            .map(field=>data.getUint32(0x100 + field, true));
+    };
+    const MEM_IMAGE = 0x1000000;
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x02, MEM_IMAGE], 'the headers');
+    assert.deepEqual(query(0x81000), [0x80, 0x1000, 0x20, MEM_IMAGE], 'code');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, 0x04, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x02, 'the old protection');
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x08, MEM_IMAGE], 'its own copy');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, 0x40, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x08);
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x80, MEM_IMAGE]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1);
+    assert.deepEqual(query(0x81000), [0x80, 0x2000, 0x08, MEM_IMAGE],
+        'a run of one protection spans sections');
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x08]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+});
 
 test('VirtualQuery inside a reservation answers the reservation, page by page as committed',
     ()=>{
@@ -1208,7 +1964,8 @@ test('VirtualQuery inside a reservation answers the reservation, page by page as
         assert.deepEqual(query(reserved), { base: reserved, allocationBase: reserved,
             size: 0x1000, state: MEM_RESERVE, protect: 0 });
         assert.deepEqual(query(reserved + 0x1234), { base: reserved + 0x1000,
-            allocationBase: reserved, size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+            allocationBase: reserved, size: 0x1000, state: MEM_COMMIT, protect: 4 },
+        'the protection it was committed with');
         assert.deepEqual(query(reserved + 0x8000), { base: reserved + 0x8000,
             allocationBase: reserved, size: 2 * GRANULARITY - 0x8000, state: MEM_RESERVE,
             protect: 0 });
@@ -1218,8 +1975,47 @@ test('VirtualQuery inside a reservation answers the reservation, page by page as
 
         const committed = fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, 4]);
         assert.deepEqual(query(committed), { base: committed, allocationBase: committed,
-            size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+            size: 0x1000, state: MEM_COMMIT, protect: 4 });
     });
+
+test('a reservation\'s pages read back the protection they were last given', ()=>{
+    // Wine's kernel32:virtual: VirtualQuery answers each page's protection,
+    // a run split where it changes, and VirtualProtect hands back the old
+    // one; a protection that is no base one, or copy-on-write for private
+    // memory, is refused.
+    const { fns, query, memory } = arenaQuery();
+    const base = fns.VirtualAlloc.handler([0, 0x3000, MEM_COMMIT, 2]);
+    assert.notEqual(base, 0);
+    assert.equal(query(base).protect, 2);
+    assert.equal(query(base).size, 0x3000);
+    assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x1000, 0x20, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 2, 'the old protection');
+    assert.deepEqual([query(base).size, query(base + 0x1000).protect,
+        query(base + 0x1000).size, query(base + 0x2000).protect], [0x1000, 0x20, 0x1000, 2]);
+    assert.equal(fns.VirtualProtect.handler([base, 0x1000, 0x40, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 2);
+    for (const refused of [0, 0x03, 0x08, 0x80, 0x101, 0x800])
+    {
+        assert.equal(fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, refused]), 0,
+            `0x${refused.toString(16)}`);
+        assert.equal(fns.VirtualProtect.handler([base, 0x1000, refused, 0x40]), 0,
+            `0x${refused.toString(16)}, protected`);
+    }
+    assert.notEqual(fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, 0x104]), 0,
+        'a guard page is a base one with a modifier');
+
+    // A reserved page has no protection to change: the range is refused
+    // whole, and committing it later starts from what the commit gives.
+    const reserved = fns.VirtualAlloc.handler([0, 0x2000, MEM_RESERVE, 1]);
+    assert.equal(query(reserved).state, MEM_RESERVE);
+    assert.equal(query(reserved).protect, 0);
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x1000, 2, 0x40]), 0);
+    assert.equal(fns.VirtualAlloc.handler([reserved, 0x1000, MEM_COMMIT, 1]), reserved);
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x2000, 2, 0x40]), 0,
+        'half of it still reserved');
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x1000, 2, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 1, 'PAGE_NOACCESS, as committed');
+});
 
 test('VirtualQuery says free only where VirtualAlloc can reserve', ()=>{
     // "Free pages ... available to be allocated": an address the arena does
@@ -1276,7 +2072,9 @@ test('the Ex forms act on the running process, and refuse any other', ()=>{
     const fns = createHeapFunctions(host);
     const self = 0xffffffff;
 
-    const base = fns.VirtualAllocEx.handler([self, 0, 0x8000, 0x1000, 0x40]);
+    // In this process the answer is at once, a number.
+    const base = /** @type {number} */ (fns.VirtualAllocEx.handler(
+        [self, 0, 0x8000, 0x1000, 0x40]));
     assert.notEqual(base, 0);
     assert.equal(fns.VirtualQueryEx.handler([self, base, 0x100, 28]), 28);
     assert.equal(fns.VirtualProtectEx.handler([self, base, 4096, 0x04, 0x200]), 1);
@@ -1293,9 +2091,9 @@ test('the Ex forms act on the running process, and refuse any other', ()=>{
     assert.equal(fns.VirtualQueryEx.argBytes, 16);
 });
 
-test('GetWriteWatch tells every committed page of a watched reservation as written', ()=>{
-    // Writes are not tracked, so the answer errs on the side a collector can
-    // live with: it rescans more than it must, never less.
+test('GetWriteWatch tells every committed page written where the engine cannot tell writes', ()=>{
+    // No watchWrites: the answer errs on the side a collector can live with:
+    // it rescans more than it must, never less.
     const MEM_WRITE_WATCH = 0x200000;
     const ERROR_NOACCESS = 998;
     const FAILED = 0xffffffff;
@@ -1332,6 +2130,259 @@ test('GetWriteWatch tells every committed page of a watched reservation as writt
     assert.equal(fns.ResetWriteWatch.handler([plain, PAGE_SIZE]), FAILED);
     fns.VirtualFree.handler([base, 0, MEM_RELEASE]);
     assert.equal(watch(base, PAGE_SIZE, 64), FAILED, 'a released reservation is watched no more');
+});
+
+test('GetWriteWatch tells the pages written since the reset, and RESET starts them over', ()=>{
+    // The engine's watch stands in for cork's page marks: a page is written
+    // when the test says so, and take answers each page once.
+    const MEM_WRITE_WATCH = 0x200000;
+    const WRITE_WATCH_FLAG_RESET = 1;
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const asked = [];
+    const host = { ...fakeHost(RESERVING_ARENA), setLastError: ()=>{},
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            asked.push([from, length]);
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        } };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 4 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 0x04]);
+    /** @param {number} flags @returns {number[]} */
+    const told = flags=>{
+        view.setUint32(0x100, 64, true);
+        assert.equal(fns.GetWriteWatch.handler([flags, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x104]),
+            0);
+        return Array.from({ length: view.getUint32(0x100, true) },
+            (_, at)=>(view.getUint32(0x200 + 4 * at, true) - base) / PAGE_SIZE);
+    };
+    // Watched from the reservation on, as Windows' is: nothing written yet
+    // (Wine's virtual.c test_write_watch).
+    assert.deepEqual(asked, [[base, GRANULARITY]], 'one watch over the whole reservation');
+    assert.deepEqual(told(0), [], 'nothing written since it was made');
+    marks.add((base >>> 12) + 1);
+    assert.deepEqual(told(0), [1], 'the one page written');
+    assert.equal(fns.ResetWriteWatch.handler([base, 4 * PAGE_SIZE]), 0);
+    assert.deepEqual(told(0), [], 'nothing written since the reset');
+
+    marks.add((base >>> 12) + 1).add((base >>> 12) + 3);
+    assert.deepEqual(told(0), [1, 3]);
+    assert.deepEqual(told(0), [1, 3], 'without RESET a page stays written');
+    assert.deepEqual(told(WRITE_WATCH_FLAG_RESET), [1, 3]);
+    assert.deepEqual(told(0), [], 'RESET took them');
+
+    marks.add((base >>> 12) + 2);
+    assert.equal(fns.ResetWriteWatch.handler([base + 2 * PAGE_SIZE, PAGE_SIZE]), 0);
+    marks.add(base >>> 12);
+    assert.deepEqual(told(0), [0], 'ResetWriteWatch takes its range alone');
+    assert.equal(asked.length, 1);
+});
+
+test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR count whole', ()=>{
+    // lpAddresses is PVOID* and lpdwCount ULONG_PTR*: eight bytes each at 64 bits. Every byte of
+    // both starts as 0xAA, so a dword write leaves the upper halves as garbage a collector reads
+    // as addresses and as a count (the Boehm collector Unity's Mono builds on watches its heap).
+    const MEM_WRITE_WATCH = 0x200000;
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8, setLastError: ()=>{},
+        watchWrites: ()=>({ take: (/** @type {number} */ address)=>[(address >>> 12) + 1] }) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 4 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 0x04]);
+    host.bytes.fill(0xaa, 0x100, 0x300);
+    view.setUint32(0x100, 64, true);
+    assert.equal(fns.GetWriteWatch.handler([0, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x180]), 0);
+    // The watch tells the second page of what it is asked for.
+    assert.equal(view.getBigUint64(0x100, true), 1n, 'the count, all eight bytes');
+    assert.equal(view.getBigUint64(0x200, true), BigInt(base + PAGE_SIZE),
+        'the address, all eight bytes');
+    assert.equal(view.getBigUint64(0x208, true), 0xaaaaaaaaaaaaaaaan, 'nothing past the answer');
+    assert.equal(view.getUint32(0x180, true), PAGE_SIZE, 'the granularity is a DWORD');
+    assert.equal(view.getUint32(0x184, true), 0xaaaaaaaa, 'and only a DWORD');
+});
+
+test('a 64-bit process\'s SIZE_T past 4 GiB is refused whole, not taken by its low half', ()=>{
+    // The bridge hands a 64-bit argument's low dword and its high one beside it (`args.high`):
+    // VirtualAlloc(4 GiB + 64 KiB) was a 64 KiB reservation, HeapAlloc of 4 GiB + 16 a block of 16.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8,
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    /** @param {number[]} words @param {number} at @returns {number[] & { high: number[] }} */
+    const wide = (words, at)=>Object.assign(words, { high: words.map((_, i)=>(i === at ? 1 : 0)) });
+    const MEM_RESERVE_COMMIT = 0x3000;
+    assert.equal(fns.VirtualAlloc.handler(wide([0, 0x10000, MEM_RESERVE_COMMIT, 0x04], 1)), 0);
+    assert.equal(errors.at(-1), 8, 'ERROR_NOT_ENOUGH_MEMORY');
+    const heap = fns.GetProcessHeap.handler();
+    assert.equal(fns.HeapAlloc.handler(wide([heap, 0, 16], 2)), 0, 'HeapAlloc');
+    const block = fns.HeapAlloc.handler([heap, 0, 16]);
+    assert.notEqual(block, 0);
+    assert.equal(fns.HeapReAlloc.handler(wide([heap, 0, block, 32], 3)), 0, 'HeapReAlloc');
+    assert.equal(fns.HeapSize.handler([heap, 0, block]), 16, 'the block left as it was');
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_RESERVE_COMMIT, 0x04]);
+    assert.notEqual(base, 0);
+    assert.equal(fns.VirtualFree.handler(wide([base, 0x1000, MEM_DECOMMIT], 1)), 0, 'VirtualFree');
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
+test('GetWriteWatch over the write clock: every page written since its last report or reset '
+    + 'is told, against a model of Windows, in seeded runs', ()=>{
+    // A collector's background marking (the .NET runtime's) rescans what
+    // GetWriteWatch tells; a page written and not told is an object it never
+    // revisits. The engine's marks are cork's (`takeWrites`: written since
+    // armed, each take arming again), the clock the cpu layer's; another
+    // watch over the same pages (the graphics recorder's) takes too.
+    const MEM_WRITE_WATCH = 0x200000;
+    const RESET = 1;
+    let seed = 0x9e37;
+    /** @param {number} n */
+    const next = n=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    for (let run = 0; run < 40; run++)
+    {
+        /** The pages armed and not written since (cork's WATCH), by page. @type {Set<number>} */
+        const armed = new Set();
+        /** @param {number} page */
+        const store = page=>armed.delete(page);
+        const host = fakeHost(RESERVING_ARENA);
+        const plain = { writeMemory: host.writeMemory, fillMemory: host.fillMemory };
+        const clock = createWriteClock({
+            take: (from, bytes)=>{
+                /** @type {number[]} */
+                const written = [];
+                for (let page = from >>> 12; page < Math.ceil((from + bytes) / PAGE_SIZE); page++)
+                {
+                    if (!armed.has(page))
+                    {
+                        written.push(page);
+                        armed.add(page);
+                    }
+                }
+                return written;
+            },
+            epochs: ()=>[],
+        });
+        const fns = createHeapFunctions({ ...host, setLastError: ()=>{},
+            // The host's own writes mark what they reach, as cork's do.
+            writeMemory: (address, data)=>{
+                for (let page = address >>> 12; page <= (address + data.length - 1) >>> 12; page++)
+                {
+                    store(page);
+                }
+                plain.writeMemory(address, data);
+            },
+            fillMemory: (address, value, length)=>{
+                for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
+                {
+                    store(page);
+                }
+                plain.fillMemory(address, value, length);
+            },
+            watchWrites: (from, length)=>clock.watch(from, length) });
+        const view = new DataView(host.bytes.buffer);
+        const pages = 12;
+        const base = fns.VirtualAlloc.handler([0, pages * PAGE_SIZE,
+            MEM_RESERVE | MEM_WRITE_WATCH, 0x04]);
+        assert.notEqual(base, 0);
+        const other = clock.watch(base, pages * PAGE_SIZE);
+        /** Windows: the committed pages written since their last report with RESET. */
+        const model = new Set();
+        const committed = new Set();
+        for (let step = 0; step < 300; step++)
+        {
+            const page = next(pages);
+            switch (next(8))
+            {
+                case 0: case 1: case 2:
+                    if (committed.has(page))
+                    {
+                        store((base >>> 12) + page);
+                        model.add(page);
+                    }
+                    break;
+                case 3:
+                {
+                    const count = 1 + next(pages - page);
+                    fns.VirtualAlloc.handler([base + page * PAGE_SIZE, count * PAGE_SIZE,
+                        MEM_COMMIT, 0x04]);
+                    for (let at = page; at < page + count; at++)
+                    {
+                        // A page committed again after a decommit is zeroes,
+                        // written as far as a watch knows; a fresh one may be
+                        // told or not, and the model does not ask.
+                        committed.add(at);
+                    }
+                    break;
+                }
+                case 4:
+                    fns.VirtualFree.handler([base + page * PAGE_SIZE, PAGE_SIZE, MEM_DECOMMIT]);
+                    committed.delete(page);
+                    model.delete(page);
+                    break;
+                case 5:
+                    other.take(base, pages * PAGE_SIZE);
+                    break;
+                case 6:
+                {
+                    const from = next(pages);
+                    const count = 1 + next(pages - from);
+                    assert.equal(fns.ResetWriteWatch.handler([base + from * PAGE_SIZE,
+                        count * PAGE_SIZE]), 0);
+                    for (let at = from; at < from + count; at++)
+                    {
+                        model.delete(at);
+                    }
+                    break;
+                }
+                default:
+                {
+                    const flags = next(2) === 0 ? RESET : 0;
+                    const room = 1 + next(pages);
+                    // The collector's loop: on from past the last page told
+                    // while the room was filled.
+                    let from = base;
+                    /** @type {number[]} */
+                    const told = [];
+                    for (;;)
+                    {
+                        view.setUint32(0x100, room, true);
+                        assert.equal(fns.GetWriteWatch.handler([flags, from,
+                            base + pages * PAGE_SIZE - from, 0x200, 0x100, 0x104]), 0);
+                        const count = view.getUint32(0x100, true);
+                        for (let at = 0; at < count; at++)
+                        {
+                            told.push((view.getUint32(0x200 + 4 * at, true) - base) / PAGE_SIZE);
+                        }
+                        if (count < room || told.at(-1) === pages - 1)
+                        {
+                            break;
+                        }
+                        from = base + ((told.at(-1) ?? 0) + 1) * PAGE_SIZE;
+                    }
+                    for (const written of model)
+                    {
+                        assert.ok(told.includes(written), `run ${run} step ${step}: page ${
+                            written} written and not told (${told})`);
+                    }
+                    if (flags === RESET)
+                    {
+                        told.forEach(at=>model.delete(at));
+                    }
+                }
+            }
+        }
+    }
 });
 
 test('kernel32\'s Rtl memory routines move, zero and fill, overlap either way', ()=>{
@@ -1578,4 +2629,234 @@ test('GlobalMemoryStatus answers a commit limit past memory, as a machine that p
         'dwTotalPageFile past dwTotalPhys');
     assert.ok(view.getUint32(at + 20, true) > view.getUint32(at + 12, true),
         'and what is free of it past free memory');
+});
+
+test('QueryWorkingSetEx: a committed page is resident with its protection, an image\'s shared',
+    ()=>{
+        const host = regionHost([
+            { base: 0x10000, size: 0x1000 },
+            { base: 0x20000, size: 0x1000, kind: 'image' },
+        ]);
+        const fns = createHeapFunctions(host);
+        const at = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        [0x10010, 0x20020, 0x30000].forEach((address, index)=>{
+            view.setUint32(at + index * 8, address, true);
+            view.setUint32(at + index * 8 + 4, 0xffffffff, true);
+        });
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0xffffffff, at, 24]), 1);
+        assert.equal(view.getUint32(at + 4, true), 1 | 0x40 << 4, 'valid, read-write-execute');
+        assert.equal(view.getUint32(at + 12, true), 1 | 1 << 1 | 0x40 << 4 | 1 << 15,
+            'an image\'s page is shared');
+        assert.equal(view.getUint32(at + 20, true), 0, 'a reserved gap is not valid');
+        assert.equal(view.getUint32(at, true), 0x10010, 'the address is left as it was');
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0xffffffff, at, 4]), 0);
+        assert.equal(fns.K32QueryWorkingSetEx.handler([0x44, at, 24]), 0);
+
+        assert.equal(fns.DiscardVirtualMemory.handler([0x10000, 0x1000]), 0);
+        assert.equal(fns.DiscardVirtualMemory.handler([0x30000, 0x1000]), 87);
+    });
+
+test('a range kept from the program is no block of its, and the mark of what was handed out'
+    + ' stays below it', ()=>{
+    const allocator = createHeapAllocator({ base: 0x100000, size: 0x400000 });
+    assert.equal(allocator.allocateAt(0x300000, 0x100000,
+        { owner: 'engine', reserving: true, held: true }), true);
+    assert.equal(allocator.handedTo(), 0x100000, 'nothing of the program\'s is written there');
+    const first = allocator.allocate(0x1000);
+    assert.equal(allocator.handedTo(), first + 0x1000);
+    assert.equal(allocator.allocateAt(0x300000, 0x1000), false, 'and it is never handed out');
+});
+
+test('the allocator keeps its free total as blocks come and go', ()=>{
+    const allocator = createHeapAllocator(ARENA);
+    /** @type {number[]} */
+    const held = [];
+    let seed = 7;
+    const next = ()=>(seed = seed * 1103515245 + 12345 >>> 0);
+    for (let step = 0; step < 2000; step++)
+    {
+        if (held.length > 0 && next() % 3 === 0)
+        {
+            allocator.free(held.splice(next() % held.length, 1)[0]);
+        }
+        else
+        {
+            const address = allocator.allocate(1 + next() % 0x3000);
+            if (address)
+            {
+                held.push(address);
+            }
+        }
+        assert.equal(allocator.freeTotal(), allocator.diagnostics().free);
+    }
+});
+
+/**
+ * A host over a memory a gone process left written all through its arena
+ * (`dirtyTo`), with the allocator cleaning as `clean` lets it.
+ *
+ * @param {{ base: number, size: number }} arena @param {() => boolean} [can]
+ */
+function inheritedHost(arena, can = ()=>true){
+    const host = fakeHost(arena);
+    host.bytes.fill(0xee, arena.base);
+    /** @type {[number, number][]} */
+    const cleaned = [];
+    const allocator = createHeapAllocator({ ...arena, dirtyTo: arena.base + arena.size,
+        clean: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            if (!can())
+            {
+                return false;
+            }
+            cleaned.push([address, length]);
+            host.bytes.fill(0, address, address + length);
+            return true;
+        } });
+    return { host: { ...host, allocator }, allocator, cleaned };
+}
+
+test('in a gone process\'s memory a block reads what it reads in a new one: cleaned as it is'
+    + ' placed, padding an alignment skipped too, and nothing it was not handed', ()=>{
+    const { host, allocator, cleaned } = inheritedHost(RESERVING_ARENA);
+    const first = allocator.allocate(100);
+    assert.equal(allocator.block(first)?.fresh, true, 'zero, as fresh arena is');
+    assert.deepEqual(cleaned, [[first, 104]], 'only the block itself');
+    assert.ok(host.bytes.subarray(first, first + 104).every(byte=>byte === 0));
+    assert.equal(host.bytes[first + 104], 0xee, 'what lies past it left as it was');
+    // A block aligned past the end leaves padding behind it, under the handed mark:
+    // never handed out here, it still holds the gone process's bytes.
+    const aligned = allocator.allocate(64, { alignment: 0x1000 });
+    assert.ok(aligned > first + 104);
+    const padded = allocator.allocate(64);
+    assert.ok(padded < aligned, 'placed in the padding');
+    assert.ok(host.bytes.subarray(padded, padded + 64).every(byte=>byte === 0),
+        'cleaned there too, though the arena was handed out past it');
+    assert.equal(allocator.dirtyTo(), RESERVING_ARENA.base + RESERVING_ARENA.size);
+    // Freed and placed again: its own bytes now, recycled as any block's are.
+    host.bytes.fill(0x11, first, first + 104);
+    allocator.free(first);
+    const again = allocator.allocate(100);
+    assert.equal(again, first);
+    assert.equal(allocator.block(again)?.fresh, false);
+    assert.equal(host.bytes[again], 0x11, 'not cleaned again: this process wrote it');
+});
+
+test('a block placed before the memory can be written is not fresh, and is cleaned once it'
+    + ' can be', ()=>{
+    let can = false;
+    const { allocator, cleaned } = inheritedHost(RESERVING_ARENA, ()=>can);
+    const early = allocator.allocate(100);
+    assert.equal(allocator.block(early)?.fresh, false, 'whoever promises zeroes zeroes it');
+    assert.deepEqual(cleaned, []);
+    allocator.free(early);
+    can = true;
+    const later = allocator.allocate(100);
+    assert.equal(later, early);
+    assert.deepEqual(cleaned, [[early, 104]], 'still the gone process\'s bytes: cleaned now');
+});
+
+test('in a gone process\'s memory a reservation is zeroed as it is committed, page by page,'
+    + ' and not at once', ()=>{
+    const { host } = inheritedHost(RESERVING_ARENA);
+    const fns = createHeapFunctions(host);
+    const before = host.filled();
+    const reserved = fns.VirtualAlloc.handler([0, 2 * GRANULARITY, MEM_RESERVE, 0x04]);
+    assert.notEqual(reserved, 0);
+    assert.equal(host.filled(), before, 'the reservation itself zeroes nothing');
+    const page = fns.VirtualAlloc.handler([reserved + PAGE_SIZE, PAGE_SIZE, MEM_COMMIT, 0x04]);
+    assert.equal(page, reserved + PAGE_SIZE);
+    assert.ok(host.bytes.subarray(page, page + PAGE_SIZE).every(byte=>byte === 0),
+        'the page committed reads zero');
+    assert.equal(host.bytes[reserved], 0xee, 'a page not committed is not zeroed');
+    assert.equal(host.filled() - before, PAGE_SIZE, 'one page written');
+    const whole = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_COMMIT | MEM_RESERVE, 0x04]);
+    assert.ok(host.bytes.subarray(whole, whole + GRANULARITY).every(byte=>byte === 0),
+        'committed with its reservation: zero at once');
+});
+
+test('a heap made with a maximum is fixed: no block reaches the threshold, nor the whole past it',
+    ()=>{
+        // HeapAlloc's documented limit for a heap that does not grow, and the
+        // maximum itself less the heap's own records (kernel32's heap test).
+        /** @type {number[]} */
+        const errors = [];
+        const host = { ...fakeHost({ base: 0x10000, size: 0x400000 }),
+            setLastError: (/** @type {number} */ code)=>errors.push(code) };
+        const fns = createHeapFunctions(host);
+        const small = fns.HeapCreate.handler([0, 0x20000, 0x20000]);
+        assert.equal(small & 0xffff, 0, 'aligned as every heap is');
+        const first = fns.HeapAlloc.handler([small, 0, 0x20000 - 0x700]);
+        assert.notEqual(first, 0);
+        assert.equal(fns.HeapAlloc.handler([small, 0, 0x100]), 0, 'and nothing past its maximum');
+        assert.equal(errors.at(-1), 8);
+        assert.equal(fns.HeapFree.handler([small, 0, first]), 1);
+        assert.equal(fns.HeapAlloc.handler([small, 0, 0x20000 - 0x400]), 0,
+            'its records take a part');
+
+        const large = fns.HeapCreate.handler([0, 0x100000, 0x100000]);
+        assert.equal(fns.HeapAlloc.handler([large, 0, 0x80000]), 0, 'a block past the threshold');
+        const block = fns.HeapAlloc.handler([large, 0, 0x20000]);
+        assert.notEqual(fns.HeapReAlloc.handler([large, 0, block, 0x40000]), 0,
+            'growing within it');
+        assert.equal(fns.HeapDestroy.handler([large]), 1);
+        const growable = fns.HeapCreate.handler([0, 0, 0]);
+        assert.notEqual(fns.HeapAlloc.handler([growable, 0, 0x80000]), 0,
+            'a growable heap has no such limit');
+    });
+
+test('a placeholder is replaced by exactly its span, split, joined and given back', ()=>{
+    const { fns, query } = arenaQuery();
+    const PLACEHOLDER = MEM_RESERVE | 0x40000;
+    const REPLACE = MEM_RESERVE | MEM_COMMIT | 0x4000;
+    const PRESERVE = MEM_RELEASE | 0x2;
+    const COALESCE = MEM_RELEASE | 0x1;
+    const alloc2 = (/** @type {number} */ at, /** @type {number} */ size,
+        /** @type {number} */ type, /** @type {number} */ protect)=>
+        fns.VirtualAlloc2.handler([0, at, size, type, protect, 0, 0]);
+
+    assert.equal(alloc2(0, GRANULARITY, PLACEHOLDER, 0x04), 0, 'a placeholder is PAGE_NOACCESS');
+    const base = alloc2(0, GRANULARITY, PLACEHOLDER, PAGE_NOACCESS);
+    assert.notEqual(base, 0);
+    assert.deepEqual(query(base), { base, allocationBase: base, size: GRANULARITY,
+        state: MEM_RESERVE, protect: 0 });
+    assert.equal(fns.VirtualAlloc.handler([base, PAGE_SIZE, MEM_COMMIT, 0x04]), 0,
+        'nothing is committed in a placeholder');
+    assert.equal(fns.VirtualAlloc.handler([0, GRANULARITY, PLACEHOLDER, PAGE_NOACCESS]), 0,
+        'VirtualAlloc knows no placeholders');
+
+    // Split at pages into three, the middle replaced and given back.
+    assert.equal(fns.VirtualFree.handler([base + 0x4000, 0x4000, PRESERVE]), 1);
+    assert.equal(query(base).size, 0x4000);
+    assert.equal(query(base + 0x8000).allocationBase, base + 0x8000);
+    assert.equal(alloc2(base + 0x4000, 0x2000, REPLACE, 0x04), 0, 'not its whole span');
+    assert.equal(alloc2(base + 0x4000, 0x4000, REPLACE, 0x04), base + 0x4000);
+    assert.equal(query(base + 0x4000).state, MEM_COMMIT);
+    assert.equal(fns.VirtualFree.handler([base + 0x4000, 0, PRESERVE]), 1, 'back to a placeholder');
+    assert.equal(query(base + 0x4000).state, MEM_RESERVE);
+
+    assert.equal(fns.VirtualFree.handler([base, 0x8000, COALESCE]), 1);
+    assert.equal(query(base).size, 0x8000, 'two joined');
+    assert.equal(fns.VirtualFree.handler([base, GRANULARITY, COALESCE]), 1);
+    assert.equal(query(base).size, GRANULARITY, 'and the third');
+    assert.equal(fns.VirtualFree.handler([base, 0, MEM_RELEASE]), 1);
+    assert.equal(query(base).state, MEM_FREE);
+
+    const plain = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, PAGE_NOACCESS]);
+    assert.equal(fns.VirtualFree.handler([plain, 0, PRESERVE]), 0,
+        'only an allocation that replaced a placeholder goes back to one');
+});
+
+test('of the large spans the lowest is handed out first, whatever their sizes', ()=>{
+    // A heap past 2 GiB split by the shared page: 1.8 GiB below it, 1 GiB above
+    // (a 32-bit Windows started with /3GB), the smaller span a class below.
+    const base = 0x0c000000;
+    const shared = 0x7ffe0000;
+    const allocator = createHeapAllocator({ base, size: 0xbfff0000 - base });
+    assert.ok(allocator.allocateAt(shared, 0x20000), 'the shared page held out');
+    const small = allocator.allocate(0x100);
+    const large = allocator.allocate(64 << 20);
+    assert.ok(small < shared && large < shared,
+        `blocks from the bottom while the span below has room: 0x${small.toString(16)},`
+        + ` 0x${large.toString(16)}`);
 });

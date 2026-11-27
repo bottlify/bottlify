@@ -44,7 +44,7 @@ import { createEffects } from './effect.js';
 import { createTextureLoader } from './texture.js';
 import { createTextureTools } from './texture-tools.js';
 import { createTextureSaver } from './save-texture.js';
-import { guestEntry } from '../msvcrt/guest-code.js';
+import { guestEntry, withLongCode } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
@@ -56,6 +56,7 @@ import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
+import { MOST_TOKENS, functionLength } from '../common/shader-tokens.js';
 import * as inGuest from './inguest.js';
 import * as matrix from './inguest-matrix.js';
 import * as vector from './inguest-vector.js';
@@ -64,6 +65,12 @@ import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
 import { COMPILED as VECTOR } from './inguest-vector.x86.js';
 import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
+import { COMPILED as LONG } from './inguest.x64.js';
+import { COMPILED as MATRIX_LONG } from './inguest-matrix.x64.js';
+import { COMPILED as VECTOR_LONG } from './inguest-vector.x64.js';
+import { COMPILED as QUATERNION_LONG } from './inguest-quaternion.x64.js';
+import { wholeAddress } from '../common/pointers.js';
+import { createCompileCache } from './compile-cache.js';
 
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -89,6 +96,43 @@ const NOT_BUILT = {
 };
 
 
+/** D3D_SDK_VERSION of the DirectX 9 headers every d3dx9 version was built against. */
+const D3D_SDK_VERSION = 32;
+
+/**
+ * What differs between the d3dx9 versions' tables: the version a library
+ * answers to. A program built against one SDK asks the library it imports
+ * whether it is that SDK's (D3DXCheckVersion) and gives up when not; d3dx9_N's
+ * D3DX_SDK_VERSION is N.
+ *
+ * @param {number} version  24 to 43.
+ */
+export function d3dxVersionFunctions(version){
+    let muted = 0;
+    return {
+        /** BOOL D3DXCheckVersion(UINT D3DSdkVersion, UINT D3DXSdkVersion) */
+        D3DXCheckVersion: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([d3d, d3dx])=>((d3d >>> 0) === D3D_SDK_VERSION && (d3dx >>> 0) === version
+                ? 1 : 0),
+        },
+        /**
+         * BOOL D3DXDebugMute(BOOL Mute): the setting before this call. A retail
+         * library prints no debug output either way.
+         */
+        D3DXDebugMute: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mute])=>{
+                const before = muted;
+                muted = mute === 0 ? 0 : 1;
+                return before;
+            },
+        },
+    };
+}
+
 /**
  * Each module of guest code and what the build made of it: every function
  * compiled is exported under its own name.
@@ -97,12 +141,18 @@ const NOT_BUILT = {
  */
 const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
     [quaternion, QUATERNION]];
+// Their x86-64, from the same sources: what a 64-bit process places.
+withLongCode(COMPILED, LONG);
+withLongCode(MATRIX, MATRIX_LONG);
+withLongCode(VECTOR, VECTOR_LONG);
+withLongCode(QUATERNION, QUATERNION_LONG);
 
 /**
  * @typedef {Object} D3dxHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number) => number} [readU32]  A word read in place.
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process.
  * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
@@ -119,6 +169,10 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *           (`bridge.drive`); what a handler returns in place of a promise.
  * @property {() => any} [currentThread]
  *           Whose call is in flight: a call into the guest made after an await names it.
+ * @property {(name: string) => { run: (job: (thread: any) => Promise<void>) => void }}
+ *     [serviceThread]
+ *           A thread of the program's that runs what it is handed: D3DX 10 and 11's
+ *           thread pump's stages.
  * @property {(font: any) => any} [fontMetrics]
  *           What the font engine GDI draws with measures for a font, or null.
  * @property {(code: number, font: any) => any} [glyph]
@@ -130,6 +184,9 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *           Told of each compile, for a tool that compares the source with what came out.
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *           A file's bytes, for D3DXCreateEffectFromFile and its kin.
+ * @property {import('../../cache/module.js').CacheSpace} [compiles]
+ *           Where shader compiles done are kept: the run's cache, for every process of
+ *           the run. None: a compile asked again is done again.
  * @property {(path: string, bytes: Uint8Array) => Promise<boolean> | boolean} [writeFile]
  *           A file written whole, for D3DXSaveTextureToFile: false when it could not be.
  * @property {(module: number, name: string | number, type: number) =>
@@ -153,7 +210,8 @@ export function createD3dxFunctions(host, options = {}){
         id: IID_ID3DXBUFFER,
         methods: [
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>object.state.data },
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
+                invoke: object=>object.state.data },
             /** DWORD GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4, invoke: object=>object.state.size },
         ],
@@ -172,7 +230,7 @@ export function createD3dxFunctions(host, options = {}){
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /**
@@ -183,8 +241,23 @@ export function createD3dxFunctions(host, options = {}){
      */
     const cString = address=>readToTerminator(host, address, 1, 4096).bytes;
     /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
+    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(value & 0xff,
         value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
+
+    /** A pointer's bytes in the calling process. */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    /**
+     * A pointer written whole: its high half zero in a 64-bit process.
+     *
+     * @param {number} at @param {number} value
+     */
+    const putPointer = (at, value)=>{
+        putU32(at, value);
+        if (POINTER === 8)
+        {
+            putU32(at + 4, 0);
+        }
+    };
 
     /**
      * An ID3DXBuffer holding these bytes, its pointer written to `out`.
@@ -210,7 +283,7 @@ export function createD3dxFunctions(host, options = {}){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putU32(out, pointer);
+        putPointer(out, pointer);
         return 0;
     };
 
@@ -224,7 +297,7 @@ export function createD3dxFunctions(host, options = {}){
             face, out] = args;
         if ((out >>> 0) !== 0)
         {
-            putU32(out, 0);
+            putPointer(out, 0);
         }
         if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
         {
@@ -246,7 +319,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             return D3DERR_INVALIDCALL;
         }
-        const bytes = host.readMemory(desc >>> 0, 24);
+        const bytes = host.readMemory(wholeAddress(desc), 24);
         const view = new DataView(bytes.slice().buffer);
         return createFont([device, view.getInt32(0, true), view.getUint32(4, true),
             view.getUint32(8, true), view.getUint32(12, true), view.getUint32(16, true),
@@ -275,10 +348,10 @@ export function createD3dxFunctions(host, options = {}){
     const macrosAt = at=>{
         /** @type {[string, string][]} */
         const macros = [];
-        for (let entry = at >>> 0; entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
-            entry += 8)
+        for (let entry = wholeAddress(at); entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
+            entry += 2 * POINTER)
         {
-            const value = u32(entry + 4);
+            const value = u32(entry + POINTER);
             macros.push([latin1(cString(u32(entry))), value === 0 ? '' : latin1(cString(value))]);
         }
         return macros;
@@ -309,7 +382,8 @@ export function createD3dxFunctions(host, options = {}){
         {
             return null;
         }
-        const scratch = heap.allocate(name.length + 1 + 8);
+        // The name, then the data pointer and the byte count Open answers.
+        const scratch = heap.allocate(name.length + 1 + 16);
         if (scratch === 0)
         {
             return null;
@@ -318,18 +392,19 @@ export function createD3dxFunctions(host, options = {}){
         {
             host.writeMemory(scratch, encode(name));
             const dataOut = scratch + name.length + 1;
-            putU32(dataOut, 0);
-            putU32(dataOut + 4, 0);
+            const bytesOut = dataOut + 8;
+            putPointer(dataOut, 0);
+            putU32(bytesOut, 0);
             const vtable = u32(include);
             const answer = await callGuest({ entry: u32(vtable), args: [include, system ? 1 : 0,
-                scratch, 0, dataOut, dataOut + 4], thread });
+                scratch, 0, dataOut, bytesOut], thread });
             const data = u32(dataOut);
             if ((answer | 0) < 0 || data === 0)
             {
                 return null;
             }
-            const text = latin1(host.readMemory(data, u32(dataOut + 4)).slice());
-            await callGuest({ entry: u32(vtable + 4), args: [include, data], thread });
+            const text = latin1(host.readMemory(data, u32(bytesOut)).slice());
+            await callGuest({ entry: u32(vtable + POINTER), args: [include, data], thread });
             return text;
         }
         finally
@@ -347,16 +422,11 @@ export function createD3dxFunctions(host, options = {}){
 
     /**
      * Compiles already done, by source, entry, profile, flags and macros, each with the files
-     * it included: a program that asks for the same compile again -- every frame, as some do
-     * after a refusal -- is given the same answer once its includes are found the same.
-     *
-     * @type {Map<string, { included: { name: string, system: boolean, parent: string,
-     *     text: string }[],
-     *     result: Awaited<ReturnType<typeof compileShader>> }>}
+     * it included, in the run's cache (`compile-cache.js`): a program that asks for the same
+     * compile again -- every frame, as some do after a refusal -- is given the same answer
+     * once its includes are found the same.
      */
-    const compiles = new Map();
-    /** The most compiles kept; the oldest goes first. */
-    const COMPILES_KEPT = 512;
+    const compiles = createCompileCache(host.compiles);
 
     /** A wide string, at most 1024 characters. @param {number} address */
     const wideAt = address=>charactersOf(readToTerminator(host, address, 2, 1024).bytes, 2);
@@ -414,10 +484,21 @@ export function createD3dxFunctions(host, options = {}){
      * @typedef {{ text: string | null | Promise<string | null>, include: Include | undefined }}
      *     ShaderSource
      */
+    /**
+     * A source's text, ended at a NUL inside the size given: a program that
+     * passes strlen + 1 hands the terminator over with the text, and the
+     * compiler reads a C string.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const untilNul = bytes=>{
+        const end = bytes.indexOf(0);
+        return latin1(end < 0 ? bytes : bytes.subarray(0, end));
+    };
     const shaderSources = {
         /** @param {number} data @param {number} size @param {number} include */
         memory: (data, size, include)=>/** @type {ShaderSource} */ ({
-            text: latin1(host.readMemory(data >>> 0, size >>> 0)),
+            text: untilNul(host.readMemory(wholeAddress(data), size >>> 0)),
             include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) }),
         /**
          * @param {string} api @param {number} file @param {boolean} wide @param {number} include
@@ -490,7 +571,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
             }
         }
     };
@@ -562,7 +643,7 @@ export function createD3dxFunctions(host, options = {}){
         const key = JSON.stringify([text, entryName, profile, flags, macros, opener !== undefined]);
         /** The answer of an earlier compile, if its includes are still the same. */
         const earlier = async()=>{
-            const known = compiles.get(key);
+            const known = compiles.find(key);
             if (!known)
             {
                 return null;
@@ -583,12 +664,7 @@ export function createD3dxFunctions(host, options = {}){
             opened.length = 0;
             result = await compileShader(text, { entry: entryName, profile, flags,
                 defines: macros, include: opener && recorded });
-            compiles.delete(key);
-            compiles.set(key, { included: opened.slice(), result });
-            if (compiles.size > COMPILES_KEPT)
-            {
-                compiles.delete(/** @type {string} */ (compiles.keys().next().value));
-            }
+            compiles.keep(key, opened, result);
         }
         host.shaderCompiled?.({ api, profile, entry: entryName, defines: macros, flags,
             source: text, included, messages: result.messages, tokens: result.tokens });
@@ -758,11 +834,11 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([device, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    putU32(out, 0);
+                    putPointer(out, 0);
                 }
-                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
+                if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -771,7 +847,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return E_OUTOFMEMORY;
                 }
-                putU32(out, pointer);
+                putPointer(out, pointer);
                 return 0;
             },
         },
@@ -813,11 +889,11 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([bytes, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 if (!host.heap || !host.vtables)
                 {
                     return E_NOTIMPL;
@@ -868,39 +944,40 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([shader, , comments, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 }
-                if ((shader >>> 0) === 0 || (out >>> 0) === 0 || !host.heap || !host.vtables)
+                if (wholeAddress(shader) === 0 || wholeAddress(out) === 0 || !host.heap
+                    || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                // The length is in the stream: up to the end token, stepping over the
-                // comment blocks, whose data may hold that word, at most 1 MiB.
-                const words = [u32(shader >>> 0)];
-                for (let at = (shader >>> 0) + 4; words.length < 262144; at += 4)
+                // The length is in the stream: up to the end token, walked an
+                // instruction at a time.
+                /** @type {number[]} */
+                const words = [];
+                const length = functionLength(at=>{
+                    while (words.length <= at)
+                    {
+                        words.push(u32(wholeAddress(shader) + words.length * 4));
+                    }
+                    return words[at];
+                });
+                if (length === 0)
                 {
-                    const word = u32(at);
-                    words.push(word);
-                    if (word === 0x0000ffff)
-                    {
-                        break;
-                    }
-                    if ((word & 0xffff) === 0xfffe)
-                    {
-                        for (let n = word >>> 16 & 0x7fff; n > 0 && words.length < 262144; n--)
-                        {
-                            at += 4;
-                            words.push(u32(at));
-                        }
-                    }
+                    host.divergence?.('D3DXDisassembleShader', 'refused: no shader function'
+                        + ` ends within ${MOST_TOKENS} tokens`
+                        + ` at 0x${wholeAddress(shader).toString(16)}`);
+                    return D3DERR_INVALIDCALL;
                 }
+                words.length = length;
                 let listing;
                 try
                 {
-                    listing = disassembleShader(Uint32Array.from(words), (comments >>> 0) === 0
-                        ? undefined : { comments: latin1(cString(comments)) });
+                    listing = disassembleShader(Uint32Array.from(words),
+                        wholeAddress(comments) === 0
+                            ? undefined : { comments: latin1(cString(comments)) });
                 }
                 catch (e){
                     host.divergence?.('D3DXDisassembleShader', `refused: ${

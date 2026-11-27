@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { playedDirect3D, recordedDirect3D } from './direct3d.js';
-import { createSender } from './channel.js';
+import { carriedTo } from './ring-fixtures.js';
 import { D3D_OK } from '../d3d9/constants.js';
 
 /** A seeded generator. @param {number} seed */
@@ -140,6 +140,10 @@ function run(seed, watched, dynamic = true, checking = null){
         },
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             ram.slice(at, at + length),
+        // In place, as the engine's memory reads: what the recording keeps
+        // it copies when the call is finished, before the program runs again.
+        windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram.subarray(at, at + length),
         ...(watched ? { watchWrites: engine.watchWrites } : {}),
         ...(checking ? { checkDraws: ()=>turn } : {}),
     };
@@ -147,14 +151,7 @@ function run(seed, watched, dynamic = true, checking = null){
     const seen = [];
     const played = playedDirect3D(toy(seen, dynamic),
         { ...services, backend: {}, readMemory: true });
-    const sender = createSender({
-        post: message=>{
-            played.read(message.buffer, call=>{
-                played.play(call);
-            });
-        },
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
     const root = recordedDirect3D(toy(seen, dynamic), services, sender);
     const buffers = [0x1800, 0x1800, 0x900, 0x5000].map(length=>{
         /** @type {{ buffer?: any }} */
@@ -320,12 +317,7 @@ test('a buffer moved between storages of its own is sent whole once a storage, t
         },
     });
     const played = playedDirect3D(twoStorages, { ...services, backend: {}, readMemory: true });
-    const sender = createSender({
-        post: message=>played.read(message.buffer, call=>{
-            played.play(call);
-        }),
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
     const root = recordedDirect3D(twoStorages, services, sender);
     /** @type {{ buffer?: any }} */
     const out = {};
@@ -357,3 +349,41 @@ test('a buffer moved between storages of its own is sent whole once a storage, t
     assert.equal(buffer.Rename(second), D3D_OK);
     assert.equal(draw(), 0, 'and on the second: nothing written since');
 });
+
+test('a watched buffer\'s first draw sends all of it read where it lies, not copied out first',
+    ()=>{
+        // Without a watch the bytes are kept to compare against, so they are
+        // the recording's own; with one, the call's record copies them.
+        for (const watched of [true, false])
+        {
+            const ram = new Uint8Array(1 << 16);
+            const engine = watches();
+            /** @type {number[]} */
+            const copied = [];
+            const services = {
+                allocate: ()=>0x1000,
+                readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                    copied.push(length);
+                    return ram.slice(at, at + length);
+                },
+                windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                    ram.subarray(at, at + length),
+                ...(watched ? { watchWrites: engine.watchWrites } : {}),
+            };
+            /** @type {Uint8Array[][]} */
+            const seen = [[]];
+            const played = playedDirect3D(toy(seen), { ...services, backend: {},
+                readMemory: true });
+            const { sender } = carriedTo(played);
+            const root = recordedDirect3D(toy(seen), services, sender);
+            /** @type {{ buffer?: any }} */
+            const out = {};
+            assert.equal(root.CreateBuffer(0x3000, out), D3D_OK);
+            ram.fill(7, 0x1000, 0x4000);
+            assert.equal(root.Draw(out.buffer, 0x100, 0x200), D3D_OK);
+            ram.fill(9, 0x1000, 0x4000);
+            assert.deepEqual([...seen[0][0]], Array(0x100).fill(7), 'drawn as it was at the draw');
+            assert.equal(copied.includes(0x3000), !watched,
+                watched ? 'read in place' : 'kept to compare against, so copied');
+        }
+    });

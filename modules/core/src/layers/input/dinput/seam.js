@@ -25,8 +25,8 @@
  * offsets its buffered events carry are the ones its format gave.
  */
 
-import { createComPublisher } from '../../bridge/com-seam.js';
-import { readGuid, parseGuid } from '../../win32/ole32/guid.js';
+import { createComPublisher, IID_IUNKNOWN } from '../../bridge/com-seam.js';
+import { readGuid, parseGuid } from '../../../system/guid.js';
 import {
     createInputDevice, objectsOf, KEYBOARD, MOUSE, DIMOUSE_OFS, MOUSE_BUTTONS,
 } from './devices.js';
@@ -40,6 +40,13 @@ const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 /** A read of a device taken back from the program: another window came to the front. */
 const DIERR_INPUTLOST = 0x8007001e | 0;
+/** The generic desktop page's mouse and keyboard, as raw input names them. */
+const HID_USAGE_MOUSE = 2;
+const HID_USAGE_KEYBOARD = 6;
+const RIDEV_NOLEGACY = 0x30;
+const RIDEV_CAPTUREMOUSE = 0x200;
+const RIDEV_NOHOTKEYS = 0x200;
+const RIDEV_INPUTSINK = 0x100;
 const DIERR_ACQUIRED = 0x800700aa | 0;
 /** Another window is in the foreground of a device that reads only there. */
 const DIERR_OTHERAPPHASPRIO = 0x80070005 | 0;
@@ -50,6 +57,18 @@ const DIERR_NOTBUFFERED = 0x80040207 | 0;
 const E_POINTER = 0x80004003 | 0;
 const E_HANDLE = 0x80070006 | 0;
 const DIERR_NOINTERFACE = 0x80004002 | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+
+/** The classes the two libraries' DllGetClassObject make: a DirectInput object each. */
+const CLSID_DirectInput = '{25E609E0-B259-11CF-BFC7-444553540000}';
+const CLSID_DirectInput8 = '{25E609E4-B259-11CF-BFC7-444553540000}';
+const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+/** IClassFactory, after IUnknown's three. */
+const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
+    ['CreateInstance', 3],
+    ['LockServer', 1],
+]);
 /** ERROR_NOT_READY: an object no version was given to. */
 const DIERR_NOTINITIALIZED = 0x80070015 | 0;
 /** ERROR_RMODE_APP: a version no DirectInput was released as. */
@@ -75,7 +94,7 @@ const VERSION_8 = 0x800;
  * @param {boolean} eight   An IDirectInput8 object rather than an earlier one.
  * @returns {number}
  */
-export function versionRefusal(instance, version, eight){
+function versionRefusal(instance, version, eight){
     const asked = version >>> 0;
     // Only the first DirectInput let a program leave out its module handle.
     if ((instance >>> 0) === 0 && (eight || asked !== 0x300))
@@ -172,9 +191,9 @@ export const IID_IDirectInput8W = '{BF798031-483A-4DA2-AA99-5D64ED369700}';
 export const IID_IDirectInputDeviceA = '{5944E680-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDeviceW = '{5944E681-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDevice2A = '{5944E682-C92E-11CF-BFC7-444553540000}';
-export const IID_IDirectInputDevice2W = '{5944E683-C92E-11CF-BFC7-444553540000}';
+const IID_IDirectInputDevice2W = '{5944E683-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDevice7A = '{57D7C6BC-2356-11D3-8E9D-00C04F6844AE}';
-export const IID_IDirectInputDevice7W = '{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}';
+const IID_IDirectInputDevice7W = '{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}';
 export const IID_IDirectInputDevice8A = '{54D41080-DC15-4833-A41B-748F73A38179}';
 export const IID_IDirectInputDevice8W = '{54D41081-DC15-4833-A41B-748F73A38179}';
 
@@ -186,6 +205,8 @@ export const DIDEVICEOBJECTDATA = Object.freeze({
     dwSequence: 0x0c,
     uAppData: 0x10,
     SIZE: 0x10,
+    /** DirectX 8's in a 64-bit process, where uAppData is a quadword. */
+    SIZE_DX8_LONG: 0x18,
     SIZE_DX8: 0x14,
 });
 
@@ -222,6 +243,8 @@ const PROPERTY_SIZE = new Map([
     [DIPROP.USERNAME, 536], [DIPROP.TYPENAME, 536],
 ]);
 const DIPROPHEADER_SIZE = 16;
+/** The uAppData of an event whose object has none. */
+const NO_APP_DATA = 0xffffffff;
 const DIPROPRANGE_NOMIN = 0x80000000 | 0;
 const DIPROPRANGE_NOMAX = 0x7fffffff;
 const DIPROPAXISMODE_ABS = 0;
@@ -393,6 +416,9 @@ const DIDATAFORMAT = Object.freeze({
     dwSize: 0x00, dwObjSize: 0x04, dwDataSize: 0x0c, dwNumObjs: 0x10, rgodf: 0x14, SIZE: 24,
 });
 const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
+/** The two in a 64-bit process: each holds a pointer, a quadword at its own alignment. */
+const DIDATAFORMAT_LONG = Object.freeze({ ...DIDATAFORMAT, rgodf: 0x18, SIZE: 32 });
+const DIOBJECTDATAFORMAT_LONG = Object.freeze({ pguid: 0x0, dwOfs: 0x8, dwType: 0xc, SIZE: 24 });
 const DIDFT_AXIS = 0x03;
 const DIDFT_POV = 0x10;
 /**
@@ -450,22 +476,25 @@ const DIDFT_OPTIONAL = 0x80000000;
  * @param {number} format
  * @param {readonly import('./devices.js').DeviceObject[]} objects
  * @param {(why: string) => void} [refused]  Told what refused the format.
+ * @param {4 | 8} [pointer]  8 for a 64-bit process's layouts.
  * @returns {{ dataSize: number, places: Map<number, number>, centred: number[] } | null}
  *     `centred` is where an optional point-of-view entry no object answered
  *     sits: the state reads it as a POV at rest, all ones.
  */
-export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
-    const dataSize = readU32(format + DIDATAFORMAT.dwDataSize);
-    if (readU32(format + DIDATAFORMAT.dwSize) !== DIDATAFORMAT.SIZE
-        || readU32(format + DIDATAFORMAT.dwObjSize) !== DIOBJECTDATAFORMAT.SIZE
+function readFormat(readU32, guidAt, format, objects, refused = ()=>{}, pointer = 4){
+    const HEADER = pointer === 8 ? DIDATAFORMAT_LONG : DIDATAFORMAT;
+    const ENTRY = pointer === 8 ? DIOBJECTDATAFORMAT_LONG : DIOBJECTDATAFORMAT;
+    const dataSize = readU32(format + HEADER.dwDataSize);
+    if (readU32(format + HEADER.dwSize) !== HEADER.SIZE
+        || readU32(format + HEADER.dwObjSize) !== ENTRY.SIZE
         || dataSize % 4 !== 0)
     {
-        refused(`a header of ${readU32(format + DIDATAFORMAT.dwSize)} bytes, objects of`
-            + ` ${readU32(format + DIDATAFORMAT.dwObjSize)} and data of ${dataSize}`);
+        refused(`a header of ${readU32(format + HEADER.dwSize)} bytes, objects of`
+            + ` ${readU32(format + HEADER.dwObjSize)} and data of ${dataSize}`);
         return null;
     }
-    const count = readU32(format + DIDATAFORMAT.dwNumObjs);
-    const array = readU32(format + DIDATAFORMAT.rgodf);
+    const count = readU32(format + HEADER.dwNumObjs);
+    const array = readU32(format + HEADER.rgodf);
     /** @type {Map<number, number>} */
     const places = new Map();
     /** @type {number[]} */
@@ -473,10 +502,10 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const taken = new Set();
     for (let index = 0; index < count; index++)
     {
-        const at = array + index * DIOBJECTDATAFORMAT.SIZE;
-        const guid = readU32(at + DIOBJECTDATAFORMAT.pguid);
-        const offset = readU32(at + DIOBJECTDATAFORMAT.dwOfs);
-        const type = readU32(at + DIOBJECTDATAFORMAT.dwType);
+        const at = array + index * ENTRY.SIZE;
+        const guid = readU32(at + ENTRY.pguid);
+        const offset = readU32(at + ENTRY.dwOfs);
+        const type = readU32(at + ENTRY.dwType);
         const instance = (type >>> 8) & 0xffff;
         const named = guid === 0 ? null : guidAt(guid);
         const object = objects.find(candidate=>!taken.has(candidate)
@@ -515,13 +544,14 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
  * @param {string} id
  * @param {[string, number][]} slots
  * @param {Record<string, (target: any, args: number[], descriptor: any) => any>} [implemented]
- * @param {{ wide?: boolean, legacy?: boolean, sharedWith?: string, unknown?: boolean }} [options]
+ * @param {{ wide?: boolean, legacy?: boolean, sharedWith?: string, identity?: boolean }} [options]
  *     `wide` for a W interface, `legacy` for one of the pre-8 generations.
  *     Both are facts the method itself needs and the interface it arrived on
  *     is the only thing that carries them. `sharedWith` names the interface
  *     whose pointer answers this one too -- its table holding this one's and
- *     more -- and `unknown` makes this interface's pointer the object's
- *     IUnknown, as COM identity has one of them be.
+ *     more -- and `identity` makes this interface's pointer the object's
+ *     IUnknown, as COM identity has one of them be. Each method is handed
+ *     the descriptor it was described with, after its arguments.
  */
 export function describe(id, slots, implemented = {}, options = {}){
     const descriptor = {
@@ -529,7 +559,7 @@ export function describe(id, slots, implemented = {}, options = {}){
         wide: options.wide === true,
         legacy: options.legacy === true,
         sharedWith: options.sharedWith,
-        unknown: options.unknown === true,
+        identity: options.identity === true,
         /** @type {{ name: string, argBytes: number, invoke?: (target: any, args: number[]) => any }[]} */
         methods: [],
     };
@@ -555,7 +585,7 @@ export const IDIRECTINPUT_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IDirectInput2 appends one; IDirectInput7 another. */
-export const IDIRECTINPUT2_SLOTS = /** @type {[string, number][]} */ ([
+const IDIRECTINPUT2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDIRECTINPUT_SLOTS,
     ['FindDevice', 3],
 ]);
@@ -651,7 +681,8 @@ export function createPublisher({ publishInterface }){
  * DirectInput and the devices behind it.
  *
  * @param {Object} deps
- * @param {any} deps.memory   readMemory/writeMemory over guest memory.
+ * @param {any} deps.memory   readMemory/writeMemory over guest memory, and writePointer
+ *     (the memory layer's, a pointer of 4 or 8 bytes whole).
  * @param {() => number} deps.now  The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(event: number) => void} [deps.signal]
@@ -669,6 +700,8 @@ export function createPublisher({ publishInterface }){
  *        so the loop names it once, before that first await, rather than
  *        asking the bridge to guess a second time.
  * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process: its data format, buffered
+ *     events and out pointers hold quadword pointers.
  *        Where a refusal the program may not expect is said.
  * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
  * @param {() => number | undefined} [deps.foreground]
@@ -682,11 +715,15 @@ export function createPublisher({ publishInterface }){
  *        exclusively: Windows hides the cursor while a program holds it so.
  * @param {() => { x: number, y: number } | null} [deps.cursor]
  *        Where the cursor is: a mouse in absolute mode starts there when taken.
+ * @param {{ claim: (usage: number, flags: number) => number | Promise<number>,
+ *     release: (usage: number) => void }} [deps.rawInput]
+ *        user32's raw input registrations, which DirectInput 8 takes a held
+ *        system mouse or keyboard into. Absent, it registers nothing.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
-        foreground, mouseHeld, cursor,
-        divergence },
+        foreground, mouseHeld, cursor, rawInput,
+        divergence, pointerSize = 4 },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -706,13 +743,67 @@ export function createDirectInput(
      */
     const formats = new WeakMap();
     /**
-     * Whose each device is, once a SetActionMap gave it to a user.
+     * Whose each device is, once a SetActionMap gave it to a user: the
+     * device itself, by its instance GUID, whichever object of it the map
+     * was set through.
      *
-     * @type {WeakMap<object, string | symbol>}
+     * @type {Map<string, string | symbol>}
      */
-    const owners = new WeakMap();
+    const owners = new Map();
     /** @type {WeakMap<object, { window: number, background: boolean }>} */
     const cooperation = new WeakMap();
+    /** The mice DIPROP_AXISMODE has been set on. @type {WeakSet<object>} */
+    const axisModeSet = new WeakSet();
+
+    /**
+     * DIPROP_APPDATA: the value an object's events carry in uAppData, kept
+     * with the data format, which a new SetDataFormat starts afresh. Only an
+     * object can have one - the whole device is DIERR_INVALIDPARAM, a usage
+     * DIERR_UNSUPPORTED - named by its offset in the program's format or by
+     * its id (Wine's device8.c test_appdata_property).
+     *
+     * @param {any} device @param {number} header
+     */
+    const setAppData = (device, header)=>{
+        if (readU32(header) !== PROPERTY_SIZE.get(DIPROP.APPDATA)
+            || readU32(header + 4) !== DIPROPHEADER_SIZE)
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        const which = readU32(header + 8);
+        const how = readU32(header + 12);
+        if (how === DIPH_DEVICE)
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        if (how === DIPH_BYUSAGE)
+        {
+            return DIERR_UNSUPPORTED;
+        }
+        const format = formats.get(device);
+        if (!format || (how !== DIPH_BYOFFSET && how !== DIPH_BYID))
+        {
+            return how === DIPH_BYOFFSET || how === DIPH_BYID ? DIERR_NOTFOUND
+                : DIERR_INVALIDPARAM;
+        }
+        let place;
+        if (how === DIPH_BYOFFSET)
+        {
+            place = [...format.places.values()].includes(which) ? which : undefined;
+        }
+        else
+        {
+            const named = objectNamed(device, which, DIPH_BYID);
+            place = typeof named === 'number' ? undefined : format.places.get(named.offset);
+        }
+        if (place === undefined)
+        {
+            return DIERR_NOTFOUND;
+        }
+        format.appData ??= new Map();
+        format.appData.set(place, readU32(header + DIPROPDWORD_DATA));
+        return DI_OK;
+    };
     /** Each device's last Acquire answer, for the diagnostics. @type {WeakMap<object, number>} */
     const acquireAnswers = new WeakMap();
     /**
@@ -746,13 +837,52 @@ export function createDirectInput(
         {
             return true;
         }
+        letGo(device);
+        lost.add(device);
+        return false;
+    };
+
+    /**
+     * A system mouse or keyboard taken through DirectInput 8 is registered
+     * for raw input to DirectInput's hidden window while it is held, over
+     * the program's own registration of it: RIDEV_INPUTSINK, or held
+     * exclusively RIDEV_NOLEGACY with RIDEV_CAPTUREMOUSE or RIDEV_NOHOTKEYS
+     * (Wine's dinput device8.c test_mouse_keyboard). An earlier DirectInput
+     * reads the devices as it always has, without it.
+     *
+     * @param {any} device
+     * @returns {number | Promise<number> | void}
+     */
+    const registerHeld = device=>{
+        if (!rawInput || device.version < 0x0800 || (device.kind !== MOUSE
+            && device.kind !== KEYBOARD))
+        {
+            return;
+        }
+        const flags = device.exclusive
+            ? RIDEV_NOLEGACY | (device.kind === MOUSE ? RIDEV_CAPTUREMOUSE : RIDEV_NOHOTKEYS)
+            : RIDEV_INPUTSINK;
+        return rawInput.claim(device.kind === MOUSE ? HID_USAGE_MOUSE : HID_USAGE_KEYBOARD,
+            flags);
+    };
+
+    /**
+     * A held device let go of, by Unacquire or by its window losing the
+     * foreground: the mouse's cursor back, its raw input registration gone.
+     *
+     * @param {any} device
+     */
+    const letGo = device=>{
         device.unacquire();
         if (device.kind === MOUSE && device.exclusive)
         {
             mouseHeld?.(false);
         }
-        lost.add(device);
-        return false;
+        if (rawInput && device.version >= 0x0800 && (device.kind === MOUSE
+            || device.kind === KEYBOARD))
+        {
+            rawInput.release(device.kind === MOUSE ? HID_USAGE_MOUSE : HID_USAGE_KEYBOARD);
+        }
     };
     /** What a read of a device nobody holds is told. @param {any} device */
     const notHeld = device=>(lost.has(device) ? DIERR_INPUTLOST : DIERR_NOTACQUIRED);
@@ -801,9 +931,33 @@ export function createDirectInput(
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
     };
+    /** An interface or any other pointer written out, whole. */
+    const writePointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            memory.writePointer(address, value, pointerSize === 8 ? 8 : 4);
+        }
+    };
 
-    /** @type {Map<string, any>} */
+    /**
+     * The device objects a program holds, by the instance GUID each was made
+     * as: every CreateDevice makes an object of its own, with its own data
+     * format, cooperative level and buffer, and each hears the device's input.
+     *
+     * @type {Map<string, any[]>}
+     */
     const devices = new Map();
+
+    /**
+     * The live objects of one device; those released to nothing are let go.
+     *
+     * @param {string} guid
+     */
+    const liveOf = guid=>{
+        const live = (devices.get(guid) ?? []).filter(device=>!device.destroyed);
+        devices.set(guid, live);
+        return live;
+    };
 
     /**
      * Fills a structure the caller sized, in one of the two sizes its width
@@ -923,6 +1077,13 @@ export function createDirectInput(
             {
                 return DI_NOEFFECT;
             }
+            // A device with no data format is not taken (Wine's dinput
+            // test_acquire): the program then sets one, and its buffer size,
+            // on a device that is not held - taken, it could set neither.
+            if (!formats.has(device))
+            {
+                return DIERR_INVALIDPARAM;
+            }
             // A device that reads only in the foreground is not the
             // program's while another window is (Wine's device8.c
             // test_sys_mouse).
@@ -941,7 +1102,8 @@ export function createDirectInput(
             {
                 mouseHeld?.(true);
             }
-            return DI_OK;
+            const registered = registerHeld(device);
+            return registered instanceof Promise ? registered.then(()=>DI_OK) : DI_OK;
         },
         /** HRESULT Unacquire(void) */
         Unacquire(device){
@@ -949,11 +1111,7 @@ export function createDirectInput(
             {
                 return DI_NOEFFECT;
             }
-            device.unacquire();
-            if (device.kind === MOUSE && device.exclusive)
-            {
-                mouseHeld?.(false);
-            }
+            letGo(device);
             return DI_OK;
         },
 
@@ -974,7 +1132,7 @@ export function createDirectInput(
             }
             const read = readFormat(readU32, guidAt, format >>> 0, objectsOf(device.kind),
                 why=>divergence?.('DirectInput', `SetDataFormat on the ${device.kind} was`
-                    + ` refused: ${why}`));
+                    + ` refused: ${why}`), pointerSize);
             if (!read)
             {
                 return DIERR_INVALIDPARAM;
@@ -1067,6 +1225,7 @@ export function createDirectInput(
             {
                 device.setAbsolute(
                     readU32((header >>> 0) + DIPROPDWORD_DATA) === DIPROPAXISMODE_ABS);
+                axisModeSet.add(device);
                 return DI_OK;
             }
             if (property === DIPROP.FFGAIN)
@@ -1078,6 +1237,10 @@ export function createDirectInput(
                 }
                 gains.set(device, gain);
                 return DI_OK;
+            }
+            if (property === DIPROP.APPDATA)
+            {
+                return setAppData(device, header >>> 0);
             }
             // Ranges and dead zones: accepted and ignored. The device is
             // already unscaled, which is what every one of them would ask for.
@@ -1122,8 +1285,12 @@ export function createDirectInput(
                     case DIPROP_BUFFERSIZE:
                         writeU32(at + DIPROPDWORD_DATA, device.bufferSize);
                         return DI_OK;
+                    // The mode the data format set, or DIPROP_AXISMODE after
+                    // it; absolute before either, as Windows answers a mouse
+                    // with no format yet (Wine's device8.c test_sys_mouse).
                     case DIPROP_AXISMODE:
                         writeU32(at + DIPROPDWORD_DATA, device.kind === MOUSE
+                            && (formats.has(device) || axisModeSet.has(device))
                             ? (device.absolute ? DIPROPAXISMODE_ABS : DIPROPAXISMODE_REL)
                             : formats.get(device)?.relative === true
                                 ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
@@ -1289,8 +1456,9 @@ export function createDirectInput(
                 return notHeld(device);
             }
             const entrySize = size >>> 0;
-            if (entrySize !== DIDEVICEOBJECTDATA.SIZE
-                && entrySize !== DIDEVICEOBJECTDATA.SIZE_DX8)
+            const withAppData = pointerSize === 8 ? DIDEVICEOBJECTDATA.SIZE_DX8_LONG
+                : DIDEVICEOBJECTDATA.SIZE_DX8;
+            if (entrySize !== DIDEVICEOBJECTDATA.SIZE && entrySize !== withAppData)
             {
                 return DIERR_INVALIDPARAM;
             }
@@ -1326,10 +1494,12 @@ export function createDirectInput(
                     view.setInt32(at + DIDEVICEOBJECTDATA.dwData, event.data, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwTimeStamp, event.time >>> 0, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwSequence, event.sequence, true);
-                    if (entrySize === DIDEVICEOBJECTDATA.SIZE_DX8)
+                    if (entrySize === withAppData)
                     {
+                        // -1 for an object no DIPROP_APPDATA or action
+                        // named, as Windows reports it (Wine's device8.c).
                         view.setUint32(at + DIDEVICEOBJECTDATA.uAppData,
-                            appData?.get(event.offset) ?? 0, true);
+                            appData?.get(event.offset) ?? NO_APP_DATA, true);
                     }
                 });
                 if (bytes.length > 0)
@@ -1450,7 +1620,8 @@ export function createDirectInput(
             formats.set(device, { dataSize, places, appData });
             // The device is the user's from now on, as EnumDevicesBySemantics
             // tells a program asking whose it is.
-            owners.set(device, readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
+            owners.set(/** @type {string} */ (instanceGuids.get(device)),
+                readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
             device.setDataSize(dataSize);
             if (actions.bufferSize > 0)
             {
@@ -1661,29 +1832,25 @@ export function createDirectInput(
     /** The GUID each device was made or initialized as. @type {WeakMap<object, string>} */
     const instanceGuids = new WeakMap();
 
-    /** @param {string} guid */
+    /**
+     * A new object of the device the GUID names, holding the one reference
+     * its caller hands out, or null for a GUID that names none.
+     *
+     * @param {string} guid
+     */
     const deviceFor = guid=>{
         if (!isDevice(guid))
         {
             return null;
         }
-        let device = devices.get(guid);
-        // A device released to nothing is over, and a new CreateDevice makes
-        // a new one rather than handing back a pointer the bridge has let go.
-        // One still held is handed out again with a reference for this caller.
-        if (device && !device.destroyed)
-        {
-            device.addRef();
-            return device;
-        }
-        device = createInputDevice({
+        const device = /** @type {any} */ (createInputDevice({
             kind: KEYBOARD_GUIDS.has(guid) ? KEYBOARD : MOUSE,
             now,
             cursor,
-        });
+        }));
         device.offers = generationOf(device);
         instanceGuids.set(device, guid);
-        devices.set(guid, device);
+        devices.set(guid, [...liveOf(guid), device]);
         return device;
     };
 
@@ -1718,12 +1885,17 @@ export function createDirectInput(
      *
      * @param {number} type @param {number} callback @param {number} context
      * @param {number} flags @param {boolean} wide @param {boolean} legacy
+     * @param {boolean} [initialized]  false for a root Initialize has not given a version
      * @returns {number | Promise<number>}
      */
-    const enumerate = (type, callback, context, flags, wide, legacy)=>{
+    const enumerate = (type, callback, context, flags, wide, legacy, initialized = true)=>{
         if ((callback >>> 0) === 0 || (flags & ~DIEDFL_KNOWN) !== 0 || !isDeviceKind(type))
         {
             return DIERR_INVALIDPARAM;
+        }
+        if (!initialized)
+        {
+            return DIERR_NOTINITIALIZED;
         }
         const run = callGuest;
         if (!run || allocate === undefined)
@@ -1814,13 +1986,18 @@ export function createDirectInput(
             }
             if ((guid >>> 0) === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return E_POINTER;
+            }
+            if (!root.initialized)
+            {
+                writePointer(out, 0);
+                return DIERR_NOTINITIALIZED;
             }
             const device = deviceFor(guidAt(guid));
             if (!device)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DIERR_DEVICENOTREG;
             }
             const wide = descriptor?.wide === true;
@@ -1828,7 +2005,7 @@ export function createDirectInput(
                 ? (wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A)
                 : (wide ? IID_IDirectInputDeviceW : IID_IDirectInputDeviceA);
             device.setVersion(root.version);
-            writeU32(out, publisher.publish(device, deviceInterfaces(), id));
+            writePointer(out, publisher.publish(device, deviceInterfaces(), id));
             return DI_OK;
         },
 
@@ -1844,10 +2021,15 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
+            if (!root.initialized)
+            {
+                writePointer(out, 0);
+                return DIERR_NOTINITIALIZED;
+            }
             const device = deviceFor(guidAt(guid));
             if (!device)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DIERR_DEVICENOTREG;
             }
             const wanted = guidAt(iid);
@@ -1855,10 +2037,10 @@ export function createDirectInput(
             const pointer = publisher.publish(device, deviceInterfaces(), wanted);
             if (pointer === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return 0x80004002 | 0; // E_NOINTERFACE
             }
-            writeU32(out, pointer);
+            writePointer(out, pointer);
             return DI_OK;
         },
 
@@ -1879,7 +2061,7 @@ export function createDirectInput(
             const [type, callback, context, flags] = args;
             return enumerate(
                 type >>> 0, callback, context, flags >>> 0,
-                descriptor?.wide === true, descriptor?.legacy === true);
+                descriptor?.wide === true, descriptor?.legacy === true, root.initialized);
         },
 
         /**
@@ -1915,25 +2097,25 @@ export function createDirectInput(
             // SetActionMap gave that user -- any user's, when none is named --
             // and the available ones those nobody has.
             const asked = readName(user, wide);
-            const mine = (/** @type {any} */ device)=>{
-                const owner = owners.get(device);
+            const mine = (/** @type {string} */ guid)=>{
+                const owner = owners.get(guid);
                 return owner !== undefined && (asked === '' || owner === asked);
             };
-            const free = (/** @type {any} */ device)=>!owners.has(device);
-            const wanted = (/** @type {any} */ device)=>{
+            const free = (/** @type {string} */ guid)=>!owners.has(guid);
+            const wanted = (/** @type {string} */ guid)=>{
                 switch (flags & (DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES))
                 {
-                    case DIEDBSFL_THISUSER: return mine(device);
-                    case DIEDBSFL_AVAILABLEDEVICES: return free(device);
+                    case DIEDBSFL_THISUSER: return mine(guid);
+                    case DIEDBSFL_AVAILABLEDEVICES: return free(guid);
                     case DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES:
-                        return mine(device) || free(device);
+                        return mine(guid) || free(guid);
                     default: return true;
                 }
             };
             const offers = /** @type {const} */ ([
                 { guid: GUID_SysKeyboard, kind: KEYBOARD, name: 'Keyboard' },
                 { guid: GUID_SysMouse, kind: MOUSE, name: 'Mouse' },
-            ]).filter(offer=>wanted(deviceFor(offer.guid)));
+            ]).filter(offer=>wanted(offer.guid));
             enumerations++;
             const thread = callerThread?.();
             return (async()=>{
@@ -1965,6 +2147,10 @@ export function createDirectInput(
             {
                 return E_POINTER;
             }
+            if (!root.initialized)
+            {
+                return DIERR_NOTINITIALIZED;
+            }
             return isDevice(guidAt(guid)) ? DI_OK : DIERR_DEVICENOTREG;
         },
 
@@ -1978,7 +2164,11 @@ export function createDirectInput(
             {
                 return E_HANDLE;
             }
-            return (flags >>> 0) !== 0 ? DIERR_INVALIDPARAM : DI_OK;
+            if ((flags >>> 0) !== 0)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            return root.initialized ? DI_OK : DIERR_NOTINITIALIZED;
         },
         /**
          * HRESULT Initialize(HINSTANCE, DWORD version)
@@ -1993,6 +2183,7 @@ export function createDirectInput(
                 return refused;
             }
             root.version = version >>> 0;
+            root.initialized = true;
             return DI_OK;
         },
         /** HRESULT FindDevice(REFGUID, LPCSTR, LPGUID) */
@@ -2007,9 +2198,9 @@ export function createDirectInput(
     const legacyA = describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods,
         { legacy: true });
     const legacyW = describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods,
-        { legacy: true, wide: true, unknown: true });
+        { legacy: true, wide: true, identity: true });
     /** @param {string} id @param {any} table */
-    const sameAs = (id, table)=>({ ...table, id, sharedWith: table.id, unknown: false });
+    const sameAs = (id, table)=>({ ...table, id, sharedWith: table.id, identity: false });
     const legacyRootInterfaces = [
         sameAs(IID_IDirectInputA, legacyA), sameAs(IID_IDirectInput2A, legacyA), legacyA,
         sameAs(IID_IDirectInputW, legacyW), sameAs(IID_IDirectInput2W, legacyW), legacyW,
@@ -2043,33 +2234,38 @@ export function createDirectInput(
      * @param {number} request.out
      * @param {number} request.outer
      * @param {boolean} request.eight  DirectInput8Create's rather than an earlier call's.
+     * @param {boolean} [request.initialized]  False for one a class factory makes,
+     *        which takes its version from Initialize, so none is checked now.
      */
-    const create = ({ instance, version, id, out, outer, eight })=>{
+    const create = ({ instance, version, id, out, outer, eight, initialized = true })=>{
         if ((out >>> 0) === 0)
         {
             return E_POINTER;
         }
         if (!isRootOf(id, eight))
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return DIERR_NOINTERFACE;
         }
         // Asked to be part of another object, Windows makes nothing and
         // says so only through the pointer it leaves null.
         if ((outer >>> 0) !== 0)
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return DI_OK;
         }
-        const refused = versionRefusal(instance, version, eight);
+        const refused = initialized ? versionRefusal(instance, version, eight) : DI_OK;
         if (refused !== DI_OK)
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return refused;
         }
         let references = 1;
         const root = {
             version: version >>> 0,
+            // One a class factory made answers DIERR_NOTINITIALIZED until
+            // Initialize gives it a version (Wine's dinput.c test_CoCreateInstance).
+            initialized,
             eight,
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
@@ -2079,9 +2275,77 @@ export function createDirectInput(
         };
         const pointer = publisher.publish(root,
             eight ? [...rootInterfaces8, joyConfigInterface] : legacyRootInterfaces, id);
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
+
+    /**
+     * The class object CoCreateInstance reaches through a DirectInput class's
+     * InprocServer32 key: its objects are made as the creation calls make
+     * them, without a version, and wait for Initialize.
+     */
+    const factoryInterfaces = [describe(IID_IClassFactory, ICLASSFACTORY_SLOTS, {
+        /** HRESULT CreateInstance(IUnknown *outer, REFIID, void **ppv) */
+        CreateInstance(factory, [outer, iid, out]){
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writePointer(out, 0);
+            if ((outer >>> 0) !== 0)
+            {
+                return CLASS_E_NOAGGREGATION;
+            }
+            const asked = (iid >>> 0) === 0 ? '' : guidAt(iid);
+            // IUnknown is the first interface of the object's generation.
+            const id = asked === IID_IUNKNOWN
+                ? (factory.eight ? IID_IDirectInput8A : IID_IDirectInputA) : asked;
+            return create({ instance: 0, version: 0, id, out, outer: 0, eight: factory.eight,
+                initialized: false });
+        },
+        /** HRESULT LockServer(BOOL): nothing here is unloaded to be kept. */
+        LockServer: ()=>DI_OK,
+    })];
+
+    /**
+     * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv), for the one
+     * class a library makes.
+     *
+     * @param {string} served  The library's class.
+     * @param {boolean} eight
+     */
+    const classObject = (served, eight)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([clsid, iid, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writePointer(out, 0);
+            if ((clsid >>> 0) === 0 || guidAt(clsid) !== served)
+            {
+                return CLASS_E_CLASSNOTAVAILABLE;
+            }
+            const wanted = (iid >>> 0) === 0 ? '' : guidAt(iid);
+            if (wanted !== IID_IClassFactory && wanted !== IID_IUNKNOWN)
+            {
+                return DIERR_NOINTERFACE;
+            }
+            let references = 1;
+            const factory = {
+                eight,
+                addRef: ()=>++references,
+                release: ()=>(references = Math.max(0, references - 1)),
+                get destroyed(){
+                    return references === 0;
+                },
+            };
+            writePointer(out, publisher.publish(factory, factoryInterfaces,
+                wanted === IID_IUNKNOWN ? IID_IClassFactory : wanted));
+            return DI_OK;
+        },
+    });
 
     return {
         publisher,
@@ -2102,9 +2366,8 @@ export function createDirectInput(
             // or the mouse, each taking it as its own state allows.
             const guids = event.kind === 'key' ? KEYBOARD_GUIDS : MOUSE_GUIDS;
             let taken = false;
-            for (const guid of guids)
+            for (const device of [...guids].flatMap(liveOf))
             {
-                const device = devices.get(guid);
                 const keyed = event.scanned !== undefined && device?.version >= 0x0800
                     ? { ...event, code: event.scanned } : event;
                 if (keyed.kind === 'key' && keyed.code === 0)
@@ -2129,8 +2392,13 @@ export function createDirectInput(
             return taken;
         },
 
-        /** @param {string} guid */
-        device: guid=>devices.get(guid) ?? null,
+        /**
+         * The newest live object of a device, for a caller outside the
+         * program that reads its state.
+         *
+         * @param {string} guid
+         */
+        device: guid=>liveOf(guid).at(-1) ?? null,
 
         /**
          * Whether a program holds this device exclusively right now: acquired
@@ -2142,8 +2410,8 @@ export function createDirectInput(
          * @param {'keyboard' | 'mouse'} kind
          */
         exclusive(kind){
-            const device = devices.get(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
-            return device !== undefined && device.exclusive && stillHeld(device);
+            return liveOf(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse)
+                .some(device=>device.exclusive && stillHeld(device));
         },
 
         libraries: {
@@ -2184,6 +2452,7 @@ export function createDirectInput(
                             : DIERR_NOINTERFACE;
                     },
                 },
+                DllGetClassObject: classObject(CLSID_DirectInput, false),
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
             'DINPUT8.dll': {
@@ -2199,21 +2468,22 @@ export function createDirectInput(
                         eight: true,
                     }),
                 },
+                DllGetClassObject: classObject(CLSID_DirectInput8, true),
                 DllCanUnloadNow: { argBytes: 0, handler: ()=>DI_OK },
             },
         },
 
         diagnostics: ()=>({
-            devices: [...devices.keys()].map(guid=>({
+            devices: [...devices.keys()].flatMap(guid=>liveOf(guid).map(device=>({
                 guid,
-                kind: devices.get(guid).kind,
-                acquired: devices.get(guid).acquired,
-                buffered: devices.get(guid).bufferSize,
-                queued: devices.get(guid).queued,
-            })),
+                kind: device.kind,
+                acquired: device.acquired,
+                buffered: device.bufferSize,
+                queued: device.queued,
+            }))),
             // The same, flat, where a report drops the list: each device's
             // kind, whether the program holds it, and what waits in its buffer.
-            held: [...devices.values()].map(device=>{
+            held: [...devices.keys()].flatMap(liveOf).map(device=>{
                 const level = cooperation.get(device);
                 const answer = acquireAnswers.get(device);
                 return `${device.kind}:${device.acquired ? 'acquired' : 'not acquired'}`

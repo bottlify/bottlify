@@ -23,7 +23,7 @@
  * the HRESULT, or the EXCEPINFO's code and description for DISP_E_EXCEPTION.
  */
 
-import { GUID_SIZE, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
 import { VT_BYREF, VT_DISPATCH, VT_UNKNOWN, VT_VARIANT } from '../oleaut32/vartypes.js';
 import {
     DISP_E_EXCEPTION, DISP_E_UNKNOWNNAME, ExternalError, ExternalObject,
@@ -39,7 +39,7 @@ import { VARIANT_SIZE, createVariantCodec } from './variant.js';
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 export const IID_IDISPATCHEX = '{A6EF9860-C720-11D0-9337-00A0C90DCAA9}';
-export const IID_IENUMVARIANT = '{00020404-0000-0000-C000-000000000046}';
+const IID_IENUMVARIANT = '{00020404-0000-0000-C000-000000000046}';
 
 /** Invoke's wFlags. */
 export const DISPATCH_METHOD = 1;
@@ -52,7 +52,7 @@ export const DISPATCH_CONSTRUCT = 0x4000;
 export const DISPID_VALUE = 0;
 export const DISPID_UNKNOWN = -1;
 export const DISPID_PROPERTYPUT = -3;
-export const DISPID_NEWENUM = -4;
+const DISPID_NEWENUM = -4;
 export const DISPID_THIS = -10;
 export const DISPID_STARTENUM = -1;
 

@@ -19,10 +19,12 @@
  * GetURL, InvokeCommand after IUnknown's three.
  */
 
-import { writeGuid } from '../ole32/guid.js';
+import { writeGuid } from '../../../system/guid.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
-export const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
+const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_A = '{FBF23B80-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_W = '{CABB0DA0-DA57-11CF-9974-0020AFD79762}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
@@ -88,17 +90,6 @@ const dword = value=>new Uint8Array([
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
 ]);
 
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
-
 /**
  * The address a `.url` file holds: `URL=` in its `[InternetShortcut]`
  * section, names and keys without regard to case, as the profile calls read
@@ -132,7 +123,7 @@ export function urlOfShortcut(text){
  *
  * @param {string} url
  */
-export const shortcutText = url=>`[InternetShortcut]\r\nURL=${url}\r\n`;
+const shortcutText = url=>`[InternetShortcut]\r\nURL=${url}\r\n`;
 
 /**
  * The internet shortcut class, ready to be registered.
@@ -157,7 +148,7 @@ export function createInternetShortcut(host){
             host.writeMemory(slot, dword(0));
             return S_FALSE;
         }
-        const bytes = wide ? utf16(text) : encodeAnsi(`${text}\0`);
+        const bytes = wide ? utf16z(text) : encodeAnsi(`${text}\0`);
         const block = host.allocate(bytes.length);
         if (block === 0)
         {
@@ -226,7 +217,7 @@ export function createInternetShortcut(host){
         IsDirty: state=>(state.dirty ? S_OK : S_FALSE),
         /** HRESULT Load(LPCOLESTR pszFileName, DWORD dwMode) */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_STRING);
+            const path = host.readWideString(wholeAddress(name), MAX_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -267,7 +258,8 @@ export function createInternetShortcut(host){
          * Writes the file at the path, or at the current file for a null one.
          */
         Save: (state, [name, remember])=>{
-            const given = (name >>> 0) === 0 ? null : host.readWideString(name >>> 0, MAX_STRING);
+            const given = (name >>> 0) === 0 ? null
+                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -306,7 +298,8 @@ export function createInternetShortcut(host){
             return S_OK;
         },
         SaveCompleted: (state, [name])=>{
-            state.curFile = (name >>> 0) === 0 ? null : host.readWideString(name >>> 0, MAX_STRING);
+            state.curFile = (name >>> 0) === 0 ? null
+                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
             state.dirty = false;
             return S_OK;
         },

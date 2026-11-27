@@ -16,6 +16,8 @@
  * Reading and writing them lives here too, so that the offsets and the code
  * that uses them cannot drift apart.
  */
+import { paramsOf, wideParams } from '../common/pointers.js';
+
 
 /** WNDCLASSA, the classic form RegisterClassA takes. */
 export const WNDCLASSA = Object.freeze({
@@ -74,6 +76,180 @@ export const RECT = Object.freeze({
 });
 
 /**
+ * The structures whose fields include pointers, handles or WPARAM-sized
+ * values, laid out for a 64-bit process: those fields are eight bytes and on
+ * an eight-byte boundary, which moves every field after them and pads the
+ * end to eight. `WIDE` names each such field and how a 32-bit value the
+ * engine holds widens into it -- a pointer or a handle, and an LPARAM or an
+ * LRESULT, sign-extended as a LONG is, so -1 is -1 whole; a WPARAM or a
+ * UINT_PTR zero-extended as a UINT is. The offsets are winuser.h's under
+ * _WIN64.
+ */
+const WNDCLASSA64 = Object.freeze({
+    style: 0, lpfnWndProc: 8, cbClsExtra: 16, cbWndExtra: 20, hInstance: 24, hIcon: 32,
+    hCursor: 40, hbrBackground: 48, lpszMenuName: 56, lpszClassName: 64, SIZE: 72,
+});
+const WNDCLASSEXA64 = Object.freeze({
+    cbSize: 0, style: 4, lpfnWndProc: 8, cbClsExtra: 16, cbWndExtra: 20, hInstance: 24,
+    hIcon: 32, hCursor: 40, hbrBackground: 48, lpszMenuName: 56, lpszClassName: 64,
+    hIconSm: 72, SIZE: 80,
+});
+const MSG64 = Object.freeze({
+    hwnd: 0, message: 8, wParam: 16, lParam: 24, time: 32, ptX: 36, ptY: 40, SIZE: 48,
+});
+const PAINTSTRUCT64 = Object.freeze({
+    hdc: 0, fErase: 8, rcPaint: 12, fRestore: 28, fIncUpdate: 32, rgbReserved: 36, SIZE: 72,
+});
+const CREATESTRUCTA64 = Object.freeze({
+    lpCreateParams: 0, hInstance: 8, hMenu: 16, hwndParent: 24, cy: 32, cx: 36, y: 40, x: 44,
+    style: 48, lpszName: 56, lpszClass: 64, dwExStyle: 72, SIZE: 80,
+});
+const CREATESTRUCTA32 = Object.freeze({
+    lpCreateParams: 0x00, hInstance: 0x04, hMenu: 0x08, hwndParent: 0x0c, cy: 0x10, cx: 0x14,
+    y: 0x18, x: 0x1c, style: 0x20, lpszName: 0x24, lpszClass: 0x28, dwExStyle: 0x2c, SIZE: 0x30,
+});
+const CBT_CREATEWNDA32 = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
+const CBT_CREATEWNDA64 = Object.freeze({ lpcs: 0, hwndInsertAfter: 8, SIZE: 16 });
+const WINDOWPOS32 = Object.freeze({
+    hwnd: 0, hwndInsertAfter: 4, x: 8, y: 12, cx: 16, cy: 20, flags: 24, SIZE: 28,
+});
+const WINDOWPOS64 = Object.freeze({
+    hwnd: 0, hwndInsertAfter: 8, x: 16, y: 20, cx: 24, cy: 28, flags: 32, SIZE: 40,
+});
+/** CBTACTIVATESTRUCT: whether a click did it, and the window active until now. */
+const CBTACTIVATESTRUCT32 = Object.freeze({ fMouse: 0, hWndActive: 4, SIZE: 8 });
+const CBTACTIVATESTRUCT64 = Object.freeze({ fMouse: 0, hWndActive: 8, SIZE: 16 });
+/** MOUSEHOOKSTRUCT: the point on the screen, the window, the hit, the extra word. */
+const MOUSEHOOKSTRUCT32 = Object.freeze({
+    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 12, dwExtraInfo: 16, SIZE: 20,
+});
+const MOUSEHOOKSTRUCT64 = Object.freeze({
+    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 16, dwExtraInfo: 24, SIZE: 32,
+});
+/**
+ * INPUT, as SendInput reads it: the type, then the union of MOUSEINPUT,
+ * KEYBDINPUT and HARDWAREINPUT, whose dwExtraInfo puts it on an eight-byte
+ * boundary at 64 bits. The offsets are the union members' from the INPUT.
+ */
+const INPUT32 = Object.freeze({
+    type: 0, dx: 4, dy: 8, mouseData: 12, dwFlags: 16, wVk: 4, wScan: 6, keyFlags: 8,
+    mouseExtra: 24, keyExtra: 16, SIZE: 28,
+});
+const INPUT64 = Object.freeze({
+    type: 0, dx: 8, dy: 12, mouseData: 16, dwFlags: 20, wVk: 8, wScan: 10, keyFlags: 12,
+    mouseExtra: 32, keyExtra: 24, SIZE: 40,
+});
+
+/** NCCALCSIZE_PARAMS: three RECTs, then the WINDOWPOS's address. */
+const NCCALCSIZE_PARAMS32 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 52 });
+const NCCALCSIZE_PARAMS64 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 56 });
+
+/**
+ * How each eight-byte field widens a 32-bit value: a handle and an LPARAM as a
+ * LONG (HWND_TOPMOST is -1 whole), an address and a WPARAM as a UINT. An address
+ * - a window procedure, a string, lpCreateParams, a module's base (HINSTANCE) -
+ * past 2 GiB in a program linked /LARGEADDRESSAWARE stays itself.
+ */
+const WIDE = Object.freeze({
+    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'unsigned', hInstance: 'unsigned',
+    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'unsigned',
+    lpszClassName: 'unsigned', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
+    hdc: 'signed', lpCreateParams: 'unsigned', hMenu: 'signed', hwndParent: 'signed',
+    lpszName: 'unsigned', lpszClass: 'unsigned', lpcs: 'unsigned', lppos: 'unsigned',
+    hWndActive: 'signed', dwExtraInfo: 'unsigned',
+});
+
+/**
+ * @typedef {Object} UserLayouts
+ * @property {4 | 8} pointerSize
+ * @property {Record<string, number>} WNDCLASSA
+ * @property {Record<string, number>} WNDCLASSEXA
+ * @property {Record<string, number>} MSG
+ * @property {Record<string, number>} PAINTSTRUCT
+ * @property {Record<string, number>} CREATESTRUCTA
+ * @property {Record<string, number>} CBT_CREATEWNDA
+ * @property {Record<string, number>} WINDOWPOS
+ * @property {Record<string, number>} NCCALCSIZE_PARAMS
+ * @property {Record<string, number>} CBTACTIVATESTRUCT
+ * @property {Record<string, number>} MOUSEHOOKSTRUCT
+ * @property {Record<string, number>} INPUT
+ */
+
+/** @type {Map<number, UserLayouts>} */
+const LAYOUTS = new Map();
+
+/**
+ * The structures at a process's pointer width.
+ *
+ * @param {number} [pointerSize]  4 or 8; 4 by default
+ * @returns {UserLayouts}
+ */
+export function userLayouts(pointerSize = 4){
+    const wide = pointerSize === 8;
+    let layouts = LAYOUTS.get(pointerSize);
+    if (!layouts)
+    {
+        layouts = Object.freeze({
+            pointerSize: wide ? 8 : 4,
+            WNDCLASSA: wide ? WNDCLASSA64 : WNDCLASSA,
+            WNDCLASSEXA: wide ? WNDCLASSEXA64 : WNDCLASSEXA,
+            MSG: wide ? MSG64 : MSG,
+            PAINTSTRUCT: wide ? PAINTSTRUCT64 : PAINTSTRUCT,
+            CREATESTRUCTA: wide ? CREATESTRUCTA64 : CREATESTRUCTA32,
+            CBT_CREATEWNDA: wide ? CBT_CREATEWNDA64 : CBT_CREATEWNDA32,
+            WINDOWPOS: wide ? WINDOWPOS64 : WINDOWPOS32,
+            NCCALCSIZE_PARAMS: wide ? NCCALCSIZE_PARAMS64 : NCCALCSIZE_PARAMS32,
+            CBTACTIVATESTRUCT: wide ? CBTACTIVATESTRUCT64 : CBTACTIVATESTRUCT32,
+            MOUSEHOOKSTRUCT: wide ? MOUSEHOOKSTRUCT64 : MOUSEHOOKSTRUCT32,
+            INPUT: wide ? INPUT64 : INPUT32,
+        });
+        LAYOUTS.set(pointerSize, layouts);
+    }
+    return layouts;
+}
+
+/**
+ * Lays named fields of a structure into `view` at `base`: a field `WIDE`
+ * names is eight bytes at 64 bits, widened as it says, every other one a
+ * DWORD.
+ *
+ * @param {DataView} view @param {number} base @param {UserLayouts} layouts
+ * @param {Record<string, number>} layout @param {Record<string, number>} values
+ */
+export function putFields(view, base, layouts, layout, values){
+    for (const [name, value] of Object.entries(values))
+    {
+        const at = base + layout[name];
+        view.setUint32(at, value >>> 0, true);
+        if (layouts.pointerSize === 8 && Object.hasOwn(WIDE, name))
+        {
+            const signed = WIDE[/** @type {keyof typeof WIDE} */ (name)] === 'signed';
+            // An address past 4 GiB - an image a 64-bit program keeps at its
+            // own base there - is held whole and goes back whole.
+            view.setUint32(at + 4, value >= 2 ** 32 ? Math.floor(value / 2 ** 32) >>> 0
+                : signed && (value | 0) < 0 ? 0xffffffff : 0, true);
+        }
+    }
+}
+
+/**
+ * Writes named fields of a structure in guest memory, each in place: the
+ * fields not named are left as they were.
+ *
+ * @param {StructMemory} memory @param {number} address @param {UserLayouts} layouts
+ * @param {Record<string, number>} layout @param {Record<string, number>} values
+ */
+export function writeFields(memory, address, layouts, layout, values){
+    for (const [name, value] of Object.entries(values))
+    {
+        const wide = layouts.pointerSize === 8 && Object.hasOwn(WIDE, name);
+        const bytes = new Uint8Array(wide ? 8 : 4);
+        putFields(new DataView(bytes.buffer), -layout[name], layouts, layout, { [name]: value });
+        memory.writeMemory((address + layout[name]) >>> 0, bytes);
+    }
+}
+
+/**
  * @typedef {Object} StructMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -126,6 +302,9 @@ export function writeU32s(memory, address, values){
  * @property {number} iconSm      Zero for the classic form, which has no such field.
  */
 
+/** @param {Record<string, number>} layout  whether it is a class structure at 64 bits */
+const wide64 = layout=>layout === WNDCLASSA64 || layout === WNDCLASSEXA64;
+
 /**
  * Reads either form of the class structure. The layout decides which fields
  * exist; everything past that is the same set of values, which is why the two
@@ -133,49 +312,64 @@ export function writeU32s(memory, address, values){
  *
  * @param {StructMemory} memory
  * @param {number} address
- * @param {typeof WNDCLASSA | typeof WNDCLASSEXA} layout
+ * @param {Record<string, number>} layout  A WNDCLASS or WNDCLASSEX at either width.
  * @returns {WindowClassFields}
  */
 export function readWindowClass(memory, address, layout){
     /** @param {number} offset */
     const field = offset=>readU32(memory, address + offset);
+    /**
+     * An address field, whole in a 64-bit structure: a procedure or a name in
+     * an image past 4 GiB is not its low dword.
+     *
+     * @param {number} offset
+     */
+    const address64 = offset=>(wide64(layout)
+        ? field(offset) + readU32(memory, address + offset + 4) * 2 ** 32 : field(offset));
     return {
         style: field(layout.style),
-        wndProc: field(layout.lpfnWndProc),
+        wndProc: address64(layout.lpfnWndProc),
         classExtra: field(layout.cbClsExtra) | 0,
         windowExtra: field(layout.cbWndExtra) | 0,
-        instance: field(layout.hInstance),
+        instance: address64(layout.hInstance),
         icon: field(layout.hIcon),
         cursor: field(layout.hCursor),
         background: field(layout.hbrBackground),
-        menuName: field(layout.lpszMenuName),
-        className: field(layout.lpszClassName),
+        menuName: address64(layout.lpszMenuName),
+        className: address64(layout.lpszClassName),
         iconSm: 'hIconSm' in layout ? field(layout.hIconSm) : 0,
     };
 }
 
 /**
- * Fills in a WNDCLASSA for GetClassInfoA. The name pointer it reports back is
- * the one the class was registered with: the guest owns that string, and
- * handing back a pointer into a buffer of ours would outlive nothing it can see.
+ * Fills in a WNDCLASS or a WNDCLASSEX for GetClassInfo(Ex), the layout saying
+ * which; cbSize is the caller's and is left as it was. The name pointer it
+ * reports back is the one the class was registered with: the guest owns that
+ * string, and handing back a pointer into a buffer of ours would outlive
+ * nothing it can see.
  *
  * @param {StructMemory} memory
  * @param {number} address
  * @param {WindowClassFields} fields
+ * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
+ * @param {Record<string, number>} [layout]  WNDCLASSA by default.
  */
-export function writeWindowClassA(memory, address, fields){
-    writeU32s(memory, address, [
-        fields.style,
-        fields.wndProc,
-        fields.classExtra,
-        fields.windowExtra,
-        fields.instance,
-        fields.icon,
-        fields.cursor,
-        fields.background,
-        fields.menuName,
-        fields.className,
-    ]);
+export function writeWindowClass(memory, address, fields, layouts = userLayouts(4),
+    layout = layouts.WNDCLASSA)
+{
+    writeFields(memory, address, layouts, layout, {
+        style: fields.style,
+        lpfnWndProc: fields.wndProc,
+        cbClsExtra: fields.classExtra,
+        cbWndExtra: fields.windowExtra,
+        hInstance: fields.instance,
+        hIcon: fields.icon,
+        hCursor: fields.cursor,
+        hbrBackground: fields.background,
+        lpszMenuName: fields.menuName,
+        lpszClassName: fields.className,
+        ...'hIconSm' in layout ? { hIconSm: fields.iconSm ?? 0 } : {},
+    });
 }
 
 /**
@@ -187,23 +381,41 @@ export function writeWindowClassA(memory, address, fields){
  * @property {number} time
  * @property {number} x
  * @property {number} y
+ * @property {import('../common/pointers.js').WideParams} [wide]
  */
 
 /**
  * @param {StructMemory} memory
  * @param {number} address
  * @param {MessageFields} message
+ * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
  */
-export function writeMessage(memory, address, message){
-    writeU32s(memory, address, [
-        message.hwnd,
-        message.message,
-        message.wParam,
-        message.lParam,
-        message.time,
-        message.x,
-        message.y,
-    ]);
+export function writeMessage(memory, address, message, layouts = userLayouts(4)){
+    const layout = layouts.MSG;
+    const bytes = new Uint8Array(layout.SIZE);
+    putFields(new DataView(bytes.buffer), 0, layouts, layout, {
+        hwnd: message.hwnd,
+        message: message.message,
+        wParam: message.wParam,
+        lParam: message.lParam,
+        time: message.time,
+        ptX: message.x,
+        ptY: message.y,
+    });
+    // What a 64-bit poster passed that the dwords do not say goes back whole.
+    const [w, l] = layouts.pointerSize === 8 ? paramsOf(message) : [0, 0];
+    const view = new DataView(bytes.buffer);
+    if (typeof w === 'bigint')
+    {
+        view.setBigUint64(layout.wParam, w, true);
+    }
+    if (typeof l === 'bigint')
+    {
+        view.setBigUint64(layout.lParam, l, true);
+    }
+    // The 32-bit MSG ends at the point; a 64-bit one's lPrivate after it is
+    // the system's, and left as the caller had it.
+    memory.writeMemory(address, bytes.subarray(0, layout.ptY + 4));
 }
 
 /**
@@ -212,20 +424,31 @@ export function writeMessage(memory, address, message){
  * what a TIMERPROC takes in their place. The cursor position is the queue's
  * own bookkeeping and nothing here decides anything by it.
  *
+ * A field of a 64-bit MSG is read by its low half; a WPARAM or an LPARAM whose
+ * high half says more than the dword does is carried beside it (`wide`).
+ *
  * @param {StructMemory} memory
  * @param {number} address
+ * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
  * @returns {{ hwnd: number, message: number, wParam: number, lParam: number,
- *             time: number }}
+ *             time: number, wide?: import('../common/pointers.js').WideParams }}
  */
-export function readMessage(memory, address){
+export function readMessage(memory, address, layouts = userLayouts(4)){
+    const layout = layouts.MSG;
+    const wParam = readU32(memory, address + layout.wParam);
+    const lParam = readU32(memory, address + layout.lParam);
+    const wide = layouts.pointerSize === 8 ? wideParams(wParam,
+        readU32(memory, address + layout.wParam + 4), lParam,
+        readU32(memory, address + layout.lParam + 4)) : undefined;
     return {
-        hwnd: readU32(memory, address + MSG.hwnd),
-        message: readU32(memory, address + MSG.message),
-        wParam: readU32(memory, address + MSG.wParam),
-        lParam: readU32(memory, address + MSG.lParam),
+        hwnd: readU32(memory, address + layout.hwnd),
+        message: readU32(memory, address + layout.message),
+        wParam,
+        lParam,
         // What a TIMERPROC is handed as its tick count when DispatchMessage
         // calls it.
-        time: readU32(memory, address + MSG.time),
+        time: readU32(memory, address + layout.time),
+        ...wide ? { wide } : {},
     };
 }
 
@@ -339,6 +562,7 @@ export const DEVMODEA = Object.freeze({
     dmSize: 36,
     dmDriverExtra: 38,
     dmFields: 40,
+    dmDisplayOrientation: 52,
     dmBitsPerPel: 104,
     dmPelsWidth: 108,
     dmPelsHeight: 112,
@@ -359,6 +583,7 @@ export const DEVMODEW = Object.freeze({
     dmSize: 68,
     dmDriverExtra: 70,
     dmFields: 72,
+    dmDisplayOrientation: 84,
     dmBitsPerPel: 168,
     dmPelsWidth: 172,
     dmPelsHeight: 176,

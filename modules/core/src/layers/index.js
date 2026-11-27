@@ -6,6 +6,7 @@
 
 import { createAudioModule } from './audio/module.js';
 import { createBridgeModule } from './bridge/module.js';
+import { createCacheModule } from './cache/module.js';
 import { createCpuModule } from './cpu/module.js';
 import { createFilesystemModule } from './filesystem/module.js';
 import { createGraphicsModule } from './graphics/module.js';
@@ -32,6 +33,7 @@ import { createWin32Module } from './win32/module.js';
 export function defaultModules(){
     return [
         createLogModule(),
+        createCacheModule(),
         createCpuModule(),
         createMemoryModule(),
         createKernelModule(),

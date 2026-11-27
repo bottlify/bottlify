@@ -6,8 +6,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClassFunctions } from './classes.js';
+import { UNIVERSAL_CXX, createClassFunctions, longName } from './classes.js';
 import { createCxxFunctions } from './cxx.js';
+import { guestEntry } from './guest-code.js';
+import { __RTDynamicCast } from './inguest-rtti.js';
+import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -15,7 +18,8 @@ import { fakeMemory } from './harness.test.js';
  * loader places them -- each at its own address, a vtable's entry part way
  * in, every pointer filled in -- and the runtime's casts beside it.
  */
-function build(){
+/** @param {4 | 8} [pointerSize] */
+function build(pointerSize){
     const memory = fakeMemory();
     /** @type {number[]} */
     const freed = [];
@@ -31,6 +35,7 @@ function build(){
             return true;
         },
         addressOf: name=>addresses.get(name) ?? null,
+        ...pointerSize ? { pointerSize } : {},
         callGuest: async(_entry, [bytes])=>memory.allocate(bytes),
     });
     const variables = Object.entries(table).filter(([, entry])=>entry.data);
@@ -56,7 +61,8 @@ function build(){
     const cxx = createCxxFunctions({ readMemory: memory.readMemory,
         readCString: memory.readCString });
     /** @param {string} name @param {number[]} args */
-    const call = (name, args)=>table[name].handler(args);
+    const call = (name, args)=>(table[name] ?? /** @type {any} */ (table)[UNIVERSAL_CXX][name])
+        .handler(args);
     return { memory, table, freed, addresses, cxx, call };
 }
 
@@ -188,9 +194,10 @@ test('the classes carry the type information typeid and dynamic_cast read', ()=>
     const bti = cxx.__RTtypeid.handler([b]);
     assert.equal(memory.text(bti + 8), '.?AVbad_typeid@@');
     assert.equal(cxx.__RTCastToVoid.handler([e]), e);
-    assert.equal(cxx.__RTDynamicCast.handler([b, 0, 0, ti, 0]), b, 'up');
-    assert.equal(cxx.__RTDynamicCast.handler([e, 0, 0, bti, 0]), 0, 'not down');
-    assert.equal(cxx.__RTDynamicCast.handler([n, 0, 0, bti, 0]), n, 'through two levels');
+    const cast = guestEntry(__RTDynamicCast, RTTI_CODE.__RTDynamicCast, memory).handler;
+    assert.equal(cast([b, 0, 0, ti, 0]), b, 'up');
+    assert.equal(cast([e, 0, 0, bti, 0]), 0, 'not down');
+    assert.equal(cast([n, 0, 0, bti, 0]), n, 'through two levels');
 
     // The vtable's slots are the deleting destructor and what().
     const vtable = /** @type {number} */ (addresses.get('??_7exception@@6B@'));
@@ -209,7 +216,135 @@ test('__unDName undecorates a type into the buffer given, or memory from the all
     assert.equal(memory.text(buffer), 'class', 'cut to the room given');
     const made = await run([0, mangled, 0, 0x1234, 0, 0]);
     assert.equal(memory.text(made), 'class std::bad_alloc');
-    assert.equal(await run([0, memory.put('??0bad_alloc@std@@QAE@ABV01@@Z'), 0, 0x1234, 0, 0]), 0,
-        'a function\'s name is not one it reads');
+    const constructor = await run([0, memory.put('??0bad_alloc@std@@QAE@ABV01@@Z'), 0, 0x1234,
+        0, 0]);
+    assert.equal(memory.text(constructor),
+        'public: __thiscall std::bad_alloc::bad_alloc(class std::bad_alloc const &)');
+    const unread = await run([0, memory.put('?nothing'), 0, 0x1234, 0, 0]);
+    assert.equal(memory.text(unread), '?nothing', 'what cannot be read comes back as it is');
+    const typeOnly = await run([0, memory.put('P8test@@BACXZ'), 0, 0x1234, 0, 0x2800]);
+    assert.equal(memory.text(typeOnly), 'signed char (__cdecl test::*)(void)const ');
     assert.equal(table.__unDName.argBytes, 24);
+});
+
+test('__std_exception_copy copies a message the object owns and points at one it does not', ()=>{
+    const { memory, call, freed } = build();
+    const message = memory.put('owned');
+    const from = memory.allocate(8);
+    memory.setU32(from, message);
+    memory.writeMemory(from + 4, Uint8Array.of(1));
+    const to = memory.allocate(8);
+    call('__std_exception_copy', [from, to]);
+    assert.notEqual(memory.u32(to), message, 'copied');
+    assert.equal(memory.text(memory.u32(to)), 'owned');
+    assert.equal(memory.readMemory(to + 4, 1)[0], 1, 'and the copy is its to free');
+
+    memory.writeMemory(from + 4, Uint8Array.of(0));
+    call('__std_exception_copy', [from, to]);
+    assert.equal(memory.u32(to), message, 'a message it does not own is only pointed at');
+    assert.equal(memory.readMemory(to + 4, 1)[0], 0);
+
+    memory.writeMemory(from + 4, Uint8Array.of(1));
+    call('__std_exception_destroy', [from]);
+    assert.deepEqual(freed, [message], 'destroyed, an owned message is freed');
+    assert.equal(memory.u32(from), 0);
+    assert.equal(memory.readMemory(from + 4, 1)[0], 0);
+});
+
+test('__std_type_info_* compare, hash and name a type by its decorated name', ()=>{
+    const { memory, call, freed, table } = build();
+    assert.equal(table.__std_type_info_name, undefined, 'not an export of msvcrt\'s');
+    /** A __std_type_info_data: the undecorated name, then the decorated one. @param {string} name */
+    const data = name=>{
+        const at = memory.allocate(4 + name.length + 1);
+        memory.setU32(at, 0);
+        memory.writeMemory(at + 4, Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0)));
+        return at;
+    };
+    const a = data('.?AVfoo@@');
+    const b = data('.?AVfoo@@');
+    const c = data('.?AVbar@@');
+    assert.equal(call('__std_type_info_compare', [a, b]), 0, 'the same name, another record');
+    assert.notEqual(call('__std_type_info_compare', [a, c]), 0);
+    assert.equal(call('__std_type_info_hash', [a]), call('__std_type_info_hash', [b]));
+    assert.notEqual(call('__std_type_info_hash', [a]), call('__std_type_info_hash', [c]));
+    // FNV-1a of "?AVfoo@@": the first character is not hashed.
+    let fnv = 2166136261;
+    for (const character of '?AVfoo@@')
+    {
+        fnv = Math.imul((fnv ^ character.charCodeAt(0)) >>> 0, 16777619) >>> 0;
+    }
+    assert.equal(call('__std_type_info_hash', [a]), fnv);
+
+    const list = memory.allocate(8);
+    memory.setU32(list, 0);
+    memory.setU32(list + 4, 0);
+    const name = call('__std_type_info_name', [a, list]);
+    assert.equal(memory.text(name), 'class foo');
+    assert.equal(memory.u32(a), name, 'kept in the record');
+    assert.equal(call('__std_type_info_name', [a, list]), name, 'and made once');
+    assert.equal(memory.u32(list), name - 4, 'on the caller\'s list');
+    call('__std_type_info_destroy_list', [list]);
+    assert.deepEqual(freed, [name - 4]);
+    assert.equal(memory.u32(list), 0, 'which is empty after');
+});
+
+test('a 64-bit process imports the members under its compiler\'s names', ()=>{
+    // The names 64-bit programs were seen to import (Visual C++ 2005's and
+    // msvcrt's), beside the 32-bit ones they are made from.
+    for (const [from, to] of [
+        ['??0exception@@QAE@ABQBD@Z', '??0exception@@QEAA@AEBQEBD@Z'],
+        ['??0exception@@QAE@ABQBDH@Z', '??0exception@@QEAA@AEBQEBDH@Z'],
+        ['??0exception@@QAE@ABV0@@Z', '??0exception@@QEAA@AEBV0@@Z'],
+        ['??0exception@@QAE@XZ', '??0exception@@QEAA@XZ'],
+        ['??1exception@@UAE@XZ', '??1exception@@UEAA@XZ'],
+        ['?what@exception@@UBEPBDXZ', '?what@exception@@UEBAPEBDXZ'],
+        ['??1type_info@@UAE@XZ', '??1type_info@@UEAA@XZ'],
+        ['??4exception@@QAEAAV0@ABV0@@Z', '??4exception@@QEAAAEAV0@AEBV0@@Z'],
+        ['??_Eexception@@UAEPAXI@Z', '??_Eexception@@UEAAPEAXI@Z'],
+        ['?before@type_info@@QBEHABV1@@Z', '?before@type_info@@QEBAHAEBV1@@Z'],
+        ['??0bad_cast@@AAE@PBQBD@Z', '??0bad_cast@@AEAA@PEBQEBD@Z'],
+        ['??0bad_typeid@@QAE@PBD@Z', '??0bad_typeid@@QEAA@PEBD@Z'],
+        ['__unDName', '__unDName'], ['??_7exception@@6B@', '??_7exception@@6B@'],
+    ])
+    {
+        assert.equal(longName(from), to);
+    }
+    const { table } = build(8);
+    assert.ok(table['??0exception@@QEAA@AEBQEBD@Z'] && table['??1type_info@@UEAA@XZ']);
+    assert.equal(build().table['??0exception@@QEAA@AEBQEBD@Z'], undefined,
+        'and a 32-bit process has none of them');
+});
+
+test('a 64-bit exception: the vtable and the message are quadwords, the flag after them', ()=>{
+    // class exception { void *vtable; const char *_m_what; int _m_doFree; }: 24 bytes.
+    const { memory, call, addresses, freed, table } = build(8);
+    const message = memory.put('An exception name');
+    const reference = memory.allocate(8);
+    memory.setU32(reference, message);
+    memory.setU32(reference + 4, 0);
+    const e = memory.allocate(32);
+    memory.bytes.fill(0xcc, e, e + 32);
+    assert.equal(call('??0exception@@QEAA@AEBQEBD@Z', [e, reference]), e);
+    assert.deepEqual([memory.u32(e), memory.u32(e + 4)],
+        [addresses.get('??_7exception@@6B@'), 0], 'the vtable, whole');
+    assert.equal(memory.text(memory.u32(e + 8)), 'An exception name');
+    assert.deepEqual([memory.u32(e + 12), memory.u32(e + 16), memory.u32(e + 24)],
+        [0, 1, 0xcccccccc], 'the message\'s high half, owned, and no byte past 24');
+    assert.equal(call('?what@exception@@UEBAPEBDXZ', [e]), memory.u32(e + 8));
+
+    // The vtable: quadword slots, the deleting destructor then what().
+    const vtable = /** @type {number} */ (addresses.get('??_7exception@@6B@'));
+    assert.equal(table['??_7exception@@6B@'].entry, 8);
+    assert.equal(memory.u32(vtable), addresses.get('??_Eexception@@UEAAPEAXI@Z'));
+    assert.equal(memory.u32(vtable + 8), addresses.get('?what@exception@@UEBAPEBDXZ'));
+    assert.equal(memory.u32(vtable - 8), 0, 'no locator: see rttiOf');
+
+    const copy = memory.allocate(24);
+    call('??0exception@@QEAA@AEBV0@@Z', [copy, e]);
+    const owned = memory.u32(copy + 8);
+    assert.notEqual(owned, memory.u32(e + 8));
+    call('??1exception@@UEAA@XZ', [copy]);
+    assert.deepEqual(freed, [owned]);
+    assert.equal(memory.u32(copy + 16), 0);
 });

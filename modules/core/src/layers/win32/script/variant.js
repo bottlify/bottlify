@@ -31,6 +31,7 @@ import {
 } from '../oleaut32/vartypes.js';
 import { ExternalError } from './external.js';
 import { ForeignValue, NOTHING, arrayValue, dateValue, errorValue } from './values.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const VARIANT_SIZE = 16;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -76,15 +77,16 @@ const VARIANT_TRUE = 0xffff;
  */
 
 /** Little-endian reads and writes of guest memory. @param {GuestCom} com */
-export function guestMemory(com){
+function guestMemory(com){
     /** @param {number} address @param {number} length */
-    const view = (address, length)=>new DataView(com.readMemory(address >>> 0, length).slice()
+    const view = (address, length)=>new DataView(com.readMemory(wholeAddress(address),
+        length).slice()
         .buffer);
     /** @param {number} address @param {number} bytes @param {(v: DataView) => void} fill */
     const put = (address, bytes, fill)=>{
         const buffer = new Uint8Array(bytes);
         fill(new DataView(buffer.buffer));
-        com.writeMemory(address >>> 0, buffer);
+        com.writeMemory(wholeAddress(address), buffer);
     };
     return {
         /** @param {number} a */
@@ -114,14 +116,14 @@ export function guestMemory(com){
         /** @param {number} a @param {number} v */
         writeF64: (a, v)=>put(a, 8, d=>d.setFloat64(0, v, true)),
         /** @param {number} a @param {number} bytes */
-        zero: (a, bytes)=>com.writeMemory(a >>> 0, new Uint8Array(bytes)),
+        zero: (a, bytes)=>com.writeMemory(wholeAddress(a), new Uint8Array(bytes)),
         /**
          * UTF-16 text, `units` code units long.
          *
          * @param {number} a @param {number} units @returns {string}
          */
         readWide: (a, units)=>{
-            const bytes = com.readMemory(a >>> 0, units * 2);
+            const bytes = com.readMemory(wholeAddress(a), units * 2);
             let text = '';
             for (let i = 0; i + 1 < bytes.length; i += 2)
             {
@@ -135,7 +137,7 @@ export function guestMemory(com){
          * @param {number} a @param {number} max @returns {string}
          */
         readWideString: (a, max)=>{
-            const bytes = com.readMemory(a >>> 0, max * 2);
+            const bytes = com.readMemory(wholeAddress(a), max * 2);
             let text = '';
             for (let i = 0; i + 1 < bytes.length; i += 2)
             {
@@ -157,7 +159,7 @@ export function guestMemory(com){
                 bytes[i * 2] = unit & 0xff;
                 bytes[i * 2 + 1] = unit >> 8;
             }
-            com.writeMemory(a >>> 0, bytes);
+            com.writeMemory(wholeAddress(a), bytes);
         },
     };
 }

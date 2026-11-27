@@ -24,10 +24,15 @@ import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
+import { createFontResources } from './font-resources.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
+    DEFAULT_EM_HEIGHT, DESCENT_RATIO, FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH,
+    INTERNAL_LEADING_RATIO, VARIABLE_PITCH, faceNamed, fontFamilies,
+    outlineCell, rasterFace, rasterRealization, scaledAdvances, windowsMetrics,
 } from './faces.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { DISPLAY_DEVICE_NAME } from '../devices.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -53,6 +58,8 @@ import {
     writeTextMetricsW,
     writeU32s,
 } from './structs.js';
+import { floatBits } from '../../../system/floats.js';
+import { utf16z } from '../common/utf16.js';
 
 /** ABC: the three widths of one character, A and C the bearings either side of B. */
 const ABC_SIZE = 12;
@@ -70,9 +77,17 @@ const HS_API_MAX = 12;
 const WHITE_PEN = 6;
 const BLACK_PEN = 7;
 const NULL_PEN = 8;
+const OEM_FIXED_FONT = 10;
+const ANSI_FIXED_FONT = 11;
+const ANSI_VAR_FONT = 12;
+/** The OEM code page's character set, the one a console's font is in. */
+const OEM_CHARSET = 255;
 const SYSTEM_FONT = 13;
 const DEVICE_DEFAULT_FONT = 14;
 const DEFAULT_PALETTE = 15;
+/** The stock brush and pen whose color is the DC's own (SetDCBrushColor, SetDCPenColor). */
+const DC_BRUSH = 18;
+const DC_PEN = 19;
 const SYSTEM_FIXED_FONT = 16;
 const DEFAULT_GUI_FONT = 17;
 
@@ -106,8 +121,8 @@ const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
 /**
- * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
- * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, read where it locks
+ * to, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
  * BS_PATTERN under an older name.
  */
 const BS_DIBPATTERN = 5;
@@ -168,7 +183,7 @@ const CMAP_TAG = 0x70616d63;
  * @param {number} first @param {number} last
  * @returns {Uint8Array}
  */
-export function characterMap(first, last){
+function characterMap(first, last){
     const end = Math.min(last, 0xfffe);
     const segments = 2;
     const subtable = 16 + segments * 8;
@@ -243,6 +258,20 @@ const BITSPIXEL = 12;
 const PLANES = 14;
 const NUMCOLORS = 24;
 const RASTERCAPS = 38;
+/** TECHNOLOGY of a Windows metafile's DC. */
+const DT_METAFILE = 5;
+/** The shapes GDI draws on any device itself, whatever the driver does. */
+const CURVECAPS = 28;
+const LINECAPS = 30;
+const POLYGONALCAPS = 32;
+/**
+ * Every curve, line and polygon capability there is (CC_*, LC_* but
+ * LC_NONE's zero, PC_* but PC_NONE's): GDI draws them all, on the display and
+ * into a metafile alike, which is what Windows answers for both.
+ */
+const ALL_CURVE_CAPS = 0x1ff;
+const ALL_LINE_CAPS = 0xfe;
+const ALL_POLYGONAL_CAPS = 0xff;
 const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
@@ -302,6 +331,29 @@ const ERROR_NOT_SUPPORTED = 50;
 const ERROR_NOACCESS = 998;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_NOT_SUPPORTED = 0xc00000bb;
+/** The one display adapter's kernel-mode handle and LUID (D3DKMTOpenAdapterFromDeviceName). */
+const KMT_ADAPTER = 0x40000001;
+const KMT_ADAPTER_LUID = 0x00001001;
+
+/**
+ * Whether CreateDC's or CreateIC's driver and device name the display: the
+ * driver "DISPLAY", the display's device name (as EnumDisplayDevices gives
+ * it) or none, and the device that device name or none -- not both none.
+ * Anything else is a printer or a display there is not.
+ *
+ * @param {string} driver @param {string} device
+ */
+const namesDisplay = (driver, device)=>{
+    const named = driver.toUpperCase();
+    const which = device.toUpperCase();
+    if (named === '')
+    {
+        return which === DISPLAY_DEVICE_NAME || which === 'DISPLAY';
+    }
+    return (named === 'DISPLAY' || named === DISPLAY_DEVICE_NAME)
+        && (which === '' || which === DISPLAY_DEVICE_NAME);
+};
 
 /** GetBoundsRect's and SetBoundsRect's flags; DCB_SET is reset and accumulate together. */
 /** ExtCreatePen's style word: the line style, and whether the pen is geometric. */
@@ -403,11 +455,9 @@ const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
  * its length times the average width -- because a layout that adds up is what
  * code depends on, far more than the exact numbers. Every face is treated as
  * fixed-pitch for the same reason. With an engine, its measurements overlay
- * these field for field, and a string is as wide as the engine draws it.
+ * these field for field, and a string is as wide as the engine draws it. The
+ * vertical shares are faces.js's, which GDI+ estimates a family's metrics by.
  */
-const DEFAULT_EM_HEIGHT = 13;
-const INTERNAL_LEADING_RATIO = 0.2;
-const DESCENT_RATIO = 0.25;
 const WIDTH_RATIO = 0.5;
 
 /** FW_NORMAL, which a LOGFONT weight of zero means. */
@@ -477,6 +527,9 @@ const LAST_CHAR = 0xff;
 const DEFAULT_CHAR = 0x1f;
 const BREAK_CHAR = 0x20;
 
+/** How far a file name is read: Windows' MAX_PATH, in characters. */
+const MAX_PATH_CHARS = 260;
+
 /** Nothing bounds a face name but the field it came out of. */
 const MAX_FACE_NAME = 64;
 
@@ -498,9 +551,16 @@ const NEWTEXTMETRICEXW_SIZE = 100;
  * only, and of the tables GetFontData answers only 'cmap'.
  */
 const ENUMERATED_FONTTYPE = 0x0004;
+/** A bitmap face's FontType: one enumerated once for each size it has. */
+const RASTER_FONTTYPE = 0x0001;
 
 /**
  * @typedef {Object} GdiHost
+ * @property {(handle: number) => number} [lockGlobal]
+ *     The address an HGLOBAL's bytes are at - a moveable handle's block, a
+ *     fixed one itself - as GlobalLock answers it.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
@@ -528,6 +588,10 @@ const ENUMERATED_FONTTYPE = 0x0004;
  * @property {(hdc: number) => void} [windowContextCurrent]
  *           Brings a window's context up to where its window now is and what
  *           of it shows, before it draws: the window manager's to say.
+ * @property {(path: string) => Promise<Uint8Array | null>} [readFile]
+ *           A file's bytes from the volume, for a font file a program adds.
+ * @property {(path: string) => string} [fullPath]
+ *           A path as the program's current directory makes it absolute.
  * @property {(address: number, length: number) => boolean} [canWrite]
  *           Whether the program's buffer can take that many bytes. A gdi32
  *           call probes its out buffer and fails with ERROR_NOACCESS; writing
@@ -546,6 +610,8 @@ const ENUMERATED_FONTTYPE = 0x0004;
 export function createGdiFunctions(host){
     const objects = createGdiObjects(host.handles);
     const screen = host.screen ?? DEFAULT_SCREEN;
+    /** The display mode GdiEntry13 saw last, and its count of changes. */
+    const displayMode = { seen: '', uniqueness: 0 };
     /** @type {Map<number, any>} */
     const contexts = new Map();
 
@@ -651,6 +717,13 @@ export function createGdiFunctions(host){
                 return { type: 'pen', attributes: { style: 0, width: 1, color: BLACK } };
             case NULL_PEN:
                 return { type: 'pen', attributes: { style: PS_NULL, width: 1, color: BLACK } };
+            // Drawn in the DC's default colors, white and black: the color a
+            // DC was given by SetDCBrushColor or SetDCPenColor is kept and
+            // answered, not drawn with (a divergence, said when one is set).
+            case DC_BRUSH:
+                return { type: 'brush', attributes: { style: BS_SOLID, color: WHITE, hatch: 0 } };
+            case DC_PEN:
+                return { type: 'pen', attributes: { style: 0, width: 1, color: BLACK } };
             case SYSTEM_FONT:
             case DEVICE_DEFAULT_FONT:
                 return { type: 'font',
@@ -658,9 +731,24 @@ export function createGdiFunctions(host){
             case SYSTEM_FIXED_FONT:
                 return { type: 'font',
                     attributes: logFont({ height: 16, pitchAndFamily: 1, faceName: 'Fixedsys' }) };
+            // The ANSI code page's bitmap faces at 12, which realise at their
+            // 13-pixel sizes, and the OEM one a console draws in.
+            case ANSI_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_MODERN | FIXED_PITCH,
+                    faceName: 'Courier' }) };
+            case ANSI_VAR_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_SWISS | VARIABLE_PITCH,
+                    faceName: 'MS Sans Serif' }) };
+            case OEM_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 8,
+                    weight: FW_NORMAL, charSet: OEM_CHARSET,
+                    pitchAndFamily: FF_MODERN | FIXED_PITCH, faceName: 'Terminal' }) };
             case DEFAULT_GUI_FONT:
                 return { type: 'font',
-                    attributes: logFont({ height: -11, faceName: 'MS Shell Dlg' }) };
+                    attributes: logFont({ height: -11, weight: FW_NORMAL,
+                        faceName: 'MS Shell Dlg' }) };
             case DEFAULT_PALETTE:
                 // PALETTEENTRYs, red in the low byte.
                 return { type: 'palette', attributes: { version: 0x300,
@@ -670,6 +758,30 @@ export function createGdiFunctions(host){
                 return null;
         }
     };
+
+    /**
+     * SetDCBrushColor or SetDCPenColor: the color the DC's DC_BRUSH or DC_PEN
+     * stands for; answers the one before, CLR_INVALID for a handle that is
+     * no DC.
+     *
+     * @param {'Brush' | 'Pen'} kind @param {'dcBrushColor' | 'dcPenColor'} field
+     */
+    const setDcColor = (kind, field)=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, color])=>{
+            const dc = dcOf(handle);
+            if (!dc)
+            {
+                return CLR_INVALID;
+            }
+            const previous = dc[field];
+            dc[field] = color >>> 0;
+            host.divergence?.(`SetDC${kind}Color`,
+                `DC_${kind.toUpperCase()} draws in its default color, not the one set`);
+            return previous;
+        },
+    });
 
     /**
      * A LOGFONT with everything the guest did not say filled in. The stock fonts
@@ -754,6 +866,12 @@ export function createGdiFunctions(host){
             background: false,
             /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
+            /**
+             * An OpenGL pbuffer's size, for its DC: OpenGL's drawable, not GDI's.
+             *
+             * @type {{ width: number, height: number } | null}
+             */
+            pbuffer: null,
             pen: stockObject(BLACK_PEN),
             brush: stockObject(WHITE_BRUSH),
             font: stockObject(SYSTEM_FONT),
@@ -761,6 +879,9 @@ export function createGdiFunctions(host){
             palette: stockObject(DEFAULT_PALETTE),
             textColor: BLACK,
             bkColor: WHITE,
+            /** The colors DC_BRUSH and DC_PEN stand for in this DC. */
+            dcBrushColor: WHITE,
+            dcPenColor: BLACK,
             bkMode: OPAQUE,
             rop2: R2_COPYPEN,
             textAlign: 0,
@@ -1187,7 +1308,7 @@ export function createGdiFunctions(host){
      * @param {number} address @param {number} count @param {boolean} [counted]
      */
     const wideText = (address, count, counted = false)=>{
-        const bytes = host.readMemory(address >>> 0, Math.max(0, count) * 2);
+        const bytes = host.readMemory(wholeAddress(address), Math.max(0, count) * 2);
         let text = '';
         for (let at = 0; at * 2 + 1 < bytes.length; at++)
         {
@@ -1200,6 +1321,12 @@ export function createGdiFunctions(host){
         }
         return text;
     };
+
+    /** CreateDC's and CreateIC's names: NULL is none. @param {number} address */
+    const ansiName = address=>((address >>> 0) === 0 ? ''
+        : host.readCString(wholeAddress(address), 32));
+    /** @param {number} address */
+    const wideName = address=>((address >>> 0) === 0 ? '' : wideText(wholeAddress(address), 32));
 
     /**
      * CreatePen and CreatePenIndirect: see CreatePen.
@@ -1268,7 +1395,7 @@ export function createGdiFunctions(host){
                 bytes[at] = name.charCodeAt(at);
             }
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         writeU32s(host, sizeAt >>> 0, [needed]);
         return 1;
     };
@@ -1323,8 +1450,8 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const text = wide ? wideText(string >>> 0, count | 0, true)
-            : decodeAnsi(host.readMemory(string >>> 0, count | 0));
+        const text = wide ? wideText(wholeAddress(string), count | 0, true)
+            : decodeAnsi(host.readMemory(wholeAddress(string), count | 0));
         const advances = Array.from(text, character=>widthOf(dc, character));
         const width = advances.reduce((sum, advance)=>sum + advance, 0);
         if ((results >>> 0) !== 0)
@@ -1397,7 +1524,7 @@ export function createGdiFunctions(host){
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const text = (count | 0) === 0 ? '' : read(string >>> 0, count | 0);
+        const text = (count | 0) === 0 ? '' : read(wholeAddress(string), count | 0);
         const extents = Array.from(text, (_, index)=>extentOf(dc, text.slice(0, index + 1)));
         if ((fit >>> 0) !== 0)
         {
@@ -1415,13 +1542,6 @@ export function createGdiFunctions(host){
         return 1;
     };
 
-    /** A float's bits as the dword they are written as. @param {number} value */
-    const floatBits = value=>{
-        const view = new DataView(new ArrayBuffer(4));
-        view.setFloat32(0, value, true);
-        return view.getUint32(0, true);
-    };
-
     /**
      * The glyph-index form of the width calls.
      *
@@ -1434,7 +1554,8 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const list = (glyphs >>> 0) === 0 ? null : host.readMemory(glyphs >>> 0, (count >>> 0) * 2);
+        const list = (glyphs >>> 0) === 0 ? null : host.readMemory(wholeAddress(glyphs),
+            (count >>> 0) * 2);
         for (let index = 0; index < (count >>> 0); index++)
         {
             const glyph = list ? list[index * 2] | list[index * 2 + 1] << 8 : (first >>> 0) + index;
@@ -1568,7 +1689,7 @@ export function createGdiFunctions(host){
         {
             return 0;
         }
-        const bytes = host.readMemory(points >>> 0, (count | 0) * 8);
+        const bytes = host.readMemory(wholeAddress(points), (count | 0) * 8);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         for (let index = 0; index < (count | 0); index++)
         {
@@ -1588,6 +1709,28 @@ export function createGdiFunctions(host){
      * @returns {import('./structs.js').TextMetricFields}
      */
     const metricsOf = font=>{
+        let metrics = metricsCache.get(font);
+        if (metrics === undefined)
+        {
+            metrics = Object.freeze(measureFont(font));
+            metricsCache.set(font, metrics);
+        }
+        return metrics;
+    };
+    /**
+     * Each font's metrics once: a font is one object while it lives, and its
+     * metrics are asked for every string measured or drawn with it. Let go of
+     * when a font file is added, whose face may now measure otherwise.
+     *
+     * @type {WeakMap<import('./structs.js').LogFontFields, import('./structs.js').TextMetricFields>}
+     */
+    let metricsCache = new WeakMap();
+
+    /**
+     * @param {import('./structs.js').LogFontFields} font
+     * @returns {import('./structs.js').TextMetricFields}
+     */
+    const measureFont = font=>{
         const measured = host.graphics?.fontMetrics?.(font);
         // lfHeight is three different requests in one field: a cell height when
         // positive, a character height when negative, and "you choose" at zero.
@@ -1630,7 +1773,31 @@ export function createGdiFunctions(host){
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
             ...windowsFields(font),
+            ...rasterFields(font),
         };
+    };
+
+    /**
+     * What a bitmap face's size measures, over everything else: the strike
+     * it is realised at is Windows' own, drawn in the ANSI character set it
+     * is installed in, and neither scaled (no TMPF_VECTOR) nor TrueType.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const rasterFields = font=>{
+        const raster = font.raster ?? rasterRealization(font);
+        const face = faceNamed(font.faceName);
+        if (!raster || !face)
+        {
+            return {};
+        }
+        const { strike, scaleX, scaleY } = raster;
+        return { height: strike.height * scaleY, ascent: strike.ascent * scaleY,
+            descent: strike.descent * scaleY, internalLeading: strike.internalLeading * scaleY,
+            externalLeading: strike.externalLeading * scaleY,
+            aveCharWidth: strike.aveCharWidth * scaleX, maxCharWidth: strike.maxCharWidth * scaleX,
+            weight: raster.face.weight, defaultChar: raster.face.defaultChar, charSet: ANSI_CHARSET,
+            pitchAndFamily: face.family | (face.pitch === FIXED_PITCH ? 0 : TMPF_FIXED_PITCH) };
     };
 
     /**
@@ -1643,17 +1810,127 @@ export function createGdiFunctions(host){
         const known = windowsMetrics(font);
         if (!known)
         {
-            return {};
+            // An outline face whose cell is known measures as Windows scales it.
+            return outlineCell(font, fontResources.cellOf) ?? {};
         }
         const { height, ascent, descent, internalLeading, aveCharWidth } = known;
         return { height, ascent, descent, internalLeading, aveCharWidth };
     };
 
     /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
-    const currentFont = dc=>objects.get(dc.font)?.attributes ?? logFont({});
+    const currentFont = dc=>{
+        const attributes = objects.get(dc.font)?.attributes ?? NO_FONT;
+        let drawn = drawnFonts.get(attributes);
+        if (drawn === undefined)
+        {
+            drawn = asDrawn(attributes);
+            drawnFonts.set(attributes, drawn);
+        }
+        return drawn;
+    };
+    /** A DC with no font of its own draws with the defaults. */
+    const NO_FONT = logFont({});
+    /**
+     * Each font as it is drawn, once: one object for as long as the font
+     * lives, which what is measured of it is kept by (`metricsOf`).
+     *
+     * @type {WeakMap<import('./structs.js').LogFontFields, import('./structs.js').LogFontFields>}
+     */
+    const drawnFonts = new WeakMap();
+    /**
+     * A font as it is drawn: a bitmap face at the size it is realised at, so
+     * what is drawn and measured is that size whatever height was asked.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const asDrawn = font=>{
+        const raster = rasterRealization(font);
+        if (!raster)
+        {
+            return font;
+        }
+        const { strike, scaleX, scaleY } = raster;
+        // A height that already names the size it is realised at stays as
+        // asked; any other becomes that size's cell.
+        const exact = scaleY === 1 && (font.height === strike.height
+            || font.height === strike.internalLeading - strike.height);
+        return { ...font, raster, height: exact ? font.height : strike.height * scaleY,
+            width: scaleX === scaleY ? 0 : strike.aveCharWidth * scaleX };
+    };
+    /** The instance id of the font a DC draws with: its handle, which is never zero. */
+    const realizationOf = (/** @type {number} */ handle)=>{
+        const dc = dcOf(handle);
+        return dc && dc.font ? dc.font >>> 0 : 0;
+    };
+    const isRealization = (/** @type {number} */ instance)=>
+        (instance >>> 0) !== 0 && objects.get(instance >>> 0)?.type === 'font';
+    const u32Bytes = (/** @type {number[]} */ values)=>
+        new Uint8Array(Uint32Array.from(values, value=>value >>> 0).buffer);
+
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /** The font files the program added, drawn and enumerated with the system's faces. */
+    const fontResources = createFontResources({
+        readFile: host.readFile, fullPath: host.fullPath,
+        addFont: host.graphics?.addFont
+            && ((family, bytes)=>{
+                // Once the face has loaded: what was measured before was a stand-in's.
+                const added = host.graphics?.addFont?.(family, bytes) ?? false;
+                Promise.resolve(added).finally(()=>{
+                    metricsCache = new WeakMap();
+                    advanceTables = new WeakMap();
+                });
+                return added;
+            }),
+    });
+    /**
+     * A face by name: the system's, or a family a font file added.
+     *
+     * @param {string} name
+     * @returns {import('./faces.js').Face | null}
+     */
+    const knownFace = name=>{
+        const system = faceNamed(name);
+        if (system || name === '')
+        {
+            return system;
+        }
+        const wanted = name.toLowerCase();
+        const family = fontResources.enumerable().find(added=>added.toLowerCase() === wanted);
+        return family ? { name: family, family: 0, pitch: VARIABLE_PITCH } : null;
+    };
+    /**
+     * A file name a font resource call is given, in its own width.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const nameAt = (address, wide)=>{
+        if ((address >>> 0) === 0)
+        {
+            return '';
+        }
+        if (!wide)
+        {
+            const text = host.readCString(wholeAddress(address), MAX_PATH_CHARS);
+            return decodeAnsi(Uint8Array.from(text, character=>character.charCodeAt(0)));
+        }
+        // A unit at a time: a name ends wherever its NUL is, maybe at the
+        // end of its page.
+        let text = '';
+        for (let at = 0; at < MAX_PATH_CHARS; at++)
+        {
+            const bytes = host.readMemory(wholeAddress(address) + at * 2, 2);
+            const unit = bytes[0] | bytes[1] << 8;
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
 
     /** The handles AddFontMemResourceEx gave out and RemoveFontMemResourceEx has not taken back. */
     const memoryFonts = new Set();
@@ -1669,7 +1946,7 @@ export function createGdiFunctions(host){
         host.divergence?.(wide ? 'GetGlyphIndicesW' : 'GetGlyphIndicesA',
             'a glyph index is the character code, not the index in the font');
         const { firstChar, lastChar, defaultChar } = currentMetrics(dc);
-        const bytes = host.readMemory(text >>> 0, (count | 0) * (wide ? 2 : 1));
+        const bytes = host.readMemory(wholeAddress(text), (count | 0) * (wide ? 2 : 1));
         const indices = new Uint8Array((count | 0) * 2);
         const view = new DataView(indices.buffer);
         for (let index = 0; index < (count | 0); index++)
@@ -1679,7 +1956,7 @@ export function createGdiFunctions(host){
             view.setUint16(index * 2, inside ? code
                 : (flags & GGI_MARK_NONEXISTING_GLYPHS) !== 0 ? 0xffff : defaultChar, true);
         }
-        host.writeMemory(out >>> 0, indices);
+        host.writeMemory(wholeAddress(out), indices);
         return count | 0;
     };
 
@@ -1687,6 +1964,11 @@ export function createGdiFunctions(host){
     const glyphOutline = ([handle, char, format, metrics, size, buffer, matrix], api)=>{
         const dc = dcOf(handle);
         if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        // A bitmap face has no outline to measure or draw a glyph from.
+        if (rasterFace(currentFont(dc).faceName))
         {
             return GDI_ERROR;
         }
@@ -1711,7 +1993,7 @@ export function createGdiFunctions(host){
         view.setInt32(12, ascent, true);
         view.setInt16(16, width, true);
         view.setInt16(18, 0, true);
-        host.writeMemory(metrics >>> 0, bytes);
+        host.writeMemory(wholeAddress(metrics), bytes);
         return 1;
     };
 
@@ -1786,7 +2068,7 @@ export function createGdiFunctions(host){
      */
     const currentFace = dc=>{
         const font = currentFont(dc);
-        const named = font.faceName === '' ? null : faceNamed(font.faceName);
+        const named = font.faceName === '' ? null : knownFace(font.faceName);
         if (named)
         {
             return named.name;
@@ -1814,12 +2096,57 @@ export function createGdiFunctions(host){
         {
             return engine;
         }
-        const pitch = metricsOf(font).aveCharWidth;
-        const windows = windowsMetrics(font)?.advances;
-        return windows ? Array.from(text, character=>{
-            const code = character.charCodeAt(0);
-            return code >= 0x20 && code <= 0xff ? windows[code - 0x20] : pitch;
-        }).reduce((sum, advance)=>sum + advance, 0) : text.length * pitch;
+        // Laid out a character at a time (an edit control wraps by them):
+        // summed in place over the font's table, made once.
+        const table = advancesOf(font);
+        let width = 0;
+        for (let i = 0; i < text.length; i++)
+        {
+            const code = text.charCodeAt(i);
+            width += code >= 0x20 && code <= 0xff ? table[code - 0x20] : table[ADVANCE_ELSE];
+        }
+        return width;
+    };
+    /** Where an advance table keeps the width of a character past 0xFF. */
+    const ADVANCE_ELSE = 0xe0;
+    /**
+     * Each font's advances, 0x20 to 0xFF and one for every other character,
+     * without an engine to measure: a bitmap face's own scaled across, else
+     * Windows' for the face, else its pitch.
+     *
+     * @type {WeakMap<import('./structs.js').LogFontFields, Float64Array>}
+     */
+    let advanceTables = new WeakMap();
+    /** @param {import('./structs.js').LogFontFields} font */
+    const advancesOf = font=>{
+        let table = advanceTables.get(font);
+        if (table !== undefined)
+        {
+            return table;
+        }
+        table = new Float64Array(ADVANCE_ELSE + 1);
+        const raster = font.raster;
+        const own = raster?.advances;
+        if (raster && own)
+        {
+            for (let code = 0x20; code <= 0xff; code++)
+            {
+                table[code - 0x20] = own[code - 0x20] * raster.scaleX;
+            }
+            table[ADVANCE_ELSE] = raster.strike.aveCharWidth * raster.scaleX;
+        }
+        else
+        {
+            const pitch = metricsOf(font).aveCharWidth;
+            const windows = windowsMetrics(font)?.advances ?? scaledAdvances(font);
+            for (let code = 0x20; code <= 0xff; code++)
+            {
+                table[code - 0x20] = windows ? windows[code - 0x20] : pitch;
+            }
+            table[ADVANCE_ELSE] = pitch;
+        }
+        advanceTables.set(font, table);
+        return table;
     };
 
     /**
@@ -1865,11 +2192,28 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * The average width of a DC's font as dialog units are measured by it -
+     * the extent of the 52 Latin letters, halved and rounded up over 26.
+     *
+     * @param {any} dc
+     */
+    const averageWidthOf = dc=>{
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+    };
+
+    /**
      * @param {any} dc
      * @param {number} index
      * @returns {number}
      */
     const deviceCaps = (dc, index)=>{
+        // A Windows metafile's DC (CreateMetaFile) has no device behind it:
+        // it is a metafile and nothing else (Wine's dc.c test_device_caps).
+        if (dc.metafile === 'metafile')
+        {
+            return (index | 0) === TECHNOLOGY ? DT_METAFILE : 0;
+        }
         // A memory context answers for the device it is compatible with, the
         // display, whatever bitmap is selected into it (Wine's dc.c
         // test_CreateCompatibleDC compares one over a 1-bit 10x10 bitmap with
@@ -1899,6 +2243,12 @@ export function createGdiFunctions(host){
                 return depth > PALETTE_DEPTH ? -1 : 1 << depth;
             case RASTERCAPS:
                 return DISPLAY_RASTER_CAPS;
+            case CURVECAPS:
+                return ALL_CURVE_CAPS;
+            case LINECAPS:
+                return ALL_LINE_CAPS;
+            case POLYGONALCAPS:
+                return ALL_POLYGONAL_CAPS;
             case LOGPIXELSX:
             case LOGPIXELSY:
                 return LOGICAL_DPI;
@@ -1955,6 +2305,10 @@ export function createGdiFunctions(host){
 
     /** @type {number} */
     let stockBitmap = 0;
+    /** D3DKMTQueryAdapterInfo's refusal, said once. */
+    let kmtInfoSaid = false;
+    /** D3DKMTEscape's refusal, said once. */
+    let kmtEscapeSaid = false;
     /**
      * The 1-by-1 monochrome bitmap: what CreateBitmap and CreateCompatibleBitmap
      * answer for a zero width or height, and what every memory DC has selected
@@ -2175,7 +2529,7 @@ export function createGdiFunctions(host){
     const solidBrushes = new Map();
     /** @param {number} color  A COLORREF. */
     const solidBrush = color=>{
-        const key = color >>> 0;
+        const key = wholeAddress(color);
         let handle = solidBrushes.get(key);
         if (handle === undefined)
         {
@@ -2223,8 +2577,9 @@ export function createGdiFunctions(host){
      * @param {number[]} args @param {boolean} wide
      * @param {{ charSet: number, faceName: string } | null} [asked]  The request
      *     itself, for the older call that names a family instead of a LOGFONT.
+     * @param {number | bigint} [lParam]  The program's own context, whole.
      */
-    const enumerateFaces = ([hdc, logfont, proc, lParam], wide, asked)=>{
+    const enumerateFaces = ([hdc, logfont, proc], wide, asked, lParam)=>{
         if (!dcOf(hdc))
         {
             return 0;
@@ -2232,10 +2587,13 @@ export function createGdiFunctions(host){
         const request = asked !== undefined ? asked : (logfont >>> 0) === 0 ? null
             : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
         const charSet = request ? request.charSet : DEFAULT_CHARSET;
-        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const named = request && request.faceName !== '' ? knownFace(request.faceName) : null;
         const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
             : request && request.faceName !== '' ? (named ? [named] : [])
-                : FACES.filter(face=>!face.substitute);
+                : [...FACES.filter(face=>!face.substitute), ...fontResources.enumerable()
+                    .filter(family=>!faceNamed(family))
+                    .map(family=>/** @type {import('./faces.js').Face} */ (
+                        { name: family, family: 0, pitch: VARIABLE_PITCH }))];
         const call = host.call;
         if (!call || (proc >>> 0) === 0 || faces.length === 0)
         {
@@ -2253,10 +2611,14 @@ export function createGdiFunctions(host){
             let answer = 1;
             try
             {
-                for (const face of faces)
+                // A bitmap face is told of once for each size it has.
+                const sizes = faces.flatMap(face=>(rasterFace(face.name)?.strikes ?? [null])
+                    .map(strike=>({ face, strike })));
+                for (const { face, strike } of sizes)
                 {
                     const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
-                        pitchAndFamily: face.family | face.pitch });
+                        pitchAndFamily: face.family | face.pitch,
+                        ...strike ? { height: strike.height } : {} });
                     const metrics = metricsOf(font);
                     const bytes = new Uint8Array(enumSize);
                     bytes.set(logFontBytes({ ...font, height: metrics.height,
@@ -2269,7 +2631,8 @@ export function createGdiFunctions(host){
                     host.writeMemory(block + enumSize, new Uint8Array(metricSize));
                     (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
-                        [block, block + enumSize, ENUMERATED_FONTTYPE, lParam >>> 0], thread)) | 0;
+                        [block, block + enumSize, strike ? RASTER_FONTTYPE : ENUMERATED_FONTTYPE,
+                            /** @type {number} */ (lParam)], thread)) | 0;
                     if (answer === 0)
                     {
                         break;
@@ -2366,26 +2729,16 @@ export function createGdiFunctions(host){
         CreateDCA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
-                if (named.toUpperCase() !== 'DISPLAY')
-                {
-                    return 0;
-                }
-                return createContext(0, 'display').hdc;
-            },
+            handler: ([driver, device])=>(namesDisplay(ansiName(driver), ansiName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /** HDC CreateDCW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateDCA in wide text */
         CreateDCW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(wideName(driver), wideName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /**
@@ -2398,22 +2751,16 @@ export function createGdiFunctions(host){
         CreateICA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(ansiName(driver), ansiName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /** HDC CreateICW(LPCWSTR, LPCWSTR, LPCWSTR, const DEVMODEW *): CreateICA in wide text */
         CreateICW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([driver, device])=>{
-                const named = (driver >>> 0) !== 0 ? wideText(driver >>> 0, 32)
-                    : (device >>> 0) !== 0 ? wideText(device >>> 0, 32) : '';
-                return named.toUpperCase() === 'DISPLAY' ? createContext(0, 'display').hdc : 0;
-            },
+            handler: ([driver, device])=>(namesDisplay(wideName(driver), wideName(device))
+                ? createContext(0, 'display').hdc : 0),
         },
 
         /**
@@ -2428,7 +2775,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if ((desc >>> 0) === 0)
+                if (wholeAddress(desc) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2459,12 +2806,133 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * ULONG GdiEntry13(void) - DdQueryDisplaySettingsUniqueness
+         *
+         * A number that changes whenever the display's mode does: a caller
+         * keeps it with what it made for the mode (WPF's renderer, its
+         * surfaces) and makes them again when it moved. The mode is read at
+         * each call, so a change through any path counts.
+         */
+        GdiEntry13: {
+            argBytes: 0,
+            handler: ()=>{
+                const mode = `${screen.width}x${screen.height}x${screen.bitsPerPixel ?? 32}`;
+                if (mode !== displayMode.seen)
+                {
+                    displayMode.seen = mode;
+                    displayMode.uniqueness = (displayMode.uniqueness + 1) >>> 0;
+                }
+                return displayMode.uniqueness;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTOpenAdapterFromDeviceName(D3DKMT_OPENADAPTERFROMDEVICENAME *desc)
+         *
+         * The one display adapter, by any device name: pDeviceName in,
+         * hAdapter and AdapterLuid out. What a kernel-mode adapter answers
+         * of itself is not kept here (D3DKMTQueryAdapterInfo).
+         */
+        D3DKMTOpenAdapterFromDeviceName: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0]);
+                return 0;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTQueryAdapterInfo(const D3DKMT_QUERYADAPTERINFO *desc)
+         *
+         * What the display driver's kernel half says of the adapter, which no
+         * driver here has: STATUS_NOT_SUPPORTED, said once. A program asking
+         * is told what a driver that keeps none of it tells.
+         */
+        D3DKMTQueryAdapterInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!kmtInfoSaid)
+                {
+                    kmtInfoSaid = true;
+                    host.divergence?.('D3DKMTQueryAdapterInfo', 'the adapter\'s kernel-mode'
+                        + ' information is not kept here: STATUS_NOT_SUPPORTED');
+                }
+                return STATUS_NOT_SUPPORTED;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTOpenAdapterFromHdc(D3DKMT_OPENADAPTERFROMHDC *desc)
+         *
+         * The adapter behind a display DC: hDc in, hAdapter, AdapterLuid and
+         * VidPnSourceId out. A memory DC has no adapter behind it.
+         */
+        D3DKMTOpenAdapterFromHdc: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                const dc = wholeAddress(desc) === 0 ? null : dcOf(readU32s(host, desc, 1)[0]);
+                if (!dc || dc.kind === 'memory')
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                writeU32s(host, desc + 4, [KMT_ADAPTER, KMT_ADAPTER_LUID, 0, 0]);
+                return 0;
+            },
+        },
+
+        /**
+         * NTSTATUS D3DKMTEscape(const D3DKMT_ESCAPE *desc)
+         *
+         * Private data for the display driver, which a driver reads by its
+         * own rules: no driver here takes any, so every escape to the open
+         * adapter is STATUS_NOT_SUPPORTED, said once -- what a program asking
+         * another vendor's driver is told.
+         */
+        D3DKMTEscape: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>{
+                if (wholeAddress(desc) === 0 || readU32s(host, desc, 1)[0] !== KMT_ADAPTER)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!kmtEscapeSaid)
+                {
+                    kmtEscapeSaid = true;
+                    host.divergence?.('D3DKMTEscape', 'no display driver here takes private'
+                        + ' escapes: STATUS_NOT_SUPPORTED');
+                }
+                return STATUS_NOT_SUPPORTED;
+            },
+        },
+
+        /** NTSTATUS D3DKMTCloseAdapter(const D3DKMT_CLOSEADAPTER *desc) */
+        D3DKMTCloseAdapter: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([desc])=>(wholeAddress(desc) !== 0 && readU32s(host, desc,
+                1)[0] === KMT_ADAPTER
+                ? 0 : STATUS_INVALID_PARAMETER),
+        },
+
         /** NTSTATUS D3DKMTDestroyDCFromMemory(const D3DKMT_DESTROYDCFROMMEMORY *desc) */
         D3DKMTDestroyDCFromMemory: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([desc])=>{
-                if ((desc >>> 0) === 0)
+                if (wholeAddress(desc) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -2779,7 +3247,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([logpen])=>{
-                if ((logpen >>> 0) === 0)
+                if (wholeAddress(logpen) === 0)
                 {
                     return 0;
                 }
@@ -2804,10 +3272,11 @@ export function createGdiFunctions(host){
                 const kind = (style >>> 0) & PS_STYLE_MASK;
                 const geometric = ((style >>> 0) & PS_TYPE_MASK) === PS_GEOMETRIC;
                 const user = kind === PS_USERSTYLE;
-                if ((brush >>> 0) === 0 || kind > PS_ALTERNATE
+                if (wholeAddress(brush) === 0 || kind > PS_ALTERNATE
                     || (!geometric && ((width >>> 0) !== 1 || kind === PS_INSIDEFRAME))
                     || (geometric && kind === PS_ALTERNATE)
-                    || (user ? (count >>> 0) === 0 || (count >>> 0) > 16 || (dashes >>> 0) === 0
+                    || (user ? (count >>> 0) === 0 || (count >>> 0) > 16
+                        || wholeAddress(dashes) === 0
                         : (count >>> 0) !== 0))
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -2817,11 +3286,30 @@ export function createGdiFunctions(host){
                 {
                     return stockObject(NULL_PEN);
                 }
-                const [brushStyle, color, hatch] = readU32s(host, brush >>> 0, 3);
+                const [brushStyle, color, hatch] = readU32s(host, wholeAddress(brush), 3);
+                // A cosmetic pen is drawn in a colour, so its brush is solid;
+                // a geometric one takes a solid, hatched, pattern or DIB
+                // pattern brush, and a hollow one is no pen at all (Wine's
+                // pen.c test_brush_pens). A pattern's colour is not the pen's.
+                const pattern = [BS_PATTERN, BS_DIBPATTERN, BS_DIBPATTERNPT]
+                    .includes(brushStyle >>> 0);
+                if (geometric && (brushStyle >>> 0) === BS_NULL)
+                {
+                    return stockObject(NULL_PEN);
+                }
+                if (geometric ? !pattern && ![BS_SOLID, BS_HATCHED].includes(brushStyle >>> 0)
+                    : (brushStyle >>> 0) !== BS_SOLID)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 return objects.create('pen', {
-                    style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
-                    brushStyle: brushStyle >>> 0, hatch: hatch >>> 0,
-                    entries: user ? readU32s(host, dashes >>> 0, count >>> 0) : [],
+                    style: kind, width: width | 0, color: pattern ? 0 : color >>> 0,
+                    extended: style >>> 0,
+                    brushStyle: (brushStyle >>> 0) === BS_DIBPATTERN ? BS_DIBPATTERNPT
+                        : brushStyle >>> 0,
+                    hatch: hatch >>> 0,
+                    entries: user ? readU32s(host, wholeAddress(dashes), count >>> 0) : [],
                 });
             },
         },
@@ -2853,7 +3341,12 @@ export function createGdiFunctions(host){
                 {
                     return patternBrush(fields.hatch);
                 }
-                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                if (fields.style === BS_DIBPATTERN)
+                {
+                    return dibPatternBrush(host.lockGlobal?.(fields.hatch) ?? fields.hatch,
+                        fields.color);
+                }
+                return fields.style === BS_DIBPATTERNPT
                     ? dibPatternBrush(fields.hatch, fields.color)
                     : objects.create('brush', fields);
             },
@@ -2877,17 +3370,19 @@ export function createGdiFunctions(host){
          * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
          *
          * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
-         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         * forms of a LOGBRUSH describe; an HGLOBAL is read where it locks to.
          */
         CreateDIBPatternBrushPt: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+            handler: ([packed, usage])=>dibPatternBrush(wholeAddress(packed), usage >>> 0),
         },
         CreateDIBPatternBrush: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+            handler: ([packed, usage])=>
+                dibPatternBrush(host.lockGlobal?.(wholeAddress(packed)) ?? wholeAddress(packed),
+                    usage >>> 0),
         },
 
         /**
@@ -2901,7 +3396,7 @@ export function createGdiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hatch, color])=>{
-                const index = hatch >>> 0;
+                const index = wholeAddress(hatch);
                 if (index >= HS_API_MAX)
                 {
                     return 0;
@@ -2935,7 +3430,7 @@ export function createGdiFunctions(host){
                 clipPrecision: args[10] & 0xff,
                 quality: args[11] & 0xff,
                 pitchAndFamily: args[12] & 0xff,
-                faceName: (args[13] >>> 0) === 0
+                faceName: wholeAddress(args[13]) === 0
                     ? ''
                     : host.readCString(args[13], MAX_FACE_NAME),
             })),
@@ -2945,7 +3440,7 @@ export function createGdiFunctions(host){
         CreateFontIndirectA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([logfont])=>((logfont >>> 0) === 0
+            handler: ([logfont])=>(wholeAddress(logfont) === 0
                 ? 0
                 : objects.create('font', readLogFont(host, logfont))),
         },
@@ -2974,7 +3469,7 @@ export function createGdiFunctions(host){
         CreateFontIndirectW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([logfont])=>((logfont >>> 0) === 0
+            handler: ([logfont])=>(wholeAddress(logfont) === 0
                 ? 0
                 : objects.create('font', readLogFontW(host, logfont))),
         },
@@ -3091,9 +3586,10 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                if ((bits >>> 0) !== 0)
+                if (wholeAddress(bits) !== 0)
                 {
-                    attributes.pixels.set(host.readMemory(bits >>> 0, attributes.pixels.length));
+                    attributes.pixels.set(host.readMemory(wholeAddress(bits),
+                        attributes.pixels.length));
                 }
                 return objects.create('bitmap', attributes);
             },
@@ -3110,7 +3606,7 @@ export function createGdiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bitmap])=>{
-                if ((bitmap >>> 0) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
+                if (wholeAddress(bitmap) === 0 || readU32(host, bitmap + BITMAP.bmType) !== 0)
                 {
                     return 0;
                 }
@@ -3152,12 +3648,12 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return bits.size;
                 }
                 const wanted = (count | 0) < 0 ? bits.size : Math.min(count | 0, bits.size);
-                host.writeMemory(out >>> 0, bits.read().subarray(0, wanted));
+                host.writeMemory(wholeAddress(out), bits.read().subarray(0, wanted));
                 return wanted;
             },
         },
@@ -3167,12 +3663,12 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, count, source])=>{
                 const bits = bitsOf(handle);
-                if (!bits || (source >>> 0) === 0)
+                if (!bits || wholeAddress(source) === 0)
                 {
                     return 0;
                 }
                 const wanted = Math.min(count >>> 0, bits.size);
-                bits.write(host.readMemory(source >>> 0, wanted).slice());
+                bits.write(host.readMemory(wholeAddress(source), wanted).slice());
                 return wanted;
             },
         },
@@ -3190,7 +3686,7 @@ export function createGdiFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([hdc, info, usage, bitsOut, section])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return 0;
                 }
@@ -3246,7 +3742,7 @@ export function createGdiFunctions(host){
                 // program that draws text into a new section to read its glyphs
                 // read the last one's text under its own.
                 host.fillMemory?.(address, 0, bytes);
-                if ((bitsOut >>> 0) !== 0)
+                if (wholeAddress(bitsOut) !== 0)
                 {
                     writeU32s(host, bitsOut, [address]);
                 }
@@ -3306,13 +3802,13 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, start, count, quads])=>{
                 const colors = colorTableOf(hdc);
-                if (!colors || (quads >>> 0) === 0)
+                if (!colors || wholeAddress(quads) === 0)
                 {
                     return 0;
                 }
                 const first = start >>> 0;
                 const wanted = Math.min(count >>> 0, Math.max(0, colors.length - first));
-                readColorTable(quads >>> 0, wanted, 0, null).forEach((color, index)=>{
+                readColorTable(wholeAddress(quads), wanted, 0, null).forEach((color, index)=>{
                     colors[first + index] = color;
                 });
                 return wanted;
@@ -3324,7 +3820,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, start, count, quads])=>{
                 const colors = colorTableOf(hdc);
-                if (!colors || (quads >>> 0) === 0)
+                if (!colors || wholeAddress(quads) === 0)
                 {
                     return 0;
                 }
@@ -3338,7 +3834,7 @@ export function createGdiFunctions(host){
                     bytes[index * 4 + 1] = (color >>> 8) & 0xff;
                     bytes[index * 4 + 2] = (color >>> 16) & 0xff;
                 }
-                host.writeMemory(quads >>> 0, bytes);
+                host.writeMemory(wholeAddress(quads), bytes);
                 return wanted;
             },
         },
@@ -3360,7 +3856,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([hdc, infoHeader, init, bits, info, usage])=>{
                 const CBM_INIT = 4;
-                if ((infoHeader >>> 0) === 0)
+                if (wholeAddress(infoHeader) === 0)
                 {
                     return 0;
                 }
@@ -3385,13 +3881,14 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const bitmap = objects.create('bitmap', attributes);
-                if ((init & CBM_INIT) === 0 || (bits >>> 0) === 0 || (info >>> 0) === 0)
+                if ((init & CBM_INIT) === 0 || wholeAddress(bits) === 0 || wholeAddress(info) === 0)
                 {
                     return bitmap;
                 }
                 // SetDIBits of the whole DIB the bits are described by.
-                const lines = Math.abs(readBitmapInfoHeader(host, info >>> 0).height);
-                if (drawing.setDIBits(bitmap, 0, lines, bits >>> 0, info >>> 0, usage >>> 0, dc)
+                const lines = Math.abs(readBitmapInfoHeader(host, wholeAddress(info)).height);
+                if (drawing.setDIBits(bitmap, 0, lines, wholeAddress(bits), wholeAddress(info),
+                    usage >>> 0, dc)
                     > 0)
                 {
                     return bitmap;
@@ -3448,6 +3945,26 @@ export function createGdiFunctions(host){
                 dc.bkColor = color >>> 0;
                 return previous;
             },
+        },
+
+        /**
+         * COLORREF SetDCBrushColor(HDC hdc, COLORREF color), SetDCPenColor alike
+         *
+         * The color the DC's DC_BRUSH or DC_PEN stands for; answers the one
+         * before, CLR_INVALID for a handle that is no DC.
+         */
+        SetDCBrushColor: setDcColor('Brush', 'dcBrushColor'),
+        SetDCPenColor: setDcColor('Pen', 'dcPenColor'),
+        /** COLORREF GetDCBrushColor(HDC hdc), GetDCPenColor alike */
+        GetDCBrushColor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.dcBrushColor ?? CLR_INVALID,
+        },
+        GetDCPenColor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.dcPenColor ?? CLR_INVALID,
         },
 
         /** COLORREF GetBkColor(HDC hdc) */
@@ -3566,11 +4083,11 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, given])=>{
                 const dc = dcOf(handle);
-                if (!dc || (given >>> 0) === 0)
+                if (!dc || wholeAddress(given) === 0)
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(given >>> 0, COLORADJUSTMENT_SIZE);
+                const bytes = host.readMemory(wholeAddress(given), COLORADJUSTMENT_SIZE);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, COLORADJUSTMENT_SIZE);
                 const fields = Array.from({ length: 12 }, (_, index)=>(index < 8
                     ? view.getUint16(index * 2, true) : view.getInt16(index * 2, true)));
@@ -3590,7 +4107,7 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -3598,7 +4115,7 @@ export function createGdiFunctions(host){
                 const view = new DataView(bytes.buffer);
                 dc.colorAdjustment.forEach((/** @type {number} */ value,
                     /** @type {number} */ index)=>view.setUint16(index * 2, value & 0xffff, true));
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -3711,11 +4228,11 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, xform])=>{
                 const dc = dcOf(handle);
-                if (!dc || (xform >>> 0) === 0 || dc.graphicsMode !== GM_ADVANCED)
+                if (!dc || wholeAddress(xform) === 0 || dc.graphicsMode !== GM_ADVANCED)
                 {
                     return 0;
                 }
-                const values = readXform(xform >>> 0);
+                const values = readXform(wholeAddress(xform));
                 if (values[0] * values[3] - values[1] * values[2] === 0)
                 {
                     return 0;
@@ -3729,11 +4246,11 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, xform])=>{
                 const dc = dcOf(handle);
-                if (!dc || (xform >>> 0) === 0)
+                if (!dc || wholeAddress(xform) === 0)
                 {
                     return 0;
                 }
-                writeXform(xform >>> 0, dc.world ?? IDENTITY_XFORM);
+                writeXform(wholeAddress(xform), dc.world ?? IDENTITY_XFORM);
                 return 1;
             },
         },
@@ -3751,12 +4268,12 @@ export function createGdiFunctions(host){
                     setWorld(dc, IDENTITY_XFORM);
                     return 1;
                 }
-                if ((xform >>> 0) === 0 || ((mode >>> 0) !== MWT_LEFTMULTIPLY
+                if (wholeAddress(xform) === 0 || ((mode >>> 0) !== MWT_LEFTMULTIPLY
                     && (mode >>> 0) !== MWT_RIGHTMULTIPLY))
                 {
                     return 0;
                 }
-                const given = readXform(xform >>> 0);
+                const given = readXform(wholeAddress(xform));
                 const current = dc.world ?? IDENTITY_XFORM;
                 setWorld(dc, (mode >>> 0) === MWT_LEFTMULTIPLY
                     ? compose(given, current) : compose(current, given));
@@ -3802,7 +4319,7 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writePoint(host, out, dc.windowOrg);
                 }
@@ -3887,11 +4404,11 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeSize(host, out >>> 0, dc.viewportExt);
+                writeSize(host, wholeAddress(out), dc.viewportExt);
                 return 1;
             },
         },
@@ -3901,11 +4418,11 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeSize(host, out >>> 0, dc.windowExt);
+                writeSize(host, wholeAddress(out), dc.windowExt);
                 return 1;
             },
         },
@@ -3952,7 +4469,7 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, , record])=>{
-                if (dcOf(handle) && (record >>> 0) !== 0)
+                if (dcOf(handle) && wholeAddress(record) !== 0)
                 {
                     host.divergence?.('PlayMetaFileRecord', 'metafile records are not played');
                 }
@@ -3986,13 +4503,13 @@ export function createGdiFunctions(host){
         EnumFontFamiliesExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>enumerateFaces(args, false),
+            handler: args=>enumerateFaces(args, false, undefined, forwarded(args, 3, true)),
         },
 
         EnumFontFamiliesExW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>enumerateFaces(args, true),
+            handler: args=>enumerateFaces(args, true, undefined, forwarded(args, 3, true)),
         },
 
         /**
@@ -4006,10 +4523,11 @@ export function createGdiFunctions(host){
         EnumFontFamiliesA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], false, {
+            handler: args=>enumerateFaces([args[0], 0, args[2]], false, {
                 charSet: DEFAULT_CHARSET,
-                faceName: (family >>> 0) === 0 ? '' : host.readCString(family >>> 0, MAX_FACE_NAME),
-            }),
+                faceName: wholeAddress(args[1]) === 0 ? ''
+                    : host.readCString(wholeAddress(args[1]), MAX_FACE_NAME),
+            }, forwarded(args, 3, true)),
         },
 
         /**
@@ -4022,10 +4540,11 @@ export function createGdiFunctions(host){
         EnumFontFamiliesW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], true, {
+            handler: args=>enumerateFaces([args[0], 0, args[2]], true, {
                 charSet: DEFAULT_CHARSET,
-                faceName: (family >>> 0) === 0 ? '' : wideText(family >>> 0, MAX_FACE_NAME),
-            }),
+                faceName: wholeAddress(args[1]) === 0 ? '' : wideText(wholeAddress(args[1]),
+                    MAX_FACE_NAME),
+            }, forwarded(args, 3, true)),
         },
 
         /**
@@ -4049,12 +4568,11 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * The font table here is fixed: a font file cannot be added to it,
-         * and a scalable font resource cannot be written for one. Zero is the
-         * documented failure of each, which an installer notes and moves on
-         * from -- the file itself was already copied. Every spelling answers
-         * the same way, the private ones included, and nothing can be removed
-         * that was never added. A font in memory is the exception, below.
+         * A font file the program adds is read and drawn, counted, and
+         * enumerated unless it says FR_NOT_ENUM (`font-resources.js`); the
+         * spellings without Ex add and remove with no flags. A scalable font
+         * resource cannot be written: zero, the documented failure, which an
+         * installer notes and moves on from.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
          * int AddFontResourceW(LPCWSTR lpszFilename)
@@ -4067,10 +4585,16 @@ export function createGdiFunctions(host){
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
-        AddFontResourceA: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceW: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        AddFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, false), 0) },
+        AddFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, true), 0) },
+        AddFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, false), flags) },
+        AddFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, true), flags) },
         /**
          * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
          *                             DWORD *pNumFonts)
@@ -4085,11 +4609,12 @@ export function createGdiFunctions(host){
             /** @param {number[]} args */
             handler: ([view, size, , count])=>{
                 const add = host.graphics?.addFont;
-                if (!add || (view >>> 0) === 0 || (size >>> 0) === 0 || (count >>> 0) === 0)
+                if (!add || wholeAddress(view) === 0 || (size >>> 0) === 0
+                    || wholeAddress(count) === 0)
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(view >>> 0, size >>> 0).slice();
+                const bytes = host.readMemory(wholeAddress(view), size >>> 0).slice();
                 const families = fontFamilies(bytes);
                 if (families.length === 0)
                 {
@@ -4099,22 +4624,31 @@ export function createGdiFunctions(host){
                 // returns once it can be drawn with.
                 return Promise.all([...new Set(families)].map(family=>add(family, bytes)))
                     .then(taken=>{
+                        // What was measured of these names before was a stand-in's.
+                        metricsCache = new WeakMap();
+                        advanceTables = new WeakMap();
                         if (!taken.some(Boolean))
                         {
                             return 0;
                         }
                         const counted = new Uint8Array(4);
                         new DataView(counted.buffer).setUint32(0, families.length, true);
-                        host.writeMemory(count >>> 0, counted);
+                        host.writeMemory(wholeAddress(count), counted);
                         memoryFonts.add(++lastMemoryFont);
                         return lastMemoryFont;
                     });
             },
         },
-        RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        RemoveFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, false), 0) },
+        RemoveFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, true), 0) },
+        RemoveFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, false), flags) },
+        RemoveFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, true), flags) },
         // The face stays drawable: a run keeps the fonts it was given.
         RemoveFontMemResourceEx: {
             argBytes: 4,
@@ -4154,7 +4688,7 @@ export function createGdiFunctions(host){
                 const TCI_SRCCHARSET = 1;
                 const TCI_SRCCODEPAGE = 2;
                 const TCI_SRCFONTSIG = 3;
-                const value = source >>> 0;
+                const value = wholeAddress(source);
                 let found = null;
                 switch (flags >>> 0){
                     case TCI_SRCCHARSET:
@@ -4175,7 +4709,7 @@ export function createGdiFunctions(host){
                     default:
                         break;
                 }
-                if (!found || (out >>> 0) === 0)
+                if (!found || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -4186,7 +4720,7 @@ export function createGdiFunctions(host){
                 view.setUint32(0, found.charSet, true);
                 view.setUint32(4, found.codePage, true);
                 view.setUint32(24, (1 << found.bit) >>> 0, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -4211,7 +4745,7 @@ export function createGdiFunctions(host){
                 }
                 if ((signature >>> 0) !== 0)
                 {
-                    host.writeMemory(signature >>> 0, new Uint8Array(FONTSIGNATURE_SIZE));
+                    host.writeMemory(wholeAddress(signature), new Uint8Array(FONTSIGNATURE_SIZE));
                 }
                 return currentMetrics(dc).charSet;
             },
@@ -4390,7 +4924,7 @@ export function createGdiFunctions(host){
                 {
                     dc.boundingRect = null;
                 }
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
@@ -4398,7 +4932,7 @@ export function createGdiFunctions(host){
                     ? [transform(dc, { x: held.left, y: held.top }, false),
                         transform(dc, { x: held.right, y: held.bottom }, false)]
                     : [{ x: 0, y: 0 }, { x: 0, y: 0 }];
-                writeU32s(host, rect >>> 0,
+                writeU32s(host, wholeAddress(rect),
                     [corners[0].x, corners[0].y, corners[1].x, corners[1].y]);
                 return held ? DCB_SET : DCB_RESET;
             },
@@ -4430,9 +4964,9 @@ export function createGdiFunctions(host){
                 {
                     dc.boundingRect = null;
                 }
-                if ((flags & DCB_ACCUMULATE) !== 0 && (rect >>> 0) !== 0)
+                if ((flags & DCB_ACCUMULATE) !== 0 && wholeAddress(rect) !== 0)
                 {
-                    const [left, top, right, bottom] = readU32s(host, rect >>> 0, 4)
+                    const [left, top, right, bottom] = readU32s(host, wholeAddress(rect), 4)
                         .map(value=>value | 0);
                     const a = transform(dc, { x: left, y: top }, true);
                     const b = transform(dc, { x: right, y: bottom }, true);
@@ -4505,9 +5039,66 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const text = (string >>> 0) === 0 ? '' : wideText(string, count | 0, true);
+                const text = wholeAddress(string) === 0 ? '' : wideText(string, count | 0, true);
                 writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
+            },
+        },
+
+        /**
+         * LONG GdiGetCharDimensions(HDC hdc, LPTEXTMETRICW lptm, LONG *height)
+         *
+         * The average width of the DC's font as dialog units are measured
+         * by it - the extent of the 52 Latin letters, halved and rounded up
+         * over 26 - with the font's metrics and height where asked. A
+         * handle that is not a DC answers 0 and leaves both alone.
+         */
+        GdiGetCharDimensions: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, out, height])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const metrics = currentMetrics(dc);
+                if (wholeAddress(out) !== 0)
+                {
+                    writeTextMetricsW(host, wholeAddress(out), metrics);
+                }
+                if (wholeAddress(height) !== 0)
+                {
+                    host.writeMemory(wholeAddress(height), u32Bytes([metrics.height]));
+                }
+                return averageWidthOf(dc);
+            },
+        },
+
+        /**
+         * DWORD GdiGetCodePage(HDC hdc)
+         *
+         * The code page the DC's font's character set stands for: the
+         * system's ANSI page for DEFAULT_CHARSET and for a handle that is not
+         * a DC, its OEM page for OEM_CHARSET, the Macintosh Roman page for
+         * MAC_CHARSET, and TranslateCharsetInfo's page for every other set.
+         */
+        GdiGetCodePage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                const charSet = dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
+                const MAC_CHARSET = 77;
+                if (charSet === OEM_CHARSET)
+                {
+                    return OEM_PAGE;
+                }
+                if (charSet === MAC_CHARSET)
+                {
+                    return 10000;
+                }
+                return CHARSET_TABLE.find(entry=>entry.charSet === charSet)?.codePage ?? ANSI_PAGE;
             },
         },
 
@@ -4584,11 +5175,11 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const size = 20;
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     const { firstChar, lastChar } = currentMetrics(dc);
                     const glyphs = lastChar - firstChar + 1;
-                    writeU32s(host, out >>> 0, [size, 0, glyphs, 1,
+                    writeU32s(host, wholeAddress(out), [size, 0, glyphs, 1,
                         (firstChar & 0xffff | glyphs << 16) >>> 0]);
                 }
                 return size;
@@ -4621,13 +5212,13 @@ export function createGdiFunctions(host){
                 {
                     return GDI_ERROR;
                 }
-                if ((out >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (size >>> 0) === 0)
                 {
                     return data.length - (offset >>> 0);
                 }
                 const part = data.subarray(offset >>> 0,
                     Math.min(data.length, (offset >>> 0) + (size >>> 0)));
-                host.writeMemory(out >>> 0, part);
+                host.writeMemory(wholeAddress(out), part);
                 return part.length;
             },
         },
@@ -4718,6 +5309,8 @@ export function createGdiFunctions(host){
          * BOOL GetCharWidthFloatA/W(HDC, UINT iFirst, UINT iLast, PFLOAT)
          *
          * The same widths as floats; a null DC or buffer is refused.
+         * GetCharWidthFloat answers a sixteenth of the width, as Windows does
+         * whatever its documentation says (decisions.md A253).
          */
         GetCharABCWidthsFloatA: {
             argBytes: 16,
@@ -4735,13 +5328,13 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xff),
+                out, 4, width=>[floatBits(width / 16)], 0xff),
         },
         GetCharWidthFloatW: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xffff),
+                out, 4, width=>[floatBits(width / 16)], 0xffff),
         },
 
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */
@@ -4823,7 +5416,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const name = encodeAnsi(currentFace(dc));
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return name.length + 1;
                 }
@@ -4832,7 +5425,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.subarray(0, (count | 0) - 1);
-                host.writeMemory(out >>> 0, Uint8Array.of(...kept, 0));
+                host.writeMemory(wholeAddress(out), Uint8Array.of(...kept, 0));
                 return kept.length;
             },
         },
@@ -4853,7 +5446,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const name = currentFace(dc);
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return name.length + 1;
                 }
@@ -4862,14 +5455,105 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.slice(0, (count | 0) - 1);
-                const bytes = new Uint8Array((kept.length + 1) * 2);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    bytes[at * 2] = kept.charCodeAt(at) & 0xff;
-                    bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
-                }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), utf16z(kept));
                 return kept.length + 1;
+            },
+        },
+
+        /**
+         * BOOL GdiRealizationInfo(HDC hdc, DWORD *info)
+         * BOOL GetFontRealizationInfo(HDC hdc, struct font_realization_info *info)
+         *
+         * The font the DC draws with as realized: flags, a cache number and
+         * an instance id, which GetFontFileInfo and GetFontFileData take. The
+         * newer call reads its structure's size first and answers its 16- or
+         * 24-byte form, any other size refused. Flags 1 is a face that is no
+         * outline font, as GetOutlineTextMetrics answers for every face here;
+         * no style is simulated, the browser draws the weight and slant asked.
+         */
+        GdiRealizationInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const realized = realizationOf(handle);
+                if (!realized || wholeAddress(out) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(out), u32Bytes([1, 1, realized]));
+                return 1;
+            },
+        },
+        GetFontRealizationInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const realized = realizationOf(handle);
+                if (!realized || wholeAddress(out) === 0)
+                {
+                    return 0;
+                }
+                const size = readU32(host, wholeAddress(out));
+                if (size !== 16 && size !== 24)
+                {
+                    return 0;
+                }
+                // size, flags, cache_num, instance_id; then unique, face_index
+                // and simulations as two words.
+                host.writeMemory(wholeAddress(out),
+                    u32Bytes([size, 1, 1, realized, 0, 0].slice(0, size / 4)));
+                return 1;
+            },
+        },
+        /**
+         * BOOL GetFontFileInfo(DWORD instance_id, DWORD file_index,
+         *                      struct font_fileinfo *info, SIZE_T size, SIZE_T *needed)
+         * BOOL GetFontFileData(DWORD instance_id, DWORD file_index, UINT64 offset,
+         *                      void *buff, SIZE_T size)
+         *
+         * The file a realized font came from. Faces here are drawn through the
+         * browser and come from no file, so the answer is an empty one: no
+         * time, no size, an empty path -- what Windows answers for a font
+         * added from memory -- and no byte of data to read. The size needed is
+         * told even when the buffer is short, as Windows tells it.
+         */
+        GetFontFileInfo: {
+            argBytes: 20,
+            sizes: [3],
+            /** @param {number[]} args */
+            handler: ([instance, index, out, size, needed])=>{
+                if (!isRealization(instance) || (index >>> 0) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                // FILETIME, LARGE_INTEGER, then the path's terminator alone.
+                const bytes = new Uint8Array(18);
+                if (wholeAddress(needed) !== 0)
+                {
+                    host.writeMemory(wholeAddress(needed), u32Bytes([bytes.length]));
+                }
+                if (wholeAddress(out) === 0 || (size >>> 0) < bytes.length)
+                {
+                    host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                host.writeMemory(wholeAddress(out), bytes);
+                return 1;
+            },
+        },
+        GetFontFileData: {
+            argBytes: 24,
+            quadwords: [2],
+            /** @param {number[]} args */
+            handler: ([instance, index, offsetLow, offsetHigh, , size])=>{
+                if (!isRealization(instance) || (index >>> 0) !== 0
+                    || (offsetLow | offsetHigh | size) !== 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
             },
         },
 
@@ -4888,9 +5572,9 @@ export function createGdiFunctions(host){
                 {
                     return 0;
                 }
-                const text = (string >>> 0) === 0 || (count | 0) === 0
+                const text = wholeAddress(string) === 0 || (count | 0) === 0
                     ? ''
-                    : decodeAnsi(host.readMemory(string >>> 0, count | 0));
+                    : decodeAnsi(host.readMemory(wholeAddress(string), count | 0));
                 writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
             },
@@ -4970,6 +5654,125 @@ export function createGdiFunctions(host){
             return record && record.type === 'bitmap'
                 ? { width: record.attributes.width, height: record.attributes.height }
                 : null;
+        },
+
+        /**
+         * A bitmap's pixels as 32-bit BGRA, top line first, read as
+         * GetDIBits reads them -- a monochrome one's set bits white -- or
+         * null for a handle that is not a bitmap: what an icon or a cursor a
+         * program makes of two bitmaps is drawn from.
+         *
+         * @param {number} handle
+         * @returns {{ width: number, height: number, bgra: Uint8Array } | null}
+         */
+        bitmapPixels(handle){
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'bitmap')
+            {
+                return null;
+            }
+            const { width, height } = record.attributes;
+            if (!(width > 0 && height > 0))
+            {
+                return null;
+            }
+            const bgra = new Uint8Array(width * height * 4);
+            const header = { size: 40, width, height: -height, planes: 1, bitCount: 32,
+                compression: 0 };
+            const written = lend(handle >>> 0, (/** @type {number} */ source)=>
+                drawing.bound(source, false)?.getDIBits(source >>> 0, {
+                    header, bits: bgra, masks: [], colors: [], startScan: 0, scanLines: height,
+                }) ?? null);
+            return written ? { width, height, bgra } : null;
+        },
+
+        /**
+         * A device-dependent bitmap of bits this layer holds, in CreateBitmap's
+         * layout - rows top-down, padded to a WORD - copied: what GetIconInfo
+         * hands out as an icon's mask and colour, bitmaps the caller owns.
+         *
+         * @param {number} width @param {number} height @param {number} bitCount
+         * @param {Uint8Array} pixels
+         * @returns {number} the bitmap, or 0 where it cannot be made
+         */
+        bitmapFromBits(width, height, bitCount, pixels){
+            const attributes = deviceBitmap(width, height, bitCount);
+            if (!attributes)
+            {
+                return 0;
+            }
+            attributes.pixels.set(pixels.subarray(0, attributes.pixels.length));
+            return objects.create('bitmap', attributes);
+        },
+
+        /**
+         * CopyImage of a bitmap: a new one, stretched to the size asked for
+         * (zero keeps the side), drawn through StretchBlt as Windows copies
+         * it. LR_CREATEDIBSECTION makes a DIB section of the original's depth
+         * and colours, and outranks LR_MONOCHROME; LR_MONOCHROME makes a
+         * monochrome bitmap; otherwise the copy is a device bitmap - of the
+         * display's depth, or monochrome where the original is a monochrome
+         * bitmap or a one-bit section whose two colours are black and white
+         * (Wine's cursoricon test_CopyImage_Bitmap).
+         *
+         * @param {number} handle @param {number} width @param {number} height
+         * @param {number} flags
+         * @returns {number} the copy, or 0 for a handle that is no bitmap
+         */
+        copyBitmap(handle, width, height, flags){
+            const LR_MONOCHROME = 0x1;
+            const LR_CREATEDIBSECTION = 0x2000;
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'bitmap')
+            {
+                return 0;
+            }
+            const source = record.attributes;
+            const across = (width | 0) > 0 ? width | 0 : source.width;
+            const down = (height | 0) > 0 ? height | 0 : source.height;
+            /** @param {number} colour */
+            const blackOrWhite = colour=>(colour & 0xffffff) === 0
+                || (colour & 0xffffff) === 0xffffff;
+            const monochrome = source.bitCount === 1 && ((source.section >>> 0) === 0
+                || (source.palette?.length === 2 && source.palette.every(blackOrWhite)
+                    && (source.palette[0] & 0xffffff) !== (source.palette[1] & 0xffffff)));
+            let copy;
+            if ((flags & LR_CREATEDIBSECTION) !== 0)
+            {
+                const bytes = dibSize(across, down, source.bitCount);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
+                host.fillMemory?.(address, 0, bytes);
+                // A device bitmap's colours are the display's: black and white
+                // for a monochrome one, none to copy for a deeper one.
+                const palette = source.palette ? [...source.palette]
+                    : source.bitCount === 1 ? [0x000000, 0xffffff] : undefined;
+                copy = objects.create('bitmap', {
+                    width: across, height: down, planes: 1, bitCount: source.bitCount,
+                    topDown: false, usage: 0, bits: address, section: address, palette,
+                    compression: source.compression ?? 0,
+                    bitfields: [...(source.bitfields ?? [0, 0, 0])], pelsPerMeter: [0, 0],
+                });
+            }
+            else
+            {
+                const attributes = deviceBitmap(across, down,
+                    (flags & LR_MONOCHROME) !== 0 || monochrome ? 1 : screen.bitsPerPixel);
+                copy = attributes ? objects.create('bitmap', attributes) : 0;
+            }
+            if (copy === 0)
+            {
+                return 0;
+            }
+            /** @param {string} name @param {...number} args */
+            const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+            lend(copy, (/** @type {number} */ target)=>lend(handle >>> 0,
+                (/** @type {number} */ from)=>call('StretchBlt', target, 0, 0, across, down,
+                    from, 0, 0, source.width, source.height, SRCCOPY)));
+            return copy;
         },
 
         /**
@@ -5062,6 +5865,34 @@ export function createGdiFunctions(host){
             solidBrush,
 
             /**
+             * A DC moved to an item's corner and clipped to it, as a control
+             * hands one to its parent's WM_DRAWITEM: SaveDC, the viewport
+             * moved by the corner, the clip cut to the item's size from (0,0).
+             * The level answered goes to `leaveItem`; zero is no context, and
+             * the DC is then as it was.
+             *
+             * @param {number} hdc @param {{ x: number, y: number }} corner
+             * @param {{ cx: number, cy: number }} size
+             * @returns {number}
+             */
+            enterItem: (hdc, corner, size)=>{
+                const saved = aliased.SaveDC.handler([hdc]);
+                if (saved !== 0)
+                {
+                    aliased.OffsetViewportOrgEx.handler([hdc, corner.x, corner.y, 0]);
+                    aliased.IntersectClipRect.handler([hdc, 0, 0, size.cx, size.cy]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved  What `enterItem` answered. */
+            leaveItem: (hdc, saved)=>{
+                if (saved !== 0)
+                {
+                    aliased.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
              * @param {number} hdc
              * @param {{ left: number, top: number, right: number, bottom: number }} rect
              * @param {number} color  A COLORREF.
@@ -5129,8 +5960,10 @@ export function createGdiFunctions(host){
              * @param {number} brush  A brush handle the program owns.
              */
             fillWith: (hdc, rect, brush)=>{
-                metafiles.drawn.fill(hdc, rect, brush >>> 0);
-                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true;
+                // No brush is the one the DC has selected (FillRect with NULL).
+                const used = (brush >>> 0) !== 0 ? brush >>> 0 : dcOf(hdc)?.brush ?? 0;
+                metafiles.drawn.fill(hdc, rect, used);
+                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, used) === true;
             },
 
             /**
@@ -5322,16 +6155,62 @@ export function createGdiFunctions(host){
             },
 
             /**
-             * How much room a string takes in the context's font.
+             * Whether a handle is a device context at all: a call handed
+             * anything else answers before it reads its other arguments.
+             *
+             * @param {number} hdc
+             */
+            isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
+
+            /**
+             * Narrows a context's clip to a rectangle for as long as a
+             * control paints in it, as Windows' static and button controls
+             * do around WM_CTLCOLOR*: the parent sees a clip selected
+             * (GetClipRgn answers 1). Answers what `unclip` takes to put the
+             * clip back, or 0 for a handle that is no context.
+             *
+             * @param {number} hdc @param {{ left: number, top: number, right: number,
+             *     bottom: number }} rect
+             */
+            clipTo: (/** @type {number} */ hdc, /** @type {any} */ rect)=>{
+                const saved = table.SaveDC.handler([hdc]) | 0;
+                if (saved !== 0)
+                {
+                    table.IntersectClipRect.handler([hdc, rect.left, rect.top, rect.right,
+                        rect.bottom]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved */
+            unclip: (/** @type {number} */ hdc, /** @type {number} */ saved)=>{
+                if (saved !== 0)
+                {
+                    table.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
+             * The context's font's average character width, as
+             * GdiGetCharDimensions answers it: an edit's EC_USEFONTINFO
+             * margins are half of it.
+             *
+             * @param {number} hdc
+             */
+            averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
+
+            /**
+             * How much room a string takes in the context's font, with the
+             * font's line height, ascent and average character width
+             * (TEXTMETRIC's tmAveCharWidth).
              *
              * @param {number} hdc @param {string} text
-             * @returns {{ width: number, height: number, ascent: number }}
+             * @returns {{ width: number, height: number, ascent: number, average: number }}
              */
             measure(hdc, text){
                 const dc = dcOf(hdc) ?? { font: 0 };
                 const metrics = currentMetrics(dc);
                 return { width: extentOf(dc, text), height: metrics.height,
-                    ascent: metrics.ascent };
+                    ascent: metrics.ascent, average: metrics.aveCharWidth };
             },
 
             /**
@@ -5398,6 +6277,19 @@ export function createGdiFunctions(host){
                     === true,
 
             /**
+             * A rectangle of one context copied into another, as BitBlt
+             * copies it with SRCCOPY: a layered window's picture from the
+             * context UpdateLayeredWindow is handed.
+             *
+             * @param {number} hdc @param {number} x @param {number} y
+             * @param {number} width @param {number} height
+             * @param {number} source @param {number} sourceX @param {number} sourceY
+             */
+            copy: (hdc, x, y, width, height, source, sourceX, sourceY)=>table.BitBlt.handler(
+                [hdc >>> 0, x | 0, y | 0, width | 0, height | 0, source >>> 0, sourceX | 0,
+                    sourceY | 0, SRCCOPY]) !== 0,
+
+            /**
              * A bitmap the program owns, drawn at a point -- stretched to a
              * size when one is given -- or nothing when it has no pixels this
              * layer can reach.
@@ -5460,11 +6352,16 @@ export function createGdiFunctions(host){
          *
          * @param {{ width: number, height: number, pitch: number,
          *           bitCount: number, bits: number, palette?: number[] | null,
-         *           format?: string }} attributes
+         *           format?: string, sizeImage?: number, compression?: number,
+         *           bitfields?: number[] }} attributes  `sizeImage`: what GetObject says
+         *     the image's size is, where it is not its rows'; `compression` and
+         *     `bitfields`: what it says the section is laid out as (a 16-bit
+         *     Direct3D 9 surface is BI_BITFIELDS with its masks)
          * @returns {number} A device context handle, or zero.
          */
         createSurfaceDc(attributes){
-            const { width, height, pitch, bitCount, bits, palette, format } = attributes;
+            const { width, height, pitch, bitCount, bits, palette, format, sizeImage, compression,
+                bitfields } = attributes;
             // An indexed surface without its palette has no colours at all, and
             // a drawing routine given one would have to invent them. The three
             // depths are what a surface of this era actually is.
@@ -5489,6 +6386,9 @@ export function createGdiFunctions(host){
                 pitch,
                 palette,
                 format,
+                ...(sizeImage === undefined ? {} : { sizeImage }),
+                ...(compression === undefined ? {} : { compression }),
+                ...(bitfields === undefined ? {} : { bitfields }),
             });
             select(dc, dc.defaultBitmap);
             return dc.hdc;
@@ -5500,6 +6400,20 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * The DC of an OpenGL pbuffer (WGL_ARB_pbuffer): a drawable of its own
+         * size that no window shows and OpenGL draws on the device. GDI sees
+         * a memory DC with nothing selected, which draws nowhere.
+         *
+         * @param {number} width @param {number} height
+         * @returns {number} the DC
+         */
+        createPbufferDc(width, height){
+            const dc = createContext(0, 'memory');
+            dc.pbuffer = { width, height };
+            return dc.hdc;
+        },
+
+        /**
          * What a device context draws on, for the pixel-format negotiation
          * that OPENGL32 keeps. A window's contexts all name the window, so a
          * format set on one DC is found by the next DC of the same window --
@@ -5508,13 +6422,27 @@ export function createGdiFunctions(host){
          * its own drawable.
          *
          * @param {number} hdc
-         * @returns {{ key: string, window: number, width: number, height: number } | null}
+         * @returns {{ key: string, window: number, width: number, height: number,
+         *     memory: boolean } | null}
          */
         describeDrawable(hdc){
             const dc = contexts.get(hdc >>> 0);
             if (!dc)
             {
                 return null;
+            }
+            if (dc.pbuffer)
+            {
+                return { key: `pbuffer:${dc.hdc}`, window: 0, width: dc.pbuffer.width,
+                    height: dc.pbuffer.height, memory: false };
+            }
+            // A DC a program took once and keeps (CS_OWNDC, as SDL's) is over
+            // the window as it is now: OpenGL sizes its default framebuffer by
+            // this, and a window made full-screen after the DC was taken drew
+            // at the size it was created.
+            if (dc.kind === 'window' && dc.window !== 0)
+            {
+                host.windowContextCurrent?.(hdc >>> 0);
             }
             const bounds = dc.bounds;
             const size = bounds
@@ -5526,7 +6454,27 @@ export function createGdiFunctions(host){
                 window: own ? dc.window : 0,
                 width: size.width,
                 height: size.height,
+                memory: dc.kind === 'memory',
             };
+        },
+
+        /**
+         * The bitmap a memory DC has selected, and its pixels as a surface
+         * (`graphics/gdi/surface.js`): what OPENGL32's generic renderer copies
+         * its colour buffer into, and reads it from. Null for any other DC, or
+         * a bitmap with no pixels to address.
+         *
+         * @param {number} hdc
+         * @returns {{ bitmap: number, surface: any } | null}
+         */
+        bitmapSurface(hdc){
+            const dc = contexts.get(hdc >>> 0);
+            if (!dc || dc.kind !== 'memory')
+            {
+                return null;
+            }
+            const surface = host.graphics?.surfaceFor?.(dc, surfaceOf(dc)) ?? null;
+            return surface ? { bitmap: dc.bitmap, surface } : null;
         },
     };
 }

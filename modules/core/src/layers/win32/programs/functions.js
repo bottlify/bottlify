@@ -18,7 +18,12 @@
  */
 
 import { PROGRAMS_IN_PLACE, SYSTEM_PROGRAMS } from './table.js';
+import { runOnceAtLogon } from './runonce.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { utf16z } from '../common/utf16.js';
+
+/** The routine the first process's start calls for the logon's RunOnce pass. */
+export const RUN_ONCE_ROUTINE = 'runonce';
 
 /** The longest command line Windows hands a process, in characters. */
 const MAX_COMMAND_LINE = 32768;
@@ -36,18 +41,12 @@ const MAX_COMMAND_LINE = 32768;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
+ *     machine lacks (`layer-needed`).
+ * @property {(thread: any) => Promise<number>} [serveCustomActions]  msi.dll's
+ *     custom action server over this process's standard input and output.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
-
-/** @param {string} text */
-const wideBytes = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /**
  * @param {ProgramsHost} host
@@ -55,9 +54,16 @@ const wideBytes = text=>{
  */
 export function createProgramFunctions(host){
     /**
-     * @param {(context: import('./msiexec.js').ProgramContext) => Promise<number>} run
+     * Runs `body` as a program on the calling thread, its context over this
+     * process's exports, what it places in the guest freed when it is done.
+     * The context it is handed has the process's command line; `contextFor`
+     * makes one with another, for a program the logon runs here.
+     *
+     * @param {(context: import('./msiexec.js').ProgramContext,
+     *     contextFor: (commandLine: string) => import('./msiexec.js').ProgramContext)
+     *     => Promise<number>} body
      */
-    const program = run=>async()=>{
+    const asProgram = async body=>{
         // Named once, here: everything after the first await answers for it.
         const thread = host.callerThread();
         /** @type {number[]} */
@@ -79,30 +85,46 @@ export function createProgramFunctions(host){
             return (await host.answering(thread, ()=>entry.handler(args))) >>> 0;
         };
         /** @param {string} text */
-        const wide = text=>place(wideBytes(text));
+        const wide = text=>place(utf16z(text));
+        /**
+         * @param {string} commandLine
+         * @returns {import('./msiexec.js').ProgramContext}
+         */
+        const contextFor = commandLine=>({
+            commandLine,
+            call,
+            callGuest: (entry, args)=>host.callGuest(entry, args, thread),
+            wide,
+            read: (at, length)=>host.readMemory?.(at, length).slice() ?? new Uint8Array(0),
+            write: (at, data)=>host.writeMemory(at, data),
+            block: size=>place(new Uint8Array(size)),
+            bytes: data=>place(data.slice()),
+            ansi: text=>place(encodeAnsi(`${text}\0`)),
+            message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
+                [0, wide(text), wide(caption), type]),
+            need: layer=>host.need?.(layer),
+            serveCustomActions: ()=>host.serveCustomActions?.(thread) ?? Promise.resolve(1),
+        });
         try
         {
             const commandLine = host.readWideString(
-                await call('KERNEL32.dll', 'GetCommandLineW', []), MAX_COMMAND_LINE);
-            return (await run({
-                commandLine,
-                call,
-                callGuest: (entry, args)=>host.callGuest(entry, args, thread),
-                wide,
-                read: (at, length)=>host.readMemory?.(at, length).slice() ?? new Uint8Array(0),
-                block: size=>place(new Uint8Array(size)),
-                bytes: data=>place(data.slice()),
-                ansi: text=>place(encodeAnsi(`${text}\0`)),
-                message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
-                    [0, wide(text), wide(caption), type]),
-            })) >>> 0;
+                await call('KERNEL32.dll', 'GetCommandLineW', []), MAX_COMMAND_LINE * 2);
+            return (await body(contextFor(commandLine), contextFor)) >>> 0;
         }
         finally
         {
             held.forEach(at=>host.free(at));
         }
     };
+    /** @param {(context: import('./msiexec.js').ProgramContext) => Promise<number>} run */
+    const program = run=>()=>asProgram(context=>run(context));
 
-    return Object.fromEntries([...SYSTEM_PROGRAMS.values(), ...PROGRAMS_IN_PLACE]
-        .map(({ routine, run })=>[routine, { argBytes: 0, handler: program(run) }]));
+    return {
+        ...Object.fromEntries([...SYSTEM_PROGRAMS.values(), ...PROGRAMS_IN_PLACE]
+            .map(({ routine, run })=>[routine, { argBytes: 0, handler: program(run) }])),
+        // The logon's RunOnce pass, called by the first process's start before
+        // its program (`synthesiseProcessInit`'s prelude).
+        [RUN_ONCE_ROUTINE]: { argBytes: 0, handler: ()=>asProgram((context, contextFor)=>
+            runOnceAtLogon(context, contextFor, (api, detail)=>host.divergence?.(api, detail))) },
+    };
 }

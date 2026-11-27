@@ -24,16 +24,16 @@
  * code that only ever reads the classes root.
  */
 
+import { inView } from './wow64-registry.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
 } from '../kernel32/processor.js';
 import { windowsVersion } from '../kernel32/versions.js';
+import { DOCUMENT_CLASSES } from '../msxml/dom.js';
+import { USER_SID_TEXT } from './tokens.js';
+import { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS } from './hkeys.js';
 
-/** The predefined roots. A guest names these by constant; it never opens them. */
-export const HKEY_CLASSES_ROOT = 0x80000000;
-export const HKEY_CURRENT_USER = 0x80000001;
-export const HKEY_LOCAL_MACHINE = 0x80000002;
-export const HKEY_USERS = 0x80000003;
+export { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS } from './hkeys.js';
 
 /** Value types. The numbers are the guest's, not ours. */
 export const REG_NONE = 0;
@@ -57,11 +57,17 @@ const ROOT_NAMES = new Map([
 const MACHINE_CLASSES = 'SOFTWARE\\Classes';
 const USER_CLASSES = 'Software\\Classes';
 
+/** The machine's environment variables, which a session's programs start with. */
+export const MACHINE_ENVIRONMENT =
+    'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment';
+
 /**
  * @typedef {Object} RegistryValue
  * @property {string} name   As the writer spelled it; lookups ignore its case.
  * @property {number} type
  * @property {Uint8Array} data
+ * @property {boolean} [furnished]  Put there as the machine's default, and
+ *     not written since: what an installation's registry replaces.
  */
 
 /**
@@ -71,6 +77,7 @@ const USER_CLASSES = 'Software\\Classes';
  * @property {string} name
  * @property {Map<string, RegistryNode>} keys      Keyed by folded name.
  * @property {Map<string, RegistryValue>} values  Keyed by folded name.
+ * @property {string} keyClass  The class string RegCreateKeyEx was given, "" for none.
  */
 
 /**
@@ -110,7 +117,7 @@ const fold = name=>name.toLowerCase();
 
 /** @param {string} name @returns {RegistryNode} */
 function makeKey(name){
-    return { name, keys: new Map(), values: new Map() };
+    return { name, keys: new Map(), values: new Map(), keyClass: '' };
 }
 
 /**
@@ -168,10 +175,12 @@ function terminate(type, data){
 function keyToJSON(key){
     return {
         name: key.name,
+        ...key.keyClass ? { keyClass: key.keyClass } : {},
         values: [...key.values.values()].map(value=>({
             name: value.name,
             type: value.type,
             data: [...value.data],
+            ...value.furnished ? { furnished: true } : {},
         })),
         keys: [...key.keys.values()].map(keyToJSON),
     };
@@ -180,6 +189,7 @@ function keyToJSON(key){
 /** @param {any} stored @returns {RegistryNode} */
 function keyFromJSON(stored){
     const key = makeKey(stored?.name ?? '');
+    key.keyClass = stored?.keyClass ?? '';
     for (const value of stored?.values ?? [])
     {
         const name = value?.name ?? '';
@@ -187,6 +197,7 @@ function keyFromJSON(stored){
             name,
             type: value?.type >>> 0,
             data: Uint8Array.from(value?.data ?? []),
+            ...value?.furnished === true ? { furnished: true } : {},
         });
     }
     for (const child of stored?.keys ?? [])
@@ -224,17 +235,34 @@ function keyFromJSON(stored){
  * `Users`, a roaming and a local `AppData` in it, and what every user shares
  * to `ProgramData` and `Users\Public`.
  *
+ * A 64-bit Windows keeps its 32-bit programs in `Program Files (x86)`: a
+ * 32-bit process's program folder is that one, a 64-bit one's `Program
+ * Files`, and either names the 32-bit one and the 32-bit system folder
+ * (SysWOW64) as the X86 folders, and the 64-bit program folder as the 64 ones
+ * (CSIDL_PROGRAM_FILESX86, the ProgramW6432 variable). On a 32-bit Windows they
+ * are all the one folder.
+ *
  * @param {WindowsVersion} [windows]
+ * @param {{ machine64?: boolean, long?: boolean }} [process]  a 64-bit Windows, and a
+ *     64-bit process on it
  * @returns {Readonly<Record<string, string>>}
  */
-export function shellFolders(windows = windowsVersion()){
+export function shellFolders(windows = windowsVersion(), { machine64 = false, long = false } = {}){
     const { user, allUsers, public: shared } = windows.profiles;
+    const native = 'C:\\Program Files';
+    const narrow = machine64 ? 'C:\\Program Files (x86)' : native;
+    const own = machine64 && !long ? narrow : native;
     const machine = {
         Fonts: 'C:\\WINDOWS\\Fonts',
         Windows: 'C:\\WINDOWS',
         System: 'C:\\WINDOWS\\system32',
-        ProgramFiles: 'C:\\Program Files',
-        CommonFiles: 'C:\\Program Files\\Common Files',
+        SystemX86: machine64 ? 'C:\\WINDOWS\\SysWOW64' : 'C:\\WINDOWS\\system32',
+        ProgramFiles: own,
+        CommonFiles: `${own}\\Common Files`,
+        ProgramFilesX86: narrow,
+        CommonFilesX86: `${narrow}\\Common Files`,
+        ProgramFiles64: native,
+        CommonFiles64: `${native}\\Common Files`,
     };
     if (shared === null)
     {
@@ -284,15 +312,16 @@ export function shellFolders(windows = windowsVersion()){
  * the user's, the shared and the public profile's, and the machine's own, the
  * fonts folder among them -- and the directories that hold them. A setup
  * copies into a folder it was told of without making it first, and a folder
- * promised and absent fails that copy.
+ * promised and absent fails that copy. A 64-bit Windows has both program
+ * folders and both system folders.
  *
- * @param {WindowsVersion} [windows]
+ * @param {WindowsVersion} [windows] @param {boolean} [machine64]
  * @returns {string[]}
  */
-export function shellFolderDirectories(windows = windowsVersion()){
+export function shellFolderDirectories(windows = windowsVersion(), machine64 = false){
     /** @type {Set<string>} */
     const directories = new Set();
-    for (const folder of Object.values(shellFolders(windows)))
+    for (const folder of Object.values(shellFolders(windows, { machine64 })))
     {
         const parts = folder.split('\\');
         for (let depth = 2; depth <= parts.length; depth++)
@@ -302,6 +331,39 @@ export function shellFolderDirectories(windows = windowsVersion()){
     }
     return [...directories];
 }
+
+/** Where Windows lists its profiles, by the SID of the account each belongs to. */
+export const PROFILE_LIST = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList';
+
+/** The SID services run as, LocalSystem, whose profile lives in the system folder. */
+const LOCAL_SYSTEM_SID = 'S-1-5-18';
+
+/**
+ * The profile list of a Windows, as its setup leaves it: the folders profiles
+ * are made in (XP's `Documents and Settings`, Vista's `Users` beside
+ * `ProgramData` and the public profile), and one key for each account with a
+ * profile - the user's, its folder the shell's `Profile`, and LocalSystem's.
+ *
+ * @param {WindowsVersion} windows
+ * @param {Readonly<Record<string, string>>} folders  `shellFolders(windows)`
+ * @returns {MachineKey[]}
+ */
+const profileKeys = (windows, folders)=>{
+    const { user, allUsers, public: shared } = windows.profiles;
+    const directory = user.slice(0, user.lastIndexOf('\\'));
+    return [
+        { root: HKEY_LOCAL_MACHINE, path: PROFILE_LIST, values: shared === null
+            ? { ProfilesDirectory: directory, DefaultUserProfile: 'Default User',
+                AllUsersProfile: allUsers.slice(allUsers.lastIndexOf('\\') + 1) }
+            : { ProfilesDirectory: directory, Default: `${directory}\\Default`,
+                Public: shared, ProgramData: allUsers } },
+        { root: HKEY_LOCAL_MACHINE, path: `${PROFILE_LIST}\\${USER_SID_TEXT}`,
+            values: { ProfileImagePath: folders.Profile, Flags: 0, State: 0 } },
+        { root: HKEY_LOCAL_MACHINE, path: `${PROFILE_LIST}\\${LOCAL_SYSTEM_SID}`,
+            values: { ProfileImagePath: `${folders.System}\\config\\systemprofile`, Flags: 12,
+                State: 0 } },
+    ];
+};
 
 /** What NT 4, 2000 and XP keep in CurrentBuild; Vista put the build number there. */
 const OBSOLETE_BUILD = '1.511.1 () (Obsolete data - do not use)';
@@ -348,7 +410,7 @@ export const DIRECTX_VERSION = '4.09.00.0904';
  * DxDiag reports: an installer that asks it compares the letter too, since
  * 9.0, 9.0b and 9.0c share a major and a minor.
  */
-export const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
+const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
 
 /**
  * @typedef {Object} DirectXRelease
@@ -378,7 +440,7 @@ export const DIRECTX_RELEASES = Object.freeze({
  * @param {string} version
  * @returns {Uint8Array}
  */
-export function installedVersionOf(version){
+function installedVersionOf(version){
     const [, minor, release, build] = version.split('.');
     return Uint8Array.of(0, 0, 0, Number(minor), 0, Number(release),
         parseInt(build.slice(0, 2), 16), parseInt(build.slice(2), 16));
@@ -393,6 +455,100 @@ const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[nam
 /** Where the kernel describes the processors, a key for each. */
 const PROCESSORS_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor';
 
+/**
+ * Services Windows XP's setup installs, among them the ones a program is
+ * found asking for -- the print spooler, the event log, the task scheduler,
+ * WMI, and the Windows Installer, Automatic Updates and BITS a setup checks
+ * for -- with the values the service control manager keeps: sharing a
+ * process (0x20) or with one of their own (0x10), started automatically
+ * (2), errors logged (1), running as the system, in the host XP runs them in.
+ */
+const BUILT_IN_SERVICES = Object.freeze([
+    { name: 'AudioSrv', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Audio', ObjectName: 'LocalSystem', Group: 'AudioGroup' } },
+    { name: 'Dhcp', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'DHCP Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Dnscache', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k NetworkService',
+        DisplayName: 'DNS Client', ObjectName: 'LocalSystem', Group: 'TDI' } },
+    { name: 'Eventlog', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Event Log', ObjectName: 'LocalSystem', Group: 'Event log' } },
+    { name: 'LanmanWorkstation', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Workstation', ObjectName: 'LocalSystem', Group: 'NetworkProvider' } },
+    { name: 'PlugPlay', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\services.exe',
+        DisplayName: 'Plug and Play', ObjectName: 'LocalSystem', Group: 'PlugPlay' } },
+    { name: 'RpcSs', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k rpcss',
+        DisplayName: 'Remote Procedure Call (RPC)', ObjectName: 'LocalSystem',
+        Group: 'COM Infrastructure' } },
+    { name: 'Schedule', values: { Type: 0x120, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Task Scheduler', ObjectName: 'LocalSystem', Group: 'SchedulerGroup' } },
+    { name: 'Spooler', values: { Type: 0x110, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\spoolsv.exe',
+        DisplayName: 'Print Spooler', ObjectName: 'LocalSystem', Group: 'SpoolerGroup' } },
+    { name: 'Themes', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Themes', ObjectName: 'LocalSystem', Group: 'UIGroup' } },
+    { name: 'BITS', values: { Type: 0x20, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Background Intelligent Transfer Service', ObjectName: 'LocalSystem' } },
+    { name: 'msiserver', values: { Type: 0x10, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\msiexec.exe /V',
+        DisplayName: 'Windows Installer', ObjectName: 'LocalSystem' } },
+    { name: 'W32Time', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Time', ObjectName: 'LocalSystem' } },
+    { name: 'winmgmt', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Windows Management Instrumentation', ObjectName: 'LocalSystem' } },
+    { name: 'wuauserv', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Automatic Updates', ObjectName: 'LocalSystem' } },
+]);
+
+/**
+ * The services Windows Vista added that a setup asks after: the modules
+ * installer, which installs a system's updates and components and which the
+ * .NET Framework 4.5 and later setups expect on a machine of 6.0 or later.
+ */
+const VISTA_SERVICES = Object.freeze([
+    { name: 'TrustedInstaller', values: { Type: 0x10, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\servicing\\TrustedInstaller.exe',
+        DisplayName: 'Windows Modules Installer', ObjectName: 'LocalSystem' } },
+]);
+
+/**
+ * The cryptographic providers Windows XP SP3 has, by name and type, and each
+ * type's name and default provider, as its setup registers them: what
+ * CryptAcquireContext, CryptEnumProviders and CryptGetDefaultProvider read.
+ */
+const CRYPTO_PROVIDERS = Object.freeze([
+    ['Microsoft Base Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Base DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Base DSS Cryptographic Provider', 3, 'dssenh.dll'],
+    ['Microsoft DH SChannel Cryptographic Provider', 18, 'dssenh.dll'],
+    ['Microsoft Enhanced Cryptographic Provider v1.0', 1, 'rsaenh.dll'],
+    ['Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider', 13, 'dssenh.dll'],
+    ['Microsoft Enhanced RSA and AES Cryptographic Provider', 24, 'rsaenh.dll'],
+    ['Microsoft RSA SChannel Cryptographic Provider', 12, 'rsaenh.dll'],
+    ['Microsoft Strong Cryptographic Provider', 1, 'rsaenh.dll'],
+]);
+const CRYPTO_PROVIDER_TYPES = Object.freeze([
+    [1, 'RSA Full (Signature and Key Exchange)', 'Microsoft Strong Cryptographic Provider'],
+    [3, 'DSS Signature', 'Microsoft Base DSS Cryptographic Provider'],
+    [12, 'RSA SChannel', 'Microsoft RSA SChannel Cryptographic Provider'],
+    [13, 'DSS Signature with Diffie-Hellman Key Exchange',
+        'Microsoft Enhanced DSS and Diffie-Hellman Cryptographic Provider'],
+    [18, 'Diffie-Hellman SChannel', 'Microsoft DH SChannel Cryptographic Provider'],
+    [24, 'RSA Full and AES', 'Microsoft Enhanced RSA and AES Cryptographic Provider'],
+]);
+
 /** The in-process COM classes the system libraries serve, by CLSID. */
 const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', library: 'dsound.dll' }, // DirectSound
@@ -402,6 +558,8 @@ const IN_PROCESS_CLASSES = Object.freeze([
     { clsid: '{FEA4300C-7959-4147-B26A-2377B9E7A91D}', library: 'dsound.dll' }, // FullDuplex
     { clsid: '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}', library: 'ddraw.dll' }, // DirectDraw
     { clsid: '{3C305196-50DB-11D3-9CFE-00C04FD930C5}', library: 'ddraw.dll' }, // DirectDraw7
+    { clsid: '{25E609E0-B259-11CF-BFC7-444553540000}', library: 'dinput.dll' }, // DirectInput
+    { clsid: '{25E609E4-B259-11CF-BFC7-444553540000}', library: 'dinput8.dll' }, // DirectInput8
 ]);
 
 /** The Active Scripting engines Windows Script installs, and the names each answers to. */
@@ -409,6 +567,24 @@ const SCRIPT_ENGINES = Object.freeze([
     { clsid: '{F414C260-6AC0-11CF-B6D1-00AA00BBBB58}',
         progIds: ['JScript', 'JavaScript', 'ECMAScript', 'LiveScript'] },
     { clsid: '{B54F3741-5B07-11CF-A4B0-00AA004A55E8}', progIds: ['VBScript', 'VBS'] },
+]);
+
+/**
+ * OLE Automation's picture and font, by the names oleaut32's setup registers
+ * for them: CLSIDFromProgID("StdPicture") is how a program, or shlwapi's
+ * CLSIDFromProgIDWrap, finds the class.
+ */
+const AUTOMATION_OBJECTS = Object.freeze([
+    { clsid: '{0BE35204-8F91-11CE-9DE3-00AA004BB851}', progIds: ['StdPicture'] },
+    { clsid: '{0BE35203-8F91-11CE-9DE3-00AA004BB851}', progIds: ['StdFont'] },
+]);
+
+/**
+ * devenum's device moniker, by the name MkParseDisplayName reads off
+ * "@device:..." to find the class that parses the rest.
+ */
+const DEVICE_MONIKER = Object.freeze([
+    { clsid: '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}', progIds: ['device'] },
 ]);
 
 /**
@@ -426,11 +602,12 @@ const SCRIPT_ENGINES = Object.freeze([
  * @param {DirectXRelease | undefined} directx  A bottle's own; undefined, 9.0c.
  * @param {{ count: number, mhz: number, name: string }} processors  How many
  *     processors the machine has, their speed and their name.
+ * @param {boolean} [machine64]  a 64-bit Windows, with both views' program folders
  * @returns {readonly MachineKey[]}
  */
-const machineKeys = (windows, directx, processors)=>{
+const machineKeys = (windows, directx, processors, machine64 = false)=>{
     const numbers = Array.from({ length: processors.count }, (_, index)=>String(index));
-    const folders = shellFolders(windows);
+    const folders = shellFolders(windows, { machine64, long: true });
     const userFolders = pick(folders, ['Desktop', 'Programs', 'Start Menu', 'Startup',
         'Personal', 'AppData', 'Local AppData', 'Fonts']);
     const commonFolders = pick(folders, ['Common Desktop', 'Common Programs',
@@ -452,22 +629,46 @@ const machineKeys = (windows, directx, processors)=>{
             path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\InprocServer32`,
             values: { '': library, ThreadingModel: 'Both' },
         })),
-        // The script engines' names, which CLSIDFromProgID reads for a host
-        // that asks for "JScript" by name; the classes themselves are served
-        // by the engine.
-        ...SCRIPT_ENGINES.flatMap(({ clsid, progIds })=>[
-            { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
-                values: { '': progIds[0] } },
-            ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
-                path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
-        ]),
+        // The script engines' names, MSXML's documents' and OLE Automation's
+        // picture and font, which CLSIDFromProgID reads for a host that asks
+        // for "JScript", "Msxml2.DOMDocument" or "StdPicture" by name; the
+        // classes themselves are served by the engine.
+        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES, ...DEVICE_MONIKER, ...AUTOMATION_OBJECTS]
+            .flatMap(({ clsid, progIds })=>[
+                { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
+                    values: { '': progIds[0] } },
+                ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
+                    path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
+            ]),
+        // Windows Installer's file types, as it registers them: a setup that
+        // opens a package with ShellExecuteEx gets msiexec.
+        ...[['.msi', 'Msi.Package'], ['.msp', 'Msi.Patch']].map(([extension, type])=>({
+            root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\${extension}`,
+            values: { '': type } })),
+        ...[['Msi.Package', 'Open', '/i'], ['Msi.Package', 'Repair', '/f'],
+            ['Msi.Package', 'Uninstall', '/x'], ['Msi.Patch', 'Open', '/p']]
+            .map(([type, verb, option])=>({ root: HKEY_LOCAL_MACHINE,
+                path: `${MACHINE_CLASSES}\\${type}\\shell\\${verb}\\command`,
+                values: { '': `"${folders.Windows}\\system32\\msiexec.exe" ${option} "%1" %*` } })),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
-            ProgramFilesDir: folders.ProgramFiles,
-            ProgramFilesPath: folders.ProgramFiles,
-            CommonFilesDir: folders.CommonFiles,
+            ProgramFilesDir: folders.ProgramFiles64,
+            ProgramFilesPath: folders.ProgramFiles64,
+            CommonFilesDir: folders.CommonFiles64,
+            ...machine64 ? programFolders64(folders) : {},
             SystemRoot: folders.Windows,
             MediaPath: 'C:\\WINDOWS\\Media',
         } },
+        // The 32-bit view's own, as a 64-bit Windows writes it: its program
+        // folders are the 32-bit ones, which the redirection puts it under.
+        ...machine64 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion`, values: {
+                ProgramFilesDir: folders.ProgramFilesX86,
+                ProgramFilesPath: folders.ProgramFilesX86,
+                CommonFilesDir: folders.CommonFilesX86,
+                ...programFolders64(folders),
+                SystemRoot: folders.Windows,
+                MediaPath: 'C:\\WINDOWS\\Media',
+            } }] : [],
         // The browser and the player the release ships, as their own setups
         // record them: what a setup reads beside the files' versions, which
         // say the same (version/functions.js).
@@ -494,7 +695,57 @@ const machineKeys = (windows, directx, processors)=>{
                 PathName: 'C:\\WINDOWS',
             },
             owned: VERSION_VALUES },
+        // The profiles the machine keeps, under the account that owns each:
+        // the user's, by its SID (the token's), and the system's, which
+        // services run as. A program that keeps its settings by user looks
+        // its user up here, the profile's folder by the SID its token gives,
+        // and finds no profile on a machine without the key.
+        ...profileKeys(windows, folders),
+        // The video codecs Windows installs, as the compressor manager finds
+        // them (msvfw32/icm.js): a codec a game installs is a value beside them.
+        { root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32',
+            values: { 'vidc.cvid': 'iccvid.dll', 'vidc.mrle': 'msrle32.dll',
+                'vidc.msvc': 'msvidc32.dll' } },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+        // The system Path a fresh install sets, which an installer adds its
+        // own folder to (Windows Installer's Environment table, `[~];...`).
+        { root: HKEY_LOCAL_MACHINE, path: MACHINE_ENVIRONMENT, values: {
+            Path: [`${folders.Windows}\\system32`, folders.Windows,
+                `${folders.Windows}\\System32\\Wbem`].join(';'),
+        } },
+        // The services every Windows XP machine has installed, as its setup
+        // registers them: the service control manager lists them, a program
+        // asks for one by name -- the spooler, to learn whether it may print --
+        // and the event log's logs are its subkeys, each source a key under
+        // its log.
+        ...[...BUILT_IN_SERVICES, ...windows.major >= 6 ? VISTA_SERVICES : []]
+            .map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
+                path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        // Where the .NET Framework's runtimes are, which Windows 7 and later
+        // write with the shim they carry (mscoree, A247): the shim and its
+        // implementation look under it, and the Framework 4's setup there
+        // leaves it as it found it.
+        // A 64-bit Windows's 64-bit view names Framework64, its 32-bit view
+        // Framework.
+        ...windows.major >= 6 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Microsoft\\.NETFramework',
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework`
+                + `${machine64 ? '64' : ''}\\` } },
+        ...machine64 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Wow6432Node\\Microsoft\\.NETFramework',
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : []]
+            : [],
+        ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
+            values: { Type: type, 'Image Path': image } })),
+        ...CRYPTO_PROVIDER_TYPES.map(([type, typeName, name])=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider Types\\Type ${
+                String(type).padStart(3, '0')}`,
+            values: { Name: name, TypeName: typeName } })),
+        ...['Application', 'System', 'Security'].map(log=>({ root: HKEY_LOCAL_MACHINE,
+            path: `SYSTEM\\CurrentControlSet\\Services\\Eventlog\\${log}`,
+            values: { File: `%SystemRoot%\\system32\\config\\${log.slice(0, 6)}.Evt` } })),
         // What the kernel wrote about each processor it found, alike: the
         // identifier is the emulated CPUID's family, model and stepping, the
         // speed the emulated counter's rate (`createHive`'s `processorMhz`),
@@ -568,14 +819,18 @@ function walk(node, parts){
 
 /**
  * Copies into a node what a saved tree has and the node does not, leaving
- * what the node already holds as it is.
+ * what the node already holds as it is - but for a machine default nothing
+ * has written since, which the saved tree's value replaces.
  *
  * @param {RegistryNode} into @param {RegistryNode} from
  */
 function mergeMissing(into, from, over = false){
     for (const [name, value] of from.values)
     {
-        if (over || !into.values.has(name))
+        // A machine default nothing has written since is the installation's
+        // to replace: an installer that adds its folder to the system Path.
+        if (over || !into.values.has(name)
+            || (into.values.get(name)?.furnished && !value.furnished))
         {
             into.values.set(name, value);
         }
@@ -605,6 +860,43 @@ const classesKey = path=>({
 });
 
 /**
+ * The machine's keys as a 64-bit Windows has them: each under HKLM\SOFTWARE
+ * that WOW64 redirects is there in the 32-bit view too (`wow64-registry.js`),
+ * as its setup writes it for its 32-bit programs - the classes the system
+ * serves, the version keys a program reads.
+ *
+ * @param {readonly MachineKey[]} keys
+ * @returns {readonly MachineKey[]}
+ */
+const bothViews = keys=>{
+    // A key the machine writes into the 32-bit view itself keeps its own values.
+    const own = new Set(keys.map(key=>key.path.toLowerCase()));
+    return Object.freeze(keys.flatMap(key=>{
+        if (key.root !== HKEY_LOCAL_MACHINE)
+        {
+            return [key];
+        }
+        const narrow = inView(HKEY_LOCAL_MACHINE, key.path.split('\\').filter(Boolean), 32)
+            .join('\\');
+        return narrow.toLowerCase() === key.path.toLowerCase() || own.has(narrow.toLowerCase())
+            ? [key] : [key, { ...key, path: narrow }];
+    }));
+};
+
+/**
+ * The values a 64-bit Windows adds to its CurrentVersion key in both views:
+ * where the 32-bit and the 64-bit programs go, whichever view reads them.
+ *
+ * @param {Readonly<Record<string, string>>} folders
+ */
+const programFolders64 = folders=>({
+    'ProgramFilesDir (x86)': folders.ProgramFilesX86,
+    'CommonFilesDir (x86)': folders.CommonFilesX86,
+    ProgramW6432Dir: folders.ProgramFiles64,
+    CommonW6432Dir: folders.CommonFiles64,
+});
+
+/**
  * Builds a hive: the predefined roots with the machine's own keys under
  * them (see machineKeys), and nothing a program has put there yet.
  *
@@ -613,23 +905,25 @@ const classesKey = path=>({
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
  * @param {{ processorMhz?: number, processorName?: string, processors?: number,
- *     windows?: WindowsVersion, directx?: DirectXRelease }} [options]
+ *     windows?: WindowsVersion, directx?: DirectXRelease, machine64?: boolean }} [options]
  *        `processorMhz` is the speed the processor keys report: the rate the
  *        engine's rdtsc advances at, which is the engine's to say.
  *        `processors` is how many there are: the run's executors, a key for
  *        each. `windows` is the Windows the machine's keys describe, `directx`
- *        the DirectX; absent, the defaults.
+ *        the DirectX; absent, the defaults. `machine64`: a 64-bit Windows,
+ *        whose machine keys are in both views (`bothViews`).
  */
 export function createHive(
     { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, processors = 1,
-        windows = windowsVersion(), directx } = {},
+        windows = windowsVersion(), directx, machine64 = false } = {},
 )
 {
-    const furnishings = machineKeys(windows, directx, {
+    const native = machineKeys(windows, directx, {
         count: processorCount(processors),
         mhz: processorMhz,
         name: processorName,
-    });
+    }, machine64);
+    const furnishings = machine64 ? bothViews(native) : native;
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 
@@ -646,11 +940,19 @@ export function createHive(
      */
     const listeners = [];
     let announcing = false;
+    /**
+     * Inside `asMachine`: what is written is the machine's own, as `furnish`
+     * lays it - a value marked furnished, and no change announced. A layer
+     * that lays the machine's keys when it is first asked for (setupapi's
+     * device classes) does it there, so a session does not save a hive the
+     * program never wrote.
+     */
+    let machineWrites = 0;
     /** Moves with every change, for a copy kept elsewhere to tell it has none. */
     let revision = 0;
     const changed = ()=>{
         revision++;
-        if (announcing || listeners.length === 0)
+        if (announcing || machineWrites > 0 || listeners.length === 0)
         {
             return;
         }
@@ -713,11 +1015,12 @@ export function createHive(
             {
                 if (volatile || !node.values.has(fold(name)) || entry.owned?.includes(name))
                 {
-                    node.values.set(fold(name), typeof value === 'number'
-                        ? { name, type: REG_DWORD, data: dword(value) }
-                        : value instanceof Uint8Array
-                            ? { name, type: REG_BINARY, data: value }
-                            : { name, type: REG_SZ, data: sz(value) });
+                    node.values.set(fold(name), { furnished: true,
+                        ...typeof value === 'number'
+                            ? { name, type: REG_DWORD, data: dword(value) }
+                            : value instanceof Uint8Array
+                                ? { name, type: REG_BINARY, data: value }
+                                : { name, type: REG_SZ, data: sz(value) } });
                 }
             }
         }
@@ -789,7 +1092,7 @@ export function createHive(
      * @param {RegistryNode} key @param {string | null} [path]
      * @returns {{ key: RegistryNode, created: boolean }}
      */
-    const createNode = (key, path)=>{
+    const createNode = (key, path, keyClass = '')=>{
         let node = key;
         let created = false;
         for (const part of segments(path))
@@ -802,6 +1105,12 @@ export function createHive(
                 created = true;
             }
             node = next;
+        }
+        // The class is the key's, set when it is first made; Windows keeps the
+        // one an existing key already has and ignores a later create's.
+        if (created && keyClass)
+        {
+            node.keyClass = keyClass;
         }
         if (created)
         {
@@ -920,10 +1229,10 @@ export function createHive(
          * @param {RegistryKey} key @param {string | null} [path]
          * @returns {{ key: RegistryKey, created: boolean }}
          */
-        create(key, path){
+        create(key, path, keyClass = ''){
             if (!isClasses(key))
             {
-                return createNode(key, path);
+                return createNode(key, path, keyClass);
             }
             const parts = segments(path);
             if (parts.length === 0)
@@ -958,11 +1267,14 @@ export function createHive(
                 return removeNode(key, path);
             }
             const parts = segments(path);
-            if (parts.length === 0)
+            // An empty subkey names the key itself, as RegDeleteKey(hKey, "")
+            // asks: the delete reaches the real key the handle names, on the
+            // user side or the machine's, not this merged view.
+            const doomed = parts.length === 0 ? key : classesKey([...key.path, ...parts]);
+            if (doomed.path.length === 0)
             {
                 return 'missing';
             }
-            const doomed = classesKey([...key.path, ...parts]);
             const { user, machine } = sidesOf(doomed);
             const base = user
                 ? walk(roots.get(HKEY_CURRENT_USER), segments(USER_CLASSES))
@@ -977,6 +1289,27 @@ export function createHive(
         subkeys(key){
             return (isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()])
                 .map(child=>child.name);
+        },
+
+        /**
+         * A key's class string, the one RegCreateKeyEx was given. A key seen
+         * through the classes root carries none of its own.
+         *
+         * @param {RegistryKey} key @returns {string}
+         */
+        classOf(key){
+            return isClasses(key) ? '' : key.keyClass;
+        },
+
+        /**
+         * The longest class string among a key's immediate subkeys, what
+         * RegQueryInfoKey reports as the most room a class read could need.
+         *
+         * @param {RegistryKey} key @returns {number}
+         */
+        maxSubkeyClassLength(key){
+            const children = isClasses(key) ? merged(key, node=>node.keys) : [...key.keys.values()];
+            return children.reduce((most, child)=>Math.max(most, child.keyClass.length), 0);
         },
 
         /**
@@ -1005,10 +1338,14 @@ export function createHive(
         /**
          * @param {RegistryKey} key @param {string} name
          * @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]  The bytes as they are, as a program's
+         *     RegSetValueEx stores them; without it a string the engine sets
+         *     is kept terminated (`terminate`).
          * @returns {RegistryValue}
          */
-        setValue(key, name, type, data){
-            const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
+        setValue(key, name, type, data, exact = false){
+            const value = { ...machineWrites > 0 ? { furnished: true } : {}, name, type: type >>> 0,
+                data: exact ? data : terminate(type >>> 0, data) };
             const node = writable(key);
             // A classes key both sides have since deleted takes the value nowhere.
             if (node)
@@ -1091,6 +1428,27 @@ export function createHive(
 
         /** Moves with every change and never with a restore. */
         revision: ()=>revision,
+
+        /**
+         * Runs `write` as the machine laying its own keys: each value written
+         * is furnished, as `furnish` puts the machine's defaults, and no
+         * change is announced for it. What it returns, it returns.
+         *
+         * @template T
+         * @param {() => T} write
+         * @returns {T}
+         */
+        asMachine(write){
+            machineWrites++;
+            try
+            {
+                return write();
+            }
+            finally
+            {
+                machineWrites--;
+            }
+        },
 
         /**
          * Asks to be told when the hive has changed. A restore is not a change.
@@ -1191,8 +1549,11 @@ export function createHive(
                 }
             }
             // An installation's HARDWARE is the machine it was installed on:
-            // this one's processors are the ones there are.
-            furnish(furnishings.filter(entry=>entry.path.startsWith('HARDWARE\\')));
+            // this one's processors are the ones there are; and what describes
+            // the machine (`owned`) is this one's, whatever the installation's
+            // registry said of the Windows it ran on.
+            furnish(furnishings.filter(entry=>entry.path.startsWith('HARDWARE\\')
+                || entry.owned));
         },
     };
     return hive;

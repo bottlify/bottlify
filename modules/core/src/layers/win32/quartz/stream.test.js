@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { registerQuartzClasses } from './graph.js';
 import { packBottomUpRgb24 } from './stream.js';
 import {
@@ -19,7 +19,6 @@ const S_OK = 0;
 const S_FALSE = 1;
 const E_ABORT = 0x80004004;
 const E_NOINTERFACE = 0x80004002;
-const VFW_E_CANNOT_CONNECT = 0x80040217;
 const VFW_E_NOT_FOUND = 0x80040216;
 const EC_COMPLETE = 1;
 
@@ -416,15 +415,18 @@ test('a seek to the start opens the film again and flushes the renderer first', 
     assert.equal(seen.discontinuities.at(-1), S_OK, 'marked as a break in the stream');
 });
 
-test('only the source pin can be connected, and only by name', async()=>{
-    const { m, graph, source, seen } = await built();
-    const out = m.allocate(4);
-    const wrong = m.allocate(32);
-    m.host.putWide(wrong, 'Input');
-    assert.equal(m.invoke(source, 'FindPin', [wrong, out]), VFW_E_NOT_FOUND);
-    assert.equal(m.view.getUint32(out, true), 0);
-    assert.equal(await m.invoke(graph, 'Connect', [seen.pin, seen.pin]), VFW_E_CANNOT_CONNECT);
-});
+test('the source pin is found by its name, and a pin the graph does not own connects itself',
+    async()=>{
+        const { m, graph, source, seen } = await built();
+        const out = m.allocate(4);
+        const wrong = m.allocate(32);
+        m.host.putWide(wrong, 'Input');
+        assert.equal(m.invoke(source, 'FindPin', [wrong, out]), VFW_E_NOT_FOUND);
+        assert.equal(m.view.getUint32(out, true), 0);
+        // ConnectDirect is the output pin's IPin::Connect: the program's pin is
+        // asked, and its answer is the graph's.
+        assert.equal(await m.invoke(graph, 'Connect', [seen.pin, seen.pin]), S_OK);
+    });
 
 /**
  * The program's Release, as the bridge runs it: what the object owes as its

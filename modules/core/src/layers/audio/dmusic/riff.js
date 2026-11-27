@@ -253,12 +253,6 @@ export function musicToMs(tempos, ticks){
     return ms + (ticks - last) * (60000 / (PPQ * tempo));
 }
 
-/** @param {Uint8Array} bytes */
-export function isRiff(bytes){
-    return bytes.length >= 12
-        && FOURCC.decode(bytes.subarray(0, 4)) === 'RIFF';
-}
-
 /**
  * A DirectMusic segment: its header and the wave items of its wave tracks.
  *

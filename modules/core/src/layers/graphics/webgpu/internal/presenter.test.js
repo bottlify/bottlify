@@ -169,12 +169,12 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
         presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0, layered: 0, composed: 0, unshown: 0, shownBy: {}, lastBuffer: 0x1000,
+        dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0, shownBy: {}, lastBuffer: 0x1000,
         pending: false, claimed: 0, attached: 0, gamma: false, failures: [], disposed: false,
-        framesFrom: {}, layers: [], composes: false,
+        framesFrom: {}, uploadsFrom: { unnamed: 1 }, layers: [], composes: false,
         // No queue was handed over, so nothing is counted against the bound.
         latency: { limit: 3, counting: false, inFlight: 0, peak: 0, frames: 0, held: 0,
-            heldMs: 0, waiting: 0 },
+            heldMs: 0, waiting: 0, timed: 0, toQueueMs: 0, gpuMs: 0 },
     });
 
     h.presenter.present(surface);
@@ -757,4 +757,100 @@ test('a sending presenter hands each frame its own bytes, which the receiver may
     assert.notEqual(sent[0].pixels.buffer, sent[1].pixels.buffer,
         'a buffer handed over is never written again');
     assert.deepEqual([sent[0].pixels[0], sent[1].pixels[0]], [0, 0x7f]);
+});
+
+test('with a GPU and no canvas the screen is still composed of every process\'s picture, and'
+    + ' that is what the frames\' sink is handed', ()=>{
+    // A page with no canvas of its own (a harness reading frames back) was
+    // handed each process's picture in turn: a full-screen window of one
+    // process flickered with the desktop of another.
+    const gpu = createFakeDevice();
+    /** @type {any[]} */
+    const handed = [];
+    const whole = { left: 0, top: 0, right: 8, bottom: 4 };
+    const windows = [
+        { processId: 2, rect: whole, visible: true },
+        { processId: 1, rect: { left: -32000, top: -32000, right: -31990, bottom: -31996 },
+            visible: true },
+    ];
+    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>handed.push(frame), windows: ()=>windows, foreground: ()=>1 });
+    /** @param {string} label */
+    const surfaceOf = label=>({ texture: gpu.device.createTexture({ label,
+        size: { width: 8, height: 4 }, format: 'rgba8unorm', usage: 0x1f }),
+    width: 8, height: 4, format: 'rgba8unorm' });
+    presenter.show({ surface: surfaceOf('desktop of 1'), frameIndex: 1, source: 1 });
+    presenter.show({ surface: surfaceOf('frame of 2'), frameIndex: 2, source: 2 });
+    presenter.show({ surface: surfaceOf('desktop of 1'), frameIndex: 3, source: 1 });
+    assert.deepEqual(handed.map(frame=>frame.surface.label), ['composed', 'composed', 'composed']);
+    const report = presenter.diagnostics();
+    assert.equal(report.layered, 3);
+    assert.equal(report.composed, 3);
+    // The last composition: process 1's picture under, process 2's window over all of it.
+    const copies = gpu.of('copyTextureToTexture').slice(-2);
+    assert.deepEqual(copies.map((/** @type {any} */ copy)=>[copy.source.texture.descriptor?.label
+        ?? copy.source.texture.label, copy.size.width, copy.size.height]),
+    [['layer of process 1', 8, 4], ['layer of process 2', 8, 4]]);
+});
+
+test('a frame counted with no picture, a process\'s, is handed on as it is, nothing kept', ()=>{
+    // The graphics worker's `count` mode presents no picture: kept as a
+    // process's layer, its absent surface stopped the run at its first frame.
+    const gpu = createFakeDevice();
+    /** @type {any[]} */
+    const handed = [];
+    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>handed.push(frame), windows: ()=>[], foreground: ()=>1 });
+    presenter.show({ surface: null, frameIndex: 1, source: 3 });
+    assert.equal(handed.length, 1);
+    assert.equal(handed[0].surface, null);
+    assert.equal(presenter.diagnostics().layered ?? 0, 0);
+});
+
+test('a process\'s windows over its GPU frame that has the screen are laid over every frame'
+    + ' of it, and lifted', ()=>{
+    // A program that ended in a message box over its full-screen GL picture:
+    // the frame lives on the GPU, the box only in the desktop the process
+    // composed, and the frame was shown alone - the box never seen.
+    const gpu = createFakeDevice();
+    /** @type {any[]} */
+    const handed = [];
+    const box = { left: 2, top: 1, right: 5, bottom: 3 };
+    const windows = [
+        { processId: 1, rect: box, visible: true },
+        { processId: 1, rect: { left: 0, top: 0, right: 8, bottom: 4 }, visible: true },
+    ];
+    const ram = new Uint8Array(8 * 4 * 4).fill(0x22);
+    const presenter = createPresenter({ device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>handed.push(frame), windows: ()=>windows, foreground: ()=>1 });
+    const view = presenter.attach({ backend: ()=>null, source: 1,
+        readMemory: (address, length)=>ram.slice(address, address + length) });
+    /** @param {number} value */
+    const frameOf = value=>{
+        const texture = gpu.device.createTexture({ label: 'frame', size: { width: 8, height: 4 },
+            format: 'bgra8unorm', usage: 0x1f });
+        texture.bytes.fill(value);
+        return { texture, width: 8, height: 4, format: 'bgra8unorm' };
+    };
+    /** Each pixel's first byte, row by row, of the picture last handed on. */
+    const shown = ()=>{
+        const bytes = handed.at(-1).surface.texture.bytes;
+        return Array.from({ length: 4 }, (_row, y)=>Array.from({ length: 8 },
+            (_pixel, x)=>bytes[(y * 8 + x) * 4].toString(16)).join(' '));
+    };
+    const desktop = { buffer: 0, width: 8, height: 4, pitch: 32, bitCount: 32, palette: null };
+
+    presenter.show({ surface: frameOf(0x11), frameIndex: 1, source: 1 });
+    assert.deepEqual(shown(), Array(4).fill('11 11 11 11 11 11 11 11'));
+    view.overlay(desktop, [box]);
+    const veiled = ['11 11 11 11 11 11 11 11', '11 11 22 22 22 11 11 11',
+        '11 11 22 22 22 11 11 11', '11 11 11 11 11 11 11 11'];
+    assert.deepEqual(shown(), veiled, 'shown at once, with no frame to carry it');
+    presenter.show({ surface: frameOf(0x33), frameIndex: 2, source: 1 });
+    assert.deepEqual(shown(), veiled.map(row=>row.replaceAll('11', '33')),
+        'laid over the next frame too');
+    view.overlay(null, []);
+    assert.deepEqual(shown(), Array(4).fill('33 33 33 33 33 33 33 33'),
+        'lifted, the frame kept is the frame as drawn');
+    assert.ok(presenter.diagnostics().veiled >= 2);
 });

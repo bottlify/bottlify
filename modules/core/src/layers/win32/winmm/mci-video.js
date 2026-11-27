@@ -32,8 +32,8 @@ export const MCIERR_INVALID_DEVICE_NAME = 263;
 export const MCIERR_UNSUPPORTED_FUNCTION = 274;
 export const MCIERR_FILE_NOT_FOUND = 275;
 export const MCIERR_DUPLICATE_ALIAS = 289;
-export const MCIERR_MISSING_PARAMETER = 273;
-export const MCIERR_BAD_INTEGER = 270;
+const MCIERR_MISSING_PARAMETER = 273;
+const MCIERR_BAD_INTEGER = 270;
 
 /** The types that name this driver, and the file extension that opens it unnamed. */
 const VIDEO_TYPES = new Set(['avivideo', 'digitalvideo']);

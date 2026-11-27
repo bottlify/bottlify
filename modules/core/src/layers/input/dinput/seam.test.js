@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { writeGuid, readGuid, formatGuid } from '../../win32/ole32/guid.js';
+import { writeGuid, readGuid, formatGuid } from '../../../system/guid.js';
 import {
     createDirectInput, createPublisher, describe,
     DI_OK, DI_BUFFEROVERFLOW, DI_NOEFFECT, DIENUM_STOP,
@@ -25,6 +25,7 @@ import {
     DIPROP_BUFFERSIZE, DIDEVCAPS,
 } from './seam.js';
 import { KEY_DOWN, DIMOUSE_OFS } from './devices.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
@@ -157,8 +158,10 @@ function clock(){
  *     seam is told nothing and takes any handle as a window.
  */
 /** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number,
- *     mouseHeld?: (held: boolean) => void }} [options] */
-function fixture({ windows, foreground, mouseHeld } = {}){
+ *     mouseHeld?: (held: boolean) => void, rawInput?: { claim: (usage: number,
+ *     flags: number) => number, release: (usage: number) => void },
+ *     pointerSize?: 4 | 8 }} [options] */
+function fixture({ windows, foreground, mouseHeld, rawInput, pointerSize } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -182,7 +185,7 @@ function fixture({ windows, foreground, mouseHeld } = {}){
     let threadRequests = 0;
     let arena = 0x80000;
     const dinput = createDirectInput({
-        memory,
+        memory: withPointers(memory),
         now: time.now,
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
@@ -201,6 +204,8 @@ function fixture({ windows, foreground, mouseHeld } = {}){
         windowKind: windows && (hwnd=>windows[hwnd] ?? null),
         foreground,
         mouseHeld,
+        rawInput,
+        ...pointerSize ? { pointerSize } : {},
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -396,9 +401,23 @@ test('every device slot is present, including the ones nothing implements', ()=>
     assert.equal(controlPanel.invoke, undefined);
 });
 
-test('CreateDevice hands back the same device for the same GUID', ()=>{
-    const f = fixture();
-    assert.equal(createDevice(f, GUID_SysKeyboard), createDevice(f, GUID_SysKeyboard));
+test('each CreateDevice makes an object of its own, and each hears the device', ()=>{
+    // Wine's dinput.c test_CreateDevice: the device CreateDevice answered is
+    // released to nothing by one Release, whatever was made before it.
+    const f = keyboard();
+    const second = createDevice(f, GUID_SysKeyboard);
+    assert.notEqual(second, f.device, 'a second object');
+    assert.equal(f.bridge.call(second, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(second, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    for (const device of [f.device, second])
+    {
+        f.memory.bytes.fill(0, AT.state, AT.state + 256);
+        assert.equal(f.bridge.call(device, 'GetDeviceState', [256, AT.state]), DI_OK);
+        assert.equal(f.memory.bytes[AT.state + DIK_A], KEY_DOWN, 'each hears the key');
+    }
+    assert.equal(f.bridge.recordAt(second).object.release(), 0, 'one reference, its own');
+    assert.equal(f.bridge.recordAt(f.device).object.release(), 0);
     assert.notEqual(createDevice(f, GUID_SysMouse), createDevice(f, GUID_SysKeyboard));
 });
 
@@ -623,6 +642,25 @@ test('the axis mode is settled before the device is acquired', ()=>{
         DI_OK);
 });
 
+test('a device\'s axis mode is its data format\'s, and absolute before it has one', ()=>{
+    // Wine's device8.c test_sys_mouse and test_sys_keyboard: DIPROP_AXISMODE
+    // on the whole device answers absolute until SetDataFormat, then the
+    // format's own (c_dfDIMouse2 and c_dfDIKeyboard are DIDF_RELAXIS).
+    const f = fixture();
+    for (const guid of [GUID_SysMouse, GUID_SysKeyboard])
+    {
+        const device = createDevice(f, guid);
+        propertyHeader(f.memory, 20);
+        f.memory.setU32(AT.property + DIPROPDWORD_DATA, 7);
+        assert.equal(f.bridge.call(device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+        assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 0, `${guid}: absolute`);
+        assert.equal(f.bridge.call(device, 'SetDataFormat',
+            [dataFormat(f.memory, guid === GUID_SysMouse ? 16 : 256)]), DI_OK);
+        assert.equal(f.bridge.call(device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+        assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 1, `${guid}: the format's`);
+    }
+});
+
 test('a mouse set to absolute axes reports where it is, and says so', ()=>{
     // SetProperty(DIPROP_AXISMODE, DIPROPAXISMODE_ABS) on the whole device:
     // the state's axes are the position, which reading does not clear.
@@ -678,6 +716,46 @@ test('the DirectX 8 entry is twenty bytes and is laid out at that stride', ()=>{
     assert.equal(
         f.memory.u32(AT.data + DIDEVICEOBJECTDATA.SIZE_DX8 + DIDEVICEOBJECTDATA.dwOfs),
         DIK_S, 'at the sixteen-byte stride this would read the first entry\'s tail');
+});
+
+test('DIPROP_APPDATA names an object\'s uAppData, -1 without one, until the next format', ()=>{
+    // Wine's device8.c test_appdata_property: an object by offset or by id,
+    // never the whole device or a usage; SetDataFormat starts afresh.
+    const DIPROP_APPDATA = 22;
+    const [DIPH_DEVICE, DIPH_BYOFFSET, DIPH_BYID, DIPH_BYUSAGE] = [0, 1, 2, 3];
+    const f = keyboard();
+    setBufferSize(f, f.device, 32);
+    /** @param {number} how @param {number} which @param {number} value */
+    const setAppData = (how, which, value)=>{
+        propertyHeader(f.memory, 20);
+        f.memory.setU32(AT.property + 8, which);
+        f.memory.setU32(AT.property + 12, how);
+        f.memory.setU32(AT.property + DIPROPDWORD_DATA, value);
+        return f.bridge.call(f.device, 'SetProperty', [DIPROP_APPDATA, AT.property]);
+    };
+    /** @param {number} key */
+    const appDataOf = key=>{
+        f.dinput.post({ kind: 'key', code: key, down: true });
+        f.dinput.post({ kind: 'key', code: key, down: false });
+        f.memory.setU32(AT.count, 1);
+        assert.equal(f.bridge.call(f.device, 'GetDeviceData',
+            [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]), DI_OK);
+        const value = f.memory.u32(AT.data + DIDEVICEOBJECTDATA.uAppData);
+        f.memory.setU32(AT.count, 10);
+        f.bridge.call(f.device, 'GetDeviceData', [DIDEVICEOBJECTDATA.SIZE_DX8, 0, AT.count, 0]);
+        return value;
+    };
+    assert.equal(appDataOf(DIK_A), 0xffffffff, 'none set');
+    assert.equal(setAppData(DIPH_DEVICE, 0, 1), DIERR_INVALIDPARAM);
+    assert.equal(setAppData(DIPH_BYUSAGE, 2, 2), 0x80004001 | 0, 'DIERR_UNSUPPORTED');
+    assert.equal(setAppData(DIPH_BYID, (DIK_S << 8 | 0x0c) >>> 0, 3), DI_OK);
+    assert.equal(setAppData(DIPH_BYOFFSET, DIK_A, 4), DI_OK);
+    assert.equal(appDataOf(DIK_A), 4);
+    assert.equal(appDataOf(DIK_S), 3);
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
+    assert.equal(appDataOf(DIK_A), 0xffffffff, 'a new format, none again');
 });
 
 test('GetDeviceData refuses an entry size that is neither of the two', ()=>{
@@ -1605,7 +1683,7 @@ function guestMachine(){
     let nextTrap = 1;
     let heapNext = 0x8000;
     const vtables = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} at @param {number} length */
             readBytes: (at, length)=>memory.bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
@@ -1614,7 +1692,7 @@ function guestMachine(){
             readU32: at=>memory.u32(at),
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>memory.setU32(at, value),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             const trap = nextTrap++;
@@ -1632,7 +1710,7 @@ function guestMachine(){
     });
 
     const dinput = createDirectInput({
-        memory,
+        memory: withPointers(memory),
         now: ()=>5000,
         publishInterface: (object, id)=>vtables.publish(object, id),
     });
@@ -1800,9 +1878,9 @@ test('the DirectInput object counts its references, one count for every interfac
     assert.equal(g.call(second, RELEASE), 1);
 
     assert.equal(g.call(root, RELEASE), 0);
-    assert.equal(g.call(root, ADDREF), E_POINTER);
-    assert.equal(g.call(second, ADDREF), E_POINTER);
-    assert.equal(g.call(unknown, ADDREF), E_POINTER);
+    assert.equal(g.call(root, ADDREF), 0);
+    assert.equal(g.call(second, ADDREF), 0);
+    assert.equal(g.call(unknown, ADDREF), 0);
 });
 
 test('a device goes on working after the DirectInput object that made it is released', ()=>{
@@ -1969,7 +2047,7 @@ test('the root checks what it is handed before it looks for a device', ()=>{
     assert.equal(call('EnumDevices', [0, 0x7000, 0, 0xffffffff]), DIERR_INVALIDPARAM);
 });
 
-test('a device released to nothing is made anew by the next CreateDevice', async()=>{
+test('a device released to nothing is gone, and CreateDevice makes another', async()=>{
     // Wine's device8.c releases the device CreateDevice answered for one GUID
     // and creates it again for another naming the same device.
     const g = guestMachine();
@@ -1988,8 +2066,8 @@ test('a device released to nothing is made anew by the next CreateDevice', async
     assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'SetDataFormat'),
         [dataFormat(g.memory, 16)]), DI_OK, 'the new device answers');
     const third = create();
-    assert.equal(third, second, 'one still held is handed out again');
-    assert.equal(g.call(third, 2), 1, 'with a reference of its own');
+    assert.notEqual(third, second, 'one still held is not handed out again');
+    assert.equal(g.call(third, 2), 0, 'each with one reference');
     assert.equal(g.call(second, 2), 0);
 });
 
@@ -2243,4 +2321,139 @@ test('a format built against DirectX 3\'s headers names any instance 0xff, under
         assert.deepEqual([view.getInt32(AT.state, true), view.getInt32(AT.state + 4, true),
             f.memory.bytes[AT.state + 12]], [5, 7, 0x80], 'the axes and the first button');
     }
+});
+
+test('CoCreateInstance reaches DirectInput 8 through its class object, which waits for'
+    + ' Initialize', ()=>{
+    // HKCR\CLSID\{25E609E4-...}\InprocServer32 names dinput8.dll; COM asks its
+    // DllGetClassObject for the factory and the factory for the object.
+    const f = fixture();
+    const CLSID_DirectInput8 = '{25E609E4-B259-11CF-BFC7-444553540000}';
+    const IID_IClassFactory = '{00000001-0000-0000-C000-000000000046}';
+    const library = f.dinput.libraries['DINPUT8.dll'];
+    writeGuid(f.memory, AT.guid, CLSID_DirectInput8);
+    writeGuid(f.memory, AT.iid, IID_IClassFactory);
+    assert.equal(library.DllGetClassObject.handler([AT.guid, AT.iid, AT.out]), DI_OK);
+    const factory = f.memory.u32(AT.out);
+    assert.equal(f.bridge.recordAt(factory).id, IID_IClassFactory);
+
+    writeGuid(f.memory, AT.iid, IID_IDirectInput8A);
+    assert.equal(f.bridge.call(factory, 'CreateInstance', [0, AT.iid, AT.out]), DI_OK);
+    const root = f.memory.u32(AT.out);
+    assert.equal(f.bridge.recordAt(root).id, IID_IDirectInput8A);
+    // Until Initialize, what it would do is refused (Wine's dinput.c
+    // test_CoCreateInstance); what is malformed is refused first.
+    const DIERR_NOTINITIALIZED = 0x80070015 | 0;
+    writeGuid(f.memory, AT.guid, GUID_SysMouse);
+    f.memory.setU32(AT.state, 0xdeadbeef);
+    assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.state, 0]),
+        DIERR_NOTINITIALIZED);
+    assert.equal(f.memory.u32(AT.state), 0, 'the pointer zeroed');
+    assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, 0, 0]), 0x80004003 | 0);
+    assert.equal(f.bridge.call(root, 'EnumDevices', [0, 0x5000, 0, 0]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'EnumDevices', [0, 0x5000, 0, ~0 >>> 0]),
+        DIERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [AT.guid]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [0]), 0x80004003 | 0);
+    assert.equal(f.bridge.call(root, 'RunControlPanel', [0, 0]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'RunControlPanel', [0, ~0 >>> 0]), DIERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(root, 'Initialize', [INSTANCE, 0x0800]), DI_OK);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [AT.guid]), DI_OK, 'and then answered');
+
+    assert.equal(f.bridge.call(factory, 'CreateInstance', [0x1234, AT.iid, AT.out]),
+        0x80040110 | 0, 'no aggregation');
+    writeGuid(f.memory, AT.guid, '{25E609E0-B259-11CF-BFC7-444553540000}');
+    writeGuid(f.memory, AT.iid, IID_IClassFactory);
+    assert.equal(library.DllGetClassObject.handler([AT.guid, AT.iid, AT.out]),
+        0x80040111 | 0, 'DirectInput 7 is dinput.dll\'s class, not this library\'s');
+    assert.equal(f.memory.u32(AT.out), 0);
+});
+
+test('a device with no data format is not acquired, so its format can still be set', ()=>{
+    // A program that acquires its keyboard before it sets the format: Windows
+    // refuses the Acquire (Wine's test_acquire), and the format set after it
+    // and the reads after that work. Taken anyway, the format was refused as
+    // DIERR_ACQUIRED and every GetDeviceState answered E_INVALIDARG.
+    const f = fixture();
+    const device = createDevice(f, GUID_SysKeyboard);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DIERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+});
+
+test('DirectInput 8 registers a held mouse or keyboard for raw input, an earlier does not', ()=>{
+    // Wine's device8.c test_mouse_keyboard: INPUTSINK to DIEmWin while held
+    // non-exclusively, NOLEGACY with CAPTUREMOUSE or NOHOTKEYS exclusively,
+    // and nothing once let go of.
+    /** @type {string[]} */
+    const said = [];
+    const f = fixture({ windows: { 0x100: 'top' }, foreground: ()=>0x100,
+        rawInput: { claim: (usage, flags)=>{
+            said.push(`claim ${usage} ${flags.toString(16)}`);
+            return 0x77;
+        }, release: usage=>void said.push(`release ${usage}`) } });
+    const keys = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(keys, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(keys, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(keys, 'Unacquire', []), DI_OK);
+    const rat = device8(f, GUID_SysMouse, false);
+    assert.equal(f.bridge.call(rat, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+    assert.equal(f.bridge.call(rat, 'SetCooperativeLevel', [0x100, 0x1 | 0x4]), DI_OK);
+    assert.equal(f.bridge.call(rat, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(rat, 'Unacquire', []), DI_OK);
+    assert.deepEqual(said, ['claim 6 100', 'release 6', 'claim 2 230', 'release 2']);
+
+    const old = keyboard(f);
+    assert.equal(f.bridge.call(old.device, 'Unacquire', []), DI_OK);
+    assert.equal(said.length, 4, 'DirectInput 7 reads without raw input');
+});
+
+test('a 64-bit process: the format\'s pointers are quadwords, a buffered entry is 24 bytes,'
+    + ' an interface comes out whole', ()=>{
+    // DIDATAFORMAT: 32 bytes, rgodf at 24. DIOBJECTDATAFORMAT: pguid 0, dwOfs 8,
+    // dwType 12, dwFlags 16: 24 bytes. DIDEVICEOBJECTDATA: uAppData a UINT_PTR at 16.
+    const f = fixture({ pointerSize: 8 });
+    f.memory.bytes.fill(0xcc, AT.out, AT.out + 16);
+    writeGuid(f.memory, AT.guid, GUID_SysMouse);
+    assert.equal(f.bridge.call(f.root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+    const device = f.memory.u32(AT.out);
+    assert.deepEqual([f.memory.u32(AT.out + 4), f.memory.u32(AT.out + 8)], [0, 0xcccccccc],
+        'the device\'s pointer, whole');
+
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]),
+        DIERR_INVALIDPARAM, 'the 32-bit layout is not a 64-bit process\'s');
+    const entries = [
+        { guid: GUID_YAxis, offset: 0, type: ANY_AXIS },
+        { guid: GUID_XAxis, offset: 4, type: ANY_AXIS },
+        { guid: null, offset: 8, type: ANY_BUTTON },
+    ];
+    writeGuid(f.memory, 0xd0000, GUID_YAxis);
+    writeGuid(f.memory, 0xd0010, GUID_XAxis);
+    entries.forEach((one, index)=>{
+        const at = 0xc0000 + index * 24;
+        f.memory.setU32(at, one.guid === GUID_YAxis ? 0xd0000 : one.guid ? 0xd0010 : 0);
+        f.memory.setU32(at + 4, 0);
+        f.memory.setU32(at + 8, one.offset);
+        f.memory.setU32(at + 12, one.type);
+        f.memory.setU32(at + 16, 0);
+    });
+    [32, 24, 2, 12, entries.length, 0, 0xc0000, 0].forEach((word, index)=>
+        f.memory.setU32(AT.format + index * 4, word));
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [AT.format]), DI_OK);
+    setBufferSize(f, device, 8);
+    f.dinput.post({ kind: 'mouseMove', x: 3, y: -2 });
+    f.dinput.post({ kind: 'mouseButton', code: 0, down: true });
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [12, AT.state]), DI_OK);
+    const view = new DataView(f.memory.bytes.buffer);
+    assert.deepEqual([view.getInt32(AT.state, true), view.getInt32(AT.state + 4, true),
+        f.memory.bytes[AT.state + 8]], [-2, 3, 0x80]);
+
+    f.memory.setU32(AT.count, 10);
+    assert.equal(f.bridge.call(device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]), DIERR_INVALIDPARAM,
+    'twenty bytes is a 32-bit process\'s entry');
+    assert.equal(f.bridge.call(device, 'GetDeviceData', [24, AT.data, AT.count, 0]), DI_OK);
+    assert.equal(f.memory.u32(AT.count), 3);
+    assert.deepEqual([0, 1, 2].map(index=>f.memory.u32(AT.data + index * 24)), [4, 0, 8],
+        'X, Y and the button at the format\'s offsets, 24 bytes apart');
 });

@@ -27,9 +27,11 @@
  *   built a table of stubs per object, and the stubs come out of a table of
  *   sixteen thousand;
  * - **QueryInterface's answer**: IID_IUnknown answers one record whichever
- *   interface it is asked through (or the interface marked `unknown`), a
+ *   interface it is asked through (or the interface marked `identity`), a
  *   `sharedWith` interface answers with the pointer of the one whose table
- *   holds its slots and more, anything else undeclared is refused and counted;
+ *   holds its slots and more, anything else undeclared, not offered now or
+ *   refused by its description is refused and counted, with the object's own
+ *   word where it has one;
  * - **the way back**: the library object behind a pointer a program hands in,
  *   for as long as the bridge keeps that pointer.
  *
@@ -48,6 +50,19 @@ export const IUNKNOWN_METHODS = Object.freeze([
 ]);
 
 /**
+ * IUnknown with its counts kept at their traps, for an interface marked
+ * `countedInHost`: a slot that runs "in the guest" as its own trap is the
+ * trap, and the bridge's owner lookup refuses a pointer it never published.
+ * Release also looks at the table word, which a runtime that checks `this`
+ * does before it lets a reference go.
+ */
+const IUNKNOWN_IN_HOST = Object.freeze(IUNKNOWN_METHODS.map(method=>(
+    method.builtin === 'queryInterface'
+        ? method
+        : Object.freeze({ ...method, guest: (/** @type {{ trap: number }} */ { trap })=>trap,
+            ...method.builtin === 'release' ? { checksTable: true } : {} }))));
+
+/**
  * @typedef {Object} ComMethodDescription
  * @property {string} name
  * @property {number} argBytes  Counting the interface pointer.
@@ -58,6 +73,12 @@ export const IUNKNOWN_METHODS = Object.freeze([
  * @property {(builder: import('./internal/vtable.js').GuestSlotBuilder) => number} [guest]
  *           Guest code for the slot (`internal/vtable.js`).
  * @property {(call: number[]) => number | undefined} [inPlace]
+ * @property {Record<number, 'f32' | 'f64'>} [floats]
+ * @property {number[]} [quadwords]
+ * @property {Record<number, number>} [structs]
+ * @property {string} [returns]
+ *           How the bridge reads and answers the arguments (`internal/vtable.js`);
+ *           carried into the table as they are.
  */
 
 /**
@@ -72,14 +93,29 @@ export const IUNKNOWN_METHODS = Object.freeze([
  *           The interface this one is a front part of: asked for, it answers
  *           with that one's pointer and table, as single inheritance lays it
  *           out. Ignored where that interface is not declared beside it.
- * @property {boolean} [unknown]
- *           This interface's pointer is the object's IUnknown.
+ * @property {boolean} [identity]
+ *           This interface's pointer is the object's IUnknown, as single
+ *           inheritance lays out a Direct3D 8 or 9 object or the wide
+ *           IDirectInput7: QueryInterface for IUnknown answers it. An object
+ *           with none answers IUnknown with a table of its own.
+ * @property {(target: any) => number | undefined} [refuses]
+ *           Why QueryInterface does not hand this interface out on this object
+ *           now, or undefined when it does: the HRESULT it answers instead.
+ * @property {number} [stranger]
+ *           What its methods answer when called through a pointer that never
+ *           was one of its objects (`internal/vtable.js`).
+ * @property {boolean} [countedInHost]
+ *           AddRef and Release go to the host, not the guest routine that
+ *           counts through the pointer it is given: for an interface whose
+ *           runtime checks `this` -- it answers through a released pointer or
+ *           one that never was its object -- where the guest routine reads
+ *           whatever the pointer points at.
  * @property {(target: any, pointers: Iterable<number>) => void} [released]
  *           Not read here: a counting that ends objects calls it
  *           (`graphics/seam/com.js`).
  */
 
-/** @type {WeakMap<object, readonly any[]>} */
+/** By head, then by description. @type {WeakMap<object, WeakMap<object, readonly any[]>>} */
 const tables = new WeakMap();
 
 /**
@@ -89,15 +125,23 @@ const tables = new WeakMap();
  * Each method is run on the object the bridge was given.
  *
  * @param {{ methods: readonly any[], bare?: boolean }} description
+ * @param {readonly any[]} [head]  IUnknown's three as this object has them:
+ *        the bridge's own, or an aggregated object's that call through its
+ *        controlling unknown (`win32/ole32/objects.js`).
  * @returns {readonly any[]}
  */
-export function methodTable(description){
-    let table = tables.get(description);
+export function methodTable(description, head = IUNKNOWN_METHODS){
+    let byDescription = tables.get(head);
+    if (!byDescription)
+    {
+        byDescription = new WeakMap();
+        tables.set(head, byDescription);
+    }
+    let table = byDescription.get(description);
     if (!table)
     {
-        table = Object.freeze([...description.bare ? [] : IUNKNOWN_METHODS,
-            ...description.methods]);
-        tables.set(description, table);
+        table = Object.freeze([...description.bare ? [] : head, ...description.methods]);
+        byDescription.set(description, table);
     }
     return table;
 }
@@ -117,13 +161,17 @@ function adaptedTable(description){
     let table = adaptedTables.get(description);
     if (!table)
     {
+        const stranger = description.stranger === undefined
+            ? {}
+            : { stranger: description.stranger };
         table = methodTable({ bare: description.bare, methods: description.methods.map(method=>{
             const invoke = method.invoke;
             return invoke
-                ? { ...method, invoke: (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
-                    invoke(adapter.api, args) ?? 0 }
-                : method;
-        }) });
+                ? { ...method, ...stranger,
+                    invoke: (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
+                        invoke(adapter.api, args) ?? 0 }
+                : { ...method, ...stranger };
+        }) }, description.countedInHost ? IUNKNOWN_IN_HOST : IUNKNOWN_METHODS);
         adaptedTables.set(description, table);
     }
     return table;
@@ -163,6 +211,10 @@ function adaptedTable(description){
  *           through the pointer the program kept.
  * @property {() => number} [guestState]  `internal/vtable.js`'s state word.
  * @property {() => number} [countCell]   `internal/vtable.js`'s count word.
+ * @property {() => number} [ownerCell]   `internal/vtable.js`'s owner word.
+ * @property {() => unknown} [afterRelease]
+ *           The calls into the program a release left owing, which the bridge
+ *           makes and waits for before it answers the Release.
  */
 
 /**
@@ -192,6 +244,9 @@ export const countedByTheObject = ({ api })=>({
  * @property {(pointer: number) => any} objectAt
  *           The library object a pointer names; null for 0, for a pointer not
  *           published here and for one whose object was let go.
+ * @property {(pointer: number) => string | null} interfaceAt
+ *           Which interface a pointer is, or null: a reference taken through a
+ *           pointer the program passed is that interface's.
  * @property {(api: any) => any} adapterFor  The adapter, or null.
  * @property {() => number} count  Pointers the way back still knows.
  * @property {() => Record<string, number>} refused
@@ -212,13 +267,20 @@ export const countedByTheObject = ({ api })=>({
  *        Whether an object answers to a declared interface now: one
  *        interface list can serve objects that do not all answer to all of
  *        it. Not asked for IID_IUnknown.
+ * @param {(api: any, id: string) => boolean} [deps.answers]
+ *        Whether QueryInterface answers an interface the object is published
+ *        as: an object may answer less (an effect handed out as ID3D10Effect
+ *        is asked for it in vain).
+ * @param {(api: any, id: string) => number | undefined} [deps.refusal]
+ *        The object's own word for an interface it does not answer, where its
+ *        description says nothing (`refuses`); E_NOINTERFACE without.
  * @param {'pointer'} [deps.nullInterface]
  *        QueryInterface with no interface id answers E_POINTER and leaves the
  *        out pointer alone (`internal/vtable.js`).
  * @returns {ComPublisher}
  */
 export function createComPublisher({ publishInterface, unpublishInterface,
-    counting = countedByTheObject, offers, nullInterface })
+    counting = countedByTheObject, offers, answers, refusal, nullInterface })
 {
     /** Keyed by the library's object, so one object is one identity. */
     const adapters = new WeakMap();
@@ -228,16 +290,17 @@ export function createComPublisher({ publishInterface, unpublishInterface,
      * only grew would keep every object a program ever made, and its guest
      * memory, for the life of the process.
      *
-     * @type {Map<number, any>}
+     * @type {Map<number, { api: any, id: string }>}
      */
     const byPointer = new Map();
     /** @type {Record<string, number>} */
     const refusals = {};
 
-    /** @param {any} adapter @param {number} pointer */
-    const record = (adapter, pointer)=>{
-        byPointer.set(pointer >>> 0, adapter.api);
+    /** @param {any} adapter @param {number} pointer @param {string} id */
+    const record = (adapter, pointer, id)=>{
+        byPointer.set(pointer >>> 0, { api: adapter.api, id });
         adapter.pointers.add(pointer >>> 0);
+        adapter.ids.add(id);
     };
 
     /** @param {any} adapter */
@@ -264,6 +327,8 @@ export function createComPublisher({ publishInterface, unpublishInterface,
         const pointers = new Set();
         /** @type {Set<string>} */
         const ids = new Set();
+        /** @param {string} id */
+        const has = id=>!offers || offers(api, id);
         /** @type {ComCounting} */
         let counts;
         const adapter = {
@@ -275,16 +340,22 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             /** @param {string} id */
             interfaceFor(id){
                 const unknown = id === IID_IUNKNOWN;
-                if (!unknown && offers && !offers(api, id))
+                // An object that says which interfaces it has says it now: one
+                // may come to answer an interface it did not when published.
+                if (!unknown && !has(id))
                 {
                     return refuse(id);
                 }
                 const named = unknown
-                    ? interfaces.find(entry=>entry.unknown === true)
+                    ? interfaces.find(entry=>entry.identity === true)
                     : declared.get(id);
                 if (!named)
                 {
                     return unknown ? { id, methods: IUNKNOWN_METHODS } : refuse(id);
+                }
+                if (!unknown && named.refuses?.(api) !== undefined)
+                {
+                    return refuse(id);
                 }
                 const whole = named.sharedWith === undefined
                     ? undefined
@@ -294,6 +365,23 @@ export function createComPublisher({ publishInterface, unpublishInterface,
                     ? { id, methods: adaptedTable(answer) }
                     : { id, sharedWith: answer.id, methods: adaptedTable(answer) };
             },
+            ...answers === undefined ? {} : {
+                /** What QueryInterface answers for `id`. @param {string} id */
+                queryFor: (/** @type {string} */ id)=>(answers(api, id)
+                    ? adapter.interfaceFor(id)
+                    : null),
+            },
+            /**
+             * What QueryInterface answers for an interface it has not: its
+             * description's word, the object's own, or E_NOINTERFACE. One the
+             * object has not at all is refused for that, before why this one
+             * could not be made.
+             *
+             * @param {string} id
+             * @returns {number | undefined}
+             */
+            refusal: id=>(has(id) ? declared.get(id)?.refuses?.(api) : undefined)
+                ?? refusal?.(api, id),
             /** @param {string} [id] */
             addRef: id=>counts.addRef(id),
             /** @param {string} [id] */
@@ -305,6 +393,8 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             reachable: id=>counts.reachable?.(id) ?? false,
             guestState: ()=>counts.guestState?.() ?? 0,
             countCell: ()=>counts.countCell?.() ?? 0,
+            ownerCell: ()=>counts.ownerCell?.() ?? 0,
+            afterRelease: ()=>counts.afterRelease?.(),
             /** @param {number} pointer */
             forgotten(pointer){
                 if (pointers.delete(pointer >>> 0))
@@ -321,8 +411,7 @@ export function createComPublisher({ publishInterface, unpublishInterface,
                 const pointer = publishInterface(adapter, id);
                 if (pointer !== 0 && !pointers.has(pointer >>> 0))
                 {
-                    record(adapter, pointer);
-                    ids.add(id);
+                    record(adapter, pointer, id);
                 }
             },
             forgetAll: ()=>forgetAll(adapter),
@@ -341,8 +430,7 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             const pointer = publishInterface(adapter, id);
             if (pointer !== 0)
             {
-                record(adapter, pointer);
-                adapter.ids.add(id);
+                record(adapter, pointer, id);
             }
             return pointer;
         },
@@ -359,7 +447,10 @@ export function createComPublisher({ publishInterface, unpublishInterface,
             adapter.ids.clear();
             forgetAll(adapter);
         },
-        objectAt: pointer=>((pointer >>> 0) === 0 ? null : byPointer.get(pointer >>> 0) ?? null),
+        objectAt: pointer=>((pointer >>> 0) === 0
+            ? null
+            : byPointer.get(pointer >>> 0)?.api ?? null),
+        interfaceAt: pointer=>byPointer.get(pointer >>> 0)?.id ?? null,
         adapterFor: api=>adapters.get(api) ?? null,
         count: ()=>byPointer.size,
         refused: ()=>({ ...refusals }),

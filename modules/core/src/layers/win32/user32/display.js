@@ -16,6 +16,16 @@
  * the surface follows whatever size the program creates its device at.
  */
 
+/**
+ * The display driver the adapter names (D3DADAPTER_IDENTIFIER9's `Driver`,
+ * DirectDraw's `szDriver`): a file in the system directory whose version
+ * resource is the identifier's `DriverVersion`, as a real driver's is. A
+ * program reads the driver's version from the file it names, and a name that
+ * is no file answered GetFileVersionInfoSize with 0 -- a size one benchmark
+ * then allocated less one.
+ */
+export const DISPLAY_DRIVER = Object.freeze({ file: 'bottlifyumd.dll', version: '1.0.0.0' });
+
 /** The refresh rate a display reports when it is told none (`refreshOf`). */
 export const REFRESH_HZ = 60;
 
@@ -50,7 +60,7 @@ export const refreshRatesOf = screen=>{
  * finding none, falls back to a list of its own; the two rates of the era's
  * displays are both here so either setting finds its mode.
  */
-export const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
+const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
 
 /**
  * A handful of sizes, not a catalogue: the 4:3 and 5:4 ladder a driver of the
@@ -112,3 +122,18 @@ export function displayModes(screen){
         width, height, bitsPerPixel: screen.bitsPerPixel, refresh,
     })));
 }
+
+/**
+ * The mode the registry holds: the one ChangeDisplaySettings with no mode, and
+ * a full-screen Direct3D device going away, put the display back to. It is
+ * the display's own size until a program writes another with
+ * CDS_UPDATEREGISTRY.
+ *
+ * @param {{ width: number, height: number, displayWidth?: number, displayHeight?: number,
+ *           registryWidth?: number, registryHeight?: number }} screen
+ * @returns {{ width: number, height: number }}
+ */
+export const registryMode = screen=>({
+    width: screen.registryWidth ?? screen.displayWidth ?? screen.width,
+    height: screen.registryHeight ?? screen.displayHeight ?? screen.height,
+});

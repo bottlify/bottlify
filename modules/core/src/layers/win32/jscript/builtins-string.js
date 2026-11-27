@@ -35,7 +35,7 @@ import { toUint32 } from './builtins-core.js';
 /** @typedef {import('./realm.js').Realm} Realm */
 
 /** A RegExp object, with the host matcher compiled from its pattern. */
-export class RegExpObject extends JSObject
+class RegExpObject extends JSObject
 {
     /** @param {JSObject} proto @param {string} source @param {string} flags @param {RegExp} matcher */
     constructor(proto, source, flags, matcher){

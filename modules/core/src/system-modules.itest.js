@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp, spaceAbove } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 
 /** Windows' allocation granularity, at which every image is placed. */
@@ -51,7 +51,7 @@ test('the system modules take their own images\' room in the module window, and 
             codeSize: 0x10,
             code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
         });
-        const app = await createApp({ executable, engine: 'cork' });
+        const app = await createApp({ executable });
         t.after(()=>app.dispose());
 
         const header = new DataView(executable.buffer, executable.byteOffset);
@@ -65,9 +65,11 @@ test('the system modules take their own images\' room in the module window, and 
         {
             const [, name, base, size] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
             const at = parseInt(base, 16);
-            // The window holds the system modules and the arena the process
-            // starts from; a program that brings no library brings nothing else.
-            if (at < moduleBase || at >= stackPoolBase || name === 'process-startup')
+            // The window holds the system modules, the arena the process starts
+            // from and the engine's range at its top; a program that brings no
+            // library brings nothing else.
+            if (at < moduleBase || at >= stackPoolBase || name === 'process-startup'
+                || name === 'engine')
             {
                 continue;
             }
@@ -87,9 +89,124 @@ test('the system modules take their own images\' room in the module window, and 
         t.diagnostic(`${placed.length} system modules: ${(span / 2 ** 20).toFixed(2)} MiB of the `
             + `window's ${window / 2 ** 20} MiB, their images ${(own / 2 ** 20).toFixed(2)} MiB`);
         assert.equal(span, own, 'each module where the one before it ends, at the granule');
-        assert.ok(span <= window / 8,
-            `${(span / 2 ** 20).toFixed(2)} MiB is past an eighth of the window`);
+        // Where each module lies is held by the line above; this is the budget
+        // for how many there are, so three quarters of the window stay the
+        // program's own libraries'. Every system library is an image of its
+        // own, as on Windows (each CRT with its own copy of the guest code),
+        // so the budget grows with what is reproduced, not with a stride.
+        assert.ok(span <= window / 4,
+            `${(span / 2 ** 20).toFixed(2)} MiB is past a quarter of the window`);
     });
+
+test('a process writes only the system modules something loads: the rest keep their span unwritten',
+    { timeout: 60000 }, async t=>{
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            codeSize: 0x10,
+            code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({ executable });
+        t.after(()=>app.dispose());
+        const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+        let written = 0;
+        let held = 0;
+        /** @type {string[]} */
+        const placed = [];
+        for (const line of /** @type {string[]} */ (memory?.metrics?.layout ?? []))
+        {
+            const [, name, , size] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
+            if (name?.endsWith(' (not placed)'))
+            {
+                held += parseInt(size, 16);
+            }
+            else if (/\.(dll|asi)( \.data)?$/i.test(name ?? ''))
+            {
+                written += parseInt(size, 16);
+                placed.push(name);
+            }
+        }
+        t.diagnostic(`written ${(written / 2 ** 20).toFixed(2)} MiB (${placed.join(', ')}),`
+            + ` held unwritten ${(held / 2 ** 20).toFixed(2)} MiB`);
+        assert.ok(placed.includes('KERNEL32.dll') && placed.includes('ntdll.dll'),
+            'what the program imports, and what is always loaded');
+        assert.ok(!placed.includes('D3D9.dll') && !placed.includes('USER32.dll')
+            && !placed.includes('OPENGL32.dll'), 'nothing the program never asked for');
+        // Every module written at once was 12.9 MiB.
+        assert.ok(written < 2 ** 20, `${(written / 2 ** 20).toFixed(2)} MiB written`);
+    });
+
+/** The system modules a process wrote, by name. @param {any} app */
+function writtenModules(app){
+    const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+    return (/** @type {string[]} */ (memory?.metrics?.layout ?? [])).map(line=>
+        /^(.*) 0x[0-9a-f]+\+0x[0-9a-f]+ \S+$/.exec(line)?.[1] ?? '')
+        .filter(name=>/\.dll$/i.test(name));
+}
+
+test('a module whose code holds another\'s addresses places that one with it, and only then',
+    { timeout: 120000 }, async t=>{
+        /**
+         * @param {Record<string, string[]>} imports
+         * @param {'win2000' | 'win10'} windows
+         */
+        const written = async(imports, windows)=>{
+            const executable = buildExe({
+                imports: { 'KERNEL32.dll': ['ExitProcess'], ...imports },
+                codeSize: 0x10,
+                code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+            });
+            const app = await createApp({ executable, windows });
+            t.after(()=>app.dispose());
+            return writtenModules(app);
+        };
+        // GLU32's code calls OPENGL32's exports by address. A Windows no other
+        // test asks for makes the machine's layout here, both ways: the
+        // process that lays the modules out and the one that follows it.
+        const laidOut = await written({}, 'win2000');
+        assert.ok(!laidOut.includes('OPENGL32.dll') && !laidOut.includes('GLU32.dll'),
+            `laying the modules out writes neither (${laidOut.join(', ')})`);
+        const following = await written({ 'GLU32.dll': ['gluOrtho2D'] }, 'win2000');
+        assert.ok(following.includes('GLU32.dll') && following.includes('OPENGL32.dll'),
+            `a process that loads GLU32 after the layout (${following.join(', ')})`);
+        const laying = await written({ 'GLU32.dll': ['gluOrtho2D'] }, 'win10');
+        assert.ok(laying.includes('GLU32.dll') && laying.includes('OPENGL32.dll'),
+            `a process that loads GLU32 as it lays the modules out (${laying.join(', ')})`);
+    });
+
+test('a system module has the same base whatever order a process loads them in',
+    { timeout: 120000 }, async t=>{
+        /** @param {string[]} order */
+        const basesAfter = async order=>{
+            const executable = buildExe({
+                imports: Object.fromEntries(order.map(dll=>[dll,
+                    { 'KERNEL32.dll': ['ExitProcess'], 'USER32.dll': ['GetDesktopWindow'],
+                        'D3D9.dll': ['Direct3DCreate9'], 'MSVCRT.dll': ['strlen'] }[dll] ?? []])),
+                codeSize: 0x10,
+                code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+            });
+            const app = await createApp({ executable });
+            t.after(()=>app.dispose());
+            return Object.fromEntries(['KERNEL32.dll', 'USER32.dll', 'D3D9.dll', 'MSVCRT.dll']
+                .map(dll=>[dll, app.modules?.find?.(dll)?.base ?? baseOf(app, dll)]));
+        };
+        const first = await basesAfter(['KERNEL32.dll', 'D3D9.dll', 'USER32.dll', 'MSVCRT.dll']);
+        const second = await basesAfter(['MSVCRT.dll', 'USER32.dll', 'KERNEL32.dll', 'D3D9.dll']);
+        assert.deepEqual(second, first);
+    });
+
+/** A module's base as the memory layout names it. @param {any} app @param {string} dll */
+function baseOf(app, dll){
+    const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+    for (const line of /** @type {string[]} */ (memory?.metrics?.layout ?? []))
+    {
+        const [, name, base] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
+        if (name === dll || name === `${dll} (not placed)`)
+        {
+            return parseInt(base, 16);
+        }
+    }
+    return null;
+}
 
 /**
  * The program: the handles, exports and file names of d3dx9_30 and d3dx9_43,
@@ -256,3 +373,31 @@ test('a program importing d3dx9_30, d3dx9_43 and msvcrt finds each and computes'
         [Math.fround(0.6), 0, Math.fround(-0.8)], 'the vector normalised');
     assert.equal(bytes(at.number, 8).getFloat64(0, true), 2500, 'atof read its number');
 });
+
+test('a later process takes the machine\'s layout and builds only the modules it loads',
+    { timeout: 120000 }, async t=>{
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'], 'USER32.dll': ['GetDesktopWindow'] },
+            codeSize: 0x10,
+            code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        /** The traps a process registered, and where its modules lie. */
+        const made = async()=>{
+            const app = await createApp({ executable });
+            t.after(()=>app.dispose());
+            const bridge = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'bridge');
+            return {
+                traps: Number(bridge?.metrics?.implemented ?? NaN),
+                bases: Object.fromEntries(['KERNEL32.dll', 'USER32.dll', 'D3D9.dll', 'MSVCRT.dll']
+                    .map(dll=>[dll, baseOf(app, dll)])),
+            };
+        };
+        // Whichever process of this test file came first laid the layout out;
+        // one more makes sure the two compared both took it.
+        await made();
+        const first = await made();
+        const second = await made();
+        assert.deepEqual(second.bases, first.bases, 'every module where the layout put it');
+        t.diagnostic(`traps registered: ${first.traps} and ${second.traps}`);
+        assert.ok(first.traps < 4000, `${first.traps} traps: only the loaded modules' are made`);
+    });

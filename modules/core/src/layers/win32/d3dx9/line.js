@@ -7,6 +7,8 @@
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, STATEBLOCK_APPLY, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls }
     from './device.js';
+import { wholeAddress } from '../common/pointers.js';
+import { floatBits } from '../../../system/floats.js';
 
 /**
  * ID3DXLine: polylines drawn on the program's device as pre-transformed,
@@ -25,7 +27,7 @@ import { DEVICE, STATEBLOCK_APPLY, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDevice
  * through D3DRS_ANTIALIASEDLINEENABLE, which reaches a one-pixel line only.
  */
 
-export const IID_ID3DXLINE = '{D379BA7F-9042-4AC4-9F5E-58192A4C6BD8}';
+const IID_ID3DXLINE = '{D379BA7F-9042-4AC4-9F5E-58192A4C6BD8}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -66,8 +68,6 @@ const FLOAT_RETURN_LENGTH = 17;
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  */
 
-/** @param {number} value */
-const bitsOf = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
 /** @param {number} bits */
 const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
 
@@ -77,7 +77,8 @@ const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
 export function createLines(host){
     const { u32, putU32s, method } = createDeviceCalls(host);
     /** @param {number} at @param {number} count */
-    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(at >>> 0, count * 4)
+    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(wholeAddress(at),
+        count * 4)
         .slice().buffer));
 
     /**
@@ -250,7 +251,7 @@ export function createLines(host){
      */
     const floatMethod = (name, value)=>/** @type {any} */ ({
         name, argBytes: 4,
-        invoke: (/** @type {any} */ object)=>bitsOf(value(object.state)),
+        invoke: (/** @type {any} */ object)=>floatBits(value(object.state)),
         guest: (/** @type {{ trap: number }} */ { trap })=>{
             const placed = floatSlots.get(name);
             if (placed !== undefined)
@@ -354,14 +355,15 @@ export function createLines(host){
             /** DWORD GetPattern() */
             { name: 'GetPattern', argBytes: 4, invoke: object=>object.state.pattern },
             /** HRESULT SetPatternScale(FLOAT fPatternScale) */
-            { name: 'SetPatternScale', argBytes: 8, invoke: (object, [scale])=>{
-                object.state.patternScale = floatOf(scale);
-                return D3D_OK;
-            } },
+            { name: 'SetPatternScale', argBytes: 8, floats: { 1: 'f32' },
+                invoke: (object, [scale])=>{
+                    object.state.patternScale = floatOf(scale);
+                    return D3D_OK;
+                } },
             /** FLOAT GetPatternScale() */
             floatMethod('GetPatternScale', state=>state.patternScale),
             /** HRESULT SetWidth(FLOAT fWidth) -- a width of zero or less is refused. */
-            { name: 'SetWidth', argBytes: 8, invoke: (object, [bits])=>{
+            { name: 'SetWidth', argBytes: 8, floats: { 1: 'f32' }, invoke: (object, [bits])=>{
                 const width = floatOf(bits);
                 if (!(width > 0))
                 {

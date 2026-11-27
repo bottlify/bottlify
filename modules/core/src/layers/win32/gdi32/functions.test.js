@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { createGdiFunctions } from './functions.js';
 import { fontWithNames } from './faces.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -185,11 +186,13 @@ function fakeSurfaces(){
     };
 }
 
-function setup(){
+/** @param {Partial<import('./functions.js').GdiHost>} [extra] */
+function setup(extra = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const surfaces = fakeSurfaces();
     const gdi = createGdiFunctions({
+        ...extra,
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
         fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
@@ -340,6 +343,22 @@ test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=
     assert.equal(fns.DeleteDC.handler([display]), 1);
     assert.equal(fns.DeleteDC.handler([display]), 0);
 
+    // The display by the device name EnumDisplayDevices gives, as driver or device.
+    memory.putString(FACE_NAME, '\\\\.\\display1');
+    for (const args of [[0, FACE_NAME], [FACE_NAME, 0], [FACE_NAME, FACE_NAME]])
+    {
+        const named = fns.CreateDCA.handler([...args, 0, 0]);
+        assert.equal(fns.GetDeviceCaps.handler([named, BITSPIXEL]), 32, `${args}`);
+        assert.equal(fns.DeleteDC.handler([named]), 1);
+    }
+    memory.putString(FACE_NAME + 0x40, 'DISPLAY');
+    const both = fns.CreateDCA.handler([FACE_NAME + 0x40, FACE_NAME, 0, 0]);
+    assert.equal(fns.DeleteDC.handler([both]), 1, 'DISPLAY and its device');
+    memory.putString(FACE_NAME, '\\\\.\\DISPLAY2');
+    assert.equal(fns.CreateDCA.handler([0, FACE_NAME, 0, 0]), 0, 'a display there is not');
+    assert.equal(fns.CreateDCA.handler([FACE_NAME + 0x40, FACE_NAME, 0, 0]), 0);
+    assert.equal(fns.CreateICA.handler([0, FACE_NAME, 0, 0]), 0);
+
     memory.putString(FACE_NAME, 'WINSPOOL');
     assert.equal(fns.CreateDCA.handler([FACE_NAME, 0, 0, 0]), 0, 'there is no printer');
     assert.equal(fns.CreateDCA.handler([0, 0, 0, 0]), 0);
@@ -365,6 +384,12 @@ test('CreateDCW opens the display from a wide name', ()=>{
     const display = fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]);
     assert.equal(fns.GetDeviceCaps.handler([display, BITSPIXEL]), 32);
     assert.equal(fns.DeleteDC.handler([display]), 1);
+    wide('\\\\.\\DISPLAY1');
+    const named = fns.CreateDCW.handler([0, FACE_NAME, 0, 0]);
+    assert.equal(fns.GetDeviceCaps.handler([named, BITSPIXEL]), 32, 'by its device name');
+    assert.equal(fns.DeleteDC.handler([named]), 1);
+    const information = fns.CreateICW.handler([0, FACE_NAME, 0, 0]);
+    assert.equal(fns.DeleteDC.handler([information]), 1);
     wide('WINSPOOL');
     assert.equal(fns.CreateDCW.handler([FACE_NAME, 0, 0, 0]), 0);
     assert.equal(fns.CreateDCW.handler([0, 0, 0, 0]), 0);
@@ -535,6 +560,19 @@ test('ExtCreatePen takes its colour from a brush and checks its width and dashes
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 2, STRUCT]), 0,
         'dashes on a style that takes none');
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, 0, 0, 0]), 0, 'no brush');
+
+    // Wine's test_brush_pens: a cosmetic pen's brush is solid; a geometric
+    // one is solid, hatched or a pattern; a hollow brush is the null pen.
+    memory.putU32s(STRUCT, [BS_HATCHED, 0x00123456, HS_CROSS]);
+    assert.equal(fns.ExtCreatePen.handler([PS_SOLID, 1, STRUCT, 0, 0]), 0,
+        'a hatched cosmetic pen');
+    assert.ok(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]) > 0);
+    memory.putU32s(STRUCT, [4, 0x00123456, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]), 0,
+        'BS_INDEXED is no pen\'s brush');
+    memory.putU32s(STRUCT, [BS_NULL, 0, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]),
+        fns.GetStockObject.handler([8]), 'a hollow brush makes the stock NULL_PEN');
 });
 
 test('CreateBrushIndirect reads LOGBRUSH at the documented offsets', ()=>{
@@ -589,6 +627,22 @@ test('a pattern brush names its bitmap and no colour, and outlives the bitmap', 
 
     memory.putU32s(STRUCT, [3, 0, 0x9999]);
     assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
+});
+
+test('a DIB pattern brush over a moveable HGLOBAL reads the DIB where the handle locks to', ()=>{
+    // CreateDIBPatternBrush and LOGBRUSH's BS_DIBPATTERN take an HGLOBAL: a
+    // moveable one is an entry of kernel32's table, its bytes elsewhere.
+    const HANDLE = 0x1234c;
+    const DIB = STRUCT + 0x40;
+    const { fns, memory } = setup({ lockGlobal: handle=>(handle === HANDLE ? DIB : handle) });
+    memory.putU32s(DIB, [40, 32, 32, 1 | (1 << 16), 0, 0, 0, 0, 2, 0]);
+    memory.putU32s(DIB + 40, [0, 0x00ffffff]);
+    assert.ok(fns.CreateDIBPatternBrush.handler([HANDLE, 0]) > 0, 'the DIB found through it');
+    memory.putU32s(STRUCT, [5, 0, HANDLE]);
+    assert.ok(fns.CreateBrushIndirect.handler([STRUCT]) > 0);
+    memory.putU32s(STRUCT, [6, 0, HANDLE]);
+    assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0,
+        'BS_DIBPATTERNPT is a pointer, not a handle');
 });
 
 test('a DIB pattern brush reads back as BS_DIBPATTERN naming its packed DIB', ()=>{
@@ -1104,6 +1158,13 @@ test('every setter answers with the value it replaced', ()=>{
     assert.equal(fns.GetTextColor.handler([hdc]), 0x00ff0000);
     assert.equal(fns.SetBkColor.handler([hdc, 0x00000080]), 0x00ffffff);
     assert.equal(fns.GetBkColor.handler([hdc]), 0x00000080);
+    assert.equal(fns.SetDCBrushColor.handler([hdc, 0x00123456]), 0x00ffffff);
+    assert.equal(fns.GetDCBrushColor.handler([hdc]), 0x00123456);
+    assert.equal(fns.SetDCPenColor.handler([hdc, 0x00654321]), 0x00000000);
+    assert.equal(fns.GetDCPenColor.handler([hdc]), 0x00654321);
+    assert.equal(fns.SetDCBrushColor.handler([0x1234, 0]), 0xffffffff, 'CLR_INVALID: no DC');
+    assert.notEqual(fns.GetStockObject.handler([18]), 0, 'DC_BRUSH');
+    assert.notEqual(fns.GetStockObject.handler([19]), 0, 'DC_PEN');
     assert.equal(fns.SetBkMode.handler([hdc, TRANSPARENT]), OPAQUE);
     assert.equal(fns.GetBkMode.handler([hdc]), TRANSPARENT);
     assert.equal(fns.SetROP2.handler([hdc, R2_XORPEN]), R2_COPYPEN);
@@ -1274,6 +1335,19 @@ test('GetDeviceCaps answers for what is modelled and zero for what is not', ()=>
     assert.equal(fns.GetDeviceCaps.handler([memoryDC, RASTERCAPS]), raster,
         'a memory DC answers for the display it is compatible with');
 
+    // CURVECAPS, LINECAPS, POLYGONALCAPS: every shape, GDI's own to draw, on
+    // the display and into a metafile alike (Wine's metafile getwinmetafilebits).
+    const enhanced = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
+    for (const context of [hdc, enhanced])
+    {
+        assert.deepEqual([28, 30, 32].map(index=>fns.GetDeviceCaps.handler([context, index])),
+            [511, 254, 255]);
+    }
+    // A Windows metafile's DC has no device: a metafile, and every
+    // capability zero (Wine's dc.c test_device_caps).
+    const windowsMetafile = fns.CreateMetaFileA.handler([0]);
+    assert.deepEqual([TECHNOLOGY, HORZRES, RASTERCAPS, 28].map(index=>
+        fns.GetDeviceCaps.handler([windowsMetafile, index])), [5, 0, 0, 0]);
     assert.equal(fns.GetDeviceCaps.handler([hdc, 118]), 0,
         'an index with no answer here reads as absent, not as garbage');
     assert.equal(fns.GetDeviceCaps.handler([0x9999, HORZRES]), 0);
@@ -1461,7 +1535,7 @@ function withEngine(/** @type {Record<string, any>} */ more = {}){
 
 test('with a font engine the metrics are its measurements of the selected font', ()=>{
     const { fns, memory, hdc, asked } = withEngine();
-    putLogFont(memory, { height: -12, faceName: 'Tahoma', weight: 700 });
+    putLogFont(memory, { height: -12, faceName: 'Arial', weight: 700 });
     fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
 
     assert.equal(fns.GetTextMetricsA.handler([hdc, OUT]), 1);
@@ -1472,18 +1546,21 @@ test('with a font engine the metrics are its measurements of the selected font',
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmMaxCharWidth), 9);
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmWeight), 700, 'the rest is still the LOGFONT\'s');
     const font = asked.at(-1);
-    assert.equal(font?.faceName, 'Tahoma');
+    assert.equal(font?.faceName, 'Arial');
     assert.equal(font?.height, -12);
 });
 
 test('with a font engine a string is as wide as the engine draws it', ()=>{
-    const { fns, memory, hdc } = withEngine();
+    const { fns, memory, hdc, gdi } = withEngine();
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     memory.putString(FACE_NAME, 'AB');
 
     memory.fill(OUT, SIZE.SIZE / 4);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 2, OUT]), 1);
     assert.equal(memory.i32(OUT + SIZE.cx), 5 + 4, 'A is odd, B is even');
-    assert.equal(memory.i32(OUT + SIZE.cy), 16, 'as high as Windows\' System font, the DC\'s own');
+    assert.equal(memory.i32(OUT + SIZE.cy), 13, 'as high as the engine measures the font');
 
     memory.fill(OUT, 4);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x43, OUT]), 1);
@@ -1516,6 +1593,9 @@ test('an ANSI string is measured, and its face named, as its bytes are in the AN
         },
     }).table;
     const hdc = fns.GetDC.handler([HWND]);
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    putLogFont(context.memory, { height: -11, faceName: 'Arial' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
     context.memory.bytes.set([0x80, 0x99, 0x97], FACE_NAME);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 3, OUT]), 1);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x99, 0x99, OUT]), 1);
@@ -1678,7 +1758,14 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
     const faces = seen.map(one=>one.face);
     assert.ok(['Arial', 'Times New Roman', 'Courier New', 'MS Sans Serif']
         .every(face=>faces.includes(face)));
-    assert.equal(new Set(faces).size, faces.length, 'each face once');
+    const bitmapSizes = { 'MS Sans Serif': 6, 'MS Serif': 8, Courier: 3, System: 1,
+        'Small Fonts': 6, Fixedsys: 1 };
+    for (const face of new Set(faces))
+    {
+        assert.equal(faces.filter(one=>one === face).length,
+            bitmapSizes[/** @type {keyof typeof bitmapSizes} */ (face)] ?? 1,
+            `${face}: an outline face once, a bitmap face once for each size it has`);
+    }
     assert.ok(!faces.includes('MS Shell Dlg') && !faces.includes('Helv'),
         'a substitute is found by name and never listed');
     for (const one of seen)
@@ -1689,7 +1776,8 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
         assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
         assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
         assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
-        assert.equal(one.type, 4, 'TRUETYPE_FONTTYPE, as the faces are on Windows');
+        assert.equal(one.type, one.face in bitmapSizes ? 1 : 4,
+            'RASTER_FONTTYPE for a bitmap face, TRUETYPE_FONTTYPE for the rest, as on Windows');
         assert.equal(one.script, 'Western');
     }
     assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
@@ -1787,37 +1875,89 @@ test('EnumFontFamiliesEx calls nothing when it cannot, and refuses what is not a
     assert.equal(enumeration.seen.length, 0);
 });
 
-test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
-    const { fns } = setup();
-    assert.equal(fns.AddFontResourceA.handler(), 0);
-    assert.equal(fns.CreateScalableFontResourceA.handler(), 0);
-    assert.deepEqual([fns.AddFontResourceA.argBytes, fns.CreateScalableFontResourceA.argBytes],
-        [4, 16]);
+test('a font file a program adds is read, drawn, counted and named', async()=>{
+    // A game ships its title face as a .ttf, adds it, and creates its font by
+    // family; refused, its text fell back to another face.
+    const context = setup();
+    /** @type {string[]} */
+    const drawn = [];
+    const files = new Map([
+        ['C:\\GAME\\TITLE.TTF', fontWithNames([[3, 0x409, 'Trajan Pro']])],
+        ['C:\\WINDOWS\\FONTS\\SHARED.TTF', fontWithNames([[3, 0x409, 'Shared Sans']])],
+        ['C:\\GAME\\README.TXT', new TextEncoder().encode('not a font')],
+    ]);
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>context.memory.readMemory(address, length),
+        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        handles: context.handles,
+        surfaces: context.surfaces,
+        readFile: async path=>files.get(path.toUpperCase()) ?? null,
+        fullPath: path=>(/[\\:]/.test(path) ? path : `C:\\GAME\\${path}`),
+        graphics: { addFont: async family=>{
+            drawn.push(family);
+            return true;
+        } },
+    }).table;
+    const FR_PRIVATE = 0x10;
+    /** @param {string} name */
+    const named = name=>{
+        context.memory.putString(FACE_NAME, name);
+        return FACE_NAME;
+    };
+    assert.equal(await fns.AddFontResourceExA.handler([named('C:\\game\\title.ttf'),
+        FR_PRIVATE, 0]), 1, 'one face in it');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'handed to the engine to draw with');
+    assert.equal(await fns.AddFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'the same file again, by a path the current directory completes');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'and not loaded twice');
+
+    const hdc = fns.GetDC.handler([HWND]);
+    putLogFont(context.memory, { height: -20, faceName: 'Trajan Pro' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    assert.ok(fns.GetTextFaceA.handler([hdc, 32, OUT]) > 0);
+    assert.equal(context.memory.readCString(OUT, 32), 'Trajan Pro', 'the family is a face now');
+
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), 0, 0]), 0,
+        'a remove whose flags are not the add\'s fails');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1);
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'as many removes as adds');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 0);
+
+    assert.equal(await fns.AddFontResourceA.handler([named('shared.ttf')]), 1,
+        'a bare name not beside the program is looked for in the Fonts folder');
+    assert.equal(await fns.AddFontResourceA.handler([named('readme.txt')]), 0, 'no font');
+    assert.equal(await fns.AddFontResourceA.handler([named('missing.ttf')]), 0, 'no file');
+    assert.equal(fns.RemoveFontResourceA.handler([named('missing.ttf')]), 0, 'never added');
 });
 
-test('every spelling of adding and removing a font fails the same way, popping its arguments',
-    ()=>{
-        // gdi32.spec: each is stdcall with these arities. Without a font
-        // engine nothing can be added, so every add answers zero fonts and
-        // every remove FALSE -- the in-memory pair too, whose handle is NULL.
-        const { fns, memory } = setup();
-        const table = /** @type {Record<string, { argBytes: number,
-            handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-        memory.putU32s(OUT, [UNTOUCHED]);
-        /** @type {[string, number][]} */
-        const spellings = [
-            ['AddFontResourceW', 4], ['AddFontResourceExA', 12], ['AddFontResourceExW', 12],
-            ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
-            ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
-            ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
-        ];
-        for (const [name, argBytes] of spellings)
-        {
-            assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
-            assert.equal(table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
-        }
-        assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
-    });
+test('every spelling of adding and removing a font is exported, popping its arguments', async()=>{
+    // gdi32.spec: each is stdcall with these arities. With no volume to
+    // read, every add answers zero fonts and every remove FALSE -- the
+    // in-memory pair too, whose handle is NULL with no engine.
+    const { fns, memory } = setup();
+    const table = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number | Promise<number> }>} */ (
+        /** @type {unknown} */ (fns));
+    memory.putU32s(OUT, [UNTOUCHED]);
+    memory.putString(FACE_NAME, 'C:\\font.ttf');
+    /** @type {[string, number][]} */
+    const spellings = [
+        ['AddFontResourceA', 4], ['AddFontResourceW', 4], ['AddFontResourceExA', 12],
+        ['AddFontResourceExW', 12], ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
+        ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
+        ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
+    ];
+    for (const [name, argBytes] of spellings)
+    {
+        assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
+        assert.equal(await table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
+    }
+    assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
+    assert.equal(fns.CreateScalableFontResourceA.handler(), 0, 'no .fot is written');
+    assert.equal(fns.CreateScalableFontResourceA.argBytes, 16);
+});
 
 test('GetTextCharset is the selected font\'s set, and DEFAULT_CHARSET means failure', ()=>{
     const { fns, memory, hdc } = withDC();
@@ -1892,6 +2032,10 @@ test('every function declares the stack its arguments occupy', ()=>{
         GetTextColor: 4,
         SetBkColor: 8,
         GetBkColor: 4,
+        SetDCBrushColor: 8,
+        GetDCBrushColor: 4,
+        SetDCPenColor: 8,
+        GetDCPenColor: 4,
         SetBkMode: 8,
         GetBkMode: 4,
         SetROP2: 8,
@@ -2047,8 +2191,18 @@ test('every DC of a window is one drawable, and any other DC is its own', ()=>{
 
     const bounded = gdi.windowContext(HWND, { left: 10, top: 20, right: 650, bottom: 500 });
     assert.deepEqual(gdi.describeDrawable(bounded),
-        { key: keyOf(first), window: HWND, width: 640, height: 480 },
+        { key: keyOf(first), window: HWND, width: 640, height: 480, memory: false },
         'a window context is the size of the area it was given');
+    assert.equal(gdi.describeDrawable(memoryDc)?.memory, true,
+        'a memory DC says so: OpenGL draws into its bitmap');
+
+    // An OpenGL pbuffer's DC is a drawable of its own size, drawn on the device.
+    const pbuffer = gdi.createPbufferDc(16, 8);
+    assert.deepEqual(gdi.describeDrawable(pbuffer),
+        { key: `pbuffer:${pbuffer}`, window: 0, width: 16, height: 8, memory: false });
+    assert.equal(fns.GetPixelFormat.handler([pbuffer]), 0, 'a DC GDI knows: no format yet');
+    assert.equal(gdi.deleteSurfaceDc(pbuffer), true);
+    assert.equal(gdi.describeDrawable(pbuffer), null);
 });
 
 test('a region is readable and fillable from user32, and nothing else is', ()=>{
@@ -2298,6 +2452,62 @@ test('GetTextFace names the face asked for, or the one its family stands in with
     assert.equal(faceA(), 'MS Shell Dlg', 'DEFAULT_GUI_FONT');
 });
 
+test('a realized font answers its realization, and an empty file for a face that has none', ()=>{
+    // Wine's test_RealizationInfo and test_realization_info: the 16- and
+    // 24-byte forms, any other size refused; GetFontFileInfo telling the size
+    // it needs on a short buffer, refusing an id that is no realization.
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        setLastError: code=>errors.push(code),
+    }).table;
+    const hdc = fns.GetDC.handler([HWND]);
+    putLogFont(memory, { faceName: 'Tahoma' });
+    const font = fns.CreateFontIndirectA.handler([STRUCT]);
+    fns.SelectObject.handler([hdc, font]);
+
+    memory.fill(OUT, 8);
+    assert.equal(fns.GdiRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(OUT + at)), [1, 1, font, UNTOUCHED]);
+
+    memory.fill(OUT, 8);
+    memory.putU32s(OUT, [28]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 0, 'no 28-byte form');
+    memory.putU32s(OUT, [16]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>memory.u32(OUT + at)), [16, 1, 1, font, UNTOUCHED]);
+    memory.putU32s(OUT, [24]);
+    assert.equal(fns.GetFontRealizationInfo.handler([hdc, OUT]), 1);
+    assert.deepEqual([0, 12, 16, 20, 24].map(at=>memory.u32(OUT + at)),
+        [24, font, 0, 0, UNTOUCHED]);
+    assert.equal(fns.GetFontRealizationInfo.handler([0x9999, OUT]), 0, 'not a context');
+
+    const NEEDED = STRUCT + 0x80;
+    assert.equal(fns.GetFontFileInfo.handler([0xabababab, 0, OUT, 64, NEEDED]), 0);
+    assert.equal(errors.pop(), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, 0, 0, NEEDED]), 0);
+    assert.equal(errors.pop(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(memory.u32(NEEDED), 18, 'the size needed told regardless');
+    memory.fill(OUT, 8);
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, OUT, 17, 0]), 0);
+    assert.equal(memory.u32(OUT), UNTOUCHED, 'a short buffer is not written');
+    assert.equal(fns.GetFontFileInfo.handler([font, 0, OUT, 64, 0]), 1);
+    assert.deepEqual([...memory.bytes.subarray(OUT, OUT + 18)], new Array(18).fill(0),
+        'no time, no size, an empty path');
+    assert.equal(memory.u32(OUT + 20), UNTOUCHED);
+
+    assert.equal(fns.GetFontFileData.handler([font, 0, 0, 0, OUT, 0]), 1);
+    assert.equal(fns.GetFontFileData.handler([font, 0, 16, 0, OUT, 0xfffffff0]), 0);
+    assert.equal(errors.pop(), 87, 'no byte past the end of an empty file');
+});
+
 test('GetTextFace cuts the name to the count, and a null buffer asks for the size', ()=>{
     const { memory, fns, hdc } = withDC();
     const NAME = 0x2000;
@@ -2342,6 +2552,80 @@ test('GetObjectType names each kind of GDI object, a context by whether it is in
     assert.equal(fns.GetObjectType.handler([fns.CreateBitmap.handler([4, 4, 1, 1, 0])]), 7);
     assert.equal(fns.GetObjectType.handler([fns.CreateRectRgn.handler([0, 0, 4, 4])]), 8);
     assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
+});
+
+test('the stock fonts are the faces and sizes Windows makes them', ()=>{
+    // Wine's test_stock_fonts: ANSI_FIXED_FONT and ANSI_VAR_FONT are the
+    // bitmap Courier and MS Sans Serif asked at 12, which realise at 13;
+    // DEFAULT_GUI_FONT says its weight.
+    const { fns, memory, hdc } = withDC();
+    /** @param {number} index */
+    const stock = index=>{
+        const font = fns.GetStockObject.handler([index]);
+        assert.notEqual(font, 0, `stock object ${index}`);
+        assert.equal(fns.GetObjectA.handler([font, LOGFONTA.SIZE, OUT]), LOGFONTA.SIZE);
+        const before = fns.SelectObject.handler([hdc, font]);
+        fns.GetTextMetricsA.handler([hdc, STRUCT]);
+        fns.SelectObject.handler([hdc, before]);
+        return [memory.i32(OUT + LOGFONTA.lfHeight), memory.i32(OUT + LOGFONTA.lfWeight),
+            memory.bytes[OUT + LOGFONTA.lfCharSet],
+            memory.readCString(OUT + LOGFONTA.lfFaceName, 32),
+            memory.i32(STRUCT + TEXTMETRICA.tmHeight)];
+    };
+    assert.deepEqual(stock(11), [12, 400, 0, 'Courier', 13], 'ANSI_FIXED_FONT');
+    assert.deepEqual(stock(12), [12, 400, 0, 'MS Sans Serif', 13], 'ANSI_VAR_FONT');
+    assert.deepEqual(stock(10).slice(0, 4), [12, 400, 255, 'Terminal'], 'OEM_FIXED_FONT');
+    assert.deepEqual(stock(17).slice(0, 4), [-11, 400, 0, 'MS Shell Dlg'], 'DEFAULT_GUI_FONT');
+});
+
+test('D3DKMT opens the one adapter by name, closes it, and keeps no kernel information', ()=>{
+    const { fns, memory } = setup();
+    const view = new DataView(memory.bytes.buffer);
+    const DESC = 0x2000;
+    assert.equal(fns.D3DKMTOpenAdapterFromDeviceName.handler([DESC]), 0xc000000d, 'no name');
+    view.setUint32(DESC, 0x2100, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromDeviceName.handler([DESC]), 0);
+    const adapter = view.getUint32(DESC + 4, true);
+    assert.notEqual(adapter, 0);
+    view.setUint32(0x2200, adapter, true);
+    assert.equal(fns.D3DKMTQueryAdapterInfo.handler([0x2200]), 0xc00000bb, 'STATUS_NOT_SUPPORTED');
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0);
+    view.setUint32(0x2200, 7, true);
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2200]), 0xc000000d, 'not an adapter');
+});
+
+test('D3DKMT opens the adapter behind a display DC, and refuses its escapes', ()=>{
+    const { fns, memory, said } = withErrors();
+    const view = new DataView(memory.bytes.buffer);
+    const DESC = 0x2000;
+    memory.putString(FACE_NAME, '\\\\.\\DISPLAY1');
+    const display = fns.CreateDCA.handler([0, FACE_NAME, 0, 0]);
+    const plain = fns.CreateCompatibleDC.handler([display]);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([0]), 0xc000000d);
+    view.setUint32(DESC, plain, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([DESC]), 0xc000000d,
+        'no adapter behind a memory DC');
+    view.setUint32(DESC, display, true);
+    view.setUint32(DESC + 16, 0xdead, true);
+    assert.equal(fns.D3DKMTOpenAdapterFromHdc.handler([DESC]), 0);
+    const adapter = view.getUint32(DESC + 4, true);
+    assert.notEqual(adapter, 0);
+    assert.notEqual(view.getUint32(DESC + 8, true), 0, 'a LUID');
+    assert.equal(view.getUint32(DESC + 16, true), 0, 'the first video present source');
+
+    // D3DKMT_ESCAPE: hAdapter, hDevice, Type, Flags, pPrivateDriverData, size, hContext.
+    const ESCAPE = 0x2100;
+    assert.equal(fns.D3DKMTEscape.handler([0]), 0xc000000d);
+    view.setUint32(ESCAPE, 7, true);
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc000000d, 'not an adapter');
+    view.setUint32(ESCAPE, adapter, true);
+    view.setUint32(ESCAPE + 16, 0x2200, true);
+    view.setUint32(ESCAPE + 20, 0x218, true);
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc00000bb, 'STATUS_NOT_SUPPORTED');
+    assert.equal(fns.D3DKMTEscape.handler([ESCAPE]), 0xc00000bb);
+    assert.equal(said.filter(line=>line.startsWith('D3DKMTEscape')).length, 1, 'said once');
+    view.setUint32(0x2300, adapter, true);
+    assert.equal(fns.D3DKMTCloseAdapter.handler([0x2300]), 0);
 });
 
 test('D3DKMTCreateDCFromMemory makes a memory DC over the program\'s own pixels', ()=>{
@@ -2453,7 +2737,10 @@ test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP'
 });
 
 test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
@@ -2470,7 +2757,10 @@ test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
 test('GetGlyphOutline draws the bitmap of a glyph, one bit or one gray level a pixel', ()=>{
     // A game that builds its font textures from GGO_GRAY8_BITMAP got
     // GDI_ERROR for every character and drew no text at all.
-    const { fns, hdc, memory } = withEngine();
+    const { fns, hdc, memory, gdi } = withEngine();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     const BITS = STRUCT + 0xa80;
@@ -2524,7 +2814,10 @@ test('a font held in memory is drawn under its family name, and a handle says so
 });
 
 test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const TEXT = STRUCT + 0xb00;
     const INDICES = STRUCT + 0xb40;
     memory.putString(TEXT, 'A\x01');
@@ -2551,7 +2844,8 @@ test('the glyph-index width calls read a glyph as the character GetGlyphIndices 
 
     const view = new DataView(memory.bytes.buffer);
     assert.equal(fns.GetCharWidthFloatA.handler([hdc, 65, 65, WIDTHS]), 1);
-    assert.equal(view.getFloat32(WIDTHS, true), a, 'the same width, as a float');
+    assert.equal(view.getFloat32(WIDTHS, true), a / 16,
+        'a sixteenth of the width, as Windows answers it (A253)');
     assert.equal(fns.GetCharABCWidthsFloatW.handler([hdc, 66, 66, WIDTHS]), 1);
     assert.equal(view.getFloat32(WIDTHS + 4, true), b);
     assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);
@@ -2826,4 +3120,171 @@ test('EnumFonts names a face as EnumFontFamilies names a family, in either width
     assert.equal(narrow.fns.EnumFontsA.argBytes, 16);
     assert.equal(await narrow.fns.EnumFontsA.handler([narrow.hdc, 0, ENUMPROC, 0]), 1);
     assert.ok(narrow.seen.map(one=>one.face).includes('Times New Roman'), 'no name: every face');
+});
+
+test('GdiEntry13 (DdQueryDisplaySettingsUniqueness) moves when the display mode does', ()=>{
+    const memory = fakeMemory();
+    const screen = { width: 800, height: 600, bitsPerPixel: 32 };
+    const { table } = createGdiFunctions({
+        readMemory: (address, length)=>memory.readMemory(address, length),
+        writeMemory: (address, data)=>memory.writeMemory(address, data),
+        fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        handles: fakeHandles(),
+        surfaces: fakeSurfaces(),
+        screen,
+    });
+    const first = table.GdiEntry13.handler();
+    assert.equal(table.GdiEntry13.handler(), first, 'the same mode, the same number');
+    screen.width = 1024;
+    screen.height = 768;
+    assert.notEqual(table.GdiEntry13.handler(), first);
+});
+
+test('GdiGetCharDimensions is the dialog-unit average width, and GdiGetCodePage the font\'s page',
+    ()=>{
+        const { fns, memory, hdc } = withDC();
+        const RUSSIAN_CHARSET = 204;
+        const OEM_CHARSET = 255;
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const TEXT_AT = OUT + 0x100;
+        letters.split('').forEach((c, i)=>memory.writeMemory(TEXT_AT + 2 * i,
+            Uint8Array.of(c.charCodeAt(0), 0)));
+        fns.GetTextExtentPoint32W.handler([hdc, TEXT_AT, letters.length, OUT + 0x200]);
+        const extent = memory.u32(OUT + 0x200);
+        const height = memory.u32(OUT + 0x204);
+        assert.equal(fns.GdiGetCharDimensions.handler([hdc, 0, OUT]),
+            Math.floor((Math.floor(extent / 26) + 1) / 2), '(extent / 26 + 1) / 2');
+        assert.equal(memory.u32(OUT), height, 'and the font\'s height');
+        assert.equal(fns.GdiGetCharDimensions.handler([0x9999, 0, OUT + 0x300]), 0,
+            'not a DC');
+
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1252, 'the system font is ANSI');
+        assert.equal(fns.GdiGetCodePage.handler([0x9999]), 1252, 'not a DC: the ANSI page');
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: RUSSIAN_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1251);
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: OEM_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 437);
+    });
+
+test('CopyImage\'s bitmap copy takes the form its flags ask and the size given', ()=>{
+    // Wine's cursoricon test_CopyImage_Bitmap: a device bitmap at the display's
+    // depth unless monochrome, a section of the original's depth with
+    // LR_CREATEDIBSECTION, zero keeping a side.
+    const { fns, memory, gdi, hdc } = withDC();
+    const LR_MONOCHROME = 0x1;
+    const LR_CREATEDIBSECTION = 0x2000;
+    const display = fns.GetDeviceCaps.handler([hdc, 12]);
+    /** @param {number} bitmap @returns {number[]} width, height, depth, whether a section */
+    const shape = bitmap=>{
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        return [memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16,
+            memory.u32(OUT + 20) === 0 ? 0 : 1];
+    };
+    const colour = fns.CreateBitmap.handler([2, 2, 1, 32, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 0, 0)), [2, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 0, 0)), [5, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 5, LR_MONOCHROME)), [2, 5, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 5, LR_CREATEDIBSECTION | LR_MONOCHROME)),
+        [5, 5, 32, 1], 'a section outranks monochrome');
+    const mono = fns.CreateBitmap.handler([2, 2, 1, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(mono, 0, 0, 0)), [2, 2, 1, 0]);
+
+    // A one-bit section is copied monochrome only when its colours are black and white.
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 1 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0x0000ff, 0x00ff00]);
+    const tinted = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(tinted, 0, 0, 0)), [2, 2, display, 0]);
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0xffffff, 0x000000]);
+    const plain = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(plain, 0, 0, 0)), [2, 2, 1, 0]);
+    assert.equal(gdi.copyBitmap(hdc, 0, 0, 0), 0, 'no bitmap, no copy');
+});
+
+test('a bitmap made of bits this layer holds reads back those bits', ()=>{
+    const { fns, memory, gdi } = setup();
+    const bits = Uint8Array.of(0xa5, 0x00, 0x5a, 0x00);
+    const bitmap = gdi.bitmapFromBits(9, 2, 1, bits);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 16, OUT]), 4,
+        'nine pixels a line, padded to a WORD');
+    assert.deepEqual([...memory.readMemory(OUT, 4)], [...bits]);
+});
+
+test('a path keeps an arc as curves, one a quarter of the ellipse', ()=>{
+    // Wine's path test_arcto and test_anglearc, within the two pixels they allow.
+    const { fns, memory, hdc } = withDC();
+    const AD_CLOCKWISE = 2;
+    const PT_LINETO = 2;
+    const PT_BEZIERTO = 4;
+    fns.BeginPath.handler([hdc]);
+    fns.SetArcDirection.handler([hdc, AD_CLOCKWISE]);
+    assert.equal(fns.ArcTo.handler([hdc, 200, 200, 400, 300, 200, 200, 400, 300]), 1);
+    fns.EndPath.handler([hdc]);
+    const count = fns.GetPath.handler([hdc, OUT, STRUCT, 64]);
+    assert.equal(count, 11, 'the line to the start and three curves of three points');
+    const types = [...memory.readMemory(STRUCT, count)];
+    assert.deepEqual(types.slice(1, 3), [PT_LINETO, PT_BEZIERTO]);
+    /** @param {number} at */
+    const point = at=>[memory.i32(OUT + at * 8), memory.i32(OUT + at * 8 + 4)];
+    const expected = [[229, 215], [248, 205], [273, 200], [300, 200], [355, 200], [399, 222],
+        [399, 250], [399, 263], [389, 275], [370, 285]];
+    expected.forEach(([x, y], index)=>{
+        const [gotX, gotY] = point(index + 1);
+        assert.ok(Math.abs(gotX - x) <= 2 && Math.abs(gotY - y) <= 2,
+            `point ${index + 1}: (${gotX},${gotY}) for (${x},${y})`);
+    });
+
+    // An arc ending on a quarter's edge ends in a curve of no length.
+    fns.BeginPath.handler([hdc]);
+    const float = (/** @type {number} */ value)=>new Uint32Array(Float32Array.of(value).buffer)[0];
+    assert.equal(fns.AngleArc.handler([hdc, 300, 300, 100, float(45), float(135)]), 1);
+    fns.EndPath.handler([hdc]);
+    assert.equal(fns.GetPath.handler([hdc, OUT, STRUCT, 64]), 11);
+    assert.deepEqual([point(8), point(9), point(10)], [[200, 300], [200, 300], [200, 300]]);
+});
+
+test('the metrics of the selected font are measured once, not each time text is '
+    + 'measured', async()=>{
+    // Every string a control measures or draws asks for its font's metrics:
+    // building them each time was four objects and their spreads a string.
+    for (const faceName of ['Tahoma', 'MS Sans Serif'])
+    {
+        // MS Sans Serif is a bitmap face, drawn at a size of its own.
+        const { fns, memory, hdc } = withDC();
+        putLogFont(memory, { height: -12, weight: 400, faceName });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        const args = [hdc];
+        const charSet = fns.GetTextCharset.handler(args);
+        const bytes = await bytesPerCall(()=>{
+            fns.GetTextCharset.handler(args);
+        });
+        assert.ok(bytes < 16, `${faceName}: ${bytes} bytes a call`);
+        assert.equal(fns.GetTextCharset.handler(args), charSet, `${faceName}: the same answer`);
+    }
+});
+
+test('a string\'s width without an engine is summed off its font\'s table, made once', async()=>{
+    // An edit control lays its text out by characters, and a string is
+    // measured whole: each measure built an array of the string's advances
+    // and looked the face's table up again.
+    const text = 'The quick brown fox jumps over the lazy dog. '.repeat(4);
+    for (const faceName of ['Tahoma', 'MS Sans Serif'])
+    {
+        const { fns, memory, hdc } = withDC();
+        putLogFont(memory, { height: -11, weight: 400, faceName });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        memory.putString(FACE_NAME, text);
+        const args = [hdc, FACE_NAME, text.length, OUT];
+        assert.equal(fns.GetTextExtentPoint32A.handler(args), 1);
+        const width = memory.i32(OUT + SIZE.cx);
+        const bytes = await bytesPerCall(()=>{
+            fns.GetTextExtentPoint32A.handler(args);
+        });
+        // What is left is the call's own: the string read and decoded, the
+        // answer written (18.7 KB with the advances built per measure).
+        assert.ok(bytes < 9000, `${faceName}: ${bytes} bytes a measure of ${text.length}`);
+        assert.equal(memory.i32(OUT + SIZE.cx), width, `${faceName}: the same width`);
+    }
 });

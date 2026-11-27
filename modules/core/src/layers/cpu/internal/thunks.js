@@ -37,7 +37,7 @@ export const FORWARD_SAVE = 32;
  * in more slots than the region holds would write stubs into whatever follows
  * it, which is the initial stack.
  */
-export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
+export const DEFAULT_THUNK_CAPACITY = 32768 * STUB_SIZE;
 
 /**
  * Emits one stub.
@@ -181,12 +181,41 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
     const entries = [];
 
     // Slot 0 is never dispatched: it holds the park loop. A handler that ends the
-    // process cannot stop the emulator from inside its own trap callback — the
+    // process cannot stop the machine from inside its own trap callback — the
     // guest would still execute the stub's `ret` and return into whatever the
     // stack happened to hold. Instead the return address is redirected here, and
     // the machine is stopped from outside the callback. `hlt` rather than a tight
     // jump so a parked guest costs nothing while it waits.
     entries.push({ id: 0, name: '<park>', popBytes: 0, address: base });
+    // The next slot taken, and the slots a layout made elsewhere gave each
+    // name (`follow`): a library's traps take the ids they took where the
+    // machine's layout was made, so the stubs its routines jump to lie at the
+    // same addresses in every process, whatever was registered before.
+    let next = 1;
+    let taken = 1;
+    // The layout is the runtime's, shared by every process that follows it
+    // (and read only); this table keeps how far each name has gone in it.
+    /** @type {Map<string, number[]>} */
+    let laid = new Map();
+    let laidFrom = 0;
+    /** @type {Map<string, number>} */
+    const laidAt = new Map();
+    /** The next slot `laid` gives `name` here, or undefined. @param {string} name */
+    const laidSlot = name=>{
+        const ids = laid.get(name);
+        if (ids === undefined)
+        {
+            return undefined;
+        }
+        let at = laidAt.get(name) ?? 0;
+        // A slot taken here before the layout was followed is not given again.
+        while (at < ids.length && (ids[at] < laidFrom || entries[ids[at]] !== undefined))
+        {
+            at++;
+        }
+        laidAt.set(name, at + 1);
+        return ids[at];
+    };
 
     return {
         /** Address of the park loop: where a terminating call returns to. */
@@ -224,17 +253,56 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                 holdEip = false,
             } = {})
         {
-            const id = entries.length;
+            const id = laidSlot(name) ?? next;
             if (id >= slots)
             {
                 throw new Error(`cpu: the stub table is full at ${slots} slots`
                     + ` (${capacity} bytes from ${base.toString(16)}); no room to register`
                     + ` ${name}`);
             }
+            if (id === next)
+            {
+                next++;
+            }
+            taken++;
             const address = base + id * STUB_SIZE;
-            entries.push({ id, name, popBytes, address, preserveResult, forwardTo,
-                saveRegisters, pushEdx, holdEip });
+            entries[id] = { id, name, popBytes, address, preserveResult, forwardTo,
+                saveRegisters, pushEdx, holdEip };
             return { id, address };
+        },
+
+        /**
+         * Every slot taken so far by name, in the order each name took them:
+         * the layout another process follows (`follow`).
+         *
+         * @returns {{ names: Map<string, number[]>, end: number }}
+         */
+        laidOut(){
+            /** @type {Map<string, number[]>} */
+            const names = new Map();
+            for (const entry of entries)
+            {
+                if (entry !== undefined && entry.id !== 0)
+                {
+                    const ids = names.get(entry.name) ?? [];
+                    ids.push(entry.id);
+                    names.set(entry.name, ids);
+                }
+            }
+            return { names, end: next };
+        },
+
+        /**
+         * Gives each name the slots `layout` says it took, in that order, and
+         * every slot nothing names from its end on.
+         *
+         * @param {{ names: Map<string, number[]>, end: number }} layout
+         */
+        follow(layout){
+            laid = layout.names;
+            laidFrom = next;
+            laidAt.clear();
+            next = Math.max(next, layout.end);
         },
 
         /**
@@ -269,9 +337,24 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
             });
         },
 
+        /**
+         * The bytes of the stub at `address`, which run as well wherever they
+         * are copied: null where no stub taken so far lives, or where the stub
+         * forwards (`forwardTo`'s jump is relative to its own slot). A system
+         * call's export is these bytes themselves (`app.js`).
+         *
+         * @param {number} address
+         * @returns {Uint8Array | null}
+         */
+        stubAt(address){
+            const id = ((address >>> 0) - base) / STUB_SIZE;
+            return Number.isInteger(id) && id > 0 && entries[id] !== undefined
+                && !entries[id].forwardTo ? this.stub(id) : null;
+        },
+
         /** How many slots have been taken, park loop included. */
         get count(){
-            return entries.length;
+            return taken;
         },
 
         /**
@@ -291,8 +374,13 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
             const bytes = new Uint8Array(entries.length * STUB_SIZE);
             // hlt; jmp back to the hlt — the park loop in slot 0.
             bytes.set([0xf4, 0xeb, 0xfd], 0);
-            for (const entry of entries.slice(1))
+            for (const entry of entries)
             {
+                // A slot a part left unused holds nothing a guest is handed.
+                if (entry === undefined || entry.id === 0)
+                {
+                    continue;
+                }
                 bytes.set(
                     buildStub({
                         trapId: entry.id,
@@ -316,8 +404,9 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
             return entries[id];
         },
 
+        /** Slots taken, as `count`: a layout followed leaves gaps unused. */
         get size(){
-            return entries.length;
+            return taken;
         },
     };
 }

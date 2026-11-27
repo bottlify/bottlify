@@ -33,8 +33,8 @@ import { IID_IDirect3D7, IID_IDirect3DVertexBuffer7, IID_IDirectDraw7 } from './
 import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
-import { guidBytes } from './d3d7.js';
-import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
+import { guidBytes } from '../../../system/guid.js';
+import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './block.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
@@ -44,12 +44,13 @@ import {
 } from '../ddraw/constants.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDP_DONOTCLIP,
-    D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP,
-    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3D_OK, DDERR_INVALIDCAPS,
-    DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
+    D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP, D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS,
+    DDERR_NOTFOUND, DEVICE_IDS,
 } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
+import { floatBits } from '../../../system/floats.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -74,7 +75,7 @@ const slot = (slots, name)=>{
 function machine(){
     const bytes = new Uint8Array(4 << 20);
     let next = 0x100;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -89,7 +90,7 @@ function machine(){
             bytes[at + 2] = value >>> 16 & 0xff;
             bytes[at + 3] = value >>> 24 & 0xff;
         },
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
@@ -489,16 +490,16 @@ test('a viewport goes through as a structure, and Clear reads its Z as a float',
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwY, 2);
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwWidth, 8);
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwHeight, 4);
-    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMinZ, floatToDword(0.25));
-    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMaxZ, floatToDword(0.75));
+    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMinZ, floatBits(0.25));
+    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMaxZ, floatBits(0.75));
     assert.equal(h.device(device, 'SetViewport', [at]), D3D_OK);
 
     const back = 0x6200;
     assert.equal(h.device(device, 'GetViewport', [back]), D3D_OK);
     assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dwWidth), 8);
-    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMinZ), floatToDword(0.25),
+    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMinZ), floatBits(0.25),
         'the two Z bounds are floats in dword slots, and come back as they went in');
-    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMaxZ), floatToDword(0.75));
+    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMaxZ), floatBits(0.75));
     assert.equal(h.device(device, 'SetViewport', [0]), DDERR_INVALIDPARAMS >>> 0);
 
     // Clear's Z is the same kind of argument, but arrives in a stack slot
@@ -510,11 +511,11 @@ test('a viewport goes through as a structure, and Clear reads its Z as a float',
     h.box.memory.writeU32(rect + D3DRECT.x2, 4);
     h.box.memory.writeU32(rect + D3DRECT.y2, 4);
     assert.equal(h.device(device, 'Clear',
-        [1, rect, D3DCLEAR.TARGET, 0xff203040, floatToDword(1), 0]), D3D_OK);
+        [1, rect, D3DCLEAR.TARGET, 0xff203040, floatBits(1), 0]), D3D_OK);
     assert.equal(h.device(device, 'Clear', [0, 0, 0, 0, 0, 0]), DDERR_INVALIDPARAMS >>> 0,
         'clearing nothing is not a clear');
     assert.equal(
-        h.device(device, 'Clear', [0, 0, D3DCLEAR.ZBUFFER, 0, floatToDword(1), 0]),
+        h.device(device, 'Clear', [0, 0, D3DCLEAR.ZBUFFER, 0, floatBits(1), 0]),
         DDERR_INVALIDPARAMS >>> 0, 'and there is no depth buffer attached to clear');
 
     assert.equal(h.release(device), 0);
@@ -534,7 +535,7 @@ test('a draw reads exactly as many vertex bytes as the format implies', ()=>{
 
     assert.equal(
         h.device(device, 'DrawPrimitive', [D3DPT.TRIANGLELIST, FVF_TL, vertices, 3, 0]),
-        D3DERR_SCENE_NOT_IN_SCENE >>> 0, 'a draw outside a scene is refused before a read');
+        D3D_OK, 'a draw outside a scene is drawn');
     assert.equal(h.device(device, 'BeginScene'), D3D_OK);
     assert.equal(h.device(device, 'DrawPrimitive',
         [D3DPT.TRIANGLELIST, FVF_TL, vertices, 3, 0]), D3D_OK);
@@ -589,7 +590,7 @@ test('a strided draw gathers each stream into packed vertices and draws those', 
     const strided = 0x7300;
     const corners = [[-1, -1, 0], [-1, 1, 0], [1, 1, 0], [1, -1, 0]];
     corners.forEach((corner, k)=>corner.forEach((value, axis)=>
-        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatToDword(value))));
+        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatBits(value))));
     corners.forEach((_, k)=>h.box.memory.writeU32(colours + k * 4, 0x0000ff00 + k));
     [0, 1, 2, 2, 3, 0].forEach((index, k)=>{
         h.box.bytes[indices + k * 2] = index;
@@ -621,8 +622,8 @@ test('a strided draw gathers each stream into packed vertices and draws those', 
     // array: the eight sets follow the specular entry in the structure.
     const uvs = 0x7400;
     corners.forEach((_, k)=>{
-        h.box.memory.writeU32(uvs + k * 8, floatToDword(k));
-        h.box.memory.writeU32(uvs + k * 8 + 4, floatToDword(-k));
+        h.box.memory.writeU32(uvs + k * 8, floatBits(k));
+        h.box.memory.writeU32(uvs + k * 8 + 4, floatBits(-k));
     });
     h.box.memory.writeU32(strided + 4 * 8, uvs);
     h.box.memory.writeU32(strided + 4 * 8 + 4, 8);
@@ -735,20 +736,30 @@ test('a vertex buffer is a guest allocation with a description of its own', ()=>
     assert.equal(create(), D3D_OK);
     const buffer = h.box.memory.readU32(0x6500);
     assert.notEqual(buffer, 0);
+    h.box.putGuid(0x6800, '{00000000-0000-0000-C000-000000000046}');
+    assert.equal(h.box.call(buffer, 0, [0x6800, 0x6810]), D3D_OK);
+    assert.equal(h.box.memory.readU32(0x6810), buffer,
+        'IUnknown is the buffer\'s own (test_vb_refcount)');
+    h.box.call(buffer, 2, []);
 
     assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0x6604]), D3D_OK);
     const data = h.box.memory.readU32(0x6600);
     assert.notEqual(data, 0, 'the lock answers a guest address the program writes through');
     assert.equal(h.box.memory.readU32(0x6604), 4 * TL_STRIDE,
         'and the whole buffer, which is all D3D7 can lock');
-    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3DERR_VERTEXBUFFERLOCKED >>> 0);
+    h.box.memory.writeU32(0x6600, 0);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK,
+        'a locked buffer is locked again (test_process_vertices)');
+    assert.equal(h.box.memory.readU32(0x6600), data);
     assert.equal(h.buffer(buffer, 'Lock', [0, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
     assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
 
     const back = 0x6700;
+    h.box.memory.writeU32(back + D3DVERTEXBUFFERDESC.dwSize, 0);
     assert.equal(h.buffer(buffer, 'GetVertexBufferDesc', [back]), D3D_OK);
-    assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwSize),
-        D3DVERTEXBUFFERDESC.SIZE, 'the size written back is ours, not whatever was there');
+    // Wine's ddraw7 test_vb_desc: the size is left as the program left it.
+    assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwSize), 0,
+        'the size is not written');
     assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwFVF), FVF_TL);
     assert.equal(h.box.memory.readU32(back + D3DVERTEXBUFFERDESC.dwNumVertices), 4);
 
@@ -929,14 +940,14 @@ test('a buffer no draw has read is locked in place, read whole at its first draw
     }
     const lockUnlock = (/** @type {number} */ buffer)=>{
         assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
-        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3DERR_VERTEXBUFFERLOCKED >>> 0,
-            'locked in place is locked');
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK,
+            'locked in place is locked again');
         assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
     };
     const process = (/** @type {number} */ at)=>assert.equal(h.buffer(dest, 'ProcessVertices',
         [1, at, 4, src, 0, device, 0]), D3D_OK);
     const draw = ()=>assert.equal(h.device(device, 'DrawPrimitiveVB', [4, dest, 0, 3, 0]),
-        D3DERR_SCENE_NOT_IN_SCENE >>> 0, 'outside a scene, the buffer still readied');
+        D3D_OK, 'outside a scene, the buffer readied');
 
     lockUnlock(src);
     process(0);
@@ -961,7 +972,6 @@ test('a buffer no draw has read is locked in place, read whole at its first draw
     h.release(ddraw);
     h.assertAllReleased();
 });
-
 
 /**
  * The enumerations, driven through the descriptor directly: each answers with

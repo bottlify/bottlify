@@ -33,6 +33,9 @@ export const SHADER_KIND = Object.freeze({
     PIXEL: 0,
     VERTEX: 1,
     GEOMETRY: 2,
+    HULL: 3,
+    DOMAIN: 4,
+    COMPUTE: 5,
 });
 
 /** The component types a signature element declares. */
@@ -56,8 +59,18 @@ export const SYSTEM_VALUE = Object.freeze({
     INSTANCE_ID: 8,
     IS_FRONT_FACE: 9,
     SAMPLE_INDEX: 10,
+    // A hull shader's patch constants the tessellator reads.
+    QUAD_EDGE_TESSFACTOR: 11,
+    QUAD_INSIDE_TESSFACTOR: 12,
+    TRI_EDGE_TESSFACTOR: 13,
+    TRI_INSIDE_TESSFACTOR: 14,
+    LINE_DETAIL_TESSFACTOR: 15,
+    LINE_DENSITY_TESSFACTOR: 16,
     TARGET: 64,
     DEPTH: 65,
+    COVERAGE: 66,
+    DEPTH_GREATER_EQUAL: 67,
+    DEPTH_LESS_EQUAL: 68,
 });
 
 /**
@@ -70,6 +83,8 @@ export const SYSTEM_VALUE = Object.freeze({
  * @property {number} mask          Which components the element occupies.
  * @property {number} readWriteMask Which of them the program reads (inputs) or
  *                                  leaves unwritten (outputs).
+ * @property {number} [stream]      The vertex stream a geometry shader's output is
+ *                                  on (OSG5, OSG1); 0 where the signature has none.
  */
 
 /**
@@ -108,20 +123,24 @@ function cString(bytes, at){
  * element with the name stored as an offset into the chunk.
  *
  * @param {Uint8Array} chunk
+ * @param {boolean} [streamed]  each row starts with its stream
+ * @param {number} [size]  bytes a row
  * @returns {SignatureElement[]}
  */
-export function parseSignature(chunk){
+function parseSignature(chunk, streamed = false, size = 24){
     const count = u32(chunk, 0);
     const rows = u32(chunk, 4);
     /** @type {SignatureElement[]} */
     const elements = [];
     for (let index = 0; index < count; index++)
     {
-        const at = rows + index * 24;
-        if (at + 24 > chunk.length)
+        const start = rows + index * size;
+        if (start + size > chunk.length)
         {
             break;
         }
+        // A streamed row begins with its stream; the rest is laid out as ever.
+        const at = streamed ? start + 4 : start;
         const masks = u32(chunk, at + 20);
         elements.push({
             name: cString(chunk, u32(chunk, at)),
@@ -131,9 +150,49 @@ export function parseSignature(chunk){
             register: u32(chunk, at + 16),
             mask: masks & 0xff,
             readWriteMask: (masks >>> 8) & 0xff,
+            ...(streamed ? { stream: u32(chunk, start) } : {}),
         });
     }
     return elements;
+}
+
+/**
+ * A shader's outputs from whichever signature chunk it has: OSGN, or a
+ * geometry shader's OSG5 or OSG1, whose rows name a stream.
+ *
+ * @param {Map<string, Uint8Array>} chunks
+ * @returns {SignatureElement[]}
+ */
+function outputsOf(chunks){
+    const plain = chunks.get('OSGN');
+    if (plain)
+    {
+        return parseSignature(plain);
+    }
+    const five = chunks.get('OSG5');
+    if (five)
+    {
+        return parseSignature(five, true, 28);
+    }
+    const one = chunks.get('OSG1');
+    return one ? parseSignature(one, true, 32) : [];
+}
+
+/**
+ * A hull or domain shader's patch constants: its PCSG, or the PSG1 of a
+ * compiler that writes each row's stream and minimum precision.
+ *
+ * @param {Map<string, Uint8Array>} chunks
+ * @returns {SignatureElement[]}
+ */
+export function patchConstantsOf(chunks){
+    const plain = chunks.get('PCSG');
+    if (plain)
+    {
+        return parseSignature(plain);
+    }
+    const one = chunks.get('PSG1');
+    return one ? parseSignature(one, true, 32) : [];
 }
 
 /**
@@ -202,9 +261,7 @@ export function parseDxbc(bytes){
     return {
         chunks,
         inputs: chunks.has('ISGN') ? parseSignature(/** @type {Uint8Array} */ (chunks.get('ISGN'))) : [],
-        outputs: chunks.has('OSGN')
-            ? parseSignature(/** @type {Uint8Array} */ (chunks.get('OSGN')))
-            : [],
+        outputs: outputsOf(chunks),
         shader: shaderChunk ? parseShader(shaderChunk) : null,
     };
 }
@@ -216,14 +273,52 @@ export function parseDxbc(bytes){
  *
  * @param {Uint8Array} bytes
  * @param {number} kind  A SHADER_KIND.
+ * @param {number} [most]  The newest shader model the device takes, as 0xMm: 0x40 is
+ *     4.0, the default, and 0x50 is 5.0.
  * @returns {DxbcContainer | null}
  */
-export function parseShaderOfKind(bytes, kind){
+export function parseShaderOfKind(bytes, kind, most = 0x40){
     const container = parseDxbc(bytes);
-    if (!container || !container.shader || container.shader.kind !== kind
-        || container.shader.major !== 4)
+    const shader = container?.shader;
+    if (!container || !shader || shader.kind !== kind || shader.major < 4
+        || ((shader.major << 4) | shader.minor) > most)
     {
         return null;
     }
     return container;
+}
+
+/** The opcodes that declare views of raw and structured memory, and UAVs. */
+const FIRST_BUFFER_DECLARATION = 156; // dcl_uav_typed
+const LAST_BUFFER_DECLARATION = 162; // dcl_resource_structured
+const CUSTOMDATA = 53;
+
+/**
+ * Whether a program declares an unordered-access view, or a raw or structured
+ * resource or group memory. Shader model 4 has these only on hardware that
+ * reports compute through shader model 4, which no device here does: a
+ * feature level 10 device refuses such a program as Windows does there
+ * (test_unaligned_raw_buffer_access).
+ *
+ * @param {ShaderProgram} shader
+ */
+export function declaresBufferViews(shader){
+    const tokens = shader.tokens;
+    let at = 0;
+    while (at < tokens.length)
+    {
+        const token = tokens[at];
+        const opcode = token & 0x7ff;
+        if (opcode >= FIRST_BUFFER_DECLARATION && opcode <= LAST_BUFFER_DECLARATION)
+        {
+            return true;
+        }
+        const length = opcode === CUSTOMDATA ? tokens[at + 1] : (token >>> 24) & 0x7f;
+        if (!length)
+        {
+            return false;
+        }
+        at += length;
+    }
+    return false;
 }

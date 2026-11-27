@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * hid.dll: the HID class driver's user-mode side, on a machine with no HID
  * device but the keyboard and mouse the system owns.
@@ -42,9 +44,9 @@ export function createHidFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([guid])=>{
-                if ((guid >>> 0) !== 0)
+                if (wholeAddress(guid) !== 0)
                 {
-                    host.writeMemory(guid >>> 0, HID_GUID);
+                    host.writeMemory(wholeAddress(guid), HID_GUID);
                 }
                 return 0;
             },
@@ -66,6 +68,24 @@ export function createHidFunctions(host){
         HidD_GetFeature: noDevice(12),
         /** BOOLEAN HidD_SetFeature(HANDLE, PVOID, ULONG) */
         HidD_SetFeature: noDevice(12),
+        // The rest of what hid.dll exports and a HID library binds all at once: SDL's
+        // HIDAPI takes hid.dll as missing when one of its names does not resolve, and
+        // tries again at every look for a controller - a LoadLibrary, eight
+        // GetProcAddress and a FreeLibrary each frame of a game's loading screen.
+        /** BOOLEAN HidD_GetIndexedString(HANDLE, ULONG StringIndex, PVOID, ULONG) */
+        HidD_GetIndexedString: noDevice(16),
+        /** BOOLEAN HidD_GetPhysicalDescriptor(HANDLE, PVOID, ULONG) */
+        HidD_GetPhysicalDescriptor: noDevice(12),
+        /** BOOLEAN HidD_GetInputReport(HANDLE, PVOID, ULONG) */
+        HidD_GetInputReport: noDevice(12),
+        /** BOOLEAN HidD_SetOutputReport(HANDLE, PVOID, ULONG) */
+        HidD_SetOutputReport: noDevice(12),
+        /** BOOLEAN HidD_GetNumInputBuffers(HANDLE, PULONG) */
+        HidD_GetNumInputBuffers: noDevice(8),
+        /** BOOLEAN HidD_SetNumInputBuffers(HANDLE, ULONG) */
+        HidD_SetNumInputBuffers: noDevice(8),
+        /** BOOLEAN HidD_FlushQueue(HANDLE) */
+        HidD_FlushQueue: noDevice(4),
 
         /** NTSTATUS HidP_GetCaps(PHIDP_PREPARSED_DATA, PHIDP_CAPS) */
         HidP_GetCaps: { argBytes: 8, handler: ()=>HIDP_STATUS_INVALID_PREPARSED_DATA },

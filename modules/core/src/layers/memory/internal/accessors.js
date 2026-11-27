@@ -15,14 +15,19 @@
  * would otherwise have been caught.
  */
 
+import { guestFault, unterminated } from './faults.js';
+
 /**
  * @typedef {Object} RawMemory
  * @property {(address: number, bytes: Uint8Array) => void} [writeData]
- *     Writes bytes the guest cannot execute, without telling the emulator's
- *     compiler anything. Absent in a build whose memory is a plain buffer.
+ *     Writes bytes the guest cannot execute, without telling the translator
+ *     anything. Absent in a build whose memory is a plain buffer.
  * @property {(address: number, value: number, length: number) => void} [fillData]
  *     The same, for a run of one repeated byte, with no buffer to hold the
  *     pattern. Absent in a build whose memory has no such path.
+ * @property {(address: number, value: number) => void} [writeU32Data]
+ *     A dword stored into data, with no bytes made for it; the region
+ *     checks are the caller's, as writeData's are.
  * @property {(address: number, length: number) => Uint8Array} readPhysical
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, with nothing allocated. Absent in a build whose
@@ -37,6 +42,8 @@
  *     The RAM in place, byte 0 at address 0; stale once empty or detached.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  * @property {(address: number, length: number) => void} [markWritten]
+ * @property {(address: number, length: number) => void} [wrote]  bytes already in the
+ *     RAM taken as written here: the translator drops what it made of them, nothing is copied
  *     Bytes another thread wrote in place: a watch of their pages finds them
  *     written. Absent where the engine watches no writes.
  * @property {(address: number, length: number) =>
@@ -75,16 +82,48 @@ const LATIN1 = new TextDecoder('latin1');
 const C1 = /[\u0080-\u009f]/;
 const C1_ALL = /[\u0080-\u009f]/g;
 
+/** Units given to `String.fromCharCode` at once: well under any engine's argument limit. */
+const TEXT_CHUNK = 0x2000;
+
+/** Units made of bytes that are not them already, a chunk at a time. */
+const unitScratch = new Uint16Array(TEXT_CHUNK);
+
+/**
+ * A string's bytes put where the decoder takes them: `TextDecoder` refuses a
+ * view of shared memory, and a string of guest memory is one. Made once; a
+ * longer string is copied on its own.
+ */
+const ansiScratch = new Uint8Array(4096);
+
+/** Whether this host lays a 16-bit unit out low byte first, as the guest does. */
+const LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
+
 /**
  * Bytes of the ANSI page as text. The encoding standard makes 'latin1' a
  * label of windows-1252, and Chrome decodes it so; Node 22 decodes it -- and
  * 'windows-1252' itself -- as ISO-8859-1, reading 0x80 to 0x9F as C1
  * controls, so what those come back as is mapped here and both hosts agree.
+ * A view of shared memory is decoded through one buffer made once, not a
+ * copy of its own: the native decoder over a copy is faster than decoding
+ * the view by code units, and the copy is no allocation.
  *
  * @param {Uint8Array} bytes
  */
 export const decodeAnsiBytes = bytes=>{
-    const text = LATIN1.decode(bytes);
+    let plain = bytes;
+    if (typeof SharedArrayBuffer === 'function' && bytes.buffer instanceof SharedArrayBuffer)
+    {
+        if (bytes.length <= ansiScratch.length)
+        {
+            ansiScratch.set(bytes);
+            plain = ansiScratch.subarray(0, bytes.length);
+        }
+        else
+        {
+            plain = bytes.slice();
+        }
+    }
+    const text = LATIN1.decode(plain);
     return C1.test(text)
         ? text.replace(C1_ALL, c=>String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 0x80]
             || c.charCodeAt(0)))
@@ -102,6 +141,17 @@ export const decodeAnsiBytes = bytes=>{
  *     The dword reads, checked and made out of the machine's RAM.
  */
 export function createAccessors({ raw, regions, charge = null, reader = null }){
+    /**
+     * The address a host handler means. Arguments cross the bridge as signed
+     * 32-bit numbers, and a page or an alignment worked out with JavaScript's
+     * bitwise operators comes out signed too, so a guest address above 2 GiB
+     * - a large-address-aware program's heap - arrives negative. It names the
+     * same guest byte; no guest address is negative.
+     *
+     * @param {number} address
+     */
+    const unsigned = address=>(address < 0 ? address >>> 0 : address);
+
     /**
      * The last regions a read validated, by span and the table's version. A
      * host call reads several dwords -- its arguments on the stack, the fields
@@ -122,6 +172,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const readableSpan = (address, length)=>{
+        address = unsigned(address);
         const version = regions.version;
         for (let i = 0; i < readable.length; i++)
         {
@@ -150,10 +201,11 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @returns {Uint8Array}
      */
     const read = (address, length)=>{
+        address = unsigned(address);
         // The region the last read fell in, as for a dword below: a handler
         // that reads a structure reads it out of the region its pointer is in.
         readableSpan(address, length);
-        // A copy, not a window. The emulator hands back a subarray of its own
+        // A copy, not a window. The engine hands back a subarray of its own
         // memory, and a caller that holds one has a value that changes under it
         // -- read two ranges, write one, and the other has silently moved. The
         // shape of that bug is a wrong result with nothing to point at. A hot
@@ -163,15 +215,15 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
     };
 
     /**
-     * The bytes in place, for a scan done with them before anything else
-     * runs: the search for a terminator. Each chunk of a string's scan copied
-     * by `read` was most of what reading a string cost a host call. Not for a
-     * decode -- `TextDecoder` refuses a view of shared memory, which a page's
-     * guest memory is.
+     * The bytes in place, for a scan or a decode done with them before
+     * anything else runs: the search for a terminator, the string's text.
+     * Each chunk of a string's scan copied by `read` was most of what reading
+     * a string cost a host call.
      *
      * @param {number} address @param {number} length
      */
     const view = (address, length)=>{
+        address = unsigned(address);
         readableSpan(address, length);
         return raw.readPhysical(address, length);
     };
@@ -199,8 +251,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
                 }
             }
         }
-        throw new Error(
-            `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+        throw unended('wide NUL', address, limit & ~1, span, 2);
     };
 
     /**
@@ -215,22 +266,38 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} limit
      */
     const scannable = (address, limit)=>{
+        address = unsigned(address);
         const region = regions.find(address);
         return region ? Math.min(limit, region.base + region.size - address) : limit;
     };
+
+    /**
+     * Why a scan found no terminator: its region ended first -- the next
+     * byte is a fault, as the processor would have taken it -- or the limit
+     * did, and the string is only longer than the caller would look.
+     *
+     * @param {string} what @param {number} address @param {number} limit
+     * @param {number} span  How far the scan read. @param {number} unit
+     */
+    const unended = (what, address, limit, span, unit)=>(span < limit
+        ? guestFault(`No ${what} before the end of the region, from 0x${address.toString(16)}`,
+            address + span, unit, 'read')
+        : unterminated(`No ${what} within ${limit} bytes of 0x${address.toString(16)}`,
+            address, limit));
 
     /**
      * @param {number} address
      * @param {Uint8Array} bytes
      */
     const write = (address, bytes)=>{
+        address = unsigned(address);
         regions.assert(address, bytes.length, 'write');
         if (charge)
         {
             charge(bytes.length);
         }
         // Only a write the guest could execute has anything to tell the
-        // emulator's compiler. Everything else -- a structure field, an
+        // translator. Everything else -- a structure field, an
         // out-parameter, a surface -- goes straight into memory.
         if (raw.writeData && !regions.executable(address))
         {
@@ -255,21 +322,24 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const fill = (address, value, length)=>{
+        address = unsigned(address);
         if (length <= 0)
         {
             return;
         }
-        // An executable target has the emulator's compiler to tell, and the
+        // Refused before anything is made: a buffer the length of a span
+        // that is not there -- a program's memset of a stray pointer and
+        // size -- is gigabytes the host would allocate only to throw away.
+        regions.assert(address, length, 'write');
+        // An executable target has the translator to tell, and the
         // write path is what tells it. That is a guest code page rather than a
         // heap block, so it is rare, and a buffer there costs nothing worth
-        // saving. An unmapped address lands here too, and is refused by the
-        // same assertion a write would have made.
+        // saving.
         if (!raw.fillData || regions.executable(address))
         {
             write(address, new Uint8Array(length).fill(value & 0xff));
             return;
         }
-        regions.assert(address, length, 'write');
         if (charge)
         {
             // Once for the range, as the equivalent write would be charged.
@@ -290,6 +360,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @returns {number}
      */
     const readInteger = (address, length)=>{
+        address = unsigned(address);
         if (length === 4 && reader !== null)
         {
             return reader.readU32(address);
@@ -326,6 +397,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} [at]  Where in `into` the first word lands.
      */
     const readU32sInto = (address, count, into, at = 0)=>{
+        address = unsigned(address);
         if (reader !== null)
         {
             try
@@ -384,6 +456,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number[] | Float32Array} into
      */
     const readF32sInto = (address, count, into)=>{
+        address = unsigned(address);
         if (raw.readF32)
         {
             let region;
@@ -416,6 +489,22 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const writeInteger = (address, value, length)=>{
+        if (length === 4 && raw.writeU32Data)
+        {
+            // The store every host call makes several of -- an out-parameter,
+            // a field, a count: one word into the RAM, no bytes made for it.
+            address = unsigned(address);
+            regions.assert(address, 4, 'write');
+            if (!regions.executable(address))
+            {
+                if (charge)
+                {
+                    charge(4);
+                }
+                raw.writeU32Data(address, value);
+                return;
+            }
+        }
         for (let i = 0; i < length; i++)
         {
             scratch[i] = (value >>> (i * 8)) & 0xff;
@@ -432,12 +521,13 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          * Bytes another thread wrote into the guest's memory in place -- a
          * worker sharing it -- taken as this thread's own write: the range is
          * the program's to have written, it is charged, and a range the
-         * guest could execute is told to the emulator's compiler, as a write
+         * guest could execute is told to the translator, as a write
          * through here would have been.
          *
          * @param {number} address @param {number} length
          */
         adopt(address, length){
+            address = unsigned(address);
             if (length <= 0)
             {
                 return;
@@ -447,9 +537,18 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             {
                 charge(length);
             }
-            if (!raw.writeData || regions.executable(address))
+            // Told, never written again: a copy read and written back would
+            // undo another thread's store between the two, a guest's swap of
+            // the same word on another executor among them.
+            if (raw.wrote && regions.executable(address))
             {
-                raw.writePhysical(address, raw.readPhysical(address, length).slice());
+                raw.wrote(address, length);
+            }
+            else if (!raw.writeData || regions.executable(address))
+            {
+                // The bytes written back where they lie: the write copies them
+                // over themselves.
+                raw.writePhysical(address, raw.readPhysical(address, length));
             }
             else
             {
@@ -458,13 +557,14 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
         },
 
         /**
-         * The window the copy above refuses: the emulator's own bytes, valid
+         * The window the copy above refuses: the engine's own bytes, valid
          * only until control returns to the guest. For a path that reads a
          * block every call and has measured what the copy costs.
          *
          * @param {number} address @param {number} length
          */
         window(address, length){
+            address = unsigned(address);
             regions.assert(address, length, 'read');
             return raw.readPhysical(address, length);
         },
@@ -507,10 +607,10 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             }
             if (length === -1)
             {
-                throw new Error(
-                    `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
+                throw unended('NUL', address, limit, span, 1);
             }
-            return decodeAnsiBytes(read(address, length));
+            // Decoded where it lies: nothing runs between the scan and the decode.
+            return decodeAnsiBytes(view(address, length));
         },
 
         /**
@@ -544,8 +644,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
                     }
                 }
             }
-            throw new Error(
-                `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
+            throw unended('NUL', address, limit, span, 1);
         },
 
         /**
@@ -558,9 +657,42 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          */
         readWideString(address, limit = 8192){
             const units = scanWideString(address, limit);
-            return new TextDecoder('utf-16le').decode(read(address, units * 2));
+            return unitsText(view(address, units * 2));
         },
 
         scanWideString,
     };
+}
+
+/**
+ * UTF-16 units as a string, unit for unit. A Windows string is a sequence of
+ * units, not of characters: half a surrogate pair is a legal unit in a file
+ * name or a message, and a decoder would replace it with U+FFFD.
+ *
+ * @param {Uint8Array} bytes  little-endian, an even count
+ * @returns {string}
+ */
+function unitsText(bytes){
+    const count = bytes.length >> 1;
+    // The units themselves where they lie on a unit's boundary and the host
+    // reads them as the guest wrote them; made a chunk at a time otherwise.
+    const units = LITTLE_ENDIAN && (bytes.byteOffset & 1) === 0
+        ? new Uint16Array(bytes.buffer, bytes.byteOffset, count) : null;
+    let text = '';
+    for (let at = 0; at < count; at += TEXT_CHUNK)
+    {
+        const end = Math.min(count, at + TEXT_CHUNK);
+        if (units)
+        {
+            text += String.fromCharCode.apply(null, /** @type {any} */ (units.subarray(at, end)));
+            continue;
+        }
+        for (let i = at; i < end; i++)
+        {
+            unitScratch[i - at] = bytes[i * 2] | bytes[i * 2 + 1] << 8;
+        }
+        text += String.fromCharCode.apply(null,
+            /** @type {any} */ (unitScratch.subarray(0, end - at)));
+    }
+    return text;
 }

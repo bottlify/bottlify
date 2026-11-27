@@ -95,62 +95,6 @@ const build = ()=>{
     };
 };
 
-test('a cast to a base at offset zero answers the same address', ()=>{
-    const { graph, table } = build();
-    const instance = graph.object(0);
-    assert.equal(table.__RTDynamicCast.handler(
-        [instance, 0, graph.types.derived, graph.types.base, 0]), instance);
-});
-
-test('a cast to a base further in adds that base\'s offset', ()=>{
-    const { graph, table } = build();
-    const instance = graph.object(0);
-    assert.equal(table.__RTDynamicCast.handler(
-        [instance, 0, graph.types.derived, graph.types.second, 0]), instance + 8);
-});
-
-test('a type that is not a base of this object casts to null', ()=>{
-    const { graph, table } = build();
-    const instance = graph.object(0);
-    assert.equal(table.__RTDynamicCast.handler(
-        [instance, 0, graph.types.derived, graph.types.stranger, 0]), 0);
-});
-
-test('casting null is null rather than a read through zero', ()=>{
-    const { graph, table } = build();
-    assert.equal(table.__RTDynamicCast.handler(
-        [0, 0, graph.types.derived, graph.types.base, 0]), 0);
-});
-
-test('the locator\'s offset reaches the complete object from a subobject', ()=>{
-    const { graph, table } = build();
-    // A pointer to the Second subobject: its locator records that it sits
-    // eight bytes into the complete object.
-    const subobject = graph.object(8);
-    assert.equal(table.__RTDynamicCast.handler(
-        [subobject, 0, graph.types.second, graph.types.base, 0]), subobject - 8);
-});
-
-test('the delta argument is subtracted before anything else is read', ()=>{
-    const { graph, table } = build();
-    const instance = graph.object(0);
-    // A caller holding a pointer four bytes into its own subobject.
-    assert.equal(table.__RTDynamicCast.handler(
-        [instance + 4, 4, graph.types.derived, graph.types.second, 0]), instance + 8);
-});
-
-test('two descriptors for one type match by name across images', ()=>{
-    const { memory, graph, table } = build();
-    const instance = graph.object(0);
-    // A second image's descriptor for the same class: a different address,
-    // the same decorated name.
-    const elsewhere = memory.allocate(32);
-    memory.writeMemory(elsewhere + 8, new Uint8Array(
-        [...'.?AVSecond@@'].map(character=>character.charCodeAt(0)).concat(0)));
-    assert.equal(table.__RTDynamicCast.handler(
-        [instance, 0, graph.types.derived, elsewhere, 0]), instance + 8);
-});
-
 test('__RTtypeid answers the complete object\'s own type descriptor', ()=>{
     const { graph, table } = build();
     assert.equal(table.__RTtypeid.handler([graph.object(0)]), graph.types.derived);

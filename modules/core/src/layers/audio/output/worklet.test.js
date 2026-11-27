@@ -11,7 +11,22 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createMixer } from './mixer.js';
-import { GLOBAL_HEADER_INT32, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES } from './mix.js';
+import {
+    GLOBAL_HEADER_INT32, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES, READ, SLOT_HEADER_INT32,
+    slotHeaderOffset,
+} from './mix.js';
+import { readSoundTable } from '../../../host/sound-meter.js';
+
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
 
 const MIX_PATH = fileURLToPath(new URL('./mix.js', import.meta.url));
 const WORKLET_PATH = fileURLToPath(new URL('./worklet.js', import.meta.url));
@@ -75,7 +90,7 @@ const pcm16 = samples=>{
 const outputBlock = frames=>[new Float32Array(frames), new Float32Array(frames)];
 
 test('two tracks at different rates and gains come out summed', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     const music = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const effect = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     music.gain = 1;
@@ -99,8 +114,8 @@ test('two tracks at different rates and gains come out summed', ()=>{
 test('each process\'s table is its own, and the output plays them all at once', ()=>{
     // Two processes, as two films playing at once: neither table holds the
     // other's tracks, so neither can close them, and they meet only here.
-    const run = createMixer({ shared: true, sampleRate: 48000 });
-    const child = createMixer({ shared: true, sampleRate: 48000 });
+    const run = createMixer({ sampleRate: 48000 });
+    const child = createMixer({ sampleRate: 48000 });
     const music = run.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const voice = child.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     music.gain = 1;
@@ -123,7 +138,7 @@ test('each process\'s table is its own, and the output plays them all at once', 
 });
 
 test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     const left = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     const right = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
     left.balance = [1, 0];
@@ -145,34 +160,36 @@ test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
 });
 
 test('a silent block counts STARVED_BLOCKS and STARVED_FRAMES', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 }); // nothing written
 
     const Processor = loadWorkletClass();
     const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
     processor.process([], [outputBlock(16)]);
 
-    const global = new Int32Array(mixer.table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, mixer.table, 0, GLOBAL_HEADER_INT32);
     assert.equal(Atomics.load(global, BLOCKS), 1);
     assert.equal(Atomics.load(global, STARVED_BLOCKS), 1);
     assert.equal(Atomics.load(global, STARVED_FRAMES), 16);
 });
 
 test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
     // More than one block's worth, at the direct rate: one frame in, one out.
     track.write(pcm16(new Array(40).fill(1000)));
 
     const Processor = loadWorkletClass();
     const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
+    const header = tableView(Int32Array, mixer.table,
+        slotHeaderOffset(track.slot), SLOT_HEADER_INT32);
     processor.process([], [outputBlock(16)]);
     assert.equal(track.played(), 16);
-    assert.equal(track.playedBytes(), 32);
+    assert.equal(Atomics.load(header, READ), 32);
 
     processor.process([], [outputBlock(16)]);
     assert.equal(track.played(), 32);
-    assert.equal(track.playedBytes(), 64);
+    assert.equal(Atomics.load(header, READ), 64);
 
     // The last 8 frames: a short block, the rest of the output left silent.
     const outputs = [outputBlock(16)];
@@ -182,24 +199,18 @@ test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
     assert.equal(outputs[0][0][8], 0, 'nothing left to mix, so silence rather than a stale value');
 });
 
-test('without a table, the processor plays what is posted to the port it is handed', ()=>{
-    const BottlifyOutput = loadWorkletClass();
-    const processor = new BottlifyOutput({ processorOptions: { channels: 2 } });
-    /** @type {any[]} */
-    const said = [];
-    const feed = { onmessage: /** @type {any} */ (null), postMessage: (/** @type {any} */ m)=>said.push(m) };
-    processor.port.onmessage({ data: { type: 'feed', port: feed } });
-    feed.onmessage({ data: { at: 10, frames: Float32Array.from([1, -1, 2, -2, 3, -3]) } });
-
-    const outputs = [outputBlock(4)];
-    assert.equal(processor.process([], outputs), true);
-    assert.deepEqual([...outputs[0][0]], [1, 2, 3, 0]);
-    assert.deepEqual([...outputs[0][1]], [-1, -2, -3, 0]);
-    for (let block = 1; block < 4; block++)
+test('a page reads the speaker\'s gaps off the table the worklet plays', ()=>{
+    const mixer = createMixer({ sampleRate: 48000 });
+    const music = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    music.gain = 1;
+    music.write(pcm16([1, 2, 3, 4, 5, 6]));
+    const Processor = loadWorkletClass();
+    const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
+    for (let block = 0; block < 3; block++)
     {
         processor.process([], [outputBlock(4)]);
     }
-    assert.deepEqual({ ...said.at(-1) },
-        { played: 13, blocks: 4, starvedBlocks: 4, starvedFrames: 13 },
-        'what it played, as a place in the engine\'s ring, and what it found missing');
+    assert.deepEqual(readSoundTable(mixer.table),
+        { rate: 48000, blocks: 3, starvedBlocks: 2, starvedFrames: 6 },
+        'four frames, then two of four, then none: two blocks short by six frames');
 });

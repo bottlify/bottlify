@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 import { IID_IENUMIDLIST, IID_ISHELLFOLDER, MY_COMPUTER, itemsOf } from './namespace.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { createComRegistry } from '../ole32/objects.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -46,7 +47,11 @@ function machine(){
         'C:\\Program Files\\Common': { isDirectory: true, children: [] },
         'C:\\readme.txt': { isDirectory: false, children: [] },
     };
+    /** @type {Map<string, () => any>} */
+    const classes = new Map();
     const host = {
+        registerClass: (/** @type {string} */ clsid, /** @type {() => any} */ factory)=>
+            classes.set(clsid, factory),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
         allocate: (/** @type {number} */ bytes)=>{
@@ -104,7 +109,7 @@ function machine(){
     const lists = { readMemory: host.readMemory, writeMemory: host.writeMemory };
     /** @param {number} list */
     const texts = list=>itemsOf(lists, list);
-    return { memory, shell, call, u32, put, string, wide, texts, published };
+    return { memory, view, shell, call, u32, put, string, wide, texts, published, classes };
 }
 
 /**
@@ -195,6 +200,9 @@ test('attributes, names and a combined list say what a browser needs of an item'
     assert.equal(m.string(0x144), MY_COMPUTER, 'the :: prefix tells a program it is no path');
     assert.equal(m.call(desktop, FOLDER.GetDisplayNameOf, [computer, 0, 0x140]), S_OK);
     assert.equal(m.string(0x144), 'My Computer');
+    assert.equal(m.call(desktop, FOLDER.GetDisplayNameOf,
+        [computer, SHGDN_FORPARSING | 0x4001, 0x140]), S_OK);
+    assert.equal(m.string(0x144), 'My Computer', 'for the address bar, as it is shown');
 
     // A program combines the lists it was given into one, walking `cb`
     // fields and copying bytes; the result still names the place.
@@ -213,11 +221,22 @@ test('attributes, names and a combined list say what a browser needs of an item'
 
     // A path parses to its item, with the attributes asked for.
     m.put(0x150, SFGAO_FOLDER | SFGAO_FILESYSTEM);
+    m.put(0x14c, 0xdeadbeef);
     assert.equal(m.call(root, FOLDER.ParseDisplayName,
         [0, 0, m.wide('C:\\Program Files\\Common'), 0x14c, 0x148, 0x150]), S_OK);
     assert.deepEqual(m.texts(m.u32(0x148)), ['C:\\Program Files\\Common']);
     assert.equal(m.u32(0x150), SFGAO_FOLDER | SFGAO_FILESYSTEM, 'Common has no subfolder');
-    assert.equal(m.u32(0x14c), 'C:\\Program Files\\Common'.length);
+    assert.equal(m.u32(0x14c), 0xdeadbeef,
+        'the count eaten is left as it was (Wine\'s shfldr_special, against Windows)');
+    assert.equal(m.call(root, FOLDER.ParseDisplayName,
+        [0, 0, m.wide('\\\\?\\C:\\Program Files'), 0, 0x148, 0]) >>> 0, 0x80070057,
+    'no \\\\?\\ path');
+    assert.equal(m.u32(0x148), 0);
+    // Wine's shlfolder test: no name is E_INVALIDARG, read from nowhere.
+    m.put(0x148, 0xdeadbeef);
+    assert.equal(m.call(root, FOLDER.ParseDisplayName, [0, 0, 0, 0, 0x148, 0]) >>> 0,
+        0x80070057);
+    assert.equal(m.u32(0x148), 0, 'and the item is NULL');
 });
 
 test('binding a file, or asking for an interface the folder lacks, is refused with a null', ()=>{
@@ -415,4 +434,35 @@ test('the desktop parses its own items by CLSID, in any case: My Documents is it
     assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
         m.wide('::{20d04fe0-3aea-1069-a2d8-08002b30309d}'), 0, 0x10c, 0]), S_OK,
     'My Computer too');
+});
+
+test('the Control Panel is a folder of the desktop\'s, with nothing of the volume in it', ()=>{
+    // Wine's test_BindToObject: its parsing name binds, as a folder that lists nothing.
+    const m = machine();
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x104]), S_OK);
+    const desktop = m.u32(0x104);
+    m.view.setUint32(0x110, 0xffffffff, true);
+    assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
+        m.wide('::{21EC2020-3AEA-1069-A2DD-08002B30309D}'), 0, 0x108, 0x110]), S_OK);
+    assert.equal(m.u32(0x110), (0x4 | 0x20000000 | 0x80000000) >>> 0,
+        'SFGAO_CANLINK, SFGAO_FOLDER and SFGAO_HASSUBFOLDER');
+    assert.equal(m.shell.SHGetPathFromIDListA.handler([m.u32(0x108), 0x200]), 0, 'no path');
+});
+
+test('CoCreateInstance(CLSID_ShellDesktop) makes the desktop SHGetDesktopFolder answers', ()=>{
+    // ole32's marshal test makes the desktop this way.
+    const m = machine();
+    const registry = createComRegistry();
+    const CLSID_SHELL_DESKTOP = '{00021400-0000-0000-C000-000000000046}';
+    const factory = m.classes.get(CLSID_SHELL_DESKTOP);
+    assert.ok(factory, 'registered');
+    registry.registerClass(CLSID_SHELL_DESKTOP, factory);
+    const object = /** @type {any} */ (registry.create(CLSID_SHELL_DESKTOP));
+    const folder = object.queryInterface(IID_ISHELLFOLDER);
+    assert.ok(folder, 'as an IShellFolder');
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_DRIVES, 0x100]), S_OK);
+    const name = folder.methods.find((/** @type {any} */ method)=>
+        method.name === 'GetDisplayNameOf');
+    assert.equal(name.invoke(object, [m.u32(0x100), 0, 0x140]), S_OK);
+    assert.equal(m.string(0x144), 'My Computer', 'the desktop\'s own answer for its child');
 });

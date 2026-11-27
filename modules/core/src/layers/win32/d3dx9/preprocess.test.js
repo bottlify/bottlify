@@ -165,3 +165,25 @@ test('an #include goes to the program\'s ID3DXInclude, Open then Close, on the c
         assert.deepEqual(calls,
             [{ entry: 0x900, thread: 'main' }, { entry: 0x904, thread: 'main' }]);
     });
+
+test('an include is closed once it and what it includes are read, its own includes opened'
+    + ' first, each told the file that includes it', async()=>{
+    /** @type {string[]} */
+    const events = [];
+    const files = /** @type {Record<string, string>} */ ({
+        'outer.h': '#include "inner.h"\n#define OUTER INNER',
+        'inner.h': '#define INNER 7',
+    });
+    /** @param {string} name @param {boolean} _system @param {string} parent */
+    const open = (name, _system, parent)=>{
+        events.push(`open ${name} from ${parent}`);
+        return files[name] ?? null;
+    };
+    const include = Object.assign(open, { close: (/** @type {string} */ name)=>{
+        events.push(`close ${name}`);
+    } });
+    const result = await preprocess('#include "outer.h"\nint a = OUTER;', { include });
+    assert.ok(!('error' in result) && /int a = 7;/.test(result.text ?? String(result)));
+    assert.deepEqual(events, ['open outer.h from memory', 'open inner.h from outer.h',
+        'close inner.h', 'close outer.h']);
+});

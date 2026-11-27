@@ -133,11 +133,7 @@ if (inWorker)
         }
     };
     const offscreen = canvas.transferControlToOffscreen();
-    // `?pacing=event`: the loop sleeps for events rather than looking on a
-    // short timer; see the host's messages for what was measured.
-    worker.postMessage({ type: 'canvas', canvas: offscreen,
-        pacing: new URLSearchParams(window.location.search).get('pacing') ?? 'page' },
-    [offscreen]);
+    worker.postMessage({ type: 'canvas', canvas: offscreen }, [offscreen]);
 
     namespace.start = (/** @type {any} */ request)=>{
         namespace.result = null;
@@ -159,7 +155,10 @@ if (inWorker)
     namespace.debug = (/** @type {string} */ name, /** @type {any[]} */ ...args)=>
         ask('debug', { name, args });
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
-    namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
+    namespace.readFile = (/** @type {string} */ path, /** @type {number | undefined} */ tail)=>
+        ask('readFile', { path, tail });
+    namespace.standing = (/** @type {string | undefined} */ list, /** @type {number} */ journal = 0)=>
+        ask('standing', { list, journal });
     namespace.input = (/** @type {any} */ event)=>ask('input', { event });
     namespace.stop = ()=>ask('stop');
     namespace.clearLog = ()=>{
@@ -182,6 +181,7 @@ else
     namespace.lastDumped = harness.lastDumped;
     namespace.debug = harness.debug;
     namespace.journalRecent = harness.journalRecent;
+    namespace.readFile = harness.readFile;
     namespace.standing = harness.standing;
     namespace.input = harness.input;
     namespace.stop = harness.stop;
@@ -202,7 +202,7 @@ else
         harness.run(request).then(finish, error=>finish({
             ok: false,
             error: String(error && error.message),
-            stack: String(error && error.stack).split('\n').slice(0, 8).join('\n'),
+            stack: String(error && error.stack).split('\n').slice(0, 24).join('\n'),
         }));
     };
     harness.gpu.then(handle=>{

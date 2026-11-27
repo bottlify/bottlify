@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createFakeGuest } from '../script/guest.fixture.js';
 import {
     IID_IACTIVESCRIPT, IID_IACTIVESCRIPTPARSE32, IID_IOBJECTSAFETY, SCRIPTITEM_GLOBALMEMBERS,

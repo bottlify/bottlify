@@ -38,6 +38,6 @@ A Bottlify program gets the network through `createApp({ network: { module, url,
 
 ## Documentation
 
-[The relay's options, the client's API, the wire protocol](https://github.com/bottlify/bottlify/blob/main/docs/networking/README.md)
+[The relay's options, the client's API, the wire protocol](https://bottlify.app/docs/networking/)
 
 MPL-2.0.

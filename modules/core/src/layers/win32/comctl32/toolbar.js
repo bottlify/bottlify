@@ -22,6 +22,22 @@
  * image list the program hands over with TB_SETIMAGELIST. A disabled button
  * shows its image embossed.
  *
+ * A button is as large as its image and the padding around it (TB_SETPADDING,
+ * 7 by 6 at first), a text row under it once a button has text, and as wide
+ * as its widest text; TB_SETBUTTONSIZE makes it larger, never smaller than
+ * the image and padding. The size is worked out again when the images'
+ * size, the strings or the buttons change, as Wine's toolbar test
+ * (test_sizes, test_add_bitmap) records Windows doing it.
+ *
+ * TB_ADDBITMAP counts images two ways, as Windows does: its answer is the
+ * sum of the counts the program declared for the bitmaps before (the
+ * standard strips' own counts for theirs), while the list holds what each
+ * bitmap actually gives at the image size - all of its images, more blank
+ * ones up to the declared count, or for a count of zero only the first. A
+ * bitmap added twice answers where it was added first. The toolbar's own list
+ * is made again at the new size when TB_SETBITMAPSIZE or a standard strip
+ * changes it; a list the program handed over keeps its size.
+ *
  * What is not here: tooltips, the hot look of a flat button under the mouse,
  * drop-down buttons, customization, TB_AUTOSIZE, wrapping by width, and
  * comctl32's standard bitmaps, whose images are left blank.
@@ -30,9 +46,15 @@
 import {
     WM_PAINT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_CAPTURECHANGED, WM_COMMAND,
     COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT, COLOR_GRAYTEXT,
-    pointOf,
+    pointOf, after,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { notifyWindow } from './notify.js';
+import { readText, writeText, LPSTR_TEXTCALLBACK } from './strings.js';
+import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import { stripOfBitmapId } from './strips.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -42,12 +64,12 @@ export const TOOLBAR_ATOM = 0x8014;
 
 /** Button states. */
 export const TBSTATE_CHECKED = 0x01;
-export const TBSTATE_PRESSED = 0x02;
+const TBSTATE_PRESSED = 0x02;
 export const TBSTATE_ENABLED = 0x04;
-export const TBSTATE_HIDDEN = 0x08;
-export const TBSTATE_INDETERMINATE = 0x10;
+const TBSTATE_HIDDEN = 0x08;
+const TBSTATE_INDETERMINATE = 0x10;
 export const TBSTATE_WRAP = 0x20;
-export const TBSTATE_MARKED = 0x80;
+const TBSTATE_MARKED = 0x80;
 
 /** Button styles. */
 export const TBSTYLE_BUTTON = 0x00;
@@ -58,23 +80,25 @@ export const TBSTYLE_CHECKGROUP = TBSTYLE_GROUP | TBSTYLE_CHECK;
 
 /** Window styles. */
 export const TBSTYLE_FLAT = 0x0800;
-export const TBSTYLE_LIST = 0x1000;
+const TBSTYLE_LIST = 0x1000;
+export const TBSTYLE_WRAPABLE = 0x0200;
 
 /** Messages, numbered off WM_USER as the header numbers them. */
 const WM_USER = 0x0400;
+const WM_SETFONT = 0x0030;
 export const TB_ENABLEBUTTON = WM_USER + 1;
 export const TB_CHECKBUTTON = WM_USER + 2;
-export const TB_PRESSBUTTON = WM_USER + 3;
-export const TB_HIDEBUTTON = WM_USER + 4;
-export const TB_INDETERMINATE = WM_USER + 5;
-export const TB_MARKBUTTON = WM_USER + 6;
+const TB_PRESSBUTTON = WM_USER + 3;
+const TB_HIDEBUTTON = WM_USER + 4;
+const TB_INDETERMINATE = WM_USER + 5;
+const TB_MARKBUTTON = WM_USER + 6;
 export const TB_ISBUTTONENABLED = WM_USER + 9;
 export const TB_ISBUTTONCHECKED = WM_USER + 10;
 export const TB_ISBUTTONPRESSED = WM_USER + 11;
 export const TB_ISBUTTONHIDDEN = WM_USER + 12;
-export const TB_ISBUTTONINDETERMINATE = WM_USER + 13;
-export const TB_ISBUTTONHIGHLIGHTED = WM_USER + 14;
-export const TB_SETSTATE = WM_USER + 17;
+const TB_ISBUTTONINDETERMINATE = WM_USER + 13;
+const TB_ISBUTTONHIGHLIGHTED = WM_USER + 14;
+const TB_SETSTATE = WM_USER + 17;
 export const TB_GETSTATE = WM_USER + 18;
 export const TB_ADDBITMAP = WM_USER + 19;
 export const TB_ADDBUTTONSA = WM_USER + 20;
@@ -88,44 +112,92 @@ export const TB_GETITEMRECT = WM_USER + 29;
 export const TB_BUTTONSTRUCTSIZE = WM_USER + 30;
 export const TB_SETBUTTONSIZE = WM_USER + 31;
 export const TB_SETBITMAPSIZE = WM_USER + 32;
-export const TB_GETTOOLTIPS = WM_USER + 35;
-export const TB_SETTOOLTIPS = WM_USER + 36;
+const TB_GETTOOLTIPS = WM_USER + 35;
+const TB_SETTOOLTIPS = WM_USER + 36;
 export const TB_SETPARENT = WM_USER + 37;
-export const TB_GETROWS = WM_USER + 40;
-export const TB_GETBITMAPFLAGS = WM_USER + 41;
-export const TB_SETCMDID = WM_USER + 42;
-export const TB_GETBUTTONTEXTA = WM_USER + 45;
+const TB_GETROWS = WM_USER + 40;
+const TB_GETBITMAPFLAGS = WM_USER + 41;
+const TB_SETCMDID = WM_USER + 42;
+const TB_GETBUTTONTEXTA = WM_USER + 45;
 export const TB_REPLACEBITMAP = WM_USER + 46;
-export const TB_SETINDENT = WM_USER + 47;
+const TB_SETINDENT = WM_USER + 47;
 export const TB_SETIMAGELIST = WM_USER + 48;
 export const TB_GETIMAGELIST = WM_USER + 49;
-export const TB_GETRECT = WM_USER + 51;
-export const TB_SETHOTIMAGELIST = WM_USER + 52;
-export const TB_GETHOTIMAGELIST = WM_USER + 53;
-export const TB_SETDISABLEDIMAGELIST = WM_USER + 54;
-export const TB_GETDISABLEDIMAGELIST = WM_USER + 55;
+export const TB_LOADIMAGES = WM_USER + 50;
+const TB_GETRECT = WM_USER + 51;
+const TB_SETHOTIMAGELIST = WM_USER + 52;
+const TB_GETHOTIMAGELIST = WM_USER + 53;
+const TB_SETDISABLEDIMAGELIST = WM_USER + 54;
+const TB_GETDISABLEDIMAGELIST = WM_USER + 55;
 export const TB_SETSTYLE = WM_USER + 56;
 export const TB_GETSTYLE = WM_USER + 57;
 export const TB_GETBUTTONSIZE = WM_USER + 58;
-export const TB_SETMAXTEXTROWS = WM_USER + 60;
-export const TB_GETTEXTROWS = WM_USER + 61;
-export const TB_INSERTBUTTONW = WM_USER + 67;
-export const TB_ADDBUTTONSW = WM_USER + 68;
+const TB_SETMAXTEXTROWS = WM_USER + 60;
+const TB_GETTEXTROWS = WM_USER + 61;
+const TB_INSERTBUTTONW = WM_USER + 67;
+const TB_ADDBUTTONSW = WM_USER + 68;
 export const TB_HITTEST = WM_USER + 69;
 export const TB_GETHOTITEM = WM_USER + 71;
 export const TB_SETHOTITEM = WM_USER + 72;
-export const TB_GETBUTTONTEXTW = WM_USER + 75;
-export const TB_ADDSTRINGW = WM_USER + 77;
-export const TB_MOVEBUTTON = WM_USER + 82;
-export const TB_GETMAXSIZE = WM_USER + 83;
-export const TB_SETEXTENDEDSTYLE = WM_USER + 84;
-export const TB_GETEXTENDEDSTYLE = WM_USER + 85;
+const TB_GETBUTTONTEXTW = WM_USER + 75;
+const TB_ADDSTRINGW = WM_USER + 77;
+const TB_MOVEBUTTON = WM_USER + 82;
+const TB_GETMAXSIZE = WM_USER + 83;
+const TB_SETEXTENDEDSTYLE = WM_USER + 84;
+const TB_GETEXTENDEDSTYLE = WM_USER + 85;
+export const TB_GETPADDING = WM_USER + 86;
+export const TB_SETPADDING = WM_USER + 87;
+const TB_SETUNICODEFORMAT = 0x2005;
+const TB_GETUNICODEFORMAT = 0x2006;
+const TB_GETBUTTONINFOW = WM_USER + 63;
+const TB_SETBUTTONINFOW = WM_USER + 64;
+export const TB_GETBUTTONINFOA = WM_USER + 65;
+export const TB_SETBUTTONINFOA = WM_USER + 66;
+
+/**
+ * TBBUTTONINFO, the same shape in both spellings: its size, the mask of what
+ * it carries, the command, image, state and style, the width, lParam, text.
+ */
+const BUTTONINFO = Object.freeze({ cbSize: 0, dwMask: 4, idCommand: 8, iImage: 12,
+    fsState: 16, fsStyle: 17, cx: 18, lParam: 20, pszText: 24, cchText: 28, SIZE: 32 });
+const TBIF_IMAGE = 0x0001;
+const TBIF_TEXT = 0x0002;
+const TBIF_STATE = 0x0004;
+const TBIF_STYLE = 0x0008;
+const TBIF_LPARAM = 0x0010;
+const TBIF_COMMAND = 0x0020;
+const TBIF_SIZE = 0x0040;
+const TBIF_BYINDEX = 0x80000000;
+
+/** What the toolbar tells its owner, off TBN_FIRST (-700). */
+export const TBN_HOTITEMCHANGE = -713 >>> 0;
+const WM_CREATE = 0x0001;
+const WM_STYLECHANGED = 0x007d;
+const GWL_STYLE = -16;
+const WM_NOTIFY = 0x004e;
+const WM_NOTIFYFORMAT = 0x0055;
+const NF_QUERY = 3;
+const NFR_UNICODE = 2;
+/** NMTBHOTITEM's dwFlags for a hot item set by a program. */
+const HICF_OTHER = 0x00;
+const HICF_LEAVING = 0x20;
+/** CBEN_ENDEDIT's two spellings, which a toolbar hands its owner in the owner's. */
+const CBEN_ENDEDITA = -805 >>> 0;
+const CBEN_ENDEDITW = -806 >>> 0;
+const CBEMAXSTRLEN = 260;
+/** A tooltip's request for its text, and the toolbar's to its owner for a button's tip. */
+const TTN_GETDISPINFOA = -520 >>> 0;
+const TTN_GETDISPINFOW = -530 >>> 0;
+export const TBN_GETINFOTIPA = -718 >>> 0;
+const TBN_GETINFOTIPW = -719 >>> 0;
+const INFOTIPSIZE = 1024;
+/** NMTTDISPINFO's szText, in characters. */
+const TIP_TEXT = 80;
 
 /** TBBUTTON: iBitmap, idCommand, fsState, fsStyle, two bytes, dwData, iString. */
 const TBBUTTON_SIZE = 20;
 /** TBADDBITMAP's hInst for comctl32's own strips, and how many images each holds. */
 const HINST_COMMCTRL = 0xffffffff;
-const STANDARD_COUNTS = Object.freeze({ 0: 15, 1: 15, 4: 12, 5: 12, 8: 5, 9: 5 });
 const ILC_MASK_COLOR32 = 0x0021;
 /** The first row's distance from the top, and a separator's width when it gives none. */
 const TOP_MARGIN = 2;
@@ -155,11 +227,22 @@ const DT_SINGLELINE = 0x0020;
  */
 
 /**
+ * A bitmap TB_ADDBITMAP was given: where, the count declared for it (a
+ * standard strip's own), and the declared counts before it.
+ *
+ * @typedef {Object} Source
+ * @property {number} instance @property {number} id @property {number} bitmap
+ * @property {number} declared @property {number} index
+ * @property {{ count: number, side: number } | null} strip
+ */
+
+/**
  * @typedef {Object} Button
  * @property {number} image @property {number} command
  * @property {number} state @property {number} style
  * @property {number} data
  * @property {number | string} string  An index into the toolbar's strings, or the text.
+ * @property {number} [width]  TBBUTTONINFO's cx: a width of its own, not the toolbar's.
  */
 
 /**
@@ -179,15 +262,20 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
      *     button: { cx: number, cy: number }, indent: number, owner: number | null,
      *     extended: number, list: number, ownList: boolean, disabledList: number,
      *     hotList: number, tooltips: number, textRows: number, strings: string[],
-     *     images: number, sources: { instance: number, id: number, bitmap: number,
-     *         count: number }[], pressed: number, said: Set<number> }}
+     *     declared: number, sources: Source[], pressed: number, said: Set<number>,
+     *     padding: { cx: number, cy: number }, hot: number, top: number, unicode: boolean,
+     *     version?: number }}
      */
     const state = record=>{
         const held = tk.stateOf(record);
         held.buttons ??= [];
         held.structSize ??= TBBUTTON_SIZE;
-        held.bitmap ??= { cx: 16, cy: 15 };
+        held.bitmap ??= { cx: 16, cy: 16 };
+        held.padding ??= { cx: 7, cy: 6 };
         held.button ??= { cx: 23, cy: 22 };
+        held.hot ??= -1;
+        held.top ??= TOP_MARGIN;
+        held.unicode ??= false;
         held.indent ??= 0;
         held.owner ??= null;
         held.extended ??= 0;
@@ -198,7 +286,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         held.tooltips ??= 0;
         held.textRows ??= 1;
         held.strings ??= [];
-        held.images ??= 0;
+        held.declared ??= 0;
         held.sources ??= [];
         held.pressed ??= -1;
         held.said ??= new Set();
@@ -208,23 +296,16 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     /** @param {string} name @param {...number} args */
     const imageCall = (name, ...args)=>images?.functions[name]?.handler(args) ?? -1;
 
-    /** @param {number} address @param {boolean} wide */
-    const readText = (address, wide)=>{
-        if (!wide)
-        {
-            return host.readCString(address, 1024);
-        }
-        let text = '';
-        for (let at = address; text.length < 1024; at += 2)
-        {
-            const [low, high] = host.readMemory(at, 2);
-            if ((low | high) === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(low | high << 8);
-        }
-        return text;
+    /** @param {number} at */
+    const read32 = at=>{
+        const b = host.readMemory(wholeAddress(at), 4);
+        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
+    };
+    /** @param {number} at @param {number} value */
+    const write32 = (at, value)=>{
+        const v = value >>> 0;
+        host.writeMemory(wholeAddress(at),
+            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
 
     /** @param {number} address @param {boolean} wide @returns {Button} */
@@ -240,8 +321,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             data: view.getUint32(12, true),
             // Past the 64K an index can be, iString is the text itself; -1 is
             // no text at all.
-            string: string !== -1 && (string >>> 0) > 0xffff ? readText(string >>> 0, wide)
-                : string,
+            string: string !== -1 && (string >>> 0) > 0xffff
+                ? readText(host, string >>> 0, wide) : string,
         };
     };
 
@@ -276,15 +357,16 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         const held = state(record);
         const flat = (record.style & TBSTYLE_FLAT) !== 0;
         let x = held.indent;
-        let y = TOP_MARGIN;
+        let y = held.top;
         return held.buttons.map(button=>{
             if ((button.state & TBSTATE_HIDDEN) !== 0)
             {
                 return null;
             }
             const separator = (button.style & TBSTYLE_SEP) !== 0;
-            const width = separator ? (button.image > 0 ? button.image : SEPARATOR_WIDTH)
-                : held.button.cx;
+            const width = button.width ? button.width
+                : separator ? (button.image > 0 ? button.image : SEPARATOR_WIDTH)
+                    : held.button.cx;
             const rect = { left: x, top: y, right: x + width, bottom: y + held.button.cy };
             x += width;
             if ((button.state & TBSTATE_WRAP) !== 0)
@@ -315,8 +397,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         if (on && (bits & TBSTATE_CHECKED) !== 0 && (button.style & TBSTYLE_GROUP) !== 0)
         {
             /** @param {number} at */
-            const grouped = at=>held.buttons[at] && (held.buttons[at].style & TBSTYLE_GROUP) !== 0
-                && (held.buttons[at].style & TBSTYLE_SEP) === 0;
+            // A group runs over a separator that is in it (TBSTYLE_SEP |
+            // TBSTYLE_GROUP) and ends at one that is not (Wine's basic_test).
+            const grouped = at=>held.buttons[at] && (held.buttons[at].style & TBSTYLE_GROUP) !== 0;
             for (const step of [-1, 1])
             {
                 for (let at = index + step; grouped(at); at += step)
@@ -329,23 +412,29 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     };
 
     /** @param {any} record @returns {number} the window WM_COMMAND and notifications go to */
-    const ownerOf = record=>state(record).owner ?? record.parent ?? 0;
+    const ownerOf = record=>state(record).owner ?? notifyWindow(record);
 
     /**
-     * Fills a list of the toolbar's own with `count` images from a bitmap,
-     * each where the button's iBitmap counts it: the images before it padded
-     * blank, any the bitmap has past `count` dropped.
+     * The images a bitmap gives at a list's image width: all it holds, blank
+     * ones more up to the count declared for it, only the first for a count
+     * of zero; a standard strip its own count, at its own image size.
      *
-     * @param {any} record @param {number} bitmap @param {number} count
-     * @returns {number} the first image's index
+     * @param {Source} source @param {number} actual  the images the bitmap holds
      */
-    const addImages = (record, bitmap, count)=>{
+    const imagesOf = (source, actual)=>(source.declared === 0 ? 1
+        : source.declared < 0 ? actual : Math.max(source.declared, actual));
+
+    /**
+     * Puts a bitmap's images at the end of the list, making the toolbar's
+     * own at the image size when there is none.
+     *
+     * @param {any} record @param {Source} source
+     */
+    const fill = (record, source)=>{
         const held = state(record);
-        const first = held.images;
         if (!images)
         {
-            held.images += count;
-            return first;
+            return;
         }
         if (held.list === 0)
         {
@@ -353,27 +442,53 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 ILC_MASK_COLOR32, 4, 4);
             held.ownList = true;
         }
-        while (imageCall('ImageList_GetImageCount', held.list) < first)
+        const before = imageCall('ImageList_GetImageCount', held.list);
+        if (source.strip)
         {
-            imageCall('ImageList_Add', held.list, 0, 0);
+            // The strip's pixels are not here: its images, at the list's
+            // width, go in blank.
+            const width = images.size(held.list)?.cx || source.strip.side;
+            imageCall('ImageList_SetImageCount', held.list,
+                before + Math.floor(source.strip.count * source.strip.side / width));
+            return;
         }
-        if (bitmap !== 0)
+        imageCall('ImageList_AddMasked', held.list, source.bitmap, tk.color(COLOR_3DFACE));
+        const actual = imageCall('ImageList_GetImageCount', held.list) - before;
+        const wanted = imagesOf(source, actual);
+        if (wanted > actual)
         {
-            imageCall('ImageList_AddMasked', held.list, bitmap, tk.color(COLOR_3DFACE));
+            imageCall('ImageList_SetImageCount', held.list, before + wanted);
         }
-        const added = imageCall('ImageList_GetImageCount', held.list) - first;
-        const kept = count > 0 ? count : Math.max(0, added);
-        for (let at = first + added - 1; at >= first + kept; at--)
+        for (let at = before + actual - 1; at >= before + wanted; at--)
         {
             imageCall('ImageList_Remove', held.list, at);
         }
-        held.images = first + kept;
-        return first;
     };
 
     /**
-     * TB_ADDBITMAP: a bitmap handle (hInst NULL), a bitmap resource of a
-     * module, or one of comctl32's standard strips.
+     * The toolbar's own list made again at the image size from every bitmap
+     * in order; a list the program handed over is left as it is.
+     *
+     * @param {any} record
+     */
+    const refill = record=>{
+        const held = state(record);
+        if (!held.ownList || held.list === 0)
+        {
+            return;
+        }
+        imageCall('ImageList_Destroy', held.list);
+        held.list = 0;
+        held.ownList = false;
+        for (const source of held.sources)
+        {
+            fill(record, source);
+        }
+    };
+
+    /**
+     * TB_ADDBITMAP's TBADDBITMAP: a bitmap handle (hInst NULL), a bitmap
+     * resource of a module, or one of comctl32's standard strips.
      *
      * @param {any} record @param {number} count @param {number} address  the TBADDBITMAP
      */
@@ -384,26 +499,57 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         }
         const bytes = host.readMemory(address, 8);
         const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
-        const instance = view.getUint32(0, true);
-        const id = view.getUint32(4, true);
-        let bitmap = 0;
+        return addFrom(record, count, view.getUint32(0, true), view.getUint32(4, true));
+    };
+
+    /**
+     * Adds a bitmap's images, named as a TBADDBITMAP names it: the declared
+     * counts before it, or -1. A standard strip sets the image size to its own.
+     *
+     * @param {any} record @param {number} count @param {number} instance @param {number} id
+     */
+    const addFrom = (record, count, instance, id)=>{
+        const held = state(record);
+        const known = held.sources.find(source=>source.instance === instance
+            && source.id === id);
+        if (known)
+        {
+            return known.index;
+        }
+        /** @type {Source} */
+        let source;
         if (instance === HINST_COMMCTRL)
         {
+            const strip = stripOfBitmapId(id);
+            if (!strip)
+            {
+                return -1;
+            }
             host.divergence?.('TB_ADDBITMAP', `comctl32's standard bitmap ${id} is left blank`);
-            count = /** @type {any} */ (STANDARD_COUNTS)[id] ?? count;
+            source = { instance, id, bitmap: 0, declared: strip.count, strip,
+                index: held.declared };
+            if (held.bitmap.cx !== strip.side || held.bitmap.cy !== strip.side)
+            {
+                held.bitmap = { cx: strip.side, cy: strip.side };
+                refill(record);
+                recalc(record);
+            }
         }
         else
         {
-            bitmap = instance === 0 ? id : resources.loadBitmap?.(instance, id) ?? 0;
+            const bitmap = instance === 0 ? id : resources.loadBitmap?.(instance, id) ?? 0;
             if (bitmap === 0)
             {
                 return -1;
             }
+            source = { instance, id, bitmap, declared: count | 0, strip: null,
+                index: held.declared };
         }
-        const first = addImages(record, bitmap, count);
-        state(record).sources.push({ instance, id, bitmap, count: state(record).images - first });
+        held.declared += source.declared;
+        held.sources.push(source);
+        fill(record, source);
         host.invalidate(record);
-        return first;
+        return source.index;
     };
 
     /**
@@ -429,20 +575,302 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         {
             return 0;
         }
-        Object.assign(source, { instance, id, bitmap, count: view.getInt32(16, true) });
-        // ponytail: refilled from the bitmap handles, so a bitmap the program
-        // has deleted since comes back blank; copy out of the old list if one does.
-        if (held.ownList)
+        Object.assign(source, { instance, id, bitmap, strip: null,
+            declared: view.getInt32(16, true) });
+        if (!held.ownList)
         {
-            imageCall('ImageList_Remove', held.list, -1);
+            host.divergence?.('TB_REPLACEBITMAP', 'a list the program gave is not refilled');
+            return 0;
         }
-        held.images = 0;
-        for (const entry of held.sources)
-        {
-            addImages(record, entry.bitmap, entry.count);
-        }
+        refill(record);
         host.invalidate(record);
         return 1;
+    };
+
+    /**
+     * The text sizes the buttons need: the widest text and whether a row of
+     * it is under the images. A toolbar with no buttons yet takes the row
+     * from its strings, not their width (test_sizes).
+     *
+     * @param {any} record
+     */
+    const textNeeds = record=>{
+        const held = state(record);
+        const texts = held.buttons.filter(button=>(button.state & TBSTATE_HIDDEN) === 0)
+            .map(button=>textOf(record, button)).filter(text=>text !== '');
+        const row = texts.length > 0 || (held.buttons.length === 0 && held.strings.length > 0);
+        if (!row)
+        {
+            return { width: 0, height: 0 };
+        }
+        if (!host.draw)
+        {
+            return { width: Math.max(0, ...texts.map(text=>text.length * 8)), height: 17 };
+        }
+        const { hdc } = host.contextOn(record);
+        try
+        {
+            const draw = host.draw;
+            return { width: Math.max(0, ...texts.map(text=>draw.measure(hdc, text).width)),
+                height: draw.measure(hdc, 'M').height + 1 };
+        }
+        finally
+        {
+            host.endPaint(record, hdc);
+        }
+    };
+
+    /** @param {any} record  The smallest button: the image and its padding. */
+    const leastButton = record=>{
+        const held = state(record);
+        return { cx: held.bitmap.cx + held.padding.cx, cy: held.bitmap.cy + held.padding.cy };
+    };
+
+    /**
+     * The button size worked out again: the image and padding, the widest
+     * text and padding, a text row.
+     *
+     * @param {any} record @returns {{ cx: number, cy: number }}
+     */
+    const neededButton = record=>{
+        const held = state(record);
+        const least = leastButton(record);
+        const text = textNeeds(record);
+        return { cx: Math.max(least.cx, text.width > 0 ? text.width + held.padding.cx : 0),
+            cy: least.cy + text.height };
+    };
+
+    /**
+     * The buttons sized again, and the first row's distance from the top
+     * with them: none on a flat toolbar (test_recalc reads a recalculation
+     * by it).
+     *
+     * @param {any} record
+     */
+    const recalc = record=>{
+        const held = state(record);
+        held.button = neededButton(record);
+        held.top = (record.style & TBSTYLE_FLAT) !== 0 ? 0 : TOP_MARGIN;
+        host.invalidate(record);
+    };
+
+    /**
+     * A style changed: turning TBSTYLE_WRAPABLE on or off sizes the buttons
+     * again, and a wrappable toolbar's rows are its width's, not the
+     * buttons' TBSTATE_WRAP (test_sizes, test_recalc).
+     *
+     * @param {any} record @param {number} before
+     */
+    const restyled = (record, before)=>{
+        const held = state(record);
+        if (((before ^ record.style) & TBSTYLE_WRAPABLE) === 0)
+        {
+            host.invalidate(record);
+            return;
+        }
+        if ((record.style & TBSTYLE_WRAPABLE) !== 0)
+        {
+            for (const button of held.buttons)
+            {
+                button.state &= ~TBSTATE_WRAP;
+            }
+        }
+        recalc(record);
+    };
+
+    /**
+     * Sets the hot item: an index past the buttons is ignored, a negative one
+     * clears it. The owner hears TBN_HOTITEMCHANGE and may refuse it; a
+     * disabled button is announced but not made hot.
+     *
+     * @param {any} record @param {number} index @param {unknown} thread
+     * @returns {number | Promise<number>} the hot item before
+     */
+    const setHot = (record, index, thread)=>{
+        const held = state(record);
+        const previous = held.hot;
+        if (index >= held.buttons.length || index === previous
+            || ((record.controlsVersion ?? 5) < 6 && (record.style & TBSTYLE_FLAT) === 0))
+        {
+            return previous;
+        }
+        const target = index < 0 ? null : held.buttons[index];
+        const idOld = previous >= 0 ? held.buttons[previous]?.command ?? 0 : 0;
+        const idNew = target ? target.command : 0;
+        if (!target && previous < 0)
+        {
+            return previous;
+        }
+        return after(notifyOwner(record, TBN_HOTITEMCHANGE, 12, block=>{
+            write32(block + 12, idOld);
+            write32(block + 16, idNew);
+            write32(block + 20, target ? HICF_OTHER : HICF_LEAVING);
+        }, thread), refused=>{
+            if ((refused | 0) === 0)
+            {
+                held.hot = target && (target.state & TBSTATE_ENABLED) !== 0 ? index : -1;
+                host.invalidate(record);
+            }
+            return previous;
+        });
+    };
+
+    /**
+     * Sends the owner a WM_NOTIFY, the structure in guest memory while it is
+     * answered: an NMHDR and `extra` bytes after it.
+     *
+     * @param {any} record @param {number} code @param {number} extra
+     * @param {(block: number) => void} write @param {unknown} thread
+     */
+    const notifyOwner = (record, code, extra, write, thread)=>{
+        const to = ownerOf(record);
+        const block = to !== 0 ? host.allocate?.(12 + extra) ?? 0 : 0;
+        if (block === 0)
+        {
+            return 0;
+        }
+        host.writeMemory(block, new Uint8Array(12 + extra));
+        write32(block, record.hwnd);
+        write32(block + 4, record.id);
+        write32(block + 8, code);
+        write(block);
+        return after(host.send(to, WM_NOTIFY, record.id, block, thread), answer=>{
+            host.release?.(block);
+            return answer;
+        });
+    };
+
+    /**
+     * A WM_NOTIFY the toolbar is sent - a combo box's in it, say - goes on to
+     * its owner as the sender's (wParam its idFrom); CBEN_ENDEDITW to an owner
+     * that takes ANSI goes as CBEN_ENDEDITA (Wine's toolbar test,
+     * test_WM_NOTIFY), and a tooltip asking for a button's text is answered
+     * first from TBN_GETINFOTIP.
+     *
+     * @param {any} record @param {number} lParam @param {unknown} thread
+     */
+    const forwardNotify = (record, lParam, thread)=>{
+        const held = state(record);
+        const to = ownerOf(record);
+        if (to === 0 || lParam === 0)
+        {
+            return 0;
+        }
+        const code = read32(lParam + 8);
+        const from = read32(lParam + 4);
+        if (code === TTN_GETDISPINFOA || code === TTN_GETDISPINFOW)
+        {
+            return after(infoTip(record, lParam, code === TTN_GETDISPINFOW, thread),
+                ()=>tipText(record, lParam, code === TTN_GETDISPINFOW, thread));
+        }
+        if (code !== CBEN_ENDEDITW || held.unicode)
+        {
+            return host.send(to, WM_NOTIFY, from, lParam, thread);
+        }
+        const size = 12 + 8 + CBEMAXSTRLEN + 4;
+        return withCopy(size, copy=>{
+            host.writeMemory(copy, host.readMemory(lParam, 20));
+            write32(copy + 8, CBEN_ENDEDITA);
+            writeText(host, copy + 20, readText(host, lParam + 20, true), false, CBEMAXSTRLEN);
+            write32(copy + 20 + CBEMAXSTRLEN, read32(lParam + 20 + CBEMAXSTRLEN * 2));
+            return host.send(to, WM_NOTIFY, from, copy, thread);
+        }, 'CBEN_ENDEDITW');
+    };
+
+    /**
+     * A zeroed block of guest memory for as long as `use` needs it.
+     *
+     * @param {number} size @param {(at: number) => any} use @param {string} what
+     */
+    const withCopy = (size, use, what)=>{
+        const at = host.allocate?.(size) ?? 0;
+        if (at === 0)
+        {
+            host.divergence?.('WM_NOTIFY', `no memory to convert ${what}: not forwarded`);
+            return 0;
+        }
+        host.writeMemory(at, new Uint8Array(size));
+        return after(use(at), answer=>{
+            host.release?.(at);
+            return answer;
+        });
+    };
+
+    /**
+     * TBN_GETINFOTIP: the owner asked for a button's tip in its own encoding;
+     * text it gives goes into the tooltip's NMTTDISPINFO.
+     *
+     * @param {any} record @param {number} info  the tooltip's NMTTDISPINFO
+     * @param {boolean} wide  the tooltip's encoding @param {unknown} thread
+     */
+    const infoTip = (record, info, wide, thread)=>{
+        const held = state(record);
+        const command = read32(info + 4) | 0;
+        const button = held.buttons[indexOf(record, command)];
+        const own = held.unicode;
+        return withCopy(28 + INFOTIPSIZE * (own ? 2 : 1), block=>{
+            write32(block, record.hwnd);
+            write32(block + 4, record.id);
+            write32(block + 8, own ? TBN_GETINFOTIPW : TBN_GETINFOTIPA);
+            write32(block + 12, block + 28);
+            write32(block + 16, INFOTIPSIZE);
+            write32(block + 20, command);
+            write32(block + 24, button?.data ?? 0);
+            return after(host.send(ownerOf(record), WM_NOTIFY, record.id, block, thread), ()=>{
+                const pointer = read32(block + 12);
+                const text = pointer !== 0 ? readText(host, pointer, own) : '';
+                if (text !== '')
+                {
+                    writeText(host, info + 16, text, wide, TIP_TEXT);
+                    write32(info + 12, info + 16);
+                }
+                return 0;
+            });
+        }, 'TBN_GETINFOTIP');
+    };
+
+    /**
+     * TTN_GETDISPINFO handed on to the owner in its encoding, and its answer
+     * back in the tooltip's.
+     *
+     * @param {any} record @param {number} info @param {boolean} wide @param {unknown} thread
+     */
+    const tipText = (record, info, wide, thread)=>{
+        const held = state(record);
+        const to = ownerOf(record);
+        const from = read32(info + 4);
+        if (wide === held.unicode)
+        {
+            return host.send(to, WM_NOTIFY, from, info, thread);
+        }
+        const own = held.unicode;
+        /** NMTTDISPINFO's hinst, uFlags and lParam, after a szText of either width. */
+        const tail = (/** @type {boolean} */ w)=>16 + TIP_TEXT * (w ? 2 : 1);
+        return withCopy(tail(own) + 12, copy=>{
+            host.writeMemory(copy, host.readMemory(info, 12));
+            write32(copy + 8, own ? TTN_GETDISPINFOW : TTN_GETDISPINFOA);
+            writeText(host, copy + 16, readText(host, info + 16, wide, TIP_TEXT), own, TIP_TEXT);
+            const text = read32(info + 12);
+            write32(copy + 12, text === info + 16 ? copy + 16 : text);
+            host.writeMemory(copy + tail(own), host.readMemory(info + tail(wide), 12));
+            return after(host.send(to, WM_NOTIFY, from, copy, thread), answer=>{
+                const given = read32(copy + 12);
+                // Text the owner gave, at either place, comes back in the
+                // tooltip's encoding; a resource id or the callback stays.
+                if (given === copy + 16 || given > 0xffff && given !== LPSTR_TEXTCALLBACK)
+                {
+                    writeText(host, info + 16, readText(host, given, own, TIP_TEXT), wide,
+                        TIP_TEXT);
+                    write32(info + 12, info + 16);
+                }
+                else
+                {
+                    write32(info + 12, given);
+                }
+                host.writeMemory(info + tail(wide), host.readMemory(copy + tail(own), 12));
+                return answer;
+            });
+        }, 'TTN_GETDISPINFO');
     };
 
     /**
@@ -578,7 +1006,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         if (id in STATE_GETTERS)
         {
             const button = held.buttons[indexOf(record, wParam)];
-            return button ? button.state & STATE_GETTERS[id] : 0;
+            return button ? button.state & STATE_GETTERS[id] : -1;
         }
         switch (id){
             case WM_PAINT:
@@ -644,31 +1072,54 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 held.pressed = -1;
                 return 0;
+            // The toolbar keeps the font for its text and answers that it
+            // took it (Wine's toolbar and rebar tests, rebuild_toolbar).
+            case WM_SETFONT:
+                record.font = wParam;
+                if ((lParam & 0xffff) !== 0)
+                {
+                    host.invalidate(record);
+                }
+                return 1;
             case TB_BUTTONSTRUCTSIZE:
                 held.structSize = wParam;
                 return 0;
-            case TB_SETBITMAPSIZE:
-                // The size is the images', fixed once an image is in the list.
-                if (held.ownList && imageCall('ImageList_GetImageCount', held.list) > 0)
-                {
-                    return 0;
-                }
-                if (held.ownList)
-                {
-                    imageCall('ImageList_Destroy', held.list);
-                    held.list = 0;
-                    held.ownList = false;
-                }
-                held.bitmap = { cx: (lParam & 0xffff) || 16, cy: (lParam >>> 16) || 15 };
+            case CCM_SETVERSION:
+            case CCM_GETVERSION:
+                return answerVersion(record, held, id, wParam);
+            case TB_SETBITMAPSIZE: {
+                // -1 keeps a side, 0 is 1; the toolbar's own list is made
+                // again at the size, and the buttons are sized to it.
+                /** @param {number} asked @param {number} was */
+                const side = (asked, was)=>(asked === 0xffff ? was : Math.max(1, asked));
+                held.bitmap = { cx: side(lParam & 0xffff, held.bitmap.cx),
+                    cy: side(lParam >>> 16, held.bitmap.cy) };
+                refill(record);
+                recalc(record);
                 return 1;
-            case TB_SETBUTTONSIZE:
-                held.button = { cx: (lParam & 0xffff) || 24, cy: (lParam >>> 16) || 22 };
+            }
+            case TB_SETBUTTONSIZE: {
+                // Larger than the image and its padding, never smaller.
+                const least = leastButton(record);
+                held.button = { cx: Math.max(lParam & 0xffff, least.cx),
+                    cy: Math.max(lParam >>> 16, least.cy) };
                 host.invalidate(record);
                 return 1;
+            }
+            case TB_SETPADDING: {
+                const previous = (held.padding.cy << 16 | held.padding.cx) >>> 0;
+                held.padding = { cx: lParam & 0xffff, cy: lParam >>> 16 };
+                return previous;
+            }
+            case TB_GETPADDING:
+                return (held.padding.cy << 16 | held.padding.cx) >>> 0;
             case TB_GETBUTTONSIZE:
                 return (held.button.cy << 16 | held.button.cx) >>> 0;
             case TB_ADDBITMAP:
                 return addBitmap(record, wParam | 0, lParam);
+            // A standard strip by its IDB_ number, from HINST_COMMCTRL.
+            case TB_LOADIMAGES:
+                return addFrom(record, 0, lParam, wParam);
             case TB_REPLACEBITMAP:
                 return replaceBitmap(record, lParam);
             case TB_ADDBUTTONSA:
@@ -687,17 +1138,31 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 const added = Array.from({ length: count },
                     (_, index)=>readButton(lParam + index * held.structSize, wide));
                 held.buttons.splice(at, 0, ...added);
+                if (held.hot >= at)
+                {
+                    held.hot += count;
+                }
+                // Buttons with text, or any once there are strings, size the
+                // buttons again (test_sizes).
+                if (held.strings.length > 0 || added.some(button=>textOf(record, button) !== ''))
+                {
+                    recalc(record);
+                }
                 host.invalidate(record);
                 return 1;
             }
-            case TB_DELETEBUTTON:
-                if ((wParam | 0) < 0 || (wParam | 0) >= held.buttons.length)
+            case TB_DELETEBUTTON: {
+                const index = wParam | 0;
+                if (index < 0 || index >= held.buttons.length)
                 {
                     return 0;
                 }
-                held.buttons.splice(wParam | 0, 1);
+                held.buttons.splice(index, 1);
+                // The hot button gone, none is hot; the size is kept.
+                held.hot = held.hot === index ? -1 : held.hot > index ? held.hot - 1 : held.hot;
                 host.invalidate(record);
                 return 1;
+            }
             case TB_MOVEBUTTON: {
                 const [button] = held.buttons.splice(wParam | 0, 1);
                 if (!button)
@@ -736,7 +1201,13 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 {
                     return 0;
                 }
+                const shown = (button.state & TBSTATE_HIDDEN) !== 0
+                    && (lParam & TBSTATE_HIDDEN) === 0;
                 button.state = lParam & 0xff;
+                if (shown)
+                {
+                    recalc(record);
+                }
                 host.invalidate(record);
                 return 1;
             }
@@ -774,7 +1245,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                     return 0;
                 }
                 const width = Math.max(0, ...rects.map(rect=>rect.right)) - held.indent;
-                const height = Math.max(0, ...rects.map(rect=>rect.bottom)) - TOP_MARGIN;
+                const height = Math.max(0, ...rects.map(rect=>rect.bottom)) - held.top;
                 host.writeMemory(lParam, new Uint8Array(new Int32Array([width, height]).buffer));
                 return 1;
             }
@@ -794,7 +1265,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 const first = held.strings.length;
                 for (let at = lParam; at !== 0;)
                 {
-                    const text = readText(at, wide);
+                    const text = readText(host, at, wide);
                     if (text === '')
                     {
                         break;
@@ -802,7 +1273,104 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                     held.strings.push(text);
                     at += (text.length + 1) * (wide ? 2 : 1);
                 }
+                recalc(record);
                 return first;
+            }
+            case TB_GETBUTTONINFOA:
+            case TB_GETBUTTONINFOW: {
+                // A structure of any other size is refused, as is a button
+                // the command (or, under TBIF_BYINDEX, the index) names none of.
+                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                {
+                    return -1;
+                }
+                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
+                const button = held.buttons[index];
+                if (!button)
+                {
+                    return -1;
+                }
+                if (mask & TBIF_COMMAND)
+                {
+                    write32(lParam + BUTTONINFO.idCommand, button.command);
+                }
+                if (mask & TBIF_IMAGE)
+                {
+                    write32(lParam + BUTTONINFO.iImage, button.image);
+                }
+                if (mask & TBIF_STATE || mask & TBIF_STYLE)
+                {
+                    host.writeMemory(lParam + BUTTONINFO.fsState, Uint8Array.of(
+                        mask & TBIF_STATE ? button.state
+                            : host.readMemory(lParam + BUTTONINFO.fsState, 1)[0],
+                        mask & TBIF_STYLE ? button.style
+                            : host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0]));
+                }
+                if (mask & TBIF_SIZE)
+                {
+                    const rect = layout(record)[index];
+                    const width = rect ? rect.right - rect.left : button.width ?? 0;
+                    host.writeMemory(lParam + BUTTONINFO.cx, Uint8Array.of(width & 0xff,
+                        width >>> 8 & 0xff));
+                }
+                if (mask & TBIF_LPARAM)
+                {
+                    write32(lParam + BUTTONINFO.lParam, button.data);
+                }
+                if (mask & TBIF_TEXT)
+                {
+                    writeText(host, read32(lParam + BUTTONINFO.pszText), textOf(record, button),
+                        id === TB_GETBUTTONINFOW, read32(lParam + BUTTONINFO.cchText) | 0);
+                }
+                return index;
+            }
+            case TB_SETBUTTONINFOA:
+            case TB_SETBUTTONINFOW: {
+                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                {
+                    return 0;
+                }
+                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
+                const button = held.buttons[index];
+                if (!button)
+                {
+                    return 0;
+                }
+                if (mask & TBIF_COMMAND)
+                {
+                    button.command = read32(lParam + BUTTONINFO.idCommand) | 0;
+                }
+                if (mask & TBIF_IMAGE)
+                {
+                    button.image = read32(lParam + BUTTONINFO.iImage) | 0;
+                }
+                if (mask & TBIF_STATE)
+                {
+                    button.state = host.readMemory(lParam + BUTTONINFO.fsState, 1)[0];
+                }
+                if (mask & TBIF_STYLE)
+                {
+                    button.style = host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0];
+                }
+                if (mask & TBIF_SIZE)
+                {
+                    const [low, high] = host.readMemory(lParam + BUTTONINFO.cx, 2);
+                    button.width = low | high << 8;
+                }
+                if (mask & TBIF_LPARAM)
+                {
+                    button.data = read32(lParam + BUTTONINFO.lParam);
+                }
+                if (mask & TBIF_TEXT)
+                {
+                    const pointer = read32(lParam + BUTTONINFO.pszText);
+                    button.string = pointer === 0 ? '' : readText(host, pointer,
+                        id === TB_SETBUTTONINFOW);
+                }
+                host.invalidate(record);
+                return 1;
             }
             case TB_GETBUTTONTEXTA:
             case TB_GETBUTTONTEXTW: {
@@ -815,8 +1383,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 if (lParam !== 0)
                 {
                     host.writeMemory(lParam, id === TB_GETBUTTONTEXTW
-                        ? new Uint8Array(new Uint16Array([...`${text}\0`]
-                            .map(c=>c.charCodeAt(0))).buffer)
+                        ? utf16z(text)
                         : encodeAnsi(`${text}\0`));
                 }
                 return text.length;
@@ -839,9 +1406,17 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             }
             case TB_GETEXTENDEDSTYLE:
                 return held.extended;
-            case TB_SETSTYLE:
+            case TB_SETSTYLE: {
+                const before = record.style;
                 record.style = lParam;
-                host.invalidate(record);
+                restyled(record, before);
+                return 0;
+            }
+            case WM_STYLECHANGED:
+                if ((message.wParam | 0) === GWL_STYLE && lParam !== 0)
+                {
+                    restyled(record, read32(lParam));
+                }
                 return 0;
             case TB_GETSTYLE:
                 return record.style >>> 0;
@@ -866,10 +1441,15 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 held.list = lParam;
                 held.ownList = false;
-                const size = images?.size(lParam);
-                if (size)
+                // The images' size, 1 by 1 for none: the buttons as tall as
+                // it needs, as wide only if they must grow (test_sizes).
+                const size = lParam !== 0 ? images?.size(lParam) : null;
+                const bitmap = { cx: Math.max(1, size?.cx ?? 0), cy: Math.max(1, size?.cy ?? 0) };
+                if (bitmap.cx !== held.bitmap.cx || bitmap.cy !== held.bitmap.cy)
                 {
-                    held.bitmap = { cx: size.cx, cy: size.cy };
+                    held.bitmap = bitmap;
+                    const needed = neededButton(record);
+                    held.button = { cx: Math.max(held.button.cx, needed.cx), cy: needed.cy };
                 }
                 host.invalidate(record);
                 return wasOwn ? 0 : previous;
@@ -891,9 +1471,27 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             case TB_GETHOTIMAGELIST:
                 return held.hotList;
             case TB_GETHOTITEM:
-                return -1 >>> 0;
+                return held.hot;
             case TB_SETHOTITEM:
-                return -1 >>> 0;
+                return setHot(record, message.wParam | 0, thread);
+            case TB_SETUNICODEFORMAT: {
+                const previous = held.unicode ? 1 : 0;
+                held.unicode = wParam !== 0;
+                return previous;
+            }
+            case TB_GETUNICODEFORMAT:
+                return held.unicode ? 1 : 0;
+            case WM_CREATE: {
+                // It asks its owner which notifications it takes.
+                const to = ownerOf(record);
+                return after(to !== 0 ? host.send(to, WM_NOTIFYFORMAT, record.hwnd, NF_QUERY,
+                    thread) : 0, format=>{
+                    held.unicode = format === NFR_UNICODE;
+                    return tk.common(record, message, thread);
+                });
+            }
+            case WM_NOTIFY:
+                return forwardNotify(record, lParam, thread);
             default:
                 if (id >= WM_USER && id < WM_USER + 0x100 && !held.said.has(id))
                 {

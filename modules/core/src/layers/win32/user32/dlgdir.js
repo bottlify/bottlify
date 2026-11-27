@@ -20,14 +20,16 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** DlgDirList's and LB_DIR's kinds of entry. */
 export const DDL_READONLY = 0x0001;
 export const DDL_HIDDEN = 0x0002;
-export const DDL_SYSTEM = 0x0004;
+const DDL_SYSTEM = 0x0004;
 export const DDL_DIRECTORY = 0x0010;
-export const DDL_ARCHIVE = 0x0020;
-export const DDL_POSTMSGS = 0x2000;
+const DDL_ARCHIVE = 0x0020;
+const DDL_POSTMSGS = 0x2000;
 export const DDL_DRIVES = 0x4000;
 export const DDL_EXCLUSIVE = 0x8000;
 
@@ -244,8 +246,8 @@ export function createDirectoryListFunctions({ host, call }){
             return;
         }
         const cut = text.slice(0, room - 1);
-        host.writeMemory(address >>> 0, wide
-            ? new Uint8Array(Uint16Array.from(`${cut}\0`, c=>c.charCodeAt(0)).buffer)
+        host.writeMemory(wholeAddress(address), wide
+            ? utf16z(cut)
             : encodeAnsi(`${cut}\0`));
     };
 

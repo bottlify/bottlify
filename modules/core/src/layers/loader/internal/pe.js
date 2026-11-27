@@ -9,7 +9,7 @@
  *
  * Pure functions over a byte array — nothing here touches guest memory. Mapping
  * an image is a separate step (image.js) so the parsing can be tested against a
- * real executable without an emulator.
+ * real executable without an engine.
  */
 
 const DOS_MAGIC = 0x5a4d; // "MZ"
@@ -24,13 +24,18 @@ const IMAGE_FILE_RELOCS_STRIPPED = 0x0001;
 /** Data directory indices we care about. */
 export const DIR_EXPORT = 0;
 export const DIR_IMPORT = 1;
+export const DIR_EXCEPTION = 3;
 export const DIR_BASERELOC = 5;
 
 /** Section characteristics. */
 /** The COFF characteristic that marks an image as a library rather than a program. */
 const IMAGE_FILE_DLL = 0x2000;
+/** The image handles addresses past 2 GiB: given them on a 64-bit Windows. */
+const IMAGE_FILE_LARGE_ADDRESS_AWARE = 0x0020;
 
 const SECTION_MEM_EXECUTE = 0x20000000;
+/** The page an image is mapped in units of. */
+const PAGE_SIZE = 0x1000;
 const SECTION_MEM_READ = 0x40000000;
 const SECTION_MEM_WRITE = 0x80000000;
 
@@ -44,6 +49,7 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {boolean} readable
  * @property {boolean} writable
  * @property {boolean} executable
+ * @property {number} characteristics  The header's IMAGE_SCN_* bits.
  */
 
 /**
@@ -52,30 +58,106 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} imageBase        Preferred load address.
  * @property {number} entryPointRva
  * @property {number} timeDateStamp    The linker's build timestamp, from the COFF header.
- * @property {number} sizeOfImage
+ * @property {number} sizeOfImage      SizeOfImage rounded up to the page: the span mapped.
  * @property {number} sectionAlignment
+ * @property {number} fileAlignment
+ * @property {number} optionalHeaderSize  SizeOfOptionalHeader: the fields past it are the
+ *                                     file's bytes, read as Windows reads them, but the data
+ *                                     directories only count as far as it reaches.
  * @property {number} sizeOfHeaders
  * @property {number} subsystem
  * @property {number} stackReserve     How much stack the program was linked to expect.
  * @property {number} stackCommit
- * @property {boolean} relocatable     False when the image has no relocation directory.
+ * @property {boolean} relocatable     Whether it may be placed away from its base: it carries
+ *                                     relocations, needs none (x86-64), or holds no address.
+ * @property {boolean} [relocsStripped]  IMAGE_FILE_RELOCS_STRIPPED: it may never be moved. An
+ *                                     image without relocations and without this flag is
+ *                                     moved, nothing fixed up, when its base is taken, as
+ *                                     Windows' loader moves one (`placeLibrary`).
+ * @property {boolean} [dynamicBase]   Linked for ASLR (DYNAMIC_BASE).
  * @property {boolean} library         A DLL, as against a program: only a DLL's imports
  *                                     are resolved and its entry point run when one is
  *                                     loaded by LoadLibrary.
+ * @property {boolean} largeAddressAware  Linked /LARGEADDRESSAWARE: on 64-bit Windows a
+ *                                     32-bit process of it is given addresses up to 4 GiB.
  * @property {PeSection[]} sections
  * @property {{ address: number, size: number }[]} directories
  */
+
+/** The signature of a 16-bit "new executable" header, 'NE'. */
+const NE_SIGNATURE = 0x454e;
+/** NE's target operating system byte, in its header. */
+const NE_EXETYPE = 0x36;
+
+/**
+ * What kind of file an MZ file's headers say it is, before it is read as a PE:
+ * 'not-mz' for none at all, 'unreadable' for a new header that is not in the
+ * file or carries no signature it knows, 'ne' (with its target system) for a
+ * 16-bit one, 'pe' for a PE image - with `bits` from its optional header's
+ * magic, null when the magic is neither, and its Subsystem (null past the
+ * file's end). What a section refuses an image with follows from it
+ * (kernel32/mapping.js).
+ *
+ * @param {Uint8Array} bytes
+ * @returns {{ kind: 'not-mz' | 'unreadable' } | { kind: 'ne', system: number }
+ *     | { kind: 'pe', bits: 32 | 64 | null, machine: number, subsystem: number | null }}
+ */
+export function imageKind(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes.length < 2 || view.getUint16(0, true) !== DOS_MAGIC)
+    {
+        return { kind: 'not-mz' };
+    }
+    const at = bytes.length >= 0x40 ? view.getUint32(0x3c, true) : -1;
+    if (at < 0 || at + 4 > bytes.length)
+    {
+        return { kind: 'unreadable' };
+    }
+    if (view.getUint16(at, true) === NE_SIGNATURE)
+    {
+        return { kind: 'ne', system: at + NE_EXETYPE < bytes.length ? bytes[at + NE_EXETYPE] : 0 };
+    }
+    if (view.getUint32(at, true) !== PE_SIGNATURE || at + 26 > bytes.length)
+    {
+        return { kind: 'unreadable' };
+    }
+    const magic = view.getUint16(at + 24, true);
+    // The optional header's Subsystem, at one offset in both widths.
+    const subsystem = at + 24 + 70 <= bytes.length ? view.getUint16(at + 24 + 68, true) : null;
+    return { kind: 'pe', machine: view.getUint16(at + 4, true),
+        bits: magic === PE32_MAGIC ? 32 : magic === PE32_PLUS_MAGIC ? 64 : null, subsystem };
+}
 
 /**
  * Parses the headers of a PE image: a 32-bit one, or with `wide` a 64-bit
  * (PE32+, x86-64) one too. Without it a 64-bit image is refused as before, so
  * nothing that loads into a 32-bit process takes one.
  *
+ * `bits` is the machine of the process the image is for, and only that one is
+ * taken: an image of the other is refused with `code` 'BAD_EXE_FORMAT', which
+ * is what LoadLibrary answers for it on Windows (ERROR_BAD_EXE_FORMAT). Every
+ * image mapped into a process is parsed this way; `wide` is for reading one
+ * that is not mapped (its resources, its version, its imports).
+ *
  * @param {Uint8Array} bytes
- * @param {{ wide?: boolean }} [options]
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} [options]
  * @returns {PeImage}
  */
-export function parsePe(bytes, { wide = false } = {}){
+export function parsePe(bytes, { wide = false, bits: processBits } = {}){
+    const image = parseHeaders(bytes, wide || processBits !== undefined);
+    if (processBits !== undefined && image.bits !== processBits)
+    {
+        throw Object.assign(new Error(`${image.bits === 64 ? 'an x86-64' : 'an i386'} image`
+            + ` does not load into a ${processBits}-bit process`), { code: 'BAD_EXE_FORMAT' });
+    }
+    return image;
+}
+
+/**
+ * @param {Uint8Array} bytes @param {boolean} wide
+ * @returns {PeImage}
+ */
+function parseHeaders(bytes, wide){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
     if (bytes.length < 0x40 || view.getUint16(0, true) !== DOS_MAGIC)
@@ -92,8 +174,8 @@ export function parsePe(bytes, { wide = false } = {}){
     const machine = view.getUint16(coff, true);
     if (machine !== MACHINE_I386 && !(wide && machine === MACHINE_AMD64))
     {
-        throw new Error(`unsupported machine 0x${machine.toString(16)}: only i386`
-            + `${wide ? ' and x86-64 are' : ' is'} supported`);
+        throw Object.assign(new Error(`unsupported machine 0x${machine.toString(16)}: only i386`
+            + `${wide ? ' and x86-64 are' : ' is'} supported`), { code: 'BAD_EXE_FORMAT' });
     }
     const bits = machine === MACHINE_AMD64 ? 64 : 32;
     const sectionCount = view.getUint16(coff + 2, true);
@@ -112,7 +194,11 @@ export function parsePe(bytes, { wide = false } = {}){
         : view.getUint32(at, true));
     const tail = bits === 64 ? 16 : 0;
 
-    const directoryCount = view.getUint32(optional + 92 + tail, true);
+    // The directories end with the optional header the file says it has: one
+    // cut short (SizeOfOptionalHeader below the full size) has no directory past
+    // its end, whatever NumberOfRvaAndSizes and the bytes after it hold.
+    const directoryCount = Math.max(0, Math.min(view.getUint32(optional + 92 + tail, true),
+        Math.floor((optionalSize - 96 - tail) / 8)));
     /** @type {{ address: number, size: number }[]} */
     const directories = [];
     for (let i = 0; i < directoryCount; i++)
@@ -137,6 +223,7 @@ export function parsePe(bytes, { wide = false } = {}){
             readable: (characteristics & SECTION_MEM_READ) !== 0,
             writable: (characteristics & SECTION_MEM_WRITE) !== 0,
             executable: (characteristics & SECTION_MEM_EXECUTE) !== 0,
+            characteristics,
         });
     }
 
@@ -149,8 +236,13 @@ export function parsePe(bytes, { wide = false } = {}){
         // Fourth COFF field, right after the two the machine check already
         // read: machine (2 bytes), section count (2), then this.
         timeDateStamp: view.getUint32(coff + 4, true),
-        sizeOfImage: view.getUint32(optional + 56, true),
+        // Whole pages: the span the image occupies, which is what every reader
+        // of it places, reserves and reads - one whose SizeOfImage ends inside
+        // a page still holds that page, as Windows maps it.
+        sizeOfImage: Math.ceil(view.getUint32(optional + 56, true) / PAGE_SIZE) * PAGE_SIZE,
         sectionAlignment: view.getUint32(optional + 32, true),
+        fileAlignment: view.getUint32(optional + 36, true),
+        optionalHeaderSize: optionalSize,
         sizeOfHeaders: view.getUint32(optional + 60, true),
         subsystem: view.getUint16(optional + 68, true),
         // What the linker reserved for the first thread. Not advice: a program
@@ -164,11 +256,41 @@ export function parsePe(bytes, { wide = false } = {}){
         // An x86-64 image addresses its own code and data relative to RIP and may
         // need no fixup at all: it is movable unless its relocations were stripped.
         relocatable: relocDirectory !== undefined && relocDirectory.size > 0
-            || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0,
+            || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0
+            || holdsNoAddress(characteristics, view.getUint32(optional + 16, true), sections,
+                directories),
+        relocsStripped: (characteristics & IMAGE_FILE_RELOCS_STRIPPED) !== 0,
         library: (characteristics & IMAGE_FILE_DLL) !== 0,
+        largeAddressAware: (characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) !== 0,
+        // IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE: linked to be placed anywhere (ASLR), which
+        // Windows does with a program as with a library.
+        dynamicBase: (view.getUint16(optional + 70, true) & 0x40) !== 0,
         sections,
         directories,
     };
+}
+
+/** The directories that hold virtual addresses rather than RVAs, or code's: import, TLS, load
+ * config, the import address table, delay import. */
+const ADDRESS_DIRECTORIES = [1, 9, 10, 12, 13];
+
+/**
+ * Whether a library holds no absolute address at all: no code (no entry point, no section that
+ * executes) and none of the directories that store addresses - a library of resources, which a
+ * program reaches by RVA. With nothing to fix up it runs at any base, so it is movable though it
+ * carries no relocation directory: placed at its preferred base, a resource library linked for
+ * 0x10000000 grew every process that loaded one - the .NET Framework 4 setup's
+ * SetupResources.dll, five pages - from 256 MiB of memory to 512, the memory being as large as
+ * the highest address it holds.
+ *
+ * @param {number} characteristics @param {number} entryPointRva
+ * @param {{ executable: boolean }[]} sections
+ * @param {{ address: number, size: number }[]} directories
+ */
+function holdsNoAddress(characteristics, entryPointRva, sections, directories){
+    return (characteristics & IMAGE_FILE_DLL) !== 0 && entryPointRva === 0
+        && !sections.some(section=>section.executable)
+        && ADDRESS_DIRECTORIES.every(index=>!directories[index] || directories[index].size === 0);
 }
 
 /**
@@ -437,7 +559,12 @@ export function applyRelocations(mapped, image, delta){
         return 0;
     }
     const directory = image.directories[DIR_BASERELOC];
-    if ((!directory || directory.size === 0) && image.bits === 64 && image.relocatable)
+    // Movable with no directory: an x86-64 image that needs no fixup, one
+    // that holds no absolute address at all (`holdsNoAddress`), or one whose
+    // relocations are not marked stripped, which Windows' loader moves as it
+    // lies.
+    if ((!directory || directory.size === 0)
+        && (image.relocatable || image.relocsStripped === false))
     {
         return 0;
     }
@@ -491,6 +618,62 @@ export function applyRelocations(mapped, image, delta){
         block += blockSize;
     }
     return applied;
+}
+
+/**
+ * An image moved to `base`: its fixups applied, and the ImageBase of its
+ * mapped header made `base`, as Windows leaves a moved image - code that
+ * reads its own header's ImageBase (the CLR, to tell how far an image was
+ * moved) finds where it is.
+ *
+ * @param {Uint8Array} mapped   The mapped image, indexed by RVA.
+ * @param {PeImage} image
+ * @param {number} base
+ * @returns {number} how many fixups were applied
+ */
+export function relocateImage(mapped, image, base){
+    const applied = applyRelocations(mapped, image, base - image.imageBase);
+    if (base !== image.imageBase && mapped.length >= 0x40)
+    {
+        const view = new DataView(mapped.buffer, mapped.byteOffset, mapped.byteLength);
+        // ImageBase: a dword at 28 into PE32's optional header, a quadword at 24
+        // into PE32+'s.
+        const optional = view.getUint32(0x3c, true) + 24;
+        if (image.bits === 64 && optional + 32 <= mapped.length)
+        {
+            view.setBigUint64(optional + 24, BigInt(base), true);
+        }
+        else if (image.bits !== 64 && optional + 32 <= mapped.length)
+        {
+            view.setUint32(optional + 28, base >>> 0, true);
+        }
+    }
+    return applied;
+}
+
+/**
+ * `length` bytes at an RVA as the image maps them, read from the raw file:
+ * a section's tail past its file data is zero, as the loader fills it. A
+ * packer's section is mostly that tail, and a directory pointing into it
+ * holds what the unpacker writes there at run time; read through the file
+ * offset, it was the next section's bytes or past the end of the file.
+ *
+ * @param {Uint8Array} bytes  The raw file.
+ * @param {PeImage} image @param {number} rva @param {number} length
+ * @returns {Uint8Array}
+ */
+export function readMapped(bytes, image, rva, length){
+    const out = new Uint8Array(length);
+    const section = image.sections.find(each=>rva >= each.virtualAddress
+        && rva < each.virtualAddress + Math.max(each.virtualSize, each.rawSize));
+    const at = rvaToFileOffset(image, rva);
+    const end = Math.min(bytes.length,
+        section ? section.rawOffset + section.rawSize : bytes.length);
+    if (at < end)
+    {
+        out.set(bytes.subarray(at, Math.min(end, at + length)));
+    }
+    return out;
 }
 
 /**

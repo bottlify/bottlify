@@ -45,14 +45,11 @@ import {
     actionEnded, errorMessage, REGISTRY_TICKS, COMPONENT_TICKS, PROGRESS_RESET, progressed,
     actionData,
     schedule, makeDirectories, create, readFile, writeFile, componentOf, installing,
-    registryRoot, registryValue,
+    componentWide, registryPath, registryRoot, registryValue,
 } from './steps.js';
-export { setIniValue } from './ini.js';
 
 export {
-    ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
-    ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, ERROR_INVALID_HANDLE_STATE, INSTALLMESSAGE,
-    message, errorMessage, schedule, makeDirectories, readFile, writeFile, registryValue,
+    INSTALLMESSAGE, readFile, writeFile,
 } from './steps.js';
 
 /** A File row's attributes that change how it is installed. */
@@ -313,7 +310,13 @@ async function copyFiles(engine){
         {
             continue;
         }
-        const compressed = inRange.filter(file=>(file.attributes & FILE_COMPRESSED) !== 0
+        // A patch's Media row (its Source names the patch) holds what the
+        // patch delivers in its cabinet: a file it adds is read from there
+        // whatever the package says of its own files' compression.
+        const fromPatch = row[5] !== null && row[5] !== undefined && row[5] !== ''
+            && row[3] !== null && row[3] !== undefined && row[3] !== '';
+        const compressed = inRange.filter(file=>fromPatch
+            || (file.attributes & FILE_COMPRESSED) !== 0
             || (compressedByDefault && (file.attributes & FILE_NONCOMPRESSED) === 0));
         const loose = inRange.filter(file=>!compressed.includes(file));
         for (const file of loose)
@@ -437,7 +440,8 @@ async function writeRegistryValues(engine){
         {
             continue;
         }
-        const keyPath = session.formatText(String(row[2] ?? ''));
+        const keyPath = registryPath(engine, Number(row[1] ?? -2),
+            session.formatText(String(row[2] ?? '')), componentWide(engine, String(row[5])));
         const name = row[3] === null ? null : session.formatText(String(row[3]));
         const raw = row[4] === null ? null : String(row[4]);
         if (raw === null && name === '-')
@@ -822,8 +826,10 @@ async function appSearch(engine){
         if (registry)
         {
             const root = registryRoot(engine, Number(registry[1] ?? -2));
-            const key = root ? host.hive.open(root, session.formatText(String(registry[2] ?? '')))
-                : null;
+            // msidbLocatorType64bit: the 64-bit view's key.
+            const wide = (Number(registry[4] ?? 0) & 0x10) !== 0;
+            const key = root ? host.hive.open(root, registryPath(engine, Number(registry[1] ?? -2),
+                session.formatText(String(registry[2] ?? '')), wide)) : null;
             if (key)
             {
                 const type = Number(registry[4] ?? 0) & 0x0f;
@@ -927,22 +933,22 @@ async function installValidate(engine){
 
 /** @param {Engine} engine */
 async function installInitialize(engine){
-    engine.session.mode.scheduled = true;
+    engine.session.scripting = true;
     engine.session.script.length = 0;
     return ERROR_SUCCESS;
 }
 
 /** @param {Engine} engine */
 async function installExecute(engine){
-    engine.session.mode.scheduled = false;
+    engine.session.scripting = false;
     const code = await runScript(engine);
-    engine.session.mode.scheduled = true;
+    engine.session.scripting = true;
     return code;
 }
 
 /** @param {Engine} engine */
 async function installFinalize(engine){
-    engine.session.mode.scheduled = false;
+    engine.session.scripting = false;
     const code = await runScript(engine);
     if (code !== ERROR_SUCCESS)
     {
@@ -1006,7 +1012,7 @@ async function nothing(engine){
  *
  * @type {Record<string, (engine: Engine) => Promise<number>>}
  */
-export const STANDARD_ACTIONS = {
+const STANDARD_ACTIONS = {
     ...REMOVAL_ACTIONS,
     ...CLASS_ACTIONS,
     ...SYSTEM_ACTIONS,

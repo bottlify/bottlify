@@ -117,7 +117,7 @@ test('a bound of zero, or a queue that cannot say when work is done, holds nothi
         await drain();
         assert.deepEqual(unbounded.latency.diagnostics(), {
             limit: 0, counting: true, inFlight: 20, peak: 20, frames: 20, held: 0, heldMs: 0,
-            waiting: 0,
+            waiting: 0, timed: 0, toQueueMs: 0, gpuMs: 0,
         }, 'the frames are still counted, so how far behind the device is can be read');
 
         const silent = createFrameLatency({ queue: createFakeDevice().queue });
@@ -198,13 +198,41 @@ test('the diagnostics say how far behind the device is and how often a call wait
         await drain();
         assert.deepEqual(latency.diagnostics(), {
             limit: 2, counting: true, inFlight: 3, peak: 3, frames: 3, held: 1, heldMs: 0,
-            waiting: 1,
+            waiting: 1, timed: 0, toQueueMs: 0, gpuMs: 0,
         });
         clock = 25;
         gpu.finish();
         await drain();
         assert.deepEqual(latency.diagnostics(), {
             limit: 2, counting: true, inFlight: 0, peak: 3, frames: 3, held: 1, heldMs: 25,
-            waiting: 0,
+            waiting: 0, timed: 3, toQueueMs: 0, gpuMs: 25,
+        }, 'and where the finished frames\' time went: all of it the GPU\'s');
+    });
+
+test('a finished frame is timed to its queue and on the GPU, a backed-up queue counted once',
+    async()=>{
+        const gpu = createFakeDevice({ workDone: true });
+        let clock = 0;
+        const latency = createFrameLatency({ queue: gpu.queue, limit: 0, now: ()=>clock });
+        /** @type {() => void} */
+        let replayed = ()=>{};
+        const submitted = new Promise(resolve=>{
+            replayed = ()=>resolve(undefined);
         });
+        latency.queued(submitted);
+        clock = 30;
+        gpu.queue.submit([]);
+        replayed();
+        await drain();
+        clock = 50;
+        gpu.queue.submit([]);
+        latency.queued();
+        clock = 100;
+        gpu.finish(1);
+        await drain();
+        clock = 120;
+        gpu.finish(1);
+        await drain();
+        assert.deepEqual(latency.times(), { frames: 2, toQueueMs: 30, gpuMs: 90 },
+            'the first waited 30 ms for its replay and drew 70; the second, queued behind it, 20');
     });

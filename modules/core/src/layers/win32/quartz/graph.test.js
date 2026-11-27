@@ -9,10 +9,13 @@ import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { registerQuartzClasses } from './graph.js';
 import {
-    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2,
-    IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH, IID_IFILTER_MAPPER2,
+    CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER, CLSID_FILTER_MAPPER2,
+    IID_IFILTER_MAPPER, IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH, IID_IFILTER_MAPPER2,
     IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT, IID_IMEDIA_EVENT_EX,
     IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IID_IVIDEO_WINDOW,
+    IID_IFILTER_GRAPH2, IID_IBASIC_VIDEO2, IID_IFILTER_MAPPER3, IID_IGRAPH_CONFIG,
+    IID_IGRAPH_VERSION, IID_IMEDIA_FILTER, IID_IOBJECT_WITH_SITE, IID_IVIDEO_FRAME_STEP,
+    IID_IBASE_FILTER,
 } from './interfaces.js';
 
 const S_OK = 0;
@@ -42,7 +45,7 @@ const CLIP_CHANNELS = 2;
  */
 function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
     let given = 0;
-    let owedSound = true;
+    let heard = 0;
     // Whether there is PCM to hand over, as a real decoder tracks: reading when
     // it is holding nothing answers with nothing rather than with a block.
     let pending = false;
@@ -51,20 +54,23 @@ function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
         width, height, fps, frameCount, hasVideo: true, hasAudio: true,
         sampleRate: CLIP_RATE, channels: CLIP_CHANNELS,
         closed: false,
+        // The picture and the sound read apart, a frame's worth of sound a step.
         decode(){
-            if (owedSound)
-            {
-                owedSound = false;
-                pending = true;
-                return 'audio';
-            }
             if (given >= frameCount)
             {
                 return 'end';
             }
             given++;
-            owedSound = true;
             return 'frame';
+        },
+        decodeAudio(){
+            if (heard >= frameCount)
+            {
+                return 'end';
+            }
+            heard++;
+            pending = true;
+            return 'audio';
         },
         frame: ()=>Uint8Array.of(given, 0, 0, 0xff),
         readAudio(){
@@ -188,25 +194,29 @@ function call(object, iid, name, args = []){
 test('CoCreateInstance finds the filter graph under both of its class ids', ()=>{
     const registry = createComRegistry();
     registerQuartzClasses(registry, createHost());
-    for (const clsid of [CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER2])
+    for (const clsid of [CLSID_FILTER_GRAPH, CLSID_FILTER_GRAPH_NO_THREAD, CLSID_FILTER_MAPPER,
+        CLSID_FILTER_MAPPER2])
     {
         assert.equal(registry.isRegistered(clsid), true, clsid);
         assert.ok(registry.create(clsid), clsid);
     }
 });
 
-test('one object answers QueryInterface for every interface a player asks for', ()=>{
+test('one object answers QueryInterface for every interface Windows\' graph has', ()=>{
     const { object } = createObject();
     for (const iid of [
-        IID_IFILTER_GRAPH, IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT,
-        IID_IMEDIA_EVENT_EX, IID_IVIDEO_WINDOW, IID_IBASIC_VIDEO, IID_IBASIC_AUDIO,
-        IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING,
+        IID_IFILTER_GRAPH, IID_IGRAPH_BUILDER, IID_IFILTER_GRAPH2, IID_IMEDIA_CONTROL,
+        IID_IMEDIA_EVENT, IID_IMEDIA_EVENT_EX, IID_IVIDEO_WINDOW, IID_IBASIC_VIDEO,
+        IID_IBASIC_VIDEO2, IID_IBASIC_AUDIO, IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING,
+        // The graph is the system's filter mapper too, as quartz's is.
+        IID_IFILTER_MAPPER, IID_IFILTER_MAPPER2, IID_IFILTER_MAPPER3, IID_IGRAPH_CONFIG,
+        IID_IGRAPH_VERSION, IID_IMEDIA_FILTER, IID_IOBJECT_WITH_SITE, IID_IVIDEO_FRAME_STEP,
     ])
     {
         assert.ok(object.queryInterface(iid), iid);
     }
-    // A graph is not a filter mapper, and saying so is an answer a program handles.
-    assert.equal(object.queryInterface(IID_IFILTER_MAPPER2), null);
+    // It runs filters, it is not one.
+    assert.equal(object.queryInterface(IID_IBASE_FILTER), null);
 });
 
 test('IGraphBuilder derives from IUnknown, so its own methods start at slot 3', ()=>{
@@ -327,7 +337,7 @@ test('a graph with no notify window still queues the event and posts nothing', (
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
 });
 
-test('AM_MEDIAEVENT_NONOTIFY suppresses the message without losing the event', ()=>{
+test('AM_MEDIAEVENT_NONOTIFY posts nothing and queues nothing, as SetNotifyFlags documents', ()=>{
     const { object, host } = createObject();
     call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyWindow', [0x40, 0x8001, 0]);
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [1]), S_OK);
@@ -335,7 +345,8 @@ test('AM_MEDIAEVENT_NONOTIFY suppresses the message without losing the event', (
     assert.equal(host.i32(OUT), 1);
     call(object, IID_IMEDIA_CONTROL, 'Run');
     assert.equal(host.posted.length, 0);
-    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT, 'the queue takes no event while notification is off');
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [2]), E_INVALIDARG);
 });
 
@@ -349,10 +360,66 @@ test('WaitForCompletion answers with the abort code, and only while running', ()
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'WaitForCompletion', [0, OUT]), E_ABORT);
 });
 
-test('GetEventHandle fails cleanly rather than handing out a handle that never signals', ()=>{
+test('GetEventHandle with no kernel events behind it refuses and zeroes the pointer', ()=>{
     const { object, host } = createObject();
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT]), E_NOTIMPL);
     assert.equal(host.i32(OUT), 0);
+});
+
+/** Kernel events as a host keeps them: a handle each, raised or not, closed or not. */
+function fakeEvents(){
+    /** @type {Map<number, { up: boolean, closed: boolean }>} */
+    const made = new Map();
+    return {
+        made,
+        create: ()=>{
+            const handle = 0x100 + made.size * 4;
+            made.set(handle, { up: false, closed: false });
+            return handle;
+        },
+        /** @param {number} handle */
+        set: handle=>{ /** @type {any} */ (made.get(handle)).up = true; },
+        /** @param {number} handle */
+        reset: handle=>{ /** @type {any} */ (made.get(handle)).up = false; },
+        /** @param {number} handle */
+        close: handle=>{ /** @type {any} */ (made.get(handle)).closed = true; },
+    };
+}
+
+test('the event handle is one for the graph, up exactly while the queue holds an event', ()=>{
+    const host = createHost({});
+    const events = fakeEvents();
+    const registry = createComRegistry();
+    registerQuartzClasses(registry, { ...host, events });
+    const object = /** @type {any} */ (registry.create(CLSID_FILTER_GRAPH));
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [0]), E_POINTER);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT]), S_OK);
+    const handle = host.i32(OUT);
+    assert.equal(events.made.get(handle)?.up, false, 'nothing queued yet');
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    assert.equal(events.made.get(handle)?.up, true, 'EC_COMPLETE raises it');
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT + 16]), S_OK);
+    assert.equal(host.i32(OUT + 16), handle, 'the same handle every time');
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(events.made.get(handle)?.up, false,
+        'the GetEvent that empties the queue lowers it');
+
+    // With notification off, only the end of a stream raises it.
+    call(object, IID_IMEDIA_CONTROL, 'Stop');
+    call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [1]);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    assert.equal(events.made.get(handle)?.up, true);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT);
+
+    while (object.release() > 0)
+    {
+        // The graph's own references.
+    }
+    assert.equal(events.made.get(handle)?.closed, true,
+        'the graph closes its handle when it goes');
 });
 
 test('Stop and Pause move the reported state', ()=>{
@@ -572,15 +639,18 @@ test('Run with a clip plays it instead of completing at once', ()=>{
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
         E_ABORT, 'a film that has not been shown is not over');
 
-    // The clock starts at the first tick, so this one is where time zero is.
-    assert.equal(tick(1000), null, 'nothing is owed yet at the moment it starts');
+    // The clock starts at the first tick, so this one is where time zero is:
+    // no picture is due yet, and the sound is handed over a lead ahead of it.
+    const first = tick(1000);
+    assert.equal(first?.bgra, null, 'no picture at the moment it starts');
+    assert.equal(Math.round(soundMs(first?.audio ?? [])), 200, 'the sound a lead ahead');
     const shown = tick(1100);
     assert.ok(shown, 'a tenth of a second later, one frame');
     assert.equal(shown.hwnd, 0x40b4, 'addressed to the window the program owns it with');
     assert.deepEqual([shown.width, shown.height], [800, 368]);
     assert.ok(shown.bgra, 'and carries the picture');
     assert.equal(Math.round(soundMs(shown.audio)), 100,
-        'with the sound that belongs to it: one frame of film, one frame of sound');
+        'and the sound kept a lead ahead of it: one frame of film, one frame of sound');
 
     assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
     assert.equal(host.f64(OUT), 0.1, 'the position is what has been shown');
@@ -617,6 +687,53 @@ test('the picture is shown where the sound has got to, not where the clock has',
     const drift = position() - played;
     assert.ok(drift >= 0 && drift <= 250,
         `the picture stood ${drift}ms ahead of the sound a person heard`);
+});
+
+test('a film\'s sound is read on its own, ahead of a picture decoded only as it is due', ()=>{
+    // A file's muxer may put the sound seconds after the picture it belongs to
+    // (an MPEG intro, measured: up to 5 s). Read in the file's order, the sound
+    // was reached only by decoding the picture that far ahead; it ran out,
+    // stalled, and the film went over to the host clock and back - in jerks.
+    const fps = 10;
+    let decodedFrames = 0;
+    const base = fakeClip({ frameCount: 1000, fps });
+    const clip = {
+        ...base,
+        decode(){
+            decodedFrames++;
+            return base.decode();
+        },
+    };
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH, { clip });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    // A device playing in real time whatever it has been handed.
+    let handed = 0;
+    let played = 0;
+    /** @type {number[]} */
+    const shownAt = [];
+    for (let at = 0; at <= 5000; at += 20)
+    {
+        played = Math.min(handed, played + 20);
+        const shown = tick(at, handed - played);
+        handed += soundMs(shown?.audio ?? []);
+        if (shown?.bgra)
+        {
+            shownAt.push(at);
+        }
+    }
+    assert.ok(!host.reported.some(line=>line.includes('host clock alone')),
+        'the sound never stopped moving');
+    assert.ok(played >= 4500, `the sound played on in real time: ${played} ms of 5000`);
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+    const drift = Math.round(host.f64(OUT) * 1000) - played;
+    assert.ok(drift >= 0 && drift <= 250, `the picture stood ${drift} ms ahead of the sound`);
+    const gaps = shownAt.slice(1).map((at, index)=>at - shownAt[index]);
+    assert.ok(Math.max(...gaps) <= 200, `no frame waited ${Math.max(...gaps)} ms for the next`);
+    assert.ok(decodedFrames <= Math.ceil((played + 250) * fps / 1000),
+        `the picture decoded no further than it was due: ${decodedFrames} frames`);
 });
 
 test('a film with no sound to follow runs on the host clock, and says so', ()=>{
@@ -858,4 +975,69 @@ test('a graph released after the film has finished closes the clip too', ()=>{
     assert.equal(clip.closed, false, 'a finished film is not a released graph');
     object.release();
     assert.equal(clip.closed, true);
+});
+
+test('IFilterMapper takes a filter DLL\'s registration, and an instance gets a GUID of its own',
+    ()=>{
+        const { object, host } = createObject(CLSID_FILTER_MAPPER);
+        const methods = methodsOf(object, IID_IFILTER_MAPPER).slice(3);
+        assert.deepEqual(methods.map(entry=>entry.name), ['RegisterFilter',
+            'RegisterFilterInstance', 'RegisterPin', 'RegisterPinType', 'UnregisterFilter',
+            'UnregisterFilterInstance', 'UnregisterPin', 'EnumMatchingFilters']);
+        // A CLSID by value is four dwords: the name and the merit come after it.
+        assert.deepEqual(methods.map(entry=>entry.argBytes), [28, 28, 60, 56, 20, 20, 24, 88]);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilter',
+            [1, 2, 3, 4, 0x2000, 0x600000]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterPin',
+            [1, 2, 3, 4, 0x2000, 0, 1, 0, 0, 0, 0, 0, 0, 0x2010]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, OUT]), S_OK);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, OUT + 16]), S_OK);
+        const first = [0, 4, 8, 12].map(at=>host.i32(OUT + at));
+        const second = [0, 4, 8, 12].map(at=>host.i32(OUT + 16 + at));
+        assert.notDeepEqual(first, second, 'each instance its own id');
+        assert.equal((host.i32(OUT + 4) >>> 28) & 0xf, 4, 'a version 4 GUID');
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'RegisterFilterInstance',
+            [1, 2, 3, 4, 0x2000, 0]), E_POINTER);
+        assert.equal(call(object, IID_IFILTER_MAPPER, 'UnregisterFilter', [1, 2, 3, 4]), S_OK);
+    });
+
+test('IBasicVideo places the source inside the frame and the destination anywhere', ()=>{
+    const { object, host } = createObject();
+    const video = (/** @type {string} */ name, /** @type {number[]} */ args = [])=>
+        call(object, IID_IBASIC_VIDEO, name, args);
+    const rect = ()=>[0, 4, 8, 12].map(at=>host.i32(OUT + at));
+
+    assert.equal(video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, 0]), E_POINTER);
+    assert.equal(video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, OUT + 12]), S_OK);
+    assert.deepEqual(rect(), [0, 0, 640, 480], 'the whole frame by default');
+    assert.equal(video('IsUsingDefaultSource'), S_OK);
+    assert.equal(video('SetSourcePosition', [640, 0, 640, 480]), E_INVALIDARG, 'past the frame');
+    assert.equal(video('put_SourceLeft', [-1]), E_INVALIDARG);
+    assert.equal(video('SetSourcePosition', [320, 240, 214, 161]), S_OK);
+    assert.equal(video('put_SourceLeft', [213]), S_OK);
+    video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, OUT + 12]);
+    assert.deepEqual(rect(), [213, 240, 214, 161], 'a side put keeps the other three');
+    assert.equal(video('IsUsingDefaultSource'), S_FALSE);
+    assert.equal(video('SetDefaultSourcePosition'), S_OK);
+    assert.equal(video('IsUsingDefaultSource'), S_OK);
+
+    assert.equal(video('SetDestinationPosition', [-10, -10, 2000, 2000]), S_OK,
+        'a destination may reach past the window');
+    assert.equal(video('put_DestinationWidth', [0]), E_INVALIDARG, 'but has a size');
+    video('GetDestinationPosition', [OUT, OUT + 4, OUT + 8, OUT + 12]);
+    assert.deepEqual(rect(), [-10, -10, 2000, 2000]);
+    assert.equal(video('IsUsingDefaultDestination'), S_FALSE);
+});
+
+test('a graph seeks in REFERENCE_TIME alone, and converts a time to itself in it', ()=>{
+    const { object, host } = createObject();
+    const seeking = (/** @type {string} */ name, /** @type {number[]} */ args = [])=>
+        call(object, IID_IMEDIA_SEEKING, name, args);
+    assert.equal(seeking('QueryPreferredFormat', [OUT]), S_OK);
+    assert.equal(host.i32(OUT) >>> 0, 0x7b785574, 'TIME_FORMAT_MEDIA_TIME');
+    assert.equal(seeking('ConvertTimeFormat', [OUT, 0, 0x3456789a, 0x12, 0]), S_OK);
+    assert.equal(host.i64(OUT), 0x123456789an);
+    assert.equal(seeking('ConvertTimeFormat', [0, 0, 1, 0, 0]), E_POINTER);
 });

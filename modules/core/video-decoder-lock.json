@@ -1,7 +1,7 @@
 {
   "repo": "bottlify/bottlify",
-  "tag": "video-decoder-83b157d",
+  "tag": "video-decoder-6ae3a5b",
   "artifacts": {
-    "video-decoder.wasm": "sha256:179c64a43bea9e0160a1489dab11c31088921810a299cc8ba6fef04448d0f909"
+    "video-decoder.wasm": "sha256:94f82c62c34490d99e9417514614a7ec70cb7b2e47fb6438d0b9ea2663cc69f9"
   }
 }

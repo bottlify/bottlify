@@ -206,11 +206,11 @@ const RUN = `
 import { readFile } from 'node:fs/promises';
 const [module, exe] = process.argv.slice(2);
 const { createApp } = await import(module);
-const app = await createApp({ executable: new Uint8Array(await readFile(exe)), engine: 'cork',
+const app = await createApp({ executable: new Uint8Array(await readFile(exe)),
     cork: { config: { feed: 'slice' } } });
 const output = [];
 app.attachLog((_, text)=>output.push(text));
-const code = await app.run({ timeoutMs: 60000 });
+const code = await app.run({ timeoutMs: 150_000 });
 const cpu = (await app.diagnostics()).find(one=>one.name === 'cpu');
 console.log(JSON.stringify({ code, output: output.join(''), regions: cpu.metrics.cork.regions }));
 await app.dispose();

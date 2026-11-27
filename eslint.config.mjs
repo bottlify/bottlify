@@ -14,7 +14,7 @@ export default [
             '**/node_modules/**',
             '**/dist/**',
             '**/vendor/**',
-            'tools/cdp_test/reports/**',
+            'tools/*/reports/**',
             '.ghidra/**',
             '.ghidra-home/**',
             // A title's bundle content beside its manifest (its sidecar kernels)

@@ -84,11 +84,13 @@ export function installLightingCalls(context, kernel){
         restoreServerLighting(saved){
             if (saved.lights)
             {
+                // A snapshot popped off the attribute stack, nobody else's: its
+                // arrays become the live ones as they are.
                 saved.lights.forEach((/** @type {any} */ light, /** @type {number} */ i)=>{
-                    Object.assign(lights[i], structuredClone(light));
+                    Object.assign(lights[i], light);
                 });
-                Object.assign(materials.front, structuredClone(saved.materials.front));
-                Object.assign(materials.back, structuredClone(saved.materials.back));
+                Object.assign(materials.front, saved.materials.front);
+                Object.assign(materials.back, saved.materials.back);
             }
             if (saved.clipPlanes)
             {

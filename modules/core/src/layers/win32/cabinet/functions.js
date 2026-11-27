@@ -6,7 +6,8 @@
 
 /**
  * cabinet.dll: the File Decompression Interface, how a setup unpacks a
- * cabinet it carries.
+ * cabinet it carries, and beside it the File Compression Interface (fci.js),
+ * how a program makes one.
  *
  * The program supplies every service the library needs -- memory, and the
  * opening, reading, writing, seeking in and closing of files, all as
@@ -22,7 +23,20 @@
 
 import { CabinetError, COMPRESSION } from './cabinet.js';
 import { extractCabinet, readCabinetHead } from './stream.js';
+import { createFciFunctions } from './fci.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
+import { windowsVersion } from '../kernel32/versions.js';
+
+const E_INVALIDARG = 0x80070057 | 0;
+/** DLLVERSIONINFO's dwPlatformID for the NT line. */
+const DLLVER_PLATFORM_NT = 2;
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 /** FDICopy's notifications. */
 const fdintCABINET_INFO = 0;
@@ -67,6 +81,8 @@ const READ_CHUNK = 64 * 1024;
  * @property {() => any} callerThread
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]  The Windows the
+ *     machine is, whose build the library is.
  */
 
 /**
@@ -85,7 +101,7 @@ export function createCabinetFunctions(host){
     let next = 0x0fd10001;
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
 
     /**
@@ -118,7 +134,9 @@ export function createCabinetFunctions(host){
         const end = Number(await host.call(context.seek, [file, 0, 2], thread) | 0);
         const buffer = host.allocate(READ_CHUNK);
         return {
-            size: end,
+            // A seek that failed -- a handle that is no file -- leaves
+            // nothing to read, and so no cabinet; the error is the callback's.
+            size: Math.max(end, 0),
             read: async(offset, length)=>{
                 const out = new Uint8Array(length);
                 let done = 0;
@@ -154,6 +172,52 @@ export function createCabinetFunctions(host){
     };
 
     return {
+        ...createFciFunctions(host),
+
+        /**
+         * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
+         *
+         * The library is the system's, at the machine's own version and build,
+         * on the NT platform. The caller says which structure it passed by its
+         * first field - DLLVERSIONINFO, 20 bytes, or DLLVERSIONINFO2, 32, which
+         * adds flags and the version as one 64-bit number - and any other size
+         * is refused. A setup engine (WiX's Burn) asks it of each library it
+         * loads, for its log.
+         */
+        DllGetVersion: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if (wholeAddress(info) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const head = host.readMemory(wholeAddress(info), 4);
+                const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
+                if (size !== 20 && size !== 32)
+                {
+                    return E_INVALIDARG;
+                }
+                const { major, minor, build } = host.windows ?? windowsVersion(null);
+                const fields = new DataView(new ArrayBuffer(size - 4));
+                fields.setUint32(0, major, true);
+                fields.setUint32(4, minor, true);
+                fields.setUint32(8, build, true);
+                fields.setUint32(12, DLLVER_PLATFORM_NT, true);
+                if (size === 32)
+                {
+                    // dwFlags 0, wReserved, then ullVersion: major, minor,
+                    // build and QFE as four 16-bit words from the top.
+                    fields.setUint16(20, 0, true);
+                    fields.setUint16(22, build, true);
+                    fields.setUint16(24, minor, true);
+                    fields.setUint16(26, major, true);
+                }
+                host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
+                return 0;
+            },
+        },
+
         /**
          * HFDI FDICreate(PFNALLOC pfnalloc, PFNFREE pfnfree, PFNOPEN pfnopen,
          *   PFNREAD pfnread, PFNWRITE pfnwrite, PFNCLOSE pfnclose, PFNSEEK pfnseek,
@@ -204,7 +268,7 @@ export function createCabinetFunctions(host){
                 try
                 {
                     const cabinet = await readCabinetHead(source);
-                    if ((info >>> 0) !== 0)
+                    if (wholeAddress(info) !== 0)
                     {
                         const block = new Uint8Array(CABINET_INFO_SIZE);
                         const view = new DataView(block.buffer);
@@ -216,7 +280,7 @@ export function createCabinetFunctions(host){
                         view.setInt32(12, (cabinet.flags & 4) !== 0 ? 1 : 0, true);
                         view.setInt32(16, cabinet.previous !== null ? 1 : 0, true);
                         view.setInt32(20, cabinet.next !== null ? 1 : 0, true);
-                        host.writeMemory(info >>> 0, block);
+                        host.writeMemory(wholeAddress(info), block);
                     }
                     return 1;
                 }
@@ -253,8 +317,8 @@ export function createCabinetFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread();
-                const name = host.readCString(cabinetName >>> 0, 260);
-                const directory = host.readCString(cabinetPath >>> 0, 260);
+                const name = host.readCString(wholeAddress(cabinetName), WHOLE_NAME);
+                const directory = host.readCString(wholeAddress(cabinetPath), WHOLE_NAME);
                 const path = guestString(directory + name);
                 /** @param {number} kind @param {(block: Uint8Array) => void} fill */
                 const tell = async(kind, fill)=>{
@@ -264,7 +328,7 @@ export function createCabinetFunctions(host){
                     host.writeMemory(address, block);
                     try
                     {
-                        return (await host.call(notify >>> 0, [kind, address], thread)) | 0;
+                        return (await host.call(wholeAddress(notify), [kind, address], thread)) | 0;
                     }
                     finally
                     {
@@ -305,7 +369,7 @@ export function createCabinetFunctions(host){
                         view.setUint32(4, string(cabinet.next ?? ''), true);
                         view.setUint32(8, string(''), true);
                         view.setUint32(12, string(directory), true);
-                        view.setUint32(16, user >>> 0, true);
+                        view.setUint32(16, wholeAddress(user), true);
                         view.setUint16(28, cabinet.setId, true);
                         view.setUint16(30, cabinet.index, true);
                     });
@@ -326,7 +390,7 @@ export function createCabinetFunctions(host){
                             const view = new DataView(block.buffer);
                             view.setInt32(0, entry.size, true);
                             view.setUint32(4, string(text), true);
-                            view.setUint32(16, user >>> 0, true);
+                            view.setUint32(16, wholeAddress(user), true);
                             view.setUint16(24, entry.date, true);
                             view.setUint16(26, entry.time, true);
                             view.setUint16(28, entry.attributes & ~A_NAME_IS_UTF, true);
@@ -364,7 +428,7 @@ export function createCabinetFunctions(host){
                                 const answer = await tell(fdintCLOSE_FILE_INFO, block=>{
                                     const view = new DataView(block.buffer);
                                     view.setUint32(4, string(text), true);
-                                    view.setUint32(16, user >>> 0, true);
+                                    view.setUint32(16, wholeAddress(user), true);
                                     view.setInt32(20, destination, true);
                                     view.setUint16(24, entry.date, true);
                                     view.setUint16(26, entry.time, true);

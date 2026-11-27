@@ -45,14 +45,14 @@ import {
     D3DDEVICEDESC, D3DEXECUTEBUFFERDESC, D3DEXECUTEDATA, D3DFINDDEVICERESULT,
     D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 import { DDSURFACEDESC, writeSurfaceDesc } from '../ddraw/structs.js';
-import { guidBytes } from './d3d7.js';
+import { guidBytes } from '../../../system/guid.js';
 import {
-    D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_DRAWPRIMITIVES2EX, D3DDEVCAPS_FLOATTLVERTEX,
+    D3DCOLOR_MONO, D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_FLOATTLVERTEX,
     D3DDEB_BUFSIZE, D3DDEB_LPDATA, D3DERR_INVALIDVERTEXTYPE, D3DERR_MATRIX_GETDATA_FAILED,
     D3DFVF_LVERTEX, D3DFVF_TLVERTEX, D3DFVF_VERTEX, D3DVT,
-    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DFDS_GUID, D3DFDS_HARDWARE,
+    D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DFDS_GUID, D3DFDS_HARDWARE,
     D3DLIGHTCAPS_DIRECTIONAL, D3DLIGHTCAPS_PARALLELPOINT, D3DLIGHTCAPS_POINT, D3DLIGHTCAPS_SPOT,
     D3DLIGHTINGMODEL_RGB, D3DPTEXTURECAPS_POW2, D3DTRANSFORMCAPS_CLIP, D3D_OK,
     DDERR_ALREADYINITIALIZED, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS,
@@ -60,9 +60,23 @@ import {
 import {
     CLASS_E_NOAGGREGATION, DDSCAPS_TEXTURE, DDSD_CAPS, DDSD_PIXELFORMAT,
 } from '../ddraw/constants.js';
-import { createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
+import { clipVolumeMatrix, createLegacyDirect3D, createTextureHandles } from '../d3d7/legacy.js';
+import { deviceTargetRefusal } from '../d3d7/device.js';
 import { loadTexture } from '../d3d7/load.js';
 import { createExecuteBuffer, executeBuffer } from '../d3d7/execute.js';
+
+/** D3DTRANSFORMDATA's size, which TransformVertices checks its dwSize against. */
+const D3DTRANSFORMDATA_SIZE = 0x34;
+/** D3DTRANSFORM_CLIPPED and D3DTRANSFORM_UNCLIPPED. */
+const D3DTRANSFORM_CLIPPED = 1;
+const D3DTRANSFORM_UNCLIPPED = 2;
+/** The planes a D3DHVERTEX says cut its point. */
+const D3DCLIP_LEFT = 0x1;
+const D3DCLIP_RIGHT = 0x2;
+const D3DCLIP_TOP = 0x4;
+const D3DCLIP_BOTTOM = 0x8;
+const D3DCLIP_FRONT = 0x10;
+const D3DCLIP_BACK = 0x20;
 
 /** What an enumeration callback answers to stop. */
 const D3DENUMRET_CANCEL = 0;
@@ -89,6 +103,17 @@ const MAX_VERTEX_COUNT = 0xffff;
 
 /** Every D3DDD bit: which fields a full description fills. */
 const ALL_FIELDS = Object.values(D3DDD).reduce((all, bit)=>all | bit, 0);
+
+/**
+ * The software devices' own capabilities, as Windows describes them to the
+ * versions before 7 (Wine's ddraw1, ddraw2 and ddraw4 test_enum_devices):
+ * before IDirect3D3 they also sort, and leave the line capabilities out.
+ */
+const SOFTWARE_DEVCAPS = Object.freeze({
+    older: 0x55b,
+    third: 0x551,
+});
+const OLDER_SOFTWARE_FIELDS = ALL_FIELDS & ~D3DDD.LINECAPS;
 
 /** The fields the software side of the hardware device fills. */
 const HEL_OF_HAL_FIELDS = D3DDD.COLORMODEL | D3DDD.DEVCAPS | D3DDD.TRANSFORMCAPS
@@ -167,6 +192,18 @@ export function createLegacyDirect3DSeam(
     const pointerTo = (object, id)=>publisher.publish(object, [], id);
 
     /**
+     * A surface the model took a reference on for the program, handed out
+     * as `id`: the reference is that interface's to release, so it moves to
+     * that interface's count (`handedAs`).
+     *
+     * @param {any} surface @param {string} id
+     */
+    const handedSurface = (surface, id)=>{
+        surface.handedAs?.(id);
+        return pointerTo(surface, id);
+    };
+
+    /**
      * A device's methods, each first making what the routines of its third
      * generation wrote into the ring of the Direct3D 7 device under it
      * (`shadeLegacy`): the host answers after every call the program made
@@ -232,6 +269,7 @@ export function createLegacyDirect3DSeam(
         }
         const caps = device.caps;
         const software = device.id !== DEVICE_IDS.HAL;
+        const older = declared < D3DDEVICEDESC.SIZE;
         const lighting = (/** @type {number} */ lights)=>{
             fields.writeU32(at + TRANSFORM_CAPS + 4, D3DTRANSFORMCAPS_CLIP);
             fields.writeU32(at + D3DDEVICEDESC.bClipping, 1);
@@ -248,12 +286,13 @@ export function createLegacyDirect3DSeam(
             return;
         }
         // DirectX 7's own capabilities, and the hardware ones on the software
-        // device, are not this device's to claim.
-        const devCaps = caps.devCaps & ~D3DDEVCAPS_HWTRANSFORMANDLIGHT
-            & ~(software ? D3DDEVCAPS_HWRASTERIZATION | D3DDEVCAPS_DRAWPRIMITIVES2EX : 0);
+        // devices, are not this device's to claim.
+        const devCaps = software
+            ? (older ? SOFTWARE_DEVCAPS.older : SOFTWARE_DEVCAPS.third)
+            : caps.devCaps & ~D3DDEVCAPS_HWTRANSFORMANDLIGHT;
         fields.writeStruct(at, D3DDEVICEDESC, {
-            dwFlags: ALL_FIELDS,
-            dcmColorModel: D3DCOLOR_RGB,
+            dwFlags: software && older ? OLDER_SOFTWARE_FIELDS : ALL_FIELDS,
+            dcmColorModel: device.id === DEVICE_IDS.RAMP ? D3DCOLOR_MONO : D3DCOLOR_RGB,
             dwDevCaps: devCaps,
             dwDeviceRenderBitDepth: caps.deviceRenderBitDepth,
             dwDeviceZBufferBitDepth: caps.deviceZBufferBitDepth,
@@ -326,8 +365,32 @@ export function createLegacyDirect3DSeam(
     };
 
     /**
-     * EnumDevices of any version: the software device, then the hardware
-     * one, each with its descriptions at the size this version's header has.
+     * The devices a version lists and finds, in its order: IDirect3D the ramp
+     * emulation before the RGB one and the HAL, IDirect3D2 the MMX emulation
+     * after them too, IDirect3D3 neither (Wine's test_enum_devices and
+     * test_find_device, every version). The emulations are described as the
+     * RGB device is, the ramp one in the mono colour model.
+     *
+     * @param {any} root @param {number} declared  The version's description size.
+     * @returns {any[]}
+     */
+    const devicesOf = (root, declared)=>{
+        const own = legacyFor(root).devices();
+        if (declared === D3DDEVICEDESC.SIZE)
+        {
+            return own;
+        }
+        const rgb = own.find((/** @type {any} */ device)=>device.id === DEVICE_IDS.RGB);
+        const ramp = { ...rgb, id: DEVICE_IDS.RAMP, name: 'Ramp Emulation',
+            text: 'Microsoft Direct3D Mono(Ramp) Software Emulation' };
+        const mmx = { ...rgb, id: DEVICE_IDS.MMX, name: 'MMX Emulation',
+            text: 'Microsoft Direct3D MMX Software Emulation' };
+        return declared === D3DDEVICEDESC.SIZE_V1 ? [ramp, ...own] : [ramp, ...own, mmx];
+    };
+
+    /**
+     * EnumDevices of any version: its devices (`devicesOf`), each with its
+     * descriptions at the size this version's header has.
      *
      * @param {any} root @param {number} callback @param {number} context @param {number} size
      */
@@ -344,7 +407,7 @@ export function createLegacyDirect3DSeam(
         // Whose call this is, before the loop awaits anything: only the first
         // callback of an enumeration runs on the thread standing here.
         const asked = currentThread?.();
-        const devices = legacyFor(root).devices();
+        const devices = devicesOf(root, size);
         return (async()=>{
             for (const device of devices)
             {
@@ -395,7 +458,7 @@ export function createLegacyDirect3DSeam(
         const hardware = (flags & D3DFDS_HARDWARE) !== 0
             ? fields.readU32((search >>> 0) + D3DFINDDEVICESEARCH.bHardware) !== 0
             : null;
-        const device = legacyFor(root).devices().find((/** @type {any} */ candidate)=>
+        const device = devicesOf(root, declared).find((/** @type {any} */ candidate)=>
             (guid === null || candidate.id === guid)
             && (hardware === null || (candidate.id === DEVICE_IDS.HAL) === hardware));
         if (!device)
@@ -522,11 +585,12 @@ export function createLegacyDirect3DSeam(
          * @param {any} material @param {number[]} args
          */
         GetHandle: (material, [device, out])=>{
-            if (!publisher.objectAt(device) || (out >>> 0) === 0)
+            const owner = publisher.objectAt(device);
+            if (!owner || (out >>> 0) === 0)
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, material.getHandle());
+            fields.writeU32(out >>> 0, material.getHandle(owner));
             return D3D_OK;
         },
 
@@ -656,6 +720,80 @@ export function createLegacyDirect3DSeam(
             return hr;
         },
 
+        /**
+         * Each point through world, view, projection and the clip volume onto
+         * the viewport's rectangle (Wine's ddraw1.c test_transform_vertices).
+         * Clipped, a D3DHVERTEX says which planes cut it, with the point
+         * before the clip volume's scale; a point cut is left at its clip
+         * coordinates, and the offscreen word is the AND of every point's.
+         *
+         * @param {any} viewport @param {number[]} args
+         */
+        TransformVertices: (viewport, [count, pointer, flags, offscreen])=>{
+            const at = pointer >>> 0;
+            if (at === 0 || fields.readU32(at) !== D3DTRANSFORMDATA_SIZE
+                || (flags & (D3DTRANSFORM_CLIPPED | D3DTRANSFORM_UNCLIPPED)) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const { hr, matrix: m, data: v } = viewport.transformMatrix();
+            if (hr !== D3D_OK || !m || !v)
+            {
+                return hr;
+            }
+            const input = fields.readU32(at + 4);
+            const inSize = fields.readU32(at + 8);
+            const output = fields.readU32(at + 12);
+            const outSize = fields.readU32(at + 16);
+            const homogeneous = fields.readU32(at + 20);
+            const clipped = (flags & D3DTRANSFORM_CLIPPED) !== 0;
+            const clip = clipVolumeMatrix(v);
+            let all = clipped ? 0xffffffff : 0;
+            for (let k = 0; k < (count >>> 0); k++)
+            {
+                const from = input + k * inSize;
+                const [px, py, pz] = [0, 4, 8].map(offset=>fields.readF32(from + offset));
+                /** @param {number} column */
+                const row = column=>px * m[column] + py * m[4 + column] + pz * m[8 + column]
+                    + m[12 + column];
+                const [x, y, z, w] = [row(0), row(1), row(2), row(3)];
+                const to = output + k * outSize;
+                if (clipped)
+                {
+                    const planes = (x > w ? D3DCLIP_RIGHT : 0) | (x < -w ? D3DCLIP_LEFT : 0)
+                        | (y > w ? D3DCLIP_TOP : 0) | (y < -w ? D3DCLIP_BOTTOM : 0)
+                        | (z < 0 ? D3DCLIP_FRONT : 0) | (z > w ? D3DCLIP_BACK : 0);
+                    const h = homogeneous + k * 16;
+                    fields.writeU32(h, planes);
+                    fields.writeF32(h + 4, (x - clip[12] * w) / clip[0]);
+                    fields.writeF32(h + 8, (y - clip[13] * w) / clip[5]);
+                    fields.writeF32(h + 12, (z - clip[14] * w) / clip[10]);
+                    all = (all & planes) >>> 0;
+                    if (planes !== 0)
+                    {
+                        [x, y, z, w].forEach((value, index)=>
+                            fields.writeF32(to + 4 * index, value));
+                        continue;
+                    }
+                }
+                const rhw = 1 / w;
+                fields.writeF32(to, (x * rhw + 1) * v.width * 0.5 + v.x);
+                fields.writeF32(to + 4, (-y * rhw + 1) * v.height * 0.5 + v.y);
+                fields.writeF32(to + 8, z * rhw);
+                fields.writeF32(to + 12, rhw);
+                // The four dwords after the point are carried as they are.
+                for (let word = 0; word < 4; word++)
+                {
+                    fields.writeU32(to + 16 + 4 * word, fields.readU32(from + 16 + 4 * word));
+                }
+            }
+            if ((offscreen >>> 0) !== 0)
+            {
+                fields.writeU32(offscreen >>> 0, all);
+            }
+            return D3D_OK;
+        },
+
         /** @param {any} viewport @param {number[]} args */
         GetViewport2: (viewport, [pointer])=>{
             if (!viewportAt(pointer))
@@ -753,8 +891,10 @@ export function createLegacyDirect3DSeam(
 
     // --- vertex buffers ---
 
+    // IUnknown is the buffer's own interface (Wine's ddraw4 test_vb_refcount).
     const bufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+        { ...describe(IID_IDirect3DVertexBuffer, IDIRECT3DVERTEXBUFFER_SLOTS, bufferMethods),
+            identity: true },
     ];
 
     // --- devices ---
@@ -948,7 +1088,7 @@ export function createLegacyDirect3DSeam(
                 /** @type {{ surface?: any }} */
                 const held = {};
                 device.inner.GetRenderTarget(held);
-                fields.writeU32(out >>> 0, pointerTo(held.surface, ids.surface));
+                fields.writeU32(out >>> 0, handedSurface(held.surface, ids.surface));
                 return D3D_OK;
             },
 
@@ -1126,7 +1266,13 @@ export function createLegacyDirect3DSeam(
                 indexCount >>> 0, flags >>> 0, d3d7.clippedDraw(vertices, flags));
         },
 
-        ComputeSphereVisibility: onInner('ComputeSphereVisibility'),
+        // The seventh generation's call, its answer in this one's D3DVIS bits.
+        /** @param {any} device @param {number[]} args */
+        ComputeSphereVisibility: (device, args)=>deviceMethods.ComputeSphereVisibility({
+            ComputeSphereVisibility: (/** @type {number[][]} */ centers,
+                /** @type {number[]} */ radii, /** @type {{ results?: number[] }} */ out)=>
+                device.inner.ComputeSphereVisibility(centers, radii, out, true),
+        }, args),
 
         /** @param {any} device @param {number[]} args */
         GetTexture: (device, [stage, out])=>{
@@ -1140,7 +1286,7 @@ export function createLegacyDirect3DSeam(
             if (hr === D3D_OK)
             {
                 fields.writeU32(out >>> 0,
-                    held.surface ? pointerTo(held.surface, IDS[3].texture) : 0);
+                    held.surface ? handedSurface(held.surface, IDS[3].texture) : 0);
             }
             return hr;
         },
@@ -1424,11 +1570,26 @@ export function createLegacyDirect3DSeam(
     deviceInterfaces[2].push(device1);
     deviceInterfaces[1] = [device1];
 
+    /**
+     * Why a surface answers no device of a kind: the reason a device would
+     * not be made on it, unless it has one already (Wine's ddraw1 test_rt_caps).
+     *
+     * @param {string} kind
+     */
+    const refusedOn = kind=>(/** @type {any} */ surface)=>{
+        if (aggregates.get(surface)?.has(kind))
+        {
+            return undefined;
+        }
+        const hr = deviceTargetRefusal(surface, kind === DEVICE_IDS.HAL, true);
+        return hr === D3D_OK ? undefined : hr;
+    };
     /** The devices a surface answers for, each a part of it. */
     const surfaceDevices = [
-        describe(DEVICE_IDS.HAL, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.HAL), {},
-            surfaceGone),
-        describe(DEVICE_IDS.RGB, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.RGB)),
+        { ...describe(DEVICE_IDS.HAL, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.HAL), {},
+            surfaceGone), refuses: refusedOn(DEVICE_IDS.HAL) },
+        { ...describe(DEVICE_IDS.RGB, IDIRECT3DDEVICE_SLOTS, device1Methods(DEVICE_IDS.RGB)),
+            refuses: refusedOn(DEVICE_IDS.RGB) },
     ];
 
     // --- the Direct3D objects, on the DirectDraw object ---

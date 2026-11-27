@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LockFlags, alignOutward, carriedRanges, createDynamicBuffer } from './buffers.js';
+import { LockFlags, SPARE_FRAMES, alignOutward, carriedRanges, createDynamicBuffer }
+    from './buffers.js';
 import { createFakeDevice } from './fake-device.js';
 
 /** @param {number} size @param {number} [alignment] */
@@ -175,6 +176,35 @@ test('retired buffers come back after a frame boundary instead of allocating for
     fill(dynamic, 0, 16, LockFlags.DISCARD);
     assert.equal(gpu.count('createBuffer'), 2, 'the retired buffer was reused');
     assert.equal(dynamic.gpu, first);
+});
+
+test('a spare a rename left goes back to the GPU once the buffer has not renamed for a while,'
+    + ' and a ring keeps its spares', ()=>{
+    const { gpu, dynamic } = buffer(4096);
+    const first = dynamic.gpu;
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    dynamic.endFrame();
+    assert.equal(dynamic.held.spares, 1, 'the retired backing is pooled');
+    assert.equal(dynamic.retiring, true, 'the frame end keeps visiting it while it has a spare');
+    for (let frame = 2; frame < SPARE_FRAMES; frame++)
+    {
+        dynamic.endFrame();
+    }
+    assert.equal(dynamic.held.spares, 1, 'kept while a rename may still come');
+    dynamic.endFrame();
+    assert.deepEqual({ ...dynamic.held }, { capacity: 4096, shadow: 4096, spares: 0,
+        sparesFreed: 1 });
+    assert.equal(gpu.of('destroy').at(-1).buffer, first, 'the spare is the backing destroyed');
+    assert.equal(dynamic.retiring, false);
+
+    const ring = buffer(4096).dynamic;
+    for (let frame = 0; frame < SPARE_FRAMES * 3; frame++)
+    {
+        fill(ring, 0, 16, LockFlags.DISCARD);
+        ring.endFrame();
+    }
+    assert.equal(ring.held.sparesFreed, 0, 'a buffer renamed every frame keeps its spare');
+    assert.equal(ring.held.spares, 1);
 });
 
 test('a buffer in flight this frame is not recycled into itself', ()=>{
@@ -433,4 +463,32 @@ test('a lock that renamed a backing nothing is carried into sends all of itself'
     const writes = gpu.of('writeBuffer');
     assert.equal(writes.at(-1).bufferOffset, 0);
     assert.equal(writes.at(-1).size, 4096);
+});
+
+test('a buffer read from its source keeps no shadow and sends what an unlock names at once', ()=>{
+    // An OpenGL store: ten bytes in a backing of twelve, its last word partial.
+    const gpu = createFakeDevice();
+    const store = Uint8Array.from({ length: 10 }, (_, i)=>i + 1);
+    const dynamic = createDynamicBuffer({ device: gpu.device, queue: gpu.queue, size: 12,
+        usage: 0, label: 'store', source: ()=>store });
+    assert.equal(dynamic.held.shadow, 0, 'no copy beside the store');
+    const lock = dynamic.lock(6, 4, LockFlags.NOOVERWRITE);
+    assert.equal(lock.data.buffer, store.buffer, 'the lock is a view on the store');
+    assert.equal(lock.data.byteOffset, 6);
+    dynamic.unlock(lock);
+    const sent = ()=>gpu.of('writeBuffer').map((/** @type {any} */ write)=>
+        [write.bufferOffset, ...write.bytes]);
+    assert.deepEqual(sent(), [[4, 5, 6, 7, 8], [8, 9, 10, 0, 0]],
+        'the whole words from the store, the partial last one padded, before any flush');
+    store.fill(0xee);
+    dynamic.flush();
+    assert.equal(gpu.of('writeBuffer').length, 2, 'what the store holds after is not sent');
+    assert.deepEqual([...gpu.of('createBuffer')[0].createBuffer.bytes.subarray(4, 10)],
+        [5, 6, 7, 8, 9, 10], 'the queue kept the bytes as they were at the unlock');
+
+    // A rename with nothing to carry it resends the whole store.
+    store.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    dynamic.unlock(dynamic.lock(0, 2, LockFlags.DISCARD));
+    assert.deepEqual(sent().slice(2), [[0, 1, 2, 3, 4, 5, 6, 7, 8], [8, 9, 10, 0, 0]]);
+    assert.throws(()=>dynamic.rewrite(0, new Uint8Array(4)), /source/);
 });

@@ -12,9 +12,8 @@
  * A page beyond RAM is inaccessible from the start. A page holding translated
  * code carries HAS_CODE so a store into it leaves translated code with a
  * `stale` exit and the runtime invalidates what it translated there. The
- * null page is *not* marked: the emulator lets a program read address 0
- * today and hybrid parity keeps it so; marking it, and the memory layer's
- * read-only regions, is the owner's policy switch.
+ * null range is the host's to close (`closedBelow` in the cpu layer, where a
+ * Windows process has it closed): the runtime marks nothing there itself.
  */
 
 import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';
@@ -116,11 +115,12 @@ export function createPageTable(memory, layout, shared = null){
     let flagView = new Uint8Array(0);
     let rangePairs = new Uint16Array(0);
     let words = new DataView(new ArrayBuffer(0));
+    // A wide window's tables cover its 8 or 16 GiB (`wideLayout`).
+    const windowPages = (layout.window ?? 2 ** 32) / GUEST_PAGE;
     const fresh = ()=>{
         const buffer = memory.buffer;
-        flagView = new Uint8Array(buffer, pageFlagsAt(layout),
-            Tables.PAGE_FLAGS_SIZE);
-        rangePairs = new Uint16Array(buffer, codeRangesAt(layout), 1 << 20);
+        flagView = new Uint8Array(buffer, pageFlagsAt(layout), windowPages);
+        rangePairs = new Uint16Array(buffer, codeRangesAt(layout), windowPages);
         words = new DataView(buffer);
     };
     const flags = ()=>{
@@ -148,10 +148,14 @@ export function createPageTable(memory, layout, shared = null){
     const GRANULE = Tables.CODE_GRANULE_SHIFT;
     const ramPages = Math.ceil(layout.ramSize / GUEST_PAGE);
     flags().fill(PageFlag.INACCESSIBLE, ramPages);
+    // A wide window's addresses run past 32 bits.
+    /** @type {(address: number) => number} */
+    const pageOf = layout.window === undefined ? address=>address >>> 12
+        : address=>Math.floor(address / GUEST_PAGE);
     /** @param {number} address @param {number} length */
     const pagesOf = (address, length)=>{
-        const first = address >>> 12;
-        const last = length > 0 ? (address + length - 1) >>> 12 : first;
+        const first = pageOf(address);
+        const last = length > 0 ? pageOf(address + length - 1) : first;
         return [first, last];
     };
     return {
@@ -258,15 +262,61 @@ export function createPageTable(memory, layout, shared = null){
             }
         },
         staleAddress(){
+            if (layout.staleSpan !== undefined)
+            {
+                return Number(~tableWords().getBigUint64(layout.staleSpan, true)
+                    & 0xffffffffffffffffn);
+            }
             return ~tableWords().getUint32(layout.tables + Tables.STALE_LOW, true) >>> 0;
         },
         staleSize(){
+            if (layout.staleSpan !== undefined)
+            {
+                const end = Number(tableWords().getBigUint64(layout.staleSpan + 8, true));
+                return end === 0 ? 0 : end - this.staleAddress();
+            }
             const end = tableWords().getUint32(layout.tables + Tables.STALE_END, true);
             return end === 0 ? 0 : (end - this.staleAddress()) >>> 0;
         },
         clearStale(){
+            if (layout.staleSpan !== undefined)
+            {
+                tableWords().setBigUint64(layout.staleSpan, 0n, true);
+                tableWords().setBigUint64(layout.staleSpan + 8, 0n, true);
+                return;
+            }
             tableWords().setUint32(layout.tables + Tables.STALE_LOW, 0, true);
             tableWords().setUint32(layout.tables + Tables.STALE_END, 0, true);
         },
+    };
+}
+
+/**
+ * A page table as the translator sees a code block's pages (`codeBase`): its
+ * addresses and pages are offsets in the block, the table's the window's.
+ *
+ * @param {PageTable} pages @param {number} base  the block's first byte, a multiple of 4 GiB
+ * @returns {PageTable}
+ */
+export function codeBlockPages(pages, base){
+    if (base === 0)
+    {
+        return pages;
+    }
+    const first = base / GUEST_PAGE;
+    return {
+        set: (page, flag)=>pages.set(page + first, flag),
+        clear: (page, flag)=>pages.clear(page + first, flag),
+        get: page=>pages.get(page + first),
+        takeWritten: page=>pages.takeWritten(page + first),
+        markWrittenRange: (address, length)=>pages.markWrittenRange(address + base, length),
+        markCode: (address, length)=>pages.markCode(address + base, length),
+        clearCode: page=>pages.clearCode(page + first),
+        codeRange: page=>pages.codeRange(page + first),
+        markRange: (address, length, flag)=>pages.markRange(address + base, length, flag),
+        clearRange: (address, length, flag)=>pages.clearRange(address + base, length, flag),
+        staleAddress: ()=>pages.staleAddress() - base,
+        staleSize: ()=>pages.staleSize(),
+        clearStale: ()=>pages.clearStale(),
     };
 }

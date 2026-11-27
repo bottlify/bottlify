@@ -12,8 +12,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { synthesiseModule, synthesiseProgram } from './synth.js';
-import { parsePe, readImports, rvaToFileOffset } from './pe.js';
+import { imagePlacementOf, installedHeaders, synthesiseModule, synthesiseProgram }
+    from './synth.js';
+import { parsePe, readExports, readImports, rvaToFileOffset } from './pe.js';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const BASE = 0x70000000;
 
@@ -162,6 +164,26 @@ test('the image parses as a PE32 module mapped at its base', ()=>{
     const section = image.sections[0];
     assert.equal(rvaToFileOffset(image, section.virtualAddress), section.virtualAddress);
 });
+
+test('a 64-bit process\'s module is PE32+: AMD64, its exports where a program walking them looks',
+    ()=>{
+        const module = synthesiseModule({ name: 'KERNEL32.dll', base: BASE, long: true,
+            exports: [{ name: 'VirtualAlloc', target: STUBS.WriteFile },
+                { name: 'ExitProcess', target: STUBS.ExitProcess }] });
+        const view = new DataView(module.bytes.buffer);
+        const pe = view.getUint32(0x3c, true);
+        assert.equal(view.getUint16(pe + 4, true), 0x8664, 'AMD64');
+        assert.equal(view.getUint16(pe + 24, true), 0x20b, 'PE32+');
+        const image = parsePe(module.bytes, { wide: true });
+        assert.equal(image.bits, 64);
+        assert.equal(image.imageBase, BASE);
+        assert.equal(image.sections.length, 1);
+        // The export directory from data directory 0 of the wider header, at 112.
+        assert.equal(view.getUint32(pe + 24 + 112, true), module.exportDirectoryRva);
+        const { exports, refused } = readExports(module.bytes, image);
+        assert.equal(refused, null);
+        assert.deepEqual(exports.map(one=>one.name).sort(), ['ExitProcess', 'VirtualAlloc']);
+    });
 
 test('data directory 0 leads to the export directory', ()=>{
     const module = kernel32();
@@ -536,4 +558,75 @@ test('a program is an executable whose entry calls one routine and exits with it
     assert.deepEqual([...program.bytes.subarray(entry + 7, entry + 9)], [0xff, 0x15]);
     assert.equal(view.getUint32(entry + 9, true), image.imageBase + exit);
     assert.throws(()=>synthesiseProgram({ library: '', routine: 'x' }), /ASCII/);
+});
+
+test('a 64-bit program is a PE32+ executable whose entry calls its routine through its slots',
+    ()=>{
+        const program = synthesiseProgram({ library: 'bottlify.dll', routine: 'msiexec',
+            long: true });
+        const image = parsePe(program.bytes, { wide: true });
+        assert.equal(image.bits, 64);
+        assert.equal(image.library, false, 'an executable, not a library');
+        assert.equal(image.subsystem, 2);
+        assert.ok(image.stackReserve >= 0x10000);
+        assert.deepEqual(readImports(program.bytes, image).map(dll=>[dll.dll,
+            dll.entries.map(entry=>entry.name)]),
+        [['bottlify.dll', ['msiexec']], ['KERNEL32.dll', ['ExitProcess']]]);
+        const [routine, exit] = readImports(program.bytes, image).map(dll=>dll.entries[0].iatRva);
+        const iat = image.directories[12];
+        assert.ok(routine >= iat.address && exit + 8 <= iat.address + iat.size,
+            'both address tables lie in the range the IAT directory names');
+
+        // sub rsp, 0x28; call [rip+routine]; mov ecx, eax; call [rip+ExitProcess]
+        const entry = rvaToFileOffset(image, image.entryPointRva);
+        const view = new DataView(program.bytes.buffer);
+        assert.deepEqual([...program.bytes.subarray(entry, entry + 6)],
+            [0x48, 0x83, 0xec, 0x28, 0xff, 0x15]);
+        assert.equal(image.entryPointRva + 10 + view.getInt32(entry + 6, true), routine);
+        assert.deepEqual([...program.bytes.subarray(entry + 10, entry + 14)],
+            [0x89, 0xc1, 0xff, 0x15]);
+        assert.equal(image.entryPointRva + 18 + view.getInt32(entry + 14, true), exit);
+    });
+
+test('a module for a 64-bit process opens each trampoline with a no-op that is one there', ()=>{
+    // `mov edi, edi` is a 32-bit move in long mode: it clears RDI's upper
+    // half, and RDI is a register a callee keeps for its caller.
+    const module = synthesiseModule({ name: 'KERNEL32.dll', base: BASE, long: true,
+        exports: [{ name: 'ExitProcess', target: STUBS.ExitProcess }] });
+    const rva = /** @type {number} */ (module.addressOf('ExitProcess')) - BASE;
+    assert.deepEqual([...module.bytes.subarray(rva, rva + 3)], [0x66, 0x90, 0xe9],
+        'xchg ax, ax, then the jump');
+    const displacement = new DataView(module.bytes.buffer).getInt32(rva + 3, true);
+    assert.equal(BASE + rva + 7 + displacement, STUBS.ExitProcess);
+});
+
+test('a file says where its image belongs: its ImageBase and the span of its sections', ()=>{
+    // A 32-bit DLL and a 64-bit one: Windows loads either at the base it names
+    // when that base is free, and a wrapper comparing the file with the module
+    // it loaded reads the same field.
+    for (const [bits, imageBase] of /** @type {[32 | 64, number][]} */ ([[32, 0x38000000],
+        [64, 0x180000000]]))
+    {
+        const file = buildExe({ bits, dll: true, imageBase, imports: {}, code: ()=>[0xc3] });
+        const place = imagePlacementOf(file);
+        assert.ok(place, `${bits}-bit`);
+        assert.equal(place.base, imageBase);
+        const nt = new DataView(file.buffer, file.byteOffset).getUint32(0x3c, true);
+        assert.equal(place.span,
+            new DataView(file.buffer, file.byteOffset).getUint32(nt + 0x50, true),
+            'SizeOfImage, the span the loader reserves');
+        assert.deepEqual([...file.subarray(0, 2)], [0x4d, 0x5a]);
+        assert.ok(installedHeaders(file, imageBase));
+        // Linked for ASLR, it still names where it belongs: DYNAMIC_BASE allows
+        // a relocation, it does not ask for one. Valve's client DLL carries it,
+        // and a wrapper compares the file's ImageBase with the module's.
+        const view = new DataView(file.buffer, file.byteOffset);
+        view.setUint16(nt + 0x18 + 0x46, view.getUint16(nt + 0x18 + 0x46, true) | 0x40, true);
+        assert.equal(parsePe(file, { wide: true }).dynamicBase, true,
+            `${bits}-bit: the flag as the loader reads it`);
+        const aslr = imagePlacementOf(file);
+        assert.ok(aslr, `${bits}-bit, DYNAMIC_BASE: still a place`);
+        assert.equal(aslr.base, imageBase);
+    }
+    assert.equal(imagePlacementOf(new Uint8Array(0x100)), null, 'not an image: no place');
 });

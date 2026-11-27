@@ -25,7 +25,7 @@ import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { IDIRECT3DDEVICE9_SLOTS, IDIRECT3DTEXTURE9_SLOTS } from './layers/graphics/d3d9/interfaces.js';
 import { IDIRECT3D9_SLOTS } from './layers/graphics/seam/vtables.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 const ITERATIONS = 3000;
 

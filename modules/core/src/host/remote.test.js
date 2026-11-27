@@ -8,12 +8,11 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
 import {
-    postAsItIs, serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS,
+    postAsItIs, serveEngine, watchFrom, WORKER_YIELD_MS,
 } from './serve.js';
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
 import { createEvents } from '../events.js';
-import { createRing } from '../layers/audio/output/ring.js';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 import { createMetrics } from '../layers/log/internal/metrics.js';
 import {
@@ -26,8 +25,24 @@ import {
  * are the application behind the worker and the GPU it would open.
  */
 
-/** A wait for everything queued on the ports to be delivered. */
-const settled = ()=>new Promise(resolve=>setTimeout(resolve, 20));
+/** Hops a message and the answers it sets off take, with room to spare. */
+const SETTLE_TURNS = 20;
+
+/**
+ * A wait for everything queued on the ports to be delivered: past every timer
+ * of 20 ms or less (the keeper's poll among them), then turns of the event
+ * loop, each delivering the messages the last one posted. Both ends share this
+ * thread, so the turns, not the clock, carry a message and its answers over: a
+ * timer alone may come due in the turn that delivers them, on a machine that
+ * kept this thread off its core, and run before them.
+ */
+const settled = async()=>{
+    await new Promise(resolve=>setTimeout(resolve, 20));
+    for (let turn = 0; turn < SETTLE_TURNS; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+};
 
 /** Waits for a condition to hold, so no test depends on a keeper poll landing in time. */
 /** @param {() => Promise<boolean> | boolean} check @param {number} [timeoutMs] */
@@ -66,23 +81,18 @@ const made = [];
  * The log is the real thing rather than a stand-in: the whole point of the
  * wire's log half is that one side writes a journal and a table and the other
  * reads them out of the same memory, and a fake in the middle would prove
- * nothing about that. `shared: false` builds the same layout in an
- * `ArrayBuffer`, which is what an origin without cross-origin isolation gets
- * and what puts the page back on the request path.
+ * nothing about that.
  *
- * @param {{ capacity?: number, shared?: boolean, audioShared?: boolean }} [how]
+ * @param {{ capacity?: number }} [how]
  */
-function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
+function fakeApp({ capacity = 4096 } = {}){
     // The real registry, not a hand-rolled stand-in: the whole point of the
     // events tests below is that a late `on()` still catches what an early
     // `emit()` fired, and that is `events.js`'s contract to keep, not this
     // fake's to reimplement.
     const events = createEvents();
-    // The engine mixer's own ring, with a little already mixed into it.
-    const ring = createRing({ channels: 2, capacityFrames: 8 });
-    ring.write(Float32Array.of(1, -1, 2, -2, 3, -3));
-    const journal = createJournal({ now: ()=>0, capacity, shared });
-    const registry = createMetrics({ shared });
+    const journal = createJournal({ now: ()=>0, capacity });
+    const registry = createMetrics();
     const own = registry.counters('log', ['rejected']);
     const profiler = createProfiler({
         now: ()=>0,
@@ -94,7 +104,6 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
         intern: journal.intern,
     });
     const app = {
-        ring,
         options: /** @type {any} */ (null),
         sent: /** @type {any[]} */ ([]),
         attached: /** @type {any[]} */ ([]),
@@ -142,7 +151,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             },
         },
         audio: {
-            memory: ()=>(audioShared ? { table: new ArrayBuffer(64) } : ring.memory),
+            memory: ()=>({ table: new SharedArrayBuffer(64) }),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
         /** How many times the log's memory has been asked for. */
@@ -336,12 +345,12 @@ function openTestKeeper(){
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
- *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean,
- *     duringBuild?: (app: any) => void }} [deps]
+ *     journal?: { capacity?: number },
+ *     duringBuild?: (app: any) => void, on?: Record<string, (event: any) => void> }} [deps]
  */
-async function connect(options = {}, { journal, audioShared, duringBuild, ...deps } = {}){
+async function connect(options = {}, { journal, duringBuild, on, ...deps } = {}){
     const channel = new MessageChannel();
-    const app = fakeApp({ ...journal, audioShared });
+    const app = fakeApp({ ...journal });
     const keeper = openTestKeeper();
     const { gpu, canvas, screen, fail, lose, requested } = fakeGpu();
     /** @type {any} */
@@ -374,12 +383,12 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         canvas,
         options: {
             executable: Uint8Array.of(0x4d, 0x5a),
-            v86: { moduleUrl: 'v86.mjs', wasmBytes: new ArrayBuffer(4) },
             imagePath: 'C:\\App\\a.exe',
             bundle: { url: 'http://bundle/b.btl', id: 'b', store: null },
             ...options,
         },
         keeper: keeper.port,
+        on,
     });
     return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail, gpuLost: lose,
         requested };
@@ -394,6 +403,7 @@ test('a bundle kept on this device crosses as its file and is read from it a ran
         const { bundle } = built();
         assert.deepEqual([...await bundle.fetch(1000, 4)], [232, 233, 234, 235]);
         await assert.rejects(()=>bundle.fetch(4090, 10), /past the bundle's end/);
+        assert.equal(bundle.local, true, 'a file on this device: a miss reads what it asks');
     });
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -405,6 +415,7 @@ test('start rebuilds on the worker what could not cross: fetch, device, watch, s
     const options = built();
     assert.equal(typeof options.bundle.fetch, 'function');
     assert.equal(options.bundle.id, 'b');
+    assert.equal(options.bundle.local, false, 'a bundle at a URL is read in windows');
     // The canvas and its context cross to the presenter the app makes, and the
     // frame account stays here; there is no ready-made copy function any more.
     assert.equal(typeof options.device.canvas, 'object');
@@ -438,50 +449,23 @@ test('the device is asked for the features the engine draws with that the adapte
 test('the sound output\'s storage crosses once, at start', async()=>{
     const { remote, app } = await connect();
     const memory = remote.audio.memory();
-    assert.equal(memory.samples.byteLength, 64);
+    assert.equal(memory.table.byteLength, 64);
     assert.deepEqual(remote.audio.format(), { sampleRate: 48000, channels: 2 });
     assert.equal(app.attached.length, 1);
     assert.deepEqual(app.attached[0].options, { listen: false });
     await remote.dispose();
 });
 
-test('the sound output\'s shape follows the engine\'s own backend, not a fixed contract', async()=>{
+test('the sound output\'s shape is its track table, and nothing to fall back to', async()=>{
     // The whole surface a page has for its worklet is `memory()`/`format()`;
     // there is no `ring()` here for a caller to fall back to (docs/core/api.md's
-    // `audio.memory()` row) -- a caller written against the engine backend's
-    // `{ control, samples }` shape breaks outright on a page that turns out
-    // to have shared memory, rather than reading something merely wrong.
-    const shared = await connect({}, { audioShared: true });
-    assert.deepEqual(Object.keys(shared.remote.audio.memory()), ['table']);
-    assert.equal(typeof (/** @type {any} */ (shared.remote.audio)).ring, 'undefined',
+    // `audio.memory()` row).
+    const { remote } = await connect();
+    assert.deepEqual(Object.keys(remote.audio.memory()), ['table']);
+    assert.equal(typeof (/** @type {any} */ (remote.audio)).ring, 'undefined',
         'no ring() to fall back to -- a stale caller must be updated, not silently degraded');
-    await shared.remote.dispose();
-
-    const unshared = await connect({}, { audioShared: false });
-    assert.deepEqual(Object.keys(unshared.remote.audio.memory()).sort(), ['control', 'samples']);
-    await unshared.remote.dispose();
+    await remote.dispose();
 });
-
-test('without shared memory the mix is posted to the worklet, which says what it played',
-    async()=>{
-        const worklet = new MessageChannel();
-        opened.push(()=>worklet.port2.close());
-        const { remote, app, built } = await connect(
-            { audio: { drained: true, sampleRate: 48000, port: worklet.port1 } },
-            { audioShared: false });
-        assert.equal(built().audio.port, undefined, 'the port is the worker\'s, not the engine\'s');
-        assert.equal(built().audio.drained, true);
-        /** @type {any} */
-        const chunk = await new Promise(done=>{
-            worklet.port2.onmessage = event=>done(event.data);
-        });
-        assert.equal(chunk.at, 0);
-        assert.deepEqual([...chunk.frames], [1, -1, 2, -2, 3, -3]);
-        worklet.port2.postMessage({ played: 2, blocks: 1, starvedBlocks: 0, starvedFrames: 0 });
-        await until(()=>app.ring.consumed() === 2);
-        await remote.dispose();
-    });
-
 test('an input event arrives at the router as it left the page', async()=>{
     const { remote, app } = await connect();
     remote.input.send({ kind: 'key', code: 'KeyA', down: true });
@@ -494,21 +478,26 @@ test('an input event arrives at the router as it left the page', async()=>{
     await remote.dispose();
 });
 
-test('with concurrency input crosses through the ring, is read at a turn boundary without'
-    + ' a yield, and keeps its order with what is posted after it', async()=>{
+test('with concurrency input crosses through the ring, is read as the page writes it where no'
+    + ' program runs, and keeps its order with what is posted after it', async()=>{
+    // With concurrency every program stands in a worker of its own and this
+    // thread runs none: no turn boundary comes to read the ring at. Read only
+    // before a posted message, the pointer's motion waited for the page's next
+    // request and reached the program in one burst, its window's queue
+    // folding it into a single WM_MOUSEMOVE.
     const { remote, app } = await connect({ concurrency: 2 });
     const pacing = app.options.pacing;
     assert.ok(app.options.inbound === undefined, 'the ring is the host\'s, not the app\'s');
     remote.input.send({ kind: 'key', code: 'KeyA', down: true });
     remote.input.send({ kind: 'pointerMove', x: 10, y: 20, dx: 1, dy: -1 });
     await settled();
-    assert.deepEqual(app.sent, [], 'nothing was posted: the event loop delivered nothing');
-    assert.equal(pacing.yield({ suspended: 0, fetching: 0, idlers: 0, spun: 0 }), null,
-        'a turn boundary reads the ring and goes straight on');
     assert.deepEqual(app.sent, [
         { kind: 'key', code: 'KeyA', down: true },
         { kind: 'pointerMove', x: 10, y: 20, dx: 1, dy: -1 },
-    ]);
+    ], 'read with nothing posted after it and no turn');
+    assert.equal(pacing.yield({ suspended: 0, fetching: 0, idlers: 0, spun: 0 }), null,
+        'a turn boundary finds the ring read and goes straight on');
+    assert.equal(app.sent.length, 2, 'each event once');
     remote.input.send({ kind: 'key', code: 'KeyB', down: true });
     await remote.diagnostics();
     assert.deepEqual(app.sent.at(-1), { kind: 'key', code: 'KeyB', down: true },
@@ -591,6 +580,25 @@ test('an event the engine emitted before the start answer still reaches a handle
         'and a live one after still arrives, in order behind the replayed one');
     await remote.dispose();
 });
+
+test('a handler given with the start hears what the engine told while the program was loaded',
+    async()=>{
+        // `layer-needed` is told as the program is loaded: before the start's answer,
+        // before any controller exists to subscribe on.
+        /** @type {any[]} */
+        const seen = [];
+        const { remote, app } = await connect({}, {
+            duringBuild: theApp=>theApp.emit('layer-needed', { layer: 'dotnet48-x86' }),
+            on: { 'layer-needed': (/** @type {any} */ payload)=>seen.push(payload) },
+        });
+        await settled();
+        assert.deepEqual(seen, [{ layer: 'dotnet48-x86' }]);
+        app.emit('layer-needed', { layer: 'dotnet48-amd64' });
+        await settled();
+        assert.deepEqual(seen[1], { layer: 'dotnet48-amd64' }, 'and a live one after it, once');
+        assert.equal(seen.length, 2);
+        await remote.dispose();
+    });
 
 test('a handler registered after a first one already claimed a name only sees '
     + 'what is live from then on', async()=>{
@@ -717,7 +725,6 @@ test('the page reads the journal, the frames and the phases through the keeper',
     await until(async()=>(await remote.log.recent(1)).length === 1);
     const crossed = remote.traffic().request;
 
-    assert.equal(remote.log.reading(), 'shared');
     // A read is a request to a worker now, not a decode on this thread: that
     // is the whole point, and it is why every one of them is a promise.
     const recent = remote.log.recent(1);
@@ -742,7 +749,9 @@ test('the page reads the journal, the frames and the phases through the keeper',
     assert.deepEqual(await remote.log.guestByModule(), {});
     assert.deepEqual(await remote.log.stats(),
         { written: 2, capacity: 4096, lost: 0, rejected: 0 });
-    assert.ok(remote.log.memory()?.journal instanceof SharedArrayBuffer);
+    const journal = remote.log.memory()?.journal;
+    assert.ok(journal?.records.buffer instanceof SharedArrayBuffer
+        && journal.dictionary instanceof SharedArrayBuffer, 'the journal is shared memory');
 
     assert.equal(remote.traffic().request, crossed,
         'not one of those reads was a message to the engine');
@@ -781,7 +790,7 @@ test('a rebuilt process hands the keeper the next block', async()=>{
     const { remote, worker, keeper } = await connect();
     // A second machine's journal, as the engine publishes it after a swap: a
     // fresh block whose sequences continue the one the parent left behind.
-    const child = createJournal({ now: ()=>0, shared: true, capacity: 64, sequenceBase: 5 });
+    const child = createJournal({ now: ()=>0, capacity: 64, sequenceBase: 5 });
     child.write(Level.INFO, 'child', 'after the swap');
     worker.onmessage?.({ data: { type: 'log-memory',
         memory: { journal: child.memory() }, sequenceBase: 5 } });
@@ -790,38 +799,10 @@ test('a rebuilt process hands the keeper the next block', async()=>{
     const attach = keeper.sent.filter((/** @type {any} */ message)=>
         message.type === 'attach').pop();
     assert.equal(attach.sequenceBase, 5, 'the base the child begins at reached the keeper');
-    assert.ok(attach.memory.journal instanceof SharedArrayBuffer);
+    assert.ok(attach.memory.journal.records.buffer instanceof SharedArrayBuffer);
     const records = await remote.log.drain(5, 10);
     assert.deepEqual(records.records.map((/** @type {any} */ r)=>r.text), ['after the swap'],
         'and the keeper reads the new block from there');
-    await remote.dispose();
-});
-
-test('without shared memory the keeper is fed by relay, and a table does not cross', async()=>{
-    const { remote, app } = await connect({ log: { capacity: 8 } },
-        { journal: { shared: false, capacity: 6 } });
-    assert.equal(remote.log.reading(), 'requests');
-    assert.equal(remote.log.memory(), null);
-    for (let at = 0; at < 4; at++)
-    {
-        app.write(`${at}`);
-    }
-    await remote.run();
-    const first = await remote.log.drain(0, 100);
-    assert.equal(first.lost, 0);
-    assert.equal(first.next, 4);
-    assert.deepEqual(first.records.map((/** @type {any} */ r)=>r.text),
-        ['0', '1', '2', '3']);
-    app.frame();
-    assert.equal((await remote.log.frames(8)).length, 1, 'a frame still answers, by request');
-    assert.equal((await remote.log.profile(1)).frames, 1);
-    assert.deepEqual(await remote.log.counters('log'), { rejected: 0 });
-    assert.equal(await remote.log.table('log', 'frames'), null, 'a table cannot cross as a copy');
-    assert.equal(await remote.log.word(3), '#3');
-
-    const stats = await remote.log.stats();
-    assert.equal(stats.written, 4, 'everything the keeper was relayed');
-    assert.equal(stats.capacity, 8);
     await remote.dispose();
 });
 
@@ -919,7 +900,6 @@ test('a second program starts in the same worker with the canvas it already has'
     await remote.dispose();
     const again = await createRemoteApp({ worker, options: {
         executable: Uint8Array.of(0x4d, 0x5a),
-        v86: { moduleUrl: 'v86.mjs', wasmBytes: new ArrayBuffer(4) },
     } });
     assert.equal(typeof built().device.onFrame, 'function');
     assert.equal(again.frames(), 0);
@@ -935,75 +915,6 @@ test('a watch spec names libraries whole or by ordinal', ()=>{
     assert.deepEqual(watch('b.dll', null, 4), { args: 6, strings: [1] });
     assert.equal(watch('b.dll', null, 5), null);
     assert.equal(watch('c.dll', '_Name@12', 9), null);
-});
-
-test('a worker runs turns back to back and yields for something pending or on its clock', async()=>{
-    let now = 0;
-    let signalled = false;
-    let yields = 0;
-    const pacing = workerPacing({
-        macrotask: async()=>{
-            yields++;
-        },
-        poke: ()=>new Promise(()=>{}),
-        signalled: ()=>signalled,
-        now: ()=>now,
-    });
-    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
-    assert.equal(pacing.yield(nothing), null);
-    assert.equal(pacing.yield(nothing), null);
-    now += 1;
-    await pacing.yield({ ...nothing, suspended: 1 });
-    now += 1;
-    await pacing.yield({ ...nothing, fetching: 1 });
-    await pacing.yield({ ...nothing, spun: 1 });
-    assert.equal(yields, 3, 'a call suspended and a range in flight each yield once a '
-        + 'millisecond is up, a turn that retired nothing at once');
-    assert.equal(pacing.yield({ ...nothing, idlers: 1 }), null,
-        "a caller on the guest's own queue looks again without the host");
-    signalled = true;
-    await pacing.yield(nothing);
-    assert.equal(yields, 4, 'the page posted something');
-    signalled = false;
-    assert.equal(pacing.yield(nothing), null);
-    now += WORKER_YIELD_MS - 1;
-    assert.equal(pacing.yield(nothing), null, 'the interval is not up');
-    now += 1;
-    await pacing.yield(nothing);
-    assert.equal(yields, 5, 'the interval is up');
-    assert.equal(pacing.yield(nothing), null, 'and the clock was reset');
-});
-
-test('an idle worker sleeps to the deadline, or until the page or the host speaks', async()=>{
-    /** @type {(() => void) | null} */
-    let wake = null;
-    const pacing = workerPacing({
-        macrotask: async()=>{},
-        poke: ()=>new Promise(resolve=>{
-            wake = resolve;
-        }),
-        signalled: ()=>false,
-        now: ()=>performance.now(),
-    });
-    let before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: 20, wakes: [] });
-    assert.ok(performance.now() - before >= 15, 'nothing else spoke: the deadline is the wake');
-
-    before = performance.now();
-    const waiting = pacing.wait({ timer: true, sleep: true, deadlineMs: 5000, wakes: [] });
-    setTimeout(()=>wake?.(), 5);
-    await waiting;
-    assert.ok(performance.now() - before < 1000, 'a message from the page ends the wait');
-
-    before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: null,
-        wakes: [new Promise(resolve=>setTimeout(resolve, 5))] });
-    assert.ok(performance.now() - before < 1000, 'a host answer ends a wait with no deadline');
-
-    before = performance.now();
-    await pacing.wait({ timer: false, sleep: false, deadlineMs: 5000, wakes: [] });
-    assert.ok(performance.now() - before < 100,
-        'a thread still getting work done is not put to sleep, whatever the deadline');
 });
 
 test('the page counts what it posts, and the worker sees it between two turns', async()=>{
@@ -1027,7 +938,8 @@ test('the page counts what it posts, and the worker sees it between two turns', 
     assert.ok(looks.built().pacing.yield(nothing), 'and yields on its own');
     await looks.remote.dispose();
 
-    const { remote, built } = await connect({ pacing: 'event' }, { threaded: true });
+    clock = 0;
+    const { remote, built } = await connect({}, { threaded: true, now });
     const pacing = built().pacing;
     assert.equal(typeof pacing.yield, 'function');
     assert.equal(pacing.yield(nothing), null, 'nothing posted since start');

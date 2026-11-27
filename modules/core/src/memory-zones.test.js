@@ -33,7 +33,7 @@ test('the zones\' table sums what the layers measured and names what they could 
             guest: { heap: 512 * MIB },
             translation: { tables: 16 * MIB, modules: NOT_MEASURED } } } },
         { name: 'app',
-            metrics: { bytesHeld: { heaps: { blockCache: 3 * MIB, decodedBlocks: MIB } } } },
+            metrics: { bytesHeld: { heaps: { blockCache: 3 * MIB, cache: MIB } } } },
         { name: 'graphics', metrics: { bytesHeld: {
             heaps: { mirror: 2 * MIB, worker: NOT_MEASURED },
             device: { textures: 100 * MIB } } } },
@@ -46,7 +46,7 @@ test('the zones\' table sums what the layers measured and names what they could 
     assert.equal(zones.translation.bytes, 16 * MIB);
     assert.deepEqual(zones.translation.notMeasured, ['cpu.modules']);
     assert.equal(zones.heaps.bytes, 6 * MIB);
-    assert.deepEqual(zones.heaps.pools, { 'app.blockCache': 3 * MIB, 'app.decodedBlocks': MIB,
+    assert.deepEqual(zones.heaps.pools, { 'app.blockCache': 3 * MIB, 'app.cache': MIB,
         'graphics.mirror': 2 * MIB });
     assert.deepEqual(zones.heaps.notMeasured, ['graphics.worker']);
     assert.equal(total, 534 * MIB, 'the tab\'s zones only: the device\'s is apart');

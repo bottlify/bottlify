@@ -213,3 +213,55 @@ test('a thread that stops waiting leaves every queue, so the object goes to some
     assert.equal(b.state, 'ready', 'the waiter still in the queue took it');
     assert.equal(event.waiters.length, 0);
 });
+
+test('the soonest deadline is named by what waits on it', ()=>{
+    const h = harness();
+    const a = h.thread('a');
+    const b = h.thread('b');
+    assert.equal(h.sched.nextDeadlineOn(), null, 'nothing waits on time');
+    h.sched.block(a, 'Sleep', { deadline: 1020, result: 0 });
+    h.sched.block(b, 'an event', { deadline: 1010, result: 0x102 });
+    assert.equal(h.sched.nextDeadlineOn(), 'an event', 'the sooner of the two');
+    const timer = h.sync.createTimer({ manualReset: false, name: 'tick' });
+    h.sync.armTimer(timer, 1005, 0);
+    assert.equal(h.sched.nextDeadlineOn(), 'timer', 'a timer due sooner still');
+});
+
+test('a one-shot that fired leaves nothing armed under its token for a later cancel to take', ()=>{
+    // A token is spent once its one-shot has fired, and the scheduler hands it
+    // to the next timer armed: a cancel of the first, or its arming again,
+    // must not disarm the second.
+    const h = harness();
+    const first = h.sync.createTimer({ manualReset: true, name: 'once' });
+    const second = h.sync.createTimer({ manualReset: true, name: 'later' });
+    h.sync.armTimer(first, 1010, 0);
+    h.sync.wait(first, h.thread('a'));
+    h.sched.runOnce();
+    assert.equal(first.signalled, true);
+
+    h.sync.armTimer(second, 1030, 0);
+    h.sync.cancelTimer(first);
+    h.sync.armTimer(first, 1050, 0);
+    assert.equal(h.sched.nextDeadline(), 1030, 'the second is still armed');
+    h.sync.cancelTimer(second);
+    assert.equal(h.sched.nextDeadline(), 1050, 'and the first armed again');
+});
+
+test('timers come due in the order of their due times, those due together as armed', ()=>{
+    const h = harness();
+    /** @type {string[]} */
+    const order = [];
+    const arm = (/** @type {string} */ name, /** @type {number} */ due)=>
+        h.sync.armTimer(h.sync.createTimer({ manualReset: true, name }), due, 0,
+            ()=>order.push(name));
+    // The clock past them all before any is armed, so one turn finds them
+    // all due together.
+    h.sched.block(h.thread('a'), 'Sleep', { deadline: 1040, result: 0 });
+    h.sched.runOnce();
+    arm('late', 1030);
+    arm('early', 1010);
+    arm('tie-first', 1020);
+    arm('tie-second', 1020);
+    h.sched.runOnce();
+    assert.deepEqual(order, ['early', 'tie-first', 'tie-second', 'late']);
+});

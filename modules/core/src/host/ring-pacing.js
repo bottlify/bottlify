@@ -10,7 +10,6 @@
  * one reaches into the engine.
  */
 
-import { doorbellOf, waitDoorbell } from '../system/ring.js';
 import { pacedYield } from '../app.js';
 
 /**
@@ -20,7 +19,7 @@ import { pacedYield } from '../app.js';
  * but a frame to compose or a session to save does, and this bounds how long
  * they wait behind an idle machine.
  */
-export const IDLE_SLEEP_MS = 50;
+const IDLE_SLEEP_MS = 50;
 
 /**
  * The pacing of an engine fed through a ring: what the page says is read at
@@ -30,23 +29,23 @@ export const IDLE_SLEEP_MS = 50;
  * nothing to run and nothing outstanding sleeps on the doorbell.
  *
  * @param {Object} deps
- * @param {{ bell: { buffer: SharedArrayBuffer, index: number }, drain: () => number }} deps.inbound
+ * @param {{ bell: import('@bottlify/cellar').Doorbell, drain: () => number }}
+ *     deps.inbound
  * @param {() => Promise<void>} deps.macrotask
  * @param {() => number} deps.now
  * @param {number} deps.intervalMs
- * @param {(bell: { buffer: SharedArrayBuffer, index: number }, seen: number,
- *     timeoutMs: number) => any} [deps.sleep]   a blocking wait; `waitDoorbell` unless a test says
+ * @param {(bell: import('@bottlify/cellar').Doorbell, seen: number,
+ *     timeoutMs: number) => import('@bottlify/cellar').WaitEnd} [deps.sleep]
+ *     a blocking wait, with no look first; the doorbell's own unless a test says
  * @param {{ buffer: SharedArrayBuffer, index: number } | null} [deps.posted]
  *     A count the threads that post to this one -- the translation worker --
  *     raise after each message, ringing the inbound doorbell with it: a
  *     message is waiting on the event loop, and the next yield is now rather
  *     than when the interval is up.
- * @param {number} [deps.pendingMs]  How often an outstanding host answer is
- *     looked for while threads still run (`pacedYield`).
  * @returns {import('../app.js').RunPacing & { counts: () => Record<string, number> }}
  */
-export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDoorbell,
-    posted = null, pendingMs })
+export function ringPacing({ inbound, macrotask, now, intervalMs,
+    sleep = (bell, seen, timeoutMs)=>bell.wait(seen, timeoutMs, 0), posted = null })
 {
     const counts = { drained: 0, yields: 0, slept: 0, sleptMs: 0, woken: 0, heard: 0 };
     const postedWords = posted ? new Int32Array(posted.buffer) : null;
@@ -68,10 +67,15 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
     };
     /** Machines taking turns on this thread: one of several may not block it. */
     let machines = 1;
+    /**
+     * How much later than asked a timed sleep last ended, the timer's grain:
+     * risen at once to a later one, eased down after.
+     */
+    let grain = 0;
     const yieldNow = pacedYield({ macrotask: ()=>{
         counts.yields++;
         return macrotask();
-    }, now, intervalMs, signalled, pendingMs });
+    }, now, intervalMs, signalled });
     const drain = ()=>{
         const taken = inbound.drain();
         counts.drained += taken;
@@ -90,7 +94,7 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
         wait({ sleep: idle, deadlineMs, wakes }){
             // The count first: a message written after it and before the
             // sleep makes the sleep return at once.
-            const seen = doorbellOf(inbound.bell);
+            const seen = inbound.bell.seen();
             if (drain() > 0)
             {
                 return Promise.resolve();
@@ -109,30 +113,43 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
                 // deadline or the doorbell.
                 /** @type {Promise<unknown>[]} */
                 const waits = [...wakes];
-                const bell = /** @type {any} */ (Atomics).waitAsync?.(
-                    new Int32Array(inbound.bell.buffer), inbound.bell.index, seen);
-                if (bell?.async)
-                {
-                    waits.push(bell.value);
-                }
-                /** @type {ReturnType<typeof setTimeout> | null} */
-                let timer = null;
-                waits.push(new Promise(resolve=>{
-                    timer = setTimeout(resolve, Math.min(deadlineMs ?? IDLE_SLEEP_MS,
-                        bell?.async ? IDLE_SLEEP_MS : intervalMs));
-                }));
+                // The deadline is the doorbell wait's own timeout, not a timer
+                // beside it: a setTimeout nested in the loop's turns is clamped
+                // to 4 ms and more, and a guest timer due in one woke two to
+                // five late a third of the time, and one tick in sixty past its
+                // whole period - a game's sound thread, refilled once a tick,
+                // starved by as much.
+                waits.push(inbound.bell.waitAsync(seen,
+                    Math.min(deadlineMs ?? IDLE_SLEEP_MS, IDLE_SLEEP_MS)));
                 counts.yields++;
-                return Promise.race(waits).then(()=>{
-                    if (timer !== null)
-                    {
-                        clearTimeout(timer);
-                    }
-                });
+                return Promise.race(waits).then(()=>{});
             }
             const limit = Math.max(0, Math.min(deadlineMs ?? IDLE_SLEEP_MS, IDLE_SLEEP_MS));
             const started = now();
+            const end = started + limit;
             counts.slept++;
-            if (sleep(inbound.bell, seen, limit) !== 'timed-out')
+            let woken = false;
+            // Slept short of the deadline by the timer's grain, the rest spun:
+            // a timed sleep ends when the system's timer next ticks, on Windows
+            // 8-15 ms after a wait of 1 (up to 29), and a program sleeping a
+            // millisecond at a time had its timers and its sound events fire
+            // that late. ponytail: a program that sleeps 1 ms in a loop spins
+            // this thread, as the engine's own thread spins macrotasks.
+            if (limit > grain)
+            {
+                const asked = limit - grain;
+                woken = sleep(inbound.bell, seen, asked) !== 'timed-out';
+                if (!woken)
+                {
+                    const late = Math.max(0, now() - started - asked);
+                    grain = late > grain ? late : grain * 0.95 + late * 0.05;
+                }
+            }
+            while (!woken && now() < end)
+            {
+                woken = inbound.bell.seen() !== seen;
+            }
+            if (woken)
             {
                 counts.woken++;
             }

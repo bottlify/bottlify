@@ -21,6 +21,7 @@
  */
 
 import { TRANSLATION_ZONE_BYTES } from './layers/cpu/module.js';
+import { WORKING_BYTES } from './layers/filesystem/internal/page-file.js';
 
 const MIB = 1024 * 1024;
 
@@ -49,13 +50,14 @@ export const MEMORY_ZONES = Object.freeze({
  * `blockCache`: a bundle's fetched blocks where no durable store takes them (a
  * browser without the origin's file system in a worker), the least recently
  * read let go first: what a start reads before its first frame fits.
- * `decodedBlocks`: the bundle's blocks decoded for guest reads, kept for the
- * reads after them -- a block is a quarter of a mebibyte by default, and the
- * tiers hold two dozen.
+ * `writableFiles`: the pieces of what the program wrote that it is writing,
+ * held in memory of their own until they are put in the run's cache
+ * (`filesystem/internal/page-file.js`), the least recently written first;
+ * the rest are the cache's bodies, inside its budget, and on its disk past it.
  */
 export const HEAP_POOLS = Object.freeze({
     blockCache: 64 * MIB,
-    decodedBlocks: 16 * MIB,
+    writableFiles: WORKING_BYTES,
 });
 
 /** What a pool says when nothing can measure it. */

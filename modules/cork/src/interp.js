@@ -10,11 +10,9 @@
  * the instruction met once -- cold code, a refused instruction, a volatile
  * page -- where translating a whole region would cost more than running it.
  *
- * The evaluator's integer set is here. The x87, MMX and SSE operations the
- * emitter has and `ir.js` lacks are the remaining work of this step; an
- * instruction with no model throws `Unsupported`, which the host answers with
- * `cpu: cork has no tier for …` and hands to the other executor, as a refused
- * instruction is handled under hybrid.
+ * An instruction the evaluator has no model for throws `Unsupported`, which
+ * the host takes as the engine's no-tier answer: the run stops there, the
+ * instruction named.
  */
 
 import { decode } from './decode/decoder.js';
@@ -22,6 +20,7 @@ import { Fault, Unsupported, createState, evaluate, operandAddress } from './ir.
 import { ZF } from './decode/table.js';
 import { compileFast } from './fast.js';
 import { eflagsOf } from './emit/flags.js';
+import { wrappedAddress } from './emit/memory.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { PageFlag, STORE_FLAGS, markWritten } from './runtime/pages.js';
 
@@ -222,6 +221,8 @@ export function interpret(state, maxInstructions = 1, options = {}){
     const before = state.retired;
     const end = before + maxInstructions;
     const { memory } = state;
+    // A growing memory may have grown since the last run (`fit`).
+    /** @type {any} */ (memory).fit?.();
     // Where falling through from the last instruction lands.
     let fallthrough = entered === true ? -1 : state.eip;
     let first = force === true;
@@ -341,15 +342,21 @@ export class BlockMemory {
      * @param {{ faultEip: number }} owner  the state whose instruction a fault names
      */
     constructor(memory, layout, onCodeWrite, owner){
-        this.view = new DataView(memory.buffer);
+        this.memory = memory;
+        this.layout = layout;
         this.ramBase = layout.ramBase;
-        // The decoder reads code a byte at a time, so the byte path skips the
-        // DataView call and its bounds check; wider accesses keep the DataView.
-        this.ramBytes = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
-        // The page flags as bytes: every access tests one or two, and a typed
-        // array is cheaper than a DataView call.
-        this.pageFlags = new Uint8Array(memory.buffer, pageFlagsAt(layout),
-            Tables.PAGE_FLAGS_SIZE);
+        // A growing layout's wrap word (`ramFloor`), -1 for the constant wrap.
+        this.wrapAt = layout.wrap ?? -1;
+        // The views, empty until `fit` takes them over the memory.
+        this.view = new DataView(new ArrayBuffer(0));
+        this.ramBytes = new Uint8Array(0);
+        this.pageFlags = new Uint8Array(0);
+        this.bytes8 = new Uint8Array(0);
+        this.words16 = new Uint16Array(0);
+        this.words32 = new Uint32Array(0);
+        this.words64 = new BigUint64Array(0);
+        this.fittedMask = 0;
+        this.fit();
         this.codeRanges = codeRangesAt(layout);
         this.onCodeWrite = onCodeWrite;
         this.owner = owner;
@@ -358,19 +365,94 @@ export class BlockMemory {
         this.watchStart = 0;
         this.watchEnd = 0;
         this.hit = false;
+        // Ranges past RAM a read finds where an untested translated read does
+        // (`readThrough`), [from, to) each.
+        /** @type {[number, number][]} */
+        this.readThrough = [];
+        this.ramSize = layout.ramSize;
         // The locked instructions as one indivisible access each (`lockedStep`),
         // as the atomic variant's translated code makes them.
         this.atomic = false;
-        this.bytes8 = new Uint8Array(memory.buffer);
-        this.words16 = new Uint16Array(memory.buffer, 0, memory.buffer.byteLength >>> 1);
-        this.words32 = new Uint32Array(memory.buffer, 0, memory.buffer.byteLength >>> 2);
-        this.words64 = new BigUint64Array(memory.buffer, 0, memory.buffer.byteLength >>> 3);
+        // The process's lock word (`layout.lockWord`), -1 on one processor.
+        this.lockAt = /** @type {{ lockWord?: number }} */ (layout).lockWord ?? -1;
+    }
+
+    /**
+     * `body` made holding the process's lock word, spun for, as the atomic
+     * variant's translated code holds it (`emit/locked.js` `lockHeld`): a locked
+     * access no host atomic spans, indivisible against every other such access.
+     *
+     * @template T @param {() => T} body @returns {T}
+     */
+    held(body){
+        if (!this.atomic || this.lockAt < 0)
+        {
+            return body();
+        }
+        const at = this.lockAt >>> 2;
+        while (Atomics.compareExchange(this.words32, at, 0, 1) !== 0)
+        {
+            // Another executor's few instructions.
+        }
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            Atomics.store(this.words32, at, 0);
+        }
+    }
+
+    /**
+     * The views over the memory as it is now: taken at the start and again
+     * once a growing memory (`ramFloor`) has grown, whose old buffer stays
+     * whole but ends where the memory ended then. The RAM's view holds what of
+     * the RAM the memory holds; a page past it is closed in the page flags, so
+     * nothing reads there through it.
+     */
+    fit(){
+        // Asked of the views and the wrap word rather than of `memory.buffer`,
+        // whose getter is a crossing into the engine: a memory that grew says
+        // so in its word, and an unshared one detaches the old buffer.
+        if (this.bytes8.byteLength !== 0
+            && (this.wrapAt < 0 || this.view.getUint32(this.wrapAt, true) === this.fittedMask))
+        {
+            return;
+        }
+        const buffer = this.memory.buffer;
+        const layout = this.layout;
+        this.view = new DataView(buffer);
+        // The decoder reads code a byte at a time, so the byte path skips the
+        // DataView call and its bounds check; wider accesses keep the DataView.
+        this.ramBytes = new Uint8Array(buffer, layout.ramBase,
+            Math.min(layout.ramSize, buffer.byteLength - layout.ramBase));
+        // The page flags as bytes: every access tests one or two, and a typed
+        // array is cheaper than a DataView call.
+        this.pageFlags = new Uint8Array(buffer, pageFlagsAt(layout), Tables.PAGE_FLAGS_SIZE);
+        this.bytes8 = new Uint8Array(buffer);
+        this.words16 = new Uint16Array(buffer, 0, Math.floor(buffer.byteLength / 2));
+        this.words32 = new Uint32Array(buffer, 0, Math.floor(buffer.byteLength / 4));
+        this.words64 = new BigUint64Array(buffer, 0, Math.floor(buffer.byteLength / 8));
+        this.fittedMask = this.wrapAt < 0 ? 0 : this.view.getUint32(this.wrapAt, true);
+    }
+
+    /**
+     * Where an untested translated read finds `address` (`wrappedAddress`): by
+     * the growing layout's mask as it is now, or the RAM's own size.
+     *
+     * @param {number} address
+     */
+    wrapped(address){
+        return this.wrapAt >= 0 ? (address & this.view.getUint32(this.wrapAt, true)) >>> 0
+            : wrappedAddress(address, this.ramSize);
     }
 
     /**
      * A locked access's read, as one load: of its own width on an address that
      * is a multiple of it, of the aligned qword holding it otherwise, and plain
-     * across two qwords, as the atomic variant's code does it. A locked access
+     * across two qwords (its swap holds the lock word), as the atomic variant's
+     * code does it. A locked access
      * writes, so a page a store may not reach faults it here.
      *
      * @param {number} address @param {number} size
@@ -427,12 +509,14 @@ export class BlockMemory {
         else
         {
             // Across two qwords: a split lock, which no wasm atomic spans either.
-            swapped = this.read(address, size) === old;
-            if (swapped)
-            {
+            return this.held(()=>{
+                if (this.read(address, size) !== old)
+                {
+                    return false;
+                }
                 this.write(address, size, next);
                 return true;
-            }
+            });
         }
         if (swapped)
         {
@@ -442,8 +526,24 @@ export class BlockMemory {
     }
 
     /**
+     * A locked quadword's read, as `loadLocked` reads the narrower ones: one
+     * load where it is aligned, plain where not.
+     *
+     * @param {number} address @returns {bigint}
+     */
+    loadQword(address){
+        if (this.inaccessible(address, 8))
+        {
+            throw this.fault(address, 8, true);
+        }
+        const at = this.ramBase + address;
+        return (at & 7) === 0 ? BigInt.asUintN(64, Atomics.load(this.words64, at >>> 3))
+            : this.view.getBigUint64(at, true);
+    }
+
+    /**
      * `cmpxchg8b`'s qword: one compare-and-swap where it is aligned, a plain
-     * read and write where not. Answers what memory held.
+     * read and write holding the lock word where not. Answers what memory held.
      *
      * @param {number} address @param {bigint} expected @param {bigint} value
      */
@@ -460,11 +560,14 @@ export class BlockMemory {
         }
         else
         {
-            held = this.view.getBigUint64(at, true);
-            if (held === expected)
-            {
-                this.view.setBigUint64(at, value, true);
-            }
+            held = this.held(()=>{
+                const now = this.view.getBigUint64(at, true);
+                if (now === expected)
+                {
+                    this.view.setBigUint64(at, value, true);
+                }
+                return now;
+            });
         }
         if (held === expected)
         {
@@ -562,11 +665,42 @@ export class BlockMemory {
             ? (this.pageFlags[address >>> 12] & PageFlag.INACCESSIBLE) !== 0
             : this.inaccessible(address, size))
         {
-            throw this.fault(address, size, false);
+            return this.readClosed(address, size);
         }
         const offset = this.ramBase + address;
         return size === 1 ? this.ramBytes[address]
             : size === 2 ? this.view.getUint16(offset, true) : this.view.getUint32(offset, true);
+    }
+
+    /**
+     * A read that reaches a closed page: the RAM an untested translated read
+     * finds for its bytes in a `readThrough` range, and what the rest hold
+     * where it runs on to an open page; the fault if any byte it reads lies in
+     * another closed page.
+     *
+     * @param {number} address @param {number} size
+     */
+    readClosed(address, size){
+        let value = 0;
+        for (let i = size - 1; i >= 0; i--)
+        {
+            const at = (address + i) >>> 0;
+            let byte;
+            if ((this.pageFlags[at >>> 12] & PageFlag.INACCESSIBLE) === 0)
+            {
+                byte = this.ramBytes[at];
+            }
+            else if (this.readThrough.some(([from, to])=>at >= from && at < to))
+            {
+                byte = this.ramBytes[this.wrapped(at)];
+            }
+            else
+            {
+                throw this.fault(address, size, false);
+            }
+            value = value * 256 + byte;
+        }
+        return value;
     }
 
     /** @param {number} address @param {number} size @param {number} value */
@@ -771,11 +905,12 @@ class BlockState {
      * @param {WebAssembly.Memory} memory
      * @param {import('../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {((address: number, size: number) => void) | null} onCodeWrite
-     * @param {(() => bigint) | undefined} rdtsc
+     * @param {(() => number) | undefined} rdtsc
      * @param {import('./ir.js').EvalState['ports']} ports
      */
     constructor(memory, layout, onCodeWrite, rdtsc, ports){
         const view = new DataView(memory.buffer);
+        this.wasmMemory = memory;
         this.reg = new Uint32Array(memory.buffer, layout.regs, 8);
         // eip and the flags word are the state's own between `syncIn` and
         // `syncOut`: every step writes eip and most read and write the flags,
@@ -804,6 +939,7 @@ class BlockState {
         const f80Bytes = new ArrayBuffer(64);
         this.f80Values = new Float64Array(f80Bytes);
         this.f80Words = new BigInt64Array(f80Bytes);
+        this.f80Halves = new Uint32Array(f80Bytes);
         this.xmmWords = new Uint32Array(32);
         this.x87In = false;
         this.xmmIn = false;
@@ -814,7 +950,11 @@ class BlockState {
         {
             for (let i = 0; i < 8; i++)
             {
-                this.f80Values[i] = this.view.getFloat64(this.layout.x87 + i * 16, true);
+                // By their words: a signalling NaN read as a double and stored
+                // as one may come back quieted (`regWords` in `ir-x87.js`).
+                const at = this.layout.x87 + i * 16;
+                this.f80Halves[2 * i] = this.view.getUint32(at, true);
+                this.f80Halves[2 * i + 1] = this.view.getUint32(at + 4, true);
             }
             this.x87In = true;
         }
@@ -839,6 +979,11 @@ class BlockState {
     get f80bits(){
         this.loadX87();
         return this.f80Words;
+    }
+
+    get f80words(){
+        this.loadX87();
+        return this.f80Halves;
     }
 
     get xmm(){
@@ -900,12 +1045,19 @@ class BlockState {
     /** Takes the block's flags word into the state, and its x87 and XMM
      * registers into the arrays on their first use. */
     syncIn(){
+        // An unshared memory that grew detached the buffer these views are on.
+        if (this.view.buffer.byteLength === 0)
+        {
+            this.view = new DataView(this.wasmMemory.buffer);
+            this.reg = new Uint32Array(this.wasmMemory.buffer, this.layout.regs, 8);
+        }
+        this.memory.fit();
         this.x87In = false;
         this.xmmIn = false;
         // The quadwords a `fild` left exact, as the block keeps them for every
         // executor (`layout.x87Exact`); translated code takes the marks off
         // the registers it writes. A layout with no place for them keeps none.
-        const exactAt = this.layout.x87Format === 'f64' ? this.layout.x87Exact ?? -1 : -1;
+        const exactAt = this.layout.x87Exact ?? -1;
         this.x87Exact = exactAt >= 0 ? this.view.getUint8(exactAt) : 0;
         for (let i = 0; i < 8; i++)
         {
@@ -923,7 +1075,7 @@ class BlockState {
         const { view, layout } = this;
         view.setUint32(layout.eip, this.eip >>> 0, true);
         view.setUint32(layout.eflags, this.eflags >>> 0, true);
-        const exactAt = layout.x87Format === 'f64' ? layout.x87Exact ?? -1 : -1;
+        const exactAt = layout.x87Exact ?? -1;
         if (exactAt >= 0)
         {
             view.setUint8(exactAt, this.x87Exact);
@@ -939,7 +1091,8 @@ class BlockState {
         {
             for (let i = 0; i < 8; i++)
             {
-                view.setFloat64(layout.x87 + i * 16, this.f80Values[i], true);
+                view.setUint32(layout.x87 + i * 16, this.f80Halves[2 * i], true);
+                view.setUint32(layout.x87 + i * 16 + 4, this.f80Halves[2 * i + 1], true);
             }
         }
         if (this.xmmIn)
@@ -962,17 +1115,23 @@ class BlockState {
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'],
- *     atomic?: boolean }} what
+ *     rdtsc?: () => number, ports?: import('./ir.js').EvalState['ports'],
+ *     atomic?: boolean, readThrough?: [number, number][] }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it
  *     translated there, as a translated store's `stale` exit does; `atomic`: the
- *     engine's, every locked instruction one indivisible access (`lockedStep`).
+ *     engine's, every locked instruction one indivisible access (`lockedStep`);
+ *     `readThrough`: ranges past RAM a read
+ *     finds where an untested translated read does (`wrappedAddress`), stores
+ *     there faulting: a page the host keeps at that place in RAM.
  * @returns {import('./ir.js').EvalState & { syncIn: () => void, syncOut: () => void }}
  */
-export function blockState({ memory, layout, onCodeWrite, rdtsc, ports, atomic = false }){
+export function blockState(what){
+    const { memory, layout, onCodeWrite, rdtsc, ports, atomic = false,
+        readThrough = [] } = what;
     const state = new BlockState(memory, layout, onCodeWrite ?? null, rdtsc, ports);
     state.memory.atomic = atomic;
+    state.memory.readThrough = readThrough;
     return state;
 }
 
@@ -995,6 +1154,16 @@ function isLocked(instruction){
 class LockedAccess {
     /** @param {BlockMemory} memory */
     constructor(memory){
+        this.memory = memory;
+        this.address = -1;
+        this.size = 0;
+        this.old = 0;
+        this.value = 0;
+        this.wrote = false;
+    }
+
+    /** As new, over `memory`: one access serves every attempt. @param {BlockMemory} memory */
+    reset(memory){
         this.memory = memory;
         this.address = -1;
         this.size = 0;
@@ -1058,16 +1227,27 @@ function lockedStep(instruction){
             }
         };
     }
+    // A locked instruction runs millions of times in a program that counts
+    // references and takes critical sections: a snapshot and an access made
+    // per run were most of what a worker's collector had to clear. One of each
+    // serves every run, since an instruction never runs inside itself.
+    /** @type {Uint32Array | null} */
+    let registers = null;
+    const access = new LockedAccess(/** @type {any} */ (null));
     return state=>{
         const memory = /** @type {BlockMemory} */ (/** @type {unknown} */ (state.memory));
         // `interpret` moved eip and the count before the step; `evaluate` moves them itself.
         const eip = state.eip;
         const retired = state.retired;
-        const registers = state.reg.slice();
+        if (registers === null || registers.length !== state.reg.length)
+        {
+            registers = new Uint32Array(state.reg.length);
+        }
+        registers.set(state.reg);
         const eflags = state.eflags;
         for (;;)
         {
-            const access = new LockedAccess(memory);
+            access.reset(memory);
             state.memory = /** @type {any} */ (access);
             try
             {

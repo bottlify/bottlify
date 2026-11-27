@@ -5,39 +5,40 @@
  */
 
 /**
- * The pool's driver: from what each
- * process's translation workers did in the last window, which of them a
- * worker joins and which one leaves. A pure function of its state and the
- * sample, so the same decisions are taken in the engine and in a test that
- * replays a recorded load through it.
+ * The pool's driver: from what each process's translation workers did in the
+ * last window, which of them a worker joins and which one leaves. A pure
+ * function of its state and the sample, so the same decisions are taken in the
+ * engine and in a test that replays a recorded load through it.
  *
- * With n processes running: each has its first worker from its start to its
- * exit, never let go. More join a process one at a time when the median load
- * of the workers already working for it -- the share of the window each was
- * busy -- comes to `joinAt`: the median says the work is spread over them and
- * each is near full, so one more takes a share; two at 90 % and 10 % have a
- * median of 50 %, the work does not split, and a third would sit as idle as
- * the second. At most `perProcess` work for one process (the host's
- * concurrency), and at most `perProcess` × n in the pool. A joined worker
- * leaves at once when the process's workers were all idle for a window -- it
- * stopped translating to wait -- and otherwise after `leaveAfterMs` of its
- * median below `leaveBelow`: joining quick, leaving slow, so the pool does
- * not swing.
+ * With n processes running: each has its first worker, which the driver never
+ * lets go (the pool takes it back from a process that rests). More join a
+ * process one at a time when the median load of the workers already working for
+ * it -- the share of the window each was busy -- comes to `joinAt`: the median
+ * says the work is spread over them and each is near full, so one more takes a
+ * share; two at 90 % and 10 % have a median of 50 %, the work does not split,
+ * and a third would sit as idle as the second. At most `perProcess` work for
+ * one process (the host's concurrency), and at most the run's `capacity` in the
+ * pool. A joined worker leaves at once when the process's workers were all idle
+ * for a window -- it stopped translating to wait -- and otherwise after
+ * `leaveAfterMs` of its median below `leaveBelow`: joining quick, leaving slow,
+ * so the pool does not swing.
  *
  * Busy workers are not yet workers that help: on a machine with no core to
  * spare -- four cores, a game loading, the engine's thread, its translator and
- * the browser's own threads taking all of them -- one more worker takes a
- * core from the others, and every region costs more (roadmap/
- * negative-results.md, 2026-10-07). So each join is a trial: the regions the
- * process's workers emit a second over the `trialWindows` after it are
- * weighed against the rate before it, and unless they rose by `yieldShare` of
- * what one more worker would add at best, the worker leaves and the process
- * keeps that many as its ceiling for the run.
+ * the browser's own threads taking all of them -- one more worker takes a core
+ * from the others, and every region costs more (roadmap/ negative-results.md,
+ * 2026-10-07). So each join is a trial: the regions the process's workers emit
+ * a second over the `trialWindows` after it are weighed against the rate before
+ * it, and unless they rose by `yieldShare` of what one more worker would add at
+ * best, the worker leaves and the process keeps that many as its ceiling for
+ * the run.
  */
 
 /**
  * @typedef {Object} DriverSettings
  * @property {number} perProcess  workers at most for one process (`hardwareConcurrency`)
+ * @property {number} [capacity]  workers at most for the run; perProcess × the processes
+ *     sampled when not given
  * @property {number} [joinAt]    the median share at which one more joins
  * @property {number} [leaveBelow]  the median share under which one leaves, in time
  * @property {number} [leaveAfterMs]  how long the median stays under it first
@@ -95,7 +96,8 @@ export function median(values){
 
 /**
  * The decisions for one window. A process gains or loses one worker at most
- * per window; the pool's ceiling is `perProcess` × the processes sampled.
+ * per window; the pool's ceiling is the run's `capacity`, or `perProcess` × the
+ * processes sampled where none is given.
  *
  * @param {DriverState} state
  * @param {ProcessSample[]} processes
@@ -113,7 +115,7 @@ export function decide(state, processes, now, settings){
     const restMs = settings.restMs ?? 10000;
     const yieldShare = settings.yieldShare ?? 0.5;
     const perProcess = Math.max(1, settings.perProcess);
-    const ceiling = perProcess * processes.length;
+    const ceiling = settings.capacity ?? perProcess * processes.length;
     let working = processes.reduce((sum, one)=>sum + one.shares.length, 0);
     /** @type {Decision[]} */
     const decisions = [];

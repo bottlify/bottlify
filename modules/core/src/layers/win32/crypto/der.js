@@ -36,9 +36,6 @@ export const TAG = Object.freeze({
 /** A context-specific tag [n], constructed (EXPLICIT, or IMPLICIT over a constructed type). */
 export const context = (/** @type {number} */ n)=>0xa0 | n;
 
-/** A context-specific tag [n] over a primitive type. */
-export const contextPrimitive = (/** @type {number} */ n)=>0x80 | n;
-
 export class DerError extends Error {}
 
 /**

@@ -7,6 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fpremStatus, fpremValue } from './ir-x87.js';
+import { blockState, interpret } from './interp.js';
+import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { createPageTable } from './runtime/pages.js';
+import { UNDERFLOW_CASES, enterCase, leftByCase } from './testing/x87-underflow.js';
 
 const C0 = 0x100;
 const C1 = 0x200;
@@ -155,3 +159,26 @@ test('partial remainders repeated reach the exact remainder', ()=>{
         assert.equal(value, a % c, `${a} mod ${c}`);
     }
 });
+
+const UNDERFLOW_LAYOUT = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+
+for (const { name, start, code, want } of UNDERFLOW_CASES)
+{
+    test(`a stack underflow as the processor answers it: ${name}`, ()=>{
+        const layout = UNDERFLOW_LAYOUT;
+        const pages = pagesFor(layout, tablesSize(layout));
+        const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+        createPageTable(memory, layout);
+        const block = new DataView(memory.buffer);
+        const at = 0x1000;
+        new Uint8Array(memory.buffer).set([...code, 0xf4], layout.ramBase + at);
+        block.setUint32(layout.eip, at, true);
+        enterCase(block, layout, start);
+        const state = blockState({ memory, layout });
+        state.syncIn();
+        interpret(state, 100);
+        state.syncOut();
+        assert.ok(state.halted);
+        assert.deepEqual(leftByCase(block, layout), want);
+    });
+}

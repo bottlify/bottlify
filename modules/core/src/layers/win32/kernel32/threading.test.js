@@ -6,12 +6,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createThreadingFunctions } from './threading.js';
+import { createThreadingFunctions, listProcesses } from './threading.js';
+import { COMPILED as SEMAPHORE_I386 } from './semaphore-guest.x86.js';
+import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_ALREADY_EXISTS = 183;
 
@@ -21,7 +24,7 @@ const ERROR_ALREADY_EXISTS = 183;
  * about scheduling.
  */
 function fakeKernel(){
-    /** @type {Map<number, { type: string, object: any }>} */
+    /** @type {Map<number, { type: string, object: any, access?: number | null }>} */
     const handles = new Map();
     let nextHandle = 4;
     const state = {
@@ -115,6 +118,10 @@ function fakeKernel(){
     };
 
     const kernel = {
+        /** @param {any} thread @param {() => void} work */
+        whenResumed: (thread, work)=>{
+            thread.whenResumed = work;
+        },
         state,
         /** @param {any} options */
         createThread(options){
@@ -134,7 +141,18 @@ function fakeKernel(){
         createEvent: options=>(
             { kind: 'event', signalled: false, manualReset: false, waiters: [], ...options }),
         /** @param {any} options */
-        createSemaphore: options=>({ kind: 'semaphore', waiters: [], ...options }),
+        createSemaphore: options=>(
+            { kind: 'semaphore', waiters: [], count: options.initial, ...options }),
+        /** @param {any} object @param {number} count */
+        releaseSemaphore(object, count){
+            if (object.count + count > object.maximum)
+            {
+                throw new Error('Semaphore released past its maximum');
+            }
+            const previous = object.count;
+            object.count += count;
+            return previous;
+        },
         /** @param {any} options */
         createTimer: options=>(
             { kind: 'timer', signalled: false, manualReset: false, waiters: [], ...options }),
@@ -249,10 +267,10 @@ function fakeKernel(){
         block: (thread, reason, timed)=>state.blocked.push(
             timed === undefined ? { thread, reason } : { thread, reason, timed }),
         handles: {
-            /** @param {string} type @param {any} object */
-            open(type, object){
+            /** @param {string} type @param {any} object @param {number | null} [access] */
+            open(type, object, access = null){
                 const handle = nextHandle;
-                handles.set(handle, { type, object });
+                handles.set(handle, { type, object, access });
                 nextHandle += 4;
                 return handle;
             },
@@ -278,8 +296,22 @@ function fakeKernel(){
                 }
                 return entry.object;
             },
+            /**
+             * @param {number} handle @param {string} type @param {any} object
+             * @param {number | null} [access]
+             */
+            adopt(handle, type, object, access = null){
+                if (handles.has(handle))
+                {
+                    return false;
+                }
+                handles.set(handle, { type, object, access });
+                return true;
+            },
             /** @param {number} handle */
             typeOf: handle=>handles.get(handle)?.type ?? null,
+            /** @param {number} handle */
+            access: handle=>handles.get(handle)?.access ?? null,
             /** @param {any} object */
             holds: object=>[...handles.values()].some(entry=>entry.object === object),
         },
@@ -307,8 +339,9 @@ function writtenU32(written, address){
  * @param {Record<number, string>} [names] What each name pointer spells, for the
  *   tests that are about the Win32 object namespace. Every other test passes
  *   nothing and every pointer reads as the empty name, which is no name at all.
+ * @param {Partial<import('./threading.js').ThreadingHost>} [extra]  more of the host
  */
-function setup(names){
+function setup(names, extra = {}){
     const kernel = fakeKernel();
     /** @type {any} */
     const current = { name: 'caller' };
@@ -343,10 +376,52 @@ function setup(names){
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
         namedObjects: createNamedObjects(),
+        ...extra,
     };
     const fns = createThreadingFunctions(host);
     return { kernel, fns, host, parked, current, written, errors };
 }
+
+test('CreateRemoteThread into a child is the child\'s CreateThread, the handle this one\'s',
+    async()=>{
+        // The thread runs where the child does, at an address in its memory;
+        // the parent is handed a handle of its own naming the child's
+        // thread, and its id.
+        const { kernel, fns, host, written, current } = setup();
+        /** @type {any[]} */
+        const asked = [];
+        host.askChild = (record, call)=>{
+            asked.push({ record, call });
+            return Promise.resolve({ result: 0x84, error: null,
+                outs: [null, null, null, null, null, new Uint8Array([0x30, 0, 0, 0])] });
+        };
+        /** @type {any[]} */
+        const errors = [];
+        host.setLastErrorFor = (thread, code)=>errors.push([thread, code]);
+        const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
+        const process = kernel.handles.open('process', child);
+        Object.assign(kernel, { processes: { all: ()=>[child] } });
+
+        const handle = await fns.CreateRemoteThread.handler(
+            [process, 0, 0x10000, 0x7f0000, 37, 4, 0x405000]);
+        assert.deepEqual(asked, [{ record: child, call: { call: 'CreateThread',
+            args: [0, 0x10000, 0x7f0000, 37, 4, { out: 4 }] } }]);
+        assert.equal(kernel.handles.typeOf(handle), 'process-thread');
+        assert.deepEqual(kernel.handles.resolve(handle, 'process-thread'), {
+            process: child, threadId: 0x30, handle: 0x84, exitCode: null, exited: null });
+        assert.deepEqual([...written.get(0x405000) ?? []], [0x30, 0, 0, 0], 'and its id');
+        assert.deepEqual(errors, [], 'no error where the child set none');
+        void current;
+
+        // OpenThread finds it by that id from now on.
+        const again = fns.OpenThread.handler([0x1fffff, 0, 0x30]);
+        assert.equal(kernel.handles.resolve(again, 'process-thread'),
+            kernel.handles.resolve(handle, 'process-thread'));
+
+        // A child no run can ask is refused.
+        host.askChild = ()=>null;
+        assert.equal(fns.CreateRemoteThread.handler([process, 0, 0, 0x7f0000, 0, 0, 0]), 0);
+    });
 
 test('CreateThread makes a thread and does not switch to it', ()=>{
     const { kernel, fns, parked } = setup();
@@ -358,6 +433,16 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.equal(kernel.state.created[0].parameter, 0xdead);
     assert.ok(handle > 0, 'the guest gets a handle back');
     assert.deepEqual(parked, [], 'the creating thread keeps running');
+});
+
+test('a process that has begun to end makes no thread: ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader (child phase 0): after NtTerminateProcess with
+    // no handle, CreateThread fails with ERROR_ACCESS_DENIED.
+    const { kernel, fns, host, errors } = setup();
+    host.terminating = ()=>true;
+    assert.equal(fns.CreateThread.handler([0, 0x10000, 0x401000, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5);
+    assert.equal(kernel.state.created.length, 0, 'nothing made');
 });
 
 test('CreateThread begins the thread where the libraries are told of it, its routine above', ()=>{
@@ -376,10 +461,9 @@ test('CreateThread begins the thread where the libraries are told of it, its rou
     assert.equal(kernel.state.created[1].start, undefined);
 });
 
-test('CreateRemoteThread into this process is CreateThread, and into another is refused', ()=>{
+test('CreateRemoteThread into this process is CreateThread, and into no process is refused', ()=>{
     // kernel32's process and thread tests: the stack of a remote thread of
-    // our own process; a child, which runs only after this process, cannot
-    // be given one.
+    // our own process.
     const { kernel, fns, errors } = setup();
     const handle = fns.CreateRemoteThread.handler(
         [0xffffffff, 0, 0x10000, 0x401000, 0xdead, 0, 0x405000]);
@@ -470,36 +554,29 @@ test('a thread the kernel has no room for is a failed CreateThread, not a stoppe
     assert.deepEqual(kernel.state.threadIds, [], 'no id is written for a thread never made');
 });
 
-test('waiting on a child process is where the parent hands over', ()=>{
-    // Nothing in this process can signal a child: it runs once the parent has
-    // nothing else to do. So the thread blocks outside every wait queue, and is
-    // noted on the child with its answer, for the engine to wake when the
-    // child it runs beside this process exits. Left to the ordinary path,
-    // this would join a queue on an object with no signal and be reported as
-    // a deadlock.
+test('waiting on a child process is a wait on the event its exit sets', ()=>{
+    // The child runs beside its parent, so its exit is an ordinary signal:
+    // the parent joins that event's queue, and an exited child -- the event
+    // set, for good -- answers every later wait at once.
     const { kernel, fns, parked, current } = setup();
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\child.exe' };
-    const handle = kernel.handles.open('process', child);
+    const exited = { kind: 'event', manualReset: true, signalled: false };
+    const handle = kernel.handles.open('process', { imagePath: 'C:\\App\\child.exe', exited });
 
     assert.equal(fns.WaitForSingleObject.handler([handle, 0xffffffff]), PARKED);
     assert.deepEqual(parked, [current]);
-    assert.equal(kernel.state.blocked.length, 1);
-    assert.equal(kernel.state.blocked[0].thread, current);
-    assert.equal(kernel.state.waits.length, 0, 'and it never joined a wait queue');
-    assert.deepEqual(child.waiters.map((/** @type {any} */ waiter)=>
-        [waiter.thread, waiter.result, typeof waiter.live]), [[current, 0, 'function']],
-    'the child knows who waits on it, that the wait answers WAIT_OBJECT_0, and how to tell'
-        + ' it still waits');
+    assert.deepEqual(kernel.state.waits.map((/** @type {any} */ one)=>one.object), [exited]);
+
+    exited.signalled = true;
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0xffffffff]), 0);
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0, 'and stays signalled');
 });
 
 test('polling a child process says it is still running', ()=>{
     // A zero timeout is a question, not a wait. Parking on it would stop a
     // parent that was only checking whether its child had finished.
     const { kernel, fns, parked } = setup();
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\child.exe' };
-    const handle = kernel.handles.open('process', child);
+    const exited = { kind: 'event', manualReset: true, signalled: false };
+    const handle = kernel.handles.open('process', { imagePath: 'C:\\App\\child.exe', exited });
 
     assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
     assert.deepEqual(parked, []);
@@ -637,7 +714,7 @@ test('a named semaphore is found by a second create, and by OpenSemaphore', ()=>
     assert.equal(kernel.handles.resolve(second, 'semaphore'),
         kernel.handles.resolve(first, 'semaphore'));
 
-    const opened = fns.OpenSemaphoreA.handler([0, 0, NAME]);
+    const opened = fns.OpenSemaphoreA.handler([0x1f0003, 0, NAME]);
     assert.equal(kernel.handles.resolve(opened, 'semaphore'),
         kernel.handles.resolve(first, 'semaphore'));
     assert.equal(fns.OpenSemaphoreW.argBytes, 12);
@@ -690,10 +767,30 @@ test('the Ex creators take their options as flags, and make the same objects', (
         .map(fn=>fn.argBytes), [16, 16, 16, 16, 24, 24]);
 });
 
+test('ReleaseSemaphore says why it refuses, and writes the previous count only on success', ()=>{
+    // Wine's kernel32 sync test_signalandwait's semaphore checks.
+    const ERROR_TOO_MANY_POSTS = 298;
+    const { fns, errors, written } = setup();
+    const semaphore = fns.CreateSemaphoreExW.handler([0, 0, 1, 0, 0, 0x1f0003]);
+
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, -1, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 0, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.ReleaseSemaphore.handler([0x999, 1, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 2, 0x3000]), 0);
+    assert.equal(errors.at(-1), ERROR_TOO_MANY_POSTS);
+    assert.equal(written.has(0x3000), false, 'no refusal writes the previous count');
+
+    assert.equal(fns.ReleaseSemaphore.handler([semaphore, 1, 0x3000]), 1);
+    assert.deepEqual([...written.get(0x3000) ?? []], [0, 0, 0, 0]);
+});
+
 test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
     const NAME = 0x2000;
     const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
-    assert.equal(fns.OpenSemaphoreA.handler([0, 0, NAME]), 0);
+    assert.equal(fns.OpenSemaphoreA.handler([0x1f0003, 0, NAME]), 0);
     assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
 });
 
@@ -707,7 +804,7 @@ test('a named waitable timer is found by a second create, and by OpenWaitableTim
     assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
     assert.equal(kernel.handles.resolve(second, 'timer'), kernel.handles.resolve(first, 'timer'));
 
-    const opened = fns.OpenWaitableTimerW.handler([0, 0, NAME]);
+    const opened = fns.OpenWaitableTimerW.handler([0x1f0003, 0, NAME]);
     assert.equal(kernel.handles.resolve(opened, 'timer'), kernel.handles.resolve(first, 'timer'));
     assert.equal(fns.OpenWaitableTimerA.argBytes, 12);
 });
@@ -718,11 +815,11 @@ test('OpenMutexW and OpenEventW read the wide name too', ()=>{
     const { kernel, fns } = setup({ [MUTEX_NAME]: 'Warcraft III', [EVENT_NAME]: 'wc3-ready' });
 
     const mutex = fns.CreateMutexA.handler([0, 0, MUTEX_NAME]);
-    assert.equal(kernel.handles.resolve(fns.OpenMutexW.handler([0, 0, MUTEX_NAME]), 'mutex'),
+    assert.equal(kernel.handles.resolve(fns.OpenMutexW.handler([0x1f0001, 0, MUTEX_NAME]), 'mutex'),
         kernel.handles.resolve(mutex, 'mutex'));
 
     const event = fns.CreateEventA.handler([0, 0, 0, EVENT_NAME]);
-    assert.equal(kernel.handles.resolve(fns.OpenEventW.handler([0, 0, EVENT_NAME]), 'event'),
+    assert.equal(kernel.handles.resolve(fns.OpenEventW.handler([0x1f0003, 0, EVENT_NAME]), 'event'),
         kernel.handles.resolve(event, 'event'));
 });
 
@@ -740,6 +837,48 @@ test('a name lives only as long as a handle to the object behind it', ()=>{
     assert.equal(errors.at(-1), ERROR_SUCCESS);
 });
 
+test('a mutex opened by name is granted what was asked: none refused, a wait needing SYNCHRONIZE',
+    ()=>{
+        // Wine's kernel32 sync.c test_mutex.
+        const NAME = 0x2000;
+        const { kernel, fns, errors } = setup({ [NAME]: 'WineTestMutex' });
+        fns.CreateMutexA.handler([0, 0, NAME]);
+
+        assert.equal(fns.OpenMutexA.handler([0, 0, NAME]), 0);
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+        const execute = fns.OpenMutexA.handler([0x20000000, 0, NAME]);
+        assert.notEqual(execute, 0, 'GENERIC_EXECUTE');
+        assert.equal(fns.WaitForSingleObject.handler([execute, 0xffffffff]), 0);
+        const readWrite = fns.OpenMutexA.handler([0xc0000000, 0, NAME]);
+        assert.notEqual(readWrite, 0, 'GENERIC_READ | GENERIC_WRITE');
+        assert.equal(fns.WaitForSingleObject.handler([readWrite, 0xffffffff]), 0xffffffff);
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+        assert.equal(kernel.handles.access(readWrite), 0x20001);
+    });
+
+test('ReleaseMutex of a mutex not owned is ERROR_NOT_OWNER, of no mutex ERROR_INVALID_HANDLE',
+    ()=>{
+        // Wine's kernel32 sync.c test_mutex.
+        const { kernel, fns, errors } = setup();
+        const mutex = fns.CreateMutexA.handler([0, 0, 0]);
+        Object.assign(kernel, { releaseMutex: ()=>false });
+        assert.equal(fns.ReleaseMutex.handler([mutex]), 0);
+        assert.equal(errors.at(-1), 288);
+        assert.equal(fns.ReleaseMutex.handler([0x999]), 0);
+        assert.equal(errors.at(-1), 6);
+    });
+
+test('an event opened without EVENT_MODIFY_STATE is neither set nor reset', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'WineTestEvent' });
+    fns.CreateEventA.handler([0, 1, 0, NAME]);
+    const query = fns.OpenEventA.handler([0x00100001, 0, NAME]);
+    assert.equal(fns.SetEvent.handler([query]), 0);
+    assert.equal(fns.ResetEvent.handler([query]), 0);
+    assert.deepEqual(errors.slice(-2), [ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED]);
+    assert.equal(fns.SetEvent.handler([fns.OpenEventA.handler([0x00000002, 0, NAME])]), 1);
+});
+
 test('a name taken by one kind of object is not a match for another', ()=>{
     const NAME = 0x2000;
     const { kernel, fns, errors } = setup({ [NAME]: 'shared' });
@@ -749,9 +888,10 @@ test('a name taken by one kind of object is not a match for another', ()=>{
     assert.equal(fns.CreateEventA.handler([0, 0, 0, NAME]), 0,
         'the name is not the event\'s to take');
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
-    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0, 'nor is the mutex openable as an event');
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, NAME]), 0,
+        'nor is the mutex openable as an event');
     assert.equal(
-        kernel.handles.resolve(fns.OpenMutexA.handler([0, 0, NAME]), 'mutex'),
+        kernel.handles.resolve(fns.OpenMutexA.handler([0x1f0001, 0, NAME]), 'mutex'),
         kernel.handles.resolve(mutex, 'mutex'),
         'and the mutex keeps the name it holds',
     );
@@ -762,7 +902,7 @@ test('OpenEventA finds an event created by name', ()=>{
     const { kernel, fns } = setup({ [NAME]: 'ready' });
 
     const created = fns.CreateEventA.handler([0, 1, 0, NAME]);
-    const opened = fns.OpenEventA.handler([0, 0, NAME]);
+    const opened = fns.OpenEventA.handler([0x1f0003, 0, NAME]);
 
     assert.notEqual(opened, 0);
     assert.notEqual(opened, created, 'opening yields a second handle, not the first');
@@ -777,7 +917,7 @@ test('OpenEventA reports no such thing for a name nothing created', ()=>{
     const NAME = 0x2000;
     const { fns, errors } = setup({ [NAME]: 'never-made' });
 
-    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0);
+    assert.equal(fns.OpenEventA.handler([0x1f0003, 0, NAME]), 0);
     assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND,
         'a caller must tell this apart from a failure to open');
 });
@@ -802,7 +942,7 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -812,6 +952,7 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.ok(entry);
     const view = new DataView(entry.buffer, entry.byteOffset);
     assert.equal(view.getUint32(8, true), 0x2a4, 'th32ProcessID');
+    assert.equal(view.getUint32(24, true), 0, 'th32ParentProcessID: nothing started it');
     assert.equal(new TextDecoder().decode(entry.subarray(36, 45)), 'Setup.exe', 'szExeFile');
     assert.equal(fns.Process32Next.handler([snapshot, 0x100]), 0);
     assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
@@ -824,6 +965,17 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.equal(fns.CreateToolhelp32Snapshot.argBytes, 8);
     assert.equal(fns.Process32First.argBytes, 8);
     assert.equal(fns.Process32Next.argBytes, 8);
+});
+
+test('a child\'s snapshot names the process that started it as its parent', ()=>{
+    const { fns, host, written } = setup();
+    Object.assign(host, { processId: 0x2a8, parentProcessId: 0x2a4 });
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
+    fns.Process32First.handler([fns.CreateToolhelp32Snapshot.handler([0x2, 0]), 0x100]);
+    const entry = /** @type {Uint8Array} */ (written.get(0x100));
+    assert.equal(new DataView(entry.buffer, entry.byteOffset).getUint32(24, true), 0x2a4);
 });
 
 test('K32EnumProcesses lists this process, as many ids as fit, and the bytes written', ()=>{
@@ -846,7 +998,7 @@ test('a snapshot names the image in the ANSI page', ()=>{
     const { fns, host, written } = setup();
     host.imagePath = ()=>'C:\\App\\\u20ac\u2122\u2014\u00e9.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -868,7 +1020,7 @@ test('a snapshot taken with its modules lists them in either width, the image fi
     ];
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     memory.setUint32(0x100, 548, true);
     memory.setUint32(0x400, 1064, true);
     const ansi = (/** @type {Uint8Array} */ entry, /** @type {number} */ at)=>
@@ -966,7 +1118,7 @@ test('arming a timer with a waiter already parked releases it at the due time', 
     // schedules the wake -- the wait that arrived first is not a lost one.
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 1, 0]);
     assert.equal(kernel.handles.typeOf(timer), 'timer');
@@ -991,7 +1143,7 @@ test('arming a timer with a waiter already parked releases it at the due time', 
 test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1016,7 +1168,7 @@ test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
 test('a periodic timer signals again a period on, with no thread present between', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
@@ -1037,7 +1189,7 @@ test('a periodic timer signals again a period on, with no thread present between
 test('cancelling a timer leaves a parked waiter parked, and its own timeout still ends it', ()=>{
     const { fns, kernel, host, current, errors } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1060,7 +1212,7 @@ test('cancelling a timer leaves a parked waiter parked, and its own timeout stil
 test('CancelWaitableTimer un-arms without signalling a parked waiter', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1097,6 +1249,65 @@ test('DuplicateHandle accepts the pseudo-handles wherever a handle is taken', ()
     assert.ok(writtenU32(written, 0x308) > 0);
 });
 
+test('DuplicateHandle of the console\'s own handle is that handle', ()=>{
+    // Wine's process.c test_DuplicateHandle: CONIN$ duplicated with
+    // DUPLICATE_CLOSE_SOURCE; Windows 7 hands a console handle back as is.
+    const { fns, written } = setup();
+    for (const [at, handle] of [[0x300, 1], [0x304, 2], [0x308, 3]])
+    {
+        assert.equal(fns.DuplicateHandle.handler([0xffffffff, handle, 0xffffffff, at, 0, 0, 3]), 1);
+        assert.equal(writtenU32(written, at), handle);
+    }
+});
+
+test('DuplicateHandle that closes its source takes the source\'s number, unless it is protected',
+    ()=>{
+        // Wine's process.c test_DuplicateHandle: the duplicate is f again.
+        const { fns, kernel, written } = setup();
+        const event = kernel.handles.open('event', { kind: 'event', signalled: false });
+        assert.equal(fns.DuplicateHandle.handler(
+            [0xffffffff, event, 0xffffffff, 0x300, 0, 1, 3]), 1);
+        assert.equal(writtenU32(written, 0x300), event, 'the same number');
+        assert.equal(kernel.handles.typeOf(event), 'event');
+        const flags = 0x310;
+        assert.equal(fns.GetHandleInformation.handler([event, flags]), 1);
+        assert.equal(writtenU32(written, flags), 1, 'HANDLE_FLAG_INHERIT, as asked');
+
+        assert.equal(fns.SetHandleInformation.handler([event, 2, 2]), 1);
+        assert.equal(fns.DuplicateHandle.handler(
+            [0xffffffff, event, 0xffffffff, 0x304, 0, 1, 3]), 1);
+        assert.notEqual(writtenU32(written, 0x304), event, 'protected from close: both stay');
+        assert.equal(kernel.handles.typeOf(event), 'event');
+    });
+
+test('DuplicateHandle puts a duplicate into another process of the run, and takes one out', ()=>{
+    // A server hands its client the event it signals: the duplicate is in
+    // the client's table, under the client's number.
+    const { fns, kernel, written, host } = setup();
+    const client = fakeKernel();
+    const tables = new Map([[0x2008, {
+        typeOf: (/** @type {number} */ handle)=>client.handles.typeOf(handle),
+        resolve: (/** @type {number} */ handle)=>client.handles.resolve(handle),
+        open: (/** @type {string} */ type, /** @type {any} */ object)=>
+            client.handles.open(type, object),
+        close: (/** @type {number} */ handle)=>client.handles.close(handle),
+    }]]);
+    host.processTable = id=>tables.get(id) ?? null;
+    const record = { id: 0x2008 };
+    const process = kernel.handles.open('process', record);
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, process, 0x300, 0, 0, 0]), 1);
+    const theirs = writtenU32(written, 0x300);
+    assert.equal(client.handles.resolve(theirs, 'event'), kernel.handles.resolve(event, 'event'),
+        'the same event, in the client\'s table');
+
+    // And back: the client's handle, taken into this process and closed there.
+    assert.equal(fns.DuplicateHandle.handler([process, theirs, 0xffffffff, 0x304, 0, 0, 1]), 1);
+    const ours = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.resolve(ours, 'event'), kernel.handles.resolve(event, 'event'));
+    assert.equal(client.handles.typeOf(theirs), null, 'DUPLICATE_CLOSE_SOURCE closed it there');
+});
+
 test('a wait on a pseudo-handle is a wait on the running object, which is not signalled', ()=>{
     const { fns, kernel, current, written } = setup();
 
@@ -1107,7 +1318,7 @@ test('a wait on a pseudo-handle is a wait on the running object, which is not si
 
     // A timeout on a duplicate of the running thread expires while it runs.
     assert.equal(
-        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 0]), 1);
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 2]), 1);
     const duplicate = writtenU32(written, 0x300);
     assert.equal(fns.WaitForSingleObject.handler([duplicate, 100]), PARKED);
     kernel.advance(100);
@@ -1122,7 +1333,7 @@ test('a timer\'s completion routine is queued to the setting thread at each expi
     const queued = [];
     host.queueApc = (thread, routine, args)=>queued.push({ thread, routine, args });
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1142,7 +1353,7 @@ test('a timer\'s completion routine is queued to the setting thread at each expi
 test('a timer set without a routine queues nothing', ()=>{
     const { fns, kernel, host } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.queueApc = ()=>assert.fail('nothing to queue');
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
@@ -1190,7 +1401,7 @@ test('SwitchToThread stands aside for a ready thread and answers nonzero when it
 function overlapped({ host }, internal, internalHigh, event = 0){
     const bytes = new Uint8Array(0x100);
     const view = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
     view.setUint32(0x20, internal, true);
     view.setUint32(0x24, internalHigh, true);
@@ -1245,6 +1456,30 @@ test('an operation still pending is incomplete without bWait, and waited for wit
         'the low bit of hEvent is a flag, not part of the handle');
     assert.deepEqual(parked, [current]);
     assert.equal(sets[1][1], object);
+    pending.view.setUint32(0x40, 0x5555, true);
+    assert.equal(pending.count(), 0x5555, 'a wait that parks writes no count before it ends');
+    // The read finishes while the caller sleeps; the count is the one it left.
+    pending.view.setUint32(0x20, 0, true);
+    pending.view.setUint32(0x24, 4, true);
+    assert.equal(current.whenResumed(1), 1, 'TRUE, as the wait answered');
+    assert.equal(pending.count(), 4, 'the count the I/O left, written as the wait ends');
+
+    // One that ends in an error while the caller sleeps: FALSE and its error,
+    // set on the caller, whichever thread is running as it resumes.
+    /** @type {any[]} */
+    const errorsFor = [];
+    parts.host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+        errorsFor.push([thread, code]);
+    pending.view.setUint32(0x20, STATUS_PENDING, true);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), PARKED);
+    const STATUS_BUFFER_OVERFLOW = 0x80000005;
+    const ERROR_MORE_DATA = 234;
+    pending.view.setUint32(0x20, STATUS_BUFFER_OVERFLOW, true);
+    pending.view.setUint32(0x24, 8, true);
+    assert.equal(current.whenResumed(1), 0, 'FALSE: the operation failed');
+    assert.deepEqual(errorsFor, [[current, ERROR_MORE_DATA]]);
+    assert.equal(pending.count(), 8, 'with the count it left');
+    pending.view.setUint32(0x20, STATUS_PENDING, true);
 
     pending.view.setUint32(0x30, 0, true);
     assert.equal(fns.GetOverlappedResult.handler([0x9999, 0x20, 0x40, 1]), 0,
@@ -1327,7 +1562,7 @@ test('a snapshot lists the children still running and every thread, each walk to
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     const kernel = /** @type {any} */ (host.kernel);
     kernel.threads = ()=>[{ id: 0x10, state: 'running' }, { id: 0x14, state: 'terminated' },
         { id: 0x18, state: 'blocked' }];
@@ -1367,6 +1602,57 @@ test('a snapshot lists the children still running and every thread, each walk to
         'a snapshot taken without threads has none to walk');
 });
 
+test('the run\'s processes list a process\'s threads in the order they were made', ()=>{
+    // Wine's toolhelp.c: the threads a process made, in turn, and the main one
+    // first; the scheduler rotates its own list as threads take turns.
+    const kernel = {
+        threads: ()=>[{ id: 0x18, state: 'ready' }, { id: 0x10, state: 'running' },
+            { id: 0x1c, state: 'terminated' }, { id: 0x14, state: 'blocked' }],
+        processes: { STILL_ACTIVE: 259, all: ()=>[
+            { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 }] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
+        { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10, 0x14, 0x18] },
+        { id: 0x300, parent: 0x2a4, path: 'C:\\App\\child.exe', threads: [0x304] },
+    ]);
+});
+
+test('a snapshot lists every process of the run, a grandchild with the child that made it as its'
+    + ' parent', ()=>{
+    // Wine's process.c test_Startup's nested child: a child starts one
+    // suspended and exits; its parent finds it in a snapshot and resumes it.
+    const child = { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 };
+    const grandchild = { id: 0x308, threadId: 0x30c, imagePath: 'C:\\App\\child.exe',
+        exitCode: 259, parentId: 0x300 };
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }],
+        processes: { STILL_ACTIVE: 259, all: ()=>[child],
+            run: ()=>[{ id: 0x2a4, exitCode: 259 }, child, grandchild] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
+        { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10] },
+        { id: 0x300, parent: 0x2a4, path: 'C:\\App\\child.exe', threads: [0x304] },
+        { id: 0x308, parent: 0x300, path: 'C:\\App\\child.exe', threads: [0x30c] },
+    ]);
+});
+
+test('an ended thread stays in its process\'s list, and opens by id, while a handle holds it', ()=>{
+    // Wine's ntdll om.c test_get_next_thread: the thread waited for to its
+    // end is still found through the handle its creator keeps.
+    const ended = { id: 0x1c, state: 'terminated' };
+    let held = true;
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }, ended],
+        handles: { holds: (/** @type {any} */ object)=>held && object === ended },
+        processes: { STILL_ACTIVE: 259, all: ()=>[] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10, 0x1c]);
+    held = false;
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10], 'its last handle gone, so is it');
+});
+
 test("OpenThread opens a live thread or a child's first, and refuses any other", ()=>{
     // Wine's kernel32 process.c test_Toolhelp opens the thread the walk found.
     const { fns, host, errors } = setup();
@@ -1384,18 +1670,45 @@ test("OpenThread opens a live thread or a child's first, and refuses any other",
     };
     assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x10]), 0);
     assert.notEqual(fns.OpenThread.handler([0x1f03ff, 0, 0x304]), 0);
-    assert.deepEqual(opened, [['thread', live], ['process-thread', child]]);
+    assert.deepEqual(opened, [['thread', live], ['process-thread',
+        { process: child, threadId: 0x304, handle: 0, exitCode: null, exited: null }]]);
     assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x14]), 0, 'an ended thread');
     assert.equal(fns.OpenThread.handler([0x1f03ff, 0, 0x999]), 0, 'nobody');
     assert.deepEqual(errors.slice(-2), [87, 87]);
     assert.equal(fns.OpenThread.argBytes, 12);
 });
 
+test('GetProcessId, GetThreadId and GetProcessIdOfThread read the ids behind handles', ()=>{
+    // A launcher keeps the id of the child it started (tier0's
+    // ThreadIsProcessActive in the Steam client asks for it at once).
+    const { fns, host, errors } = setup();
+    const kernel = /** @type {any} */ (host.kernel);
+    /** @type {any} */ (host).processId = 0x1234;
+    const live = { id: 0x10, state: 'blocked' };
+    const child = { id: 0x300, threadId: 0x304, exitCode: 259 };
+    kernel.threads = ()=>[live];
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    const process = kernel.handles.open('process', child);
+    const childThread = fns.OpenThread.handler([0x1f03ff, 0, 0x304]);
+    const ownThread = fns.OpenThread.handler([0x1f03ff, 0, 0x10]);
+    assert.equal(fns.GetProcessId.handler([process]), 0x300);
+    assert.equal(fns.GetProcessId.handler([0xffffffff]), 0x1234, 'the pseudo-handle is this one');
+    assert.equal(fns.GetThreadId.handler([childThread]), 0x304);
+    assert.equal(fns.GetThreadId.handler([ownThread]), 0x10);
+    assert.equal(fns.GetProcessIdOfThread.handler([childThread]), 0x300);
+    assert.equal(fns.GetProcessIdOfThread.handler([ownThread]), 0x1234);
+    assert.equal(fns.GetProcessId.handler([ownThread]), 0, 'a thread is no process');
+    assert.equal(fns.GetThreadId.handler([0x7777]), 0);
+    assert.deepEqual(errors.slice(-2), [6, 6]);
+    assert.deepEqual([fns.GetProcessId, fns.GetThreadId, fns.GetProcessIdOfThread]
+        .map(one=>one.argBytes), [4, 4, 4]);
+});
+
 test('a handle reads back the flags a duplicate or SetHandleInformation gave it', ()=>{
     // Wine's kernel32 process.c test_DuplicateHandle: GetHandleInformation was missing.
     const { fns, host, errors } = setup();
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);
     const read = (/** @type {number} */ handle)=>{
@@ -1417,6 +1730,25 @@ test('a handle reads back the flags a duplicate or SetHandleInformation gave it'
         [8, 12]);
 });
 
+test('a socket takes handle flags as a kernel object does', ()=>{
+    // A SOCKET is a handle on Windows: a program keeps its sockets from the
+    // children it starts with SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0),
+    // and one that is told the handle is invalid gives up on its network.
+    const { fns, host, errors } = setup();
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
+    host.writeMemory = (address, data)=>bytes.set(data, address);
+    /** @type {any} */ (host).isSocket = (/** @type {number} */ handle)=>handle === 3;
+    assert.equal(fns.SetHandleInformation.handler([3, 1, 0]), 1);
+    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    assert.equal(bytes[0x200], 0);
+    assert.equal(fns.SetHandleInformation.handler([3, 1, 1]), 1);
+    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    assert.equal(bytes[0x200], 1, 'HANDLE_FLAG_INHERIT reads back');
+    assert.equal(fns.SetHandleInformation.handler([5, 1, 0]), 0, 'not a socket, not an object');
+    assert.deepEqual(errors.slice(-1), [6]);
+});
+
 test('Process32FirstW and Process32NextW walk the same processes into a PROCESSENTRY32W', ()=>{
     // 556 bytes: the narrow entry's 36 before the name, then MAX_PATH wide
     // characters for it.
@@ -1425,7 +1757,7 @@ test('Process32FirstW and Process32NextW walk the same processes into a PROCESSE
     host.imagePath = ()=>'C:\\App\\Setup\u20ac.exe';
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     memory.setUint32(0x100, 556, true);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -1450,4 +1782,112 @@ test('Process32FirstW and Process32NextW walk the same processes into a PROCESSE
     assert.equal(errors.at(-1), 122);
     assert.equal(fns.Process32FirstW.handler([0x7777, 0x100]), 0);
     assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+});
+
+test('an object\'s name is read whole: ANSI refuses MAX_PATH or more, wide tells it apart',
+    ()=>{
+        const long = 'n'.repeat(300);
+        const { fns, errors } = setup({ 0x2000: long, 0x3000: `${long}x`, 0x4000: `${long}y` });
+        assert.equal(fns.CreateEventA.handler([0, 1, 0, 0x2000]), 0);
+        assert.equal(errors.at(-1), 206, 'ERROR_FILENAME_EXCED_RANGE');
+        assert.equal(fns.OpenMutexA.handler([0x1f0001, 0, 0x2000]), 0);
+        assert.equal(errors.at(-1), 206);
+        const first = fns.CreateEventW.handler([0, 1, 0, 0x3000]);
+        assert.notEqual(first, 0);
+        assert.equal(fns.OpenEventW.handler([0x1f0003, 0, 0x4000]), 0,
+            'a name differing past the 260th character is another name');
+    });
+
+test('CreateWaitableTimerEx takes the manual reset as a flag and refuses others', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns, errors } = setup({ [NAME]: 'ticker' });
+    const manual = fns.CreateWaitableTimerExW.handler([0, 0, 0x3, 0x1f0003]);
+    assert.equal(kernel.handles.resolve(manual, 'timer').manualReset, true);
+    const named = fns.CreateWaitableTimerExA.handler([0, NAME, 0, 0x1f0003]);
+    assert.equal(kernel.handles.resolve(named, 'timer').manualReset, false);
+    assert.equal(fns.CreateWaitableTimerExW.handler([0, 0, 0x4, 0x1f0003]), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.CreateWaitableTimerExW.argBytes, 16);
+});
+
+test('CompareObjectHandles says whether two handles name one object', ()=>{
+    const { fns, written } = setup();
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x300, 0, 0, 2]);
+    const copy = writtenU32(written, 0x300);
+    const other = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.CompareObjectHandles.handler([event, copy]), 1);
+    assert.equal(fns.CompareObjectHandles.handler([event, other]), 0);
+    assert.equal(fns.CompareObjectHandles.handler([0x9999, 0x9999]), 0, 'no object at all');
+});
+
+test('ReleaseSemaphore places the code of the process\'s width: x86-64 in a 64-bit one', ()=>{
+    for (const [pointerSize, record] of /** @type {const} */ ([[4, SEMAPHORE_I386],
+        [8, SEMAPHORE_LONG]]))
+    {
+        const memory = new Uint8Array(1 << 20);
+        let free = 0x1000;
+        const fns = /** @type {any} */ (createThreadingFunctions(/** @type {any} */ ({
+            pointerSize, kernel: { mirrorEvents: ()=>{} }, namedObjects: createNamedObjects(),
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = free;
+                free += (bytes + 15) & -16;
+                return at;
+            },
+            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+                memory.set(bytes, at);
+            },
+        })));
+        assert.equal(fns.ReleaseSemaphore.guestLong, true, 'placed in a 64-bit process too');
+        const at = fns.ReleaseSemaphore.guest({ register: ()=>0x7000_0000 });
+        const { code, host } = record.ReleaseSemaphore;
+        assert.deepEqual([...memory.subarray(at, at + host - 1)], [...code.subarray(0, host - 1)],
+            `${pointerSize * 8}-bit: the code its width builds`);
+    }
+});
+
+test('a duplicate carries the rights asked for, none for 0, the source\'s with SAME_ACCESS', ()=>{
+    // DuplicateHandle's dwDesiredAccess is ignored only with
+    // DUPLICATE_SAME_ACCESS; 0 without it is a handle with no rights (Wine's
+    // kernel32 virtual.c: MapViewOfFile through such a duplicate is refused).
+    const { fns, kernel, written } = setup();
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x300, 0, 0, 0]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x300)), 0);
+    assert.equal(fns.DuplicateHandle.handler(
+        [0xffffffff, event, 0xffffffff, 0x304, 0x80000000, 0, 0]), 1);
+    const read = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.access(read), 0x20001, 'GENERIC_READ: READ_CONTROL | QUERY_STATE');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, read, 0xffffffff, 0x308, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x308)), 0x20001,
+        'DUPLICATE_SAME_ACCESS: the source\'s rights, the asked ignored');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x30c, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x30c)), null,
+        'a handle with every right duplicates with every right');
+    assert.equal(fns.SetEvent.handler([writtenU32(written, 0x300)]), 0,
+        'no EVENT_MODIFY_STATE on the duplicate with none');
+});
+
+test('an object made with SECURITY_ATTRIBUTES is inheritable as it asks, at either width', ()=>{
+    // At 64 bits lpSecurityDescriptor is eight bytes: the flag is at 16, not 8.
+    for (const pointerSize of [4, 8])
+    {
+        const word = pointerSize;
+        /** @param {number} descriptor @param {number} inherit */
+        const flagOf = (descriptor, inherit)=>{
+            const { fns, host } = setup(undefined, { pointerSize });
+            const bytes = new Uint8Array(0x1000);
+            const view = new DataView(bytes.buffer);
+            host.readMemory = (address, length)=>bytes.slice(address, address + length);
+            host.writeMemory = (address, data)=>bytes.set(data, address);
+            view.setUint32(0x300, 3 * word, true);
+            view.setUint32(0x300 + word, descriptor, true);
+            view.setUint32(0x300 + 2 * word, inherit, true);
+            const event = fns.CreateEventA.handler([0x300, 1, 0, 0]);
+            assert.equal(fns.GetHandleInformation.handler([event, 0x200]), 1);
+            return bytes[0x200];
+        };
+        assert.equal(flagOf(0, 1), 1, `${pointerSize * 8}-bit: HANDLE_FLAG_INHERIT`);
+        assert.equal(flagOf(0x2000, 0), 0, `${pointerSize * 8}-bit: a descriptor is not the flag`);
+    }
 });

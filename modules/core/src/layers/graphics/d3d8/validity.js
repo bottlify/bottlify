@@ -30,15 +30,14 @@ import {
 import { D3DTA, D3DTOP, argumentsRead } from '../webgpu/internal/fixedfunction.js';
 
 /** ValidateDevice's refusals: MAKE_D3DHRESULT of the codes d3d8.h and d3d9.h give them. */
-export const D3DERR_UNSUPPORTEDCOLOROPERATION = 0x88760819;
-export const D3DERR_UNSUPPORTEDCOLORARG = 0x8876081a;
-export const D3DERR_UNSUPPORTEDALPHAOPERATION = 0x8876081b;
-export const D3DERR_UNSUPPORTEDALPHAARG = 0x8876081c;
-export const D3DERR_UNSUPPORTEDTEXTUREFILTER = 0x88760822;
+const D3DERR_UNSUPPORTEDCOLOROPERATION = 0x88760819;
+const D3DERR_UNSUPPORTEDCOLORARG = 0x8876081a;
+const D3DERR_UNSUPPORTEDALPHAOPERATION = 0x8876081b;
+const D3DERR_UNSUPPORTEDALPHAARG = 0x8876081c;
+const D3DERR_UNSUPPORTEDTEXTUREFILTER = 0x88760822;
 
 export {
-    FORMAT_KIND, RESOURCE_VALIDITY, SURFACE_TYPE, reportedBackBufferCount, surfaceCreateResult,
-    surfaceIsLockable,
+    RESOURCE_VALIDITY, SURFACE_TYPE, reportedBackBufferCount,
 } from '../d3d9/validity.js';
 
 /** The usage bits the validity table has a column for; the rest do not select a row. */
@@ -52,7 +51,7 @@ const TABLE_USAGE = D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL | D3DUSAGE.DYN
  * @param {number} usage
  * @returns {import('../d3d9/validity.js').ResourceValidityRow | undefined}
  */
-export function validityRow(format, pool, usage){
+function validityRow(format, pool, usage){
     const info = FORMAT_INFO[format];
     if (!info)
     {
@@ -134,7 +133,11 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [backBufferFormat]
  * @property {number} [flags]  D3DPRESENTFLAG_*, which decide what the swap
  *           chain itself will allow -- locking the back buffer, above all.
+ * @property {number} [fullScreenPresentationInterval]  D3DPRESENT_INTERVAL_*; 0 is DEFAULT.
  */
+
+/** The present intervals a device offers: once a refresh, or at once. */
+export const PRESENTATION_INTERVALS = 0x80000000 | 0x00000001;
 
 /**
  * The rule is the same in windowed and fullscreen mode, which is worth stating
@@ -147,6 +150,14 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
 export function validatePresentParameters(parameters){
     const limit = SWAP_EFFECT_MAX_BACK_BUFFERS[parameters.swapEffect];
     if (limit === undefined)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // DEFAULT, or one interval the caps offer (Wine's d3d8
+    // test_swapchain_parameters).
+    const interval = (parameters.fullScreenPresentationInterval ?? 0) >>> 0;
+    if (interval !== 0 && ((interval & (interval - 1)) !== 0
+        || (interval & PRESENTATION_INTERVALS) === 0))
     {
         return D3DERR_INVALIDCALL;
     }
@@ -180,16 +191,26 @@ export function imageSurfaceCreateResult(format, support){
  * wants to change the depth stencil. A null depth stencil *is* an unbind, and
  * that asymmetry is why each side is tested separately.
  *
- * @param {{ Usage: number } | null} renderTarget
- * @param {{ Usage: number } | null} depthStencil
+ * @param {{ Usage: number, Width?: number, Height?: number } | null} renderTarget
+ * @param {{ Usage: number, Width?: number, Height?: number } | null} depthStencil
+ * @param {{ Width?: number, Height?: number } | null} [bound]  The target the depth
+ *        surface goes with: the one given, else the one kept bound.
  * @returns {number}
  */
-export function targetPairResult(renderTarget, depthStencil){
+export function targetPairResult(renderTarget, depthStencil, bound = renderTarget){
     if (renderTarget && (renderTarget.Usage & D3DUSAGE.RENDERTARGET) === 0)
     {
         return D3DERR_INVALIDCALL;
     }
     if (depthStencil && (depthStencil.Usage & D3DUSAGE.DEPTHSTENCIL) === 0)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // A depth surface smaller than the target it is set with, or the one kept
+    // bound, in either side (Wine's d3d8 test_depth_stencil_size).
+    if (depthStencil && bound
+        && ((depthStencil.Width ?? 0) < (bound.Width ?? 0)
+            || (depthStencil.Height ?? 0) < (bound.Height ?? 0)))
     {
         return D3DERR_INVALIDCALL;
     }
@@ -298,7 +319,7 @@ const COMBINED_SOURCES = new Set([
 ]);
 
 /** What a stage may minify and magnify by. @type {Set<number>} */
-const SAMPLED_FILTERS = new Set([D3DTEXF.POINT, D3DTEXF.LINEAR]);
+const SAMPLED_FILTERS = new Set([D3DTEXF.POINT, D3DTEXF.LINEAR, D3DTEXF.ANISOTROPIC]);
 /** What may pick its mip level. @type {Set<number>} */
 const MIP_FILTERS = new Set([D3DTEXF.NONE, D3DTEXF.POINT, D3DTEXF.LINEAR]);
 

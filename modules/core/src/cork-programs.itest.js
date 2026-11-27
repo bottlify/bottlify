@@ -18,7 +18,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
+import { threadCpuMs } from '../../../tools/fixtures/cpu-time.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 
 /**
@@ -33,7 +34,12 @@ const layerOf = (app, name)=>app.diagnostics()
 
 /** @param {string} name */
 const FIXTURE = name=>new URL(`../test/fixtures/${name}`, import.meta.url);
-const ITERATIONS = 2_000_000;
+/**
+ * Calls the loop makes into the host: enough that the warm-up is a small part
+ * of the run and the longer run four times the shorter, a quarter million --
+ * at two million the test took 68 s of an otherwise quiet machine.
+ */
+const ITERATIONS = 250_000;
 /** Cork with nothing translated and no wasm tier: the reference a run is judged against. */
 const MODEL = { translate: false, wasmInterpreter: false };
 
@@ -118,10 +124,13 @@ async function run(executable, translated = true){
     try
     {
         const began = performance.now();
-        const code = await app.run({ timeoutMs: 30000 });
+        const cpuBegan = threadCpuMs();
+        const code = await app.run({ timeoutMs: 90_000 });
         const ms = performance.now() - began;
+        // A program of one thread translated inline: the run is this thread's work.
+        const cpuMs = threadCpuMs() - cpuBegan;
         const { metrics } = layerOf(app, 'cpu');
-        return { code, output: output.join(''), diagnostics: layerOf(app, 'cpu'), ms,
+        return { code, output: output.join(''), diagnostics: layerOf(app, 'cpu'), ms, cpuMs,
             instructions: /** @type {any} */ (metrics).instructions,
             trapsHot: /** @type {[string, number][]} */ (
                 /** @type {any} */ (layerOf(app, 'bridge').metrics).hot ?? []),
@@ -147,7 +156,6 @@ test('hello ends translated as it ends on the model',
         const cork = await run(exe);
         assert.equal(cork.code, reference.code);
         assert.equal(cork.output, reference.output);
-        assert.equal(cork.diagnostics.metrics?.engine, 'cork');
     });
 
 for (const name of ['qsort.exe', 'threads.exe', 'session.exe'])
@@ -224,11 +232,11 @@ test('a loop calling an import runs and translates under cork',
         // The loop traps an import every iteration, so its rate is the trap
         // channel's cost as much as the executor's; the compute loop below is
         // where the executor shows.
-        const corkRate = cork.instructions / cork.ms / 1000;
-        const modelRate = reference.instructions / reference.ms / 1000;
+        const corkRate = cork.instructions / cork.cpuMs / 1000;
+        const modelRate = reference.instructions / reference.cpuMs / 1000;
         console.log(`cork loop: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s of processor time`);
         // E: the translator's cost is a fixed warm-up, not a per-slice toll.
         // The two runs below leave the same regions, so whatever the longer
         // one pays more is the engine thread translating on the slice path
@@ -236,17 +244,22 @@ test('a loop calling an import runs and translates under cork',
         const warm = await run(buildLoopExe(ITERATIONS / 2));
         const twice = await run(buildLoopExe(ITERATIONS * 2));
         // Same regions and modules on four times the iterations: the
-        // translator does nothing on the slice path after warm-up. Its time is
-        // held to a share of the run's rather than to a figure of milliseconds:
-        // the warm-up is a percent or two of the run, and a machine others load
-        // stretches both, where a per-slice toll would be a large part of it.
+        // translator does nothing on the slice path after warm-up. Held by
+        // every count the translator keeps, not by its time against the run's:
+        // a machine others load stretches the two unevenly, the warm-up's
+        // moments by more than the run's or less.
         assert.equal(twice.cork.regions, warm.cork.regions,
             'the longer run forms no further regions: the translator is done at warm-up');
         assert.equal(twice.cork.modules, warm.cork.modules,
             'no further module is emitted or instantiated after warm-up');
-        assert.ok(twice.cork.translateMs < 0.05 * twice.ms,
-            `translateMs ${twice.cork.translateMs.toFixed(2)} ms for ${ITERATIONS * 2} iterations`
-            + ` of a ${twice.ms.toFixed(0)} ms run`);
+        /**
+         * The translator's counts: what it did, not how long it took or what ran.
+         * @param {any} counts
+         */
+        const work = counts=>Object.fromEntries(Object.entries(counts).filter(([name, value])=>
+            typeof value === 'number' && !/Ms$|Share$|^retired$/.test(name)));
+        assert.deepEqual(work(twice.cork), work(warm.cork),
+            'nothing the translator counts grows with the iterations');
         console.log(`cork translateMs: ${warm.cork.translateMs.toFixed(2)} ms at`
             + ` ${ITERATIONS / 2} iterations, ${twice.cork.translateMs.toFixed(2)} ms at`
             + ` ${ITERATIONS * 2} (runs of ${warm.ms.toFixed(0)} and ${twice.ms.toFixed(0)} ms),`
@@ -350,14 +363,17 @@ test('a compute loop runs translated, and faster than the model',
         assert.equal(cork.code, reference.code);
         assert.ok(cork.cork.translatedShare > 0.9,
             `the loop translated: share ${cork.cork.translatedShare}`);
-        const corkRate = cork.instructions / cork.ms / 1000;
-        const modelRate = reference.instructions / reference.ms / 1000;
+        // Rates of this thread's processor time: two wall times taken a run
+        // apart compare the machine's load at the two moments as much as the
+        // code.
+        const corkRate = cork.instructions / cork.cpuMs / 1000;
+        const modelRate = reference.instructions / reference.cpuMs / 1000;
         console.log(`cork compute: share ${cork.cork.translatedShare.toFixed(2)},`
             + ` regions ${cork.cork.regions},`
-            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s`);
+            + ` cork ${corkRate.toFixed(0)} M/s vs model ${modelRate.toFixed(0)} M/s of processor time`);
         assert.ok(corkRate > modelRate,
             `translated code ran the compute loop at ${corkRate.toFixed(1)} M/s against the`
-            + ` model's ${modelRate.toFixed(1)} M/s`);
+            + ` model's ${modelRate.toFixed(1)} M/s, of this thread's processor time`);
     });
 
 test('the trap count and the trap log agree with the model\'s run of the loop',
@@ -516,11 +532,11 @@ test('with no sink of the caller\'s own, a traced area\'s calls reach the journa
             0x6a, 0x00, 0xff, 0x15, ...u32(iat('GetSystemMetrics')), 0x4e, 0x75, 0xef,
             0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
     });
-    const app = await createApp({ executable: exe, engine: 'cork' });
+    const app = await createApp({ executable: exe });
     try
     {
         app.log.setLevel('call.cpu', 'trace');
-        await app.run({ timeoutMs: 30000 });
+        await app.run({ timeoutMs: 90_000 });
         /** @type {string[]} */
         const texts = app.log.recent(1000).map((/** @type {any} */ record)=>record.text);
         assert.equal(texts.filter(text=>/GetCurrentProcessId/.test(text)).length, 3,
@@ -553,7 +569,6 @@ test('a call area switched on mid-run is traced from the next call on',
         let calls = 0;
         app = await createApp({
             executable: exe,
-            engine: 'cork',
             onCall: (/** @type {any} */ call)=>{
                 if (call.name === 'KERNEL32.dll!GetCurrentProcessId' && ++calls === 1)
                 {
@@ -566,7 +581,7 @@ test('a call area switched on mid-run is traced from the next call on',
         });
         try
         {
-            await app.run({ timeoutMs: 30000 });
+            await app.run({ timeoutMs: 90_000 });
             const traced = app.log.recent(1000)
                 .filter((/** @type {any} */ record)=>/GetCurrentProcessId/.test(record.text));
             assert.equal(calls, 5);
@@ -577,4 +592,549 @@ test('a call area switched on mid-run is traced from the next call on',
         {
             await app.dispose();
         }
+    });
+
+test('a program\'s calls to the engine\'s own msvcrt memset and strlen are formed as their'
+    + ' operations, and answer as the routines do', async()=>{
+    // 1000 times: memset(buffer, 0x41 + (i & 7), 100); then strlen(buffer) as the exit code.
+    const exe = buildExe({
+        imports: { 'msvcrt.dll': ['memset', 'strlen'], 'KERNEL32.dll': ['ExitProcess'] },
+        data: { buffer: new Array(128).fill(0) },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0xbe, ...u32(1000),                                   // mov esi, 1000
+            0x89, 0xf0, 0x83, 0xe0, 0x07, 0x83, 0xc0, 0x41,       // eax = 0x41 + (esi & 7)
+            0x6a, 100, 0x50, 0x68, ...u32(at('buffer')),          // push 100; push eax; push buf
+            0xff, 0x15, ...u32(iat('memset')),                    // call [memset]
+            0x83, 0xc4, 12,                                       // add esp, 12
+            0x4e, 0x75, 0xe4,                                     // dec esi; jnz
+            0x68, ...u32(at('buffer')),
+            0xff, 0x15, ...u32(iat('strlen')),                    // call [strlen]
+            0x83, 0xc4, 4,
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),         // ExitProcess(strlen)
+            0xf4,
+        ],
+    });
+    const cork = await run(exe);
+    assert.equal(cork.code, 100);
+    const formed = /** @type {Record<string, number>} */ (cork.cork.crtFormed ?? {});
+    assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
+        `formed: ${JSON.stringify(formed)}`);
+});
+
+test('a 64-bit program\'s calls to the engine\'s own msvcrt memset and strlen through its import'
+    + ' slots are formed as their operations, and answer as the routines do', async()=>{
+    const exe = buildExe({
+        bits: 64,
+        imports: { 'msvcrt.dll': ['memset', 'strlen'], 'KERNEL32.dll': ['ExitProcess'] },
+        data: { buffer: new Array(128).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at, code })=>{
+            /** @type {number[]} */
+            const out = [];
+            /** A rip-relative displacement to `target` from the end of an instruction `rest`
+             * bytes past here. @param {number} target @param {number} rest */
+            const rip = (target, rest)=>u32((target - code(out.length + rest)) >>> 0);
+            out.push(0x48, 0x83, 0xec, 0x28);                         // sub rsp, 40
+            out.push(0xbb, ...u32(1000));                             // mov ebx, 1000
+            const loop = out.length;
+            out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));      // lea rcx, [buffer]
+            out.push(0x89, 0xda, 0x83, 0xe2, 0x07, 0x83, 0xc2, 0x41); // edx = 0x41 + (ebx & 7)
+            out.push(0x41, 0xb8, ...u32(100));                        // mov r8d, 100
+            out.push(0xff, 0x15, ...rip(iat('memset'), 6));           // call [memset]
+            out.push(0xff, 0xcb, 0x75, (loop - (out.length + 4)) & 0xff);  // dec ebx; jnz
+            out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+            out.push(0xff, 0x15, ...rip(iat('strlen'), 6));           // call [strlen]
+            out.push(0x89, 0xc1);                                     // mov ecx, eax
+            out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+            return out;
+        },
+    });
+    const cork = await run(exe);
+    assert.equal(cork.code, 100);
+    const formed = /** @type {Record<string, number>} */ (cork.cork.crtFormed ?? {});
+    assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
+        `formed: ${JSON.stringify(formed)}`);
+});
+
+test('a 64-bit program\'s msvcrt sin, atan2, acos and pow run as guest code, crossing nothing',
+    async()=>{
+        // xmm0 = sin(0.5) + atan2(0.25, 2) + acos(0.125) + pow(2, 0.25); its low dword the exit
+        // code.
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sin', 'atan2', 'acos', 'pow'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { half: [...new Uint8Array(new Float64Array([0.5]).buffer)],
+                quarter: [...new Uint8Array(new Float64Array([0.25]).buffer)],
+                two: [...new Uint8Array(new Float64Array([2]).buffer)],
+                eighth: [...new Uint8Array(new Float64Array([0.125]).buffer)],
+                sum: new Array(8).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);                              // sub rsp, 40
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('half'), 8));       // movsd xmm0, [half]
+                out.push(0xff, 0x15, ...rip(iat('sin'), 6));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));        // movsd [sum], xmm0
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('quarter'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x0d, ...rip(at('two'), 8));        // movsd xmm1, [two]
+                out.push(0xff, 0x15, ...rip(iat('atan2'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));        // addsd xmm0, [sum]
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('eighth'), 8));
+                out.push(0xff, 0x15, ...rip(iat('acos'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x0d, ...rip(at('quarter'), 8)); // xmm1
+                out.push(0xff, 0x15, ...rip(iat('pow'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0x66, 0x48, 0x0f, 0x7e, 0xc1);                        // movq rcx, xmm0
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        const want = new Uint32Array(new Float64Array([Math.sin(0.5) + Math.atan2(0.25, 2)
+            + Math.acos(0.125) + 2 ** 0.25]).buffer)[0];
+        assert.equal(cork.code >>> 0, want);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/sin|atan2|acos|pow/.test(name));
+        assert.deepEqual(hosted, [], 'none of them crossed to the host');
+    });
+
+test('a 64-bit program\'s msvcrt sinf, atan2f, sqrtf and powf run as guest code, crossing nothing',
+    async()=>{
+        // xmm0 = sinf(0.5f) + atan2f(0.25f, 2f) + sqrtf(2f) + powf(2f, 0.25f), a float; its bits
+        // the exit code.
+        const f32 = (/** @type {number} */ x)=>[...new Uint8Array(new Float32Array([x]).buffer)];
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sinf', 'atan2f', 'sqrtf', 'powf'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { half: f32(0.5), quarter: f32(0.25), two: f32(2), sum: new Array(4).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);                              // sub rsp, 40
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('half'), 8));       // movss xmm0, [half]
+                out.push(0xff, 0x15, ...rip(iat('sinf'), 6));
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));        // movss [sum], xmm0
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('quarter'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x0d, ...rip(at('two'), 8));        // movss xmm1, [two]
+                out.push(0xff, 0x15, ...rip(iat('atan2f'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));        // addss xmm0, [sum]
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xff, 0x15, ...rip(iat('sqrtf'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x0d, ...rip(at('quarter'), 8)); // xmm1
+                out.push(0xff, 0x15, ...rip(iat('powf'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0x66, 0x0f, 0x7e, 0xc1);                              // movd ecx, xmm0
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        const sum = Math.fround(Math.fround(Math.fround(Math.sin(0.5))
+            + Math.fround(Math.atan2(0.25, 2))) + Math.fround(Math.sqrt(2)));
+        const total = Math.fround(sum + Math.fround(2 ** 0.25));
+        assert.equal(cork.code >>> 0, new Uint32Array(new Float32Array([total]).buffer)[0]);
+        const hosted = cork.trapsHot.map(([name])=>name)
+            .filter(name=>/sinf|atan2f|sqrtf|powf/.test(name));
+        assert.deepEqual(hosted, [], 'none of them crossed to the host');
+    });
+
+test('a 64-bit program\'s msvcrt sprintf and _snprintf run as guest code, crossing nothing',
+    async()=>{
+        // sprintf(buffer, "%d|%-4s|%5x|%c|%u", -42, "ab", 255, 'Z', 7) and _snprintf of the
+        // same into 6 bytes; the first held to its text by memcmp; the exit code the answers.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sprintf', '_snprintf', 'memcmp'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { format: [...text('%d|%-4s|%5x|%c|%u'), 0], word: [...text('ab'), 0],
+                want: [...text('-42|ab  |   ff|Z|7'), 0], buffer: new Array(32).fill(0x55) },
+            codeSize: 0x100,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53);                                            // push rbx
+                out.push(0x48, 0x83, 0xec, 0x40);                          // sub rsp, 64
+                // -42 and "ab" in R8 and R9, 255, 'Z' and 7 past the home space.
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x20, 255, 0, 0, 0);      // [rsp+32] = 255
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x28, 0x5a, 0, 0, 0);     // [rsp+40] = 'Z'
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x30, 7, 0, 0, 0);        // [rsp+48] = 7
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));       // lea rcx, buffer
+                out.push(0x48, 0x8d, 0x15, ...rip(at('format'), 7));       // lea rdx, format
+                out.push(0x49, 0xc7, 0xc0, ...u32(-42 >>> 0));             // mov r8, -42
+                out.push(0x4c, 0x8d, 0x0d, ...rip(at('word'), 7));         // lea r9, word
+                out.push(0xff, 0x15, ...rip(iat('sprintf'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('want'), 7));
+                out.push(0x41, 0xb8, ...u32(19));                          // the text and its 0
+                out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                out.push(0xc1, 0xe0, 0x10, 0x01, 0xc3);                    // ebx += eax << 16
+                // _snprintf(buffer, 6, format, -42, "ab", ...): six bytes, no terminator, -1;
+                // -42 in R9, the rest past the home space.
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));         // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x20);                    // mov [rsp+32], rax
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x28, 255, 0, 0, 0);
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x30, 0x5a, 0, 0, 0);
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x38, 7, 0, 0, 0);
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0xba, ...u32(6));                                 // mov edx, 6
+                out.push(0x4c, 0x8d, 0x05, ...rip(at('format'), 7));       // lea r8, format
+                out.push(0x49, 0xc7, 0xc1, ...u32(-42 >>> 0));             // mov r9, -42
+                out.push(0xff, 0x15, ...rip(iat('_snprintf'), 6));
+                out.push(0xc1, 0xe0, 0x08, 0x01, 0xc3);                    // ebx += eax << 8
+                out.push(0x89, 0xd9);                                      // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        // 18 bytes and memcmp 0, then _snprintf's -1 shifted in.
+        assert.equal(cork.code >>> 0, (18 + (-1 << 8)) >>> 0);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'neither crossed to the host');
+    });
+
+/**
+ * The data of a program that formats "%d-%s" of 12345 and "ab" (8 characters)
+ * through the UCRT's printers, narrow or wide, into buffers of 12, and what
+ * each holds after.
+ *
+ * @param {boolean} wide
+ */
+const commonPrintData = wide=>{
+    const text = (/** @type {string} */ value)=>[...value].flatMap(c=>(wide
+        ? [c.charCodeAt(0), 0] : [c.charCodeAt(0)]));
+    const unit = wide ? 2 : 1;
+    const untouched = new Array(unit).fill(0x55);
+    const zero = new Array(unit).fill(0);
+    return { format: [...text('%d-%s'), ...zero], word: [...text('ab'), ...zero],
+        b1: new Array(12 * unit).fill(0x55), b2: new Array(12 * unit).fill(0x55),
+        b3: new Array(12 * unit).fill(0x55), b4: new Array(12 * unit).fill(0x55),
+        // C99's snprintf into 5: what fits and a terminator; _vsnprintf's: 5 characters and
+        // the next untouched; under LEGACY_VSPRINTF_NULL_TERMINATION the fifth the terminator.
+        w1: [...text('1234'), ...zero], w2: [...text('12345'), ...untouched],
+        w3: [...text('1234'), ...zero], w4: [...text('12345-ab'), ...zero] };
+};
+
+/** The calls of that program: options, buffer (null for none), count, and whether `_s`. */
+const COMMON_PRINT_CALLS = /** @type {const} */ ([[2, 'b1', 5, 0], [0, 'b2', 5, 0],
+    [1, 'b3', 5, 0], [2, null, 0, 0], [0, 'b4', 9, 1]]);
+
+/**
+ * Where each call's answer goes in the exit code: 8 the first, -1 + 1 the two
+ * legacy ones shifted, 8 << 8 the length asked for, 8 << 16 the `_s` one's;
+ * each memcmp of a buffer and what it should hold added << 24.
+ */
+const COMMON_PRINT_CODE = 8 + (8 << 8) + (8 << 16);
+
+/** The buffers compared, what each should hold and how many characters. */
+const COMMON_PRINT_COMPARED = /** @type {const} */ ([['b1', 'w1', 5], ['b2', 'w2', 6],
+    ['b3', 'w3', 5], ['b4', 'w4', 9]]);
+
+/** @type {Record<number, number[]>} after the answer of call i is in EAX */
+const COMMON_PRINT_FOLD = {
+    0: [0x89, 0xc3],                                                  // mov ebx, eax
+    1: [0x83, 0xc0, 0x01, 0xc1, 0xe0, 0x04, 0x01, 0xc3],             // ebx += (eax + 1) << 4
+    2: [0x83, 0xc0, 0x01, 0xc1, 0xe0, 0x05, 0x01, 0xc3],             // ebx += (eax + 1) << 5
+    3: [0xc1, 0xe0, 0x08, 0x01, 0xc3],                                // ebx += eax << 8
+    4: [0xc1, 0xe0, 0x10, 0x01, 0xc3],                                // ebx += eax << 16
+};
+
+/** @param {boolean} wide */
+const commonPrinters = wide=>(wide ? ['__stdio_common_vswprintf', '__stdio_common_vswprintf_s']
+    : ['__stdio_common_vsprintf', '__stdio_common_vsprintf_s']);
+
+for (const wide of [false, true])
+{
+    const [counted, secured] = commonPrinters(wide);
+    const unit = wide ? 2 : 1;
+    test(`a 32-bit program's UCRT ${wide ? 'wide' : 'narrow'} printers run as guest code under`
+        + ' each behaviour their options pick, the options two slots', async()=>{
+        const exe = buildExe({
+            imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': [counted, secured],
+                'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: commonPrintData(wide),
+            codeSize: 0x180,
+            code: ({ iat, at })=>{
+                /** @type {number[]} */
+                const out = [0x68, ...u32(at('word')), 0x68, ...u32(12345), 0x89, 0xe6];
+                COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
+                    out.push(0x56, 0x6a, 0x00, 0x68, ...u32(at('format')), 0x6a, count);
+                    out.push(...buffer === null ? [0x6a, 0x00] : [0x68, ...u32(at(buffer))]);
+                    out.push(0x6a, 0x00, 0x6a, options);                // the options' two halves
+                    out.push(0xff, 0x15, ...u32(iat(secure ? secured : counted)));
+                    out.push(0x83, 0xc4, 0x1c, ...COMMON_PRINT_FOLD[i]);
+                });
+                for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
+                {
+                    out.push(0x6a, length * unit, 0x68, ...u32(at(want)), 0x68, ...u32(at(buffer)));
+                    out.push(0xff, 0x15, ...u32(iat('memcmp')), 0x83, 0xc4, 0x0c);
+                    out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);            // ebx += eax << 24
+                }
+                out.push(0x53, 0xff, 0x15, ...u32(iat('ExitProcess')), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });
+
+    test(`a 64-bit program's UCRT ${wide ? 'wide' : 'narrow'} printers run as guest code under`
+        + ' each behaviour their options pick, the options one register', async()=>{
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': [counted, secured],
+                'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: commonPrintData(wide),
+            codeSize: 0x240,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53, 0x48, 0x83, 0xec, 0x50);                // push rbx; sub rsp, 80
+                // The va_list: 12345 and "ab" in slots of eight bytes at [rsp+64].
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x40, ...u32(12345));
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));    // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x48);                // mov [rsp+72], rax
+                COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
+                    // The locale ([rsp+32]) a value of its own, the va_list at [rsp+40].
+                    out.push(0x48, 0xc7, 0x44, 0x24, 0x20, ...u32(0x5eed));
+                    out.push(0x48, 0x8d, 0x44, 0x24, 0x40);            // lea rax, [rsp+64]
+                    out.push(0x48, 0x89, 0x44, 0x24, 0x28);            // mov [rsp+40], rax
+                    out.push(0x48, 0xb9, options, 0, 0, 0, 0x34, 0x12, 0, 0); // mov rcx, options
+                    out.push(...buffer === null ? [0x31, 0xd2]
+                        : [0x48, 0x8d, 0x15, ...rip(at(buffer), 7)]); // rdx: the buffer
+                    out.push(0x41, 0xb8, ...u32(count));               // mov r8d, count
+                    out.push(0x4c, 0x8d, 0x0d, ...rip(at('format'), 7)); // lea r9, format
+                    out.push(0xff, 0x15, ...rip(iat(secure ? secured : counted), 6));
+                    out.push(...COMMON_PRINT_FOLD[i]);
+                });
+                for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
+                {
+                    out.push(0x48, 0x8d, 0x0d, ...rip(at(buffer), 7));
+                    out.push(0x48, 0x8d, 0x15, ...rip(at(want), 7));
+                    out.push(0x41, 0xb8, ...u32(length * unit));
+                    out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                    out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);
+                }
+                out.push(0x89, 0xd9);                                  // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });
+}
+
+test('a 64-bit program\'s sprintf of a double is the host\'s, its va_list the spilled home space',
+    async()=>{
+        // sprintf(buffer, "%d|%.1f|%s", 7, 2.5, "ok"): the double in R9 and XMM3 both, as a
+        // variadic call passes it; the exit code its length, 256 times memcmp's answer added.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sprintf', 'memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { format: [...text('%d|%.1f|%s'), 0], word: [...text('ok'), 0],
+                want: [...text('7|2.5|ok'), 0], buffer: new Array(32).fill(0x55) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53, 0x48, 0x83, 0xec, 0x30);                    // push rbx; sub rsp, 48
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('format'), 7));
+                out.push(0x41, 0xb8, ...u32(7));                           // mov r8d, 7
+                out.push(0x49, 0xb9, 0, 0, 0, 0, 0, 0, 0x04, 0x40);        // mov r9, 2.5's bits
+                out.push(0x66, 0x49, 0x0f, 0x6e, 0xd9);                    // movq xmm3, r9
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));         // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x20);                    // mov [rsp+32], rax
+                out.push(0xff, 0x15, ...rip(iat('sprintf'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('want'), 7));
+                out.push(0x41, 0xb8, ...u32(9));
+                out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                out.push(0xc1, 0xe0, 0x08, 0x01, 0xc3);                    // ebx += eax << 8
+                out.push(0x89, 0xd9);
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 8, 'eight bytes, as the host printed them');
+    });
+
+test('a 64-bit program\'s msvcrt strtod and atof run as guest code, *end a whole pointer',
+    async()=>{
+        // strtod("1.25e2xy", &end) + atof("-0.5"): 124.5, its double's low dword the exit
+        // code's low half; end - text (6) in its high half, and the quadword end's upper half
+        // (preset to all ones) added in.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['strtod', 'atof'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { number: [...text('1.25e2xy'), 0], half: [...text('-0.5'), 0],
+                end: new Array(8).fill(0xff), sum: new Array(8).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('number'), 7));       // lea rcx, number
+                out.push(0x48, 0x8d, 0x15, ...rip(at('end'), 7));          // lea rdx, end
+                out.push(0xff, 0x15, ...rip(iat('strtod'), 6));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));    // movsd [sum], xmm0
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('half'), 7));
+                out.push(0xff, 0x15, ...rip(iat('atof'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));    // addsd xmm0, [sum]
+                out.push(0xf2, 0x0f, 0x2c, 0xc8);                          // cvttsd2si ecx, xmm0
+                out.push(0x48, 0x8b, 0x05, ...rip(at('end'), 7));          // mov rax, [end]
+                out.push(0x48, 0x8d, 0x15, ...rip(at('number'), 7));       // lea rdx, number
+                out.push(0x48, 0x29, 0xd0);                                // sub rax, rdx
+                out.push(0x48, 0xc1, 0xe0, 0x10);                          // shl rax, 16
+                out.push(0x01, 0xc1);                                      // add ecx, eax
+                out.push(0x48, 0xc1, 0xe8, 0x20);                          // shr rax, 32
+                out.push(0x01, 0xc1);                                      // add ecx, eax
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 124 + (6 << 16), 'the sum, the end six bytes in, its upper half 0');
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/strtod|atof/.test(name));
+        assert.deepEqual(hosted, [], 'neither crossed to the host');
+    });
+
+test('a 64-bit program\'s msvcrt _isnan, _finite and _copysign read XMM bits in the guest',
+    async()=>{
+        // _isnan(NaN) + 2 * _finite(Infinity) + 4 * _finite(1.5) + 8 * (copysign(3, -0) < 0):
+        // 1 + 0 + 4 + 8.
+        const f64 = (/** @type {number} */ x)=>[...new Uint8Array(new Float64Array([x]).buffer)];
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['_isnan', '_finite', '_copysign'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { nan: f64(NaN), inf: f64(Infinity), one: f64(1.5), three: f64(3),
+                zero: f64(-0) },
+            codeSize: 0xc0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                const load = (/** @type {string} */ name, /** @type {number} */ reg)=>
+                    out.push(0xf2, 0x0f, 0x10, 0x05 | reg << 3, ...rip(at(name), 8));
+                out.push(0x53, 0x48, 0x83, 0xec, 0x20);                    // push rbx; sub rsp, 32
+                load('nan', 0);
+                out.push(0xff, 0x15, ...rip(iat('_isnan'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                load('inf', 0);
+                out.push(0xff, 0x15, ...rip(iat('_finite'), 6));
+                out.push(0x8d, 0x1c, 0x43);                                // lea ebx, [rbx+rax*2]
+                load('one', 0);
+                out.push(0xff, 0x15, ...rip(iat('_finite'), 6));
+                out.push(0x8d, 0x1c, 0x83);                                // lea ebx, [rbx+rax*4]
+                load('three', 0);
+                load('zero', 1);
+                out.push(0xff, 0x15, ...rip(iat('_copysign'), 6));
+                out.push(0x66, 0x48, 0x0f, 0x7e, 0xc0);                    // movq rax, xmm0
+                out.push(0x48, 0xc1, 0xe8, 0x3f);                          // shr rax, 63
+                out.push(0x8d, 0x0c, 0xc3);                                // lea ecx, [rbx+rax*8]
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 13);
+        const hosted = cork.trapsHot.map(([name])=>name)
+            .filter(name=>/_isnan|_finite|_copysign/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });
+
+test('a 64-bit program\'s msvcrt srand, rand, div and ldiv run as guest code, div_t whole in RAX',
+    async()=>{
+        // srand(42); a = rand(); b = rand(); div(-7, 2) = { -3, -1 }; ldiv(9, -4) = { -2, 1 }.
+        // The exit code: (a ^ b << 3) & 0xffff, then div's quotient and remainder plus 8
+        // in bits 16-19 and 20-23, ldiv's in 24-27 and 28-31.
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['srand', 'rand', 'div', 'ldiv'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: {},
+            codeSize: 0xc0,
+            code: ({ iat, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                // The div_t in RAX into its two halves plus 8, each in a nibble at `shift`.
+                const nibbles = (/** @type {number} */ shift)=>{
+                    out.push(0x48, 0x89, 0xc2);                            // mov rdx, rax
+                    out.push(0x83, 0xc0, 0x08, 0x83, 0xe0, 0x0f);          // eax = (eax + 8) & 15
+                    out.push(0xc1, 0xe0, shift, 0x09, 0xc3);               // ebx |= eax << shift
+                    out.push(0x48, 0xc1, 0xea, 0x20);                      // shr rdx, 32
+                    out.push(0x83, 0xc2, 0x08, 0x83, 0xe2, 0x0f);          // edx = (edx + 8) & 15
+                    out.push(0xc1, 0xe2, shift + 4, 0x09, 0xd3);           // ebx |= edx << shift+4
+                };
+                out.push(0x53, 0x56, 0x48, 0x83, 0xec, 0x28);              // push rbx, rsi; sub rsp
+                out.push(0xb9, ...u32(42));                                // mov ecx, 42
+                out.push(0xff, 0x15, ...rip(iat('srand'), 6));
+                out.push(0xff, 0x15, ...rip(iat('rand'), 6));
+                out.push(0x89, 0xc6);                                      // mov esi, eax
+                out.push(0xff, 0x15, ...rip(iat('rand'), 6));
+                out.push(0xc1, 0xe0, 0x03, 0x31, 0xf0);                    // eax = b << 3 ^ a
+                out.push(0x0f, 0xb7, 0xd8);                                // movzx ebx, ax
+                out.push(0xb9, ...u32(-7 >>> 0), 0xba, ...u32(2));         // ecx -7, edx 2
+                out.push(0xff, 0x15, ...rip(iat('div'), 6));
+                nibbles(16);
+                out.push(0xb9, ...u32(9), 0xba, ...u32(-4 >>> 0));         // ecx 9, edx -4
+                out.push(0xff, 0x15, ...rip(iat('ldiv'), 6));
+                nibbles(24);
+                out.push(0x89, 0xd9);                                      // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        let seed = 42;
+        const draw = ()=>{
+            seed = (Math.imul(seed, 214013) + 2531011) >>> 0;
+            return (seed >>> 16) & 0x7fff;
+        };
+        const a = draw();
+        const b = draw();
+        const want = ((a ^ b << 3) & 0xffff | (-3 + 8) << 16 | (-1 + 8) << 20 | (-2 + 8) << 24
+            | (1 + 8) << 28) >>> 0;
+        assert.equal(cork.code >>> 0, want);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/rand|div/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
     });

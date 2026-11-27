@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createIoCompletionPorts } from './iocp.js';
+import { readIntoBy } from './vfs.js';
 import { createFileFunctions } from './files.js';
+import { createNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -37,7 +39,7 @@ function fakeMemory(size = 0x1000){
     return {
         bytes,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address @param {number} maxLength */
@@ -93,6 +95,10 @@ function fakeKernel(){
             const thread = {
                 name, blocked: false, reason: null, deadline: null,
                 timeoutResult: 0, result: null, error: ERROR_SUCCESS,
+                /** The kernel's own word for it, which the port reads. */
+                get state(){
+                    return this.blocked ? 'blocked' : 'ready';
+                },
             };
             threads.push(thread);
             return thread;
@@ -143,6 +149,17 @@ function fakeKernel(){
             }
             return true;
         },
+        // A port is the kernel's manual-reset event, signalled while a packet waits.
+        /** @param {{ manualReset: boolean, signalled: boolean, name: string }} options */
+        createEvent: options=>({ ...options }),
+        /** @param {any} event */
+        setEvent(event){
+            event.signalled = true;
+        },
+        /** @param {any} event */
+        resetEvent(event){
+            event.signalled = false;
+        },
         handles: {
             /** @param {string} type @param {any} object */
             open(type, object){
@@ -171,7 +188,12 @@ function fakeKernel(){
     return kernel;
 }
 
-function setup(){
+/**
+ * @param {{ synchronous?: (handle: number) => boolean,
+ *     alertably?: (alertable: boolean, wait: () => any, answer?: () => number) => any,
+ *     namedObjects?: any, pointerSize?: number }} [extra]
+ */
+function setup(extra = {}){
     const memory = fakeMemory();
     const kernel = fakeKernel();
     const main = kernel.thread('main');
@@ -202,6 +224,7 @@ function setup(){
         /** @param {string} text */
         trace: text=>traced.push(text),
         hostTime: ()=>host,
+        ...extra,
     });
 
     return {
@@ -239,6 +262,22 @@ test('a packet posted to a port comes back exactly as it went in', ()=>{
     assert.equal(memory.dword(OUT_KEY), 0xabc);
     assert.equal(memory.dword(OUT_OVERLAPPED), 0xdef);
     assert.equal(main.error, ERROR_SUCCESS);
+});
+
+test('a 64-bit caller\'s key and OVERLAPPED come back whole, eight bytes each', ()=>{
+    // A key is often the address of the pool's own object, which a 64-bit
+    // program keeps past 4 GiB; so is the OVERLAPPED in an image there.
+    const { fns, memory } = setup({ pointerSize: 8 });
+    const port = makePort(fns);
+    const args = Object.assign([port, 7, 0x2000, 0x3000], { high: [0, 0, 1, 1] });
+    // The bridge joins the declared address (lpOverlapped); the key is read whole.
+    args[3] = 0x1_0000_3000;
+    assert.equal(fns.PostQueuedCompletionStatus.handler(args), 1);
+    const [bytes, key, overlapped] = [0x500, 0x508, 0x510];
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, bytes, key, overlapped, 0]), 1);
+    assert.equal(memory.dword(bytes), 7);
+    assert.deepEqual([memory.dword(key), memory.dword(key + 4)], [0x2000, 1]);
+    assert.deepEqual([memory.dword(overlapped), memory.dword(overlapped + 4)], [0x3000, 1]);
 });
 
 test('a wait on an empty port parks, and a later post answers it', ()=>{
@@ -359,6 +398,37 @@ test('a finished operation fills its OVERLAPPED and signals its event', ()=>{
     assert.equal(memory.dword(OUT_OVERLAPPED), OVERLAPPED);
 });
 
+test('an operation that failed posts all the same, and its packet answers FALSE', ()=>{
+    // A pipe read cancelled or broken: the OVERLAPPED holds the status, the
+    // event is set, and GetQueuedCompletionStatus dequeues it as FALSE with
+    // the status's Win32 error, the OVERLAPPED written so the caller knows which.
+    const { fns, ports, memory, main } = setup();
+    const port = makePort(fns);
+    const file = 0x40;
+    fns.CreateIoCompletionPort.handler([file, port, 7, 0]);
+    assert.equal(ports.completed(file, 0, OVERLAPPED, 0xc0000120), true);
+    assert.equal(memory.dword(OVERLAPPED), 0xc0000120);
+    assert.equal(
+        fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 0);
+    assert.equal(main.error, 995, 'ERROR_OPERATION_ABORTED');
+    assert.equal(memory.dword(OUT_OVERLAPPED), OVERLAPPED);
+    assert.equal(ports.completed(file, 4, OVERLAPPED, 0, { port: true }), false,
+        'a completion mode that skips the port');
+});
+
+test('a file bound to a thread pool I/O object hands it its completions, not a port', ()=>{
+    const { ports, memory } = setup();
+    /** @type {any[]} */
+    const taken = [];
+    assert.equal(ports.bindSink(0x40, packet=>taken.push(packet)), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED, 0xc0000120), true);
+    assert.deepEqual(taken, [{ transferred: 8, key: 0, overlapped: OVERLAPPED,
+        status: 0xc0000120, error: 995 }]);
+    assert.equal(memory.dword(OVERLAPPED + 4), 8, 'the OVERLAPPED finished as ever');
+    assert.equal(ports.bindSink(0x40, null), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED), false, 'let go');
+});
+
 test('an operation on a handle bound to nothing posts nothing, and is not an error', ()=>{
     const { ports, memory } = setup();
     assert.equal(ports.completed(0x40, 8, OVERLAPPED), false);
@@ -430,6 +500,11 @@ function fileSetup(behaviour = {}){
     /** @type {Map<string, Uint8Array>} */
     const contents = new Map([['C:\\GAME\\DATA', Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8])]]);
 
+    /** @param {{ path: string }} node @param {number} offset @param {number} length */
+    const readData = (node, offset, length)=>/** @type {Uint8Array | Promise<Uint8Array>} */ (
+        behaviour.read
+            ? behaviour.read(offset, length)
+            : /** @type {any} */ (contents.get(node.path)).slice(offset, offset + length));
     const files = {
         /** @param {string} path */
         stat: path=>contents.has(path)
@@ -447,10 +522,18 @@ function fileSetup(behaviour = {}){
             }
             return { path };
         },
-        /** @param {{ path: string }} node @param {number} offset @param {number} length */
-        read: (node, offset, length)=>behaviour.read
-            ? behaviour.read(offset, length)
-            : /** @type {any} */ (contents.get(node.path)).slice(offset, offset + length),
+        /** @type {(node: { path: string }, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} */
+        read: readData,
+        /**
+         * Through `read` as it is when called: a test may put another in its place.
+         *
+         * @param {{ path: string }} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, put){
+            return readIntoBy(this.read)(node, offset, length, put);
+        },
         /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
             const held = /** @type {any} */ (contents.get(node.path));
@@ -558,4 +641,142 @@ test('a read on a handle bound to no port still reads', ()=>{
     const { files, memory, file } = fileSetup();
     assert.equal(files.ReadFile.handler([file, BUFFER, 3, OUT_COUNT, 0]), 1);
     assert.equal(memory.dword(OUT_COUNT), 3);
+});
+
+test('a packet one front door queues the other takes: native and Win32 over one port', ()=>{
+    // NtSetIoCompletion's packet carries its caller's status, which the native
+    // dequeue hands back in the IO_STATUS_BLOCK; a Win32 dequeue of a failing
+    // one answers FALSE.
+    const { fns, memory } = setup();
+    const natives = /** @type {any} */ (fns.CreateIoCompletionPort).natives;
+    const port = makePort(fns);
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+
+    assert.equal(natives.NtSetIoCompletion.handler([port, 0xabc, 0xdef, 0, 42]), 0);
+    assert.equal(natives.NtSetIoCompletion.handler([port, 1, 2, STATUS_ACCESS_DENIED, 3]), 0);
+    assert.equal(natives.NtQueryIoCompletion.handler([port, 0, 0x500, 4, 0]), 0);
+    assert.equal(memory.dword(0x500), 2, 'two packets queued');
+    assert.equal(fns.GetQueuedCompletionStatus.handler(
+        [port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 1);
+    assert.deepEqual([memory.dword(OUT_BYTES), memory.dword(OUT_KEY)], [42, 0xabc]);
+    assert.equal(fns.GetQueuedCompletionStatus.handler(
+        [port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 0, 'a failed status answers FALSE');
+
+    fns.PostQueuedCompletionStatus.handler([port, 7, 0x11, 0x22]);
+    assert.equal(natives.NtRemoveIoCompletion.handler([port, 0x510, 0x514, 0x518, 0]), 0);
+    assert.deepEqual([memory.dword(0x510), memory.dword(0x514), memory.dword(0x518),
+        memory.dword(0x51c)], [0x11, 0x22, 0, 7], 'key, overlapped, status, bytes');
+});
+
+test('a port is signalled while a packet waits, and the last thread to wait is woken first', ()=>{
+    const { fns, kernel, main, run } = setup();
+    const port = makePort(fns);
+    const object = kernel.handles.resolve(port, 'iocp');
+    assert.equal(object.signalled, false);
+    fns.PostQueuedCompletionStatus.handler([port, 0, 1, 0]);
+    assert.equal(object.signalled, true, 'a wait on the handle is satisfied');
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]);
+    assert.equal(object.signalled, false, 'and empty again');
+
+    const second = kernel.thread('second');
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, INFINITE]);
+    run(second);
+    fns.GetQueuedCompletionStatus.handler([port, 0x530, 0x534, 0x538, INFINITE]);
+    run(main);
+    fns.PostQueuedCompletionStatus.handler([port, 0, 2, 0]);
+    assert.equal(second.blocked, false, 'the latest waiter, as Windows wakes them');
+    assert.equal(main.blocked, true);
+});
+
+test('a handle opened for synchronous I/O is bound to no port', ()=>{
+    // Windows refuses it with ERROR_INVALID_PARAMETER, and the native
+    // FileCompletionInformation with STATUS_INVALID_PARAMETER: nothing it does
+    // completes later, so nothing would ever reach the port.
+    const SYNC = 0x88;
+    const ASYNC = 0x8c;
+    const { fns, ports, main } = setup({ synchronous: handle=>handle === SYNC });
+    const port = makePort(fns);
+    assert.equal(fns.CreateIoCompletionPort.handler([SYNC, port, 1, 0]), 0);
+    assert.equal(main.error, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.CreateIoCompletionPort.handler([SYNC, 0, 1, 0]), 0, 'nor a new port');
+    assert.equal(ports.bind(SYNC, port, 1), 'synchronous');
+    assert.equal(ports.bind(ASYNC, port, 1), true);
+});
+
+test('a native call\'s packet carries its ApcContext as the completion value', ()=>{
+    const FILE = 0x90;
+    const { fns, ports, memory } = setup();
+    const port = makePort(fns);
+    assert.equal(ports.posted(FILE, 3, 0, 0xc0de), false, 'a handle bound to nothing');
+    ports.bind(FILE, port, 0x55);
+    assert.equal(ports.posted(FILE, 3, 0, 0xc0de), true);
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED,
+        0]), 1);
+    assert.deepEqual([memory.dword(OUT_BYTES), memory.dword(OUT_KEY), memory.dword(OUT_OVERLAPPED)],
+        [3, 0x55, 0xc0de]);
+});
+
+test('an alertable dequeue takes queued packets at once, and only a wait is the APC\'s', ()=>{
+    // Windows removes an entry that is there; a user APC ends only the wait the
+    // call would make: FALSE with WAIT_IO_COMPLETION, the packets left alone.
+    /** @type {{ answer?: () => number }} */
+    const seen = {};
+    const { fns, memory, main } = setup({
+        alertably: (alertable, wait, answer)=>{
+            seen.answer = answer;
+            return 'apc';
+        },
+    });
+    const port = makePort(fns);
+    const ENTRIES = 0x200;
+    const REMOVED = 0x300;
+    assert.equal(fns.GetQueuedCompletionStatusEx.handler([port, ENTRIES, 4, REMOVED, 0, 1]),
+        'apc', 'nothing queued: the wait is the APC\'s');
+    assert.equal(seen.answer?.(), 0);
+    assert.equal(main.error, 0xc0, 'WAIT_IO_COMPLETION');
+    fns.PostQueuedCompletionStatus.handler([port, 7, 1, 2]);
+    assert.equal(fns.GetQueuedCompletionStatusEx.handler([port, ENTRIES, 4, REMOVED, 0, 1]), 1,
+        'a packet there is taken');
+    assert.equal(memory.dword(REMOVED), 1);
+
+    // A taker whose wait an APC ended is not handed the next packet.
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, INFINITE]);
+    main.blocked = false;
+    fns.PostQueuedCompletionStatus.handler([port, 9, 1, 2]);
+    assert.equal(main.result, null, 'the alerted thread is not woken with it');
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED,
+        0]), 1, 'the packet waits on the port');
+    assert.equal(memory.dword(OUT_BYTES), 9);
+});
+
+test('a port made by name is opened again by it; another name, or none, finds nothing', ()=>{
+    const namedObjects = createNamedObjects();
+    const { memory, kernel, fns } = setup({ namedObjects });
+    const natives = /** @type {any} */ (fns.CreateIoCompletionPort).natives;
+    const view = new DataView(memory.bytes.buffer);
+    /** An OBJECT_ATTRIBUTES at 0x800 naming `name`. @param {string} name */
+    const attributes = name=>{
+        view.setUint32(0x800, 24, true);
+        view.setUint32(0x804, 0, true);
+        view.setUint32(0x808, 0x820, true);
+        view.setUint32(0x80c, 0, true);
+        view.setUint16(0x820, name.length * 2, true);
+        view.setUint32(0x824, 0x840, true);
+        [...name].forEach((c, i)=>view.setUint16(0x840 + i * 2, c.charCodeAt(0), true));
+        return 0x800;
+    };
+    const name = '\\Sessions\\1\\BaseNamedObjects\\port';
+    assert.equal(natives.NtCreateIoCompletion.handler([0x900, 0, attributes(name), 0]), 0);
+    const made = memory.dword(0x900);
+    assert.equal(natives.NtCreateIoCompletion.handler([0x904, 0, attributes(name), 0]) >>> 0,
+        0xc0000035, 'STATUS_OBJECT_NAME_COLLISION');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0, attributes(name)]), 0);
+    assert.equal(kernel.handles.resolve(memory.dword(0x904)), kernel.handles.resolve(made),
+        'the same port');
+    assert.equal(namedObjects.nameOf(kernel.handles.resolve(made)), 'port');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0,
+        attributes('\\Sessions\\1\\BaseNamedObjects\\none')]) >>> 0, 0xc0000034,
+    'STATUS_OBJECT_NAME_NOT_FOUND');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0,
+        attributes('\\Elsewhere\\port')]) >>> 0, 0xc000003a, 'STATUS_OBJECT_PATH_NOT_FOUND');
 });

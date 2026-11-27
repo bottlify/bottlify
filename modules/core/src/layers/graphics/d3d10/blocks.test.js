@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { convertTexels, convertedTexelBytes } from './blocks.js';
+import { convertTexels, convertedTexelBytes, isSixteenBit, programTexelBytes, sixteenBitFromFloats }
+    from './blocks.js';
 
 /**
  * One BC4 block: two endpoints and sixteen three-bit indices, low bits first.
@@ -75,4 +76,27 @@ test('BC1 goes through the shared decoder, and an alpha texture keeps only its a
     assert.deepEqual([...(bc1 ?? [])].slice(0, 4), [255, 0, 0, 255]);
     const alpha = convertTexels('a8', Uint8Array.from([7, 200]), 2, 1);
     assert.deepEqual([...(alpha ?? [])], [0, 0, 0, 7, 0, 0, 0, 200]);
+});
+
+test('a 16-bit normalised format goes to floats and comes back as the codes it was', ()=>{
+    const codes = Uint16Array.of(0, 1, 32767, 32768, 65534, 65535);
+    const floats = convertTexels('r16unorm', new Uint8Array(codes.buffer), 6, 1);
+    assert.ok(floats);
+    const values = new Float32Array(floats.buffer);
+    assert.deepEqual([values[0], values[5]], [0, 1]);
+    assert.equal(values[3], Math.fround(32768 / 65535), 'the nearest float, which rounds back');
+    assert.deepEqual([...new Uint16Array(sixteenBitFromFloats('r16unorm', floats).buffer)],
+        [...codes]);
+    // -32768 is -1 as -32767 is, and comes back as -32767, as Direct3D reads it.
+    const signed = Int16Array.of(-32768, -32767, -1, 0, 1, 32767);
+    const back = sixteenBitFromFloats('rg16snorm',
+        /** @type {Uint8Array} */ (convertTexels('rg16snorm', new Uint8Array(signed.buffer), 3, 1)));
+    assert.deepEqual([...new Int16Array(back.buffer)], [-32767, -32767, -1, 0, 1, 32767]);
+    // What a draw left past the range is held to it on the way back.
+    assert.deepEqual([...new Uint16Array(sixteenBitFromFloats('r16unorm',
+        new Uint8Array(Float32Array.of(-0.5, 2, Number.NaN).buffer)).buffer)], [0, 65535, 0]);
+    assert.equal(convertedTexelBytes('rgba16unorm'), 16);
+    assert.equal(programTexelBytes('rgba16unorm'), 8);
+    assert.equal(programTexelBytes('a8'), 1);
+    assert.equal(isSixteenBit('a8'), false);
 });

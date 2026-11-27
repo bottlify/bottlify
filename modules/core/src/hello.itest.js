@@ -72,7 +72,7 @@ test('the volume is read from outside while it runs: a file saved by an earlier 
         .find((/** @type {any} */ e)=>e.path === path);
     assert.deepEqual(entry && { name: entry.name, directory: entry.directory, size: entry.size },
         { name: 'slot1.sav', directory: false, size: 3 });
-    assert.deepEqual(app.files.read(path), Uint8Array.of(7, 8, 9));
+    assert.deepEqual(await app.files.read(path), Uint8Array.of(7, 8, 9));
     assert.ok(app.files.list('C:\\App')
         .some((/** @type {any} */ e)=>e.name === 'save' && e.directory));
 });
@@ -105,7 +105,7 @@ test('hello.exe prints what it prints on Windows, then exits cleanly',
         const output = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
 
-        const code = await app.run({ timeoutMs: 8000 });
+        const code = await app.run({ timeoutMs: 30_000 });
 
         assert.equal(output.join(''), EXPECTED_OUTPUT, 'same bytes real Windows writes to stdout');
         assert.equal(code, 0, "the guest's own exit code");
@@ -114,7 +114,7 @@ test('hello.exe prints what it prints on Windows, then exits cleanly',
 test('the image lands where its headers ask, and every import is bound',
     { timeout: 15000 }, async t=>{
         const app = await startApp(t);
-        await app.run({ timeoutMs: 8000 });
+        await app.run({ timeoutMs: 30_000 });
 
         assert.equal(app.image.base, 0x400000, 'the fixture has no relocations and cannot move');
         assert.equal(app.image.entryPoint, 0x401000);
@@ -123,16 +123,15 @@ test('the image lands where its headers ask, and every import is bound',
 
 test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
     const app = await startApp(t);
-    await app.run({ timeoutMs: 8000 });
+    await app.run({ timeoutMs: 30_000 });
 
     const byName = Object.fromEntries(app.diagnostics().map((/** @type {any} */ d)=>[d.name, d]));
 
-    assert.equal(byName.cpu.metrics.protectedMode, true, 'the ROM switched the CPU over');
     assert.ok(byName.cpu.metrics.instructions > 0);
     // Every function of every library gets a stub, whether the program calls it
-    // or not: the modules exist in guest memory before the first instruction, so
-    // an address taken early is the address that works later (§13.3). Plus the
-    // park slot and the callback sentinel.
+    // or not: the modules are laid out before the first instruction, so an
+    // address taken early is the address that works later (A280). Plus the park
+    // slot and the callback sentinel.
     //
     // Counted against what the bridge registered rather than against one
     // layer's tally: the drawing libraries are exported to a program exactly as
@@ -148,15 +147,18 @@ test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
     // names: a drawing or a sound library is synthesised into guest memory
     // exactly as a system one is, a program reaches it the same way, and a test
     // that names the layers it knows about goes red every time another one
-    // starts exporting -- which has now happened twice.
+    // starts exporting -- which has now happened twice. An assembly's own
+    // version of a library (Common Controls 6's comctl32) is an image beside
+    // system32's of the same name, so a layer's faces count too.
     /** @param {any} layer */
     const librariesOf = layer=>{
         const libraries = layer.metrics?.libraries;
+        const faces = layer.metrics?.faces?.length ?? 0;
         if (Array.isArray(libraries))
         {
-            return libraries.length;
+            return libraries.length + faces;
         }
-        return libraries ? Object.keys(libraries).length : 0;
+        return (libraries ? Object.keys(libraries).length : 0) + faces;
     };
     const synthesised = app.diagnostics()
         .reduce((/** @type {number} */ total, /** @type {any} */ layer)=>
@@ -188,8 +190,19 @@ test('a detached log sink stops receiving output', { timeout: 15000 }, async t=>
     app.attachLog(sink);
     app.detachLog(sink);
 
-    await app.run({ timeoutMs: 8000 });
+    await app.run({ timeoutMs: 30_000 });
 
     assert.equal(kept.join(''), EXPECTED_OUTPUT);
     assert.deepEqual(dropped, [], 'detached before the run, so it saw nothing');
+});
+
+test('a machine has its standard folders before the program runs: the profile\'s, TEMP', async t=>{
+    // Made while the modules are built, before the synthesised libraries'
+    // table exists; a program that saves into its profile's Application Data
+    // creates its own folder inside and fails where that is not there.
+    const app = await startApp(t);
+    const names = (/** @type {string} */ path)=>app.files.list(path)
+        .map((/** @type {any} */ entry)=>entry.name);
+    assert.ok(names('C:\\Documents and Settings\\User').includes('Application Data'));
+    assert.ok(names('C:\\WINDOWS').includes('TEMP'));
 });

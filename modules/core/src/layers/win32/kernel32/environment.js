@@ -22,15 +22,33 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { STARTF_USESTDHANDLES, STARTUPINFO, startupInfoBytes } from './startup-info.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
+const ERROR_INVALID_PARAMETER = 87;
 
-/** sizeof(STARTUPINFOA). */
-const STARTUPINFOA_SIZE = 68;
+/** sizeof(STARTUPINFO) in a 64-bit process, whose pointers and handles are eight bytes. */
+const STARTUPINFO_SIZE64 = 104;
+
+/**
+ * The key under which the table answers the variables as they are now, for
+ * the CreateProcess of this process: a child given no environment block of
+ * its own inherits its parent's, changes included.
+ */
+export const ENVIRONMENT_NOW = Symbol('environmentNow');
+
+/**
+ * The key under which the table expands `%NAME%` in a string as
+ * ExpandEnvironmentStrings does, for a library that answers a REG_EXPAND_SZ
+ * expanded (advapi32's RegGetValue, shlwapi's SHRegGetValue).
+ */
+export const EXPAND_ENVIRONMENT = Symbol('expandEnvironment');
 
 /** Where Windows lives, as a program of this era expects to find it. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -45,6 +63,10 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @property {(code: number) => void} setLastError
  * @property {() => string} commandLine
  * @property {() => Record<string, string>} environment
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
+ * @property {() => import('./startup-info.js').StartupRecord | null} [startup]
+ *           What the parent's CreateProcess was handed, null for a process
+ *           no parent described.
  */
 
 /**
@@ -65,16 +87,24 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @param {import('./versions.js').WindowsVersion} windows
  * @param {Readonly<Record<string, string>>} folders  That Windows's shell folders.
  * @param {number} [processors]  How many the machine has; absent, one.
+ * @param {{ long?: boolean, wow64?: boolean }} [process]  A 64-bit process sees
+ *        its own architecture; a 32-bit one on a 64-bit machine sees x86, and
+ *        the machine's in PROCESSOR_ARCHITEW6432, as WOW64 sets them.
  * @returns {Record<string, string>}
  */
-export function defaultEnvironment(windows, folders, processors = 1){
+export function defaultEnvironment(windows, folders, processors = 1, process = {}){
     const { allUsers, public: shared } = windows.profiles;
-    return {
+    return sortedBlock({
         ALLUSERSPROFILE: allUsers,
         APPDATA: folders.AppData,
         ...shared === null ? {} : { LOCALAPPDATA: folders['Local AppData'] },
         NUMBER_OF_PROCESSORS: String(processors),
-        PROCESSOR_ARCHITECTURE: 'x86',
+        // The system directories, the Windows directory and its Wbem, as a
+        // fresh install sets it; a program puts its own in front.
+        Path: [`${WINDOWS_DIRECTORY}\\system32`, WINDOWS_DIRECTORY,
+            `${WINDOWS_DIRECTORY}\\System32\\Wbem`].join(';'),
+        PROCESSOR_ARCHITECTURE: process.long ? 'AMD64' : 'x86',
+        ...process.wow64 ? { PROCESSOR_ARCHITEW6432: 'AMD64' } : {},
         PROCESSOR_IDENTIFIER: `${PROCESSOR_IDENTIFIER}, ${PROCESSOR.vendor}`,
         PROCESSOR_LEVEL: String(PROCESSOR_LEVEL),
         PROCESSOR_REVISION: PROCESSOR_REVISION.toString(16).padStart(4, '0'),
@@ -82,12 +112,111 @@ export function defaultEnvironment(windows, folders, processors = 1){
             ProgramData: folders['Common AppData'],
             PUBLIC: shared,
         },
+        // The program folders, the process's own: on a 64-bit Windows a
+        // 32-bit process's are Program Files (x86), and both widths are named
+        // too, as WOW64 sets them.
+        ProgramFiles: folders.ProgramFiles,
+        CommonProgramFiles: folders.CommonFiles,
+        ...process.long || process.wow64 ? {
+            'ProgramFiles(x86)': folders.ProgramFilesX86,
+            'CommonProgramFiles(x86)': folders.CommonFilesX86,
+            ProgramW6432: folders.ProgramFiles64,
+            CommonProgramW6432: folders.CommonFiles64,
+        } : {},
         SystemRoot: WINDOWS_DIRECTORY,
         TEMP: `${WINDOWS_DIRECTORY}\\TEMP`,
         TMP: `${WINDOWS_DIRECTORY}\\TEMP`,
         USERPROFILE: folders.Profile,
         windir: WINDOWS_DIRECTORY,
-    };
+    });
+}
+
+/**
+ * Variables in the order Windows keeps the block: sorted by name, without
+ * regard to case.
+ *
+ * @param {Record<string, string>} variables
+ * @returns {Record<string, string>}
+ */
+const sortedBlock = variables=>Object.fromEntries(Object.entries(variables)
+    .sort(([left], [right])=>(left.toUpperCase() < right.toUpperCase() ? -1 : 1)));
+
+/**
+ * A registry value an environment block is built from: its name, its text,
+ * and whether it is REG_EXPAND_SZ.
+ *
+ * @typedef {{ name: string, value: string, expand: boolean }} EnvironmentValue
+ */
+
+/**
+ * The variables a session's first program starts with, as Windows builds
+ * the block (CreateEnvironmentBlock): the machine's own, then the machine's
+ * `Session Manager\Environment` values over them, then the user's
+ * `Environment` values over those, each REG_EXPAND_SZ expanded against what
+ * is set by then. Path is the one joined rather than replaced: the machine's,
+ * then the user's. What an installer added to either is in every program
+ * started after it.
+ *
+ * @param {Readonly<Record<string, string>>} base
+ * @param {readonly EnvironmentValue[]} machine
+ * @param {readonly EnvironmentValue[]} user
+ * @returns {Record<string, string>}
+ */
+export function sessionEnvironment(base, machine, user){
+    /** @type {Record<string, string>} */
+    const block = { ...base };
+    /** @param {string} name */
+    const spelling = name=>Object.keys(block).find(key=>key.toUpperCase() === name.toUpperCase());
+    /** @param {string} text */
+    const expand = text=>text.replace(/%([^%]+)%/g, (whole, name)=>{
+        const key = spelling(name);
+        return key === undefined ? whole : block[key];
+    });
+    for (const [values, joined] of /** @type {const} */ ([[machine, false], [user, true]]))
+    {
+        for (const { name, value, expand: expanding } of values)
+        {
+            const text = expanding ? expand(value) : value;
+            const key = spelling(name) ?? name;
+            block[key] = joined && name.toUpperCase() === 'PATH' && block[key]
+                ? `${block[key]};${text}` : text;
+        }
+    }
+    return block;
+}
+
+/**
+ * A process's variables on a 64-bit machine as the process sees them,
+ * whatever its parent's said: WOW64 sets a 32-bit process's architecture to
+ * x86 with the machine's in PROCESSOR_ARCHITEW6432, and a 64-bit process
+ * names its own with no PROCESSOR_ARCHITEW6432, so a 64-bit parent's AMD64
+ * does not reach a 32-bit child, nor a 32-bit parent's x86 a 64-bit one.
+ * Names compare without regard to case; each keeps its spelling.
+ *
+ * @param {Readonly<Record<string, string>>} variables
+ * @param {{ long: boolean, wow64: boolean }} process
+ * @returns {Record<string, string>}
+ */
+export function machineArchitecture(variables, { long, wow64 }){
+    /** @type {Record<string, string>} */
+    const seen = {};
+    /** @param {string} name */
+    const spelling = name=>Object.keys(variables).find(key=>key.toUpperCase() === name) ?? name;
+    const architecture = spelling('PROCESSOR_ARCHITECTURE');
+    const beneath = spelling('PROCESSOR_ARCHITEW6432');
+    for (const [name, value] of Object.entries(variables))
+    {
+        if (name !== beneath)
+        {
+            seen[name] = value;
+        }
+    }
+    seen[architecture] = long ? 'AMD64' : 'x86';
+    if (wow64)
+    {
+        seen[beneath] = 'AMD64';
+    }
+    return seen;
 }
 
 /**
@@ -101,7 +230,31 @@ export function createEnvironmentFunctions(host){
     let commandLineWideAddress = null;
     /** @type {Map<string, number>} */
     const blocks = new Map();
-    const variables = new Map(Object.entries(host.environment()));
+    /**
+     * Names compare without regard to case, as Windows compares them, and
+     * keep the spelling they were first set with: the block lists `Path` as
+     * it was given, and `PATH` finds it. Read when the process first asks:
+     * a session's block comes from the registry, which holds what the bottle
+     * installed only once its volume is mounted.
+     *
+     * @type {Map<string, { name: string, value: string }> | null}
+     */
+    let folded = null;
+    const byFolded = ()=>(folded ??= new Map(Object.entries(host.environment())
+        .map(([name, value])=>[name.toUpperCase(), { name, value }])));
+    const variables = {
+        /** @param {string} name */
+        get: name=>byFolded().get(name.toUpperCase())?.value,
+        /** @param {string} name @param {string} value */
+        set: (name, value)=>{
+            const key = name.toUpperCase();
+            byFolded().set(key, { name: byFolded().get(key)?.name ?? name, value });
+        },
+        /** @param {string} name */
+        delete: name=>byFolded().delete(name.toUpperCase()),
+        /** @returns {[string, string][]} */
+        entries: ()=>[...byFolded().values()].map(({ name, value })=>[name, value]),
+    };
 
     /**
      * Text in the ANSI page, which is how the memory layer reads what a
@@ -118,13 +271,7 @@ export function createEnvironmentFunctions(host){
 
     /** @param {string} text */
     const writeWideString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
+        const bytes = utf16z(text);
         const address = host.allocate(bytes.length);
         host.writeMemory(address, bytes);
         return address;
@@ -145,7 +292,7 @@ export function createEnvironmentFunctions(host){
             return held;
         }
 
-        const entries = [...variables].map(([name, value])=>`${name}=${value}`);
+        const entries = variables.entries().map(([name, value])=>`${name}=${value}`);
         const text = `${entries.map(entry=>`${entry}\0`).join('')}\0`;
         const bytes = wide ? new Uint8Array(text.length * 2) : encodeAnsi(text);
         if (wide)
@@ -177,7 +324,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        host.writeMemory(buffer >>> 0, encodeAnsi(`${path}\0`));
+        host.writeMemory(wholeAddress(buffer), encodeAnsi(`${path}\0`));
         return path.length;
     };
 
@@ -187,7 +334,92 @@ export function createEnvironmentFunctions(host){
      *
      * @param {string} text
      */
-    const expand = text=>text.replace(/%([^%]*)%/g, (whole, name)=>variables.get(name) ?? whole);
+    const expand = text=>expandPieces(text).map(piece=>piece.text).join('');
+
+    /**
+     * The expansion in the pieces ExpandEnvironmentStrings writes it in:
+     * runs of text (an unset `%NAME%` among them, percent signs and all) and
+     * the values of the variables that are set.
+     *
+     * @param {string} text
+     * @returns {{ text: string, value: boolean }[]}
+     */
+    const expandPieces = text=>{
+        /** @type {{ text: string, value: boolean }[]} */
+        const pieces = [];
+        /** @param {string} piece @param {boolean} value */
+        const add = (piece, value)=>{
+            const last = pieces[pieces.length - 1];
+            if (!value && last && !last.value)
+            {
+                last.text += piece;
+            }
+            else if (piece.length > 0 || value)
+            {
+                pieces.push({ text: piece, value });
+            }
+        };
+        let at = 0;
+        for (const found of text.matchAll(/%([^%]*)%/g))
+        {
+            add(text.slice(at, found.index), false);
+            const value = variables.get(found[1]);
+            add(value ?? found[0], value !== undefined);
+            at = (found.index ?? 0) + found[0].length;
+        }
+        add(text.slice(at), false);
+        return pieces;
+    };
+
+    /**
+     * What ExpandEnvironmentStringsW leaves in a buffer of `size` characters,
+     * as the units it writes and where: text is copied while a character of
+     * room stays for the terminator, and a run that does not fit is cut there
+     * and ends the copy, unterminated; a variable's value goes in whole with
+     * its terminator when it fits and leaves only a terminator when it does
+     * not, which ends the copy too. All of it fitted, it is terminated (Wine's
+     * environ test, test_ExpandEnvironmentStringsW, as Windows answers).
+     *
+     * @param {{ text: string, value: boolean }[]} pieces @param {number} size
+     * @returns {{ at: number, units: string }[]}
+     */
+    const placeExpansion = (pieces, size)=>{
+        /** @type {{ at: number, units: string }[]} */
+        const writes = [];
+        let at = 0;
+        let room = size;
+        for (const piece of pieces)
+        {
+            if (piece.value)
+            {
+                if (piece.text.length >= room)
+                {
+                    if (room > 0)
+                    {
+                        writes.push({ at, units: '\0' });
+                    }
+                    return writes;
+                }
+                writes.push({ at, units: `${piece.text}\0` });
+            }
+            else
+            {
+                const copied = Math.max(0, Math.min(piece.text.length, room - 1));
+                writes.push({ at, units: piece.text.slice(0, copied) });
+                if (copied < piece.text.length)
+                {
+                    return writes;
+                }
+            }
+            at += piece.text.length;
+            room -= piece.text.length;
+        }
+        if (room > 0)
+        {
+            writes.push({ at, units: '\0' });
+        }
+        return writes;
+    };
 
     /**
      * The wide twin of reportPath. Counted in characters in both forms, so only
@@ -200,39 +432,78 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        const bytes = new Uint8Array((path.length + 1) * 2);
-        for (let at = 0; at < path.length; at++)
-        {
-            const code = path.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(path));
         return path.length;
     };
 
     /**
-     * VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo)
+     * VOID GetStartupInfoA/W(LPSTARTUPINFO lpStartupInfo)
      *
-     * Every field but the size is zero, and that is a real answer rather than
-     * a placeholder: no parent handed this process a desktop, a title, a
-     * window position or a set of standard handles to inherit, and dwFlags of
-     * zero is precisely how a program is told not to read the rest.
+     * What the parent handed CreateProcess, its strings in the call's width
+     * and written once, since a caller keeps the pointers. A process no
+     * parent started has every field but the size zero, and that is a real
+     * answer: nothing handed it a desktop, a title, a window position or
+     * standard handles, and dwFlags of zero says not to read the rest.
+     *
+     * @param {boolean} wide
      */
-    const startupInfo = {
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([info])=>{
-            const bytes = new Uint8Array(STARTUPINFOA_SIZE);
-            new DataView(bytes.buffer).setUint32(0, STARTUPINFOA_SIZE, true);
-            host.writeMemory(info >>> 0, bytes);
-            return 0;
-        },
+    const startupInfo = wide=>{
+        /** @type {{ desktop: number, title: number } | null} */
+        let strings = null;
+        return {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [info])=>{
+                if (host.pointerSize === 8)
+                {
+                    // The 64-bit layout carries only its size: the parent's record
+                    // is not laid out at that width yet.
+                    const bytes = new Uint8Array(STARTUPINFO_SIZE64);
+                    new DataView(bytes.buffer).setUint32(0, STARTUPINFO_SIZE64, true);
+                    host.writeMemory(wholeAddress(info), bytes);
+                    return 0;
+                }
+                const record = host.startup?.() ?? null;
+                const write = wide ? writeWideString : writeAnsi;
+                strings ??= {
+                    desktop: record?.desktop == null ? 0 : write(record.desktop),
+                    title: record?.title == null ? 0 : write(record.title),
+                };
+                const bytes = startupInfoBytes(record, strings);
+                const view = new DataView(bytes.buffer);
+                if ((view.getUint32(STARTUPINFO.FLAGS, true) & STARTF_USESTDHANDLES) === 0)
+                {
+                    // No standard handles were handed: the ANSI form answers
+                    // INVALID_HANDLE_VALUE for each, the wide form leaves the
+                    // caller's fields as they were (Wine's process.c
+                    // test_StdHandleInheritance, as Windows answers).
+                    if (wide)
+                    {
+                        host.writeMemory(wholeAddress(info), bytes.subarray(0,
+                            STARTUPINFO.STD_INPUT));
+                        return 0;
+                    }
+                    for (const at of [STARTUPINFO.STD_INPUT, STARTUPINFO.STD_OUTPUT,
+                        STARTUPINFO.STD_ERROR])
+                    {
+                        view.setUint32(at, 0xffffffff, true);
+                    }
+                }
+                host.writeMemory(wholeAddress(info), bytes);
+                return 0;
+            },
+        };
     };
 
     return {
+        /** @returns {Record<string, string>} */
+        [ENVIRONMENT_NOW]: ()=>Object.fromEntries(variables.entries()),
+        /** @param {string} text */
+        [EXPAND_ENVIRONMENT]: text=>expand(text),
+
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineAddress ??= writeAnsi(host.commandLine());
@@ -248,6 +519,7 @@ export function createEnvironmentFunctions(host){
          * two must each stay put once handed out.
          */
         GetCommandLineW: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineWideAddress ??= writeWideString(host.commandLine());
@@ -259,11 +531,13 @@ export function createEnvironmentFunctions(host){
          * LPCH GetEnvironmentStrings(VOID), exported under both of its
          * names, as kernel32 exports it.
          */
-        GetEnvironmentStrings: { argBytes: 0, handler: ()=>environmentBlock(false) },
+        GetEnvironmentStrings: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(false) },
         GetEnvironmentStringsA: { argBytes: 0, handler: ()=>environmentBlock(false) },
 
         /** LPWCH GetEnvironmentStringsW(VOID) */
-        GetEnvironmentStringsW: { argBytes: 0, handler: ()=>environmentBlock(true) },
+        GetEnvironmentStringsW: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(true) },
 
         /**
          * BOOL FreeEnvironmentStringsA(LPCH penv)
@@ -275,14 +549,14 @@ export function createEnvironmentFunctions(host){
         FreeEnvironmentStringsA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([block])=>blocks.get('ansi') === (block >>> 0) ? 1 : 0,
+            handler: ([block])=>blocks.get('ansi') === wholeAddress(block) ? 1 : 0,
         },
 
         /** BOOL FreeEnvironmentStringsW(LPWCH penv) */
         FreeEnvironmentStringsW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([block])=>blocks.get('wide') === (block >>> 0) ? 1 : 0,
+            handler: ([block])=>blocks.get('wide') === wholeAddress(block) ? 1 : 0,
         },
 
         /**
@@ -292,8 +566,9 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
-                const wanted = host.readCString(name >>> 0, 0x400);
-                const value = variables.get(wanted);
+                // A NULL name names no variable.
+                const value = wholeAddress(name) === 0 ? undefined
+                    : variables.get(host.readCString(wholeAddress(name), 0x400));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -308,7 +583,8 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
-                const value = variables.get(host.readWideString(name >>> 0, 0x400));
+                const value = wholeAddress(name) === 0 ? undefined
+                    : variables.get(host.readWideString(wholeAddress(name), 0x400 * 2));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -323,14 +599,19 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
-                const wanted = host.readCString(name >>> 0, 0x400);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(name) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const wanted = host.readCString(wholeAddress(name), 0x400);
+                if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readCString(value >>> 0, 0x2000));
+                    variables.set(wanted, host.readCString(wholeAddress(value), 0x2000));
                 }
                 // The cached blocks describe an environment that no longer
                 // exists. Dropping them means the next reader builds a fresh
@@ -345,21 +626,31 @@ export function createEnvironmentFunctions(host){
          * DWORD ExpandEnvironmentStringsA(LPCSTR lpSrc, LPSTR lpDst, DWORD nSize)
          *
          * A `%NAME%` whose variable does not exist is left as it was, percent
-         * signs included; an unpaired `%` is ordinary text. The count is the
-         * whole answer including its terminator whether or not it fitted, and
-         * a buffer too small gets nothing: a caller sizes from a first call
-         * with no buffer and asks again.
+         * signs included; an unpaired `%` is ordinary text. The expansion fits
+         * only with a byte to spare beyond its terminator: then it is written
+         * and the count is its bytes with the terminator; otherwise the buffer
+         * is left empty - its first byte a terminator, even at a size of 0 -
+         * and the count is one more (Wine's environ test, as Windows answers).
+         * The last error is left as it was.
          */
         ExpandEnvironmentStringsA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = expand(host.readCString(source >>> 0, 0x8000));
-                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                const expanded = encodeAnsi(wholeAddress(source) === 0 ? ''
+                    : expand(host.readCString(wholeAddress(source), 0x8000)));
+                if ((size >>> 0) >= expanded.length + 2 && wholeAddress(destination) !== 0)
                 {
-                    reportPath(expanded, destination, size);
+                    const bytes = new Uint8Array(expanded.length + 1);
+                    bytes.set(expanded);
+                    host.writeMemory(wholeAddress(destination), bytes);
+                    return expanded.length + 1;
                 }
-                return expanded.length + 1;
+                if (wholeAddress(destination) !== 0)
+                {
+                    host.writeMemory(wholeAddress(destination), Uint8Array.of(0));
+                }
+                return expanded.length + 2;
             },
         },
 
@@ -367,30 +658,37 @@ export function createEnvironmentFunctions(host){
          * DWORD ExpandEnvironmentStringsW(LPCWSTR lpSrc, LPWSTR lpDst, DWORD nSize)
          *
          * The A form's expansion, from the same variables, in UTF-16; nSize and
-         * the count are in characters.
+         * the count are in characters. The count is the whole expansion with
+         * its terminator, fitted or not; a buffer too small holds as much as
+         * Windows copies into it (`placeExpansion`). The last error is left
+         * as it was.
          */
         ExpandEnvironmentStringsW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = expand(host.readWideString(source >>> 0, 0x8000));
-                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                const pieces = wholeAddress(source) === 0 ? []
+                    : expandPieces(host.readWideString(wholeAddress(source), 0x8000));
+                const length = pieces.reduce((sum, piece)=>sum + piece.text.length, 0);
+                if (wholeAddress(destination) !== 0)
                 {
-                    reportWidePath(expanded, destination, size);
+                    for (const { at, units } of placeExpansion(pieces, size >>> 0))
+                    {
+                        host.writeMemory(wholeAddress(destination) + at * 2, utf16(units));
+                    }
                 }
-                return expanded.length + 1;
+                return length + 1;
             },
         },
 
         /** VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo) */
-        GetStartupInfoA: startupInfo,
+        GetStartupInfoA: startupInfo(false),
 
         /**
          * VOID GetStartupInfoW(LPSTARTUPINFOW lpStartupInfo): the same answer,
-         * STARTUPINFOW being STARTUPINFOA's size with its three strings wide,
-         * and none of them given.
+         * STARTUPINFOW being STARTUPINFOA's size with its strings wide.
          */
-        GetStartupInfoW: startupInfo,
+        GetStartupInfoW: startupInfo(true),
 
         /**
          * BOOL SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)
@@ -402,14 +700,19 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
-                const wanted = host.readWideString(name >>> 0, 0x400);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(name) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const wanted = host.readWideString(wholeAddress(name), 0x400 * 2);
+                if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readWideString(value >>> 0, 0x2000));
+                    variables.set(wanted, host.readWideString(wholeAddress(value), 0x2000));
                 }
                 blocks.clear();
                 return 1;
@@ -470,9 +773,11 @@ export function createEnvironmentFunctions(host){
  * the user's from the registry if a program tells the two apart.
  *
  * @param {{ block: () => number, free: (block: number) => number,
+ *     expand?: (source: number, target: number, size: number) => number,
  *     writeMemory: (address: number, bytes: Uint8Array) => void,
  *     setLastError: (code: number) => void }} host
- *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW.
+ *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW,
+ *     `expand` ExpandEnvironmentStringsW.
  */
 export function createUserenvFunctions(host){
     return {
@@ -486,7 +791,7 @@ export function createUserenvFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     host.setLastError(87);
                     return 0;
@@ -494,7 +799,7 @@ export function createUserenvFunctions(host){
                 const block = host.block() >>> 0;
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, block, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return block === 0 ? 0 : 1;
             },
         },
@@ -505,5 +810,38 @@ export function createUserenvFunctions(host){
             /** @param {number[]} args */
             handler: ([block])=>host.free(block),
         },
+
+        /**
+         * BOOL ExpandEnvironmentStringsForUserW(HANDLE hToken, LPCWSTR lpSrc,
+         *     LPWSTR lpDest, DWORD dwSize)
+         *
+         * As ExpandEnvironmentStringsW, the user's variables being the
+         * process's here; a buffer too small is ERROR_INSUFFICIENT_BUFFER.
+         */
+        ExpandEnvironmentStringsForUserW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, source, target, size])=>{
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0 || !host.expand)
+                {
+                    host.setLastError(87);
+                    return 0;
+                }
+                const needed = host.expand(source, target, size) >>> 0;
+                if (needed === 0 || needed > (size >>> 0))
+                {
+                    host.setLastError(122);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL UnloadUserProfile(HANDLE hToken, HANDLE hProfile)
+         *
+         * Nothing was loaded for another user: the one user's profile stays.
+         */
+        UnloadUserProfile: { argBytes: 8, handler: ()=>1 },
     };
 }

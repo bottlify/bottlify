@@ -30,6 +30,46 @@
  * The FILE_NOTIFY_CHANGE_ kinds a change to a name is: its name (a file's or
  * a directory's), its attributes, its size and its last write.
  */
+/**
+ * The most of one read fetched at once: a small share of the smallest place
+ * blocks are kept (64 MiB in the heap), with room for the window a miss
+ * brings in around it.
+ */
+export const FETCHED_PIECE_BYTES = 8 << 20;
+
+/** How many times a read or write fetches blocks it fetched before and misses again before it fails (`fetchedAgain`). */
+export const MISS_FETCHES = 4;
+/**
+ * Large reads kept whole in the run's cache (the `cache` layer's space
+ * `reads`), by the file's identity, size and last write, once the same range
+ * is read a second time: an engine maps its own executable, reads its tables
+ * and unmaps it hundreds of times while it loads, and each map decoded every
+ * bundle block of it again (a second a time for 111 MB). Only a second read
+ * keeps: a setup extracting a cabinet reads it once, a mebibyte a batch, and
+ * keeping each batch held a quarter of a gibibyte a process of bytes nothing
+ * read again. The cache's budget bounds them and its idle time lets them go;
+ * every process of the run reads what one of them kept.
+ *
+ * Up to this many bytes a range: the executable mapped whole again and again.
+ */
+const KEPT_READ_LARGEST = 128 << 20;
+/** A read smaller than this costs less than keeping it. */
+export const KEPT_READ_MIN = 1 << 20;
+/** A range is kept in parts of this many bytes at most, each a body of the cache's. */
+export const KEPT_PART_BYTES = 8 << 20;
+/** How many large ranges read once are remembered, by key alone, to tell a second read. */
+const SEEN_READS = 256;
+/**
+ * A last write younger than this is not trusted to tell versions apart: two
+ * writes in one millisecond carry the same stamp.
+ */
+const SETTLED_MS = 2000;
+
+/** A volume with no cache to keep reads in. @type {import('../../cache/module.js').CacheSpace} */
+const KEEP_NOTHING = Object.freeze({
+    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
+});
+
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
 const CHANGE_ATTRIBUTES = 0x004;
@@ -37,12 +77,60 @@ const CHANGE_SIZE = 0x008;
 const CHANGE_LAST_WRITE = 0x010;
 
 /**
+ * The FILE_ACTION_ a change to one name is, as ReadDirectoryChangesW reports
+ * it. A rename is its old name and its new one; seen from a watch that holds
+ * only one of the two, it is a name removed or a name added.
+ */
+const FILE_ACTION_ADDED = 1;
+const FILE_ACTION_REMOVED = 2;
+const FILE_ACTION_MODIFIED = 3;
+const FILE_ACTION_RENAMED_OLD_NAME = 4;
+const FILE_ACTION_RENAMED_NEW_NAME = 5;
+
+/**
+ * One change as a watch is told it: what happened, and to which name, from
+ * the watched directory down, as the volume spells it.
+ *
+ * @typedef {{ action: number, name: string }} ChangeRecord
+ */
+
+/**
+ * `then` on a value that may be a promise: a read that had its blocks
+ * answers at once, one that fetches answers later.
+ *
+ * @template T, U
+ * @param {T | Promise<T>} value @param {(arrived: T) => U} then
+ * @returns {U | Promise<U>}
+ */
+const settled = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<T>} */ (value).then(then)
+    : then(/** @type {T} */ (value)));
+
+/**
+ * `readInto` for a volume that keeps nothing of its own: its `read`, the
+ * bytes handed on whole.
+ *
+ * @param {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ * @returns {(node: any, offset: number, length: number,
+ *     put: (bytes: Uint8Array, at: number) => void) => number | Promise<number>}
+ */
+export const readIntoBy = read=>(node, offset, length, put)=>
+    settled(read(node, offset, length), bytes=>{
+        put(bytes, 0);
+        return bytes.length;
+    });
+
+/**
  * @param {any} fs  The filesystem layer's API.
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
  *        from a bundle, in which case a miss is a fault rather than a wait.
+ * @param {{ now?: () => number,
+ *     kept?: import('../../cache/module.js').CacheSpace }} [options]
+ *        `now`: the clock a last write is aged against, in milliseconds
+ *        (`Date.now`); `kept`: where ranges read again are kept (none: never)
  */
-export function createVolume(fs, fetchBlocks = null){
+export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KEEP_NOTHING } = {}){
     const { ErrorCode, Disposition, SeekFrom } = fs;
 
     /**
@@ -72,6 +160,131 @@ export function createVolume(fs, fetchBlocks = null){
             }
             return fallback;
         }
+    };
+
+    /**
+     * An operation done again after its miss: the blocks the miss named
+     * fetched, then the operation again, and again fetched while it misses
+     * blocks it never fetched, or up to `MISS_FETCHES` fetches of blocks it
+     * had. A block fetched can be gone before the
+     * operation comes back for it: a cache in the heap keeps 64 MiB and
+     * another thread's reads landing between the fetch and the retry push the
+     * oldest blocks out, and a read that waited on another read's request
+     * finds nothing when that request failed. Each fetch makes the blocks the
+     * newest the cache holds, so a second rarely misses; one that misses
+     * every time is a fetch that does not deliver, and the operation fails
+     * saying so.
+     *
+     * @template T
+     * @param {() => T} operation
+     * @param {{ blocks: any[] }} miss
+     * @param {string} what  For the failure: what was not done.
+     * @returns {Promise<T>}
+     */
+    const fetchedAgain = async(operation, miss, what)=>{
+        const fetch = /** @type {(blocks: any[]) => Promise<void>} */ (fetchBlocks);
+        /** @param {any} block */
+        const keyOf = block=>`${block.layer ?? 0}:${block.index}`;
+        /** Every block this operation has fetched. */
+        const fetched = new Set();
+        // Counted only when the operation asks again for nothing but blocks
+        // it had fetched: one that misses blocks it never asked for has gone
+        // further - a copy up stops at each piece it lacks (`tree.js`) and
+        // goes on from there - and would otherwise fail at its fifth piece.
+        for (let fetches = 1; ;)
+        {
+            for (const block of miss.blocks)
+            {
+                fetched.add(keyOf(block));
+            }
+            await fetch(miss.blocks);
+            try
+            {
+                return operation();
+            }
+            catch (e){
+                const again = /** @type {any} */ (e);
+                if (again?.code !== 'BLOCK_MISS')
+                {
+                    throw again;
+                }
+                if (again.blocks.every((/** @type {any} */ block)=>fetched.has(keyOf(block))))
+                {
+                    if (fetches >= MISS_FETCHES)
+                    {
+                        throw new Error(`${what}: ${again.blocks.length} blocks still absent`
+                            + ` after ${fetches} fetches`, { cause: e });
+                    }
+                    fetches++;
+                }
+                miss = again;
+            }
+        }
+    };
+
+    /**
+     * @param {any} node @param {number} offset @param {number} length
+     * @param {{ blocks: any[] }} miss
+     * @returns {Promise<Uint8Array>}
+     */
+    const fetchedRead = (node, offset, length, miss)=>fetchedAgain(()=>{
+        fs.seek(node, offset, SeekFrom.BEGIN);
+        return fs.read(node, length);
+    }, miss, `${length} bytes at ${offset} not read`);
+
+    /**
+     * A read too large to fetch whole, fetched and copied a piece at a time.
+     *
+     * The blocks a read needs must all be resident when it copies them, and
+     * where they are kept in the heap (no origin store) that keeps 64 MiB: a
+     * program mapping a 241 MiB archive whole fetched every block, found the
+     * first ones evicted by the last and was told the map failed. A piece
+     * holds a fraction of that bound, so its fetch cannot evict itself; each
+     * piece is fetched as a read is (`fetchedRead`).
+     *
+     * @param {any} node @param {number} offset @param {number} length
+     * @returns {Promise<Uint8Array>}
+     */
+    const readInPieces = async(node, offset, length)=>{
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        let total = 0;
+        while (total < length)
+        {
+            const wanted = Math.min(FETCHED_PIECE_BYTES, length - total);
+            fs.seek(node, offset + total, SeekFrom.BEGIN);
+            let piece;
+            try
+            {
+                piece = fs.read(node, wanted);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS')
+                {
+                    throw miss;
+                }
+                piece = await fetchedRead(node, offset + total, wanted, miss);
+            }
+            pieces.push(piece);
+            total += piece.length;
+            if (piece.length < wanted)
+            {
+                break;
+            }
+        }
+        if (pieces.length === 1)
+        {
+            return pieces[0];
+        }
+        const bytes = new Uint8Array(total);
+        let at = 0;
+        for (const piece of pieces)
+        {
+            bytes.set(piece, at);
+            at += piece.length;
+        }
+        return bytes;
     };
 
     /**
@@ -117,47 +330,27 @@ export function createVolume(fs, fetchBlocks = null){
     const marks = entry=>({
         ...entry.readOnly ? { readOnly: true } : {},
         ...entry.hidden ? { hidden: true } : {},
+        ...entry.junction ? { junction: entry.junction } : {},
+        ...entry.reparseTag ? { reparseTag: entry.reparseTag } : {},
     });
 
     /**
-     * The attributes programs set, by name folded to one case as the volume
-     * folds it. The filesystem below keeps no attribute bits, and read-only
-     * is not decoration: a program marks a file read-only and expects the
-     * delete and the write it did not mean to allow to be refused. Kept for
-     * the life of the process, following a name through a rename, a delete
-     * and a directory's removal.
+     * A file with more than one name says how many and what it is known by;
+     * one with its own alone says nothing of either.
      *
-     * @type {Map<string, number>}
+     * @param {any} entry
+     * @returns {{ links?: number, identity?: string }}
      */
-    const recorded = new Map();
-    /** @param {string} path */
-    const keyOf = path=>path.toLowerCase();
-    /** @param {string} path */
-    const setBy = path=>{
-        const attributes = recorded.get(keyOf(path));
-        return attributes === undefined ? {} : { attributes };
-    };
+    const linked = entry=>(entry.links > 1 ? { links: entry.links, identity: entry.identity } : {});
+
     /**
-     * Moves what was recorded under one name, and under every name below it,
-     * to another; with no destination, forgets it.
+     * The attributes a program set on the file, which the volume keeps for
+     * every name it has; none recorded leaves it as the volume reports it.
      *
-     * @param {string} from @param {string | null} to
+     * @param {any} entry
      */
-    const carry = (from, to)=>{
-        const key = keyOf(from);
-        for (const [name, attributes] of [...recorded])
-        {
-            if (name !== key && !name.startsWith(`${key}\\`))
-            {
-                continue;
-            }
-            recorded.delete(name);
-            if (to !== null)
-            {
-                recorded.set(keyOf(to) + name.slice(key.length), attributes);
-            }
-        }
-    };
+    const setBy = entry=>(typeof entry.attributes === 'number'
+        ? { attributes: entry.attributes } : {});
 
     /**
      * The watches FindFirstChangeNotification set, each a directory, whether
@@ -165,9 +358,13 @@ export function createVolume(fs, fetchBlocks = null){
      * it asked for, what to tell, and whether anyone still holds it.
      *
      * @type {Set<{ directory: string, subtree: boolean, filter: number,
-     *     changed: () => void, alive: () => boolean }>}
+     *     changed: (records: ChangeRecord[]) => void, alive: () => boolean }>}
      */
     const watches = new Set();
+
+    /** Why the last open was refused, for the surface to answer with: `openRefusal`. */
+    /** @type {string | null} */
+    let refusedOpen = null;
 
     /**
      * Where each open file is, so a write through it can be told to the
@@ -177,9 +374,94 @@ export function createVolume(fs, fetchBlocks = null){
      */
     const openedAt = new WeakMap();
 
+    /** The path each node was opened by, for its version. @type {WeakMap<any, string>} */
+    const pathOf = new WeakMap();
+    /** Large ranges read once, by key: a second read of one keeps it. @type {Set<string>} */
+    const seen = new Set();
+    /**
+     * The key a read of a node is kept under, or null when it is not to be:
+     * a small read, an unknown file, or one written moments ago.
+     *
+     * @param {any} node @param {number} offset @param {number} length
+     */
+    const keptKey = (node, offset, length)=>{
+        const path = length >= KEPT_READ_MIN ? pathOf.get(node) : undefined;
+        const entry = path === undefined ? null : attempt(()=>fs.stat(path), null);
+        return entry && !entry.directory && now() - (entry.modified ?? 0) > SETTLED_MS
+            ? `${entry.identity ?? entry.path}|${entry.size}|${entry.modified}|${offset}|${length}`
+            : null;
+    };
+    /** @param {string} key @param {number} part */
+    const partOf = (key, part)=>`${key}#${part}`;
+    /**
+     * A range kept by any process of the run, handed to `put` part by part as
+     * the cache holds it, read in place: true where every part was there. A
+     * part missing after others were handed leaves those handed; the caller
+     * reads the range afresh and hands the same bytes again.
+     *
+     * @param {string} key @param {number} length
+     * @param {(bytes: Uint8Array, at: number) => void} put
+     */
+    const keptInto = (key, length, put)=>{
+        if (kept.look(partOf(key, 0)) === null)
+        {
+            return false;
+        }
+        for (let at = 0, part = 0; at < length; at += KEPT_PART_BYTES, part++)
+        {
+            const want = Math.min(KEPT_PART_BYTES, length - at);
+            const whole = kept.with(partOf(key, part), body=>{
+                if (body.length !== want)
+                {
+                    return false;
+                }
+                put(body, at);
+                return true;
+            });
+            if (whole !== true)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    /**
+     * Keeps a read when its range was read before: a copy of it, in parts, in
+     * the cache. A part the cache had no room for leaves the range unkept.
+     *
+     * @param {string | null} key @param {Uint8Array} bytes
+     */
+    const keep = (key, bytes)=>{
+        if (key === null || bytes.length > KEPT_READ_LARGEST)
+        {
+            return;
+        }
+        if (!seen.delete(key))
+        {
+            seen.add(key);
+            if (seen.size > SEEN_READS)
+            {
+                seen.delete(/** @type {string} */ (seen.values().next().value));
+            }
+            return;
+        }
+        for (let at = 0, part = 0; at < bytes.length; at += KEPT_PART_BYTES, part++)
+        {
+            if (!kept.put(partOf(key, part), bytes.subarray(at, at + KEPT_PART_BYTES)))
+            {
+                for (let earlier = 0; earlier < part; earlier++)
+                {
+                    kept.drop(partOf(key, earlier));
+                }
+                return;
+            }
+        }
+    };
+
+    /** @param {string} path  The volume's own spelling, no trailing separator. */
+    const spelled = path=>attempt(()=>fs.resolve(path).path, path).replace(/\\+$/, '');
     /** @param {string} path  The volume's own spelling, folded, no trailing separator. */
-    const canonical = path=>attempt(()=>fs.resolve(path).path, path)
-        .replace(/\\+$/, '').toLowerCase();
+    const canonical = path=>spelled(path).toLowerCase();
 
     /**
      * A change to one name, told to every watch over the directory it is in
@@ -187,17 +469,22 @@ export function createVolume(fs, fetchBlocks = null){
      * filter asks about it. Removing the watched directory itself is told
      * too, as Windows tells it. Nothing is worked out while nothing watches.
      *
-     * One operation is one change, whatever names it touches: a rename is
-     * told once to a watch that sees both its names.
+     * One operation is one telling, whatever names it touches: a rename is
+     * told once to a watch that sees both its names, as the records of
+     * both. The watched directory's own removal is told with no record;
+     * its rename is not told.
      *
      * @param {string | string[]} paths @param {number} kind  FILE_NOTIFY_CHANGE_ flags.
+     * @param {number | number[]} actions  FILE_ACTION_ of each path.
      */
-    const changed = (paths, kind)=>{
+    const changed = (paths, kind, actions)=>{
         if (watches.size === 0)
         {
             return;
         }
-        const names = (Array.isArray(paths) ? paths : [paths]).map(canonical);
+        const given = Array.isArray(paths) ? paths : [paths];
+        const names = given.map(spelled);
+        const acts = Array.isArray(actions) ? actions : given.map(()=>actions);
         for (const watch of [...watches])
         {
             if (!watch.alive())
@@ -205,16 +492,52 @@ export function createVolume(fs, fetchBlocks = null){
                 watches.delete(watch);
                 continue;
             }
-            const within = names.some(name=>{
-                const parent = name.slice(0, Math.max(name.lastIndexOf('\\'), 0));
-                return parent === watch.directory
-                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`))
-                    || (name === watch.directory && kind === CHANGE_DIR_NAME);
-            });
-            if (within && (watch.filter & kind) !== 0)
+            if ((watch.filter & kind) === 0)
             {
-                watch.changed();
+                continue;
             }
+            // Its removal is told; its move is not, as Windows does neither
+            // more nor less.
+            const self = names.some((name, index)=>name.toLowerCase() === watch.directory
+                && kind === CHANGE_DIR_NAME && acts[index] === FILE_ACTION_REMOVED);
+            /** @type {ChangeRecord[]} */
+            const records = [];
+            names.forEach((name, index)=>{
+                const folded = name.toLowerCase();
+                const parent = folded.slice(0, Math.max(folded.lastIndexOf('\\'), 0));
+                if (parent === watch.directory
+                    || (watch.subtree && parent.startsWith(`${watch.directory}\\`)))
+                {
+                    records.push({ action: acts[index],
+                        name: name.slice(watch.directory.length + 1) });
+                }
+            });
+            if (records.length === 1 && acts.length === 2)
+            {
+                // Half a rename: the name left the watch, or came into it.
+                records[0].action = records[0].action === FILE_ACTION_RENAMED_OLD_NAME
+                    ? FILE_ACTION_REMOVED : FILE_ACTION_ADDED;
+            }
+            if (records.length > 0 || self)
+            {
+                watch.changed(records);
+            }
+        }
+    };
+
+    /**
+     * What follows a name moved: the watches are told. Its attributes are the
+     * volume's, and go with it there.
+     *
+     * @param {string} from @param {string} to
+     */
+    const moved = (from, to)=>{
+        if (watches.size > 0)
+        {
+            const kind = attempt(()=>fs.stat(to), null)?.directory
+                ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
+            changed([from, to], kind,
+                [FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME]);
         }
     };
 
@@ -223,13 +546,15 @@ export function createVolume(fs, fetchBlocks = null){
          * @param {string} path
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
          *             modified: number, readOnly?: boolean, hidden?: boolean,
-         *             attributes?: number } | null}
+         *             attributes?: number, links?: number, identity?: string,
+         *             junction?: string, reparseTag?: number } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
-                    modified: entry.modified ?? 0, ...marks(entry), ...setBy(path) }
+                    modified: entry.modified ?? 0, ...linked(entry), ...marks(entry),
+                    ...setBy(entry) }
                 : null;
         },
 
@@ -245,16 +570,135 @@ export function createVolume(fs, fetchBlocks = null){
             {
                 return false;
             }
-            changed(path, CHANGE_ATTRIBUTES);
-            if (attributes === null)
+            changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
+            // The attributes are the file's: every name it has shows them.
+            return attempt(()=>{
+                fs.setAttributes(path, attributes === null ? null : attributes >>> 0);
+                return true;
+            }, false);
+        },
+
+        /**
+         * Sets a reparse point on the file or directory at `path`, or with
+         * null takes it off: null when it did, or the volume's code for why
+         * not. `target`, the place a mount point or a symbolic link names,
+         * makes it stand for that place on its drive; `away` is set when that
+         * place is on another drive, and the point stands for nothing here.
+         *
+         * @param {string} path
+         * @param {{ tag: number, data: Uint8Array | null, target: string | null } | null} point
+         * @returns {string | null | { away: true }}
+         */
+        setReparse(path, point){
+            try
             {
-                recorded.delete(keyOf(path));
+                return fs.setReparse(path, point) === false ? { away: true } : null;
             }
-            else
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+        },
+
+        /**
+         * The reparse point at `path` as it was set, null for none.
+         *
+         * @param {string} path
+         * @returns {{ tag: number, data: Uint8Array | null } | null}
+         */
+        reparseOf(path){
+            return attempt(()=>fs.reparseOf?.(path) ?? null, null);
+        },
+
+        /**
+         * Holds the directory at `path` open on `access` and `share`: its
+         * number, or the volume's code for why not - SHARING_VIOLATION when
+         * the opens already there do not allow it.
+         *
+         * @param {string} path
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} access
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} share
+         * @returns {{ token: number } | { error: string }}
+         */
+        holdDirectory(path, access, share){
+            try
             {
-                recorded.set(keyOf(path), attributes >>> 0);
+                return { token: fs.holdDirectory(path, access, share) };
             }
-            return true;
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return { error: error.code };
+            }
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            fs.releaseDirectory(token);
+        },
+
+        /**
+         * The number of the file at `path` on its volume, the same under
+         * every name and across renames: 0 for a path that names nothing.
+         *
+         * @param {string} path @returns {number}
+         */
+        fileId(path){
+            return attempt(()=>fs.fileId(path), 0);
+        },
+
+        /**
+         * The path `path` reaches as its volume spells it, every junction on
+         * the way taken: itself where it names nothing.
+         *
+         * @param {string} path @returns {string}
+         */
+        finalPath(path){
+            return attempt(()=>fs.finalPath(path), path);
+        },
+
+        /**
+         * Where the file numbered `id` is on the volume `path` is on: null
+         * for a number no file there has.
+         *
+         * @param {string} path @param {number} id @returns {string | null}
+         */
+        pathOfFileId(path, id){
+            return attempt(()=>fs.pathOfFileId(path, id), null);
+        },
+
+        /**
+         * Gives the file at `existing` the further name `path`: null when it
+         * did, or the volume's code for why not -- NOT_SAME_DEVICE across
+         * drives, ACCESS_DENIED for a directory, ALREADY_EXISTS for a name
+         * taken, NOT_FOUND or PATH_NOT_FOUND for what is not there. The new
+         * name shows the attributes the file was given.
+         *
+         * @param {string} path @param {string} existing
+         * @returns {string | null}
+         */
+        link(path, existing){
+            try
+            {
+                fs.link(path, existing);
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+            changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
+            return null;
         },
 
         /**
@@ -265,10 +709,19 @@ export function createVolume(fs, fetchBlocks = null){
         setModified(path, modified){
             return attempt(()=>{
                 fs.setModified(path, modified);
-                changed(path, CHANGE_LAST_WRITE);
+                changed(path, CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 return true;
             }, false);
         },
+
+        /**
+         * Why the last `open` answered null: the volume's code -- NOT_FOUND,
+         * SHARING_VIOLATION and the rest -- or null when it opened.
+         *
+         * @returns {string | null}
+         */
+        openRefusal: ()=>refusedOpen,
+
 
         /**
          * @param {string} path
@@ -278,23 +731,43 @@ export function createVolume(fs, fetchBlocks = null){
         open(path, mode){
             const existed = watches.size > 0 && (mode.create || mode.truncate)
                 ? attempt(()=>fs.stat(path), null) !== null : null;
-            const node = attempt(()=>fs.open(path, {
-                read: mode.read !== false,
-                write: Boolean(mode.write),
-                shareWrite: mode.shareWrite === true,
-                disposition: dispositionOf(mode),
-                inherited: mode.inherited === true,
-            }), null);
+            refusedOpen = null;
+            const node = attempt(()=>{
+                try
+                {
+                    return fs.open(path, {
+                        read: mode.read !== false,
+                        write: Boolean(mode.write),
+                        shareRead: mode.shareRead !== false,
+                        shareWrite: mode.shareWrite === true,
+                        delete: mode.delete === true,
+                        // Only CreateFile says how it shares deletion; a layer's own
+                        // reader (an installer's database, a library a DLL loads) does
+                        // not stand in the way of the program deleting the file.
+                        shareDelete: mode.shareDelete !== false,
+                        disposition: dispositionOf(mode),
+                        inherited: mode.inherited === true,
+                    });
+                }
+                catch (e){
+                    refusedOpen = /** @type {any} */ (e)?.code ?? null;
+                    throw e;
+                }
+            }, null);
+            if (node)
+            {
+                pathOf.set(node, path);
+            }
             if (node && watches.size > 0)
             {
                 openedAt.set(node, path);
                 if (existed === false)
                 {
-                    changed(path, CHANGE_FILE_NAME);
+                    changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
                 }
                 else if (existed && mode.truncate)
                 {
-                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                    changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
                 }
             }
             return node;
@@ -312,10 +785,77 @@ export function createVolume(fs, fetchBlocks = null){
          * fetches them, and the guest thread is parked in the meantime by the
          * same machinery that parks it on any other call that cannot answer yet.
          *
+         * The bytes are the caller's own: whoever reads may write into them or
+         * keep them. A caller that only copies them on, into guest memory
+         * above all, reads with `readInto` and is handed what the run's cache
+         * holds where it lies.
+         *
          * @param {any} node @param {number} offset @param {number} length
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
         read(node, offset, length){
+            const key = keptKey(node, offset, length);
+            if (key !== null)
+            {
+                const out = new Uint8Array(length);
+                if (keptInto(key, length, (bytes, at)=>out.set(bytes, at)))
+                {
+                    return out;
+                }
+            }
+            return settled(this.readFresh(node, offset, length), arrived=>{
+                keep(key, arrived);
+                return arrived;
+            });
+        },
+
+        /**
+         * read, the bytes handed to `put` (with where in the range they go)
+         * rather than answered: what the run's cache keeps is read in place,
+         * valid only inside `put`, so its one copy is the caller's own (into
+         * guest memory). Answers how many bytes the range had.
+         *
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, put){
+            const key = keptKey(node, offset, length);
+            if (key !== null && keptInto(key, length, put))
+            {
+                return length;
+            }
+            if (key === null)
+            {
+                // Nothing to keep: the volume hands its bytes where they lie.
+                fs.seek(node, offset, SeekFrom.BEGIN);
+                try
+                {
+                    return fs.readInto(node, length, put);
+                }
+                catch (e){
+                    if (/** @type {any} */ (e)?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                    {
+                        throw e;
+                    }
+                    // What was handed before the miss is handed again whole
+                    // once the blocks are here.
+                }
+            }
+            return settled(this.readFresh(node, offset, length), arrived=>{
+                keep(key, arrived);
+                put(arrived, 0);
+                return arrived.length;
+            });
+        },
+
+        /**
+         * read, past what is kept.
+         *
+         * @param {any} node @param {number} offset @param {number} length
+         * @returns {Uint8Array | Promise<Uint8Array>}
+         */
+        readFresh(node, offset, length){
             fs.seek(node, offset, SeekFrom.BEGIN);
             try
             {
@@ -327,14 +867,11 @@ export function createVolume(fs, fetchBlocks = null){
                 {
                     throw miss;
                 }
-                return (async()=>{
-                    await fetchBlocks(miss.blocks);
-                    fs.seek(node, offset, SeekFrom.BEGIN);
-                    // One retry, not a loop: the miss named every absent block,
-                    // so a second miss means the fetch did not deliver and
-                    // looping would only hide that.
-                    return fs.read(node, length);
-                })();
+                if (length <= FETCHED_PIECE_BYTES)
+                {
+                    return fetchedRead(node, offset, length, miss);
+                }
+                return readInPieces(node, offset, length);
             }
         },
 
@@ -345,7 +882,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined && bytes.length > 0)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
             return written;
         },
@@ -373,8 +910,32 @@ export function createVolume(fs, fetchBlocks = null){
                 // The guest's buffer may change while it is parked; what it
                 // asked to write is what it passed at the call.
                 const held = bytes.slice();
-                // One retry, as read: the miss named every absent block.
-                return fetchBlocks(miss.blocks).then(()=>this.write(node, offset, held));
+                return fetchedAgain(()=>this.write(node, offset, held), miss,
+                    `${held.length} bytes at ${offset} not written`);
+            }
+        },
+
+        /**
+         * truncate for a caller that can park: a file the bundle holds is
+         * copied up first, as for a write, and absent blocks under it are
+         * fetched; the answer is then a promise.
+         *
+         * @param {any} node @param {number} size
+         * @returns {void | Promise<void>}
+         */
+        truncateOrFetch(node, size){
+            try
+            {
+                return this.truncate(node, size);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                return fetchedAgain(()=>this.truncate(node, size), miss,
+                    `the end at ${size} not set`);
             }
         },
 
@@ -385,7 +946,7 @@ export function createVolume(fs, fetchBlocks = null){
             const path = watches.size > 0 ? openedAt.get(node) : undefined;
             if (path !== undefined)
             {
-                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE);
+                changed(path, CHANGE_SIZE | CHANGE_LAST_WRITE, FILE_ACTION_MODIFIED);
             }
         },
 
@@ -435,10 +996,69 @@ export function createVolume(fs, fetchBlocks = null){
                 {
                     fs.deleteFile(path);
                 }
-                carry(path, null);
-                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME);
+                changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME,
+                    FILE_ACTION_REMOVED);
                 return true;
             }, false);
+        },
+
+        /**
+         * Why the file at `path` may not be renamed or deleted as its opens
+         * stand -- SHARING_VIOLATION, an open that does not share deletion --
+         * or null when it may.
+         *
+         * @param {string} path
+         * @returns {string | null}
+         */
+        removalRefused(path){
+            try
+            {
+                fs.mayRemove?.(path);
+                return null;
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return error.code;
+            }
+        },
+
+        /** @param {string} path @returns {boolean} whether any process holds the file open */
+        isOpen: path=>attempt(()=>fs.isOpen?.(path) ?? false, false),
+
+        /**
+         * The device a path names wherever it is -- `nul`, `C:\\dir\\NUL.txt` --
+         * in upper case, or null.
+         *
+         * @param {string} path @returns {string | null}
+         */
+        deviceOf: path=>attempt(()=>fs.resolve?.(path)?.device ?? null, null),
+
+        /**
+         * How a section maps the file, or null.
+         *
+         * @param {string} path @returns {'readonly' | 'readwrite' | 'image' | null}
+         */
+        mappedAs: path=>attempt(()=>fs.mappedAs?.(path) ?? null, null),
+
+        /**
+         * A section's own hold on the file `node` has open, on the section's
+         * terms: what the section keeps once the file's handle is closed.
+         * Null where the volume cannot give one.
+         *
+         * @param {any} node @param {'readonly' | 'readwrite' | 'image'} kind
+         */
+        section: (node, kind)=>{
+            const held = attempt(()=>fs.reopenSection?.(node, kind) ?? null, null);
+            const path = pathOf.get(node);
+            if (held && path !== undefined)
+            {
+                pathOf.set(held, path);
+            }
+            return held;
         },
 
         /** @param {string} path @returns {boolean} */
@@ -446,21 +1066,102 @@ export function createVolume(fs, fetchBlocks = null){
             const made = attempt(()=>fs.createDirectory(path), false);
             if (made !== false)
             {
-                changed(path, CHANGE_DIR_NAME);
+                changed(path, CHANGE_DIR_NAME, FILE_ACTION_ADDED);
             }
             return made;
         },
 
-        /** @param {string} from @param {string} to @returns {boolean} */
-        rename: (from, to)=>attempt(()=>{
-            fs.rename(from, to);
-            carry(from, to);
-            if (watches.size > 0)
+        /**
+         * rename for a caller that can park: a move from the bundle to the
+         * overlay copies the file, and the copy needs every block under it.
+         * When one is absent the copy stops at it, so what was copied is
+         * removed, the blocks are fetched and the move is done again -- as
+         * many times as it meets blocks not here yet, each time with more of
+         * them here. A directory's move stopped part way goes on from there:
+         * what it moved is under its new name, which is not there to move to
+         * again.
+         *
+         * @param {string} from @param {string} to
+         * @param {{ held?: boolean }} [options]  `held`: through a handle that
+         *     holds the file for deletion (the file system's `rename`)
+         * @returns {boolean | Promise<boolean>}
+         */
+        renameOrFetch(from, to, options = {}){
+            const existed = attempt(()=>fs.stat(to), null) !== null;
+            try
             {
-                const kind = attempt(()=>fs.stat(to), null)?.directory
-                    ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
-                changed([from, to], kind);
+                return this.rename(from, to, options);
             }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                if (!existed && attempt(()=>fs.stat(to), null)?.directory)
+                {
+                    return fetchBlocks(miss.blocks).then(()=>this.moveRest(from, to))
+                        .then(done=>{
+                            if (done)
+                            {
+                                moved(from, to);
+                            }
+                            return done;
+                        });
+                }
+                if (!existed)
+                {
+                    attempt(()=>fs.deleteFile(to), null);
+                }
+                return fetchBlocks(miss.blocks).then(()=>this.renameOrFetch(from, to, options));
+            }
+        },
+
+        /**
+         * What is left of a directory's move a miss stopped, moved into the
+         * directory it was going to: everything under `to` is the move's own,
+         * so a file at both names is a copy the miss cut short.
+         *
+         * @param {string} from @param {string} to
+         * @returns {Promise<boolean>}
+         */
+        async moveRest(from, to){
+            for (const child of attempt(()=>fs.list(from), []))
+            {
+                const leaving = `${from}\\${child.name}`;
+                const arriving = `${to}\\${child.name}`;
+                const there = attempt(()=>fs.stat(arriving), null);
+                if (child.directory && there?.directory)
+                {
+                    if (!await this.moveRest(leaving, arriving))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (there)
+                {
+                    attempt(()=>fs.deleteFile(arriving), null);
+                }
+                if (!await this.renameOrFetch(leaving, arriving))
+                {
+                    return false;
+                }
+            }
+            return attempt(()=>{
+                fs.removeDirectory(from);
+                return true;
+            }, false);
+        },
+
+        /**
+         * @param {string} from @param {string} to
+         * @param {{ held?: boolean }} [options]  as `renameOrFetch`'s
+         * @returns {boolean}
+         */
+        rename: (from, to, options = {})=>attempt(()=>{
+            fs.rename(from, to, options);
+            moved(from, to);
             return true;
         }, false),
 
@@ -470,7 +1171,7 @@ export function createVolume(fs, fetchBlocks = null){
          * nobody holds it any more.
          *
          * @param {string} path @param {boolean} subtree @param {number} filter
-         * @param {() => void} notify @param {() => boolean} alive
+         * @param {(records: ChangeRecord[]) => void} notify @param {() => boolean} alive
          * @returns {{ close: () => void }}
          */
         watch(path, subtree, filter, notify, alive){
@@ -489,8 +1190,9 @@ export function createVolume(fs, fetchBlocks = null){
                 isDirectory: Boolean(entry.directory),
                 size: entry.size,
                 modified: entry.modified ?? 0,
+                ...linked(entry),
                 ...marks(entry),
-                ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
+                ...setBy(entry),
             })), []),
 
         /**

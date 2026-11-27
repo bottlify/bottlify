@@ -145,7 +145,6 @@ export function formatText(message, args){
  * @param {number} [options.capacity]   Records held before the oldest is lapped.
  * @param {number} [options.bytes]      Bytes of record storage behind them.
  * @param {number} [options.dictionary] Bytes for the words records refer to.
- * @param {boolean} [options.shared]    Shared memory when the platform has it.
  * @param {number} [options.level]      The level of a category nobody set.
  * @param {Record<string, number>} [options.categories]  Per-category levels.
  * @param {number} [options.sequenceBase]  The sequence the first record gets.
@@ -157,7 +156,6 @@ export function createJournal(options){
         records: options.capacity ?? 4096,
         bytes: options.bytes,
         dictionary: options.dictionary,
-        shared: options.shared,
         sequenceBase: options.sequenceBase,
     });
     const writer = createJournalWriter(memory);

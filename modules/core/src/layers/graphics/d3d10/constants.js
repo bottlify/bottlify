@@ -34,11 +34,13 @@ export const E_FAIL = 0x80004005;
 export const E_INVALIDARG = 0x80070057;
 export const E_NOINTERFACE = 0x80004002;
 export const E_OUTOFMEMORY = 0x8007000e;
+export const E_UNEXPECTED = 0x8000ffff;
 export const DXGI_STATUS_OCCLUDED = 0x087a0001;
 export const DXGI_ERROR_INVALID_CALL = 0x887a0001;
 export const DXGI_ERROR_NOT_FOUND = 0x887a0002;
 export const DXGI_ERROR_MORE_DATA = 0x887a0003;
 export const DXGI_ERROR_UNSUPPORTED = 0x887a0004;
+export const DXGI_ERROR_SDK_COMPONENT_MISSING = 0x887a002d;
 export const DXGI_ERROR_WAS_STILL_DRAWING = 0x887a000a;
 
 /**
@@ -184,6 +186,12 @@ export const DXGI_FORMAT = Object.freeze({
     B8G8R8A8_UNORM_SRGB: 0x5b,
     B8G8R8X8_TYPELESS: 0x5c,
     B8G8R8X8_UNORM_SRGB: 0x5d,
+    BC6H_TYPELESS: 0x5e,
+    BC6H_UF16: 0x5f,
+    BC6H_SF16: 0x60,
+    BC7_TYPELESS: 0x61,
+    BC7_UNORM: 0x62,
+    BC7_UNORM_SRGB: 0x63,
 });
 
 /** What the validity tables distinguish about a format, and nothing more. */
@@ -282,6 +290,8 @@ export const FORMAT_INFO = Object.freeze(Object.fromEntries([
         [F.R10G10B10A2_UNORM]: COLOUR, [F.R10G10B10A2_UINT]: COLOUR,
     }),
     [F.R11G11B10_FLOAT, format(FORMAT_KIND.COLOUR, F.R11G11B10_FLOAT, 4)],
+    [F.R10G10B10_XR_BIAS_A2_UNORM,
+        format(FORMAT_KIND.COLOUR, F.R10G10B10_XR_BIAS_A2_UNORM, 4)],
     ...family(F.R8G8B8A8_TYPELESS, 4, {
         [F.R8G8B8A8_UNORM]: COLOUR, [F.R8G8B8A8_UNORM_SRGB]: COLOUR, [F.R8G8B8A8_UINT]: COLOUR,
         [F.R8G8B8A8_SNORM]: COLOUR, [F.R8G8B8A8_SINT]: COLOUR,
@@ -317,6 +327,8 @@ export const FORMAT_INFO = Object.freeze(Object.fromEntries([
     ...family(F.BC3_TYPELESS, 16, { [F.BC3_UNORM]: COLOUR, [F.BC3_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.BC4_TYPELESS, 8, { [F.BC4_UNORM]: COLOUR, [F.BC4_SNORM]: COLOUR }, BLOCK),
     ...family(F.BC5_TYPELESS, 16, { [F.BC5_UNORM]: COLOUR, [F.BC5_SNORM]: COLOUR }, BLOCK),
+    ...family(F.BC6H_TYPELESS, 16, { [F.BC6H_UF16]: COLOUR, [F.BC6H_SF16]: COLOUR }, BLOCK),
+    ...family(F.BC7_TYPELESS, 16, { [F.BC7_UNORM]: COLOUR, [F.BC7_UNORM_SRGB]: COLOUR }, BLOCK),
     ...family(F.B8G8R8A8_TYPELESS, 4, {
         [F.B8G8R8A8_UNORM]: COLOUR, [F.B8G8R8A8_UNORM_SRGB]: COLOUR,
     }),
@@ -393,6 +405,8 @@ export const IID = Object.freeze({
     IDXGIObject: '{AEC22FB8-76F3-4639-9BE0-28EB43A67A2E}',
     IDXGIDeviceSubObject: '{3D3E0379-F9DE-4D58-BB6C-18D62992F1A6}',
     IDXGIResource: '{035F3AB4-482E-4E50-B41F-8A7F8BD8960B}',
+    IDXGIResource1: '{30961379-4609-4A41-998E-54FE567EE0C1}',
+    IDXGIKeyedMutex: '{9D8E1289-D7B3-465F-8126-250E349AF85D}',
     IDXGISurface: '{CAFCB56C-6AC3-4889-BF47-9E23BBD260EC}',
     IDXGISurface1: '{4AE63092-6327-4C1B-80AE-BFE12EA32B86}',
     IDXGIOutput: '{AE02EEDB-C735-4690-8D52-5A8DC20213AA}',
@@ -403,6 +417,29 @@ export const IID = Object.freeze({
     IDXGIFactory1: '{770AAE78-F26F-4DBA-A829-253C83D1B387}',
     IDXGIDevice: '{54EC77FA-1377-44E6-8C32-88FD5F44C84C}',
     IDXGIDevice1: '{77DB970F-6276-48BA-BA28-070143B4392C}',
+    // DXGI 1.2 to 1.6 (Wine's dxgi1_2.idl to dxgi1_6.idl).
+    IDXGIDevice2: '{05008617-FBFD-4051-A790-144884B4F6A9}',
+    IDXGIDevice3: '{6007896C-3244-4AFD-BF18-A6D3BEDA5023}',
+    IDXGIDevice4: '{95B4F95F-D8DA-4CA4-9EE6-3B76D5968A10}',
+    IDXGIFactory2: '{50C83A1C-E072-4C48-87B0-3630FA36A6D0}',
+    IDXGIFactory3: '{25483823-CD46-4C7D-86CA-47AA95B837BD}',
+    IDXGIFactory4: '{1BC6EA02-EF36-464F-BF0C-21CA39E5168A}',
+    IDXGIFactory5: '{7632E1F5-EE65-4DCA-87FD-84CD75F8838D}',
+    IDXGIFactory6: '{C1B6694F-FF09-44A9-B03C-77900A0A1D17}',
+    IDXGIFactory7: '{A4966EED-76DB-44DA-84C1-EE9A7AFB20A8}',
+    IDXGIAdapter2: '{0AA1AE0A-FA0E-4B84-8644-E05FF8E5ACB5}',
+    IDXGIAdapter3: '{645967A4-1392-4310-A798-8053CE3E93FD}',
+    IDXGIAdapter4: '{3C8D99D1-4FBF-4181-A82C-AF66BF7BD24E}',
+    IDXGIOutput1: '{00CDDEA8-939B-4B83-A340-A685226666CC}',
+    IDXGIOutput2: '{595E39D1-2724-4663-99B1-DA969DE28364}',
+    IDXGIOutput3: '{8A6BB301-7E7E-41F4-A8E0-5B32F7F99B18}',
+    IDXGIOutput4: '{DC7DCA35-2196-414D-9F53-617884032A60}',
+    IDXGIOutput5: '{80A07424-AB52-42EB-833C-0C42FD282D98}',
+    IDXGIOutput6: '{068346E8-AAEC-4B84-ADD7-137F513F77A1}',
+    IDXGISwapChain1: '{790A45F7-0D42-4876-983A-0A55CFE6F4AA}',
+    IDXGISwapChain2: '{A8BE2AC4-199F-4946-B331-79599FB98DE7}',
+    IDXGISwapChain3: '{94D99BDB-F1F8-4AB0-B236-7DA0170EDAB1}',
+    IDXGISwapChain4: '{3D585D5A-BD4A-489E-B1F4-3DBCB6452FFB}',
     ID3D10Device: '{9B7E4C0F-342C-4106-A19F-4F2704F689F0}',
     ID3D10Device1: '{9B7E4C8F-342C-4106-A19F-4F2704F689F0}',
     ID3D10Multithread: '{9B7E4E00-342C-4106-A19F-4F2704F689F0}',
@@ -435,6 +472,12 @@ export const IID = Object.freeze({
     ID3D10ShaderReflectionConstantBuffer: '{66C66A94-DDDD-4B62-A66A-F0DA33C2B4D0}',
     ID3D10ShaderReflectionVariable: '{1BF63C95-2650-405D-99C1-3636BD1DA0A1}',
     ID3D10ShaderReflectionType: '{C530AD7D-9B16-4395-A979-BA2ECFF83ADD}',
+    // D3DReflect's: d3dcompiler_43's identifier, and the one of 46 and 47.
+    ID3D11ShaderReflection43: '{0A233719-3960-4578-9D7C-203B8B1D9CC1}',
+    ID3D11ShaderReflection: '{8D536CA1-0CCA-4956-A837-786963755584}',
+    ID3D11ShaderReflectionConstantBuffer: '{EB62D63D-93DD-4318-8AE8-C6F83AD371B8}',
+    ID3D11ShaderReflectionVariable: '{51F23923-F3E5-4BD1-91CB-606177D8DB4C}',
+    ID3D11ShaderReflectionType: '{6E6FFA6A-9BAE-4613-A51E-91652D508C21}',
     ID3D10Effect: '{51B0CA8B-EC0B-4519-870D-8EE1CB5017C7}',
     ID3D10EffectPool: '{9537AB04-3250-412E-8213-FCD2F8677933}',
     ID3D10EffectTechnique: '{DB122CE8-D1C9-4292-B237-24ED3DE8B175}',
@@ -457,6 +500,44 @@ export const IID = Object.freeze({
     ID3D10StateBlock: '{0803425A-57F5-4DD6-9465-A87570834A08}',
     ID3D10ShaderResourceView1: '{9B7E4C87-342C-4106-A19F-4F2704F689F0}',
     ID3D10BlendState1: '{EDAD8D99-8A35-4D6D-8566-2EA276CDE161}',
+    // Direct3D 11's, which the same objects answer to as well.
+    ID3D11Device: '{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}',
+    ID3D11Device1: '{A04BFB29-08EF-43D6-A49C-A9BDBDCBE686}',
+    ID3D11DeviceContext: '{C0BFA96C-E089-44FB-8EAF-26F8796190DA}',
+    ID3D11DeviceContext1: '{BB2C6FAA-B5FB-4082-8E6B-388B8CFA90E1}',
+    ID3D11Multithread: '{9B7E4E00-342C-4106-A19F-4F2704F689F0}',
+    ID3DUserDefinedAnnotation: '{B2DAAD8B-03D4-4DBF-95EB-32AB4B63D0AB}',
+    ID3D11DeviceChild: '{1841E5C8-16B0-489B-BCC8-44CFB0D5DEAE}',
+    ID3D11Asynchronous: '{4B35D0CD-1E15-4258-9C98-1B1333F6DD3B}',
+    ID3D11Query: '{D6C00747-87B7-425E-B84D-44D108560AFD}',
+    ID3D11Predicate: '{9EB576DD-9F77-4D86-81AA-8BAB5FE490E2}',
+    ID3D11Counter: '{6E8C49FB-A371-4770-B440-29086022B741}',
+    ID3D11Resource: '{DC8E63F3-D12B-4952-B47B-5E45026A862D}',
+    ID3D11Buffer: '{48570B85-D1EE-4FCD-A250-EB350722B037}',
+    ID3D11Texture1D: '{F8FB5C27-C6B3-4F75-A4C8-439AF2EF564C}',
+    ID3D11Texture2D: '{6F15AAF2-D208-4E89-9AB4-489535D34F9C}',
+    ID3D11Texture3D: '{037E866E-F56D-4357-A8AF-9DABBE6E250E}',
+    ID3D11View: '{839D1216-BB2E-412B-B7F4-A9DBEBE08ED1}',
+    ID3D11ShaderResourceView: '{B0E06FE0-8192-4E1A-B1CA-36D7414710B2}',
+    ID3D11RenderTargetView: '{DFDBA067-0B8D-4865-875B-D7B4516CC164}',
+    ID3D11DepthStencilView: '{9FDAC92A-1876-48C3-AFAD-25B94F84A9B6}',
+    ID3D11UnorderedAccessView: '{28ACF509-7F5C-48F6-8611-F316010A6380}',
+    ID3D11BlendState: '{75B68FAA-347D-4159-8F45-A0640F01CD9A}',
+    ID3D11BlendState1: '{CC86FABE-DA55-401D-85E7-E3C9DE2877E9}',
+    ID3D11DepthStencilState: '{03823EFB-8D8F-4E1C-9AA2-F64BB2CBFDF1}',
+    ID3D11RasterizerState: '{9BB4AB81-AB1A-4D8F-B506-FC04200B6EE7}',
+    ID3D11RasterizerState1: '{1217D7A6-5039-418C-B042-9CBE256AFD6E}',
+    ID3D11SamplerState: '{DA6FEA51-564C-4487-9810-F0D0F9B4E3A5}',
+    ID3D11InputLayout: '{E4819DDC-4CF0-4025-BD26-5DE82A3E07B7}',
+    ID3D11VertexShader: '{3B301D64-D678-4289-8897-22F8928B72F3}',
+    ID3D11HullShader: '{8E5C6061-628A-4C8E-8264-BBE45CB3D5DD}',
+    ID3D11DomainShader: '{F582C508-0F36-490C-9977-31EECE268CFA}',
+    ID3D11GeometryShader: '{38325B96-EFFB-4022-BA02-2E795B70275C}',
+    ID3D11PixelShader: '{EA82E40D-51DC-4F33-93D4-DB7C9125AE8C}',
+    ID3D11ComputeShader: '{4F5B196E-C2BD-495E-BD01-1FDED38E4969}',
+    ID3D11ClassLinkage: '{DDF57CBA-9543-46E4-A12B-F207A0FE7FED}',
+    ID3D11CommandList: '{A24BC4D1-769E-43F7-8013-98FF566C18E2}',
+    ID3DDeviceContextState: '{5C1E0D8A-7C23-48F9-8C59-A92958CEFF11}',
 });
 
 // --- Direct3D 10 ---
@@ -500,6 +581,92 @@ export const D3D10_MAP = Object.freeze({
 });
 
 export const D3D10_MAP_FLAG_DO_NOT_WAIT = 0x100000;
+
+// --- Direct3D 11 ---
+
+/**
+ * The Direct3D 11 interface each Direct3D 10 one has its twin in: an object
+ * of either version answers to both (`com.js`), as one object serves both
+ * APIs here. The devices are not in it -- which a device answers to is the
+ * version it was made by -- and neither are the 10.1 additions, whose 11
+ * twins are the plain interfaces already named.
+ */
+/** @type {Readonly<Record<string, string>>} */
+export const D3D11_TWIN = Object.freeze({
+    [IID.ID3D10DeviceChild]: IID.ID3D11DeviceChild,
+    [IID.ID3D10Resource]: IID.ID3D11Resource,
+    [IID.ID3D10Buffer]: IID.ID3D11Buffer,
+    [IID.ID3D10Texture1D]: IID.ID3D11Texture1D,
+    [IID.ID3D10Texture2D]: IID.ID3D11Texture2D,
+    [IID.ID3D10Texture3D]: IID.ID3D11Texture3D,
+    [IID.ID3D10View]: IID.ID3D11View,
+    [IID.ID3D10ShaderResourceView]: IID.ID3D11ShaderResourceView,
+    [IID.ID3D10RenderTargetView]: IID.ID3D11RenderTargetView,
+    [IID.ID3D10DepthStencilView]: IID.ID3D11DepthStencilView,
+    [IID.ID3D10BlendState]: IID.ID3D11BlendState,
+    [IID.ID3D10DepthStencilState]: IID.ID3D11DepthStencilState,
+    [IID.ID3D10RasterizerState]: IID.ID3D11RasterizerState,
+    [IID.ID3D10SamplerState]: IID.ID3D11SamplerState,
+    [IID.ID3D10InputLayout]: IID.ID3D11InputLayout,
+    [IID.ID3D10VertexShader]: IID.ID3D11VertexShader,
+    [IID.ID3D10GeometryShader]: IID.ID3D11GeometryShader,
+    [IID.ID3D10PixelShader]: IID.ID3D11PixelShader,
+    [IID.ID3D10Asynchronous]: IID.ID3D11Asynchronous,
+    [IID.ID3D10Query]: IID.ID3D11Query,
+    [IID.ID3D10Predicate]: IID.ID3D11Predicate,
+    [IID.ID3D10Counter]: IID.ID3D11Counter,
+});
+
+/** The version tag `D3D11CreateDevice` is compiled with. */
+export const D3D11_SDK_VERSION = 7;
+
+/** Direct3D 11's binding, past 10's: a resource an unordered-access view writes. */
+export const D3D11_BIND_UNORDERED_ACCESS = 0x80;
+
+export const D3D11_RESOURCE_MISC = Object.freeze({
+    DRAWINDIRECT_ARGS: 0x10,
+    BUFFER_ALLOW_RAW_VIEWS: 0x20,
+    BUFFER_STRUCTURED: 0x40,
+    RESOURCE_CLAMP: 0x80,
+    SHARED_KEYEDMUTEX: 0x100,
+    GDI_COMPATIBLE: 0x200,
+    SHARED_NTHANDLE: 0x800,
+});
+
+export const D3D11_UAV_DIMENSION = Object.freeze({
+    UNKNOWN: 0,
+    BUFFER: 1,
+    TEXTURE1D: 2,
+    TEXTURE1DARRAY: 3,
+    TEXTURE2D: 4,
+    TEXTURE2DARRAY: 5,
+    TEXTURE3D: 8,
+});
+
+/** A buffer view's flags: raw (byte-addressed), and an append or counter structure. */
+export const D3D11_BUFFER_UAV_FLAG = Object.freeze({ RAW: 1, APPEND: 2, COUNTER: 4 });
+
+/** D3D11_DSV_FLAG: what a depth-stencil view leaves unwritten. */
+export const D3D11_DSV_FLAG = Object.freeze({ READ_ONLY_DEPTH: 1, READ_ONLY_STENCIL: 2 });
+
+/** Direct3D 11's limits past 10's. */
+export const D3D11_LIMITS = Object.freeze({
+    VERTEX_INPUT_SLOTS: 32,
+    INPUT_ELEMENTS: 32,
+    UNORDERED_ACCESS_SLOTS: 8,
+    UNORDERED_ACCESS_SLOTS_1: 64,
+    MAX_TEXTURE1D_DIMENSION: 16384,
+    MAX_TEXTURE2D_DIMENSION: 16384,
+    MAX_TEXTURE3D_DIMENSION: 2048,
+    THREAD_GROUP_COUNT: 65535,
+});
+
+/** What D3D11_KEEP_UNORDERED_ACCESS_VIEWS and _KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL say. */
+export const D3D11_KEEP_UNORDERED_ACCESS_VIEWS = 0xffffffff;
+export const D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL = 0xffffffff;
+
+/** D3D11_DEVICE_CONTEXT_TYPE. */
+export const D3D11_DEVICE_CONTEXT = Object.freeze({ IMMEDIATE: 0, DEFERRED: 1 });
 
 export const D3D10_CLEAR = Object.freeze({ DEPTH: 1, STENCIL: 2 });
 

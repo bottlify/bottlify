@@ -10,12 +10,12 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DFMT,
-    D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat,
-    floatToDword,
+    D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK,
 } from './constants.js';
 import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D9 } from './device.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** Distinguishes "the call wrote nothing" from "the call wrote a zero". */
 const UNTOUCHED = Symbol('untouched');
@@ -177,7 +177,7 @@ test('POINTSIZE_MAX follows the reported maximum point size', ()=>{
     const out = {};
 
     assert.equal(device.GetRenderState(D3DRS.POINTSIZE_MAX, out), D3D_OK);
-    assert.equal(dwordToFloat(out.value ?? 0), 8.0);
+    assert.equal(bitsFloat(out.value ?? 0), 8.0);
 
     assertFullyReleased(device);
 });
@@ -187,10 +187,10 @@ test('a float render state is stored as the bit pattern the guest wrote', ()=>{
     /** @type {{ value?: number }} */
     const out = {};
 
-    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.25)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatBits(0.25)), D3D_OK);
     assert.equal(device.GetRenderState(D3DRS.FOGSTART, out), D3D_OK);
     assert.equal(out.value, 0x3e800000);
-    assert.equal(dwordToFloat(out.value ?? 0), 0.25);
+    assert.equal(bitsFloat(out.value ?? 0), 0.25);
 
     assertFullyReleased(device);
 });
@@ -569,14 +569,18 @@ test('a fresh device has a white material, not a black one', ()=>{
     assertFullyReleased(device);
 });
 
-test('sRGB reads and writes are not offered: nothing here reads or writes in that space', ()=>{
+test('sRGB reads and writes are offered for the eight-bit and DXT formats alone', ()=>{
     const d3d = createDirect3D9({});
-    assert.equal(d3d.CheckDeviceFormat(0x00010000, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8),
-        D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBREAD');
-    assert.equal(d3d.CheckDeviceFormat(0x00040000 | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
-        D3DFMT.A8R8G8B8), D3DERR_NOTAVAILABLE, 'D3DUSAGE_QUERY_SRGBWRITE');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK,
-        'the format itself is there');
+    const SRGBREAD = 0x00010000;
+    const SRGBWRITE = 0x00040000;
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBWRITE | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
+        D3DFMT.A8R8G8B8), D3D_OK);
+    assert.equal(d3d.CheckDeviceFormat(SRGBREAD, D3DRTYPE.TEXTURE, D3DFMT.A16B16G16R16F),
+        D3DERR_NOTAVAILABLE, 'a floating-point format is linear already');
+    assert.equal(d3d.CheckDeviceFormat(SRGBWRITE | D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE,
+        D3DFMT.A16B16G16R16F), D3DERR_NOTAVAILABLE);
 });
 
 // --- the block-compressed formats ---
@@ -828,6 +832,7 @@ const WIDE_FORMATS = [
     { format: D3DFMT.G32R32F, bytesPerPixel: 8 },
     { format: D3DFMT.A16B16G16R16, bytesPerPixel: 8 },
     { format: D3DFMT.G16R16, bytesPerPixel: 4 },
+    { format: D3DFMT.L16, bytesPerPixel: 2 },
 ];
 /** D3DUSAGE_QUERY_FILTER and D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING. */
 const QUERY_FILTER = 0x00020000;
@@ -1003,4 +1008,132 @@ test('GetAvailableTextureMem falls as default-pool resources are made and comes 
         assert.equal(managed.buffer.release(), 0);
         assert.equal(device.GetAvailableTextureMem(), start);
         assert.equal(device.release(), 0);
+
+        // An extended device's memory is virtual: nothing it makes is taken
+        // off (Wine's d3d9ex test_vidmem_accounting).
+        const d3d = createDirect3D9({ maxPointSize: MAX_POINT_SIZE });
+        /** @type {{ device?: any }} */
+        const ex = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64,
+            backBufferHeight: 64, backBufferFormat: D3DFMT.X8R8G8B8 }, ex, 0, {}, true), D3D_OK);
+        const before = ex.device.GetAvailableTextureMem();
+        /** @type {{ texture?: any }} */
+        const target = {};
+        assert.equal(ex.device.CreateTexture(1024, 1024, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, target), D3D_OK);
+        assert.equal(ex.device.GetAvailableTextureMem(), before);
+        // And its scene outlives a reset (Wine's d3d9ex test_scene).
+        assert.equal(ex.device.BeginScene(), D3D_OK);
+        assert.equal(ex.device.Reset({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferWidth: 64,
+            backBufferHeight: 64, backBufferFormat: D3DFMT.X8R8G8B8 }), D3D_OK);
+        assert.equal(ex.device.EndScene(), D3D_OK);
+        assert.equal(target.texture.release(), 0);
+        assert.equal(ex.device.release(), 0);
     });
+
+test('ATI1 and ATI2 lock a byte a pixel: the width for a pitch, a rectangle at top times it'
+    + ' plus left (test_lockrect_offset)', ()=>{
+    const device = createDevice();
+    for (const format of [D3DFMT.ATI1, D3DFMT.ATI2, D3DFMT.DXT1])
+    {
+        /** @type {{ surface?: any }} */
+        const made = {};
+        assert.equal(device.CreateOffscreenPlainSurface(128, 128, format, D3DPOOL.SCRATCH, made),
+            D3D_OK);
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const whole = {};
+        assert.equal(made.surface.LockRect(whole, null, 0), D3D_OK);
+        made.surface.UnlockRect();
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const part = {};
+        assert.equal(made.surface.LockRect(part, { left: 60, top: 60, right: 68, bottom: 68 }, 0),
+            D3D_OK);
+        made.surface.UnlockRect();
+        const [pitch, offset] = format === D3DFMT.DXT1 ? [256, 15 * 256 + 15 * 8] : [128, 7740];
+        assert.equal(whole.Pitch, pitch, `${format}`);
+        assert.equal((part.pBits ?? 0) - (whole.pBits ?? 0), offset, `${format}`);
+        made.surface.release();
+    }
+});
+
+test('a texture\'s levels lie one after another, a cube\'s faces each from a 16-byte boundary,'
+    + ' ATI1 and ATI2 a pitch a row of pixels (test_miptree_layout)', ()=>{
+    const device = createDevice();
+    for (const format of [D3DFMT.A8R8G8B8, D3DFMT.ATI1, D3DFMT.ATI2])
+    {
+        for (const pool of [D3DPOOL.MANAGED, D3DPOOL.SYSTEMMEM, D3DPOOL.SCRATCH])
+        {
+            /** @type {{ texture?: any }} */
+            const made = {};
+            assert.equal(device.CreateTexture(257, 257, 0, 0, format, pool, made), D3D_OK);
+            const levels = made.texture.levels;
+            let base = 0;
+            let offset = 0;
+            for (let level = 0; level < levels; level++)
+            {
+                /** @type {{ pBits?: number, Pitch?: number }} */
+                const locked = {};
+                assert.equal(made.texture.LockRect(level, locked, null, 0), D3D_OK);
+                if (level === 0)
+                {
+                    base = locked.pBits ?? 0;
+                }
+                assert.equal(locked.pBits, base + offset, `${format}, level ${level}`);
+                offset += (257 >> level) * (locked.Pitch ?? 0);
+                made.texture.UnlockRect(level);
+            }
+            made.texture.release();
+
+            assert.equal(device.CreateCubeTexture(257, 0, 0, format, pool, made), D3D_OK);
+            offset = 0;
+            for (let face = 0; face < 6; face++)
+            {
+                for (let level = 0; level < levels; level++)
+                {
+                    /** @type {{ pBits?: number, Pitch?: number }} */
+                    const locked = {};
+                    assert.equal(made.texture.LockCubeRect(face, level, locked, null, 0), D3D_OK);
+                    if (face === 0 && level === 0)
+                    {
+                        base = locked.pBits ?? 0;
+                    }
+                    assert.equal(locked.pBits, base + offset, `cube ${format}, face ${face},`
+                        + ` level ${level}`);
+                    offset += (257 >> level) * (locked.Pitch ?? 0);
+                    made.texture.UnlockCubeRect(face, level);
+                }
+                offset = (offset + 15) & ~15;
+            }
+            made.texture.release();
+        }
+    }
+});
+
+test('a packed video surface needs the driver in system memory too, and a compressed one in'
+    + ' video memory locks whole blocks (test_surface_blocks)', ()=>{
+    const device = createDevice();
+    /** @type {{ surface?: any, texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.YUY2, D3DPOOL.SYSTEMMEM, out),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.YUY2, D3DPOOL.SCRATCH, out),
+        D3D_OK);
+    out.surface.release();
+    for (const [pool, usage, answer] of [[D3DPOOL.DEFAULT, D3DUSAGE.DYNAMIC, D3DERR_INVALIDCALL],
+        [D3DPOOL.MANAGED, 0, D3D_OK], [D3DPOOL.SYSTEMMEM, 0, D3D_OK]])
+    {
+        assert.equal(device.CreateTexture(128, 128, 1, usage, D3DFMT.DXT1, pool, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.texture.LockRect(0, locked, { left: 2, top: 0, right: 4, bottom: 4 }, 0),
+            answer, `pool ${pool}`);
+        if (answer === D3D_OK)
+        {
+            out.texture.UnlockRect(0);
+        }
+        assert.equal(out.texture.LockRect(0, locked, { left: 4, top: 4, right: 8, bottom: 8 }, 0),
+            D3D_OK, 'a whole block');
+        out.texture.UnlockRect(0);
+        out.texture.release();
+    }
+});

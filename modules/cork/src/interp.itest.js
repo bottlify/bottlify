@@ -5,182 +5,68 @@
  */
 
 /**
- * The whole single-instruction corpus on the interpreter alone, against the
- * hardware recording. A case the evaluator has no model for is counted by its
- * opcode and not judged -- the list is the interpreter's work list, printed
- * with the count -- and every case it does run must leave what the recording
- * holds. This is the acceptance harness for step 5.2's families: the left-out
- * count falls commit by commit.
- *
- * Needs the corpus (`npm run fetch:corpus`).
+ * The hardware corpus on the interpreter alone: every case placed in a state
+ * block, run by the JavaScript interpreter over it, and judged against what the
+ * processor left (`testing/x86-corpus.js` says how). An instruction the
+ * interpreter has no model for fails the case as any divergence does.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { skipWithout } from './testing/fetched.js';
-import { readFile } from 'node:fs/promises';
-import { Fault, Unsupported, createState } from './ir.js';
-import { interpret } from './interp.js';
-import { BSS, BSS_SIZE, VECTOR_NAMES, diffFixture, loadCorpus } from './testing/corpus.js';
+import { Fault, Unsupported, blockState, interpret } from './interp.js';
+import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { createPageTable } from './runtime/pages.js';
+import { judgeAll, loadX86Corpus, outcomeOf, placeCase } from './testing/x86-corpus.js';
 
-const CORPUS = new URL('../vendor/nasm-corpus.json.gz', import.meta.url);
 const RAM = 2 << 20;
 const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
-/** Cases whose divergence is the 80-bit-versus-double design's own (plan 3.1). */
-const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
-test('the interpreter leaves what the hardware left, on every case it models',
-    { skip: skipWithout(CORPUS) },
-    async()=>{
-        const { cases } = loadCorpus(await readFile(CORPUS));
-        const selected = cases.filter(one=>ONLY.test(one.name));
-        /** @type {string[]} */
-        const failures = [];
-        /** @type {Map<string, number>} */
-        const leftOut = new Map();
-        let judged = 0;
-        let precision = 0;
-        let invalid = 0;
-        let died = 0;
-        const started = Date.now();
-        for (const one of selected)
+test('the interpreter leaves what the processor left, on every corpus case', ()=>{
+    const cases = loadX86Corpus().filter(one=>ONLY.test(one.name));
+    const layout = ownLayout({ ramSize: RAM, hashSlots: 1 << 16 });
+    const pages = pagesFor(layout, tablesSize(layout));
+    const memory = new WebAssembly.Memory({ initial: pages, maximum: pages });
+    createPageTable(memory, layout);
+    const view = new DataView(memory.buffer);
+    const bytes = new Uint8Array(memory.buffer);
+    const started = Date.now();
+    const result = judgeAll(cases, 'interpreter', one=>{
+        bytes.fill(0, 0, layout.ramBase + RAM);
+        placeCase(view, layout, one);
+        const state = blockState({ memory, layout });
+        /** @type {{ vector: number, eip: number } | null} */
+        let fault = null;
+        /** @type {Unsupported | null} */
+        let refused = null;
+        let left = 100_000;
+        try
         {
-            const ram = new Uint8Array(RAM);
-            const view = new DataView(ram.buffer);
-            /** @type {import('./ir.js').EvalState} */
-            let state;
-            // The run being interpreted, so a store into it ends the run as
-            // `blockState`'s memory does: the cases run a run at a time.
-            let watchStart = 0;
-            let watchEnd = 0;
-            const memory = {
-                /** @param {number} address @param {number} size */
-                read: (address, size)=>{
-                    if (address + size > RAM)
-                    {
-                        throw new Fault(13, state.eip);
-                    }
-                    return size === 1 ? ram[address]
-                        : size === 2 ? view.getUint16(address, true)
-                            : view.getUint32(address, true);
-                },
-                /** @param {number} address @param {number} size @param {number} value */
-                write: (address, size, value)=>{
-                    if (address + size > RAM)
-                    {
-                        throw new Fault(13, state.eip);
-                    }
-                    if (size === 1)
-                    {
-                        ram[address] = value;
-                    }
-                    else if (size === 2)
-                    {
-                        view.setUint16(address, value, true);
-                    }
-                    else
-                    {
-                        view.setUint32(address, value, true);
-                    }
-                    if (address < watchEnd && address + size > watchStart)
-                    {
-                        memory.hit = true;
-                    }
-                },
-                /** @param {number} start @param {number} end */
-                watch: (start, end)=>{
-                    watchStart = start;
-                    watchEnd = end;
-                    memory.hit = false;
-                },
-                hit: false,
-            };
-            for (const { address, bytes } of one.segments)
+            while (left > 0 && !state.halted)
             {
-                ram.set(bytes, address);
-            }
-            state = createState(memory, { eip: one.entry });
-            /** @type {{ name: string, eip: number } | null} */
-            let exception = null;
-            let left = 2_000_000;
-            try
-            {
-                while (left > 0 && !state.halted)
-                {
-                    left -= Math.max(interpret(state, Math.min(left, 100_000)), 1);
-                }
-            }
-            catch (e){
-                if (e instanceof Unsupported)
-                {
-                    // A decoder refusal at the address the hardware raised #UD
-                    // is that same invalid encoding, not a gap in the model --
-                    // the emitter's corpus counts it the same way.
-                    if (one.expected.exception === 'UD' && e.eip === one.expected.eip)
-                    {
-                        invalid++;
-                        continue;
-                    }
-                    leftOut.set(e.op, (leftOut.get(e.op) ?? 0) + 1);
-                    continue;
-                }
-                if (e instanceof Fault)
-                {
-                    exception = {
-                        name: /** @type {Record<number, string>} */ (VECTOR_NAMES)[e.vector]
-                            ?? `#${e.vector}`,
-                        eip: e.eip >>> 0,
-                    };
-                }
-                else
-                {
-                    throw e;
-                }
-            }
-            if (exception !== null && exception.name.startsWith('#'))
-            {
-                invalid++;
-                continue;
-            }
-            judged++;
-            died += exception ? 1 : 0;
-            const top = state.top;
-            const outcome = {
-                exception,
-                halted: state.halted,
-                reg32: Int32Array.from(state.reg, value=>value | 0),
-                eip: state.eip,
-                st: Array.from({ length: 8 }, (_, i)=>state.f80[(top + i) & 7]),
-                fstat: (state.status & ~0x3800 | top << 11) & 0xffff,
-                mm: Int32Array.from({ length: 16 }, (_, word)=>Number(
-                    state.f80bits[word >> 1] >> BigInt((word & 1) * 32) & 0xffffffffn) | 0),
-                xmm: Int32Array.from(state.xmm, word=>word | 0),
-                memory: new Int32Array(ram.buffer, BSS, BSS_SIZE / 4),
-                eflags: state.eflags >>> 0,
-            };
-            const divergences = diffFixture(one.expected, outcome);
-            if (divergences.length > 0 && X87_PRECISION.has(one.name))
-            {
-                precision++;
-                continue;
-            }
-            if (divergences.length > 0)
-            {
-                failures.push(`${one.name}: ${divergences.slice(0, 5)
-                    .map(d=>`${d.name} expected ${String(d.expected)} got ${String(d.actual)}`)
-                    .join('; ')}`);
+                left -= Math.max(interpret(state, Math.min(left, 10_000)), 1);
             }
         }
-        const top = [...leftOut].sort((a, b)=>b[1] - a[1]).slice(0, 24)
-            .map(([opcode, count])=>`${opcode}×${count}`).join(' ');
-        console.log(`interpreted: ${judged} cases judged (${died} died as recorded),`
-            + ` ${invalid} invalid encodings, ${leftOut.size} opcodes left out,`
-            + ` ${failures.length} diverged, ${precision} x87.precision,`
-            + ` ${((Date.now() - started) / 1000).toFixed(1)} s; left out: ${top}`);
-        assert.equal(failures.length, 0,
-            `${failures.length} diverged:\n${failures.slice(0, 40).join('\n')}`);
-        assert.ok(judged > 0);
-        assert.equal(precision, X87_PRECISION.size,
-            'every named precision case still diverges, and no other');
+        catch (e){
+            if (e instanceof Unsupported)
+            {
+                refused = e;
+            }
+            else if (e instanceof Fault)
+            {
+                fault = { vector: e.vector, eip: e.eip >>> 0 };
+            }
+            else
+            {
+                throw e;
+            }
+        }
+        state.syncOut();
+        const outcome = outcomeOf(view, layout, { fault, halted: state.halted });
+        return refused ? { unsupported: refused.op, eip: refused.eip ?? -1, outcome } : { outcome };
     });
-
+    console.log(`interpreter: ${result.summary}, ${((Date.now() - started) / 1000).toFixed(1)} s`);
+    assert.deepEqual(result.stale, [], 'listed as known failures, and passing');
+    assert.equal(result.failures.length, 0,
+        `${result.failures.length} diverged:\n${result.failures.slice(0, 40).join('\n')}`);
+    assert.ok(result.judged > 0);
+});

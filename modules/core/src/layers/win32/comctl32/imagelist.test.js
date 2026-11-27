@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createImageLists } from './imagelist.js';
 import { createImageListIcons } from './imagelist-icon.js';
+import { IID_IIMAGELIST2 } from './imagelist-com.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
@@ -38,11 +39,11 @@ const SRCCOPY = 0x00cc0020;
 const SRCINVERT = 0x00660046;
 
 /**
- * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined) }}
- *     [wired]
+ * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined),
+ *     ownInstance?: () => number, vtables?: { publish: (object: any) => number } }} [wired]
  */
 function machine(wired = {}){
-    const bytes = new Uint8Array(0x40000);
+    const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let next = 0x10000;
     let handle = 4;
@@ -68,12 +69,18 @@ function machine(wired = {}){
     });
     const gdi32 = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
         /** @type {unknown} */ (gdi.table));
+    // Guest memory a list describes its image in, from the top of the space.
+    let scratch = 0x100000;
     const lists = createImageLists({
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
+        allocate: size=>(scratch -= (size + 15) & ~15),
+        release: ()=>undefined,
         gdi32: name=>gdi32[name],
         user32: wired.user32,
+        ownInstance: wired.ownInstance,
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+        vtables: wired.vtables,
     });
     const fns = /** @type {Record<string, { argBytes: number,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (lists.functions));
@@ -146,6 +153,20 @@ test('a list loaded out of a bitmap resource is cut into images cx wide', ()=>{
     assert.equal(fns.ImageList_GetImageCount.handler([square]), 2, 'a cx of 0 cuts squares');
     assert.equal(fns.ImageList_LoadImageA.handler([0x400000, 0x71, 16, 10, CLR_NONE, 1, 0]), 0,
         'an icon resource is not loaded');
+});
+
+test('comctl32\'s own standard strips load at their size, blank, without user32', ()=>{
+    // Wine's rebar test makes a band's image list of resource 121, the
+    // standard strip 24 pixels square.
+    const { fns, view } = machine({ ownInstance: ()=>0x70000000,
+        user32: ()=>({ handler: ()=>assert.fail('no module holds these here') }) });
+    const list = fns.ImageList_LoadImageA.handler([0x70000000, 121, 24, 2, CLR_NONE, 0, 0]);
+    assert.notEqual(list, 0);
+    assert.equal(fns.ImageList_GetImageCount.handler([list]), 15);
+    fns.ImageList_GetIconSize.handler([list, OUT, OUT + 4]);
+    assert.deepEqual([view.getInt32(OUT, true), view.getInt32(OUT + 4, true)], [24, 24]);
+    const small = fns.ImageList_LoadImageA.handler([0x70000000, 130, 16, 2, CLR_NONE, 0, 0]);
+    assert.equal(fns.ImageList_GetImageCount.handler([small]), 5);
 });
 
 test('ImageList_DrawIndirect refuses no structure, no DC, no list and a missing image', ()=>{
@@ -516,6 +537,156 @@ test('ImageList_Duplicate is a list of its own with the same images', ()=>{
     assert.equal(m.fns.ImageList_Duplicate.handler([0xdeadbeef]), 0);
     assert.equal(m.fns.ImageList_Duplicate.argBytes, 4);
 });
+
+test('ImageList_Copy moves or swaps images within one list, and refuses between two', ()=>{
+    const m = machine();
+    const list = maskedList(m, [[[0x111111, 0x222222], [false, true]],
+        [[0x333333, 0x444444], [false, false]]]);
+    const other = maskedList(m, [[[0x555555, 0x666666], [false, false]]]);
+    assert.equal(m.fns.ImageList_Copy.handler([other, 0, list, 1, 0]), 0, 'between two lists');
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 2, 0]), 0, 'past the end');
+    const screen = m.target(2);
+    const drawn = (/** @type {number} */ index)=>{
+        screen.fill(0x777777);
+        m.fns.ImageList_Draw.handler([list, index, screen.dc, 0, 0, ILD_TRANSPARENT]);
+        return screen.pixels().map(pixel=>pixel & 0xffffff);
+    };
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 1, 1]), 1, 'ILCF_SWAP');
+    assert.deepEqual(drawn(0), [0x333333, 0x444444]);
+    assert.deepEqual(drawn(1), [0x111111, 0x777777], 'the mask went with it');
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 1, 0]), 1, 'ILCF_MOVE');
+    assert.deepEqual(drawn(0), [0x111111, 0x777777]);
+    assert.equal(m.fns.ImageList_GetFlags.handler([list]) & ILC_MASK, ILC_MASK);
+    assert.equal(m.fns.ImageList_Copy.argBytes, 20);
+});
+
+/**
+ * A list's image's bits a pixel and colour table, 0xRRGGBB, as Wine's
+ * test_color_table reads them: through GetImageInfo's bitmap.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} list
+ */
+function imageOf(m, list){
+    if (m.fns.ImageList_GetImageCount.handler([list]) === 0)
+    {
+        // GetImageInfo answers for an image there: a 32-bit one, no colours of its own.
+        m.fns.ImageList_Add.handler([list, m.section(16, 16, Array(256).fill(0)).bitmap, 0]);
+    }
+    assert.equal(m.fns.ImageList_GetImageInfo.handler([list, 0, OUT]), 1);
+    const bitmap = m.view.getUint32(OUT, true);
+    const dc = m.gdi32.CreateCompatibleDC.handler([0]);
+    m.gdi32.SelectObject.handler([dc, bitmap]);
+    const count = m.gdi32.GetDIBColorTable.handler([dc, 0, 256, BITS]);
+    m.gdi32.DeleteDC.handler([dc]);
+    m.gdi32.GetObjectA.handler([bitmap, 24, PARAMS]);
+    return { bits: m.view.getUint16(PARAMS + 18, true), colors: Array.from({ length: count },
+        (_, index)=>m.view.getUint32(BITS + index * 4, true) & 0xffffff) };
+}
+
+test('a list of four or eight bits a pixel keeps its image at that depth, with the VGA or the '
+    + 'system\'s table', ()=>{
+    // test_color_table: the defaults Windows gives each depth.
+    const m = machine();
+    const four = imageOf(m, m.fns.ImageList_Create.handler([16, 16, 0x0004, 1, 1]));
+    assert.equal(four.bits, 4);
+    assert.deepEqual(four.colors.slice(0, 9),
+        [0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xc0c0c0, 0x808080]);
+    const eight = imageOf(m, m.fns.ImageList_Create.handler([16, 16, 0x0008, 1, 1]));
+    assert.equal(eight.bits, 8);
+    assert.equal(eight.colors.length, 256);
+    assert.equal(eight.colors[9], 0x000033, 'the cube starts at 000033');
+    assert.equal(imageOf(m, m.fns.ImageList_Create.handler([16, 16, 0x0018, 1, 1])).bits, 24);
+});
+
+test('ImageList_SetColorTable sets the entries a palette of the list\'s depth has, in its '
+    + 'image', ()=>{
+    const m = machine();
+    const four = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+    const deep = m.fns.ImageList_Create.handler([1, 1, ILC_COLOR32, 1, 1]);
+    // cc0000 and 0000cc, as RGBQUADs.
+    m.view.setUint32(PARAMS + 0x40, 0x00cc0000, true);
+    m.view.setUint32(PARAMS + 0x44, 0x000000cc, true);
+    assert.equal(m.fns['#390'].handler([four, 0, 2, PARAMS + 0x40]), 2);
+    assert.deepEqual(imageOf(m, four).colors.slice(0, 3), [0xcc0000, 0x0000cc, 0x008000]);
+    assert.equal(m.fns['#390'].handler([four, 14, 8, PARAMS + 0x40]), 2, 'no further than sixteen');
+    assert.equal(m.fns['#390'].handler([deep, 0, 2, PARAMS + 0x40]), 0, 'no palette at 32 bits');
+    assert.equal(m.fns.ImageList_GetFlags.handler([four]), 0x0004);
+});
+
+test('the first bitmap a list of a palette is given brings its colour table', ()=>{
+    // test_color_table's "add 4": a four-bit DIB's colours become the list's.
+    const m = machine();
+    const list = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+    m.bytes.fill(0, INFO, INFO + 40 + 64);
+    m.view.setUint32(INFO, 40, true);
+    m.view.setInt32(INFO + 4, 1, true);
+    m.view.setInt32(INFO + 8, 1, true);
+    m.view.setUint16(INFO + 12, 1, true);
+    m.view.setUint16(INFO + 14, 4, true);
+    [0xff00ff, 0xffff00, 0x00ffff].forEach((rgb, index)=>m.view.setUint32(INFO + 40 + index * 4,
+        rgb, true));
+    const bitmap = m.gdi32.CreateDIBSection.handler([0, INFO, 0, POINTER, 0, 0]);
+    assert.equal(m.fns.ImageList_Add.handler([list, bitmap, 0]), 0);
+    assert.deepEqual(imageOf(m, list).colors.slice(0, 3), [0xff00ff, 0xffff00, 0x00ffff]);
+});
+
+test('IImageList::GetItemFlags says which images of a 32-bit list came with alpha', ()=>{
+    // Wine's test_alpha and test_IImageList_GetItemFlags.
+    /** @type {Map<number, any>} */
+    const published = new Map();
+    let next = 0x9000;
+    const m = machine({ vtables: { publish: object=>{
+        published.set(next, object);
+        return (next += 0x10) - 0x10;
+    } } });
+    const list = m.fns.ImageList_Create.handler([2, 1, ILC_COLOR32 | 0x0001, 0, 4]);
+    const flags = (/** @type {number} */ index, /** @type {number} */ out = OUT)=>published
+        .get(list).interfaceFor(IID_IIMAGELIST2).methods
+        .find((/** @type {any} */ x)=>x.name === 'GetItemFlags')
+        .invoke(published.get(list), [index, out]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x00654321, 0x00abcdef]).bitmap, 0]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x00654321, 0x89abcdef]).bitmap, 0]);
+    assert.equal(flags(0), 0);
+    assert.equal(m.view.getUint32(OUT, true), 0, 'no alpha');
+    assert.equal(flags(1), 0);
+    assert.equal(m.view.getUint32(OUT, true), 1, 'ILIF_ALPHA');
+    assert.equal(flags(2) | 0, 0x80070057 | 0, 'no such image: E_INVALIDARG');
+    assert.equal(flags(0, 0) | 0, 0x80070057 | 0, 'nowhere to answer');
+    m.fns.ImageList_Remove.handler([list, 0]);
+    flags(0);
+    assert.equal(m.view.getUint32(OUT, true), 1, 'the flag moves down with its image');
+});
+
+test('a list\'s colour table is set once: later bitmaps, an emptied list\'s included, leave it',
+    ()=>{
+        // test_color_table's "remove all, add 4" and "SetColorTable".
+        const m = machine();
+        /** A four-bit DIB whose first three colours are these. @param {number[]} colors */
+        const dib = colors=>{
+            m.bytes.fill(0, INFO, INFO + 40 + 64);
+            m.view.setUint32(INFO, 40, true);
+            m.view.setInt32(INFO + 4, 1, true);
+            m.view.setInt32(INFO + 8, 1, true);
+            m.view.setUint16(INFO + 12, 1, true);
+            m.view.setUint16(INFO + 14, 4, true);
+            colors.forEach((rgb, index)=>m.view.setUint32(INFO + 40 + index * 4, rgb, true));
+            return m.gdi32.CreateDIBSection.handler([0, INFO, 0, POINTER, 0, 0]);
+        };
+        const list = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+        m.fns.ImageList_Add.handler([list, dib([0xff0000, 0x00ff00, 0x0000ff]), 0]);
+        m.fns.ImageList_Remove.handler([list, -1]);
+        m.fns.ImageList_Add.handler([list, dib([0xff00ff, 0xffff00, 0x00ffff]), 0]);
+        assert.deepEqual(imageOf(m, list).colors.slice(0, 3), [0xff0000, 0x00ff00, 0x0000ff],
+            'the first table stays');
+
+        const set = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+        m.view.setUint32(PARAMS + 0x40, 0x00cc0000, true);
+        m.view.setUint32(PARAMS + 0x44, 0x000000cc, true);
+        assert.equal(m.fns['#390'].handler([set, 0, 2, PARAMS + 0x40]), 2, 'before any image');
+        m.fns.ImageList_Add.handler([set, dib([0xff00ff, 0xffff00, 0x00ffff]), 0]);
+        assert.deepEqual(imageOf(m, set).colors.slice(0, 4),
+            [0xcc0000, 0x0000cc, 0x008000, 0x808000], 'the set entries, the defaults after');
+    });
 
 test('ImageList_LoadImageW loads through user32\'s wide LoadImage', ()=>{
     /** @type {string[]} */

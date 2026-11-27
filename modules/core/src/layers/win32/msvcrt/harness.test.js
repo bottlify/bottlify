@@ -7,10 +7,10 @@
 /**
  * The guest memory the msvcrt tests run against.
  *
- * `readMemory` hands back a view rather than a copy, deliberately: that is what
- * the real memory layer does, and a function that reads a block and then writes
- * over it -- a swap, an overlapping move -- only fails when the read is a view.
- * A test double that copied would pass either way.
+ * `readMemory` hands back bytes of the caller's own, as the memory layer does
+ * (`MsvcrtHost.readMemory`): the handlers take a copy's `.buffer` and keep what
+ * they read across writes, so a double that handed out a view would test code
+ * no run executes.
  */
 
 import { test } from 'node:test';
@@ -34,7 +34,7 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
 
         /**
          * Bytes the handlers asked memory for, reads only. The real layer
-         * counts what its scan hands the emulator; counting what the fake is
+         * counts what its scan reads; counting what the fake is
          * asked is the same measurement from this side of the seam.
          */
         asked: 0,
@@ -42,7 +42,7 @@ export function fakeMemory(base = 0x10000, size = 1 << 20){
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>{
             memory.asked += length;
-            return bytes.subarray(address, address + length);
+            return bytes.slice(address, address + length);
         },
 
         /** @param {number} address @param {Uint8Array} source */
@@ -196,6 +196,19 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
             volume.reads++;
             const bytes = files[node].slice(at, at + length);
             return late ? Promise.resolve(bytes) : bytes;
+        },
+        /**
+         * @param {string} node @param {number} at @param {number} length
+         * @param {(bytes: Uint8Array, offset: number) => void} put
+         */
+        readInto(node, at, length, put){
+            volume.reads++;
+            const bytes = files[node].subarray(at, at + length);
+            const handed = ()=>{
+                put(bytes, 0);
+                return bytes.length;
+            };
+            return late ? Promise.resolve().then(handed) : handed();
         },
         /** @param {string} node @param {number} at @param {Uint8Array} bytes */
         write(node, at, bytes){
@@ -351,13 +364,15 @@ export function fakeFpu(){
     };
 }
 
-test('the double reads back as a view, so a swap must copy to be correct', ()=>{
+test('the double reads back bytes of the caller\'s own, as the memory layer does', ()=>{
     const memory = fakeMemory();
     const at = memory.put('ab');
-    const view = memory.readMemory(at, 2);
+    const read = memory.readMemory(at, 2);
     memory.writeMemory(at, new Uint8Array([0x7a]));
-    assert.equal(view[0], 0x7a, 'a view follows the write');
-    assert.equal(memory.readMemory(at, 2).slice()[0], 0x7a);
+    assert.equal(read[0], 0x61, 'a write after the read does not reach it');
+    assert.equal(read.byteOffset, 0, 'a buffer of its own, whole');
+    assert.equal(read.buffer.byteLength, 2);
+    assert.equal(memory.readMemory(at, 2)[0], 0x7a);
 });
 
 test('strings placed by the harness read back through readCString', ()=>{

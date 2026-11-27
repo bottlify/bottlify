@@ -47,7 +47,8 @@ import { open, stat, readdir, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import zlib from 'node:zlib';
-import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, crc32 } from './bundle.js';
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, DEFAULT_BLOCK_SIZE, crc32 }
+    from './bundle.js';
 
 // Re-exported from the reader rather than restated here. A writer and a reader
 // that each carry their own copy of a magic number, a header size or a version
@@ -58,30 +59,8 @@ import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, crc32 } f
 // is free and the two disagree often enough to matter. A reader must be able to
 // decode whatever it finds; the manifest names the set a bundle actually used,
 // so one that only has deflate can be told before it fetches anything.
-export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec };
+export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, DEFAULT_BLOCK_SIZE };
 
-/**
- * A quarter of a mebibyte.
- *
- * The block is not the granularity of a request -- runs of blocks are coalesced
- * up to a separate cap, and the rest of the bundle is filled in while nothing is
- * being read -- so the two numbers are independent knobs and this one answers
- * only one question: how long a guest thread is held.
- *
- * A thread that reads a byte nobody has fetched is parked for one whole block,
- * however few bytes it asked for. That is the cost this is chosen against, and
- * it outranks what a larger block would win. Compression context and index size
- * both improve with size and neither is worth holding a thread: about 21 ms here
- * on a domestic connection, against a third of a second at 4 MiB and five
- * seconds at 64.
- *
- * A measurement once had this size beating 1, 4 and 16 MiB on ratio as well.
- * That part was an artefact of the probe below, which was then capped and so
- * judged a large block on an ever smaller fraction of itself. The probe is an
- * uncapped fraction now, so that comparison would have to be run again -- but
- * its outcome would not move this number, because latency decides it.
- */
-export const DEFAULT_BLOCK_SIZE = 1 << 18;
 
 /**
  * A block is stored uncompressed unless compression saves at least this much.
@@ -112,17 +91,8 @@ const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
     zlib.deflateRawSync(bytes, { level });
 const inflate = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.inflateRawSync(bytes);
 
-/**
- * zstd at its slowest and densest setting.
- *
- * Affordable because a bundle is packed once, offline, and because the probe
- * below means only the blocks that will actually compress are ever handed to
- * it -- three per cent of a large game.
- */
-const ZSTD_LEVEL = 19;
-const zstdPack = (/** @type {Buffer} */ bytes)=>zlib.zstdCompressSync(bytes, {
-    params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_LEVEL },
-});
+// Bundles packed before deflate became the only codec carry zstd blocks, so
+// they are still read; nothing writes them.
 const zstdUnpack = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.zstdDecompressSync(bytes);
 
 /**
@@ -141,16 +111,9 @@ export function packBlock(block, level = 9){
         return { codec: Codec.STORED, bytes: block };
     }
 
-    // Both, and keep the smaller. Packing twice costs build time, which is
-    // spent once and by us; a byte saved is paid for by every download.
-    const candidates = [
-        { codec: Codec.DEFLATE_RAW, bytes: deflate(block, level) },
-        { codec: Codec.ZSTD, bytes: zstdPack(block) },
-    ].sort((a, b)=>a.bytes.length - b.bytes.length);
-
-    const best = candidates[0];
-    return best.bytes.length <= block.length * (1 - MIN_SAVING)
-        ? best
+    const packed = deflate(block, level);
+    return packed.length <= block.length * (1 - MIN_SAVING)
+        ? { codec: Codec.DEFLATE_RAW, bytes: packed }
         : { codec: Codec.STORED, bytes: block };
 }
 
@@ -275,6 +238,8 @@ async function writeTranslations(handle, seed, blocks, cursor, { blockSize, leve
  * @param {number} [options.blockSize]
  * @param {number} [options.level]
  * @param {boolean} [options.store]     Store everything; skip compression entirely.
+ * @param {(block: Buffer, level: number) => { codec: number, bytes: Buffer }} [options.pack]
+ *     How a block is stored (`packBlock`); a test writes the codecs older bundles carry.
  * @param {Uint8Array} [options.translations]  A translation seed to carry.
  * @param {(progress: any) => void} [options.onProgress]
  * @returns {Promise<any>} what the manifest needs to know about the bundle
@@ -282,7 +247,7 @@ async function writeTranslations(handle, seed, blocks, cursor, { blockSize, leve
 export async function writeBundle(options){
     const {
         root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
-        translations,
+        translations, pack = packBlock,
     } = options;
     const { files, directories } = await scanTree(root);
     const handle = await open(output, 'w');
@@ -320,7 +285,7 @@ export async function writeBundle(options){
             fileDigest.update(block);
             const { codec, bytes } = store
                 ? { codec: Codec.STORED, bytes: block }
-                : packBlock(block, level);
+                : pack(block, level);
             await handle.write(bytes, 0, bytes.length, cursor);
             digest.update(bytes);
             // Over the stored bytes, not the block's contents: this is checked
@@ -584,8 +549,9 @@ export async function openBundle(path){
 }
 
 /**
- * Reads a whole bundle back and checks every file against the digest recorded
- * when it was written.
+ * Reads a whole bundle back and checks every block against its checksum and
+ * every file against the digest recorded when it was written, where there is
+ * one: `bad` names, once, each file a damaged block or a wrong digest is in.
  *
  * @param {string} path
  * @param {(progress: any) => void} [onProgress]
@@ -596,14 +562,59 @@ export async function verifyBundle(path, onProgress){
     /** @type {string[]} */
     const bad = [];
 
+    // Every block against the checksum its index records, as a page checks
+    // each block it fetches: a bundle written in place records no file
+    // digests, and checking only those passed it with nothing checked.
+    let blocksChecked = 0;
+    /** @type {number[]} */
+    const badBlocks = [];
+    const handle = await open(path, 'r');
+    try
+    {
+        for (let at = 0; at < bundle.index.blocks.length; at++)
+        {
+            const block = bundle.index.blocks[at];
+            if (block.crc === null || block.crc === undefined)
+            {
+                continue;
+            }
+            const raw = Buffer.alloc(block.packed);
+            await handle.read(raw, 0, block.packed, block.offset);
+            if (crc32(raw) !== block.crc)
+            {
+                badBlocks.push(at);
+            }
+            blocksChecked++;
+        }
+    }
+    finally
+    {
+        await handle.close();
+    }
+    for (const at of badBlocks)
+    {
+        for (const file of bundle.list().filter((/** @type {any} */ one)=>one.blocks > 0
+            && at >= one.firstBlock && at < one.firstBlock + one.blocks))
+        {
+            if (!bad.includes(file.path))
+            {
+                bad.push(file.path);
+            }
+        }
+    }
+
     for (const file of bundle.list())
     {
+        if (file.sha256 === undefined)
+        {
+            continue;
+        }
         const digest = createHash('sha256');
         for (let at = 0; at < file.size; at += bundle.blockSize)
         {
             digest.update(await bundle.read(file.path, at, bundle.blockSize));
         }
-        if (digest.digest('hex') !== file.sha256)
+        if (digest.digest('hex') !== file.sha256 && !bad.includes(file.path))
         {
             bad.push(file.path);
         }
@@ -621,7 +632,7 @@ export async function verifyBundle(path, onProgress){
     }
 
     await bundle.close();
-    return { checked, bad };
+    return { checked, blocksChecked, badBlocks, bad };
 }
 
 /** @param {string} directory */

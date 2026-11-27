@@ -5,11 +5,22 @@
  */
 
 import { encodeAnsi } from './locale.js';
-import { isStandardHandle, untagged } from './handle-tags.js';
+import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
+import { askChild, childThread, threadEnd } from './cross-process.js';
+import { MODIFY_STATE, SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
-import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMutexCode,
-    waitOneCode } from './wait-one.js';
+import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
+import { createSyncNatives } from './sync-natives.js';
+import { createDirectoryNatives } from './object-directories.js';
+import { overlappedLayout } from '../common/overlapped.js';
+import { wholeAddress } from '../common/pointers.js';
+import { readSecurityAttributes } from '../common/security-attributes.js';
+import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
+    releaseMutexCode, waitOneCode } from './wait-one.js';
+import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
+import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -32,23 +43,11 @@ import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMute
  *     PollBuilder
  */
 
+/** The console's own handles (`console.js`), which duplicate as themselves. */
+const CONSOLE_HANDLES = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
+
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
-
-/**
- * A thread's wait on a child process, marked so the child's exit wakes it
- * only while it is still that wait: one that timed out and went on to wait
- * on something else is not woken out of that by a child it stopped waiting
- * for.
- *
- * @param {any} thread @param {string} reason  what the thread is blocked on
- * @returns {() => boolean} whether the thread is still in this wait
- */
-export function childWaitMark(thread, reason){
-    const mark = {};
-    thread.childWait = mark;
-    return ()=>thread.childWait === mark && thread.waitingOn === reason;
-}
 
 /** What the guest gets back when a handle is not what it claims to be. */
 const WAIT_FAILED = 0xffffffff;
@@ -56,8 +55,6 @@ const WAIT_FAILED = 0xffffffff;
 const WAIT_TIMEOUT = 0x102;
 /** The object was signalled: the first of a set, or the one. */
 const WAIT_OBJECT_0 = 0;
-/** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
-const FILETIME_EPOCH_MS = 11644473600000;
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -69,18 +66,27 @@ const ERROR_FILE_NOT_FOUND = 2;
 
 /** A name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
+/**
+ * An object's name is read whole, as Windows reads it, up to what a name may
+ * hold: two longer names that share their first 259 characters are two objects.
+ */
+const WHOLE_NAME = 32767;
+const ERROR_FILENAME_EXCED_RANGE = 206;
+/** What reading an ANSI name of MAX_PATH characters or more throws, to refuse the call. */
+const TOO_LONG = Symbol('a name too long');
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_NOT_OWNER = 288;
 const ERROR_INVALID_PARAMETER = 87;
+/** ReleaseSemaphore past the semaphore's maximum. */
+const ERROR_TOO_MANY_POSTS = 298;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
 /** GetOverlappedResult on an operation still in progress, asked not to wait. */
 const ERROR_IO_INCOMPLETE = 996;
 
 /** OVERLAPPED: the operation's status, its byte count, and the event it signals. */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_EVENT = 16;
 
 /**
  * How long SwitchToThread stands aside when only threads of lower priority are
@@ -99,17 +105,23 @@ const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 /** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
 const CREATE_SUSPENDED = 0x4;
 
-/** DuplicateHandle's one option that changes what it does. */
+/** DuplicateHandle's options: close the source, and give the copy the source's rights. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
+const DUPLICATE_SAME_ACCESS = 0x00000002;
 
 /**
  * @typedef {Object} ThreadingHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, for a thread made or waited on there.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(thread: any, code: number) => Promise<number> | null} [endThread]
  *           Ends a thread that ended itself, and the process with it when it
  *           was the last: null once it has, or the promise of telling the
@@ -117,9 +129,16 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {() => number} [threadStart]
  *           Where a new thread begins: the libraries told of it, then its start
  *           routine. Zero, or absent, and it begins in its start routine.
+ * @property {() => boolean} [terminating]  Whether the process has begun to end,
+ *           after which CreateThread makes no thread (ERROR_ACCESS_DENIED).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
+ * @property {(object: object, sd: number) => void} [recordObjectSecurity]
+ *           Keeps the SECURITY_ATTRIBUTES' descriptor a freshly created sync
+ *           object was given, so GetKernelObjectSecurity hands it back.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
+ * @property {(handle: number, object: any) => void} [closed]  told of each handle
+ *     CloseHandle closes and what it named
  *           The one table every named sync object and file mapping shares --
  *           constructed once outside this process so a name a parent gave an
  *           object still finds it after a replacement rebuilds this layer.
@@ -133,12 +152,32 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           and if nothing notices it stays runnable for ever, is picked every
  *           turn, retires nothing, and keeps whatever it was holding.
  * @property {number} [processId]      What the running process is numbered.
+ * @property {number} [parentProcessId]  The process that started it, 0 for none.
+ * @property {() => import('../ntdll/query.js').SystemProcess[]} [processes]
+ *           The run's processes as a snapshot lists them, this one first and
+ *           its threads in the order they were made: the list
+ *           SystemProcessInformation answers from. Without it, `listProcesses`
+ *           of the kernel given.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {() => { name: string, base: number, size?: number, path?: string }[]} [modules]
  *           The modules the process has loaded, the image first, for a snapshot's
  *           module list.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(process: number) => ({ typeOf: (handle: number) => string | null,
+ *     resolve: (handle: number) => any,
+ *     open: (type: string, object: any, access?: number | null) => number,
+ *     access?: (handle: number) => number | null,
+ *     close: (handle: number) => any } | null)} [processTable]
+ *     The handle table of another process of the run on this thread, by its
+ *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
+ * @property {Map<number, number>} [handleFlags]  The process's handles' HANDLE_FLAG_*
+ *     flags, kept by whoever starts its children; absent, its own.
+ * @property {(handle: number) => boolean} [isSocket]
+ *           Whether winsock holds a socket by this number, which the handle
+ *           flags are kept for as for a kernel object's.
  * @property {(node: any) => void} [retainNode]
+ * @property {(node: any) => void} [closeNode]  gives a hold back, closing the node
+ *           with the last
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
  *           handle takes, so closing its source leaves the file open.
@@ -157,6 +196,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
  *           without it DuplicateHandle refuses rather than guessing.
+ * @property {{ setInheritable: (handle: number, on: boolean) => void,
+ *     waitable?: (handle: number) => any }} [pipes]
+ *           Told what a pipe handle's inheritance is set to, which a child reads.
  */
 
 /** PROCESSENTRY32, as a caller of the era declares it: 296 bytes. */
@@ -202,12 +244,57 @@ const HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2;
 const NORMAL_PRIORITY_BASE = 8;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+/** CreateWaitableTimerEx's flags. */
+const CREATE_WAITABLE_TIMER_MANUAL_RESET = 0x1;
+const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
 
 /**
  * @typedef {{ id: number, parent: number, threads: number, path: string }} SnapshotProcess
  * @typedef {{ id: number, owner: number }} SnapshotThread
  * @typedef {{ base: number, size: number, path: string }} SnapshotModule
  */
+
+/**
+ * Whether a thread is still an object of its process: running, or ended and
+ * held by a handle, as Windows keeps a thread's object - in its process's
+ * list, to be opened by id - until its last reference goes.
+ *
+ * @param {any} kernel @param {any} thread
+ */
+const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
+    || kernel.handles?.holds?.(thread) === true;
+
+/**
+ * The run's processes as a snapshot lists them: this one, its threads in the
+ * order they were made (ids are taken in that order; the scheduler's own list
+ * is rotated as threads take turns) while each is an object
+ * (`threadObjectLives`), then the children it started that are
+ * still running, each with the first thread it was told of.
+ *
+ * @param {any} kernel
+ * @param {{ id: number, parent: number, path: string }} self
+ * @returns {import('../ntdll/query.js').SystemProcess[]}
+ */
+export function listProcesses(kernel, self){
+    const own = kernel.processes?.all() ?? [];
+    // This process's children, then every other process of the run its
+    // directory holds: a grandchild is in a snapshot of the run as on Windows.
+    const others = (kernel.processes?.run?.() ?? []).filter((/** @type {any} */ record)=>
+        (record.id >>> 0) !== (self.id >>> 0) && !own.includes(record));
+    return [
+        { ...self, threads: (kernel.threads?.() ?? [])
+            .filter((/** @type {any} */ thread)=>threadObjectLives(kernel, thread))
+            .map((/** @type {any} */ thread)=>thread.id >>> 0)
+            .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
+        ...[...own, ...others]
+            .filter((/** @type {any} */ child)=>!child.completed
+                && child.exitCode === kernel.processes.STILL_ACTIVE)
+            .map((/** @type {any} */ child)=>({
+                id: child.id >>> 0, parent: own.includes(child) ? self.id : child.parentId >>> 0,
+                path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
+            })),
+    ];
+}
 
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32 = (bytes, at)=>
@@ -222,6 +309,7 @@ const readU32 = (bytes, at)=>
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
+    const overlappedFields = overlappedLayout(host.pointerSize);
     /**
      * @param {number} handle
      * @returns {{ flags: number, processes: SnapshotProcess[], threads: SnapshotThread[],
@@ -265,7 +353,7 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_NO_MORE_FILES);
             return 0;
         }
-        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
+        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -303,7 +391,7 @@ export function createThreadingFunctions(host){
             view.setUint32(THREADENTRY32.tpBasePri, NORMAL_PRIORITY_BASE, true);
             snapshot.thread = at + 1;
         }
-        host.writeMemory(entry >>> 0, bytes);
+        host.writeMemory(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -332,7 +420,7 @@ export function createThreadingFunctions(host){
         }
         const unit = wide ? 2 : 1;
         const size = MODULEENTRY32.szModule + (MODULEENTRY32.NAME + MAX_PATH) * unit;
-        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
+        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -365,7 +453,7 @@ export function createThreadingFunctions(host){
             MODULEENTRY32.NAME);
         put(module.path, MODULEENTRY32.szModule + MODULEENTRY32.NAME * unit, MAX_PATH);
         snapshot.module = at + 1;
-        host.writeMemory(entry >>> 0, bytes);
+        host.writeMemory(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -451,13 +539,42 @@ export function createThreadingFunctions(host){
 
     /**
      * HANDLE_FLAG_INHERIT and HANDLE_FLAG_PROTECT_FROM_CLOSE, by handle: what
-     * a duplicate was made inheritable with and SetHandleInformation set.
-     * Handles are not reissued while the table has fresh ones, so an entry
-     * outliving its handle names nothing.
+     * a handle was made or opened inheritable with, a duplicate was made
+     * with and SetHandleInformation set; the process's own, which a child it
+     * starts with bInheritHandles takes (`inheritedObjects`). Handles are not
+     * reissued while the table has fresh ones, so an entry outliving its
+     * handle names nothing.
      *
      * @type {Map<number, number>}
      */
-    const handleFlags = new Map();
+    const handleFlags = host.handleFlags ?? new Map();
+
+    /**
+     * A handle made inheritable, as SECURITY_ATTRIBUTES' bInheritHandle or an
+     * open's bInheritHandle asks. Answers the handle.
+     *
+     * @param {number} handle @param {boolean} inherit
+     */
+    const inheritIf = (handle, inherit)=>{
+        if (inherit && handle !== 0)
+        {
+            handleFlags.set(handle, HANDLE_FLAG_INHERIT);
+        }
+        return handle;
+    };
+    /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
+    const securityOf = attributes=>readSecurityAttributes(host.readMemory,
+        wholeAddress(attributes), host.pointerSize);
+    /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
+    const inherits = attributes=>securityOf(attributes)?.inherit ?? false;
+
+    /**
+     * Whether a handle is one GetHandleInformation and SetHandleInformation
+     * keep flags for: a kernel object's, or a socket's.
+     *
+     * @param {number} handle
+     */
+    const flagged = handle=>Boolean(object(handle)) || (host.isSocket?.(handle) ?? false);
 
     /**
      * What kind of object a handle names, the pseudo-handles included.
@@ -501,10 +618,27 @@ export function createThreadingFunctions(host){
      * @param {number} argBytes
      * @param {(args: number[], wide: boolean) => number} body
      */
-    const bothNamedForms = (argBytes, body)=>({
-        ansi: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, false) },
-        wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, true) },
-    });
+    const bothNamedForms = (argBytes, body)=>{
+        /** @param {number[]} args @param {boolean} wide */
+        const call = (args, wide)=>{
+            try
+            {
+                return body(args, wide);
+            }
+            catch (e){
+                if (e !== TOO_LONG)
+                {
+                    throw e;
+                }
+                host.setLastError(ERROR_FILENAME_EXCED_RANGE);
+                return 0;
+            }
+        };
+        return {
+            ansi: { argBytes, handler: (/** @type {number[]} */ args)=>call(args, false) },
+            wide: { argBytes, handler: (/** @type {number[]} */ args)=>call(args, true) },
+        };
+    };
 
     /**
      * @param {number} pointer @param {boolean} [wide] @returns {string | null}
@@ -514,8 +648,14 @@ export function createThreadingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME * 2)
-            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+        const name = wide ? host.readWideString(wholeAddress(pointer), WHOLE_NAME * 2)
+            : host.readCString(wholeAddress(pointer), WHOLE_NAME);
+        // The ANSI forms take a name shorter than MAX_PATH, as Windows' do.
+        if (!wide && name.length >= MAX_NAME)
+        {
+            throw TOO_LONG;
+        }
+        return name || null;
     };
 
     // The table itself is shared with the file-mapping surface and lives
@@ -528,12 +668,13 @@ export function createThreadingFunctions(host){
 
     /**
      * What an Open* call reports for a name: no name at all is a bad
-     * parameter, nothing by that name is "no such thing", and a different
-     * kind holding it is a bad handle rather than a silent conversion between
-     * kinds.
-     * @param {string} kind @param {string | null} name
+     * parameter, nothing by that name is "no such thing", a different kind
+     * holding it is a bad handle rather than a silent conversion between
+     * kinds, and rights the kind does not have -- or none at all -- are
+     * refused. The handle carries what it was granted.
+     * @param {string} kind @param {string | null} name @param {number} desired
      */
-    const namedOpen = (kind, name)=>{
+    const namedOpen = (kind, name, desired)=>{
         if (name === null)
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
@@ -545,12 +686,32 @@ export function createThreadingFunctions(host){
             host.setLastError(found === TAKEN ? ERROR_INVALID_HANDLE : ERROR_FILE_NOT_FOUND);
             return 0;
         }
+        const access = grantedAccess(kind, desired);
+        if ('error' in access)
+        {
+            host.setLastError(access.error);
+            return 0;
+        }
         host.namedObjects.reference(found);
-        return kernel.handles.open(kind, found);
+        return kernel.handles.open(kind, found, access.granted);
     };
 
-    const openMutex = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('mutex', nameOf(namePointer, wide)));
+    /**
+     * Whether a handle may do what needs `right`, set as refused where not.
+     *
+     * @param {number} handle @param {number} right
+     */
+    const permitted = (handle, right)=>{
+        if (allows(kernel.handles.access?.(untagged(handle >>> 0)) ?? null, right))
+        {
+            return true;
+        }
+        host.setLastError(ERROR_ACCESS_DENIED);
+        return false;
+    };
+
+    const openMutex = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('mutex', nameOf(namePointer, wide), access), inherit !== 0));
 
     /**
      * Unlike the mutex form this can succeed, and routinely does: one process
@@ -558,100 +719,192 @@ export function createThreadingFunctions(host){
      * how two parts of the same program that do not know about each other
      * agree on a signal.
      */
-    const openEvent = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('event', nameOf(namePointer, wide)));
+    const openEvent = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('event', nameOf(namePointer, wide), access), inherit !== 0));
 
-    const openSemaphore = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('semaphore', nameOf(namePointer, wide)));
+    const openSemaphore = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('semaphore', nameOf(namePointer, wide), access), inherit !== 0));
 
-    const openWaitableTimer = bothNamedForms(12, ([, , namePointer], wide)=>
-        namedOpen('timer', nameOf(namePointer, wide)));
-
-    const createMutex = bothNamedForms(12, ([, initialOwner, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'mutex');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
-        if (initialOwner && found === null)
-        {
-            kernel.wait(mutex, host.currentThread());
-        }
-        remember(name, 'mutex', mutex, found !== null);
-        const handle = kernel.handles.open('mutex', mutex);
-        if (name === null)
-        {
-            mutex.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
-
-    const createEvent = bothNamedForms(16, ([, manualReset, initialState, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'event');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const event = found ?? kernel.createEvent({
-            manualReset: Boolean(manualReset),
-            signalled: Boolean(initialState),
-            name: name ?? 'event',
-        });
-        remember(name, 'event', event, found !== null);
-        const handle = kernel.handles.open('event', event);
-        // An unnamed object is most of them, and "event" tells a reader
-        // nothing when three threads are blocked on three of them. The handle
-        // is what the trace shows at every other call, so it is what ties a
-        // blocked thread to the code that made the object.
-        if (name === null)
-        {
-            event.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
+    const openWaitableTimer = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('timer', nameOf(namePointer, wide), access), inherit !== 0));
 
     /**
-     * The counts are signed and both are checked, because the failure they
-     * guard against is silent: a maximum of zero or an initial count above it
-     * makes every later wait behave in a way the caller cannot explain. They
-     * are only checked on a fresh create -- the documented contract is that
-     * they are ignored, like a mutex's initial owner, when the name already
-     * names one.
+     * A fresh object's security descriptor, by its address, recorded so a
+     * label set at creation is handed back; one found by its name keeps what
+     * it was made with.
+     *
+     * @param {number} sd @param {object} made @param {any} found
      */
-    const createSemaphore = bothNamedForms(16, ([, initial, maximum, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'semaphore');
-        if (found === TAKEN)
+    const keepDescriptor = (sd, made, found)=>{
+        if (found === null && sd !== 0)
         {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
+            host.recordObjectSecurity?.(made, sd);
         }
-        if (found === null)
-        {
-            const start = initial | 0;
-            const limit = maximum | 0;
-            if (limit <= 0 || start < 0 || start > limit)
+    };
+
+    /**
+     * The creates of the four kinds, each over a name already read: the Win32
+     * forms read it from the caller's string, the native ones from an
+     * OBJECT_ATTRIBUTES (`sync-natives.js`). Each answers the handle, or 0 with
+     * the last error said; a name that held one already is opened again, as
+     * Windows does, with ERROR_ALREADY_EXISTS.
+     */
+    const creates = {
+        /** @param {string | null} name @param {boolean} owned @param {number} sd @param {boolean} inherit */
+        mutex: (name, owned, sd, inherit)=>{
+            const found = existing(name, 'mutex');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
+            if (owned && found === null)
+            {
+                kernel.wait(mutex, host.currentThread());
+            }
+            keepDescriptor(sd, mutex, found);
+            remember(name, 'mutex', mutex, found !== null);
+            const handle = inheritIf(kernel.handles.open('mutex', mutex), inherit);
+            if (name === null)
+            {
+                mutex.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * @param {string | null} name @param {boolean} manual @param {boolean} initial
+         * @param {number} sd @param {boolean} inherit
+         */
+        event: (name, manual, initial, sd, inherit)=>{
+            const found = existing(name, 'event');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const event = found ?? kernel.createEvent({
+                manualReset: manual,
+                signalled: initial,
+                name: name ?? 'event',
+            });
+            keepDescriptor(sd, event, found);
+            remember(name, 'event', event, found !== null);
+            const handle = inheritIf(kernel.handles.open('event', event), inherit);
+            // An unnamed object is most of them, and "event" tells a reader
+            // nothing when three threads are blocked on three of them. The
+            // handle is what the trace shows at every other call, so it is
+            // what ties a blocked thread to the code that made the object.
+            if (name === null)
+            {
+                event.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * The counts are signed and both are checked, because the failure they
+         * guard against is silent: a maximum of zero or an initial count above
+         * it makes every later wait behave in a way the caller cannot explain.
+         * They are only checked on a fresh create -- the documented contract is
+         * that they are ignored, like a mutex's initial owner, when the name
+         * already names one.
+         *
+         * @param {string | null} name @param {number} initial @param {number} maximum
+         * @param {number} sd @param {boolean} inherit
+         */
+        semaphore: (name, initial, maximum, sd, inherit)=>{
+            const found = existing(name, 'semaphore');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            if (found === null && (maximum <= 0 || initial < 0 || initial > maximum))
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-        }
-        const semaphore = found ?? kernel.createSemaphore({
-            initial: initial | 0, maximum: maximum | 0, name: name ?? 'semaphore',
-        });
-        remember(name, 'semaphore', semaphore, found !== null);
-        const handle = kernel.handles.open('semaphore', semaphore);
-        if (name === null)
-        {
-            semaphore.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
+            const semaphore = found ?? kernel.createSemaphore({
+                initial, maximum, name: name ?? 'semaphore',
+            });
+            keepDescriptor(sd, semaphore, found);
+            remember(name, 'semaphore', semaphore, found !== null);
+            const handle = inheritIf(kernel.handles.open('semaphore', semaphore), inherit);
+            if (name === null)
+            {
+                semaphore.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * A keyed event: always signalled to a wait on its handle, its pairings
+         * of waiters and releasers by key kept beside it (`sync-natives.js`).
+         *
+         * @param {string | null} name @param {number} sd @param {boolean} inherit
+         * @param {number | null} granted
+         */
+        keyedEvent: (name, sd, inherit, granted)=>{
+            const found = existing(name, 'keyedevent');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const keyed = found ?? Object.assign(kernel.createEvent({
+                manualReset: true, signalled: true, name: name ?? 'keyed event',
+            }), { keyed: { waiting: [], releasing: [] } });
+            keepDescriptor(sd, keyed, found);
+            remember(name, 'keyedevent', keyed, found !== null);
+            const handle = inheritIf(kernel.handles.open('keyedevent', keyed, granted), inherit);
+            if (name === null)
+            {
+                keyed.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /** @param {string | null} name @param {boolean} manual @param {number} sd @param {boolean} inherit */
+        timer: (name, manual, sd, inherit)=>{
+            const found = existing(name, 'timer');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const timer = found ?? kernel.createTimer({
+                manualReset: manual,
+                name: name ?? 'timer',
+            });
+            keepDescriptor(sd, timer, found);
+            remember(name, 'timer', timer, found !== null);
+            const handle = inheritIf(kernel.handles.open('timer', timer), inherit);
+            if (name === null)
+            {
+                timer.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+    };
+    /**
+     * A SECURITY_ATTRIBUTES' lpSecurityDescriptor, or 0: recorded as a fresh
+     * object's security, so a label set at creation is handed back; an
+     * object opened by an existing name keeps the security it was made with,
+     * as Windows ignores the attributes on an open.
+     *
+     * @param {number} attributes  SECURITY_ATTRIBUTES, or 0
+     */
+    const descriptorOf = attributes=>securityOf(attributes)?.descriptor ?? 0;
+
+    const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>
+        creates.mutex(nameOf(namePointer, wide), Boolean(initialOwner), descriptorOf(security),
+            inherits(security)));
+
+    const createEvent = bothNamedForms(16, ([security, manual, initial, namePointer], wide)=>
+        creates.event(nameOf(namePointer, wide), Boolean(manual), Boolean(initial),
+            descriptorOf(security), inherits(security)));
+
+    const createSemaphore = bothNamedForms(16, ([security, initial, maximum, namePointer], wide)=>
+        creates.semaphore(nameOf(namePointer, wide), initial | 0, maximum | 0,
+            descriptorOf(security), inherits(security)));
 
     // The Ex forms: what the plain ones take as BOOLs arrives as flags, and an
     // access mask follows that nothing here checks, since every handle here
@@ -666,25 +919,24 @@ export function createThreadingFunctions(host){
         (wide ? createSemaphore.wide : createSemaphore.ansi).handler(
             [security, initial, maximum, namePointer]));
 
-    const createWaitableTimer = bothNamedForms(12, ([, manualReset, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'timer');
-        if (found === TAKEN)
+    const createWaitableTimer = bothNamedForms(12, ([security, manualReset, namePointer], wide)=>
+        creates.timer(nameOf(namePointer, wide), Boolean(manualReset), descriptorOf(security),
+            inherits(security)));
+
+    /**
+     * The Ex form: the manual-reset BOOL arrives as a flag, beside the
+     * high-resolution one, which asks for a timer the guest's clock already
+     * keeps to the millisecond. Any other flag is refused.
+     */
+    const createWaitableTimerEx = bothNamedForms(16, ([security, namePointer, flags], wide)=>{
+        if (((flags >>> 0) & ~(CREATE_WAITABLE_TIMER_MANUAL_RESET
+            | CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)) !== 0)
         {
-            host.setLastError(ERROR_INVALID_HANDLE);
+            host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const timer = found ?? kernel.createTimer({
-            manualReset: Boolean(manualReset),
-            name: name ?? 'timer',
-        });
-        remember(name, 'timer', timer, found !== null);
-        const handle = kernel.handles.open('timer', timer);
-        if (name === null)
-        {
-            timer.name = `#${handle.toString(16)}`;
-        }
-        return handle;
+        return (wide ? createWaitableTimer.wide : createWaitableTimer.ansi).handler(
+            [security, flags & CREATE_WAITABLE_TIMER_MANUAL_RESET, namePointer]);
     });
 
     /**
@@ -697,7 +949,8 @@ export function createThreadingFunctions(host){
     let handleWords;
     /** What the kernel's words say, for the routines that read them. */
     const wordValues = ()=>({ clear: kernel.EventMirror.CLEAR, set: kernel.EventMirror.SET,
-        mutexTag: kernel.MUTEX_TAG, eventTag: kernel.EVENT_TAG });
+        invalid: kernel.EventMirror.INVALID, mutexTag: kernel.MUTEX_TAG,
+        eventTag: kernel.EVENT_TAG });
     const placedTable = ()=>{
         if (handleWords !== undefined)
         {
@@ -710,14 +963,62 @@ export function createThreadingFunctions(host){
             return null;
         }
         const words = host.allocate(EVENT_SLOTS * 4);
-        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
         const mutexes = host.allocate(MUTEX_SLOTS * 4);
-        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         const events = host.allocate(EVENT_WORD_SLOTS * 4);
+        // A machine out of memory hands none out: the waits stay the host's,
+        // as where the table is switched off.
+        if (words === 0 || mutexes === 0 || events === 0)
+        {
+            handleWords = null;
+            return null;
+        }
+        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
+        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         host.writeMemory(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
-        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, EVENT_WORD_SLOTS);
+        // The semaphores' two words each at the table's end (`wait-one.js`).
+        const eventWords = EVENT_WORD_SLOTS - SEMAPHORE_SLOTS * 2;
+        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS, events, eventWords,
+            events + eventWords * 4, SEMAPHORE_SLOTS);
         handleWords = words;
         return words;
+    };
+
+    /**
+     * A compiled routine (`semaphore-guest.js`) as it runs at `at`: its
+     * hand-over jumping to the trap, its HANDLE_WORDS the table.
+     *
+     * @param {{ code: Uint8Array, host: number, tables: { HANDLE_WORDS: number } }} compiled
+     * @param {number} at @param {number} trap @param {number} words
+     */
+    const boundRoutine = (compiled, at, trap, words)=>{
+        const bytes = compiled.code.slice();
+        const view = new DataView(bytes.buffer);
+        // A `jmp rel32`'s displacement, from the end of the instruction.
+        view.setInt32(compiled.host, (trap - (at + compiled.host + 4)) | 0, true);
+        view.setUint32(compiled.tables.HANDLE_WORDS, words >>> 0, true);
+        return bytes;
+    };
+    /** Where the wait on a semaphore went, once placed. @type {number | undefined} */
+    let semaphoreWait;
+    /**
+     * The wait on a semaphore, placed once: WaitForSingleObject's routine goes
+     * there for a semaphore's word, and it hands over to the same trap.
+     *
+     * @param {number} trap @param {number} words
+     */
+    const placedSemaphoreWait = (trap, words)=>{
+        if (semaphoreWait === undefined)
+        {
+            const allocate = host.allocateCode ?? host.allocate;
+            if (!allocate)
+            {
+                return trap;
+            }
+            const at = allocate(SEMAPHORE_CODE.waitSemaphore.code.length);
+            host.writeMemory(at, boundRoutine(SEMAPHORE_CODE.waitSemaphore, at, trap, words));
+            semaphoreWait = at;
+        }
+        return semaphoreWait;
     };
 
     /** Where each routine reading the table went, once placed. @type {Map<string, number>} */
@@ -726,7 +1027,8 @@ export function createThreadingFunctions(host){
      * A routine reading the table, or the trap alone where there is no table.
      *
      * @param {PollBuilder} builder
-     * @param {'WaitForSingleObject' | 'ReleaseMutex' | 'SetEvent' | 'ResetEvent'} name
+     * @param {'WaitForSingleObject' | 'ReleaseMutex' | 'SetEvent' | 'ResetEvent'
+     *     | 'ReleaseSemaphore'} name
      * @param {(at: number, trap: number, words: number) => Uint8Array} code
      */
     const placedRoutine = (builder, name, code)=>{
@@ -756,8 +1058,17 @@ export function createThreadingFunctions(host){
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
             argBytes: 24,
+            sizes: [1],
+            addresses: [2, 3],
             /** @param {number[]} args */
             handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
+                // A process that has begun to end takes no new thread, as
+                // Windows refuses one from NtTerminateProcess on.
+                if (host.terminating?.())
+                {
+                    host.setLastError(ERROR_ACCESS_DENIED);
+                    return 0;
+                }
                 // The size is the stack's commit unless the caller says it is
                 // the reserve; the kernel turns either into the reserve by the
                 // rules CreateThread documents.
@@ -766,12 +1077,12 @@ export function createThreadingFunctions(host){
                 // its start routine runs.
                 const begin = host.threadStart?.() ?? 0;
                 const thread = kernel.createThread({
-                    entry: begin || start >>> 0,
-                    ...begin === 0 ? {} : { start: start >>> 0 },
+                    entry: begin || wholeAddress(start),
+                    ...begin === 0 ? {} : { start: wholeAddress(start) },
                     ...reservation
                         ? { stackReserve: stackSize >>> 0 }
                         : { stackSize: stackSize >>> 0 },
-                    parameter: parameter >>> 0,
+                    parameter: wholeAddress(parameter),
                     // Returning from the start routine is how most threads end,
                     // and it means exactly what calling ExitThread with the
                     // same value means. Somewhere has to notice; this is where
@@ -841,7 +1152,8 @@ export function createThreadingFunctions(host){
          * low bit is a flag, not part of the handle), or the file's handle
          * when there is none, and then answers TRUE with the count even if
          * Internal still says pending (Wine's kernel32 file tests,
-         * test_overlapped).
+         * test_overlapped); a wait that parks reads the count and the
+         * status as it ends.
          */
         GetOverlappedResult: {
             argBytes: 16,
@@ -854,10 +1166,11 @@ export function createThreadingFunctions(host){
                 };
                 const count = ()=>{
                     const bytes = new Uint8Array(4);
-                    new DataView(bytes.buffer).setUint32(0, field(OVERLAPPED_INTERNAL_HIGH), true);
-                    host.writeMemory(transferred >>> 0, bytes);
+                    new DataView(bytes.buffer).setUint32(0, field(overlappedFields.internalHigh),
+                        true);
+                    host.writeMemory(wholeAddress(transferred), bytes);
                 };
-                let status = field(OVERLAPPED_INTERNAL);
+                let status = field(overlappedFields.internal);
                 if (status === STATUS.PENDING)
                 {
                     if (wait === 0)
@@ -865,7 +1178,7 @@ export function createThreadingFunctions(host){
                         host.setLastError(ERROR_IO_INCOMPLETE);
                         return 0;
                     }
-                    const eventHandle = (field(OVERLAPPED_EVENT) & ~1) >>> 0;
+                    const eventHandle = (field(overlappedFields.event) & ~1) >>> 0;
                     const target = object(eventHandle !== 0 ? eventHandle : file >>> 0);
                     if (!target)
                     {
@@ -880,10 +1193,25 @@ export function createThreadingFunctions(host){
                         host.currentThread());
                     if (answered === null)
                     {
-                        count();
+                        // The count and the answer are the ones the I/O
+                        // leaves when the wait ends, not the ones there now:
+                        // an operation that ended in an error (a message
+                        // longer than the buffer, a cancel, a broken pipe)
+                        // answers FALSE with its error.
+                        const thread = host.currentThread();
+                        kernel.whenResumed(thread, (/** @type {number | bigint} */ answer)=>{
+                            count();
+                            const ended = field(overlappedFields.internal);
+                            if (ended === STATUS.SUCCESS || ended === STATUS.PENDING)
+                            {
+                                return answer;
+                            }
+                            host.setLastErrorFor?.(thread, toDosError(ended));
+                            return 0;
+                        });
                         return host.park();
                     }
-                    status = field(OVERLAPPED_INTERNAL);
+                    status = field(overlappedFields.internal);
                     if (status === STATUS.PENDING)
                     {
                         count();
@@ -905,14 +1233,16 @@ export function createThreadingFunctions(host){
          *
          * Guest code first: a signalled event the host does not keep is
          * taken there, a poll of an event that is not signalled times out
-         * there, and a free mutex or one the caller owns is taken there
-         * (`wait-one.js`); everything else comes here.
+         * there, a free mutex or one the caller owns is taken there
+         * (`wait-one.js`), and a count of a semaphore nobody waits on, or a
+         * poll of one at zero (`semaphore-guest.js`); everything else comes here.
          */
         WaitForSingleObject: {
             argBytes: 8,
             /** @param {PollBuilder} builder */
             guest: builder=>placedRoutine(builder, 'WaitForSingleObject',
-                (at, trap, words)=>waitOneCode(at, trap, words, wordValues())),
+                (at, trap, words)=>waitOneCode(at, trap, words, wordValues(),
+                    placedSemaphoreWait(trap, words))),
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
                 // A standard stream is always ready to be written, and one
@@ -928,7 +1258,12 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return WAIT_FAILED;
                 }
-                const wait = timeout >>> 0;
+                // A handle opened without SYNCHRONIZE cannot be waited on.
+                if (!permitted(handle, SYNCHRONIZE))
+                {
+                    return WAIT_FAILED;
+                }
+                const wait = wholeAddress(timeout);
                 const thread = host.currentThread();
 
                 if (kindOf(handle >>> 0) === 'process')
@@ -952,41 +1287,31 @@ export function createThreadingFunctions(host){
                             });
                         return host.park(thread);
                     }
-                    // A child the engine already answered for -- a
-                    // redistributable installer it stands in for -- is
-                    // finished, and a wait on it returns at once with its exit
-                    // code, as on any already-signalled object.
-                    if (kernel.processes?.finished?.(target))
-                    {
-                        return WAIT_OBJECT_0;
-                    }
-                    // A child process that has not started runs once the
-                    // parent has nothing else to do. So a poll says the child
-                    // is still running, which is true, and a real wait is the
-                    // parent handing over to it. The waiter is noted on the
-                    // child: when it exits, this thread is woken with the
-                    // wait's answer, and the parent goes on after its child as
-                    // on Windows. A timeout is armed only for a child running
-                    // beside this process: one run in its place has the
-                    // parent's time stand still. A poll is noted too: a parent
-                    // that polls in a loop that never blocks waits all the
-                    // same.
+                    // A child's exit is an event of its own: set when it
+                    // ends, set already for one the engine answered for -- a
+                    // redistributable installer it stands in for -- and waited
+                    // on as any other object is, timed or not.
                     if (wait === 0)
                     {
-                        if (!target.started)
-                        {
-                            target.polled = true;
-                        }
-                        return WAIT_TIMEOUT;
+                        return kernel.poll(target.exited, thread) ?? WAIT_TIMEOUT;
                     }
-                    const reason = `child process ${target.imagePath}`;
-                    (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0,
-                        live: childWaitMark(thread, reason) });
-                    const timed = (target.started || target.beside) && wait !== INFINITE;
-                    kernel.block(thread, reason, timed
-                        ? { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }
-                        : undefined);
-                    return host.park(thread);
+                    return settle(kernel.wait(target.exited, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
+                }
+
+                // A child's thread ends where the child runs; the wait is on
+                // the event this process sets once the child says it has.
+                if (kindOf(handle >>> 0) === 'process-thread')
+                {
+                    const ended = threadEnd({ kernel, askChild: host.askChild }, target);
+                    if (wait === 0)
+                    {
+                        return kernel.poll(ended, thread) ?? WAIT_TIMEOUT;
+                    }
+                    return settle(kernel.wait(ended, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
                 }
 
                 // A timer is ordinary here. Its signal is a property of the
@@ -1000,11 +1325,36 @@ export function createThreadingFunctions(host){
                 // deadline answered at once too, but left the thread queued on
                 // the object, and a later signal woke it out of whatever it
                 // was waiting on by then with an answer naming the wrong thing.
+                if (FILE_OBJECT_KINDS.has(kindOf(handle >>> 0) ?? ''))
+                {
+                    return WAIT_OBJECT_0;
+                }
+                // A pipe end is waited on as a file object is: through the
+                // event its pending operations hold down.
+                if (kindOf(handle >>> 0) === 'pipe')
+                {
+                    const signal = host.pipes?.waitable?.(handle >>> 0) ?? null;
+                    if (!signal)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return WAIT_FAILED;
+                    }
+                    if (wait === 0)
+                    {
+                        return kernel.poll(signal, thread) ?? WAIT_TIMEOUT;
+                    }
+                    return settle(kernel.wait(signal, thread, wait === INFINITE
+                        ? undefined
+                        : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
+                }
+                // An object the kernel does not wait on itself - a job - is
+                // waited on as the event it carries.
+                const signal = target.waitable ?? target;
                 if (wait === 0)
                 {
-                    return kernel.poll(target, thread) ?? WAIT_TIMEOUT;
+                    return kernel.poll(signal, thread) ?? WAIT_TIMEOUT;
                 }
-                return settle(kernel.wait(target, thread, wait === INFINITE
+                return settle(kernel.wait(signal, thread, wait === INFINITE
                     ? undefined
                     : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
             },
@@ -1031,15 +1381,37 @@ export function createThreadingFunctions(host){
          * Releasing past the maximum fails and releases nothing -- it does not
          * clamp. A caller uses exactly that to detect its own double release,
          * and the previous count is written only on success, which is what makes
-         * the check meaningful.
+         * the check meaningful. Each refusal says why: no semaphore, a count
+         * that is not positive, or ERROR_TOO_MANY_POSTS past the maximum.
+         * Guest code first: a semaphore nobody waits on is released there
+         * (`semaphore-guest.js`); everything else comes here.
          */
         ReleaseSemaphore: {
             argBytes: 12,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedRoutine(builder, 'ReleaseSemaphore',
+                (at, trap, words)=>boundRoutine(host.pointerSize === 8
+                    ? SEMAPHORE_LONG.ReleaseSemaphore : SEMAPHORE_CODE.ReleaseSemaphore,
+                at, trap, words)),
+            // Its x86-64 in a 64-bit process (`semaphore-guest.js` compiled for
+            // it), placed the same way: the hand-over and the table where the
+            // build left their places.
+            guestLong: true,
             /** @param {number[]} args */
             handler: ([handle, count, previous])=>{
                 const semaphore = object(handle >>> 0, 'semaphore');
-                if (!semaphore || (count | 0) <= 0)
+                if (!semaphore)
                 {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (!permitted(handle, MODIFY_STATE))
+                {
+                    return 0;
+                }
+                if ((count | 0) <= 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 try
@@ -1047,7 +1419,7 @@ export function createThreadingFunctions(host){
                     const before = kernel.releaseSemaphore(semaphore, count | 0);
                     if (previous !== 0)
                     {
-                        host.writeMemory(previous >>> 0, new Uint8Array([
+                        host.writeMemory(wholeAddress(previous), new Uint8Array([
                             before & 0xff, before >>> 8 & 0xff,
                             before >>> 16 & 0xff, before >>> 24 & 0xff,
                         ]));
@@ -1056,6 +1428,7 @@ export function createThreadingFunctions(host){
                 }
                 catch (e){
                     void e;
+                    host.setLastError(ERROR_TOO_MANY_POSTS);
                     return 0;
                 }
             },
@@ -1090,6 +1463,21 @@ export function createThreadingFunctions(host){
         OpenWaitableTimerW: openWaitableTimer.wide,
 
         /**
+         * BOOL CompareObjectHandles(HANDLE hFirstObjectHandle, HANDLE hSecondObjectHandle)
+         *
+         * Whether two handles name one kernel object; a handle that names
+         * none is not the same as anything.
+         */
+        CompareObjectHandles: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                const one = object(first >>> 0);
+                return one && one === object(second >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
          * BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle,
          *   HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle,
          *   DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)
@@ -1098,13 +1486,66 @@ export function createThreadingFunctions(host){
          * not a copy of the object. Closing either leaves the other usable,
          * which is the property a caller duplicates a handle to get.
          *
-         * Both process handles are ignored: there is one process, and a
-         * duplicate into another one has nowhere to go.
+         * Either process may be another of the run's on this thread: a
+         * server hands its client the handles of the events it signals by
+         * duplicating them into the client, and the client uses the number
+         * it is sent. The duplicate is then in that process's table, under a
+         * number of its own. A process the run cannot reach (in a worker of
+         * its own) is taken for this one.
+         *
+         * The copy carries the source's rights with DUPLICATE_SAME_ACCESS and
+         * what was asked without it - nothing at all for 0 (`duplicateAccess`).
          */
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, source, , target, , inherit, options])=>{
+            handler: ([sourceProcess, source, targetProcess, target, desired, inherit, options])=>{
+                const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
+                /** The table a process handle names, or null for this process's own. */
+                const tableOf = (/** @type {number} */ process)=>{
+                    const record = (process >>> 0) === CURRENT_PROCESS ? null
+                        : object(process >>> 0, 'process');
+                    return record && !record.current && typeof record.id === 'number'
+                        ? host.processTable?.(record.id) ?? null : null;
+                };
+                const from = tableOf(sourceProcess);
+                const into = tableOf(targetProcess);
+                if (from)
+                {
+                    const foreign = from.resolve(source >>> 0);
+                    const foreignKind = from.typeOf(source >>> 0);
+                    if (!foreign || foreignKind === null || target === 0)
+                    {
+                        host.setLastError(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    const rights = duplicateAccess(foreignKind, desired,
+                        from.access?.(source >>> 0) ?? null, same);
+                    if ('error' in rights)
+                    {
+                        host.setLastError(rights.error);
+                        return 0;
+                    }
+                    host.namedObjects.reference(foreign);
+                    const taken = (into ?? kernel.handles).open(foreignKind, foreign,
+                        rights.granted);
+                    if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
+                    {
+                        from.close(source >>> 0);
+                    }
+                    host.writeMemory(wholeAddress(target), new Uint8Array([
+                        taken & 0xff, taken >>> 8 & 0xff, taken >>> 16 & 0xff, taken >>> 24 & 0xff,
+                    ]));
+                    return 1;
+                }
+                // The console's own handles are the console wherever they are
+                // held: a duplicate is the same handle, as Windows 7 hands a
+                // console handle (a pseudo value) back.
+                if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
+                {
+                    host.writeMemory(wholeAddress(target), new Uint8Array([source >>> 0, 0, 0, 0]));
+                    return 1;
+                }
                 const held = object(source >>> 0);
                 const kind = kindOf(source >>> 0);
                 if (!held || target === 0 || kind === null)
@@ -1118,29 +1559,72 @@ export function createThreadingFunctions(host){
                         : ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                const rights = duplicateAccess(kind, desired,
+                    pseudo(source) ? null
+                        : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
+                if ('error' in rights)
+                {
+                    host.setLastError(rights.error);
+                    return 0;
+                }
                 // A no-op on anything unnamed, and on a named object this is
                 // the reference CloseHandle will one day take back off -- a
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                // A handle protected from close is not closed by
+                // DUPLICATE_CLOSE_SOURCE either: both stay, as on Windows.
                 const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
-                    && !pseudo(source);
-                if (held.node && (kind === 'file' || kind === 'mapping') && !closesSource)
+                    && !pseudo(source)
+                    && ((handleFlags.get(untagged(source >>> 0)) ?? 0)
+                        & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0;
+                // Into another process, an open file is that process's own open
+                // of it, which its table makes (`adoptFile`); here, one more hold.
+                if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
+                    && !closesSource)
                 {
                     host.retainNode?.(held.node);
                 }
-                const duplicate = kernel.handles.open(kind, held);
-                handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
-                host.writeMemory(target >>> 0, new Uint8Array([
+                // A pipe end counts its handles in every process: it breaks
+                // the pipe with the last of them, not the first.
+                if (kind === 'pipe' && !closesSource)
+                {
+                    held.retain();
+                }
+                // Within the process, a duplicate that closes its source takes
+                // the source's slot, the first free one, as Windows hands it.
+                const reused = closesSource && !into && Boolean(kernel.handles.adopt)
+                    && kernel.handles.close(source >>> 0) !== null
+                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted);
+                const duplicate = reused ? source >>> 0
+                    : (into ?? kernel.handles).open(kind, held, rights.granted);
+                // A file the other process could not open as its own.
+                if (duplicate === 0)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (!into)
+                {
+                    handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
+                    host.pipes?.setInheritable(duplicate, inherit !== 0);
+                }
+                host.writeMemory(wholeAddress(target), new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
                 ]));
                 // A pseudo-handle cannot be closed: duplicating one and closing
                 // the source leaves both usable, as it does on Windows.
-                if (closesSource)
+                if (closesSource && !reused)
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);
+                    // The other process opened the file as its own: this
+                    // process's hold goes with its handle.
+                    if (into && kind === 'file' && held.node)
+                    {
+                        host.closeNode?.(held.node);
+                    }
                 }
                 return 1;
             },
@@ -1150,19 +1634,22 @@ export function createThreadingFunctions(host){
          * BOOL GetHandleInformation(HANDLE hObject, LPDWORD lpdwFlags) and
          * BOOL SetHandleInformation(HANDLE hObject, DWORD dwMask, DWORD dwFlags):
          * a handle's inheritance and protection flags, which nothing here
-         * acts on but which read back as they were set.
+         * acts on but which read back as they were set. A socket is a handle
+         * on Windows, and a program that keeps its sockets from children
+         * clears their inherit flag through these, so winsock's sockets
+         * answer too.
          */
         GetHandleInformation: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if (pseudo(handle) || !object(handle >>> 0) || (out >>> 0) === 0)
+                if (pseudo(handle) || !flagged(handle >>> 0) || wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
                 const flags = handleFlags.get(untagged(handle >>> 0)) ?? 0;
-                host.writeMemory(out >>> 0, new Uint8Array([flags, 0, 0, 0]));
+                host.writeMemory(wholeAddress(out), new Uint8Array([flags, 0, 0, 0]));
                 return 1;
             },
         },
@@ -1170,7 +1657,7 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, mask, flags])=>{
-                if (pseudo(handle) || !object(handle >>> 0))
+                if (pseudo(handle) || !flagged(handle >>> 0))
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
@@ -1179,6 +1666,11 @@ export function createThreadingFunctions(host){
                 const kept = HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE;
                 handleFlags.set(key, ((handleFlags.get(key) ?? 0) & ~(mask & kept))
                     | (flags & mask & kept));
+                // What a child inherits of the pipes is read from the pipes.
+                if ((mask & HANDLE_FLAG_INHERIT) !== 0)
+                {
+                    host.pipes?.setInheritable(key, (flags & HANDLE_FLAG_INHERIT) !== 0);
+                }
                 return 1;
             },
         },
@@ -1207,9 +1699,17 @@ export function createThreadingFunctions(host){
                 const mutex = object(handle >>> 0, 'mutex');
                 if (!mutex)
                 {
+                    host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return kernel.releaseMutex(mutex, host.currentThread()) ? 1 : 0;
+                if (!kernel.releaseMutex(mutex, host.currentThread()))
+                {
+                    // Wine's kernel32 sync.c test_mutex: a mutex the caller
+                    // does not own, as Windows says.
+                    host.setLastError(ERROR_NOT_OWNER);
+                    return 0;
+                }
+                return 1;
             },
         },
 
@@ -1239,7 +1739,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
@@ -1261,7 +1761,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
@@ -1286,7 +1786,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
-                if (!event)
+                if (!event || !permitted(handle, MODIFY_STATE))
                 {
                     return 0;
                 }
@@ -1320,6 +1820,12 @@ export function createThreadingFunctions(host){
          */
         CreateWaitableTimerA: createWaitableTimer.ansi,
         CreateWaitableTimerW: createWaitableTimer.wide,
+        /**
+         * HANDLE CreateWaitableTimerExA/W(LPSECURITY_ATTRIBUTES, LPCSTR/LPCWSTR,
+         *     DWORD dwFlags, DWORD dwDesiredAccess)
+         */
+        CreateWaitableTimerExA: createWaitableTimerEx.ansi,
+        CreateWaitableTimerExW: createWaitableTimerEx.wide,
 
         SetWaitableTimer: {
             argBytes: 24,
@@ -1331,15 +1837,8 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                // A negative due time is relative, in hundreds of nanoseconds;
-                // a positive one is an absolute FILETIME.
-                const bytes = host.readMemory(dueTime >>> 0, 8);
-                const raw = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
-                const now = kernel.clock.virtualTime();
-                const due = raw < 0n
-                    ? now + Number(-raw) / 10000
-                    : now + Math.max(0,
-                        Number(raw / 10000n) - FILETIME_EPOCH_MS - kernel.clock.wallClock());
+                const due = kernel.clock.virtualTime() + dueInMs(
+                    readLargeInteger(host.readMemory, dueTime), kernel.clock.wallClock());
                 // A completion routine is queued to the thread that set the
                 // timer, once per expiry, with the time it expired as a
                 // FILETIME; it runs when that thread next waits alertably.
@@ -1405,28 +1904,15 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags])=>{
-                const self = (host.processId ?? 0x1000) >>> 0;
-                const own = (kernel.threads?.() ?? [])
-                    .filter((/** @type {any} */ thread)=>thread.state !== 'terminated');
-                const children = (kernel.processes?.all() ?? [])
-                    .filter((/** @type {any} */ child)=>!child.completed
-                        && child.exitCode === kernel.processes.STILL_ACTIVE);
+                const listed = host.processes?.() ?? listProcesses(kernel, {
+                    id: (host.processId ?? 0x1000) >>> 0,
+                    parent: (host.parentProcessId ?? 0) >>> 0, path: host.imagePath?.() ?? '' });
                 return kernel.handles.open('snapshot', {
                     flags: flags >>> 0,
-                    processes: [
-                        { id: self, parent: 0, threads: Math.max(own.length, 1),
-                            path: host.imagePath?.() ?? '' },
-                        ...children.map((/** @type {any} */ child)=>({
-                            id: child.id >>> 0, parent: self, threads: 1,
-                            path: String(child.imagePath ?? ''),
-                        })),
-                    ],
-                    threads: [
-                        ...own.map((/** @type {any} */ thread)=>({
-                            id: thread.id >>> 0, owner: self })),
-                        ...children.map((/** @type {any} */ child)=>({
-                            id: child.threadId >>> 0, owner: child.id >>> 0 })),
-                    ],
+                    processes: listed.map(process=>({ id: process.id, parent: process.parent,
+                        threads: Math.max(process.threads.length, 1), path: process.path })),
+                    threads: listed.flatMap(process=>process.threads
+                        .map(id=>({ id, owner: process.id }))),
                     modules: (flags & TH32CS_SNAPMODULE) === 0 ? [] : (host.modules?.() ?? [])
                         .map(module=>({
                             base: module.base >>> 0,
@@ -1450,7 +1936,7 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([ids, size, needed])=>{
-                if ((needed >>> 0) === 0)
+                if (wholeAddress(needed) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1460,18 +1946,18 @@ export function createThreadingFunctions(host){
                         .filter((/** @type {any} */ child)=>!child.completed
                             && child.exitCode === kernel.processes.STILL_ACTIVE)
                         .map((/** @type {any} */ child)=>child.id >>> 0)];
-                const count = (ids >>> 0) === 0
+                const count = wholeAddress(ids) === 0
                     ? 0 : Math.min(all.length, Math.floor((size >>> 0) / 4));
                 const bytes = new Uint8Array(count * 4);
                 const view = new DataView(bytes.buffer);
                 all.slice(0, count).forEach((id, i)=>view.setUint32(i * 4, id, true));
                 if (count > 0)
                 {
-                    host.writeMemory(ids >>> 0, bytes);
+                    host.writeMemory(wholeAddress(ids), bytes);
                 }
                 const written = new Uint8Array(4);
                 new DataView(written.buffer).setUint32(0, count * 4, true);
-                host.writeMemory(needed >>> 0, written);
+                host.writeMemory(wholeAddress(needed), written);
                 return 1;
             },
         },
@@ -1479,28 +1965,100 @@ export function createThreadingFunctions(host){
         /**
          * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
          *
-         * A new handle to a thread of this process that has not ended, or to
-         * the first thread of a child it started; any other id is refused.
+         * A new handle to a thread of this process that is still an object -
+         * running, or ended and held (`threadObjectLives`) - or to
+         * a thread of a child it started that it knows the id of -- the first,
+         * or one it made there; any other id is refused.
          */
         OpenThread: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , id])=>{
+            handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
-                    (thread.id >>> 0) === wanted && thread.state !== 'terminated');
+                    (thread.id >>> 0) === wanted && threadObjectLives(kernel, thread));
                 if (own)
                 {
-                    return kernel.handles.open('thread', own);
+                    // The handle carries the rights asked for: a wait on it
+                    // needs SYNCHRONIZE, a query of its information
+                    // THREAD_QUERY_INFORMATION or the limited form.
+                    const access = grantedAccess('thread', desired);
+                    if ('error' in access)
+                    {
+                        host.setLastError(access.error);
+                        return 0;
+                    }
+                    return inheritIf(kernel.handles.open('thread', own, access.granted),
+                        inherit !== 0);
                 }
-                const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
-                    (made.threadId >>> 0) === wanted);
+                // A child's thread, or one of any process of the run (a
+                // grandchild's first thread, found in a snapshot of the run).
+                const child = [...kernel.processes?.all() ?? [], ...kernel.processes?.run?.() ?? []]
+                    .find((/** @type {any} */ made)=>
+                        (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
                 if (child)
                 {
-                    return kernel.handles.open('process-thread', child);
+                    return kernel.handles.open('process-thread', childThread(child, wanted));
                 }
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
+            },
+        },
+
+        /**
+         * DWORD GetProcessId(HANDLE Process)
+         *
+         * The id of the process a handle names: this one's for its own
+         * pseudo-handle, a child's as CreateProcess reported it. A handle to
+         * no process is zero and ERROR_INVALID_HANDLE.
+         */
+        GetProcessId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const found = object(handle >>> 0, 'process');
+                if (!found)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (found.current ? host.processId ?? 0x1000 : found.id) >>> 0;
+            },
+        },
+
+        /**
+         * DWORD GetThreadId(HANDLE Thread) and DWORD GetProcessIdOfThread(HANDLE Thread)
+         *
+         * A thread's id, and the id of the process it runs in: a thread of
+         * this process, or a child's first thread through the handle
+         * CreateProcess gave for it.
+         */
+        GetThreadId: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const own = object(handle >>> 0, 'thread');
+                const child = own ? null : object(handle >>> 0, 'process-thread');
+                if (!own && !child)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (own ? own.id : child.threadId) >>> 0;
+            },
+        },
+        GetProcessIdOfThread: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const own = object(handle >>> 0, 'thread');
+                const child = own ? null : object(handle >>> 0, 'process-thread');
+                if (!own && !child)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                return (own ? host.processId ?? 0x1000 : child.process.id) >>> 0;
             },
         },
 
@@ -1611,6 +2169,9 @@ export function createThreadingFunctions(host){
                     const closed = kernel.handles.close(handle >>> 0);
                     // A no-op on anything that was never named.
                     host.namedObjects.forget(closed);
+                    // A completion port's waiters, and a file's association
+                    // with one, go with its handle (`iocp.js`).
+                    host.closed?.(handle >>> 0, closed);
                     return 1;
                 }
                 catch (e){
@@ -1626,10 +2187,9 @@ export function createThreadingFunctions(host){
      *                           LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD)
      * HANDLE CreateRemoteThreadEx(..., LPPROC_THREAD_ATTRIBUTE_LIST, LPDWORD)
      *
-     * A thread in this process is CreateThread's; one in a child cannot be
-     * made, since a child runs only once this process has nothing left to do,
-     * and is refused with ERROR_NOT_SUPPORTED rather than answered with a
-     * thread that would never run where it was asked to.
+     * A thread in this process is CreateThread's. One in a child is the
+     * child's CreateThread, made where the child runs, at an address in its
+     * memory; this process gets a handle of its own to it, and its id.
      *
      * @param {number} process @param {number[]} rest  CreateThread's six arguments.
      */
@@ -1640,16 +2200,48 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_INVALID_HANDLE);
             return 0;
         }
-        if (!target.current)
+        if (target.current)
         {
-            host.setLastError(ERROR_NOT_SUPPORTED);
+            return table.CreateThread.handler(rest);
+        }
+        const [, stack, start, parameter, flags, idOut] = rest;
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, target,
+        { call: 'CreateThread', args: [0, stack >>> 0, start >>> 0, parameter >>> 0,
+            flags >>> 0, { out: 4 }] }, [null, null, null, null, null, idOut >>> 0],
+        (answer, made)=>{
+            const bytes = answer.outs[5];
+            if (made === 0 || !bytes)
+            {
+                return 0;
+            }
+            const id = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+            return kernel.handles.open('process-thread', childThread(target, id, made));
+        }) : null;
+        if (asked === null)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
             return 0;
         }
-        return table.CreateThread.handler(rest);
+        return asked;
     };
+
+    // The native calls over the same objects, which ntdll publishes: they ride
+    // on CreateEventW's entry, whose state they share (`sync-natives.js`).
+    const natives = createSyncNatives({
+        readMemory: host.readMemory, writeMemory: host.writeMemory, kernel, creates,
+        existing, keyOf: (given, kind)=>host.namedObjects.keyOf(given, kind),
+        reference: found=>host.namedObjects.reference(found), object,
+        currentThread: host.currentThread, park: host.park, queueApc: host.queueApc,
+        divergence: host.divergence,
+    });
 
     return {
         ...table,
+        CreateEventW: { ...table.CreateEventW, natives: { ...natives,
+            ...createDirectoryNatives({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, kernel, namedObjects: host.namedObjects }) } },
         CreateRemoteThread: {
             argBytes: 28,
             /** @param {number[]} args */

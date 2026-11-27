@@ -53,6 +53,9 @@ export function fakeContext(commandLine, answer = ()=>0){
             bytes.set((memory.get(at) ?? new Uint8Array(0)).subarray(0, length));
             return bytes;
         },
+        write: (at, data)=>{
+            memory.set(at, data.slice());
+        },
         block: size=>{
             const at = next;
             next += Math.max(0x100, size + 0x10);

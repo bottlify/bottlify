@@ -19,8 +19,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE, appendCommand, usagesOf, commandCode }
-    from './shadow.js';
+import { appendCommand } from './shadow.js';
+import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE } from './block.js';
+import { usagesOf, commandCode } from './routines/command.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
@@ -71,7 +72,7 @@ const setters = (commands, slotOf, mirrors, hostMirrors)=>Object.entries(command
 function gate(version, list){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(TRAP, Uint8Array.of(0xf4));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
@@ -83,6 +84,13 @@ function gate(version, list){
         return at;
     });
     const next = random(version === '9' ? 91 : 81);
+    /**
+     * A number below `n` from the generator's high bits: its low bits repeat
+     * within a few draws, and choices made of them come in lockstep.
+     *
+     * @param {number} n
+     */
+    const below = n=>(next() >>> 16) % n;
     /**
      * A word an argument takes: small, about the bounds the routines check (a
      * sampler's sixteen, a stage's eight, a type's thirty-two), a pointer into
@@ -96,10 +104,14 @@ function gate(version, list){
     };
     let written = 0;
     let handed = 0;
-    // Four hundred rounds for every setter, each its own.
-    for (let round = 0; round < 400 * list.length; round++)
+    /** Each routine's records written with a rectangle in them. @type {Map<string, number>} */
+    const withRects = new Map();
+    // Four hundred rounds for every setter, each its own; eight times as many
+    // for one that copies rectangles, which it takes only when both are good.
+    const order = list.flatMap((entry, i)=>new Array(entry.shape.rects ? 8 : 1).fill(i));
+    for (let round = 0; round < 400 * order.length; round++)
     {
-        const which = round % list.length;
+        const which = order[round % order.length];
         const entry = list[which];
         // The low memory as the round starts: the object, its block, the ring and the data.
         const memory = new Uint8Array(HIGH - LOW);
@@ -145,14 +157,23 @@ function gate(version, list){
         // block, or none, or the other's.
         const surfaceArgs = [...entry.shape.objects ?? [],
             ...usagesOf(entry.shape).map(usage=>usage.arg)];
+        // A routine that copies rectangles checks them against their surfaces'
+        // sizes, which it reads only of two render targets in the default
+        // pool: mostly such surfaces there, or the sizes would decide nothing.
+        const sized = entry.shape.rects !== undefined;
+        // One size for both, so a rectangle's edges can be put on it, and one past.
+        const size = [1 + below(64), 1 + below(64)];
         [[SURFACE_OBJECT, SURFACE_BLOCK], [OTHER_OBJECT, OTHER_BLOCK]].forEach(([object, block])=>{
             put(object + 4, next() % 6 === 0 ? 0 : block);
             put(block + SURFACE.DESC, [75, 77, 22][next() % 3]);
-            put(block + SURFACE.DESC + 8, [0, 1, 2, 3, 0x200][next() % 5]);
-            put(block + SURFACE.DESC + 12, [0, 0, 0, 1, 2][next() % 5]);
-            put(block + SURFACE.DESC + 24, 1 + next() % 2048);
-            put(block + SURFACE.DESC + 28, 1 + next() % 2048);
+            put(block + SURFACE.DESC + 8, sized && next() % 4 !== 0 ? 1
+                : [0, 1, 2, 3, 0x200][next() % 5]);
+            put(block + SURFACE.DESC + 12, sized && next() % 4 !== 0 ? 0
+                : [0, 0, 0, 1, 2][next() % 5]);
+            put(block + SURFACE.DESC + 24, sized ? size[0] : 1 + next() % 2048);
+            put(block + SURFACE.DESC + 28, sized ? size[1] : 1 + next() % 2048);
             put(block + SURFACE.CONTAINER, next() % 3);
+            put(block + SURFACE.OWNER, next() % 4 === 0 ? BLOCK + 0x40 : BLOCK);
         });
         put(BLOCK + SHADOW.ELSEWHERE, next() % 4 === 0 ? 0 : 1);
         surfaceArgs.forEach((arg, index)=>{
@@ -160,10 +181,37 @@ function gate(version, list){
             args[arg] = pick === 0 ? 0 : pick === 1 ? SURFACE_OBJECT
                 : index === 0 ? SURFACE_OBJECT : OTHER_OBJECT;
         });
-        // A rectangle now and then where a routine takes none.
+        // A rectangle in the data or none, where a routine copies them: its
+        // corner within the surfaces, now and then negative, and each far
+        // edge within, on the edge, one past it, or on the near one.
+        /** @param {number} near @param {number} extent */
+        const far = (near, extent)=>[extent, extent + 1, near,
+            near + 1 + below(Math.max(1, extent - near))][[0, 1, 2, 3, 3, 3][below(6)]];
+        (entry.shape.rects ?? []).forEach((/** @type {number} */ arg, /** @type {number} */ i)=>{
+            if (below(4) === 0)
+            {
+                args[arg] = 0;
+                return;
+            }
+            const at = DATA + 0x800 + 16 * i;
+            const left = below(16) === 0 ? 0xffffffff : below(size[0]);
+            const top = below(size[1]);
+            put(at, left);
+            put(at + 4, top);
+            put(at + 8, far(left, size[0]));
+            put(at + 12, far(top, size[1]));
+            args[arg] = at;
+        });
+        // And an argument the routine takes within ranges: within, or just past.
+        for (const { arg, ranges } of sized ? entry.shape.within ?? [] : [])
+        {
+            const [low, high] = ranges[0];
+            args[arg] = low + below(high - low + 2);
+        }
+        // Direct3D 8's CopyRects copies none: a rectangle list now and then.
         for (const arg of [1, 3])
         {
-            if (entry.shape.objects?.length === 2 && next() % 4 !== 0)
+            if (entry.shape.objects?.length === 2 && !entry.shape.rects && next() % 4 !== 0)
             {
                 args[arg] = 0;
             }
@@ -224,6 +272,10 @@ function gate(version, list){
             continue;
         }
         written++;
+        if ((entry.shape.rects ?? []).some((/** @type {number} */ arg)=>args[arg] !== 0))
+        {
+            withRects.set(entry.name, (withRects.get(entry.name) ?? 0) + 1);
+        }
         assert.equal(host.readReg32('eax'), 0, `${label}: D3D_OK`);
         assert.equal(answer, 0);
         const mine = memory.subarray(BLOCK - LOW);
@@ -233,6 +285,9 @@ function gate(version, list){
     }
     assert.ok(written > 1000 && handed > 500,
         `${version}: ${written} written, ${handed} handed over`);
+    const copying = list.filter(entry=>entry.shape.rects).map(entry=>entry.name);
+    assert.deepEqual(copying.filter(name=>!((withRects.get(name) ?? 0) > 30)), [],
+        `${version}: records written with a rectangle: ${JSON.stringify([...withRects])}`);
 }
 
 test('the host writes a setter\'s record as the guest\'s routine does, or goes to the host where'

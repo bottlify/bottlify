@@ -62,6 +62,12 @@ export const PBM_SETBARCOLOR = WM_USER + 9;
 /** The background colour travels under the common-controls message number. */
 export const PBM_SETBKCOLOR = 0x2001;
 
+/** A colour that is the system's. */
+const CLR_DEFAULT = 0xff000000;
+
+/** A colour the program set, or null for the system's. @param {number | undefined} color */
+const own = color=>(color === undefined || color === CLR_DEFAULT ? null : color);
+
 /** PBRANGE, what PBM_GETRANGE fills in. */
 const PBRANGE = Object.freeze({ iLow: 0, iHigh: 4, SIZE: 8 });
 
@@ -144,7 +150,7 @@ export function createProgressProcedure(host, tk){
         const held = state(record);
         const vertical = (record.style & PBS_VERTICAL) !== 0;
         const smooth = (record.style & PBS_SMOOTH) !== 0;
-        draw.fill(hdc, rect, held.bkColor ?? tk.color(COLOR_3DFACE));
+        draw.fill(hdc, rect, own(held.bkColor) ?? tk.color(COLOR_3DFACE));
         const track = tk.shrink(rect, 1);
         const size = vertical ? track.bottom - track.top : track.right - track.left;
         const breadth = vertical ? track.right - track.left : track.bottom - track.top;
@@ -157,7 +163,7 @@ export function createProgressProcedure(host, tk){
             const pitch = block + BLOCK_GAP;
             end = Math.min(Math.ceil(end / pitch) * pitch, size);
         }
-        fill(hdc, track, vertical, end, block, held.barColor ?? tk.color(COLOR_HIGHLIGHT));
+        fill(hdc, track, vertical, end, block, own(held.barColor) ?? tk.color(COLOR_HIGHLIGHT));
     };
 
     /**
@@ -190,7 +196,8 @@ export function createProgressProcedure(host, tk){
                 return previous;
             }
             case PBM_SETRANGE32: {
-                const previous = held.min;
+                // The previous range, as PBM_SETRANGE answers it: two WORDs.
+                const previous = ((held.max & 0xffff) << 16 | held.min & 0xffff) >>> 0;
                 held.min = message.wParam | 0;
                 held.max = message.lParam | 0;
                 held.pos = clamp(record, held.pos);
@@ -216,11 +223,21 @@ export function createProgressProcedure(host, tk){
                 const previous = held.pos;
                 const span = held.max - held.min;
                 let next = held.pos + held.step;
-                // A step past the top comes back around at the bottom, which
-                // is what a loop that steps once a pass expects.
-                if (span > 0 && next > held.max)
+                // A step past either end comes back around by the range's
+                // width, which is what a loop that steps once a pass expects
+                // (Wine's progress test_PBM_STEPIT, a negative step too); an
+                // empty range stays at its one position.
+                if (span === 0)
                 {
-                    next = held.min + (next - held.max - 1) % (span + 1);
+                    next = held.min;
+                }
+                else if (next > held.max)
+                {
+                    next = (next - held.min) % span + held.min;
+                }
+                else if (next < held.min)
+                {
+                    next = (next - held.min) % span + held.max;
                 }
                 held.pos = clamp(record, next);
                 return moved(record, previous, thread);
@@ -237,14 +254,15 @@ export function createProgressProcedure(host, tk){
                 return held.pos;
             }
             case PBM_SETBARCOLOR: {
-                const previous = held.barColor ?? tk.color(COLOR_HIGHLIGHT);
-                held.barColor = message.wParam >>> 0;
+                // The colour is lParam's; CLR_DEFAULT, the system's, until set.
+                const previous = held.barColor ?? CLR_DEFAULT;
+                held.barColor = message.lParam >>> 0;
                 host.invalidate(record);
                 return previous;
             }
             case PBM_SETBKCOLOR: {
-                const previous = held.bkColor ?? tk.color(COLOR_3DFACE);
-                held.bkColor = message.wParam >>> 0;
+                const previous = held.bkColor ?? CLR_DEFAULT;
+                held.bkColor = message.lParam >>> 0;
                 host.invalidate(record);
                 return previous;
             }

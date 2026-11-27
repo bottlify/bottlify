@@ -238,7 +238,11 @@ test('the texture stages validate when the combiner draws them, and name what it
     assert.equal(validate(false), D3D_OK, 'unless the filters are not these numbers');
     reset();
     set(3, D3DTSS.MINFILTER, D3DTEXF.ANISOTROPIC);
-    assert.equal(validate(), UNSUPPORTEDTEXTUREFILTER, 'anisotropy, which is not claimed');
+    set(3, D3DTSS.MAGFILTER, D3DTEXF.ANISOTROPIC);
+    assert.equal(validate(), D3D_OK, 'anisotropy, which the caps claim and the sampler makes');
+    reset();
+    set(3, D3DTSS.MINFILTER, 6);
+    assert.equal(validate(), UNSUPPORTEDTEXTUREFILTER, 'a filter no sampler makes');
     reset();
     set(0, D3DTSS.MIPFILTER, D3DTEXF.NONE);
     set(0, D3DTSS.MINFILTER, D3DTEXF.LINEAR);

@@ -11,7 +11,7 @@ name: ci
 # Tests); this is the same set on a clean machine.
 #
 # One job a package, run when the push touched that package or a file of
-# another that it uses (tools/ci-layers.mjs): cork's are core's; core's are the
+# another that it uses (tools/ci/ci-layers.mjs): cork's are core's; core's are the
 # installer's only where the installer imports them; networking stands alone. A
 # change to what every package shares (the root's files, tools/, the lockfile
 # beyond its packages' versions, these workflows) runs them all, as a run by
@@ -55,8 +55,8 @@ jobs:
             changed=$(echo "$changed" | grep -vx package-lock.json)
           fi
           echo "$changed"
-          # The packages these files are in and those that use them (tools/ci-layers.mjs).
-          echo "$changed" | node tools/ci-layers.mjs | tee -a "$GITHUB_OUTPUT"
+          # The packages these files are in and those that use them (tools/ci/ci-layers.mjs).
+          echo "$changed" | node tools/ci/ci-layers.mjs | tee -a "$GITHUB_OUTPUT"
 
   cork:
     name: cork (typecheck, lint, tests, corpus)
@@ -74,9 +74,6 @@ jobs:
       - run: npm run typecheck -w @bottlify/cork
       - run: npx eslint modules/cork --max-warnings 0
       - run: npm run test -w @bottlify/cork
-      # The translator's corpus suites judge it against the hardware recording;
-      # with CI set they fail rather than skip without it.
-      - run: npm run fetch:corpus
       - run: npm run test:integration -w @bottlify/cork
 
   core:
@@ -98,6 +95,7 @@ jobs:
       - run: npx eslint modules/core tools eslint.config.mjs eslint-rules.mjs --max-warnings 0
       - run: npm run test -w @bottlify/core
       - run: npm run check:boundaries
+      - run: npm run test:tools
       # The release test packs and installs the built package, decoder included.
       # It is a release of this repository, which is private: the plain download
       # URL answers 404, so the fetch goes through the API with the job's token.
@@ -105,6 +103,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: npm run test:integration -w @bottlify/core
+      - run: npm run test:realtime -w @bottlify/core
       - run: npm run build
 
   installer:
@@ -165,5 +164,21 @@ jobs:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
       # Random shaders through the reference machine and through WGSL on the GPU.
       - run: npm run cdp:shaders
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # The WGSL tessellator against the reference tessellator's corpus.
+      - run: npm run cdp:tess
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Geometry shaders and stream output against what Direct3D writes.
+      - run: npm run cdp:gs
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # Vertex streams the vertex stage reads itself against WebGPU's fetch.
+      - run: npm run cdp:pull
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # cork's stand in the browser: the same work as Node's record.
+      - run: npm run cdp:bench
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

@@ -21,14 +21,16 @@
 import {
     MS_COEFFICIENTS, decodeImaBlock, decodeMsBlock, imaSamplesPerBlock, msSamplesPerBlock,
 } from './codecs.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const MMSYSERR_NOERROR = 0;
 const MMSYSERR_INVALHANDLE = 5;
+const MMSYSERR_NODRIVER = 6;
 const MMSYSERR_NOTSUPPORTED = 8;
 const MMSYSERR_INVALFLAG = 10;
 const MMSYSERR_INVALPARAM = 11;
 /** ACMERR_NOTPOSSIBLE: no driver can perform the requested conversion. */
-const ACMERR_NOTPOSSIBLE = 0x200 + 3;
+const ACMERR_NOTPOSSIBLE = 0x200;
 const ACMERR_UNPREPARED = 0x200 + 2;
 
 /** The manager reports itself as version 4.0 with no driver-specific build. */
@@ -86,15 +88,16 @@ const fourcc = text=>[...text.padEnd(4, ' ')].reduce(
  * The installed drivers, in the order Windows enumerates its own.
  *
  * @type {readonly { id: number, tag: number, support: number, short: string,
- *     long: string, comp: string }[]}
+ *     long: string, comp: string, mid: number, pid: number }[]}
  */
 const DRIVERS = Object.freeze([
     { id: 0x41c00001, tag: WAVE_FORMAT_ADPCM, support: ACMDRIVERDETAILS_SUPPORTF_CODEC,
-        short: 'MS-ADPCM', long: 'Microsoft ADPCM CODEC', comp: 'msad' },
+        short: 'MS-ADPCM', long: 'Microsoft ADPCM CODEC', comp: 'msad', mid: 1, pid: 33 },
     { id: 0x41c00002, tag: WAVE_FORMAT_IMA_ADPCM, support: ACMDRIVERDETAILS_SUPPORTF_CODEC,
-        short: 'IMA ADPCM', long: 'Microsoft IMA ADPCM CODEC', comp: 'imad' },
+        short: 'Microsoft IMA ADPCM', long: 'Microsoft IMA ADPCM CODEC', comp: 'imad',
+        mid: 1, pid: 34 },
     { id: 0x41c00003, tag: WAVE_FORMAT_PCM, support: ACMDRIVERDETAILS_SUPPORTF_CONVERTER,
-        short: 'MS-PCM', long: 'Microsoft PCM Converter', comp: 'pcm ' },
+        short: 'MS-PCM', long: 'Microsoft PCM Converter', comp: 'pcm ', mid: 1, pid: 38 },
 ]);
 
 /** ACMFORMATDETAILS, its name in the width of the entry point. */
@@ -116,6 +119,14 @@ const ACM_FORMATTAGDETAILSF_INDEX = 0x00000000;
 const ACM_FORMATTAGDETAILSF_FORMATTAG = 0x00000001;
 const ACM_FORMATTAGDETAILSF_LARGESTSIZE = 0x00000002;
 const ACM_FORMATDETAILSF_FORMAT = 0x00000001;
+const WAVE_FORMAT_UNKNOWN = 0;
+/** PCMWAVEFORMAT: WAVEFORMATEX short of cbSize, the least a format buffer holds. */
+const PCMWAVEFORMAT_SIZE = 16;
+/** The bits of acmFormatSuggest's flags that name what the caller fixed. */
+const ACM_FORMATSUGGESTF_TYPEMASK = 0x00ff0000;
+/** ACMFORMATDETAILS whole, its name in the entry point's width. @param {boolean} wide */
+const formatDetailsSize = wide=>FORMAT_DETAILS.szFormat
+    + FORMAT_DETAILS.NAME_CHARS * (wide ? 2 : 1);
 
 /** The rates the drivers list a format at, as Windows' own do. */
 const STANDARD_RATES = Object.freeze([8000, 11025, 22050, 44100]);
@@ -136,7 +147,9 @@ const STANDARD_RATES = Object.freeze([8000, 11025, 22050, 44100]);
 function listedFormat(tag, channels, rate, bits){
     const perChannel = rate <= 11025 ? 256 : rate <= 22050 ? 512 : 1024;
     const extra = tag === WAVE_FORMAT_ADPCM ? 4 + 7 * 4 : tag === WAVE_FORMAT_IMA_ADPCM ? 2 : 0;
-    const bytes = new Uint8Array(WAVEFORMATEX.SIZE + extra);
+    // PCM is a PCMWAVEFORMAT, which has no cbSize, as Windows' converter lists it.
+    const bytes = new Uint8Array(tag === WAVE_FORMAT_PCM ? PCMWAVEFORMAT_SIZE
+        : WAVEFORMATEX.SIZE + extra);
     const view = new DataView(bytes.buffer);
     let blockAlign = channels * (bits / 8);
     let samplesPerBlock = 1;
@@ -157,7 +170,10 @@ function listedFormat(tag, channels, rate, bits){
         Math.floor(rate * blockAlign / samplesPerBlock), true);
     view.setUint16(WAVEFORMATEX.nBlockAlign, blockAlign, true);
     view.setUint16(WAVEFORMATEX.wBitsPerSample, bits, true);
-    view.setUint16(WAVEFORMATEX.cbSize, extra, true);
+    if (tag !== WAVE_FORMAT_PCM)
+    {
+        view.setUint16(WAVEFORMATEX.cbSize, extra, true);
+    }
     if (extra > 0)
     {
         view.setUint16(WAVEFORMATEX.wSamplesPerBlock, samplesPerBlock, true);
@@ -201,6 +217,16 @@ function tagsOf(/** @type {typeof DRIVERS[number] & { codec?: AcmCodec }} */ dri
 }
 
 /**
+ * The largest format any of `drivers` lists, in bytes.
+ *
+ * @param {(typeof DRIVERS[number] & { codec?: AcmCodec })[]} drivers
+ */
+function largestFormat(drivers){
+    return Math.max(0, ...drivers.flatMap(driver=>tagsOf(driver)
+        .flatMap(tag=>tag.formats.map(format=>format.bytes.length))));
+}
+
+/**
  * @typedef {Object} WaveFormat
  * @property {number} tag
  * @property {number} channels
@@ -222,6 +248,8 @@ function tagsOf(/** @type {typeof DRIVERS[number] & { codec?: AcmCodec }} */ dri
  * @property {string} short
  * @property {string} long
  * @property {string} comp      the driver's four-character code
+ * @property {number} [mid]     its maker's id (mmreg.h's MM_*), as acmDriverDetails gives it
+ * @property {number} [pid]     its product's id
  * @property {string} tagName   what acmFormatTagDetails calls its tag
  * @property {ListedFormat[]} formats  its own tag's formats
  * @property {(from: WaveFormat, to: WaveFormat) => boolean} converts
@@ -258,18 +286,19 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
      */
     const allDrivers = ()=>[...DRIVERS, ...(host.codecs?.() ?? []).map((codec, index)=>({
         id: 0x41c00004 + index, tag: codec.tag, support: ACMDRIVERDETAILS_SUPPORTF_CODEC,
-        short: codec.short, long: codec.long, comp: codec.comp, codec,
+        short: codec.short, long: codec.long, comp: codec.comp, mid: codec.mid ?? 0,
+        pid: codec.pid ?? 0, codec,
     }))];
     /** The installed codec that decodes a tag. @param {number} tag */
     const codecFor = tag=>(host.codecs?.() ?? []).find(codec=>codec.tag === tag) ?? null;
 
     /** @param {number} address */
     const u32 = address=>{
-        const b = readMemory(address >>> 0, 4);
+        const b = readMemory(wholeAddress(address), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const put32 = (address, value)=>writeMemory(address >>> 0, new Uint8Array(
+    const put32 = (address, value)=>writeMemory(wholeAddress(address), new Uint8Array(
         [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff]));
 
     /**
@@ -281,7 +310,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             return null;
         }
-        const head = readMemory(address >>> 0, WAVEFORMATEX.SIZE);
+        const head = readMemory(wholeAddress(address), WAVEFORMATEX.SIZE);
         const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
         const tag = view.getUint16(WAVEFORMATEX.wFormatTag, true);
         const channels = view.getUint16(WAVEFORMATEX.nChannels, true);
@@ -340,7 +369,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
      * Open conversion streams, by handle.
      *
      * @type {Map<number, { from: WaveFormat, to: WaveFormat,
-     *     carry: { position: number, previous: number[] }, codec?: AcmCodecStream }>}
+     *     carry: { position: number, base: number }, codec?: AcmCodecStream }>}
      */
     const streams = new Map();
     let nextStream = 0x41e00001;
@@ -383,15 +412,19 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
     const blockOutput = from=>from.samplesPerBlock * from.channels * 2;
 
     /**
-     * PCM to PCM: width, channel count and rate. A change of rate is linear
-     * between neighbouring frames and carries across calls -- where the next
-     * output frame falls and the frame before the next source -- so a stream
-     * converted a piece at a time joins up.
+     * PCM to PCM: width, channel count and rate, as Windows' PCM converter
+     * does it. Two channels become one by adding them, saturated; a change of
+     * rate holds a source frame rather than blending two -- output frame j is
+     * source frame floor((j + 1/2) * from / to) going down, and the nearest,
+     * a tie to the earlier, going up -- so every output sample is one the
+     * source had. Frames are counted across calls (`carry`: output frames made
+     * and source frames passed so far), so a stream converted a piece at a
+     * time joins up.
      *
      * @param {Uint8Array} source @param {WaveFormat} from @param {WaveFormat} to
      * @param {number} frames  source frames given
      * @param {number} room  output frames there is room for
-     * @param {{ position: number, previous: number[] }} carry
+     * @param {{ position: number, base: number }} carry
      * @returns {{ output: Uint8Array, consumed: number }}
      */
     const convertPcm = (source, from, to, frames, room, carry)=>{
@@ -399,10 +432,6 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         const inStride = from.channels * (from.bits / 8);
         /** @param {number} frame @returns {number[]} */
         const read = frame=>{
-            if (frame < 0)
-            {
-                return carry.previous;
-            }
             /** @param {number} channel */
             const sample = channel=>{
                 const at = frame * inStride
@@ -411,45 +440,40 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             };
             return [sample(0), sample(1)];
         };
-        const step = from.rate / to.rate;
+        /**
+         * The source frame, counted from the stream's start, output frame j holds.
+         *
+         * @param {number} j
+         */
+        const held = from.rate === to.rate ? (/** @type {number} */ j)=>j
+            : from.rate > to.rate
+                ? (/** @type {number} */ j)=>Math.floor(((2 * j + 1) * from.rate) / (2 * to.rate))
+                : (/** @type {number} */ j)=>Math.floor((2 * j * from.rate + to.rate - 1)
+                    / (2 * to.rate));
         /** @type {number[][]} */
         const produced = [];
         let position = carry.position;
-        if (step === 1)
+        while (produced.length < room)
         {
-            for (let frame = 0; frame < Math.min(frames, room); frame++)
+            const frame = held(position) - carry.base;
+            if (frame >= frames)
             {
-                produced.push(read(frame));
+                break;
             }
+            produced.push(read(Math.max(0, frame)));
+            position++;
         }
-        else
-        {
-            while (produced.length < room)
-            {
-                const index = Math.floor(position);
-                if (index + 1 >= frames)
-                {
-                    break;
-                }
-                const fraction = position - index;
-                const [l0, r0] = read(index);
-                const [l1, r1] = read(index + 1);
-                produced.push([l0 + (l1 - l0) * fraction, r0 + (r1 - r0) * fraction]);
-                position += step;
-            }
-        }
-        const consumed = step === 1 ? produced.length
-            : Math.max(0, Math.min(frames, Math.floor(position) + 1));
-        if (step !== 1 && consumed > 0)
-        {
-            carry.previous = read(consumed - 1);
-            carry.position = position - consumed;
-        }
+        // Every frame given is used up unless the room ran out first: then up to
+        // the one the next output frame holds.
+        const consumed = produced.length < room ? frames
+            : Math.max(0, Math.min(frames, held(position) - carry.base));
+        carry.position = position;
+        carry.base += consumed;
         const out = new Uint8Array(produced.length * to.channels * (to.bits / 8));
         const outView = new DataView(out.buffer);
         produced.forEach(([left, right], frame)=>{
             const values = to.channels === 1 && from.channels === 2
-                ? [(left + right) / 2] : to.channels === 2 ? [left, right] : [left];
+                ? [left + right] : to.channels === 2 ? [left, right] : [left];
             values.forEach((value, channel)=>{
                 const at = (frame * to.channels + channel) * (to.bits / 8);
                 const whole = Math.max(-32768, Math.min(32767, Math.round(value)));
@@ -482,7 +506,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         view.setUint32(WAVEFORMATEX.nAvgBytesPerSec, pcm.rate * blockAlign, true);
         view.setUint16(WAVEFORMATEX.nBlockAlign, blockAlign, true);
         view.setUint16(WAVEFORMATEX.wBitsPerSample, pcm.bits, true);
-        writeMemory(address >>> 0, bytes.subarray(0, Math.min(room, WAVEFORMATEX.SIZE)));
+        writeMemory(wholeAddress(address), bytes.subarray(0, Math.min(room, WAVEFORMATEX.SIZE)));
     };
 
     /**
@@ -490,37 +514,33 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
      *
      * @param {number[]} args @param {boolean} wide
      */
-    const driverDetails = ([handle, details], wide)=>{
+    const driverDetails = ([handle, details, flags], wide)=>{
+        // Windows writes as much of the structure as its size says, however
+        // little: only one too small to hold its own size is refused.
+        if ((details >>> 0) === 0 || u32(details) < 4)
+        {
+            return MMSYSERR_INVALPARAM;
+        }
+        if ((flags >>> 0) !== 0)
+        {
+            return MMSYSERR_INVALFLAG;
+        }
         const driver = driverOf(handle);
         if (!driver)
         {
             return MMSYSERR_INVALHANDLE;
         }
-        if ((details >>> 0) === 0)
-        {
-            return MMSYSERR_INVALPARAM;
-        }
         const room = u32(details);
         const units = wide ? 2 : 1;
         const size = DETAILS.strings
             + DETAIL_STRINGS.reduce((sum, length)=>sum + length, 0) * units;
-        if (room < DETAILS.strings)
-        {
-            return MMSYSERR_INVALPARAM;
-        }
         const bytes = new Uint8Array(size);
         const view = new DataView(bytes.buffer);
         view.setUint32(DETAILS.cbStruct, Math.min(room, size), true);
         view.setUint32(DETAILS.fccType, fourcc('audc'), true);
         view.setUint32(DETAILS.fccComp, fourcc(driver.comp), true);
-        view.setUint16(DETAILS.wMid, 1, true);
-        view.setUint16(DETAILS.wPid, driver.tag === WAVE_FORMAT_PCM ? 38 : 36, true);
-        // An installed codec answers as one more driver, without a vendor's ids.
-        if ('codec' in driver)
-        {
-            view.setUint16(DETAILS.wMid, 0, true);
-            view.setUint16(DETAILS.wPid, 0, true);
-        }
+        view.setUint16(DETAILS.wMid, driver.mid, true);
+        view.setUint16(DETAILS.wPid, driver.pid, true);
         view.setUint32(DETAILS.vdwACM, ACM_VERSION, true);
         view.setUint32(DETAILS.vdwDriver, ACM_VERSION, true);
         view.setUint32(DETAILS.fdwSupport, driver.support, true);
@@ -534,7 +554,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             }
             at += DETAIL_STRINGS[index] * units;
         });
-        writeMemory(details >>> 0, bytes.subarray(0, Math.min(room, size)));
+        writeMemory(wholeAddress(details), bytes.subarray(0, Math.min(room, size)));
         return MMSYSERR_NOERROR;
     };
 
@@ -548,7 +568,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             bytes[index * units] = text.charCodeAt(index) & 0xff;
         }
-        writeMemory(address >>> 0, bytes);
+        writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -563,7 +583,8 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         put32(details + FORMAT_DETAILS.dwFormatTag, format.tag);
         put32(details + FORMAT_DETAILS.fdwSupport, support);
         const into = u32(details + FORMAT_DETAILS.pwfx);
-        const room = u32(details + FORMAT_DETAILS.cbwfx);
+        const room = Math.max(u32(details + FORMAT_DETAILS.cbwfx), format.tag === WAVE_FORMAT_PCM
+            ? PCMWAVEFORMAT_SIZE : WAVEFORMATEX.SIZE);
         writeMemory(into, format.bytes.subarray(0, Math.min(room, format.bytes.length)));
         if (u32(details + FORMAT_DETAILS.cbStruct) > FORMAT_DETAILS.szFormat)
         {
@@ -581,8 +602,9 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
      */
     const formatEnum = ([handle, details, callback, instance, flags], wide)=>{
         if ((details >>> 0) === 0 || (callback >>> 0) === 0
-            || u32(details + FORMAT_DETAILS.cbStruct) < FORMAT_DETAILS.szFormat
-            || u32(details + FORMAT_DETAILS.pwfx) === 0)
+            || u32(details + FORMAT_DETAILS.cbStruct) < formatDetailsSize(wide)
+            || u32(details + FORMAT_DETAILS.pwfx) === 0
+            || u32(details + FORMAT_DETAILS.fdwSupport) !== 0)
         {
             return MMSYSERR_INVALPARAM;
         }
@@ -590,6 +612,11 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         if (drivers.some(driver=>!driver))
         {
             return MMSYSERR_INVALHANDLE;
+        }
+        if (u32(details + FORMAT_DETAILS.cbwfx)
+            < largestFormat(/** @type {ReturnType<typeof allDrivers>} */ (drivers)))
+        {
+            return MMSYSERR_INVALPARAM;
         }
         const wanted = readFormat(u32(details + FORMAT_DETAILS.pwfx));
         /** @param {ListedFormat} format */
@@ -623,6 +650,60 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                         {
                             return MMSYSERR_NOERROR;
                         }
+                    }
+                }
+            }
+            return MMSYSERR_NOERROR;
+        })();
+    };
+
+
+    /**
+     * acmFormatTagEnum: each tag of one driver, or of every driver when none
+     * is named, to the program's callback with ACMFORMATTAGDETAILS filled.
+     *
+     * @param {number[]} args @param {boolean} wide
+     */
+    const formatTagEnum = ([handle, details, callback, instance, flags], wide)=>{
+        if ((details >>> 0) === 0 || (callback >>> 0) === 0
+            || u32(details + TAG_DETAILS.cbStruct) < TAG_DETAILS.szFormatTag
+                + TAG_DETAILS.NAME_CHARS * (wide ? 2 : 1))
+        {
+            return MMSYSERR_INVALPARAM;
+        }
+        if ((flags >>> 0) !== 0)
+        {
+            return MMSYSERR_INVALFLAG;
+        }
+        const drivers = (handle >>> 0) === 0 ? allDrivers() : [driverOf(handle)];
+        if (drivers.some(driver=>!driver))
+        {
+            return MMSYSERR_INVALHANDLE;
+        }
+        const run = host.callGuest;
+        if (!run)
+        {
+            return MMSYSERR_NOERROR;
+        }
+        const thread = host.currentThread?.();
+        return (async()=>{
+            for (const driver of /** @type {ReturnType<typeof allDrivers>} */ (drivers))
+            {
+                for (const [index, tag] of tagsOf(driver).entries())
+                {
+                    put32(details + TAG_DETAILS.dwFormatTagIndex, index);
+                    put32(details + TAG_DETAILS.dwFormatTag, tag.tag);
+                    put32(details + TAG_DETAILS.cbFormatSize, Math.max(...tag.formats
+                        .map(format=>format.bytes.length)));
+                    put32(details + TAG_DETAILS.fdwSupport, driver.support);
+                    put32(details + TAG_DETAILS.cStandardFormats, tag.formats.length);
+                    writeName(details + TAG_DETAILS.szFormatTag, tag.name, TAG_DETAILS.NAME_CHARS,
+                        wide);
+                    const more = await run(callback >>> 0,
+                        [driver.id, details >>> 0, instance >>> 0, driver.support], thread);
+                    if ((more | 0) === 0)
+                    {
+                        return MMSYSERR_NOERROR;
                     }
                 }
             }
@@ -687,13 +768,21 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
      * @param {number[]} args @param {boolean} wide
      */
     const formatDetails = ([handle, details, flags], wide)=>{
+        const tag = (details >>> 0) === 0 ? 0 : u32(details + FORMAT_DETAILS.dwFormatTag);
+        // WAVE_FORMAT_UNKNOWN names no tag to look a format up in.
         if ((details >>> 0) === 0
-            || u32(details + FORMAT_DETAILS.cbStruct) < FORMAT_DETAILS.szFormat
-            || u32(details + FORMAT_DETAILS.pwfx) === 0)
+            || u32(details + FORMAT_DETAILS.cbStruct) < formatDetailsSize(wide)
+            || u32(details + FORMAT_DETAILS.pwfx) === 0 || tag === WAVE_FORMAT_UNKNOWN
+            || u32(details + FORMAT_DETAILS.fdwSupport) !== 0
+            || u32(details + FORMAT_DETAILS.cbwfx) < PCMWAVEFORMAT_SIZE)
         {
             return MMSYSERR_INVALPARAM;
         }
-        const tag = u32(details + FORMAT_DETAILS.dwFormatTag);
+        if ((flags & 0xf) === ACM_FORMATDETAILSF_FORMAT
+            && (readFormat(u32(details + FORMAT_DETAILS.pwfx))?.tag ?? 0) === WAVE_FORMAT_UNKNOWN)
+        {
+            return MMSYSERR_INVALPARAM;
+        }
         const listed = ((handle >>> 0) === 0 ? allDrivers() : [driverOf(handle)])
             .flatMap(driver=>(driver ? tagsOf(driver) : []))
             .find(entry=>entry.tag === tag);
@@ -737,7 +826,13 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         acmMetrics: {
             argBytes: 12,
             handler: ([object, metric, out])=>{
-                if ((out >>> 0) === 0)
+                const named = (object >>> 0) === 0 ? null
+                    : driverOf(object) ?? (streams.has(object >>> 0) ? 'stream' : null);
+                if ((object >>> 0) !== 0 && named === null)
+                {
+                    return MMSYSERR_INVALHANDLE;
+                }
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -757,8 +852,9 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                     [METRIC.COUNT_LOCAL_CONVERTERS]: 0,
                     [METRIC.COUNT_LOCAL_FILTERS]: 0,
                     [METRIC.COUNT_LOCAL_DISABLED]: 0,
-                    // An ADPCM format with the seven standard pairs after it.
-                    [METRIC.MAX_SIZE_FORMAT]: WAVEFORMATEX.aCoef + 7 * 4,
+                    // The driver's own largest format, or the largest of any.
+                    [METRIC.MAX_SIZE_FORMAT]: largestFormat(named && named !== 'stream'
+                        ? [named] : drivers),
                     [METRIC.MAX_SIZE_FILTER]: 0,
                 };
                 if (metric === METRIC.DRIVER_SUPPORT || metric === METRIC.DRIVER_PRIORITY)
@@ -819,7 +915,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         acmDriverOpen: {
             argBytes: 12,
             handler: ([out, id, flags])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -841,21 +937,35 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         /** MMRESULT acmDriverClose(HACMDRIVER had, DWORD fdwClose) */
         acmDriverClose: {
             argBytes: 8,
-            handler: ([handle])=>(opened.delete(handle >>> 0)
-                ? MMSYSERR_NOERROR : MMSYSERR_INVALHANDLE),
+            handler: ([handle, flags])=>{
+                if (!opened.has(handle >>> 0))
+                {
+                    return MMSYSERR_INVALHANDLE;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return MMSYSERR_INVALFLAG;
+                }
+                opened.delete(handle >>> 0);
+                return MMSYSERR_NOERROR;
+            },
         },
         /** MMRESULT acmDriverID(HACMOBJ hao, LPHACMDRIVERID phadid, DWORD fdwDriverID) */
         acmDriverID: {
             argBytes: 12,
-            handler: ([object, out])=>{
+            handler: ([object, out, flags])=>{
                 const driver = driverOf(object);
                 if (!driver)
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
+                }
+                if ((flags >>> 0) !== 0)
+                {
+                    return MMSYSERR_INVALFLAG;
                 }
                 put32(out, driver.id);
                 return MMSYSERR_NOERROR;
@@ -869,22 +979,61 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
          * MMRESULT acmFormatSuggest(HACMDRIVER had, LPWAVEFORMATEX pwfxSrc,
          *     LPWAVEFORMATEX pwfxDst, DWORD cbwfxDst, DWORD fdwSuggest)
          *
-         * What a driver here would turn the source into: 16-bit PCM of its
-         * rate and channels for ADPCM, the same PCM for PCM -- with whatever of
-         * the destination the flags say the caller has fixed.
+         * What the driver would turn the source into, with whatever of the
+         * destination the flags say the caller has fixed; with no driver,
+         * what the first that can would. Each driver suggests only what it
+         * converts: a codec decodes its own format to 16-bit PCM of the same
+         * rate and channels (the codecs here decode and do not encode, so PCM
+         * given to one is not possible), and only the PCM converter turns PCM
+         * into PCM -- a codec asked for its own tag back is not possible.
          */
         acmFormatSuggest: {
             argBytes: 20,
-            handler: ([, source, destination, room, flags])=>{
+            handler: ([handle, source, destination, room, flags])=>{
                 const from = readFormat(source);
-                if (!from || (destination >>> 0) === 0 || room < 16)
+                if (!from || wholeAddress(destination) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                const fixed = (destination >>> 0) !== 0 ? readFormat(destination) : null;
+                if (((flags >>> 0) & ~ACM_FORMATSUGGESTF_TYPEMASK) !== 0)
+                {
+                    return MMSYSERR_INVALFLAG;
+                }
+                const named = (handle >>> 0) === 0 ? null : driverOf(handle);
+                if ((handle >>> 0) !== 0 && !named)
+                {
+                    return MMSYSERR_INVALHANDLE;
+                }
+                const candidates = named ? [named] : allDrivers();
+                const fixed = readFormat(destination);
                 const tag = (flags & ACM_FORMATSUGGESTF_WFORMATTAG) && fixed
                     ? fixed.tag : WAVE_FORMAT_PCM;
-                if (tag !== WAVE_FORMAT_PCM)
+                // Room for the largest format of the tag asked for, or of any the
+                // driver -- or any driver -- lists when none is; PCM that is PCM
+                // already is suggested as itself, and needs only its own room.
+                const plainPcm = from.tag === WAVE_FORMAT_PCM && from.channels > 0
+                    && from.rate > 0;
+                const largest = (flags & ACM_FORMATSUGGESTF_WFORMATTAG)
+                    ? Math.max(0, ...candidates.flatMap(driver=>tagsOf(driver))
+                        .filter(entry=>entry.tag === tag)
+                        .flatMap(entry=>entry.formats.map(format=>format.bytes.length)))
+                    : plainPcm ? PCMWAVEFORMAT_SIZE : largestFormat(candidates);
+                if (largest === 0)
+                {
+                    return ACMERR_NOTPOSSIBLE;
+                }
+                if ((room >>> 0) < largest)
+                {
+                    return MMSYSERR_INVALPARAM;
+                }
+                // With no driver named, a source no driver here lists has none to
+                // go to at all.
+                if (!named && !candidates.some(driver=>tagsOf(driver)
+                    .some(entry=>entry.tag === from.tag)))
+                {
+                    return MMSYSERR_NODRIVER;
+                }
+                if (tag !== WAVE_FORMAT_PCM || from.channels === 0 || from.rate === 0)
                 {
                     return ACMERR_NOTPOSSIBLE;
                 }
@@ -896,6 +1045,11 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                     bits: (flags & ACM_FORMATSUGGESTF_WBITSPERSAMPLE) && fixed
                         ? fixed.bits : from.tag === WAVE_FORMAT_PCM ? from.bits : 16,
                 };
+                // A driver converts from its own tag; the PCM converter's is PCM.
+                if (named && named.tag !== from.tag)
+                {
+                    return ACMERR_NOTPOSSIBLE;
+                }
                 if (!convertible(from, { ...pcm, tag, blockAlign: 0, samplesPerBlock: 0,
                     coefficients: [] }))
                 {
@@ -916,7 +1070,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             handler: ([out, , source, destination, filter, , , flags])=>{
                 const from = readFormat(source);
                 const to = readFormat(destination);
-                if (!from || !to || (filter >>> 0) !== 0)
+                if (!from || !to || wholeAddress(filter) !== 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -930,12 +1084,12 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_NOERROR;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
                 const handle = nextStream++;
-                streams.set(handle, { from, to, carry: { position: 0, previous: [0, 0] },
+                streams.set(handle, { from, to, carry: { position: 0, base: 0 },
                     codec: codecFor(from.tag)?.open(from, to) });
                 put32(out, handle);
                 return MMSYSERR_NOERROR;
@@ -962,7 +1116,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1008,7 +1162,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0 || u32(header + HEADER.cbStruct) < HEADER.SIZE)
+                if (wholeAddress(header) === 0 || u32(header + HEADER.cbStruct) < HEADER.SIZE)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1026,7 +1180,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0)
+                if (wholeAddress(header) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1053,7 +1207,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0)
+                if (wholeAddress(header) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1135,13 +1289,15 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         acmDriverDetailsW: { argBytes: 12, handler: args=>driverDetails(args, true) },
         acmFormatEnumA: { argBytes: 20, handler: args=>formatEnum(args, false) },
         acmFormatEnumW: { argBytes: 20, handler: args=>formatEnum(args, true) },
+        acmFormatTagEnumA: { argBytes: 20, handler: args=>formatTagEnum(args, false) },
+        acmFormatTagEnumW: { argBytes: 20, handler: args=>formatTagEnum(args, true) },
         acmFormatTagDetailsA: { argBytes: 12, handler: args=>formatTagDetails(args, false) },
         acmFormatTagDetailsW: { argBytes: 12, handler: args=>formatTagDetails(args, true) },
         acmFormatDetailsA: { argBytes: 12, handler: args=>formatDetails(args, false) },
         acmFormatDetailsW: { argBytes: 12, handler: args=>formatDetails(args, true) },
     };
     for (const [base, argCount] of /** @type {[string, number][]} */ ([
-        ['acmDriverAdd', 5], ['acmFormatChoose', 1], ['acmFormatTagEnum', 5],
+        ['acmDriverAdd', 5], ['acmFormatChoose', 1],
         ['acmFilterChoose', 1], ['acmFilterDetails', 3], ['acmFilterEnum', 5],
         ['acmFilterTagDetails', 3], ['acmFilterTagEnum', 5],
     ]))

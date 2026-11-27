@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * imm32 — the input method, which this build does not have and does not need.
  *
@@ -34,6 +36,9 @@
 
 /** What a call on an input context answers in the last error when it was handed none. */
 const ERROR_INVALID_HANDLE = 6;
+
+/** The virtual key a key an input method processed reads as. */
+const VK_PROCESSKEY = 0xe5;
 
 /**
  * The messages an input method's own window handles: the composition's
@@ -89,7 +94,7 @@ export function createImmFunctions(host){
         },
     };
 
-    return {
+    const table = {
         /**
          * HIMC ImmAssociateContext(HWND hWnd, HIMC hIMC)
          *
@@ -108,8 +113,28 @@ export function createImmFunctions(host){
          */
         ImmGetContext: { argBytes: 4, handler: ()=>0 },
 
+        /**
+         * UINT ImmGetVirtualKey(HWND hWnd)
+         *
+         * The key an IME took for itself, or VK_PROCESSKEY when it kept none;
+         * no window has an input context (ImmGetContext), so none was taken.
+         */
+        ImmGetVirtualKey: { argBytes: 4, handler: ()=>VK_PROCESSKEY },
+
         /** BOOL ImmReleaseContext(HWND hWnd, HIMC hIMC) */
         ImmReleaseContext: { argBytes: 8, handler: ()=>1 },
+
+        /**
+         * LPINPUTCONTEXT ImmLockIMC(HIMC hIMC), BOOL ImmUnlockIMC(HIMC hIMC),
+         * LPVOID ImmLockIMCC(HIMCC hIMCC) and BOOL ImmUnlockIMCC(HIMCC hIMCC)
+         *
+         * No input context is ever handed out (ImmGetContext), so none can be
+         * locked: NULL, and FALSE for the unlock, as an invalid handle answers.
+         */
+        ImmLockIMC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
+        ImmUnlockIMC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMCC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
+        ImmUnlockIMCC: { argBytes: 4, handler: ()=>0 },
 
         /**
          * LONG ImmGetCompositionStringA(HIMC hIMC, DWORD dwIndex, LPVOID lpBuf, DWORD dwBufLen)
@@ -153,7 +178,7 @@ export function createImmFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                        host.writeMemory(wholeAddress(out), new Uint8Array(4));
                     }
                 }
                 return 1;
@@ -202,9 +227,9 @@ export function createImmFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, count])=>{
-                if ((count >>> 0) !== 0)
+                if (wholeAddress(count) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },
@@ -263,6 +288,26 @@ export function createImmFunctions(host){
          *   DWORD dwCompLen, LPVOID lpRead, DWORD dwReadLen)
          */
         ImmSetCompositionStringA: noContext(24),
+        ImmSetCompositionStringW: noContext(24),
+
+        /**
+         * BOOL ImmGetCompositionFontA(HIMC hIMC, LPLOGFONTA lplf), and the W form
+         *
+         * The context's font: no context is handed out, so there is none to
+         * read, refused as the other calls on a context are.
+         */
+        ImmGetCompositionFontA: noContext(8),
+        ImmGetCompositionFontW: noContext(8),
+
+        /**
+         * UINT ImmGetIMEFileNameA(HKL hKL, LPSTR lpszFileName, UINT uBufLen), and
+         * the W form
+         *
+         * The input method's file. A layout that is none has no file: zero
+         * characters, as for its description.
+         */
+        ImmGetIMEFileNameA: { argBytes: 12, handler: ()=>0 },
+        ImmGetIMEFileNameW: { argBytes: 12, handler: ()=>0 },
 
         /**
          * LRESULT ImmEscapeA(HKL hKL, HIMC hIMC, UINT uEscape, LPVOID lpData)
@@ -281,9 +326,9 @@ export function createImmFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, count])=>{
-                if ((count >>> 0) !== 0)
+                if (wholeAddress(count) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },
@@ -299,6 +344,7 @@ export function createImmFunctions(host){
          * characters, and the buffer untouched.
          */
         ImmGetDescriptionA: { argBytes: 12, handler: ()=>0 },
+        ImmGetDescriptionW: { argBytes: 12, handler: ()=>0 },
 
         /**
          * DWORD ImmGetProperty(HKL hKL, DWORD fdwIndex)
@@ -333,4 +379,6 @@ export function createImmFunctions(host){
             },
         },
     };
+    // The IME messages carry no text, so the W form is the same answer.
+    return { ...table, ImmIsUIMessageW: table.ImmIsUIMessageA };
 }

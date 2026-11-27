@@ -12,30 +12,55 @@ import { createProgramFunctions } from './functions.js';
 import { parsePe, readImports } from '../../loader/internal/pe.js';
 import { synthesiseProgram } from '../../loader/internal/synth.js';
 import { rewriteResources } from '../kernel32/resource-update.js';
+import { runWinver } from './winver.js';
 
 test('a program is one of the system folder\'s, however its path is spelled', ()=>{
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\msiexec.exe'), 'msiexec');
     assert.equal(systemProgramAt('c:/windows//SYSTEM32/RunDll32.EXE'), 'rundll32');
     assert.equal(systemProgramAt(' C:\\Windows\\System32\\regsvr32.exe'), 'regsvr32');
+    // A setup's custom actions register performance counters through them (A246).
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\lodctr.exe'), 'lodctr');
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\unlodctr.exe'), 'unlodctr');
+    // The one program every Windows has: a child to suspend, query and end.
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\winver.exe'), 'winver');
     assert.equal(systemProgramAt('C:\\App\\msiexec.exe'), null, 'only there');
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\sub\\msiexec.exe'), null);
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\calc.exe'), null);
     assert.equal(systemProgramAt('msiexec.exe'), null, 'a bare name is the spawner\'s to find');
 });
 
+test('a 64-bit machine keeps 64-bit programs in its system folder and 32-bit ones in SysWOW64',
+    ()=>{
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\msiexec.exe'), 'msiexec');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\Sysnative\\msiexec.exe'), 'msiexec');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\notepad.exe'), 'notepad');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\regedit.exe'), null,
+            'regedit is the Windows directory\'s alone');
+        /** @param {string} path @param {'x86' | 'amd64'} [machine] */
+        const bits = (path, machine)=>parsePe(/** @type {Uint8Array} */ (
+            systemProgramImage(path, machine)), { wide: true }).bits;
+        assert.equal(bits('C:\\WINDOWS\\system32\\msiexec.exe'), 32, 'a 32-bit machine\'s');
+        assert.equal(bits('C:\\WINDOWS\\system32\\msiexec.exe', 'amd64'), 64);
+        assert.equal(bits('C:\\WINDOWS\\SysWOW64\\msiexec.exe', 'amd64'), 32);
+        assert.equal(bits('C:\\WINDOWS\\notepad.exe', 'amd64'), 64);
+
+    });
+
 test('every program\'s image calls its own routine, and every routine is in the library', ()=>{
     const routines = Object.keys(createProgramFunctions(/** @type {any} */ ({})));
-    for (const [name, { routine }] of SYSTEM_PROGRAMS)
+    for (const [name, { routine, directories }] of SYSTEM_PROGRAMS)
     {
-        const bytes = systemProgramImage(`C:\\WINDOWS\\system32\\${name}`);
+        const directory = (directories ?? ['C:\\WINDOWS\\system32'])[0];
+        const bytes = systemProgramImage(`${directory}\\${name}`);
         assert.ok(bytes, name);
         const imports = readImports(bytes, parsePe(bytes));
         assert.deepEqual(imports[0], { dll: PROGRAMS_LIBRARY,
             entries: [{ name: routine, ordinal: null, iatRva: imports[0].entries[0].iatRva }] });
         assert.ok(routines.includes(routine), `${PROGRAMS_LIBRARY} exports ${routine}`);
     }
-    assert.equal(routines.length, SYSTEM_PROGRAMS.size + PROGRAMS_IN_PLACE.length,
-        'and nothing else');
+    assert.equal(routines.length, SYSTEM_PROGRAMS.size + PROGRAMS_IN_PLACE.length + 1,
+        'and nothing else but the logon\'s RunOnce pass');
+    assert.ok(routines.includes('runonce'));
     assert.equal(systemProgramImage('C:\\App\\msiexec.exe'), null);
 });
 
@@ -102,7 +127,29 @@ test('DirectX\'s setup a title brings is run as the engine\'s own, known by its 
     assert.equal(programInPlaceOf(new Uint8Array(64)), null, 'and bytes that are no image');
 });
 
-test('the setup run in DXSETUP\'s place succeeds without a restart, and shows nothing', async()=>{
+test('the .NET Framework 4\'s setups are run as the engine\'s own, known by their version', ()=>{
+    // The version blocks of the 4.0 and 4.8 offline installers as they are.
+    for (const [description, original] of [
+        ['Microsoft .NET Framework 4 Setup', 'dotNetFx40_Full_x86_x64.exe'],
+        ['Microsoft .NET Framework 4.8 Setup', 'NDP48-x86-x64-AllOS-ENU.exe'],
+        ['Microsoft .NET Framework 4.7.2 Setup', 'NDP472-KB4054531-Web.exe'],
+        ['Microsoft .NET Framework 4 Client Profile Setup', 'dotNetFx40_Client_x86_x64.exe']])
+    {
+        const bytes = programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+            FileDescription: description, OriginalFilename: original }));
+        assert.ok(bytes, description);
+        assert.equal(readImports(bytes, parsePe(bytes))[0].entries[0].name, 'netfxsetup');
+    }
+    // What the setup unpacks and runs is not it: the Framework is not installed by parts.
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+        FileDescription: 'Setup Installer', OriginalFilename: 'SetupUI.exe' })), null);
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+        FileDescription: 'Microsoft .NET Framework 3.5 SP1 Setup' })), null, 'not CLR 2\'s');
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'A Vendor',
+        FileDescription: 'Microsoft .NET Framework 4.8 Setup' })), null, 'only Microsoft\'s');
+});
+
+test('DXSETUP\'s place, nothing beside it: succeeds, no restart, shows nothing', async()=>{
     const functions = createProgramFunctions(/** @type {any} */ ({
         callerThread: ()=>null,
         answering: (/** @type {any} */ thread, /** @type {() => any} */ fn)=>fn(),
@@ -112,7 +159,31 @@ test('the setup run in DXSETUP\'s place succeeds without a restart, and shows no
         readWideString: ()=>'"D:\\DirectX\\DXSETUP.exe" /silent',
         /** @param {string} library */
         exports: library=>(library === 'KERNEL32.dll'
-            ? { GetCommandLineW: { handler: ()=>0x2000 } } : {}),
+            ? { GetCommandLineW: { handler: ()=>0x2000 },
+                GetModuleFileNameW: { handler: ()=>0 }, GetNativeSystemInfo: { handler: ()=>0 },
+                FindFirstFileW: { handler: ()=>0xffffffff } } : {}),
     }));
     assert.equal(await functions.dxsetup.handler(), 0, 'DSETUPERR_SUCCESS: no restart');
+});
+
+test('lodctr and unlodctr answer success and register nothing (A246)', async()=>{
+    for (const name of ['lodctr.exe', 'unlodctr.exe'])
+    {
+        const program = SYSTEM_PROGRAMS.get(name);
+        assert.equal(await program?.run(/** @type {any} */ ({ commandLine: `"${name}" /M:x.man` })), 0,
+            name);
+    }
+});
+
+test('winver is the shell\'s about box with the system\'s name, and exits with 0', async()=>{
+    /** @type {any[]} */
+    const calls = [];
+    const context = /** @type {any} */ ({
+        wide: (/** @type {string} */ text)=>(calls.push(['wide', text]), 0x5000),
+        call: async(/** @type {string} */ library, /** @type {string} */ name,
+            /** @type {number[]} */ args)=>(calls.push([library, name, args]), 1),
+    });
+    assert.equal(await runWinver(context), 0);
+    assert.deepEqual(calls,
+        [['wide', 'Windows'], ['SHELL32.dll', 'ShellAboutW', [0, 0x5000, 0, 0]]]);
 });

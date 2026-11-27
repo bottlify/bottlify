@@ -154,9 +154,11 @@ test('texture parameters refuse what is not a parameter or not a value of it', (
         [1, 0.5, 0, 1]);
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_BASE_LEVEL, -1);
     assert.equal(context.glGetError(), GL.INVALID_VALUE);
-    // GL_TEXTURE_3D, which this implementation has no images for.
+    // GL_TEXTURE_2D_MULTISAMPLE, whose textures have no sampling state.
+    context.glTexParameteri(0x9100, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'a target with no parameters');
     context.glTexParameteri(0x806f, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'a target this has no textures for');
+    assert.equal(context.glGetError(), GL.NO_ERROR, 'a 3D texture has parameters');
     assert.deepEqual(context.glGetTexParameteriv(GL.TEXTURE_2D, GL.TEXTURE_RESIDENT), [1]);
 });
 
@@ -781,37 +783,42 @@ test('a call that is accepted and not honoured reports a divergence, once', ()=>
 });
 
 test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask and the '
-    + 'unsuffixed glGet queries alike, independently of the two-sided enable', ()=>{
+    + 'unsuffixed glGet queries alike; on the front face they set both, as OpenGL 2.0 does', ()=>{
     const { context } = drawing();
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.FRONT],
         'a fresh context starts on the front face');
 
     // The selector is like glActiveTextureARB: it governs the setters and
     // the unsuffixed queries with the two-sided enable untouched (still off
-    // here), which is what keeps a title that never calls it writing the
-    // single record it always had.
+    // here). On the front face the one-face calls are OpenGL 2.0's, which
+    // set both faces' state.
     context.glStencilFunc(GL.GEQUAL, 3, 0xf0);
     context.glStencilOp(GL.INCR, GL.DECR, GL.REPLACE);
     context.glStencilMask(0x0f);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.GEQUAL]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [3]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0x0f]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS],
-        'the front-only write left the back record at its default');
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.GEQUAL],
+        'with two-sided testing off, the front face\'s calls set the back face too');
 
     // Selecting the back face -- the two-sided enable is still off -- moves
-    // both the setters and the unsuffixed queries onto it.
+    // both the setters and the unsuffixed queries onto the extension's own
+    // back face, a record apart from OpenGL 2.0's (`GL_STENCIL_BACK_*`).
     context.glActiveStencilFaceEXT(GL.BACK);
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
+    context.glStencilFuncSeparate(GL.BACK, GL.LESS, 1, 0xff);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.LESS]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.ALWAYS],
-        'glGet with no suffix answers the active face, not always the front');
+        'glGet with no suffix answers the active face -- the extension\'s, untouched yet');
     context.glStencilFunc(GL.ALWAYS, 9, 0xff);
     context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
     context.glStencilMask(0xaa);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [9]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0xaa]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [9]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0xaa]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.LESS],
+        'OpenGL 2.0\'s back face keeps what glStencilFuncSeparate set');
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.REPLACE]);
 
     // The first block's front record is untouched by any of the above.
     context.glActiveStencilFaceEXT(GL.FRONT);
@@ -823,7 +830,7 @@ test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask and 
     assert.equal(context.glGetError(), GL.INVALID_ENUM, 'not a face');
 });
 
-test('a program\'s texture units reach the eighth, and the limits say so', ()=>{
+test('a program\'s texture units reach the sixteenth, and the limits say so', ()=>{
     const { context } = drawing();
     // The selector takes every unit a program can sample or write coordinates
     // for, past the four the conventional pipeline combines.
@@ -835,11 +842,15 @@ test('a program\'s texture units reach the eighth, and the limits say so', ()=>{
         'the binding landed on unit five');
     context.glActiveTextureARB(GL.TEXTURE0);
     assert.deepEqual(context.glGetIntegerv(GL.TEXTURE_BINDING_2D), [0]);
-    context.glActiveTextureARB(GL.TEXTURE0 + 8);
-    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'and stops at eight');
+    context.glActiveTextureARB(GL.TEXTURE0 + 15);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glActiveTextureARB(GL.TEXTURE0 + 16);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'and stops at sixteen');
+    context.glClientActiveTextureARB(GL.TEXTURE0 + 8);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'eight coordinate sets');
     // The queries a program decides its own limits by.
     assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_COORDS_ARB), [8]);
-    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_IMAGE_UNITS_ARB), [8]);
+    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_IMAGE_UNITS_ARB), [16]);
     assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_UNITS), [4],
         'the conventional pipeline still combines four');
     // A fifth unit's coordinates are a current value of their own.

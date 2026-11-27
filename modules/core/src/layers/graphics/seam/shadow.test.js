@@ -6,16 +6,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { HOST_MIRRORS, createCommandReader, createShadow } from './shadow.js';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
-    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
-    createCommandReader, createShadow, getRenderStateCode,
-    getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
-    transformType, unlockCode,
-} from './shadow.js';
+    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE, transformSlot, transformType,
+} from './block.js';
+import {
+    getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
+} from './routines/getters.js';
+import { lockCode, unlockCode } from './routines/locks.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
-import { D3DFMT as D3DFMT9, D3DRS as D3DRS9, D3DSWAPEFFECT as D3DSWAPEFFECT9 } from '../d3d9/constants.js';
+import {
+    D3DFMT as D3DFMT9, D3DRS as D3DRS9, D3DSWAPEFFECT as D3DSWAPEFFECT9,
+} from '../d3d9/constants.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 
 /** Direct3D 8's stage state types, a bit each. */
@@ -100,12 +104,17 @@ function fakeDevice(){
 /**
  * @param {{ readU32?: boolean, commands?: boolean,
  *     phases?: import('./shadow.js').ShadowPhases,
- *     exchange?: (address: number) => void }} [options]  exchange: a
+ *     exchange?: (address: number) => void, base?: number }} [options]  exchange: a
  *     compare-and-swap of the memory's, as with threads on other executors,
- *     told of each swap first
+ *     told of each swap first; base: where its memory starts
  */
 function machine(options = {}){
     const memory = new Uint8Array(0x240000);
+    // Where the machine's memory starts in the guest's space: above 2 GB, an
+    // address is a word past what a signed 32-bit number holds.
+    const base = options.base ?? 0;
+    /** @param {number} address */
+    const offset = address=>(address >>> 0) - base;
     /**
      * How often guest memory was copied out, which regions of it relative to
      * the block, and which words were read in place.
@@ -125,29 +134,29 @@ function machine(options = {}){
     const order = [];
     const shadow = createShadow({
         allocate: bytes=>{
-            const at = free;
+            const made = free;
             free += bytes;
-            return at;
+            return made + base;
         },
         readMemory: (address, length)=>{
             reads.memory++;
             reads.regions.push([address - shadow.address(), length]);
-            return memory.slice(address, address + length);
+            return memory.slice(offset(address), offset(address) + length);
         },
         readU32: options.readU32
             ? address=>{
                 reads.words.push(address - shadow.address());
-                return view.getUint32(address, true);
+                return view.getUint32(offset(address), true);
             }
             : undefined,
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        writeMemory: (address, bytes)=>memory.set(bytes, offset(address)),
         compareExchangeU32: options.exchange
             ? (address, expected, value)=>{
                 options.exchange?.(address);
-                const held = view.getUint32(address, true);
+                const held = view.getUint32(offset(address), true);
                 if (held === expected >>> 0)
                 {
-                    view.setUint32(address, value >>> 0, true);
+                    view.setUint32(offset(address), value >>> 0, true);
                 }
                 return held;
             }
@@ -175,10 +184,10 @@ function machine(options = {}){
     return {
         reads, taken, order,
         memory, device, shadow, divergences,
-        /** @param {number} at */
-        u32: at=>view.getUint32(at, true),
-        /** @param {number} at @param {number} value */
-        put32: (at, value)=>view.setUint32(at, value >>> 0, true),
+        /** @param {number} address */
+        u32: address=>view.getUint32(offset(address), true),
+        /** @param {number} address @param {number} value */
+        put32: (address, value)=>view.setUint32(offset(address), value >>> 0, true),
     };
 }
 
@@ -248,7 +257,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.LEFT_FULL + 4, SHADOW.LEFT_CHECKS);
     // The bytes the moves copied, two words.
     assert.equal(SHADOW.LEFT_CHECKS + 4, SHADOW.MOVE_COPIED);
-    assert.equal(SHADOW.MOVE_COPIED + 8, SHADOW.SIZE);
+    assert.equal(SHADOW.MOVE_COPIED + 8, SHADOW.CREATION);
+    // The creation parameters, four dwords, and the scissor rectangle, four.
+    assert.equal(SHADOW.CREATION + 16, SHADOW.SCISSOR);
+    assert.equal(SHADOW.SCISSOR + 16, SHADOW.SIZE);
     assert.equal(BUFFER.QUEUED + 4, BUFFER.SPARES);
     // A dynamic buffer's other storages, then whether each is the guest's to move onto.
     assert.equal(BUFFER.SPARES + BUFFER.SPARE_COUNT * 4, BUFFER.SPARE_FREE);
@@ -262,8 +274,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
         [BUFFER.LOCKED, BUFFER.LOCK_FLAGS, BUFFER.DEVICE, BUFFER.QUEUED]);
     assert.equal(LEVEL.BOX + 24, LEVEL.SIZE);
     // A displacement of a byte reaches every word of it.
-    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.LEVEL < 128);
-    assert.equal(SURFACE.LEVEL + 4, SURFACE.SIZE);
+    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.OWNER < 128);
+    assert.deepEqual([SURFACE.OWNER, SURFACE.SIZE], [SURFACE.LEVEL + 4, SURFACE.LEVEL + 8]);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.
     assert.ok(TEXTURE.LEVEL_SLOTS >= 14);
@@ -500,6 +512,26 @@ test('a buffer gets a block on its own page, naming its bytes and its device', (
     assert.equal(m.u32(block + BUFFER.DEVICE), m.shadow.address());
     assert.equal(m.shadow.attachBuffer(ib), block + BUFFER.SIZE, 'the next carved from the page');
     assert.equal(m.shadow.diagnostics().buffers, 2);
+});
+
+test('a block above 2 GB is the one the guest hands back: its unlock reaches the device', ()=>{
+    // The page a block was carved from came back as a signed number past
+    // 2 GB, and the host's map of blocks was keyed by it; the guest puts the
+    // unsigned word on the ring, so no unlock was ever found, and a menu's
+    // text drew from vertex buffers never sent.
+    const m = machine({ base: 0x80000000 });
+    const at = m.shadow.address();
+    const vb = fakeBuffer(0x8000, 0x100);
+    const block = m.shadow.attachBuffer(vb);
+    assert.ok(at >= 0x80000000 && block >= 0x80000000, 'both unsigned, above 2 GB');
+    m.put32(block + BUFFER.FROM, 0);
+    m.put32(block + BUFFER.TO, 0x40);
+    m.put32(at + SHADOW.RING, block);
+    m.put32(at + SHADOW.RING_HEAD, 1);
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, ['lock 0+64 0x0', 'unlock']);
+    assert.deepEqual(m.shadow.diagnostics().settled,
+        { sent: 1, unknown: 0, released: 0, unattached: 0 });
 });
 
 test('a lock and unlock taken in the guest are replayed before the host goes on', ()=>{
@@ -772,6 +804,27 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock'], 'sent before the calls in the ring');
     assert.equal(m.taken.length, 2);
 });
+
+test('a static buffer held on its first lock is sent before the ring\'s calls that may read it',
+    ()=>{
+        // Wine's d3d9 test_draw_mapped_buffer: an index buffer locked once,
+        // written and drawn from without an unlock, draws what it holds.
+        const m = machine({ commands: true });
+        const ib = fakeBuffer(0x8000, 0x100);
+        const block = m.shadow.attachBuffer(ib);
+        const at = m.shadow.address();
+        m.put32(block + BUFFER.LOCKED, 1);
+        m.put32(block + BUFFER.FROM, 0);
+        m.put32(block + BUFFER.TO, 12);
+        m.put32(block + BUFFER.LOCK_FLAGS, 0);
+        m.put32(at + SHADOW.LOCK_RING, block);
+        m.put32(at + SHADOW.LOCK_CALLS, 1);
+        const ring = m.u32(at + SHADOW.COMMANDS);
+        record(7, [1, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));
+        m.put32(at + SHADOW.COMMAND_HEAD, 16);
+        m.shadow.sync();
+        assert.deepEqual(ib.calls, ['lock 0+12 0x0', 'unlock'], 'sent before the draw');
+    });
 
 test('a held lock is found through the lock routine\'s ring, and past its capacity by a look at'
     + ' every buffer', ()=>{
@@ -1098,6 +1151,170 @@ test('a ring started over keeps the record a routine on another executor took sp
         assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0);
     });
 
+test('with the RAM shared, a take reads the ring where it lies: no copy or window of the memory, '
+    + 'and the records handed on are the RAM\'s own bytes', ()=>{
+    // A window of the memory per word and per take (a view each, and a view
+    // of words over it) was the largest share of the engine's garbage in a
+    // menu of Doom 3.
+    const memory = new Uint8Array(new SharedArrayBuffer(0x20000));
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    let reads = 0;
+    /** @type {Uint8Array[]} */
+    const handed = [];
+    const reader = createCommandReader({
+        block, ring,
+        shared: ()=>memory,
+        readWord: address=>{
+            reads++;
+            return words.getUint32(address, true);
+        },
+        readWords: (address, count)=>{
+            reads++;
+            return new Uint32Array(memory.buffer, address, count);
+        },
+        loadU32: address=>{
+            reads++;
+            return words.getUint32(address, true);
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        take: records=>{
+            handed.push(records);
+            return records.byteLength / 8;
+        },
+        refuse: detail=>assert.fail(detail),
+    });
+    let head = 0;
+    for (let turn = 0; turn < 50; turn++)
+    {
+        for (let n = 0; n < 4; n++, head += 8)
+        {
+            words.setUint32(ring + head + COMMAND.SLOT, turn, true);
+            words.setUint32(ring + head + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        reader.take();
+    }
+    assert.equal(reads, 0, 'nothing read through the memory\'s copy, window or word reads');
+    assert.equal(handed.length, 50, 'one hand-over a take that found records');
+    assert.ok(handed.every(records=>records.buffer === memory.buffer), 'the RAM\'s own bytes');
+    assert.equal(handed[49].byteOffset, ring + 49 * 32, 'where the records lie');
+    assert.equal(reader.queued(), 0);
+    assert.equal(reader.holds(word=>word === 7), false, 'nothing waits');
+    assert.equal(reads, 0, 'queued and holds read in place too');
+});
+
+test('a take in place and a take through the memory hand on the same records, start the ring '
+    + 'over alike and count alike, over seeded runs', ()=>{
+    for (let seed = 1; seed <= 20; seed++)
+    {
+        /** @type {{ records: number[][], heads: number[], taken: number, queued: number[] }[]} */
+        const seen = [];
+        for (const inPlace of [false, true])
+        {
+            const memory = new Uint8Array(new SharedArrayBuffer(0x20000));
+            const words = new DataView(memory.buffer);
+            const block = 0x1000;
+            const ring = 0x2000;
+            let state = seed;
+            const next = ()=>(state = (Math.imul(state, 1103515245) + 12345) >>> 0);
+            /** @type {number[][]} */
+            const records = [];
+            const reader = createCommandReader({
+                block, ring,
+                ...inPlace ? { shared: ()=>memory } : {},
+                readWord: address=>words.getUint32(address, true),
+                readWords: (address, count)=>new Uint32Array(memory.slice(address,
+                    address + count * 4).buffer),
+                writeMemory: (address, bytes)=>memory.set(bytes, address),
+                compareExchangeU32: (address, expected, value)=>{
+                    const held = words.getUint32(address, true);
+                    if (held === expected)
+                    {
+                        words.setUint32(address, value, true);
+                    }
+                    return held;
+                },
+                take: bytes=>{
+                    records.push([...new Uint32Array(bytes.slice().buffer)]);
+                    return bytes.byteLength >>> 3;
+                },
+                refuse: detail=>assert.fail(detail),
+            });
+            /** @type {number[]} */
+            const heads = [];
+            /** @type {number[]} */
+            const queued = [];
+            // Rounds enough to pass the point the ring starts over at, again and again.
+            for (let round = 0; round < 400; round++)
+            {
+                let head = words.getUint32(block + SHADOW.COMMAND_HEAD, true);
+                const count = next() % 30;
+                for (let n = 0; n < count && head + 16 <= COMMAND_RING_BYTES; n++)
+                {
+                    const length = next() % 2 === 0 ? 8 : 16;
+                    words.setUint32(ring + head + COMMAND.SLOT, next() & 0xffff, true);
+                    words.setUint32(ring + head + COMMAND.BYTES, length, true);
+                    head += length;
+                }
+                words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+                queued.push(reader.queued());
+                reader.take();
+                heads.push(words.getUint32(block + SHADOW.COMMAND_HEAD, true));
+            }
+            assert.ok(heads.includes(0), `seed ${seed}: started over`);
+            seen.push({ records, heads, taken: reader.taken(), queued });
+        }
+        assert.deepEqual(seen[1], seen[0], `seed ${seed}: in place as through the memory`);
+    }
+});
+
+test('a ring started over many times zeroes it from one buffer, made once', ()=>{
+    // A buffer the length of what was read, made at every turn of the ring,
+    // was the most garbage a frame of Direct3D made (767 MiB in a run).
+    const memory = new Uint8Array(0x20000);
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    /** @type {Set<ArrayBufferLike>} */
+    const zeroedFrom = new Set();
+    let taken = 0;
+    const reader = createCommandReader({
+        block, ring,
+        readWord: address=>words.getUint32(address, true),
+        readWords: (address, count)=>new Uint32Array(memory.buffer, address, count),
+        writeMemory: (address, bytes)=>{
+            if (address === ring)
+            {
+                zeroedFrom.add(bytes.buffer);
+            }
+            memory.set(bytes, address);
+        },
+        take: records=>{
+            taken += records.byteLength / 8;
+            return records.byteLength / 8;
+        },
+        refuse: detail=>assert.fail(detail),
+    });
+    const head = COMMAND_RING_BYTES - 1024;
+    for (let turn = 0; turn < 5; turn++)
+    {
+        for (let at = 0; at < head; at += 8)
+        {
+            words.setUint32(ring + at + COMMAND.SLOT, 1, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0, `turn ${turn}: over`);
+        assert.ok(memory.subarray(ring, ring + head).every(byte=>byte === 0), 'zeroed');
+    }
+    assert.equal(taken, 5 * head / 8, 'every record');
+    assert.equal(zeroedFrom.size, 1, 'one buffer of zeroes for every turn');
+});
+
 test('the host holds the device while it replays what a routine left, and lets it go after', ()=>{
     // A routine on another executor that finds it held leaves for the host
     // rather than merge a range, or write the unlock ring, under the replay.
@@ -1174,4 +1391,73 @@ test('a mirror the host writes from the device comes after the calls the ring ho
     assert.deepEqual(m.taken, [[7, 16, 1, 2]], 'the ring made first');
     m.shadow.remirror({ renderStates: [] });
     assert.equal(m.taken.length, 1, 'and only once');
+});
+
+test('a host mirror writes what it read as it was read, with no second copy', ()=>{
+    // A guest word reader whose `read` answers bytes of their own, as the
+    // memory layer's readBytes does: a mirror that copied them again would
+    // hand `write` another array, and every matrix, viewport and scissor
+    // mirrored would cost two copies.
+    /** @type {Uint8Array[]} */
+    const reads = [];
+    /** @type {Uint8Array[]} */
+    const writes = [];
+    /** @type {import('./shadow.js').GuestWords} */
+    const m = {
+        // Every word 1: a viewport of some size at the origin.
+        u32: ()=>1,
+        setU32: ()=>{},
+        read: (_at, length)=>{
+            const bytes = new Uint8Array(length).fill(7);
+            reads.push(bytes);
+            return bytes;
+        },
+        write: (_at, bytes)=>{
+            writes.push(bytes);
+        },
+    };
+    assert.equal(HOST_MIRRORS.transform(m, 0x1000, [256, 0x2000]), true, 'the world matrix');
+    assert.equal(HOST_MIRRORS.viewport9(m, 0x1000, [0x3000]), true, 'a viewport');
+    assert.equal(reads.length, 2);
+    assert.deepEqual(writes.map(bytes=>bytes.length), [64, 24]);
+    writes.forEach((bytes, i)=>assert.equal(bytes, reads[i], 'written as read'));
+});
+
+test('a ring started over where the memory fills is zeroed by the fill, no buffer of zeros', ()=>{
+    const memory = new Uint8Array(0x20000);
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    /** @type {[number, number, number][]} */
+    const fills = [];
+    let ringWrites = 0;
+    const reader = createCommandReader({
+        block, ring,
+        readWord: address=>words.getUint32(address, true),
+        readWords: (address, count)=>new Uint32Array(memory.buffer, address, count),
+        writeMemory: (address, bytes)=>{
+            ringWrites += address >= ring ? 1 : 0;
+            memory.set(bytes, address);
+        },
+        fillMemory: (address, value, length)=>{
+            fills.push([address, value, length]);
+            memory.fill(value, address, address + length);
+        },
+        take: records=>records.byteLength / 8,
+        refuse: detail=>assert.fail(detail),
+    });
+    const head = COMMAND_RING_BYTES - 1024;
+    for (let turn = 0; turn < 3; turn++)
+    {
+        for (let at = 0; at < head; at += 8)
+        {
+            words.setUint32(ring + at + COMMAND.SLOT, 1, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        assert.ok(memory.subarray(ring, ring + head).every(byte=>byte === 0), 'zeroed');
+    }
+    assert.deepEqual(fills, [[ring, 0, head], [ring, 0, head], [ring, 0, head]]);
+    assert.equal(ringWrites, 0, 'no bytes written into the ring');
 });

@@ -16,7 +16,8 @@ test('every forwarded export has its own ordinal and its own name, and takes who
     for (const [ordinal, name, home, target, words] of SHLWAPI_FORWARDS)
     {
         assert.match(name, /^[A-Za-z0-9]+Wrap[AW]?$|^[A-Za-z0-9]+$/, `#${ordinal}`);
-        assert.match(home, /^[A-Z0-9]+\.dll$/, name);
+        // The library as the engine's table is keyed: ole32 is the one in lower case.
+        assert.match(home, /^([A-Z0-9]+|ole32)\.dll$/, name);
         assert.match(target, /^[A-Za-z0-9]+$/, name);
         assert.ok(Number.isInteger(words) && words >= 0 && words <= 16, name);
     }
@@ -50,4 +51,25 @@ test('a forwarded export whose target is not implemented says so and answers not
     assert.equal(functions.FindResourceWrapW.handler([0, 0, 0]), 0);
     assert.equal(said.length, 1);
     assert.match(said[0], /#66 FindResourceWrapW is KERNEL32\.dll!FindResourceW/);
+});
+
+test('the COM wrappers reach ole32 by the key its table has', ()=>{
+    // Wine's clsid test: CLSIDFromProgIDWrap answers as CLSIDFromProgID, E_INVALIDARG
+    // for no ProgID - a wrapper that found no ole32 answered 0 there.
+    /** @type {string[]} */
+    const asked = [];
+    const functions = createForwards(home=>(home === 'ole32.dll' ? {
+        CLSIDFromProgID: { handler: ()=>{
+            asked.push('CLSIDFromProgID');
+            return 0x80070057;
+        } },
+        CLSIDFromString: { handler: ()=>{
+            asked.push('CLSIDFromString');
+            return 0;
+        } },
+    } : undefined));
+    assert.equal(functions.CLSIDFromProgIDWrap.handler([0, 0x100]), 0x80070057);
+    assert.equal(functions.CLSIDFromStringWrap.handler([0x200, 0x100]), 0);
+    assert.deepEqual(asked, ['CLSIDFromProgID', 'CLSIDFromString']);
+    assert.equal(SHLWAPI_ORDINALS[333], 'SHBrowseForFolderWrapW');
 });

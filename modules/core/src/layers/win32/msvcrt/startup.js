@@ -32,7 +32,9 @@
 
 import { windowsVersion } from '../kernel32/versions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
-import { createGlobals } from './globals.js';
+import { EINVAL, createGlobals } from './globals.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** `_XcptFilter`'s answer: this filter handles nothing and passes it on. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -50,20 +52,33 @@ const EXCEPTION_CONTINUE_SEARCH = 0;
  * @returns {string[]}
  */
 export function splitCommandLine(line){
-    /** @type {string[]} */
+    return splitCommandLineWords(line).map(word=>word.text);
+}
+
+/**
+ * splitCommandLine's words, each with whether a quote was part of it: the
+ * runtime's wildcard expansion leaves a quoted word as it is.
+ *
+ * @param {string} line
+ * @returns {{ text: string, quoted: boolean }[]}
+ */
+function splitCommandLineWords(line){
+    /** @type {{ text: string, quoted: boolean }[]} */
     const argv = [];
     let current = '';
     let quoted = false;
     let started = false;
+    let hadQuote = false;
     let slashes = 0;
 
     const flush = ()=>{
         if (started)
         {
-            argv.push(current);
+            argv.push({ text: current, quoted: hadQuote });
         }
         current = '';
         started = false;
+        hadQuote = false;
     };
 
     for (const character of line)
@@ -83,6 +98,7 @@ export function splitCommandLine(line){
             else
             {
                 quoted = !quoted;
+                hadQuote = true;
             }
             slashes = 0;
             started = true;
@@ -109,6 +125,12 @@ export function splitCommandLine(line){
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(bytes: number) => number} allocate
  * @property {() => string} commandLine
+ * @property {() => string} [imagePath]
+ *           The program's image, as GetModuleFileName(NULL) names it. Absent,
+ *           `_pgmptr`, `_wpgmptr` and their getters stay unexported.
+ * @property {(pattern: string) => string[] | null} [expand]
+ *           The names in a directory a wildcard pattern matches, null for a
+ *           directory that is not there. Absent, no word is expanded.
  *           What the process was started with, exactly as GetCommandLineA
  *           reports it -- the two must agree, because a program is free to read
  *           either and compare.
@@ -138,6 +160,9 @@ export function splitCommandLine(line){
  * @property {{ narrow: () => number, wide: () => number }} [environment]
  *           The runtime's environment arrays (`environ.js`), which the main
  *           arguments hand on as they stand. Absent, an empty one.
+ * @property {number} [pointerSize]
+ *           8 in a 64-bit process, where argv, the initialiser tables and the
+ *           exit tables hold 8-byte pointers. Absent, 4.
  */
 
 /**
@@ -146,6 +171,7 @@ export function splitCommandLine(line){
  */
 export function createStartupFunctions(host){
     const version = host.version ?? windowsVersion();
+    const width = pointerWidth(host.pointerSize);
 
     /**
      * A C string in guest memory that outlives this call, in the ANSI page
@@ -172,14 +198,12 @@ export function createStartupFunctions(host){
      * @returns {number}
      */
     const publishVector = pointers=>{
-        const address = host.allocate((pointers.length + 1) * 4);
+        const bytes = width.array(pointers);
+        const address = host.allocate(bytes.length);
         if (address === 0)
         {
             return 0;
         }
-        const bytes = new Uint8Array((pointers.length + 1) * 4);
-        const view = new DataView(bytes.buffer);
-        pointers.forEach((pointer, index)=>view.setUint32(index * 4, pointer >>> 0, true));
         host.writeMemory(address, bytes);
         return address;
     };
@@ -192,13 +216,39 @@ export function createStartupFunctions(host){
         }
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
+    };
+
+    /** @param {number} address @param {number} value */
+    const writePointer = (address, value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            host.writeMemory(wholeAddress(address), width.bytes(value));
+        }
     };
 
     /** @param {number} address */
-    const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
-        return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+    const readPointer = address=>{
+        const bytes = host.readMemory(wholeAddress(address), width.size);
+        return width.get(new DataView(bytes.buffer, bytes.byteOffset, width.size), 0);
+    };
+
+    /**
+     * The non-null pointers of a table from `first` up to `last`.
+     *
+     * @param {number} first @param {number} last
+     */
+    const tableEntries = (first, last)=>{
+        const entries = [];
+        for (let at = first; at + width.size <= last; at += width.size)
+        {
+            const entry = readPointer(at);
+            if (entry !== 0)
+            {
+                entries.push(entry);
+            }
+        }
+        return entries;
     };
 
     /**
@@ -212,12 +262,42 @@ export function createStartupFunctions(host){
      */
     let mainArgs = null;
 
-    const buildMainArgs = ()=>{
-        if (mainArgs)
+    /**
+     * The words of the command line, each wildcard word unquoted made the
+     * names it matches when the program asks for that (`doWildCard`), as
+     * the runtime's own `_setargv` does: a word whose last component has a
+     * `*` or `?` and matches something, the directory it names kept as it
+     * was typed before each name; a word that matches nothing stays.
+     *
+     * @param {boolean} wildcards
+     */
+    const wordsOf = wildcards=>splitCommandLineWords(host.commandLine()).flatMap(word=>{
+        if (!wildcards || word.quoted || !host.expand)
+        {
+            return [word.text];
+        }
+        const cut = Math.max(word.text.lastIndexOf('\\'), word.text.lastIndexOf('/'));
+        if (!/[*?]/.test(word.text.slice(cut + 1)) || /[*?]/.test(word.text.slice(0, cut + 1)))
+        {
+            return [word.text];
+        }
+        const names = host.expand(word.text);
+        return names && names.length > 0
+            ? names.map(name=>`${word.text.slice(0, cut + 1)}${name}`) : [word.text];
+    });
+
+    /**
+     * The argument vector: built once, and again each time a program asks
+     * for the wildcards expanded, which may find what the last one did not.
+     *
+     * @param {boolean} [wildcards]
+     */
+    const buildMainArgs = (wildcards = false)=>{
+        if (mainArgs && !wildcards)
         {
             return mainArgs;
         }
-        const argv = splitCommandLine(host.commandLine());
+        const argv = wordsOf(wildcards);
         const pointers = argv.map(argument=>publish(argument));
         mainArgs = {
             argc: argv.length,
@@ -225,8 +305,10 @@ export function createStartupFunctions(host){
             // An empty environment block, not a null one: a program that walks
             // it expects to reach a terminator, and a null pointer is what it
             // checks for to decide the runtime failed.
-            env: publishVector([]),
+            env: mainArgs?.env ?? publishVector([]),
         };
+        globals.set('argc', mainArgs.argc);
+        globals.set('argv', mainArgs.argv);
         return mainArgs;
     };
 
@@ -239,12 +321,7 @@ export function createStartupFunctions(host){
 
     /** A wide string in guest memory that outlives this call. @param {string} text */
     const publishWide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         const address = host.allocate(bytes.length);
         if (address !== 0)
         {
@@ -253,12 +330,50 @@ export function createStartupFunctions(host){
         return address;
     };
 
-    const buildWideMainArgs = ()=>{
-        if (!wideMainArgs)
+    /**
+     * `_pgmptr` and `_wpgmptr`, the program's path in the runtime's two
+     * widths, published once so the variable and its getter hand out the
+     * same string; and `_get_pgmptr` and `_get_wpgmptr`, which write that
+     * pointer where asked: 0, or EINVAL with nothing written for nowhere.
+     *
+     * @param {() => string} imagePath
+     */
+    const programPath = imagePath=>{
+        let narrow = 0;
+        let wide = 0;
+        const narrowPath = ()=>(narrow ||= publish(imagePath()));
+        const widePath = ()=>(wide ||= publishWide(imagePath()));
+        /** @param {() => number} pointer */
+        const getter = pointer=>({
+            convention: /** @type {'cdecl'} */ ('cdecl'),
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    globals.set(host.errnoName?.() ?? 'errno', EINVAL);
+                    return EINVAL;
+                }
+                host.writeMemory(wholeAddress(out), dword(pointer()));
+                return 0;
+            },
+        });
+        return {
+            _pgmptr: { data: ()=>dword(narrowPath()) },
+            _wpgmptr: { data: ()=>dword(widePath()) },
+            _get_pgmptr: getter(narrowPath),
+            _get_wpgmptr: getter(widePath),
+        };
+    };
+
+    /** @param {boolean} [wildcards] */
+    const buildWideMainArgs = (wildcards = false)=>{
+        if (!wideMainArgs || wildcards)
         {
-            const words = splitCommandLine(host.commandLine());
+            const words = wordsOf(wildcards);
             wideMainArgs = { argc: words.length,
                 argv: publishVector(words.map(word=>publishWide(word))) };
+            globals.set('wargv', wideMainArgs.argv);
         }
         return wideMainArgs;
     };
@@ -307,20 +422,20 @@ export function createStartupFunctions(host){
          * int __getmainargs(int *argc, char ***argv, char ***env,
          *                   int doWildCard, _startupinfo *startInfo)
          *
-         * Zero for success. The wildcard expansion is deliberately not done:
-         * Windows does not expand wildcards for a program, the runtime does, and
-         * only when the program asked -- a program that did not ask and gets an
-         * expanded vector sees files it never named.
+         * Zero for success. Windows does not expand wildcards for a program,
+         * the runtime does, and only when the program asked -- `doWildCard`
+         * -- since a program that did not ask and gets an expanded vector
+         * sees files it never named.
          */
         __getmainargs: {
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([argc, argv, env])=>{
-                const built = buildMainArgs();
+            handler: ([argc, argv, env, wildcards])=>{
+                const built = buildMainArgs(wildcards !== 0);
                 writeU32(argc, built.argc);
-                writeU32(argv, built.argv);
-                writeU32(env, host.environment?.narrow() ?? built.env);
+                writePointer(argv, built.argv);
+                writePointer(env, host.environment?.narrow() ?? built.env);
                 return 0;
             },
         },
@@ -336,11 +451,11 @@ export function createStartupFunctions(host){
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([argc, argv, env])=>{
-                const built = buildWideMainArgs();
+            handler: ([argc, argv, env, wildcards])=>{
+                const built = buildWideMainArgs(wildcards !== 0);
                 writeU32(argc, built.argc);
-                writeU32(argv, built.argv);
-                writeU32(env, host.environment?.wide() ?? buildMainArgs().env);
+                writePointer(argv, built.argv);
+                writePointer(env, host.environment?.wide() ?? buildMainArgs().env);
                 return 0;
             },
         },
@@ -361,21 +476,13 @@ export function createStartupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, end])=>{
-                const first = start >>> 0;
-                const last = end >>> 0;
+                const first = wholeAddress(start);
+                const last = wholeAddress(end);
                 if (first === 0 || last <= first)
                 {
                     return 0;
                 }
-                const entries = [];
-                for (let at = first; at < last; at += 4)
-                {
-                    const entry = readU32(at);
-                    if (entry !== 0)
-                    {
-                        entries.push(entry);
-                    }
-                }
+                const entries = tableEntries(first, last);
                 // Whose call this is, read before the walk starts. Only the
                 // first initialiser runs while this handler holds the
                 // processor; the loop turns between them, and the rest would
@@ -399,21 +506,13 @@ export function createStartupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, end])=>{
-                const first = start >>> 0;
-                const last = end >>> 0;
+                const first = wholeAddress(start);
+                const last = wholeAddress(end);
                 if (first === 0 || last <= first)
                 {
                     return 0;
                 }
-                const entries = [];
-                for (let at = first; at < last; at += 4)
-                {
-                    const entry = readU32(at);
-                    if (entry !== 0)
-                    {
-                        entries.push(entry);
-                    }
-                }
+                const entries = tableEntries(first, last);
                 const asked = host.currentThread?.();
                 return entries.reduce(
                     (waiting, entry)=>waiting.then(
@@ -441,6 +540,7 @@ export function createStartupFunctions(host){
          * through, and the same address every time.
          */
         __p__commode: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('commode', 0),
@@ -462,6 +562,7 @@ export function createStartupFunctions(host){
          * the calling thread's own failing calls set.
          */
         _errno: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell(host.errnoName?.() ?? 'errno', 0),
@@ -475,6 +576,7 @@ export function createStartupFunctions(host){
 
         /** int *__p___argc(void) */
         __p___argc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -485,6 +587,7 @@ export function createStartupFunctions(host){
 
         /** char ***__p___argv(void) */
         __p___argv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -501,6 +604,7 @@ export function createStartupFunctions(host){
          * this way whichever start-up the program ran.
          */
         __p___wargv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('wargv', buildWideMainArgs().argv),
@@ -545,6 +649,8 @@ export function createStartupFunctions(host){
             },
         },
 
+        ...host.imagePath ? programPath(/** @type {() => string} */ (host.imagePath)) : {},
+
         /**
          * int _adjust_fdiv
          *
@@ -555,14 +661,24 @@ export function createStartupFunctions(host){
         _adjust_fdiv: { data: ()=>new Uint8Array(4) },
 
         /**
-         * unsigned _osver, _winver, _winmajor, _winminor
+         * int _fmode, _commode: the default translation mode and commit flag, the cells
+         * `__p__fmode` and `__p__commode` answer (`globals.js`); a start-up built for the
+         * DLL imports them by name and writes its own defaults there.
+         */
+        _fmode: { data: ()=>new Uint8Array(4) },
+        _commode: { data: ()=>new Uint8Array(4) },
+
+        /**
+         * unsigned _osver, _winver, _winmajor, _winminor, _osplatform
          *
          * The runtime's copy of the system version, which a start-up and a
          * program's own version check read without calling GetVersion: the
-         * build, major and minor in one word, and each part alone. The same
-         * figures GetVersion answers for the Windows the process is told it
-         * runs on, since a program may compare the two.
+         * build, major and minor in one word, and each part alone, and the
+         * platform GetVersionEx names. The same figures GetVersion answers
+         * for the Windows the process is told it runs on, since a program may
+         * compare the two.
          */
+        _osplatform: { data: ()=>dword(version.platformId) },
         _osver: { data: ()=>dword(version.build) },
         _winver: { data: ()=>dword(version.major << 8 | version.minor) },
         _winmajor: { data: ()=>dword(version.major) },
@@ -588,7 +704,7 @@ export function createStartupFunctions(host){
          * The environment `__getmainargs` hands `main` as its third argument,
          * the same vector: a program walks whichever it has.
          */
-        _environ: { data: ()=>dword(buildMainArgs().env) },
+        _environ: { data: ()=>width.bytes(buildMainArgs().env) },
 
         /**
          * int __mb_cur_max
@@ -610,7 +726,7 @@ export function createStartupFunctions(host){
             /** @param {number[]} args */
             handler: ([fn])=>{
                 onExit.push(fn >>> 0);
-                return fn >>> 0;
+                return wholeAddress(fn);
             },
         },
 
@@ -620,7 +736,7 @@ export function createStartupFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fn])=>{
-                onExit.push(fn >>> 0);
+                onExit.push(wholeAddress(fn));
                 return 0;
             },
         },
@@ -639,24 +755,25 @@ export function createStartupFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([fn, pbegin, pend])=>{
-                const begin = readU32(pbegin);
+                const size = width.size;
+                const begin = readPointer(pbegin);
                 const empty = begin === 0 || begin === 0xffffffff;
-                const count = empty ? 0 : (readU32(pend) - begin) >>> 2;
+                const count = empty ? 0 : Math.trunc(((readPointer(pend) - begin) >>> 0) / size);
                 // ponytail: a fresh array per entry, the old one left to the
                 // library's own free at detach; resize when a table gets long.
-                const grown = host.allocate((count + 1) * 4);
+                const grown = host.allocate((count + 1) * size);
                 if (grown === 0)
                 {
                     return 0;
                 }
                 if (count > 0)
                 {
-                    host.writeMemory(grown, host.readMemory(begin, count * 4));
+                    host.writeMemory(grown, host.readMemory(begin, count * size));
                 }
-                writeU32(grown + count * 4, fn >>> 0);
-                writeU32(pbegin, grown);
-                writeU32(pend, grown + (count + 1) * 4);
-                return fn >>> 0;
+                writePointer(grown + count * size, fn >>> 0);
+                writePointer(pbegin, grown);
+                writePointer(pend, grown + (count + 1) * size);
+                return wholeAddress(fn);
             },
         },
 

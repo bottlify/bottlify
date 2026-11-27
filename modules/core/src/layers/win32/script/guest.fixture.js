@@ -14,7 +14,7 @@
  * runtime agreeing with itself.
  */
 
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 
 const S_OK = 0;
 const E_NOINTERFACE = 0x80004002 | 0;

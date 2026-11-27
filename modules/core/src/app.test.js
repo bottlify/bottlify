@@ -6,61 +6,54 @@
 
 /**
  * What createApp wires that the module graph deliberately does not express.
- * Only the parts that can be exercised without an emulator are here.
+ * Only the parts that can be exercised without an engine are here.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
-    withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
-    resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
-    pagePacing,
-    PAGE_YIELD_MS,
-    PENDING_YIELD_MS,
-    retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, emulatorOf,
-    heapSizeFor,
-    spaceAbove,
-    placeMainStack,
-    stackReserveOf,
-    resourceLookup,
-    createMissingImports,
-    shippedLibraryReader,
-    areaOf,
-    createGuestView,
-    createKernelGl,
-    resolveOpenglEntry,
-    describeEvent,
-    chooseZstdDecoder,
-    answeredByEngine,
-    mapShippedLibraries,
-    placeLibrary,
-    missingImportCall,
-    compatibilityOf,
-    createApp,
-    versionResourceOf,
+    createMacrotask, pacedYield, pageIsHidden, timedWait, divergenceReporter, pagePacing,
+    PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
+    filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT, placeMainStack,
+    stackReserveOf, shippedLibraryReader, areaOf, answeredByEngine, mapShippedLibraries, createApp,
     runProcessId,
-    withCpuSetup,
-    withoutFaultingTailCalls,
-    tailCallsFault,
-    mobileOrSafari,
-    automaticCores,
+    withCpuSetup, withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores,
     translatorsBeside,
-    allocateCleared,
-    RESOURCE_ALIGNMENT,
-    liveDumpOf,
 } from './app.js';
+import {
+    createGuestView, createKernelGl, resolveOpenglEntry,
+} from './process/sidecar.js';
+import { idleWait, answeringWhile } from './process/run-waits.js';
+import { bytesPerAwait, bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
+import { allocateCleared, RESOURCE_ALIGNMENT } from './process/process-layout.js';
+import {
+    resourceLookup, compatibilityOf, versionResourceOf, imageInMemory,
+} from './process/image-resources.js';
+import { journalEvents } from './process/system-host.js';
+import { liveDumpOf } from './process/live-dump.js';
+import {
+    groupBlocks, inParallel, withReadAhead, withWindow, refetchedIn, windowFor,
+    NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
+} from './process/bundle-mount.js';
+import {
+    fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
+    withLibraryExtension, pathDirectories, moduleKeyOf, createMissingImports, describeEvent,
+    placeLibrary, missingImportCall, readWholeFile, WHOLE_READ_BYTES,
+} from './process/libraries.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
+import { HEAP_POOLS } from './memory-zones.js';
+import { writeBundle } from './bundle-node.js';
+import { openBundle } from './layers/filesystem/internal/bundle/format.js';
+import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { createBlockCache } from './layers/filesystem/internal/bundle/cache.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { parsePe } from './layers/loader/internal/pe.js';
-import { decompressZstd } from './zstd.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
 import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
 
@@ -259,6 +252,21 @@ test('a window at the end is clipped, and two misses in one window are one reque
     assert.equal(groupBlocks(pair).length, 1);
 });
 
+test('a window takes only the blocks laid beside the miss in the container', ()=>{
+    // An installation's bottle: blocks 0..3 written last, at the container's
+    // end, and blocks 4..7 -- a file that arrived first -- at its start. A miss
+    // on block 4 is in the first window, and so by offset is nothing below it.
+    const head = run(40, 4, 256 << 10);
+    const tail = run(64 << 20, 4, 256 << 10);
+    const layout = [...tail, ...head].map((block, index)=>({ ...block, index }));
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 8 };
+
+    assert.deepEqual(withWindow([layout[4]], bundle, ()=>false).map(block=>block.index),
+        [4, 5, 6, 7], 'took blocks 0..3 from 64 MiB away before');
+    assert.deepEqual(withWindow([layout[3]], bundle, ()=>false).map(block=>block.index),
+        [0, 1, 2, 3]);
+});
+
 test('the window does not begin before an unaligned first block', ()=>{
     // Blocks start after the container's header, so the first window is short
     // by that much and no block before index zero is asked for.
@@ -324,25 +332,35 @@ test('a program starts in its own directory, and at the root the backslash stays
     assert.equal(startDirectoryOf('C:/App/Game.exe'), 'C:/App');
 });
 
-test('a bare library name is looked for beside the executable', ()=>{
-    assert.equal(resolveLibraryPath('Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
+test('a bare library name fixes no place: it is searched for', ()=>{
+    assert.equal(fixedLibraryPath('Storm.dll', 'C:\\App'), null);
 });
 
 test('a name that already says where it is, is taken as given', ()=>{
     // Prefixing a qualified name again asks for C:\\App\\C:\\App\\..., which is not
     // there -- and the library is reported missing while sitting exactly where
     // it was asked for.
-    assert.equal(resolveLibraryPath('C:\\App\\Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
-    assert.equal(resolveLibraryPath('D:\\Other\\Plug.dll', IMAGE), 'D:\\Other\\Plug.dll');
-    assert.equal(resolveLibraryPath('C:/App/Storm.dll', IMAGE), 'C:/App/Storm.dll',
+    assert.equal(fixedLibraryPath('C:\\App\\Storm.dll'), 'C:\\App\\Storm.dll');
+    assert.equal(fixedLibraryPath('D:\\Other\\Plug.dll'), 'D:\\Other\\Plug.dll');
+    assert.equal(fixedLibraryPath('C:/App/Storm.dll'), 'C:/App/Storm.dll',
         'a program is free to use forward slashes, and Windows accepts them');
-    assert.equal(resolveLibraryPath('\\App\\Storm.dll', IMAGE), '\\App\\Storm.dll',
+    assert.equal(fixedLibraryPath('\\App\\Storm.dll'), '\\App\\Storm.dll',
         'root-relative is qualified too');
 });
 
-test('a relative name with a directory in it still searches beside the executable', ()=>{
-    assert.equal(resolveLibraryPath('plugins\\Sound.dll', IMAGE),
-        'C:\\App\\plugins\\Sound.dll');
+test('a drive-relative or dot-relative name starts at the current directory', ()=>{
+    assert.equal(fixedLibraryPath('C:1\\x.dll', 'C:\\Temp\\'), 'C:\\Temp\\1\\x.dll',
+        'the current directory of its own drive');
+    assert.equal(fixedLibraryPath('D:x.dll', 'C:\\Temp'), 'D:\\x.dll',
+        'another drive\'s root, the only current directory known there');
+    assert.equal(fixedLibraryPath('.\\x.dll', 'C:\\Temp'), 'C:\\Temp\\.\\x.dll');
+    assert.equal(fixedLibraryPath('..\\x.dll', 'C:\\Temp'), 'C:\\Temp\\..\\x.dll');
+});
+
+test('a relative name with a directory in it is searched for as a bare one is', ()=>{
+    // LoadLibrary("1\\x.dll") with the current directory holding 1\x.dll
+    // finds it there, after the program's and the system's directories.
+    assert.equal(fixedLibraryPath('plugins\\Sound.dll', 'C:\\Temp'), null);
 });
 
 test('a resource is addressed relative to the module its instance names', ()=>{
@@ -509,7 +527,7 @@ test('a Windows that is not one of the four is refused before anything is built'
 test('a graphics choice nobody knows is refused before anything is built', async()=>{
     const options = /** @type {any} */ ({ executable: new Uint8Array(0), graphicsApi: 'glide' });
     await assert.rejects(createApp(options),
-        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, opengl/);
+        /unknown graphics choice "glide": the choices are directx7, directx8, directx9, directx10, directx11, opengl/);
 });
 
 test('a library loaded as data answers for its resources by the handle it was given', ()=>{
@@ -543,8 +561,12 @@ test('a bare name is looked for beside the executable, then where the system kee
     ]);
     assert.deepEqual(libraryCandidates('C:\\Other\\x.dll', IMAGE), ['C:\\Other\\x.dll'],
         'a qualified name has one place');
-    assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
-        ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
+    assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE, 'C:\\Temp'), [
+        'C:\\App\\plugins\\Sound.dll', 'C:\\WINDOWS\\system32\\plugins\\Sound.dll',
+        'C:\\WINDOWS\\plugins\\Sound.dll', 'C:\\Temp\\plugins\\Sound.dll',
+    ], 'a relative one with a directory in it is searched for, each place taking it after');
+    assert.deepEqual(libraryCandidates('C:1\\x.dll', IMAGE, 'C:\\Temp'), ['C:\\Temp\\1\\x.dll'],
+        'a drive-relative one has one place');
     // A setup that changes to a folder of its disc loads a helper there by
     // bare name: the current directory, after the system ones.
     assert.deepEqual(libraryCandidates('dsetup.dll', IMAGE, 'D:\\DirectX').at(-1),
@@ -555,6 +577,33 @@ test('a bare name is looked for beside the executable, then where the system kee
     // wins, the system's is the engine's.
     assert.deepEqual(libraryCandidates('d3dx9_24.dll', IMAGE, undefined, { ours: true }),
         ['C:\\App\\d3dx9_24.dll']);
+});
+
+test('a LOAD_LIBRARY_SEARCH_* search looks in its places alone, in the documented order', ()=>{
+    const only = searchedDirectories({ application: true, user: ['E:\\Added'], system: true,
+        from: 'D:\\Lib' }, IMAGE);
+    assert.deepEqual(only, ['D:\\Lib', 'C:\\App', 'E:\\Added', 'C:\\WINDOWS\\system32\\']);
+    assert.deepEqual(libraryCandidates('1\\x.dll', IMAGE, 'C:\\Temp', { only: [
+        'C:\\WINDOWS\\system32\\'] }), ['C:\\WINDOWS\\system32\\1\\x.dll'],
+    'not the current directory, not the program\'s');
+    assert.deepEqual(libraryCandidates('C:\\Temp\\x.dll', IMAGE, 'C:\\Temp', { only: [] }),
+        ['C:\\Temp\\x.dll'], 'a full path is its own place still');
+    assert.equal(searchedDirectories(null, IMAGE), undefined, 'none: the standard search');
+});
+
+test('a library loaded with an altered search finds its imports beside it, then on PATH', ()=>{
+    // LOAD_WITH_ALTERED_SEARCH_PATH: the loaded library's directory replaces
+    // the program's for its own imports; the directories PATH names come last.
+    assert.deepEqual(libraryCandidates('tier0.dll', IMAGE, 'C:\\App', {
+        from: 'C:\\App\\bin\\', path: ['C:\\WINDOWS\\system32', 'C:\\App\\bin', 'D:\\Tools'],
+    }), [
+        'C:\\App\\bin\\tier0.dll', 'C:\\WINDOWS\\system32\\tier0.dll', 'C:\\WINDOWS\\tier0.dll',
+        'C:\\App\\tier0.dll', 'D:\\Tools\\tier0.dll',
+    ], 'each place once, case aside');
+    assert.deepEqual(pathDirectories(' C:\\WINDOWS;;"C:\\Program Files\\X";bin;D:/y '),
+        ['C:\\WINDOWS', 'C:\\Program Files\\X', 'D:/y'],
+        'quotes off, empty and relative entries out');
+    assert.deepEqual(pathDirectories(undefined), []);
 });
 
 test('a library name without an extension is looked for as a .dll', ()=>{
@@ -668,32 +717,35 @@ function movable(file){
  * @param {Record<string, Uint8Array>} files  Beside the program, by name.
  * @param {Uint8Array} executable
  * @param {{ base: number, limit: number, floor?: number,
- *           held?: { base: number, size: number }[] }} space
+ *           held?: { base: number, size: number }[], bits?: 32 | 64 }} space
+ *        `bits`: the process's machine.
  */
 async function mapBeside(files, executable, space){
     const filesystem = await filesystemModule.create({
         drives: { C: { source: createMemoryStore(Object.fromEntries(
             Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
     });
-    /** @type {{ name: string, base: number, size: number }[]} */
+    /** @type {{ name: string, region: string, base: number, size: number }[]} */
     const placed = [];
     /** @type {any[]} */
     const emitted = [];
     const loader = {
         /** @param {Uint8Array} file @param {{ base: number, name: string }} where */
         map: (file, { base, name })=>{
-            placed.push({ name, base, size: parsePe(file).sizeOfImage });
+            // The region is named by the file; the library by its file name.
+            placed.push({ name: name.slice(name.lastIndexOf('\\') + 1), region: name, base,
+                size: parsePe(file, { wide: true }).sizeOfImage });
             return { record: { entryPoint: 0 } };
         },
     };
     const kernel32 = (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll';
-    const { held = [], floor = 0x00500000, ...bounds } = space;
+    const { held = [], floor = 0x00500000, bits, ...bounds } = space;
     const mapped = await mapShippedLibraries({
-        executable, imagePath: IMAGE, filesystem, loader, blocks: null,
+        executable, imagePath: IMAGE, filesystem, loader, blocks: null, bits,
         events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             emitted.push([name, payload]) },
         isSystem: kernel32, isKnownDll: kernel32,
-        byName: new Map(), byBase: new Map(),
+        modules: { add: ()=>{} },
         floor,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>[...held, ...placed].find(one=>
@@ -702,6 +754,30 @@ async function mapBeside(files, executable, space){
     });
     return { mapped, placed, emitted };
 }
+
+test('a library of the other machine is refused with its reason, as Windows refuses to map it',
+    async()=>{
+        /** @param {32 | 64} bits */
+        const build = bits=>new Uint8Array(buildExe({ bits, dll: true, imageBase: 0x02000000,
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3] }));
+        /** @param {32 | 64} bits */
+        const program = bits=>new Uint8Array(buildExe({ bits,
+            imports: { 'other.dll': ['Anything'] }, code: ()=>[0xc3] }));
+        for (const [bits, other, said] of /** @type {const} */ ([
+            [32, 64, /an x86-64 image does not load into a 32-bit process/],
+            [64, 32, /an i386 image does not load into a 64-bit process/]]))
+        {
+            const space = { base: 0x02000000, limit: 0x08000000, bits };
+            const refused = await mapBeside({ 'other.dll': build(other) }, program(bits), space);
+            assert.deepEqual(refused.placed, [], `a ${other}-bit library in a ${bits}-bit process`);
+            assert.ok(refused.emitted.some(([name, payload])=>name === 'libraries-missing'
+                && payload.names.includes('other.dll') && said.test(payload.reason)));
+            const taken = await mapBeside({ 'other.dll': build(bits) }, program(bits), space);
+            assert.deepEqual(taken.placed.map(one=>one.name), ['other.dll']);
+            assert.deepEqual(taken.placed.map(one=>one.region), ['C:\\App\\other.dll'],
+                'its region named by its file, apart from a table of the same name');
+        }
+    });
 
 test('a library that would reach past the modules\' space is refused, not mapped over the stacks',
     async()=>{
@@ -751,23 +827,45 @@ test('a library without relocations goes to its own base, and movable ones fill 
         ]);
     });
 
-test('a library without relocations whose base is taken is refused, not moved', async()=>{
-    // "If the base address is not available, the loader reports an error"
-    // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
-    // relocations runs with every absolute address pointing at its old base.
-    const fixed = new Uint8Array(buildExe({
-        imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
-    }));
-    const executable = new Uint8Array(buildExe({
-        imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
-    }));
-    const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
-        { base: 0x02000000, limit: 0x08000000 });
+test('a library whose relocations are stripped is refused where its base is taken, not moved',
+    async()=>{
+        // "If the base address is not available, the loader reports an error"
+        // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
+        // relocations runs with every absolute address pointing at its old base.
+        const fixed = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const view = new DataView(fixed.buffer);
+        const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+        view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+        const executable = new Uint8Array(buildExe({
+            imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
 
-    assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
-    assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
-        && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
-});
+        assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
+        assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+            && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
+    });
+
+test('a library whose relocations are merely absent is moved as it lies where its base is taken',
+    async()=>{
+        // Windows' loader moves an image with no relocation directory and no
+        // IMAGE_FILE_RELOCS_STRIPPED, fixing nothing up (Wine's kernel32:loader
+        // loads 34 such libraries linked at one base).
+        const loose = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const executable = new Uint8Array(buildExe({
+            imports: { 'loose.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const { placed } = await mapBeside({ 'loose.dll': loose }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [['loose.dll', 0x02000000]],
+            'its base, 0x400000, is the program\'s: the first free one');
+    });
 
 test('a library that cannot move takes its base outside the modules\' space when it is given up',
     ()=>{
@@ -821,6 +919,12 @@ test('a movable library takes the first free base at or after the next one', ()=
     assert.ok('refused' in placeLibrary(
         { relocatable: false, imageBase: 0x00400000, sizeOfImage: 0x5000 }, space),
     'below the floor is the program\'s and the engine\'s');
+    // Where the library before it ended mid-granule: Windows maps every image
+    // on a 64 KiB granule, and the CLR refuses a native image that is not.
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x5000 },
+        { ...space, next: 0x02034000 }),
+    { base: 0x02040000 });
 });
 
 test('a library that imports from the program is not given a second copy of the program',
@@ -838,27 +942,6 @@ test('a library that imports from the program is not given a second copy of the 
         assert.deepEqual(placed.map(one=>one.name), ['game.dll']);
         assert.ok(!emitted.some(([, payload])=>payload?.missing?.length > 0));
     });
-
-test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
-    // A write that falls outside the image was addressing a mapping this
-    // process does not have. Putting the bytes down anyway corrupts whatever
-    // really is at that address, and the failure then looks like the child
-    // being wrong rather than the patch being misplaced.
-    /** @param {number} address @param {number} length */
-    const at = (address, length)=>({ address, bytes: new Uint8Array(length) });
-
-    const { applied, refused } = placePatches(
-        [at(0x401000, 4), at(0x400000, 1), at(0x3fffff, 1), at(0x401ffe, 4), at(0x500000, 1)],
-        0x400000, 0x2000);
-
-    assert.deepEqual(applied.map(patch=>patch.address), [0x401000, 0x400000]);
-    assert.deepEqual(refused.map(patch=>patch.address), [0x3fffff, 0x401ffe, 0x500000],
-        'below the base, straddling the end, and past it');
-});
-
-test('nothing to patch is not a patch of nothing', ()=>{
-    assert.deepEqual(placePatches([], 0x400000, 0x2000), { applied: [], refused: [] });
-});
 
 /**
  * Runs `body` as a browser would see the globals: no `setImmediate`, which
@@ -1164,7 +1247,7 @@ test('the loop yields at once for something pending, otherwise on a clock it res
     assert.ok(signalled(nothing), 'a message known to be waiting yields at once');
 });
 
-test("a page's pacing yields on its own clock and looks again on its timer or on a wake", async()=>{
+test("a page's pacing yields on its own clock and looks again on its timer or on a wake", async t=>{
     // The default the loop runs with when a host does not choose: it cannot
     // block, so a turn boundary is a macrotask when the page's interval is
     // up, and an idle machine looks again on a short timer -- unless a wake
@@ -1197,9 +1280,20 @@ test("a page's pacing yields on its own clock and looks again on its timer or on
             woke = true;
         })] });
     assert.equal(woke, true, 'a wake ends the wait before the timer');
-    const before = performance.now();
-    await pacing.wait({ timer: true, sleep: true, deadlineMs: null, wakes: [] });
-    assert.ok(performance.now() - before < 100, 'the look is short, whatever the deadline');
+    // The look is the page's timer of `lookMs`, whatever the deadline: read off
+    // the timer it sets, not off how soon a busy machine got round to it.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let looked = false;
+    const look = pacing.wait({ timer: true, sleep: true, deadlineMs: null, wakes: [] })
+        .then(()=>{
+            looked = true;
+        });
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(looked, false, 'the look waits for its timer');
+    t.mock.timers.tick(1);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(looked, true, 'the look is short, whatever the deadline');
+    await look;
 });
 
 test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it", async t=>{
@@ -1218,13 +1312,17 @@ test("a page's pacing sleeps to a deadline rather than spinning macrotasks to it
     // An async wait does not hold node's loop open; the page's does.
     const held = setInterval(()=>{}, 1000);
     t.after(()=>clearInterval(held));
-    let before = performance.now();
+    // How long each nap is asked to last, read off the wait itself: a loaded
+    // machine wakes it late, never early.
+    const naps = t.mock.method(Atomics, /** @type {any} */ ('waitAsync'));
+    const before = performance.now();
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 5, wakes: [] });
     assert.equal(laps, 0, 'no macrotask on the way to the deadline');
     assert.ok(performance.now() - before >= 4, 'the deadline is waited out');
-    before = performance.now();
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 10_000, wakes: [] });
-    assert.ok(performance.now() - before < 1000, 'a look at most, whatever the deadline');
+    assert.deepEqual(naps.mock.calls.map((/** @type {any} */ call)=>call.arguments[3]), [5, 20],
+        'to the deadline, and a look at most, whatever the deadline');
+    naps.mock.restore();
     assert.equal(pacing.counts?.().napped, 2);
     await pacing.wait({ timer: false, sleep: false, deadlineMs: 5, wakes: [] });
     await pacing.wait({ timer: false, sleep: true, deadlineMs: null, wakes: [] });
@@ -1278,14 +1376,43 @@ test('a near jump is encoded relative to the instruction after it', ()=>{
         'backwards wraps');
 });
 
-test('a film\'s sound counts whole on its timeline, even the part its track refused', ()=>{
-    // Counted as taken only, the refused part was heard the moment it was
-    // offered and the picture raced ahead of a sound that was mostly dropped.
-    const track = { write: (/** @type {Uint8Array} */ bytes)=>Math.floor(bytes.length / 4 / 2) };
-    const block = new Int16Array(22050 * 2);
-    const fed = feedFilmSound(track, [block], 2, 22050, 44100);
-    assert.deepEqual(fed, { offered: 44100, refused: 44100 - 11025 },
-        'a second of film at 22050 is a second of device frames, taken or not');
+test('a film\'s sound a track has no room for is held and goes in as it drains', ()=>{
+    // A track with room for 5500 frames of film (22050 Hz, stereo, 16-bit) at
+    // the device's 44100: a second handed over at once, as a decoder reaching
+    // sound that lay behind the picture in the file does.
+    const ROOM = 5500 * 4;
+    let filled = 0;
+    /** @type {number[]} */
+    const written = [];
+    const track = {
+        room: ()=>ROOM - filled,
+        write: (/** @type {Uint8Array} */ bytes)=>{
+            filled += bytes.length;
+            written.push(bytes.length);
+            return bytes.length / 4 * 2;
+        },
+    };
+    const ledger = { taken: 0, held: /** @type {Uint8Array[]} */ ([]), heldBytes: 0,
+        framesPerByte: 44100 / 22050 / 4 };
+    feedFilmSound(track, [new Int16Array(22050 * 2)], 2, ledger);
+    assert.equal(ledger.taken, 11000, 'what it has room for');
+    assert.equal(ledger.heldBytes, 22050 * 4 - ROOM, 'the rest held, not dropped');
+    assert.equal(filmSoundOwed(ledger, 0), 44100, 'the whole second is owed: none of it heard');
+    assert.equal(filmSoundOwed(ledger, 11000), 44100 - 11000,
+        'what the track played is heard; the held part is still to come');
+
+    filled = 0;
+    feedFilmSound(track, [], 2, ledger);
+    assert.equal(ledger.taken, 22000, 'with no new sound, what is held goes in as there is room');
+    for (let turn = 0; turn < 3; turn++)
+    {
+        filled = 0;
+        feedFilmSound(track, [], 2, ledger);
+    }
+    assert.equal(ledger.heldBytes, 0);
+    assert.equal(written.reduce((sum, bytes)=>sum + bytes, 0), 22050 * 4, 'every byte, once');
+    assert.ok(written.every(bytes=>bytes % 4 === 0), 'and in whole frames');
+    assert.equal(filmSoundOwed(ledger, 44100), 0);
 });
 
 test('the guest clock is credited with all the wall time between credits, capped', ()=>{
@@ -1309,21 +1436,6 @@ test('the guest clock is credited with all the wall time between credits, capped
     wall += 2000;
     assert.equal(credit(Infinity), 2000, 'a wait that was asked for is credited in full');
     assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
-});
-
-test('the emulator is the caller\'s: named without one, it is refused as not installed', ()=>{
-    // The package carries no emulator, so `engine: 'emulator'` needs both
-    // halves handed in, and cork -- the default -- needs neither.
-    const bytes = new ArrayBuffer(4);
-    assert.equal(emulatorOf({}), null, 'the default engine is cork');
-    assert.equal(emulatorOf({ engine: 'cork', v86: { moduleUrl: 'x', wasmBytes: bytes } }), null,
-        'cork ignores an emulator it was handed');
-    assert.deepEqual(emulatorOf({ engine: 'emulator', v86: { moduleUrl: 'x', wasmBytes: bytes } }),
-        { moduleUrl: 'x', wasmBytes: bytes });
-    for (const v86 of [undefined, { moduleUrl: 'x' }, { wasmBytes: bytes }])
-    {
-        assert.throws(()=>emulatorOf({ engine: 'emulator', v86 }), /emulator is not installed/);
-    }
 });
 
 test('the space above the program moves up past an image too large for the fixed layout', ()=>{
@@ -1364,11 +1476,12 @@ test('the first thread gets its whole reserve, in the pool when it does not fit 
         'an enormous reserve is capped at a quarter of the pool');
 });
 
-test('the heap reaches the end of RAM unless a size was asked for', ()=>{
+test('the heap reaches the end of RAM, short of the shared page, unless a size was asked for', ()=>{
     // A fixed heap short of the end of RAM was what a program loading a level
     // ran into: it reported the machine's memory as exhausted while most of
-    // it sat unused above the heap.
-    assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x0c000000);
+    // it sat unused above the heap. A RAM short of 0x7FFE0000 keeps the shared
+    // page in its last 128 KiB (`sharedPageAt`).
+    assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x20000 - 0x0c000000);
     assert.equal(heapSizeFor(1024 * 1024 * 1024, 0x14000000), 0x14000000, 'an asked-for size wins');
     assert.throws(()=>heapSizeFor(64 * 1024 * 1024), /less than the heap's base/);
     assert.equal(heapSizeFor(0x80000000), 0x7ffe0000 - 0x0c000000,
@@ -1649,33 +1762,12 @@ test('resolveOpenglEntry remembers a seam that throws once, and reuses one that 
 test('an event line names a picture by its size, never by its pixels', ()=>{
     const line = describeEvent({
         width: 32, height: 32, hotSpot: { x: 1, y: 2 }, bgra: new Uint8Array(32 * 32 * 4),
-        shown: true, names: ['a', 'b'],
+        shown: true, names: ['a', 'b'], changes: [{ path: 'a.txt', kind: 'written' }],
     });
     assert.equal(line,
-        'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]');
+        'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]'
+        + ' changes=[{"path":"a.txt","kind":"written"}]');
 });
-
-test('the bundle zstd decoder follows the engine: the emulator while it is loaded, ours for cork',
-    ()=>{
-        const calls = [];
-        const cpu = { decompressZstd: (/** @type {Uint8Array} */ packed, /** @type {number} */ length)=>{
-            calls.push([packed, length]);
-            return new Uint8Array([1, 2, 3]);
-        } };
-        const theirs = chooseZstdDecoder('emulator', cpu);
-        assert.deepEqual([...theirs(new Uint8Array([9]), 4)], [1, 2, 3]);
-        assert.equal(calls.length, 1, 'the emulator decoder answered');
-        // Under cork the api has no emulator decoder: the project's own decoder
-        // is the choice, by identity.
-        assert.equal(chooseZstdDecoder('cork', /** @type {any} */ ({})), decompressZstd);
-        // With the wasm build present it decodes for every engine.
-        const wasm = { decompress: ()=>new Uint8Array([7]), version: 1 };
-        for (const engine of ['emulator', 'cork'])
-        {
-            assert.equal(chooseZstdDecoder(engine, cpu, wasm), wasm.decompress, engine);
-        }
-        assert.equal(calls.length, 1, 'the emulator decoder was not asked with the wasm present');
-    });
 
 test('a file\'s version block is read without reading the file', ()=>{
     // An installer asks after every file it puts down, a gigabyte archive
@@ -1746,6 +1838,30 @@ test('a file\'s version block is read without reading the file', ()=>{
     view.setUint32(0x98 + 96 + 2 * 8 + 4, 0, true);
     assert.equal(versionResourceOf(filesystem, 'C:\\Game\\content.gcf'), null,
         'an image with no resources has no version');
+});
+
+test('a synthesised library is read out of memory a page at a time, across its regions', ()=>{
+    // Its code and its .data are two regions; one read the image's size long
+    // ran off the first, and a setup that asked the version of every module
+    // in its process ended with an access violation.
+    const pages = new Map([[0x10000, 1], [0x11000, 2], [0x13000, 4]]);
+    const memory = {
+        readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            const fill = pages.get(address);
+            if (fill === undefined || length > 0x1000)
+            {
+                throw Object.assign(new Error('unmapped'), { code: 'GUEST_ACCESS' });
+            }
+            return new Uint8Array(length).fill(fill);
+        },
+    };
+    const image = imageInMemory(memory, { base: 0x10000, size: 0x3800 });
+    assert.equal(image.length, 0x3800);
+    assert.deepEqual([image[0], image[0x1000], image[0x2000], image[0x3000]], [1, 2, 0, 4],
+        'each mapped page in its place, an unmapped one zeros');
+    assert.throws(()=>imageInMemory({ readBytes: ()=>{
+        throw new Error('not a fault');
+    } }, { base: 0, size: 0x1000 }), /not a fault/, 'any other error is not swallowed');
 });
 
 test('the version block of a bundle file whose bytes are still coming is waited for, as a read '
@@ -1848,53 +1964,45 @@ test('each run has a first process id of its own, below the others and on the ta
     }
 });
 
-test('the cpu setup\'s cores are the executors, a whole number from 1 to 32 that executors does'
-    + ' not contradict', ()=>{
-    assert.equal(withCpuSetup({ cpu: { cores: 4 } }).executors, 4);
-    assert.equal(withCpuSetup({ cpu: { cores: 2 }, executors: 2 }).executors, 2);
-    assert.equal(withCpuSetup({ executors: 3 }).executors, 3, 'executors alone, as before');
+test('the cpu setup\'s cores are a whole number from 1 to 32, and `executors`, their older name,'
+    + ' is refused', ()=>{
+    assert.equal(withCpuSetup({ cpu: { cores: 4 } }).cpu?.cores, 4);
     for (const cores of [0, 33, 2.5, -1, NaN])
     {
         assert.throws(()=>withCpuSetup({ cpu: { cores } }), /from 1 to 32/);
     }
-    assert.throws(()=>withCpuSetup({ cpu: { cores: 2 }, executors: 4 }), /one number/);
+    assert.throws(()=>withCpuSetup(/** @type {any} */ ({ executors: 3 })), /cpu\.cores/);
+    assert.throws(()=>withCpuSetup(/** @type {any} */ ({ cpu: { cores: 3 }, executors: 3 })),
+        /cpu\.cores/);
 });
 
 test('cores the caller names open before the program starts, automatic ones as threads want them',
     ()=>{
-        const browser = { node: false, processors: 4, shareable: true };
+        const browser = { node: false, processors: 4 };
         assert.equal(withCpuSetup({ cpu: { cores: 4 } }).cpu?.eager, true);
-        assert.equal(withCpuSetup({ executors: 3 }).cpu?.eager, true, 'executors, as named');
         assert.equal(withCpuSetup({ cpu: { cores: 4, eager: false } }).cpu?.eager, false,
             'unless the caller says otherwise');
         assert.equal(withCpuSetup({}, browser).cpu?.eager, false, 'automatic: lazy');
         assert.equal(withCpuSetup({ cpu: { eager: true } }, browser).cpu?.eager, true);
-        assert.equal(withCpuSetup({}, { node: true, processors: 4, shareable: true, named: '4' })
+        assert.equal(withCpuSetup({}, { node: true, processors: 4, named: '4' })
             .cpu?.eager, false, 'BOTTLIFY_CORES is the suite\'s choice, not the caller\'s');
     });
 
-test('a run that names no cores gets one fewer than a browser host\'s processors where it shares'
-    + ' memory, at most eight, and one where it cannot; in node the cores BOTTLIFY_CORES names',
+test('a run that names no cores gets one fewer than a browser host\'s processors, at most eight;'
+    + ' in node the cores BOTTLIFY_CORES names',
 ()=>{
-    const browser = { node: false, processors: 4, shareable: true };
-    assert.equal(withCpuSetup({}, browser).executors, 3, 'four processors: three cores');
-    assert.equal(withCpuSetup({}, { ...browser, processors: 16 }).executors, 8, 'at most eight');
-    assert.equal(withCpuSetup({}, { ...browser, processors: 2 }).executors, 1);
-    assert.equal(withCpuSetup({}, { ...browser, processors: 1 }).executors, undefined, 'one');
-    assert.equal(withCpuSetup({}, { ...browser, processors: undefined }).executors, undefined,
+    const browser = { node: false, processors: 4 };
+    assert.equal(withCpuSetup({}, browser).cpu?.cores, 3, 'four processors: three cores');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 16 }).cpu?.cores, 8, 'at most eight');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 2 }).cpu?.cores, 1);
+    assert.equal(withCpuSetup({}, { ...browser, processors: 1 }).cpu?.cores, undefined, 'one');
+    assert.equal(withCpuSetup({}, { ...browser, processors: undefined }).cpu?.cores, undefined,
         'a host that does not say: one');
-    assert.equal(withCpuSetup({}, { ...browser, shareable: false }).executors, undefined,
-        'a page that is not cross-origin isolated: one');
-    assert.equal(withCpuSetup({ mode: 'compatible' }, browser).executors, undefined);
-    assert.equal(withCpuSetup({ cork: { config: { sharedMemory: false } } }, browser).executors,
-        undefined);
-    assert.equal(withCpuSetup({ engine: 'emulator' }, browser).executors, undefined);
-    assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).executors, 1, 'named, as named');
-    assert.equal(withCpuSetup({ executors: 2 }, browser).executors, 2, 'executors, as named');
-    const node = { node: true, processors: 4, shareable: true };
-    assert.equal(withCpuSetup({}, node).executors, undefined, 'node: one, the same everywhere');
-    assert.equal(withCpuSetup({}, { ...node, named: '4' }).executors, 4, 'BOTTLIFY_CORES');
-    assert.equal(withCpuSetup({}, { ...node, named: '' }).executors, undefined);
+    assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).cpu?.cores, 1, 'named, as named');
+    const node = { node: true, processors: 4 };
+    assert.equal(withCpuSetup({}, node).cpu?.cores, undefined, 'node: one, the same everywhere');
+    assert.equal(withCpuSetup({}, { ...node, named: '4' }).cpu?.cores, 4, 'BOTTLIFY_CORES');
+    assert.equal(withCpuSetup({}, { ...node, named: '' }).cpu?.cores, undefined);
 });
 
 test('the pool lends a process the host\'s cores its own leave, less two, and never none', ()=>{
@@ -2015,16 +2123,276 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     }
     const off = withoutFaultingTailCalls({ cork: { config: { worker: false } } }, true);
     assert.deepEqual(off.cork.config,
-        { crossTailCalls: false, dispatch: true, callDepth: 64, gatherAfter: 0, worker: false });
-    assert.deepEqual(off.jit, { 6: 0 }, 'the emulator chains no modules');
+        { crossTailCalls: false, dispatch: true, callDepth: 64, worker: false });
     assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
         .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');
-    const options = { engine: 'cork' };
+    const options = {};
     assert.equal(withoutFaultingTailCalls(options, false), options);
 
-    const browser = { node: false, processors: 8, shareable: true };
-    assert.equal(automaticCores({}, browser), 7);
-    assert.equal(automaticCores({}, { ...browser, oneCore: true }), undefined, 'one core');
-    assert.equal(withCpuSetup({ cpu: { cores: 3 } }, { ...browser, oneCore: true }).executors, 3,
+    const browser = { node: false, processors: 8 };
+    assert.equal(automaticCores(browser), 7);
+    assert.equal(automaticCores({ ...browser, oneCore: true }), undefined, 'one core');
+    assert.equal(withCpuSetup({ cpu: { cores: 3 } }, { ...browser, oneCore: true }).cpu?.cores, 3,
         'cores asked for by name are given');
+});
+
+test('a whole file larger than the heap\'s pool of fetched blocks is read whole, a piece at a time',
+    async()=>{
+        const BLOCK = 1024;
+        const image = new Uint8Array(40 * BLOCK).map((_, at)=>(at * 7 + (at >> 10)) & 0xff);
+        image.set([0x4d, 0x5a]);
+        const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
+        const { tmpdir } = await import('node:os');
+        const { join } = await import('node:path');
+        const directory = await mkdtemp(join(tmpdir(), 'bottlify-whole-'));
+        let container;
+        try
+        {
+            await writeFile(join(directory, 'game.exe'), image);
+            await writeBundle({ root: directory, output: join(directory, 'b.btl'),
+                blockSize: BLOCK, pack: (/** @type {Buffer} */ block)=>({ codec: 0,
+                    bytes: block }) });
+            container = new Uint8Array(await readFile(join(directory, 'b.btl')));
+        }
+        finally
+        {
+            await rm(directory, { recursive: true, force: true });
+        }
+        const { inflateRawSync } = await import('node:zlib');
+        const bundle = await openBundle(async(at, length)=>container.subarray(at, at + length),
+            (codec, bytes)=>(codec === 1 ? new Uint8Array(inflateRawSync(bytes)) : bytes));
+        /**
+         * A run with no store: eight blocks in memory, as the pool is to a large
+         * image (a block takes 4 KiB of it at least).
+         */
+        const cache = await createBlockCache({ store: null, name: 'b', blockSize: BLOCK,
+            blockCount: bundle.blockCount, budget: 8 * 4096 });
+        const source = createBundleSource({ bundle, blocks: cache });
+        // The volume's handle reads, which move only by what they answer.
+        const filesystem = {
+            open: (/** @type {string} */ path)=>({ path, position: 0 }),
+            size: (/** @type {any} */ handle)=>source.stat(handle.path)?.size ?? 0,
+            read(/** @type {any} */ handle, /** @type {number} */ length){
+                const bytes = source.read(handle.path, handle.position, length);
+                handle.position += bytes.length;
+                return bytes;
+            },
+            close(){},
+        };
+        // The run's fetch: the blocks in, then the batch's end, where the
+        // heap's cache lets go of all but its pool.
+        let fetches = 0;
+        const blocks = {
+            fetch: async(/** @type {any[]} */ needed)=>{
+                if (++fetches > 200)
+                {
+                    throw new Error('fetched for ever');
+                }
+                for (const { offset, packed, index } of needed)
+                {
+                    cache.put(index, container.subarray(offset, offset + packed));
+                }
+                await cache.persist();
+            },
+        };
+        const read = await readWholeFile(filesystem, blocks, 'game.exe', 4 * BLOCK);
+        assert.deepEqual(read, image, 'the file arrives whole, MZ first');
+        assert.ok(fetches <= 10, `a fetch a piece (${fetches})`);
+        await assert.rejects(readWholeFile(filesystem, blocks, 'game.exe', Infinity),
+            /fetched for ever/, 'the whole file in one read never fits the pool');
+        assert.ok(WHOLE_READ_BYTES * 2 <= HEAP_POOLS.blockCache,
+            'a piece and the read-ahead beside it fit the pool');
+    });
+
+test('a divergence is said once, a loss the first time and every 256th with its count', ()=>{
+    /** @type {[string, any][]} */
+    const said = [];
+    const report = divergenceReporter((name, payload)=>said.push([name, payload]));
+    report('Direct3D', 'a state accepted and not drawn');
+    report('Direct3D', 'a state accepted and not drawn');
+    for (let time = 0; time < 512; time++)
+    {
+        report('Direct3D', 'lost: a draw', 'loss');
+    }
+    assert.deepEqual(said, [
+        ['divergence', { api: 'Direct3D', detail: 'a state accepted and not drawn' }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw' }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw', seen: 256 }],
+        ['loss', { api: 'Direct3D', detail: 'lost: a draw', seen: 512 }],
+    ]);
+    // And kept, for the diagnostics, after the journal has let them go.
+    assert.deepEqual([...report.losses], [['Direct3D: lost: a draw', 512]]);
+    assert.deepEqual([...report.divergences], ['Direct3D: a state accepted and not drawn']);
+});
+
+test('the engine keeps a range under the stacks, short of 0x10000000, cut out of the heap'
+    + ' past the bases libraries are linked for, or none', ()=>{
+    const MIB = 0x100000;
+    const space = { moduleBase: 0x02000000, stackPoolStart: 0x08000000, heapStart: 0x0c000000 };
+    const image = { imageBase: 0x400000, sizeOfImage: MIB };
+    /** @param {number} executors @param {object} [more] */
+    const area = (executors, more = {})=>engineAreaFor({ wide: false, memorySize: 2 ** 31,
+        ...space, executors, image, ...more });
+    assert.deepEqual(area(1), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false },
+        'twenty MiB an executor and eight shared, at the top of the libraries\' space');
+    assert.deepEqual(area(3), { at: 0x08000000 - 68 * MIB, span: 68 * MIB, inHeap: false });
+    const four = { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false,
+        others: { at: ENGINE_CUT_AT, span: 60 * MIB } };
+    assert.deepEqual(area(4), four, 'too large for the libraries\' space, and at the heap\'s start'
+        + ' it would reach 0x10000000: the first executor\'s part at the top, the others\' cut out'
+        + ' of the heap past it, so the memory starts as small as one executor\'s');
+    assert.deepEqual(area(16), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false,
+        others: { at: ENGINE_CUT_AT, span: 300 * MIB } });
+    assert.deepEqual(area(8, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
+        { at: ENGINE_CUT_AT, span: 168 * MIB, inHeap: false, cut: true },
+        'no room at the top for the first part either: all of it cut out of the heap');
+    assert.deepEqual(area(8, { heapStart: 0x20000000 }),
+        { at: 0x20000000, span: 168 * MIB, inHeap: true },
+        'a heap that starts past it already: its start');
+    assert.equal(area(8, { image: { imageBase: 0x15000000, sizeOfImage: MIB } }), undefined,
+        'the program\'s image where the cut would be');
+    assert.deepEqual(area(1, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
+        { at: 0x0c000000, span: 28 * MIB, inHeap: true },
+        'too little of the libraries\' space left: the heap\'s start');
+    assert.equal(area(1, { wide: true }), undefined,
+        'a wide window keeps its RAM in a memory of its own, which does not grow');
+    assert.equal(area(1, { memorySize: 3 * 2 ** 30 }), undefined, 'a RAM not a power of two');
+    assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x10000 } }),
+        { at: 0x0c000000, span: 28 * MIB, inHeap: true }, 'the program\'s image at the top');
+    assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x06000000 } }),
+        { at: ENGINE_CUT_AT, span: 28 * MIB, inHeap: false, cut: true },
+        'the program\'s image over both: cut out of the heap');
+});
+
+test('a shader that compiled is a journal line only when asked, one that failed always is', ()=>{
+    /** @param {boolean} shaders */
+    const journalled = shaders=>{
+        /** @type {any} */
+        let watcher = null;
+        /** @type {[string, string, string][]} */
+        const written = [];
+        journalEvents({ onAny: (/** @type {any} */ w)=>{ watcher = w; } },
+            { write: (level, category, _template, text)=>written.push([level, category, text]) },
+            { shaders });
+        const compiled = { api: 'D3DXCompileShader', profile: 'vs_2_0', entry: 'vsh',
+            defines: [['EVA_SM_2_0', '1'], ['FOG', '']], source: 'float4 vsh() : POSITION { }',
+            tokens: new Uint8Array(4) };
+        watcher('shader-compiled', compiled);
+        watcher('shader-compiled', { ...compiled, tokens: null, messages: 'error X3000' });
+        return written;
+    };
+    const quiet = journalled(false);
+    assert.equal(quiet.length, 1, 'off: only the failure');
+    assert.equal(quiet[0][0], 'warn');
+    assert.match(quiet[0][2], /float4 vsh/, 'the failed one with its source');
+    const asked = journalled(true);
+    assert.deepEqual(asked[0], ['info', 'shader-compiled',
+        'D3DXCompileShader vs_2_0 vsh defines=[EVA_SM_2_0=1 FOG=]']);
+    assert.doesNotMatch(asked[0][2], /float4/, 'no source for one that compiled');
+});
+
+test('console output written a character at a time is journalled a line at a time', ()=>{
+    /** @type {any} */
+    let watcher = null;
+    /** @type {string[]} */
+    const written = [];
+    journalEvents({ onAny: (/** @type {any} */ w)=>{ watcher = w; } },
+        { write: (_level, category, _template, text)=>written.push(`${category} ${text}`) });
+    for (const ch of 'one\r\ntwo\n')
+    {
+        watcher('output', { handle: 3, text: ch });
+    }
+    watcher('output', { handle: 7, text: 'other' });
+    watcher('output', { handle: 3, text: 'tail' });
+    assert.deepEqual(written, ['output handle=3 text=one', 'output handle=3 text=two']);
+    watcher('exit', { code: 0 });
+    assert.deepEqual(written.slice(2), ['output handle=3 text=tail', 'output handle=7 text=other',
+        'exit code=0'], 'an unfinished line is said when the process ends');
+});
+
+test('a yield answers the other executors each time their bell rings while it lasts', async()=>{
+    let rung = 0;
+    /** @type {(() => void)[]} */
+    let sleepers = [];
+    let looks = 0;
+    const bell = {
+        rung: ()=>rung,
+        waitAsync: (/** @type {number} */ seen, /** @type {number} */ ms)=>new Promise(wake=>{
+            void seen;
+            void ms;
+            looks++;
+            sleepers.push(()=>wake(undefined));
+        }),
+    };
+    const ring = ()=>{
+        rung++;
+        const woken = sleepers;
+        sleepers = [];
+        woken.forEach(wake=>wake());
+    };
+    let answers = 0;
+    const answering = answeringWhile(bell, ()=>{
+        answers++;
+    });
+    answering.begin();
+    await Promise.resolve();
+    ring();
+    await new Promise(next=>setImmediate(next));
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'each ring during the yield answered');
+    answering.end();
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'nothing answered once the yield is over');
+    const armed = looks;
+    answering.begin();
+    answering.end();
+    answering.begin();
+    answering.end();
+    assert.equal(looks, armed + 1, 'a look parked on the bell serves the yields after it');
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'and answers none of the gaps between them');
+});
+
+test('a yield that answers the executors makes no garbage of its own', async()=>{
+    // The engine thread yields thousands of times a second; a promise, a race
+    // and closures a yield were 2.5 KB each (node).
+    const parked = new Promise(()=>{});
+    const answering = answeringWhile({ rung: ()=>0, waitAsync: ()=>parked }, ()=>{});
+    const settled = Promise.resolve();
+    const bytes = await bytesPerAwait(async()=>{
+        answering.begin();
+        await settled;
+        answering.end();
+    }, { empty: async()=>{
+        await settled;
+    } });
+    assert.ok(bytes < 16, `${bytes.toFixed(1)} bytes a yield`);
+});
+
+test('a turn waiting on the host is told how without a record made for it', async()=>{
+    const waiting = { fetching: 0, idlers: 1, suspended: 1, spun: 9, others: false };
+    assert.deepEqual(idleWait(waiting), { phase: 'idle-message-wait', timer: true });
+    // Kept, as the run loop keeps it across the wait: a record that escapes
+    // is made on the heap (105 bytes a wait, node, before).
+    /** @type {any} */
+    let kept = null;
+    const bytes = await bytesPerCall(()=>{
+        kept = idleWait(waiting);
+    });
+    assert.equal(kept.timer, true);
+    assert.ok(bytes < 8, `${bytes.toFixed(1)} bytes a wait`);
+});
+
+test('a trip to the event loop makes nothing beside the trip itself', async()=>{
+    const settled = Promise.resolve();
+    let clock = 0;
+    const trip = pacedYield({ macrotask: ()=>settled, now: ()=>clock++, intervalMs: 0 });
+    const pending = { suspended: 0, fetching: 0, idlers: 0, spun: 1 };
+    // The promise that resets the clock when the trip ends, and its reaction
+    // (168 bytes, node): no closure a trip, which made it 226.
+    const bytes = await bytesPerAwait(()=>/** @type {Promise<void>} */ (trip(pending)));
+    assert.ok(bytes < 200, `${bytes.toFixed(1)} bytes a trip`);
 });

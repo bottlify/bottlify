@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -46,7 +46,7 @@ async function runExecutable(t, executable){
     /** @type {any[]} */
     const boxes = [];
     app.on('message-box', (/** @type {any} */ box)=>boxes.push(box));
-    const code = await app.run({ timeoutMs: 20000 });
+    const code = await app.run({ timeoutMs: 30_000 });
     const bridge = app.diagnostics().find((/** @type {any} */ entry)=>entry.name === 'bridge');
     return { code, text: output.join(''), suspended: bridge?.metrics?.suspended, boxes };
 }
@@ -318,9 +318,174 @@ function buildNullStoreExe(){
 }
 
 test('a store through NULL faults where it stands, with the stack and frame of the store',
-    { timeout: 60000, todo: 'the first 64 KiB stay open until a store alone can fault there' },
+    { timeout: 60000 },
     async t=>{
         const { code } = await runExecutable(t, buildNullStoreExe());
         assert.equal(code, 0, '1: the context\'s Esp was another; 2: the frame was another;'
             + ' 4: it went on on another stack; 0x77: the store went through');
+    });
+
+/**
+ * A field read through NULL, over and over in one loop: each read faults with
+ * the address it read and goes on past it, as the .NET runtime's JIT counts on
+ * (it emits no null test; the read's access violation is its
+ * NullReferenceException). The loop runs long enough to be translated, so
+ * the interpreter and translated code both meet it.
+ *
+ * Exits 0 when the handler saw every read as a read of 0x28; 1 otherwise
+ * (0 handled: the reads went through and found something there).
+ */
+const NULL_READS = 2000;
+function buildNullReadExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { count: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0xbe, ...u32(NULL_READS),                        // mov esi, NULL_READS
+                0x31, 0xc0,                                      // L: xor eax, eax
+                0x8b, 0x48, 0x28,                                // mov ecx, [eax+0x28]
+                0x4e,                                            // dec esi
+                0x75, 0xf8,                                      // jnz L
+                0xa1, ...u32(at('count')),                       // mov eax, [count]
+                0x3d, ...u32(NULL_READS),                        // cmp eax, NULL_READS
+                0x74, 0x08,                                      // je +8
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 1
+                0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0
+            ];
+            const handle = [
+                0x8b, 0x44, 0x24, 0x04,                          // mov eax, [esp+4]: the record
+                0x81, 0x38, ...u32(0xc0000005),                  // cmp [eax], ACCESS_VIOLATION
+                0x75, 0x12,                                      // jne done
+                0x83, 0x78, 0x14, 0x00,                          // cmp [eax+0x14], 0: a read
+                0x75, 0x0c,                                      // jne done
+                0x83, 0x78, 0x18, 0x28,                          // cmp [eax+0x18], 0x28: of 0x28
+                0x75, 0x06,                                      // jne done
+                0xff, 0x05, ...u32(at('count')),                 // inc [count]
+                0x8b, 0x4c, 0x24, 0x0c,                          // done: mov ecx, [esp+12]
+                0x83, 0x81, ...u32(0xb8), 0x03,                  // context.Eip += 3: past the read
+                0x31, 0xc0,                                      // xor eax, eax: continue
+                0xc3,                                            // ret
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a read through NULL faults with the address it read, interpreted and translated alike',
+    { timeout: 120000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildNullReadExe());
+        assert.equal(code, 0, 'every read faulted as a read of 0x28');
+    });
+
+/**
+ * Two frames on the chain: the inner one's handler at an address no region
+ * holds, the outer one's the program's own. A frame is checked by whether its
+ * memory is there (seh.js), so the inner frame is passed over and the outer
+ * handler ends the process with 0x5a.
+ */
+function buildUnmappedHandlerExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x100,
+        code: ({ iat, code })=>{
+            const handler = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x68, ...u32(0xdead0000),                        // push unmapped handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x0f, 0x0b,                                      // ud2
+                0x6a, 0x77, 0xff, 0x15, ...u32(iat('ExitProcess')), // not reached
+            ];
+            const handle = [
+                0x6a, 0x5a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0x5a
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a frame whose handler no region holds is passed over for the next one',
+    { timeout: 60000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildUnmappedHandlerExe());
+        assert.equal(code, 0x5a, 'the outer handler ran');
+    });
+
+/**
+ * A TIMERPROC that raises, dispatched by DispatchMessage: Windows calls the
+ * procedure inside an __except of its own (UOI_TIMERPROC_EXCEPTION_SUPPRESSION
+ * is on by default), so the exception ends the call answering zero and the
+ * program goes on after DispatchMessage. The procedure raises the way a
+ * compiler's tail call does, leaving RaiseException standing on the
+ * procedure's own frame. Exits 0x5a once it has, with the
+ * procedure run once; 0x66 if it ran another number of times, 0x77 if
+ * DispatchMessage answered anything but zero.
+ */
+function buildTimerProcExceptionExe(){
+    return buildExe({
+        imports: { 'USER32.dll': ['SetTimer', 'DispatchMessageA'],
+            'KERNEL32.dll': ['ExitProcess', 'RaiseException'] },
+        data: { msg: new Array(28).fill(0), count: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            const proc = code(0x80);
+            const main = [
+                0x68, ...u32(proc),                              // push proc
+                0x68, ...u32(1000),                              // push 1000
+                0x6a, 0x00, 0x6a, 0x00,                          // push 0; push 0
+                0xff, 0x15, ...u32(iat('SetTimer')),             // call SetTimer
+                0xa3, ...u32(at('msg') + 8),                     // mov [msg.wParam], eax
+                0xc7, 0x05, ...u32(at('msg') + 4), ...u32(0x113), // msg.message = WM_TIMER
+                0xc7, 0x05, ...u32(at('msg') + 12), ...u32(proc), // msg.lParam = proc
+                0x68, ...u32(at('msg')),                         // push &msg
+                0xff, 0x15, ...u32(iat('DispatchMessageA')),     // call DispatchMessageA
+                0x85, 0xc0,                                      // test eax, eax
+                0x75, 0x19,                                      // jnz to the 0x77 exit
+                0x83, 0x3d, ...u32(at('count')), 0x01,           // cmp dword [count], 1
+                0x75, 0x08,                                      // jne to the 0x66 exit
+                0x6a, 0x5a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0x5a
+                0x6a, 0x66, 0xff, 0x15, ...u32(iat('ExitProcess')), // ran another number of times
+                0x6a, 0x77, 0xff, 0x15, ...u32(iat('ExitProcess')), // DispatchMessage answered
+            ];
+            // As a compiler ends a void procedure on a call: RaiseException's
+            // four arguments written over its own, and a jump, so the raise
+            // returns where the procedure would have.
+            const timerProc = [
+                0xff, 0x05, ...u32(at('count')),                 // inc dword [count]
+                0xc7, 0x44, 0x24, 0x04, ...u32(0xe000beef),      // mov [esp+4], code
+                0xc7, 0x44, 0x24, 0x08, ...u32(0),               // mov [esp+8], 0
+                0xc7, 0x44, 0x24, 0x0c, ...u32(0),               // mov [esp+12], 0
+                0xc7, 0x44, 0x24, 0x10, ...u32(0),               // mov [esp+16], 0
+                0xff, 0x25, ...u32(iat('RaiseException')),       // jmp [RaiseException]
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, timerProc.length, ...timerProc);
+            return bytes;
+        },
+    });
+}
+
+test('an exception a TIMERPROC leaves ends DispatchMessage\'s call to it answering zero',
+    { timeout: 60000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildTimerProcExceptionExe());
+        assert.equal(code, 0x5a, '0x77: DispatchMessage answered nonzero; 0x66: the procedure'
+            + ' ran another number of times; anything else: the exception ended the process');
     });

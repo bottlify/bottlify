@@ -1,0 +1,213 @@
+# Limits
+
+What is missing, and where the engine answers differently from Windows. A call that answers
+differently raises a `divergence` event naming the API, a warning in the journal; one whose work
+did not happen at all -- a draw or a frame lost, an object the GPU refused -- raises a `loss`
+event, an error. Neither stops the program.
+
+## Programs
+
+- 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs with its pages below
+  4 GiB (past 4 GiB, the wide window, on one executor), as far as console programs on msvcrt or
+  vcruntime140 go, structured and C++ exceptions, floating-point arguments and results, and a window program's classes,
+  windows, messages, hooks and painting, and Direct3D 9, OpenGL and DirectSound included, every
+  call into them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
+  64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
+  first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
+  the file system's and the registry's redirection.
+  A 64-bit image linked past 4 GiB with no relocations needs a 64-bit WebAssembly memory
+  (memory64) of 8 GiB: a browser without one (Safari, iOS) refuses the program at its start,
+  naming that. Such a process is given the space below 4 GiB first and then its window's RAM
+  past it, around its image, as much as its `memorySize` says; only its image's code is
+  translated: the system libraries' own code and pages it makes executable
+  itself are interpreted, some twenty times dearer an instruction.
+  A relocatable 64-bit image given a `memorySize` past 4 GiB is moved below 4 GiB and runs over
+  a window of 8 GiB too, its RAM a memory64 memory of the window (a browser weighs a thread's
+  memories by their length and collects without end past 4 GiB in Chrome 157, 8 GiB in 153),
+  given addresses past 4 GiB once the space below has no room: a reservation there, its pages
+  not committed yet, does not fault (the page flags hold 4 GiB). Given 4 GiB or less it runs in
+  the 4 GiB layout.
+  A structured exception there passes no `_set_se_translator` translator. The exports that are
+  i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
+  `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
+  refused when it is loaded.
+- Only user mode. There is no kernel underneath; the engine's layers answer every system call.
+- On Node.js 22 (V8 12.4) every module the translator makes stays in memory for the run: that
+  V8 keeps each module importing a table while the table lives. A long run there grows with all
+  the code it ever translated (a run that JITs, the .NET Framework's, by gigabytes); the cpu layer
+  says so once. Node.js 24 and later, and the browsers, let the modules go.
+- Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
+  there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
+- A process the run starts may run in the memory of one gone before it. What it is handed (a heap
+  block, a committed page, a thread's stack) reads zero as in a new memory, but a page it reserved
+  and has not committed reads the gone process's bytes until it commits it, where Windows faults
+  (`roadmap/decisions.md` A242).
+- The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
+  AVX-512 are not announced and fault as on that processor.
+- The engine has no .NET runtime of its own: the runtime and its assembly cache (`fusion.dll`)
+  are the .NET Framework's, which a bottle has as a layer mounted under it (`bundle.layers`): a
+  managed program on a volume without it, or a Framework 4 setup a program starts, asks the
+  embedder for that layer (`layer-needed`), and the setup itself succeeds in its place (A249).
+  A bottle whose own installation put a Framework in keeps it. On Windows 7 and 10 the shim,
+  `mscoree.dll`, is the system's, as there: the engine's, which hands every call to the
+  Framework 4's `mscoreei.dll` (`roadmap/decisions.md` A247); without the Framework a managed
+  program ends at its start, and the loss is said. On XP the shim is the Framework's own file;
+  where a Framework 4 is there without it (one installed on 7), the engine's stands in. A managed
+  program in an XP bottle with neither does not start: `mscoree.dll` is not found, as on an XP
+  without .NET. A 64-bit managed program has no shim of the engine's yet.
+- With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
+  RAM's last 128 KiB, and the heap ends below it.
+- shlwapi looks up no file association: AssocQueryString, AssocQueryKey and AssocQueryStringByKey
+  answer that nothing is associated, AssocCreate makes no IQueryAssociations object, and
+  AssocIsDangerous answers from a fixed list of types (`roadmap/decisions.md` A260). UrlFixupW
+  mends no mistyped scheme. SHCreateThread runs its callback on the caller's thread and gives the
+  new thread no reference or COM apartment of the caller's. Each is said once.
+- The WebBrowser control (ieframe, shdocvw) is there without an HTML engine
+  (`roadmap/decisions.md` A240): a program embeds it, navigates and hears its events, but the
+  page is not drawn and has no document; each address not drawn is said once as a loss. The
+  InternetExplorer application object is not there.
+- A library Windows carries in its system directory and the engine does not recreate (in Wine's
+  list of them, `loader/internal/windows-libraries.js`, from the Windows that first carries it,
+  `libraries-since.js`) is missing, not absent: a program that
+  imports one still starts, and fails where it calls in. A static import of a library in no list
+  and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
+  Windows (`roadmap/decisions.md` A256).
+- Common Controls 6 is bound where a manifest asks for it (`roadmap/decisions.md` A257), but of the
+  exports only it has, GetWindowSubclass, HIMAGELIST_QueryInterface, ImageList_CoCreateInstance and
+  ImageList_WriteEx are there and TaskDialog, TaskDialogIndirect, DrawShadowText, LoadIconMetric,
+  LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize and DllInstall are not. An image
+  list is the IImageList its handle points at in both libraries; of IImageList2's own methods only
+  Resize and Initialize are there, the rest answer E_NOTIMPL and say so.
+  Version 6's button keeps what its BCM_ messages set (image list, text margin, split part,
+  command-link note) and answers BCM_GETIDEALSIZE by its own layout - the text in its font, the
+  image where the style puts it, its frame - which holds the content but is not Windows' pixel
+  for pixel. No button draws the image BM_SETIMAGE gives it, and version 6's draws neither the
+  split part, the image list nor the note.
+- The month calendar (`SysMonthCal32`) shows only its month view: a click on a title's month or
+  year offers no menu or spinner, MCM_SETCURRENTVIEW takes only MCMV_MONTH, MCN_VIEWCHANGE is not
+  sent, and "today" is the clock when the calendar was made, not moved on at midnight.
+- The date and time picker (`SysDateTimePick32`) drops its calendar down until a day is chosen,
+  the button or F4 is pressed again, Escape or Enter is pressed or DTM_CLOSEMONTHCAL comes - not
+  when the focus moves elsewhere. Its DTS_UPDOWN arrows are drawn in the control, not an up-down
+  child; callback fields (X) are written as they stand, with no DTN_FORMAT or DTN_FORMATQUERY, and
+  DTM_GETDATETIMEPICKERINFO and DTM_GETIDEALSIZE are not answered; each is said once.
+- The extended combo box (`ComboBoxEx32`) keeps its items' images, indents and values, but its
+  combo box's list shows only their text, in the ANSI code page: user32's combo box draws an
+  owner-drawn item's string itself rather than asking its parent with WM_DRAWITEM.
+- The common controls' window classes are there without comctl32 being loaded: a program that
+  makes one, or asks GetClassInfo for it, does not load comctl32, where Windows' user32 loads it
+  to register the class, so GetModuleHandle("comctl32") stays 0 until the program loads it.
+- Where no font engine draws (node, a page without a canvas), a string's width in Tahoma or
+  Microsoft Sans Serif at a size other than 8 points is its 8-point hinted widths scaled to the
+  em, and may be a pixel a character off Windows' (`roadmap/decisions.md` A266); other faces with
+  no file here measure at one fixed pitch.
+- An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
+  library, a library the program brought). Otherwise the program stops with `unimplemented import`
+  and the function's name.
+- The guest's zone is measured, not enforced: a program that holds more than 1 GiB of its RAM marks
+  the zones' table `over` and goes on.
+- The tab's memory is held to 1.5 GiB in three zones ([configuration.md](../configuration.md#memory-zones)).
+  Not every pool of the engine's own heaps is measured yet: the zones' table names those that are
+  not, and the bytes they hold are counted nowhere.
+
+## Sound
+
+- 64 voices play at once.
+- DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
+  3D processing off.
+- A DirectSound buffer's effects (SetFX) are made and driven as on Windows - a program's own DMO
+  runs over what it plays - but the standard ones (echo, chorus, reverb, the equalizer and the
+  rest) keep their parameters and pass the sound through unchanged, said once each
+  (`roadmap/decisions.md` A264). Effects run over a span when it is unlocked and over the whole
+  buffer at Play, not as the cursor reaches it. A buffer whose last reference goes does not
+  release its effects: a program's own DMO keeps one reference more than on Windows.
+- No capture: recording answers `DSERR_NODRIVER`.
+- WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
+  redistributable and FMOD do on Vista and later: exclusive mode answers
+  `AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`, as on a machine whose user has not allowed it, and a
+  loopback stream is refused. Session notifications are kept and never sent: nothing outside the
+  program changes its session.
+  The enumerator is there from Vista on; on XP it is not registered, so a program that would play
+  to an endpoint plays through DirectSound, as on XP. The endpoint is activated as IAudioClient,
+  IAudioSessionManager, IAudioEndpointVolume (its master and channel levels and mute, which every
+  stream plays at; -65.25 to 0 dB, `roadmap/decisions.md` A265; change notifications kept and not
+  sent), and as DirectSound or DirectShow's DirectSound renderer, made through COM; IAudioClient2
+  and 3, IDeviceTopology and spatial audio are not, and answer E_NOINTERFACE. DirectShow's
+  renderer is made without quartz.dll being loaded as a module, as the engine's built-in classes
+  are.
+- Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
+  attributes, media types, memory buffers, samples and events are there, and `propsys`'s
+  PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader
+  (`MFCreateSourceReaderFromURL`, `MFCreateSourceReaderFromByteStream`) is refused and the loss
+  is said with the file's name: XNA's songs and videos through FNA (WMA, WMV) and FAudio's xWMA do
+  not play. Registering a transform is refused with `E_ACCESSDENIED`.
+- Video for Windows has the codecs Windows installs - Cinepak (`cvid`, decoded only), Microsoft
+  Video 1 (`MSVC`, decoded only) and Microsoft RLE (`mrle`, both ways) - and a codec a game installs
+  (a `Drivers32` registry value, a `[drivers32]` line of `system.ini`, or a function given to
+  `ICInstall`) is loaded and sent its messages through its own `DriverProc`. DrawDib draws through
+  StretchDIBits on a true-colour display: it realizes no palette. There is no MCI video device, so
+  an MCIWnd is never made.
+
+## Input
+
+- Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
+  never do.
+- A mouse or keyboard DirectInput 8 holds is registered for raw input to its hidden `DIEmWin`
+  window as on Windows, over the program's own registration, which is gone once the device is let
+  go of. The registration is what a program reads back; the device's own reading does not go
+  through WM_INPUT. An earlier DirectInput registers nothing, as on Windows.
+- DirectInput's BuildActionMap answers no dwCRC, and a key pressed with no scan code is not kept
+  as byte 0 of the keyboard's state.
+
+## Accessibility
+
+- No UI Automation client runs beside a program (no screen reader, no test driver): in
+  `UIAutomationCore.dll`, clients are never listening, events raised reach nobody, a window
+  answers `WM_GETOBJECT` for UI Automation with nothing, and the provider a window is hosted
+  with knows only its handle. Identifiers are answered by GUID for properties, patterns, events
+  and control types; text attributes, landmarks, annotations, changes and styles answer 0.
+
+## Displays
+
+- The one display monitor is one physical monitor (`dxva2`'s monitor configuration API), a
+  "Generic PnP Monitor" with no DDC/CI: its brightness, contrast and other settings cannot be
+  read or set (`ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA`).
+
+## Network
+
+- No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the
+  loopback adapter exists.
+- The relay links tabs in one room and reaches outside hosts only from its server's allow list.
+- crypt32 builds a certificate chain from the certificates it was given and the ROOT store
+  (`win32.trustedRoots`); it fetches nothing, so a missing intermediate is a partial chain and
+  revocation, when asked, is unknown and offline (`CRYPT_E_REVOCATION_OFFLINE` under the SSL
+  policy). Only RSA signatures are verified: a certificate signed with an ECDSA key fails as
+  not signature valid.
+
+## Files
+
+- The bundle is read-only. What the program writes goes into the session, kept per `id`.
+- What the program writes is held in memory, all of it, where the engine's thread has no
+  synchronous handle on the origin's file system (a run on the page's own thread, a browser
+  without one, WebKit before 16.4): an installer that unpacks gigabytes needs them in the tab.
+  Elsewhere 64 MiB of it stays in memory and the rest goes to the run's page file.
+- A file mapping is a copy: a view reads the file when it is made and writes it back when it is
+  closed, so two views of one file do not see each other's writes.
+
+## Images (WIC)
+
+The Windows Imaging Component (`windowscodecs.dll`, `CLSID_WICImagingFactory`) decodes, converts
+and scales bitmaps for the program, .NET's WPF among them.
+
+- Decoders: BMP, PNG, ICO, GIF, JPEG and TIFF, each frame in the pixel format Windows' decoder
+  gives, except TIFF: its first image only, always as 32bppBGRA. DDS and JPEG XR are refused
+  (`WINCODEC_ERR_COMPONENTNOTFOUND`). A decoder reads its whole stream and decodes every frame
+  when it is initialized.
+- No encoders, no metadata (query readers and writers, metadata blocks, fast metadata encoders),
+  no colour transforms and no embedded ICC profiles: refused, and said once as a divergence.
+- The scaler's linear, cubic and Fant modes all average the source area under each pixel;
+  nearest neighbour is the pixel under its centre. Indexed formats scale by nearest neighbour.
+- Conversion covers the integer, float and half formats and CMYK (without colour management);
+  fixed-point, 32bppRGBE and n-channel formats are not converted.
+- The internal interfaces native WPF used on Windows (`IMILBitmap`, `IMILBitmapSource` and
+  kin) are not there.

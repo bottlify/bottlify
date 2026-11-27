@@ -92,6 +92,28 @@ const BUTTONS = Object.freeze({
 });
 
 /**
+ * The physical key a virtual key names as SendInput reads it: a control or
+ * an alt is the right one when the extended flag says so, whichever side its
+ * virtual key named, and a shift the right one when either does (Wine's
+ * user32:input sequences, as Windows keeps the key state).
+ *
+ * @param {number} vk @param {boolean} extended
+ * @returns {string | null}
+ */
+function codeForNamedVk(vk, extended){
+    switch (vk){
+        case 0x10: case 0xa0: case 0xa1:
+            return extended || vk === 0xa1 ? 'ShiftRight' : 'ShiftLeft';
+        case 0x11: case 0xa2: case 0xa3:
+            return extended ? 'ControlRight' : 'ControlLeft';
+        case 0x12: case 0xa4: case 0xa5:
+            return extended ? 'AltRight' : 'AltLeft';
+        default:
+            return codeForVk(vk);
+    }
+}
+
+/**
  * @typedef {Object} HostInputEvent
  * @property {'key' | 'text' | 'type' | 'paste' | 'pointerMove' | 'pointerButton' | 'wheel'
  *           | 'focus' | 'padAxis' | 'padButton'} kind
@@ -105,6 +127,8 @@ const BUTTONS = Object.freeze({
  * @property {number} [scanGiven] For `key` named by `vk`: the scan code the
  *           program wrote beside it, perhaps none -- what DirectInput 8 keys
  *           the event by, where earlier versions take the virtual key.
+ * @property {boolean} [injected] A program's SendInput: the low-level hooks were
+ *           shown it where it was put in, and are not shown it again.
  * @property {boolean} [down]    For `key`, `pointerButton` and `padButton`.
  * @property {string} [text]     For `text`: the character the browser composed
  *           from the `key` press sent just before it, which carries it.
@@ -178,6 +202,10 @@ const BUTTONS = Object.freeze({
  *     Where each event goes as the device reported it, for the WM_INPUT of a
  *     program that registered for raw input: user32 decides who is told.
  *     Absent in a build with no windows.
+ * @property {(width: number, height: number) => ({ x: number, y: number } | null)} [origin]
+ *     Where a viewport of that size starts on the screen, when what it shows
+ *     is one window's client rather than the screen: that client's upper left.
+ *     Absent or null, the viewport is the screen from its corner.
  * @property {(x: number, y: number) => void} [moved]
  *     Where the cursor is told, as a fraction of the viewport each way, each
  *     time it moves -- by the pointer or by the program placing it. A locked
@@ -190,9 +218,17 @@ const BUTTONS = Object.freeze({
  * @param {RouterDeps} deps
  */
 export function createInputRouter(
-    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput, moved },
+    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput, moved,
+        origin },
 )
 {
+    /**
+     * Where the viewport's upper left lies on the screen: the client's of a
+     * window whose picture alone fills it, else the screen's own.
+     *
+     * @param {{ width: number, height: number } | null} box
+     */
+    const originOf = box=>(box && origin?.(box.width, box.height)) || { x: 0, y: 0 };
     /** The configured screen, or nothing: what the cursor falls back to. */
     const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
@@ -288,11 +324,16 @@ export function createInputRouter(
      * the keyboard layout, which is the host's, not ours.
      */
     let lastKeyLParam = 0;
+    /** Whether ALT is down with no other key pressed since it went down. */
+    let altAlone = false;
     let posted = 0;
     let dropped = 0;
 
-    /** @param {number} message @param {number} wParam @param {number} lParam */
-    const emit = (message, wParam, lParam)=>{
+    /**
+     * @param {number} message @param {number} wParam @param {number} lParam
+     * @param {number} [side]
+     */
+    const emit = (message, wParam, lParam, side = undefined)=>{
         post({
             hwnd: targetWindow() >>> 0,
             message,
@@ -301,6 +342,9 @@ export function createInputRouter(
             time: clock() >>> 0,
             x: cursor.x,
             y: cursor.y,
+            // The left or right key of a shift, control or alt, which the
+            // message's wParam names as one: the key state keeps both.
+            ...side === undefined ? {} : { side },
         });
         posted++;
     };
@@ -331,7 +375,8 @@ export function createInputRouter(
     const key = event=>{
         const code = event.code
             ?? (event.scan !== undefined ? codeForScan(event.scan, event.extended === true)
-                : event.vk !== undefined ? codeForVk(event.vk) : null);
+                : event.vk !== undefined ? codeForNamedVk(event.vk, event.extended === true)
+                    : null);
         if (code === null)
         {
             dropped++;
@@ -345,7 +390,13 @@ export function createInputRouter(
         }
 
         const wasDown = held.has(code);
-        const altBefore = keys[VK_MENU] !== 0;
+        // Alt let go with no other key pressed since it went down is the
+        // system's (it opens the menu); let go after one, a plain key-up.
+        if (event.down && !wasDown)
+        {
+            altAlone = mapping.vk === VK_MENU;
+        }
+        const alone = altAlone;
         if (event.down)
         {
             held.set(code, mapping);
@@ -373,15 +424,22 @@ export function createInputRouter(
                 [...held.values()].some(other=>other.vk === mapping.vk) ? 1 : 0;
         }
 
-        // ALT decides which of the two pairs of messages this is; F10 is a
-        // system key on its own, which is how a menu opens without one. What
-        // ALT does not decide is the context bit, which reports whether it is
-        // down *now* -- so releasing ALT is a system message with the bit clear.
-        const system = altBefore || mapping.vk === VK_MENU || mapping.vk === VK_F10;
+        // ALT held without CONTROL, as the keys stand after this one, makes
+        // the system pair of messages; F10 is a system key on its own, which
+        // is how a menu opens without one; ALT's own release is the system's
+        // only when nothing was pressed while it was down. The context bit
+        // reports whether ALT is down *now*, whichever pair it is (Wine's
+        // user32:input keyboard sequences).
+        const altNow = keys[VK_MENU] !== 0;
+        const system = mapping.vk === VK_MENU && !event.down ? alone && keys[VK_CONTROL] === 0
+            : (altNow && keys[VK_CONTROL] === 0) || mapping.vk === VK_F10;
+        // A key a program put in by its virtual key carries the scan code it
+        // wrote beside it, perhaps none, as Windows reports it (SendInput).
+        const scanned = event.scanGiven ?? mapping.scan;
         const lParam = (1
-            | (mapping.scan & 0xff) << 16
+            | (scanned & 0xff) << 16
             | (mapping.extended ? 1 << 24 : 0)
-            | (system && keys[VK_MENU] !== 0 ? 1 << 29 : 0)
+            | (altNow ? 1 << 29 : 0)
             // A key that is going up was down, whether or not this router saw
             // it happen: a program reading the transition off a key-up whose
             // previous-state bit is clear concludes the key never went down.
@@ -397,7 +455,8 @@ export function createInputRouter(
             : [WM.KEYUP, WM.SYSKEYUP];
         if (windowHears('keyboard'))
         {
-            emit(messages[system ? 1 : 0], mapping.vk, lParam);
+            emit(messages[system ? 1 : 0], mapping.vk, lParam,
+                mapping.vkSide !== mapping.vk ? mapping.vkSide : undefined);
         }
         device({ kind: 'key', code: dikOf(mapping), down: event.down === true,
             ...event.scanGiven === undefined ? {}
@@ -491,8 +550,8 @@ export function createInputRouter(
         }
         const clip = clipRect;
         const [scaleX, scaleY] = scaleOf(clip, box);
-        moved((cursor.x - (clip ? clip.left : 0)) / scaleX / box.width,
-            (cursor.y - (clip ? clip.top : 0)) / scaleY / box.height);
+        const from = clip ? { x: clip.left, y: clip.top } : originOf(box);
+        moved((cursor.x - from.x) / scaleX / box.width, (cursor.y - from.y) / scaleY / box.height);
     };
 
     /** @param {HostInputEvent} event */
@@ -537,12 +596,15 @@ export function createInputRouter(
         }
         const px = cursor.x;
         const py = cursor.y;
+        // A clip is the program's own space on the screen; without one the
+        // viewport is, from wherever its picture starts.
+        const from = clip ? { x: clip.left, y: clip.top } : originOf(box);
         let nx = event.x === undefined || placed
             ? cursor.x + stepX
-            : (clip ? clip.left : 0) + Math.round((event.x | 0) * scaleX);
+            : from.x + Math.round((event.x | 0) * scaleX);
         let ny = event.y === undefined || placed
             ? cursor.y + stepY
-            : (clip ? clip.top : 0) + Math.round((event.y | 0) * scaleY);
+            : from.y + Math.round((event.y | 0) * scaleY);
         if (clip)
         {
             nx = confineRange(nx, clip.left, clip.right);
@@ -550,8 +612,8 @@ export function createInputRouter(
         }
         else if (box)
         {
-            nx = confine(nx, box.width);
-            ny = confine(ny, box.height);
+            nx = confineRange(nx, from.x, from.x + box.width);
+            ny = confineRange(ny, from.y, from.y + box.height);
         }
         cursor.x = nx;
         cursor.y = ny;

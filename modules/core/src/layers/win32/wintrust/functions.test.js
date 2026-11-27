@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWintrustFunctions } from './functions.js';
-import { certificates, NOW, signedCabinet } from './fixtures.test.js';
+import { certificates, NOW, SIGNED, signedCabinet } from './fixtures.test.js';
 
 const TRUST_E_NOSIGNATURE = 0x800b0100;
 const TRUST_E_SUBJECT_FORM_UNKNOWN = 0x800b0003;
@@ -30,7 +30,7 @@ const GENERIC_VERIFY_V2 = [0x6b, 0xc5, 0xaa, 0x00, 0x44, 0xcd, 0xd0, 0x11,
 
 const chain = certificates();
 
-/** @param {{ roots?: (Uint8Array | string)[] }} [options] */
+/** @param {{ roots?: (Uint8Array | string)[], crypt32?: (name: string, args: number[]) => number }} [options] */
 function machine(options = {}){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
@@ -41,6 +41,9 @@ function machine(options = {}){
     let nextHandle = 0x100;
     let lastError = 0;
     const divergences = /** @type {string[]} */ ([]);
+    let heap = 0x8000;
+    /** @type {number[]} */
+    const freed = [];
     const fns = createWintrustFunctions({
         readMemory: (at, length)=>memory.subarray(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
@@ -76,6 +79,16 @@ function machine(options = {}){
         trustedRoots: ()=>options.roots,
         now: ()=>NOW,
         divergence: (_api, detail)=>divergences.push(detail),
+        ...options.crypt32 ? {
+            crypt32: options.crypt32,
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = heap;
+                heap += (bytes + 15) & ~15;
+                memory.fill(0, at, at + bytes);
+                return at;
+            },
+            free: (/** @type {number} */ at)=>freed.push(at),
+        } : {},
     });
 
     const action = 0x100;
@@ -109,7 +122,7 @@ function machine(options = {}){
     };
 
     return {
-        fns, memory, view, file, verify, action, data, divergences,
+        fns, memory, view, file, verify, action, data, divergences, freed,
         lastError: ()=>lastError,
         setLastError: (/** @type {number} */ code)=>{
             lastError = code;
@@ -255,4 +268,51 @@ test('WTHelperGetProvSignerFromChain and WTHelperGetProvCertFromChain index the 
     assert.equal(cert.handler([signers + 44, 0]), 0, 'no chain');
     m.view.setUint32(data + 68, 0, true);
     assert.equal(signer.handler([data, 0, 0, 0]), 0, 'a count with no array');
+});
+
+test('a verification that keeps its state lays out the provider data a setup checks its'
+    + ' publisher against: the signer, its certificates as contexts, the chain over them', ()=>{
+    /** @type {string[]} */
+    const called = [];
+    /** @type {any} */
+    let m = null;
+    let builtAt = 0;
+    const crypt32 = (/** @type {string} */ name, /** @type {number[]} */ args)=>{
+        called.push(name);
+        switch (name)
+        {
+            case 'CertOpenStore': return 0x7000;
+            case 'CertAddEncodedCertificateToStore':
+                m.view.setUint32(args[5], 0x7100 + called.filter(one=>one === name).length, true);
+                return 1;
+            case 'CertGetCertificateChain':
+                builtAt = Number(m.view.getBigUint64(args[2], true) / 10000n - 11644473600000n);
+                m.view.setUint32(args[7], 0x7200, true);
+                return 1;
+            default: return 1;
+        }
+    };
+    m = machine({ roots: [chain.root], crypt32 });
+    m.file('C:\\signed.cab', signedCabinet());
+    assert.equal(m.verify('C:\\signed.cab', { state: WTD_STATEACTION_VERIFY }), 0);
+    const provider = m.fns.WTHelperProvDataFromStateData.handler([m.stateHandle()]);
+    assert.notEqual(provider, 0, 'CRYPT_PROVIDER_DATA is laid out');
+    assert.equal(m.view.getUint32(provider, true), 136, 'its cbStruct');
+    const signer = m.fns.WTHelperGetProvSignerFromChain.handler([provider, 0, 0, 0]);
+    assert.notEqual(signer, 0);
+    assert.equal(m.view.getUint32(signer + 40, true), 0x7200, 'pChainContext');
+    // The publisher's certificate ran out a year after it signed, long before now.
+    assert.equal(builtAt, SIGNED, 'the chain built at the timestamp\'s time, as the verdict is');
+    const count = m.view.getUint32(signer + 12, true);
+    assert.ok(count >= 2, 'from the signer\'s certificate to the root');
+    assert.equal(m.view.getUint32(m.fns.WTHelperGetProvCertFromChain.handler([signer, 0]) + 4,
+        true), 0x7101, 'the signer\'s own first');
+    assert.equal(m.fns.WTHelperGetProvSignerFromChain.handler([provider, 1, 0, 0]), 0);
+
+    m.view.setUint32(m.data + 28, WTD_STATEACTION_CLOSE, true);
+    assert.equal(m.fns.WinVerifyTrust.handler([0, m.action, m.data]), 0);
+    assert.equal(called.filter(one=>one === 'CertFreeCertificateContext').length, count);
+    assert.ok(called.includes('CertFreeCertificateChain') && called.includes('CertCloseStore'),
+        'and closing it gives everything back');
+    assert.ok(m.freed.includes(provider));
 });

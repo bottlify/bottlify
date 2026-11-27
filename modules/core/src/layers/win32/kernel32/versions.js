@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Windows this machine says it is.
  *
@@ -21,8 +23,8 @@
  * chosen.
  */
 
-export const VER_PLATFORM_WIN32_NT = 2;
-export const VER_NT_WORKSTATION = 1;
+const VER_PLATFORM_WIN32_NT = 2;
+const VER_NT_WORKSTATION = 1;
 
 /**
  * Remote Desktop with one interactive session, which OSVERSIONINFOEX
@@ -31,6 +33,9 @@ export const VER_NT_WORKSTATION = 1;
  * Professional has no Remote Desktop and no suite bit.
  */
 const VER_SUITE_SINGLEUSERTS = 0x100;
+
+/** GetProductInfo's Professional edition, which 7 Professional and 10 Pro are. */
+const PRODUCT_PROFESSIONAL = 0x30;
 
 /**
  * @typedef {'win2000' | 'winxp' | 'win7' | 'win10'} WindowsName
@@ -74,6 +79,9 @@ const VER_SUITE_SINGLEUSERTS = 0x100;
  * @property {number} suiteMask
  * @property {number} productType
  * @property {string} productName   The registry's ProductName.
+ * @property {number} [edition]  GetProductInfo's product type, the edition
+ *           ProductName names; absent before Vista, which had no editions to
+ *           ask about.
  * @property {ProfileRoots} profiles
  * @property {{ displayVersion: string, releaseId: string, ubr: number } | null} release
  * @property {SystemComponents | null} [components]
@@ -149,6 +157,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         servicePackMajor: 1, servicePackMinor: 0, csdVersion: 'Service Pack 1',
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 7 Professional',
+        edition: PRODUCT_PROFESSIONAL,
         profiles: USERS,
         release: null,
     }),
@@ -158,6 +167,7 @@ export const WINDOWS_VERSIONS = Object.freeze({
         servicePackMajor: 0, servicePackMinor: 0, csdVersion: '',
         suiteMask: VER_SUITE_SINGLEUSERTS, productType: VER_NT_WORKSTATION,
         productName: 'Windows 10 Pro',
+        edition: PRODUCT_PROFESSIONAL,
         profiles: USERS,
         // Build 19045 is 22H2. Its ReleaseId stayed at 2009, where it froze
         // when the name moved to DisplayVersion; the update revision is one
@@ -274,6 +284,61 @@ export function reportedVersion(version, compatibility = {}){
         ...version, major, minor, build: minor === 3 ? 9600 : 9200,
         servicePackMajor: 0, servicePackMinor: 0, csdVersion: '',
     });
+}
+
+/** The Windows a supportedOS GUID names, as a person says it. */
+const SUPPORTED_OS_NAMES = Object.freeze({
+    '6.0': 'Vista', '6.1': '7', '6.2': '8', '6.3': '8.1', '10.0': '10',
+});
+
+/**
+ * Libraries no Windows before 8 has: a program that imports one does not
+ * start on 7 or older (the Windows Runtime's API sets, which a Unity player
+ * imports; combase, which they are; Direct3D 12).
+ */
+const NEWER_LIBRARIES = /^(api-ms-win-core-winrt-[a-z0-9-]+|combase|d3d12)(\.dll)?$/i;
+
+/**
+ * The Windows a program is run on when the run names none (`windows: 'auto'`):
+ * the one it was made for. The newest its manifest's supportedOS elements name
+ * (8 and 8.1, which are not choices here, as 10), else the operating system
+ * version its PE header names (4.x and 5.x XP, 6.0 and 6.1 7, newer 10); a
+ * library it imports that only 8 and later have makes it 10 whatever the rest
+ * says, and a 64-bit program is given no less than 7, none of the older
+ * choices being 64-bit. Said with the reason, for the run to say it.
+ *
+ * @param {{ compatibility: ProgramCompatibility, imports: string[], bits: 32 | 64 | null }} program
+ * @returns {{ windows: WindowsName, because: string }}
+ */
+export function windowsFor({ compatibility, imports, bits }){
+    const declared = (compatibility.supportedOS ?? [])
+        .map(id=>SUPPORTED_OS[id.toLowerCase()])
+        .filter(known=>known !== undefined)
+        .sort(compareVersions)
+        .at(-1);
+    const image = compatibility.imageVersion;
+    /** @param {readonly number[]} version @returns {WindowsName} */
+    const byVersion = version=>(compareVersions(version, [6, 2]) >= 0 ? 'win10'
+        : compareVersions(version, [6, 0]) >= 0 ? 'win7' : 'winxp');
+    /** @type {{ windows: WindowsName, because: string }} */
+    let chosen = declared !== undefined
+        ? { windows: byVersion(declared), because: `its manifest names Windows ${
+            SUPPORTED_OS_NAMES[/** @type {keyof typeof SUPPORTED_OS_NAMES} */ (
+                `${declared[0]}.${declared[1]}`)]}` }
+        : image && image.major > 0
+            ? { windows: byVersion([image.major, image.minor]),
+                because: `its header names Windows ${image.major}.${image.minor}` }
+            : { windows: DEFAULT_WINDOWS, because: 'it names no Windows' };
+    const newer = imports.find(name=>NEWER_LIBRARIES.test(name));
+    if (newer && chosen.windows !== 'win10')
+    {
+        chosen = { windows: 'win10', because: `it imports ${newer}` };
+    }
+    if (bits === 64 && (chosen.windows === 'winxp' || chosen.windows === 'win2000'))
+    {
+        chosen = { windows: 'win7', because: `${chosen.because}, and it is 64-bit` };
+    }
+    return chosen;
 }
 
 /** VerifyVersionInfo's type bits, which are also VerSetConditionMask's. */
@@ -395,7 +460,7 @@ const HIERARCHY = Object.freeze([
  * @returns {'met' | 'not-met' | 'invalid'}
  */
 export function verifyVersion(current, requested, typeMask, conditionMask){
-    const types = typeMask >>> 0;
+    const types = wholeAddress(typeMask);
     const mask = BigInt.asUintN(64, conditionMask);
     // A request that names nothing to compare is refused as a bad argument
     // rather than answered.

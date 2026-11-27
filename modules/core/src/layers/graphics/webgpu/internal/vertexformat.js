@@ -37,6 +37,12 @@ const POSITION = Object.freeze({
     XYZB5: 0x00e,
 });
 
+/**
+ * Direct3D 9's position of four floats (D3DFVF_XYZW), which the field above
+ * cannot hold: XYZ with a bit of its own.
+ */
+const XYZW_BIT = 0x4000;
+
 export const FVF = Object.freeze({
     RESERVED0: 0x001,
     ...POSITION,
@@ -68,6 +74,8 @@ const floatFormat = count=>(count === 1 ? 'float32' : `float32x${count}`);
  * @property {string} format      A WebGPU vertex format.
  * @property {number} shaderLocation
  * @property {number} [stream]    The stream it is read from; zero when absent.
+ * @property {boolean} [rgba]     A colour red first, of a declaration type other than
+ *     D3DCOLOR, whose bytes come B, G, R, A.
  */
 
 /**
@@ -106,7 +114,10 @@ export function decodeFvf(fvf){
     };
 
     const preTransformed = position === POSITION.XYZRHW;
-    add('position', preTransformed ? 'float32x4' : 'float32x3', preTransformed ? 16 : 12);
+    // An untransformed w is stepped over: the fixed function takes it as one,
+    // which the matrices then scale (Wine's d3d9 test_ffp_w, test_fog).
+    const fourth = preTransformed || (position === POSITION.XYZ && (fvf & XYZW_BIT) !== 0);
+    add('position', preTransformed ? 'float32x4' : 'float32x3', fourth ? 16 : 12);
 
     // Blend weights sit immediately after the position and share its field:
     // XYZB1 through XYZB5 carry one to five floats.
@@ -115,7 +126,11 @@ export function decodeFvf(fvf){
         : 0;
     if (blendWeights > 0)
     {
-        add('blendWeight', floatFormat(blendWeights), blendWeights * 4);
+        // WebGPU's widest float format is four: a fifth weight (XYZB5, the
+        // indexed-skinning format) is stepped over, not declared -- a
+        // float32x5 made the whole pipeline invalid. Nothing draws by them;
+        // ProcessVertices reads them by the attribute's offset.
+        add('blendWeight', floatFormat(Math.min(4, blendWeights)), blendWeights * 4);
     }
 
     if ((fvf & FVF.NORMAL) !== 0)

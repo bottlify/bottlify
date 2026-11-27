@@ -37,9 +37,18 @@ function registryMachine(){
             return 0;
         } },
     };
+    // %X% expands to a longer string, as an environment variable would.
+    const kernel32 = {
+        ExpandEnvironmentStringsA: { handler: (/** @type {number[]} */ [from, to])=>{
+            const text = m.base.readCString(from, 0x1000).replace('%X%', 'expanded');
+            m.memory.set(new TextEncoder().encode(`${text}\0`), to);
+            return text.length + 1;
+        } },
+    };
     m = shlwapiMachine({
         advapi32: ()=>registry,
-        library: name=>(name === 'ole32.dll' ? ole32 : undefined),
+        library: name=>(name === 'ole32.dll' ? ole32 : name === 'KERNEL32.dll' ? kernel32
+            : undefined),
     });
     registry = createRegistryFunctions({ ...m.base, hive: createRegistryService(createHive()) });
     /**
@@ -130,4 +139,218 @@ test('SHAutoComplete leaves the edit control as it is and says so once', ()=>{
     assert.equal(m.divergences.length, 1);
     assert.equal(m.fns.SHAutoComplete.handler([0, 0]) >>> 0, E_INVALIDARG, 'no window');
     assert.equal(m.fns.SHAutoComplete.argBytes, 8);
+});
+
+test('SHQueryValueEx and SHGetValue answer an expandable string expanded, as REG_SZ', async()=>{
+    // Wine's test_SHGetValue and test_SHQueryValueEx.
+    const REG_EXPAND_SZ = 2;
+    const { m, set } = registryMachine();
+    set(0x80000001, 'Software\\Wine\\Test', 'Test1', REG_EXPAND_SZ,
+        new TextEncoder().encode('a%X%b\0'));
+    set(0x80000001, 'Software\\Wine\\Test', 'Test2', REG_SZ, new TextEncoder().encode('plain\0'));
+    const get = m.fns.SHGetValueA.handler;
+    const key = m.put('Software\\Wine\\Test');
+    const type = m.count(0xffffffff);
+    const buffer = m.put('0123456789', false, 64);
+    let size = m.count(64);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 0);
+    assert.equal(m.read(buffer), 'aexpandedb');
+    assert.equal(m.dwordAt(type), REG_SZ, 'expanded, it is a plain string');
+    assert.equal(m.dwordAt(size), 11, 'the larger of the two lengths');
+    assert.equal(await get([0x80000001, key, m.put('Test2'), type, buffer, m.count(64)]), 0);
+    assert.equal(m.read(buffer), 'plain');
+    m.memory.set(new TextEncoder().encode('0123456789\0'), buffer);
+    size = m.count(3);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 234,
+        'ERROR_MORE_DATA');
+    assert.equal(m.read(buffer), '0123456789', 'no room for what is stored: untouched');
+    assert.equal(m.dwordAt(size), 11);
+    size = m.count(7);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, buffer, size]), 234);
+    assert.equal(m.read(buffer), '', 'room for what is stored, not for its expansion: empty');
+    size = m.count(3);
+    assert.equal(await get([0x80000001, key, m.put('Test1'), type, 0, size]), 0);
+    assert.equal(m.dwordAt(size), 11, 'no buffer: the size it needs');
+    assert.equal(await get([0x80000001, m.put('Software\\None'), m.put('Test1'), type, buffer,
+        m.count(64)]), 2, 'no such key');
+});
+
+test('SHRegGetUSValue reads the user\'s value, then the machine\'s, then the default', ()=>{
+    const { m, set } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Test', 'Both', REG_DWORD, Uint8Array.of(1, 0, 0, 0));
+    set(HKEY_LOCAL_MACHINE, 'Software\\Test', 'Both', REG_DWORD, Uint8Array.of(2, 0, 0, 0));
+    /** @param {string} name @param {number} ignore @param {number} [fallback] */
+    const get = (name, ignore, fallback = 0)=>{
+        const type = m.count(0);
+        const data = m.count(0xcccccccc);
+        const size = m.count(4);
+        const status = m.fns.SHRegGetUSValueA.handler([m.put('Software\\Test'), m.put(name), type,
+            data, size, ignore, fallback, fallback ? 4 : 0]);
+        return { status, type: m.dwordAt(type), data: m.dwordAt(data), size: m.dwordAt(size) };
+    };
+    assert.deepEqual(get('Both', 0), { status: 0, type: REG_DWORD, data: 1, size: 4 });
+    assert.deepEqual(get('Both', 1).data, 2, 'the machine\'s, the user ignored');
+    assert.equal(get('Missing', 0).status, 2, 'ERROR_FILE_NOT_FOUND');
+    const fallback = m.count(7);
+    const given = get('Missing', 0, fallback);
+    assert.equal(given.status, 0);
+    assert.equal(given.data, 7, 'the default copied in');
+    assert.equal(m.fns.SHRegGetUSValueA.argBytes, 32);
+});
+
+test('AssocQueryString answers that nothing is associated, and says so once', ()=>{
+    const m = shlwapiMachine();
+    const E_NO_ASSOCIATION = 0x80070483 | 0;
+    for (const name of ['AssocQueryStringA', 'AssocQueryStringW'])
+    {
+        assert.equal(m.fns[name].argBytes, 24);
+        assert.equal(m.fns[name].handler([0, 2, m.put('.htm', name.endsWith('W')), 0, 0,
+            m.count(0)]), E_NO_ASSOCIATION);
+    }
+    assert.ok(m.divergences.some((/** @type {any} */ one)=>
+        JSON.stringify(one).includes('associations')));
+});
+
+test('SHSetValue makes the subkey and writes the value SHGetValue reads back', async()=>{
+    // Wine's shreg test: SHSetValue then SHGetValue under a key it creates.
+    const { m } = registryMachine();
+    for (const [suffix, wide] of /** @type {const} */ ([['A', false], ['W', true]]))
+    {
+        const data = m.count(0x1234);
+        assert.equal(m.fns[`SHSetValue${suffix}`].handler([HKEY_CURRENT_USER,
+            m.put(`Software\\Set${suffix}`, wide), m.put('Number', wide), REG_DWORD, data, 4]), 0);
+        const type = m.count(0);
+        const out = m.count(0);
+        const size = m.count(4);
+        assert.equal(await m.fns[`SHGetValue${suffix}`].handler([HKEY_CURRENT_USER,
+            m.put(`Software\\Set${suffix}`, wide), m.put('Number', wide), type, out, size]), 0);
+        assert.deepEqual([m.dwordAt(type), m.dwordAt(out)], [REG_DWORD, 0x1234]);
+    }
+    assert.equal(m.fns.SHSetValueA.argBytes, 24);
+});
+
+test('a US key enumerates and counts as advapi32 does, and is closed once', ()=>{
+    const { m, set, sz } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Enum\\Child', 'Inner', REG_SZ, sz('x'));
+    set(HKEY_CURRENT_USER, 'Software\\Enum', 'Value', REG_SZ, sz('text'));
+    const out = m.count(0);
+    assert.equal(m.fns.SHRegOpenUSKeyA.handler([m.put('Software\\Enum'), 0xf003f, 0, out, 0]), 0);
+    const us = m.dwordAt(out);
+    const name = m.put('', false, 64);
+    assert.equal(m.fns.SHRegEnumUSKeyA.handler([us, 0, name, m.count(64), 0]), 0);
+    assert.equal(m.read(name), 'Child');
+    assert.equal(m.fns.SHRegEnumUSKeyA.handler([us, 1, name, m.count(64), 0]), 259,
+        'ERROR_NO_MORE_ITEMS');
+    const subKeys = m.count(9);
+    const values = m.count(9);
+    assert.equal(m.fns.SHRegQueryInfoUSKeyA.handler([us, subKeys, m.count(0), values, m.count(0),
+        0]), 0);
+    assert.deepEqual([m.dwordAt(subKeys), m.dwordAt(values)], [1, 1]);
+    assert.equal(m.fns.SHRegEnumUSValueA.handler([us, 0, name, m.count(64), m.count(0), 0, 0, 0]),
+        0);
+    assert.equal(m.read(name), 'Value');
+    assert.equal(m.fns.SHRegCloseUSKey.handler([us]), 0);
+    assert.equal(m.fns.SHRegCloseUSKey.handler([us]), 87, 'closed once');
+});
+
+test('SHEnumKeyEx, SHEnumValue and SHQueryInfoKey take a plain key', ()=>{
+    const { m, set, sz } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Plain\\Sub', 'Inner', REG_SZ, sz('x'));
+    set(HKEY_CURRENT_USER, 'Software\\Plain', 'Name', REG_SZ, sz('y'));
+    const subKeys = m.count(0);
+    assert.equal(m.fns.SHQueryInfoKeyA.handler([HKEY_CURRENT_USER, subKeys, m.count(0),
+        m.count(0), m.count(0)]), 0);
+    assert.ok(m.dwordAt(subKeys) >= 1, 'Software at least');
+    const name = m.put('', true, 128);
+    assert.equal(m.fns.SHEnumKeyExW.handler([HKEY_CURRENT_USER, 0, name, m.count(64)]), 0);
+    assert.equal(m.read(name, true), 'Software');
+    assert.equal(m.fns.SHEnumValueA.argBytes, 28);
+});
+
+test('a US key reads the user\'s value first, writes where its flags say', ()=>{
+    // Wine's shreg test of the SHRegOpenUSKey family.
+    const { m, set } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Pair', 'Shared', REG_DWORD, Uint8Array.of(1, 0, 0, 0));
+    set(HKEY_LOCAL_MACHINE, 'Software\\Pair', 'Shared', REG_DWORD, Uint8Array.of(2, 0, 0, 0));
+    set(HKEY_LOCAL_MACHINE, 'Software\\Pair', 'Machine', REG_DWORD, Uint8Array.of(3, 0, 0, 0));
+    const out = m.count(0);
+    assert.equal(m.fns.SHRegOpenUSKeyW.handler([m.put('Software\\Pair', true), 0xf003f, 0, out,
+        0]), 0);
+    const us = m.dwordAt(out);
+    /** @param {string} name @param {number} ignore */
+    const query = (name, ignore)=>{
+        const data = m.count(0);
+        const size = m.count(4);
+        const status = m.fns.SHRegQueryUSValueA.handler([us, m.put(name), m.count(0), data, size,
+            ignore, 0, 0]);
+        return status === 0 ? m.dwordAt(data) : -status;
+    };
+    assert.equal(query('Shared', 0), 1, 'the user\'s');
+    assert.equal(query('Shared', 1), 2, 'the machine\'s, the user ignored');
+    assert.equal(query('Machine', 0), 3);
+    assert.equal(query('Missing', 0), -2);
+
+    const SHREGSET_HKCU = 1;
+    const SHREGSET_FORCE_HKCU = 2;
+    const value = m.count(9);
+    assert.equal(m.fns.SHRegWriteUSValueA.handler([us, m.put('Shared'), REG_DWORD, value, 4,
+        SHREGSET_HKCU]), 0);
+    assert.equal(query('Shared', 0), 1, 'a plain flag does not overwrite');
+    assert.equal(m.fns.SHRegWriteUSValueA.handler([us, m.put('Shared'), REG_DWORD, value, 4,
+        SHREGSET_FORCE_HKCU]), 0);
+    assert.equal(query('Shared', 0), 9, 'a forced one does');
+    assert.equal(m.fns.SHRegDeleteUSValueA.handler([us, m.put('Shared'), 1]), 0);
+    assert.equal(query('Shared', 0), 2, 'the user\'s gone, the machine\'s remains');
+    m.fns.SHRegCloseUSKey.handler([us]);
+
+    assert.equal(m.fns.SHRegSetUSValueA.handler([m.put('Software\\Fresh'), m.put('New'), REG_DWORD,
+        value, 4, SHREGSET_FORCE_HKCU]), 0);
+    assert.equal(m.fns.SHRegOpenUSKeyA.handler([m.put('Software\\Fresh'), 0xf003f, 0, out, 1]), 2,
+        'made under the user\'s root alone');
+    assert.equal(m.fns.SHRegOpenUSKeyA.handler([m.put('Software\\Nowhere'), 0xf003f, 0, out, 0]),
+        2);
+    assert.equal(m.fns.SHRegOpenUSKeyA.handler([m.put('Software\\Pair'), 0xf003f, 0, 0, 0]), 87);
+});
+
+test('SHDeleteOrphanKey keeps a key with a default value or a subkey', ()=>{
+    const { m, set, sz } = registryMachine();
+    set(HKEY_CURRENT_USER, 'Software\\Orphan\\Named', 'Name', REG_SZ, sz('named'));
+    set(HKEY_CURRENT_USER, 'Software\\Orphan\\Default', '', REG_SZ, sz('kept'));
+    assert.equal(m.fns.SHDeleteOrphanKeyA.handler([HKEY_CURRENT_USER,
+        m.put('Software\\Orphan\\Default')]), 1020);
+    assert.equal(m.fns.SHDeleteOrphanKeyA.handler([HKEY_CURRENT_USER, m.put('Software\\Orphan')]),
+        1020, 'a key with subkeys');
+    assert.equal(m.fns.SHDeleteOrphanKeyW.handler([HKEY_CURRENT_USER,
+        m.put('Software\\Orphan\\Named', true)]), 0, 'named values do not keep it');
+});
+
+test('SHRegGetIntW reads a string as a number; SHRegGetCLSIDKey opens the class\'s settings', ()=>{
+    const { m } = registryMachine();
+    /** @param {string} text */
+    const wide = text=>{
+        const at = m.put(text, true);
+        return [at, (text.length + 1) * 2];
+    };
+    const [text, length] = wide(' 42x');
+    // In the root key itself: no subkey names it.
+    assert.equal(m.fns.SHSetValueW.handler([HKEY_CURRENT_USER, 0, m.put('IntText', true), REG_SZ,
+        text, length]), 0);
+    assert.equal(m.fns.SHSetValueA.handler([HKEY_CURRENT_USER, 0, m.put('IntWord'), REG_DWORD,
+        m.count(5), 4]), 0);
+    assert.equal(m.fns.SHRegGetIntW.handler([HKEY_CURRENT_USER, m.put('IntText', true), 7]), 42,
+        'the number the string starts with');
+    assert.equal(m.fns.SHRegGetIntW.handler([HKEY_CURRENT_USER, m.put('IntWord', true), 7]), 7,
+        'a DWORD is not a string');
+    assert.equal(m.fns.SHRegGetIntW.handler([HKEY_CURRENT_USER, m.put('Missing', true), 7]), 7);
+
+    const guid = m.put('', false, 32);
+    m.memory.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], guid);
+    const key = m.count(0);
+    assert.equal(m.fns.SHRegGetCLSIDKeyA.handler([guid, m.put('Sub'), 1, 0, key]) | 0,
+        0x80004005 | 0, 'not there, not made');
+    assert.equal(m.fns.SHRegGetCLSIDKeyA.handler([guid, m.put('Sub'), 1, 1, key]), 0);
+    assert.notEqual(m.dwordAt(key), 0);
+    assert.equal(m.fns.SHRegGetCLSIDKeyW.handler([guid, m.put('Sub', true), 1, 0, key]), 0,
+        'there once made');
+    assert.equal(m.fns.SHRegGetCLSIDKeyA.handler([0, 0, 1, 0, key]) | 0, E_INVALIDARG | 0);
 });

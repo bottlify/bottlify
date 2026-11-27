@@ -169,6 +169,41 @@ test('remove and rename act on the volume, and _access asks whether it exists', 
     assert.equal(files.entries.has('C:\\game\\old.mpq'), false);
 });
 
+test('the wide names make, rename and remove the same entries', ()=>{
+    const { memory, files, table } = build();
+    assert.equal(table._wmkdir.handler([memory.putWide('C:\\game\\mods')]), 0);
+    assert.equal(table._wmkdir.handler([memory.putWide('C:\\game\\mods')]), -1, 'taken now');
+    assert.equal(table._wrename.handler(
+        [memory.putWide('C:\\game\\data.mpq'), memory.putWide('C:\\game\\mods\\data.mpq')]), 0);
+    assert.equal(files.entries.has('C:\\game\\mods\\data.mpq'), true);
+    assert.equal(table._wunlink.handler([memory.putWide('C:\\game\\mods\\data.mpq')]), 0);
+    assert.equal(table._wremove.handler([memory.putWide('C:\\game\\mods\\data.mpq')]), -1,
+        'gone already');
+    assert.equal(table._wrmdir.handler([memory.putWide('C:\\game\\mods')]), 0);
+    assert.equal(files.entries.has('C:\\game\\mods'), false);
+    assert.equal(table._wunlink.handler([0]), -1, 'no path');
+});
+
+test('a removal leaves the last error DeleteFile and RemoveDirectory leave', ()=>{
+    // Wine's msvcp140 test_Unlink: msvcp140's _Unlink reads its code from
+    // the last error after the universal runtime's _wremove.
+    const memory = fakeMemory();
+    const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves',
+        'C:\\game\\saves\\one.sav']);
+    /** @type {number[]} */
+    const last = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory, files, errno: ()=>{}, setLastError: code=>last.push(code),
+    }));
+    table._wremove.handler([memory.putWide('C:\\game\\none.txt')]);
+    table._wremove.handler([memory.putWide('C:\\game\\gone\\none.txt')]);
+    files.remove = ()=>false;
+    table._wremove.handler([memory.putWide('C:\\game\\saves')]);
+    table._rmdir.handler([memory.put('C:\\game\\saves')]);
+    assert.deepEqual(last, [2, 3, 5, 145],
+        'not found, no folder on the way, a folder to DeleteFile, a folder not empty');
+});
+
 test('a failing operation says why in errno, as each one documents', ()=>{
     const memory = fakeMemory();
     const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves']);
@@ -614,4 +649,44 @@ test('_findfirst lists "." and ".." first in a folder, as the FindFirstFile it w
     assert.equal(found().name, '..');
     assert.equal(table._findnext.handler([handle, data]), 0);
     assert.notEqual(found().name, '..', 'then what the folder holds');
+});
+
+test('_wmktemp makes a wide template\'s name as _mktemp makes a narrow one', ()=>{
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: ()=>({ exists: false }), currentDirectory: ()=>'C:\\here' },
+    }));
+    const at = memory.putWide('tmpXXXXXX');
+    assert.equal(table._wmktemp.handler([at]), at);
+    assert.match(memory.wide(at), /^tmpa\d{5}$/);
+    const short = memory.putWide('tmpXX');
+    assert.equal(table._wmktemp.handler([short]), 0);
+    assert.equal(memory.wide(short), 'tmpXX');
+});
+
+test('_mktemp fills six closing X\'s with a free letter and digits, or answers null', ()=>{
+    // Wine's msvcrt test_mktemp: five X's, a letter after them, no X's at all fail.
+    const memory = fakeMemory();
+    const taken = new Set();
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory,
+        files: { stat: (/** @type {string} */ path)=>({ exists: taken.has(path) }),
+            currentDirectory: ()=>'C:\\here' },
+    }));
+    for (const template of ['a', 'testXXXXX', 'testXXXXXXa'])
+    {
+        const at = memory.put(template);
+        assert.equal(table._mktemp.handler([at]), 0, template);
+        assert.equal(memory.text(at), template, 'left as it was');
+    }
+    const first = memory.put('testXXXXXX');
+    assert.equal(table._mktemp.handler([first]), first);
+    assert.match(memory.text(first), /^testa\d{5}$/);
+    taken.add(memory.text(first));
+    const second = memory.put('testXXXXXX');
+    table._mktemp.handler([second]);
+    assert.match(memory.text(second), /^testb\d{5}$/, 'the next letter while a name is taken');
+    const stars = memory.put('**XXXXXX');
+    assert.equal(table._mktemp.handler([stars]), stars);
 });

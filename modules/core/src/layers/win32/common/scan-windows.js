@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from './pointers.js';
+
 /**
  * Guest memory read for a scan to a terminator: a string, a list of them, a
  * stream of tokens, whose caller hands over where it starts and nothing of
@@ -41,7 +43,7 @@ export const SCAN_WINDOW = 256;
  * @returns {Generator<Uint8Array, void, void>}
  */
 export function* scanWindows(memory, address, unit = 1){
-    for (let at = address >>> 0; ;)
+    for (let at = wholeAddress(address); ;)
     {
         const room = SCAN_WINDOW - at % SCAN_WINDOW;
         const length = room < unit ? unit : room - room % unit;
@@ -51,7 +53,7 @@ export function* scanWindows(memory, address, unit = 1){
         {
             return;
         }
-        at = (at + length) >>> 0;
+        at = wholeAddress(at + length);
     }
 }
 

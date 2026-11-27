@@ -44,7 +44,6 @@
  * RPC_S_CANNOT_SUPPORT rather than walking on through bytes it cannot read.
  */
 
-import { readToTerminator } from '../common/scan-windows.js';
 
 /** Format characters. */
 export const FC = Object.freeze({
@@ -101,9 +100,35 @@ export const FC = Object.freeze({
     CONSTANT_IID: 0x5a,
     END: 0x5b,
     PAD: 0x5c,
+    USER_MARSHAL: 0xb4,
     INT3264: 0xb8,
     UINT3264: 0xb9,
 });
+
+/** A user-marshal type's flags, the high nibble of its second byte. */
+const USER_MARSHAL_POINTER = 0xc0;
+
+/**
+ * What a user-marshal type's wire form starts with when its flags say it is a
+ * pointer: the four bytes of "User", where a referent ID would stand.
+ */
+const USER_MARSHAL_MARKER = 0x72657355;
+
+/** USER_MARSHAL_CB, 32-bit: what a user-marshal routine's first argument points at. */
+const USER_MARSHAL_CB = Object.freeze({
+    FLAGS: 0, STUB_MESSAGE: 4, RESERVE: 8, SIGNATURE: 12, TYPE: 16, FORMAT: 20, TYPE_FORMAT: 24,
+    SIZE: 28,
+});
+
+/** USER_MARSHAL_CB's signature, "USRC". */
+const USER_MARSHAL_CB_SIGNATURE = 0x55535243;
+
+/** USER_MARSHAL_CB_TYPE: which of the four routines the block is for. */
+const USER_MARSHAL_CB_TYPE = Object.freeze({ BUFFER_SIZE: 0, MARSHALL: 1, UNMARSHALL: 2,
+    FREE: 3 });
+
+/** NDR_LOCAL_DATA_REPRESENTATION: little-endian, ASCII, IEEE floats. */
+const LOCAL_DATA_REPRESENTATION = 0x10;
 
 /** A pointer's attribute byte. */
 export const POINTER = Object.freeze({
@@ -174,6 +199,7 @@ export const STUB_DESC = Object.freeze({
     FREE: 8,
     FORMAT_TYPES: 32,
     VERSION: 40,
+    USER_MARSHAL_QUADRUPLES: 56,
 });
 
 /** Little-endian integers, ASCII characters and IEEE floats. */
@@ -228,8 +254,7 @@ export class RpcException extends Error {
 
 /**
  * @typedef {Object} NdrHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(call: NdrCall, bytes: number) => number | Promise<number>} allocate
  *           Through the stub descriptor's allocator; 0 when nothing fits.
  * @property {(call: NdrCall, address: number) => unknown} free
@@ -240,6 +265,9 @@ export class RpcException extends Error {
  *           unmarshalInterface  A pointer of this process holding one reference,
  *           for the interface the OBJREF carries when `iid` is null.
  * @property {(call: NdrCall, pointer: number) => unknown} releaseInterface
+ * @property {(call: NdrCall, routine: number, args: number[]) => number | Promise<number>}
+ *           [callRoutine]  A routine of the program's (or of a library's) called on the call's
+ *           thread: a user-marshal type's four.
  * @property {number} interfaceBytes  The most an OBJREF takes.
  * @property {(detail: string) => void} [divergence]
  */
@@ -303,28 +331,12 @@ const align = (value, to)=>to <= 1 ? value >>> 0 : ((value + to - 1) & ~(to - 1)
  * @param {NdrHost} host
  */
 export function createNdr(host){
-    /** @param {number} at */
-    const u8 = at=>host.readMemory(at >>> 0, 1)[0];
-    /** @param {number} at */
-    const u16 = at=>{
-        const bytes = host.readMemory(at >>> 0, 2);
-        return bytes[0] | (bytes[1] << 8);
-    };
-    /** @param {number} at */
-    const i16 = at=>(u16(at) << 16) >> 16;
-    /** @param {number} at */
-    const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
-        return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    };
-    /** @param {number} at @param {number} value */
-    const w32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(
-        value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
+    const { guest } = host;
 
     /** @param {NdrCall} call @param {number} offset */
-    const field = (call, offset)=>u32(call.message + offset);
+    const field = (call, offset)=>guest.u32(call.message + offset);
     /** @param {NdrCall} call @param {number} offset @param {number} value */
-    const setField = (call, offset, value)=>w32(call.message + offset, value);
+    const setField = (call, offset, value)=>guest.set32(call.message + offset, value);
 
     /** @type {Map<number, MessageState>} */
     const states = new Map();
@@ -356,10 +368,10 @@ export function createNdr(host){
 
     /** @param {number} at */
     const unknownType = at=>unsupported(
-        `format character 0x${u8(at).toString(16).padStart(2, '0')}`);
+        `format character 0x${guest.u8(at).toString(16).padStart(2, '0')}`);
 
     /** @param {NdrCall} call */
-    const isClient = call=>(u8(call.message + STUB_MESSAGE.IS_CLIENT)) !== 0;
+    const isClient = call=>(guest.u8(call.message + STUB_MESSAGE.IS_CLIENT)) !== 0;
 
     /**
      * Sizing: the length grows by padding to `to` and then by `bytes`.
@@ -388,7 +400,7 @@ export function createNdr(host){
         }
         if (at > buffer)
         {
-            host.writeMemory(buffer, new Uint8Array(at - buffer));
+            guest.fill(buffer, 0, at - buffer);
         }
         setField(call, STUB_MESSAGE.BUFFER, at + bytes);
         return at;
@@ -443,7 +455,7 @@ export function createNdr(host){
      * @param {NdrCall} call @param {number} ppMemory @param {boolean} mustAlloc
      */
     const mayUseBuffer = (call, ppMemory, mustAlloc)=>!mustAlloc && !isClient(call)
-        && u32(ppMemory) === 0;
+        && guest.u32(ppMemory) === 0;
 
     /** @param {NdrCall} call @param {number} start @param {number} bytes */
     const keepInPlace = (call, start, bytes)=>{
@@ -458,13 +470,13 @@ export function createNdr(host){
      * @param {number} bytes
      */
     const destination = async(call, ppMemory, mustAlloc, bytes)=>{
-        const current = u32(ppMemory);
+        const current = guest.u32(ppMemory);
         if (current !== 0 && !mustAlloc)
         {
             return current;
         }
         const made = await allocate(call, bytes);
-        w32(ppMemory, made);
+        guest.set32(ppMemory, made);
         return made;
     };
 
@@ -480,14 +492,14 @@ export function createNdr(host){
      * @returns {number | null}
      */
     const correlate = (call, at, memory)=>{
-        const first = u8(at);
-        const operator = u8(at + 1);
-        const offset = i16(at + 2);
+        const first = guest.u8(at);
+        const operator = guest.u8(at + 1);
+        const offset = guest.i16(at + 2);
         const kind = first & 0xf0;
         const type = first & 0x0f;
         if (kind === CORRELATION.CONSTANT)
         {
-            return ((operator << 16) | u16(at + 2)) >>> 0;
+            return ((operator << 16) | guest.u16(at + 2)) >>> 0;
         }
         let base;
         if (kind === CORRELATION.TOP_LEVEL)
@@ -513,7 +525,7 @@ export function createNdr(host){
         }
         if (operator === FC.DEREFERENCE)
         {
-            base = u32(base);
+            base = guest.u32(base);
         }
         let value = readCorrelation(base >>> 0, type);
         switch (operator)
@@ -546,16 +558,16 @@ export function createNdr(host){
             case FC.BYTE:
             case FC.USMALL:
             case FC.CHAR:
-                return u8(at);
+                return guest.u8(at);
             case FC.SMALL:
-                return (u8(at) << 24) >> 24;
+                return (guest.u8(at) << 24) >> 24;
             case FC.USHORT:
             case FC.WCHAR:
-                return u16(at);
+                return guest.u16(at);
             case FC.SHORT:
-                return i16(at);
+                return guest.i16(at);
             default:
-                return u32(at);
+                return guest.u32(at);
         }
     };
 
@@ -590,14 +602,14 @@ export function createNdr(host){
         const at = put(call, type.wire, type.wire);
         if (fc === FC.IGNORE)
         {
-            host.writeMemory(at, new Uint8Array(4));
+            guest.fill(at, 0, 4);
             return;
         }
-        if (fc === FC.ENUM16 && u32(memory) > 0x7fff)
+        if (fc === FC.ENUM16 && guest.u32(memory) > 0x7fff)
         {
             throw new RpcException(RPC_STATUS.X_ENUM_VALUE_OUT_OF_RANGE);
         }
-        host.writeMemory(at, host.readMemory(memory, type.wire).slice());
+        guest.copy(at, memory, type.wire);
     };
 
     /** @param {NdrCall} call @param {number} memory @param {number} fc */
@@ -606,12 +618,11 @@ export function createNdr(host){
         const at = take(call, type.wire, type.wire);
         if (fc === FC.IGNORE)
         {
-            w32(memory, 0);
+            guest.set32(memory, 0);
             return;
         }
-        const bytes = new Uint8Array(type.memory);
-        bytes.set(host.readMemory(at, type.wire));
-        host.writeMemory(memory, bytes);
+        // Widened where memory holds more than the wire (an enum16), its high bytes zero.
+        guest.setBytes(memory, guest.bytes(at, type.wire, new Uint8Array(type.memory)));
     };
 
     // --- layouts ----------------------------------------------------------------
@@ -633,14 +644,14 @@ export function createNdr(host){
         let cursor = at + 2;
         for (let guard = 0; guard < 4096; guard++)
         {
-            const kind = u8(cursor);
+            const kind = guest.u8(cursor);
             if (kind === FC.END)
             {
                 return pointers;
             }
             if (kind === FC.NO_REPEAT)
             {
-                pointers.push({ memory: i16(cursor + 2), buffer: i16(cursor + 4),
+                pointers.push({ memory: guest.i16(cursor + 2), buffer: guest.i16(cursor + 4),
                     format: cursor + 6 });
                 cursor += 10;
                 continue;
@@ -650,19 +661,19 @@ export function createNdr(host){
                 throw unknownType(cursor);
             }
             const fixed = kind === FC.FIXED_REPEAT;
-            const iterations = fixed ? u16(cursor + 2) : count;
+            const iterations = fixed ? guest.u16(cursor + 2) : count;
             const header = fixed ? cursor + 4 : cursor + 2;
-            const increment = u16(header);
-            const toArray = i16(header + 2);
-            const each = u16(header + 4);
+            const increment = guest.u16(header);
+            const toArray = guest.i16(header + 2);
+            const each = guest.u16(header + 4);
             for (let element = 0; element < iterations; element++)
             {
                 for (let index = 0; index < each; index++)
                 {
                     const entry = header + 6 + index * 8;
                     pointers.push({
-                        memory: toArray + element * increment + i16(entry),
-                        buffer: toArray + element * increment + i16(entry + 2),
+                        memory: toArray + element * increment + guest.i16(entry),
+                        buffer: toArray + element * increment + guest.i16(entry + 2),
                         format: entry + 4,
                     });
                 }
@@ -677,7 +688,7 @@ export function createNdr(host){
      *
      * @param {number} at
      */
-    const layoutAt = at=>u8(at) === FC.PP ? at : 0;
+    const layoutAt = at=>guest.u8(at) === FC.PP ? at : 0;
 
     /**
      * Everything an array is, read from its format.
@@ -689,17 +700,17 @@ export function createNdr(host){
      *     total: number }}
      */
     const arrayShape = (call, format, memory, purpose)=>{
-        const fc = u8(format);
-        const alignment = u8(format + 1) + 1;
+        const fc = guest.u8(format);
+        const alignment = guest.u8(format + 1) + 1;
         if (fc === FC.SMFARRAY || fc === FC.LGFARRAY)
         {
             const small = fc === FC.SMFARRAY;
-            const total = small ? u16(format + 2) : u32(format + 2);
+            const total = small ? guest.u16(format + 2) : guest.u32(format + 2);
             const layout = layoutAt(format + (small ? 4 : 6));
             return { alignment, elementSize: 1, count: total, offset: 0, length: total,
                 conformant: false, varying: false, layout, total };
         }
-        const elementSize = u16(format + 2);
+        const elementSize = guest.u16(format + 2);
         const varying = fc === FC.CVARRAY;
         const tail = format + (varying ? 12 : 8);
         const layout = layoutAt(tail);
@@ -718,9 +729,9 @@ export function createNdr(host){
     // --- pointers ---------------------------------------------------------------
 
     /** @param {number} format */
-    const pointeeOf = format=>(u8(format + 1) & POINTER.SIMPLE_POINTER) !== 0
+    const pointeeOf = format=>(guest.u8(format + 1) & POINTER.SIMPLE_POINTER) !== 0
         ? format + 2
-        : format + 2 + i16(format + 2);
+        : format + 2 + guest.i16(format + 2);
 
     /** @param {NdrCall} call */
     const referent = call=>{
@@ -738,7 +749,7 @@ export function createNdr(host){
      * @param {boolean} embedded
      */
     const sizePointer = async(call, value, format, embedded)=>{
-        const type = u8(format);
+        const type = guest.u8(format);
         if (type !== FC.RP && !embedded)
         {
             grow(call, 4, 4);
@@ -766,8 +777,8 @@ export function createNdr(host){
 
     /** @param {NdrCall} call @param {number} value @param {number} format */
     const sizePointee = async(call, value, format)=>{
-        const deref = (u8(format + 1) & POINTER.DEREF) !== 0;
-        await bufferSize(call, deref ? u32(value) : value, pointeeOf(format));
+        const deref = (guest.u8(format + 1) & POINTER.DEREF) !== 0;
+        await bufferSize(call, deref ? guest.u32(value) : value, pointeeOf(format));
     };
 
     /**
@@ -778,7 +789,7 @@ export function createNdr(host){
      * @param {number | null} slot
      */
     const pointerId = (call, value, format, slot)=>{
-        const type = u8(format);
+        const type = guest.u8(format);
         if (type === FC.RP)
         {
             if (value === 0)
@@ -788,7 +799,7 @@ export function createNdr(host){
             }
             if (slot !== null)
             {
-                w32(slot, referent(call));
+                guest.set32(slot, referent(call));
             }
             return true;
         }
@@ -806,14 +817,14 @@ export function createNdr(host){
         {
             id = referent(call);
         }
-        w32(slot ?? put(call, 4, 4), id);
+        guest.set32(slot ?? put(call, 4, 4), id);
         return follows;
     };
 
     /** @param {NdrCall} call @param {number} value @param {number} format */
     const marshallPointee = async(call, value, format)=>{
-        const deref = (u8(format + 1) & POINTER.DEREF) !== 0;
-        await marshall(call, deref ? u32(value) : value, pointeeOf(format));
+        const deref = (guest.u8(format + 1) & POINTER.DEREF) !== 0;
+        await marshall(call, deref ? guest.u32(value) : value, pointeeOf(format));
     };
 
     /**
@@ -825,12 +836,12 @@ export function createNdr(host){
      * @param {number | null} id
      */
     const unmarshallPointer = async(call, slot, format, mustAlloc, id)=>{
-        const type = u8(format);
-        const attributes = u8(format + 1);
+        const type = guest.u8(format);
+        const attributes = guest.u8(format + 1);
         let referentId = id;
         if (type !== FC.RP && referentId === null)
         {
-            referentId = u32(take(call, 4, 4));
+            referentId = guest.u32(take(call, 4, 4));
         }
         if (referentId === 0)
         {
@@ -839,25 +850,25 @@ export function createNdr(host){
                 throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
                     'a reference pointer is null in the buffer');
             }
-            w32(slot, 0);
+            guest.set32(slot, 0);
             return;
         }
         const full = type === FC.FP ? state(call).fullUnmarshalled : null;
         const seen = full?.get(referentId ?? 0);
         if (seen !== undefined)
         {
-            w32(slot, seen);
+            guest.set32(slot, seen);
             return;
         }
         const pointee = pointeeOf(format);
         if ((attributes & POINTER.DEREF) !== 0)
         {
-            let inner = u32(slot);
+            let inner = guest.u32(slot);
             if (inner === 0 || mustAlloc)
             {
                 inner = await allocate(call, 4);
-                w32(inner, 0);
-                w32(slot, inner);
+                guest.set32(inner, 0);
+                guest.set32(slot, inner);
             }
             await unmarshall(call, inner, pointee, mustAlloc);
         }
@@ -865,7 +876,7 @@ export function createNdr(host){
         {
             await unmarshall(call, slot, pointee, mustAlloc);
         }
-        full?.set(referentId ?? 0, u32(slot));
+        full?.set(referentId ?? 0, guest.u32(slot));
     };
 
     /**
@@ -879,8 +890,8 @@ export function createNdr(host){
         {
             return;
         }
-        const attributes = u8(format + 1);
-        if (u8(format) === FC.FP)
+        const attributes = guest.u8(format + 1);
+        if (guest.u8(format) === FC.FP)
         {
             const freed = state(call).fullFreed;
             if (freed.has(value))
@@ -891,8 +902,8 @@ export function createNdr(host){
         }
         const pointee = pointeeOf(format);
         const deref = (attributes & POINTER.DEREF) !== 0;
-        await free(call, deref ? u32(value) : value, pointee);
-        if (!deref && u8(pointee) === FC.IP)
+        await free(call, deref ? guest.u32(value) : value, pointee);
+        if (!deref && guest.u8(pointee) === FC.IP)
         {
             // The pointer is the interface, which has no block of its own.
             return;
@@ -921,7 +932,7 @@ export function createNdr(host){
         const following = [];
         for (const entry of pointers)
         {
-            const value = u32(memory + entry.memory);
+            const value = guest.u32(memory + entry.memory);
             if (pointerId(call, value, entry.format, copy + entry.buffer))
             {
                 following.push({ value, format: entry.format });
@@ -948,7 +959,7 @@ export function createNdr(host){
         setField(call, STUB_MESSAGE.MEMORY, memory);
         for (const entry of pointers)
         {
-            await sizePointer(call, u32(memory + entry.memory), entry.format, true);
+            await sizePointer(call, guest.u32(memory + entry.memory), entry.format, true);
         }
         setField(call, STUB_MESSAGE.MEMORY, outer);
     };
@@ -964,10 +975,10 @@ export function createNdr(host){
     const unmarshallEmbedded = async(call, memory, copy, pointers, mustAlloc)=>{
         const outer = field(call, STUB_MESSAGE.MEMORY);
         setField(call, STUB_MESSAGE.MEMORY, memory);
-        const ids = pointers.map(entry=>u32(copy + entry.buffer));
+        const ids = pointers.map(entry=>guest.u32(copy + entry.buffer));
         for (const entry of pointers)
         {
-            w32(memory + entry.memory, 0);
+            guest.set32(memory + entry.memory, 0);
         }
         for (let index = 0; index < pointers.length; index++)
         {
@@ -982,7 +993,7 @@ export function createNdr(host){
     const freeEmbedded = async(call, memory, pointers)=>{
         for (const entry of pointers)
         {
-            await freePointer(call, u32(memory + entry.memory), entry.format);
+            await freePointer(call, guest.u32(memory + entry.memory), entry.format);
         }
     };
 
@@ -993,10 +1004,10 @@ export function createNdr(host){
      * @returns {{ alignment: number, size: number, pointers: PointerEntry[] }}
      */
     const structShape = format=>{
-        const fc = u8(format);
-        const alignment = u8(format + 1) + 1;
-        const size = u16(format + 2);
-        const pointers = fc === FC.PSTRUCT && u8(format + 4) === FC.PP
+        const fc = guest.u8(format);
+        const alignment = guest.u8(format + 1) + 1;
+        const size = guest.u16(format + 2);
+        const pointers = fc === FC.PSTRUCT && guest.u8(format + 4) === FC.PP
             ? pointerLayout(format + 4, 0)
             : [];
         return { alignment, size, pointers };
@@ -1005,21 +1016,33 @@ export function createNdr(host){
     // --- strings ----------------------------------------------------------------
 
     /** @param {number} format */
-    const charSize = format=>u8(format) === FC.C_WSTRING ? 2 : 1;
+    const charSize = format=>guest.u8(format) === FC.C_WSTRING ? 2 : 1;
 
     /**
-     * Characters up to and including the terminator; read a window at a time,
-     * so a string at the end of what the program allocated is not read past.
+     * Characters up to and including the terminator; a string at the end of
+     * what the program allocated is not read past, and one whose memory or
+     * longest length ends first has no end.
      *
      * @param {number} memory @param {number} unit
      */
     const stringLength = (memory, unit)=>{
-        const { bytes, terminated } = readToTerminator(host, memory, unit, LONGEST_STRING);
-        if (!terminated)
+        let length = LONGEST_STRING;
+        try
+        {
+            length = (unit === 2 ? guest.wstr(memory, LONGEST_STRING * 2)
+                : guest.cstr(memory, LONGEST_STRING)).length;
+        }
+        catch (e){
+            if (/** @type {{ code?: unknown }} */ (e)?.code !== 'GUEST_ACCESS')
+            {
+                throw e;
+            }
+        }
+        if (length >= LONGEST_STRING)
         {
             throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA, 'a string without an end');
         }
-        return bytes.length / unit + 1;
+        return length + 1;
     };
 
     /**
@@ -1028,7 +1051,7 @@ export function createNdr(host){
      * @param {NdrCall} call @param {number} format @param {number} length
      */
     const stringMaximum = (call, format, length)=>{
-        if (u8(format + 1) !== FC.STRING_SIZED)
+        if (guest.u8(format + 1) !== FC.STRING_SIZED)
         {
             return length;
         }
@@ -1049,18 +1072,94 @@ export function createNdr(host){
      * @param {NdrCall} call @param {number} format
      */
     const interfaceId = (call, format)=>{
-        if (u8(format + 1) === FC.CONSTANT_IID)
+        if (guest.u8(format + 1) === FC.CONSTANT_IID)
         {
-            return host.readMemory(format + 2, 16).slice();
+            return guest.bytes(format + 2, 16);
         }
         const at = conformance(call, format + 2, field(call, STUB_MESSAGE.MEMORY));
         if (at === 0)
         {
             throw new RpcException(RPC_STATUS.X_NULL_REF_POINTER,
                 `iid_is names no IID: format 0x${format.toString(16)}, correlation 0x${
-                    u32(format + 2).toString(16)}`);
+                    guest.u32(format + 2).toString(16)}`);
         }
-        return host.readMemory(at, 16).slice();
+        return guest.bytes(at, 16);
+    };
+
+    // --- user-marshal types ---------------------------------------------------
+
+    /**
+     * A user-marshal type (FC_USER_MARSHAL): the flags and alignment, the
+     * index of its routines in the stub descriptor's aUserMarshalQuadruple,
+     * and its size in memory. Its wire form is the routines' own.
+     *
+     * @param {NdrCall} call @param {number} format
+     */
+    const userType = (call, format)=>{
+        const flags = guest.u8(format + 1);
+        const table = guest.u32(field(call, STUB_MESSAGE.STUB_DESC)
+            + STUB_DESC.USER_MARSHAL_QUADRUPLES);
+        if (table === 0 || !host.callRoutine)
+        {
+            throw unsupported('a user-marshal type with no routines to call');
+        }
+        const at = table + guest.u16(format + 2) * 16;
+        return {
+            pointer: (flags & USER_MARSHAL_POINTER) !== 0,
+            alignment: (flags & 0x0f) + 1,
+            memoryBytes: guest.u16(format + 4),
+            routines: [guest.u32(at), guest.u32(at + 4), guest.u32(at + 8), guest.u32(at + 12)],
+        };
+    };
+
+    /**
+     * Calls one of a user-marshal type's routines with the USER_MARSHAL_CB
+     * its first argument points at: the marshaling context (the stub message's
+     * destination context) with the data representation, the stub message,
+     * which routine it is, and the type's format and its transmitted type's.
+     *
+     * @param {NdrCall} call @param {number} format @param {number} kind
+     * @param {number} routine @param {number[]} rest  the arguments past the first
+     */
+    const callUser = async(call, format, kind, routine, rest)=>{
+        const block = await allocate(call, USER_MARSHAL_CB.SIZE);
+        const offset = guest.u16(format + 8);
+        const transmitted = format + 8 + (offset >= 0x8000 ? offset - 0x10000 : offset);
+        const words = [
+            [USER_MARSHAL_CB.FLAGS, (field(call, STUB_MESSAGE.DEST_CONTEXT) & 0xffff)
+                | LOCAL_DATA_REPRESENTATION << 16],
+            [USER_MARSHAL_CB.STUB_MESSAGE, call.message], [USER_MARSHAL_CB.RESERVE, 0],
+            [USER_MARSHAL_CB.SIGNATURE, USER_MARSHAL_CB_SIGNATURE], [USER_MARSHAL_CB.TYPE, kind],
+            [USER_MARSHAL_CB.FORMAT, format], [USER_MARSHAL_CB.TYPE_FORMAT, transmitted],
+        ];
+        for (const [at, value] of words)
+        {
+            guest.set32(block + at, value);
+        }
+        try
+        {
+            return (await /** @type {NonNullable<NdrHost['callRoutine']>} */ (host.callRoutine)(
+                call, routine, [block, ...rest])) >>> 0;
+        }
+        finally
+        {
+            await host.free(call, block);
+        }
+    };
+
+    /**
+     * A user-marshal routine's answer of where it stopped in the buffer, held
+     * to the buffer it was given.
+     *
+     * @param {NdrCall} call @param {number} from @param {number} to
+     */
+    const userBufferEnd = (call, from, to)=>{
+        if (to < from || to > field(call, STUB_MESSAGE.BUFFER_END))
+        {
+            throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
+                'a user-marshal routine went past the buffer');
+        }
+        setField(call, STUB_MESSAGE.BUFFER, to);
     };
 
     // --- the four passes --------------------------------------------------------
@@ -1073,7 +1172,7 @@ export function createNdr(host){
      * @returns {Promise<void>}
      */
     const bufferSize = async(call, memory, format)=>{
-        const fc = u8(format);
+        const fc = guest.u8(format);
         const base = baseType(fc);
         if (base)
         {
@@ -1127,6 +1226,18 @@ export function createNdr(host){
                     grow(call, 4, 8 + host.interfaceBytes);
                 }
                 return;
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    grow(call, 4, 4);
+                }
+                grow(call, user.alignment, 0);
+                const start = field(call, STUB_MESSAGE.BUFFER_LENGTH);
+                setField(call, STUB_MESSAGE.BUFFER_LENGTH, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.BUFFER_SIZE, user.routines[0], [start, memory]));
+                return;
+            }
             default:
                 throw unknownType(format);
         }
@@ -1139,7 +1250,7 @@ export function createNdr(host){
      * @returns {Promise<void>}
      */
     const marshall = async(call, memory, format)=>{
-        const fc = u8(format);
+        const fc = guest.u8(format);
         if (baseType(fc))
         {
             marshallBase(call, memory, fc);
@@ -1159,7 +1270,7 @@ export function createNdr(host){
             case FC.PSTRUCT: {
                 const shape = structShape(format);
                 const copy = put(call, shape.alignment, shape.size);
-                host.writeMemory(copy, host.readMemory(memory, shape.size).slice());
+                guest.copy(copy, memory, shape.size);
                 await marshallEmbedded(call, memory, copy, shape.pointers);
                 return;
             }
@@ -1169,11 +1280,11 @@ export function createNdr(host){
                 const length = stringLength(memory, unit);
                 const maximum = stringMaximum(call, format, length);
                 const header = put(call, 4, 12);
-                w32(header, maximum);
-                w32(header + 4, 0);
-                w32(header + 8, length);
+                guest.set32(header, maximum);
+                guest.set32(header + 4, 0);
+                guest.set32(header + 8, length);
                 const at = put(call, 1, length * unit);
-                host.writeMemory(at, host.readMemory(memory, length * unit).slice());
+                guest.copy(at, memory, length * unit);
                 return;
             }
             case FC.CARRAY:
@@ -1188,17 +1299,17 @@ export function createNdr(host){
                 if (shape.conformant)
                 {
                     const header = put(call, 4, shape.varying ? 12 : 4);
-                    w32(header, shape.count);
+                    guest.set32(header, shape.count);
                     if (shape.varying)
                     {
-                        w32(header + 4, shape.offset);
-                        w32(header + 8, shape.length);
+                        guest.set32(header + 4, shape.offset);
+                        guest.set32(header + 8, shape.length);
                     }
                 }
                 const bytes = shape.length * shape.elementSize;
                 const first = memory + shape.offset * shape.elementSize;
                 const copy = put(call, shape.alignment, bytes);
-                host.writeMemory(copy, host.readMemory(first, bytes).slice());
+                guest.copy(copy, first, bytes);
                 if (shape.layout !== 0)
                 {
                     await marshallEmbedded(call, first, copy,
@@ -1210,15 +1321,26 @@ export function createNdr(host){
                 const at = put(call, 4, 4);
                 if (memory === 0)
                 {
-                    w32(at, 0);
+                    guest.set32(at, 0);
                     return;
                 }
-                w32(at, referent(call));
+                guest.set32(at, referent(call));
                 const objref = await host.marshalInterface(call, memory, interfaceId(call, format));
                 const header = put(call, 4, 8);
-                w32(header, objref.length);
-                w32(header + 4, objref.length);
-                host.writeMemory(put(call, 1, objref.length), objref);
+                guest.set32(header, objref.length);
+                guest.set32(header + 4, objref.length);
+                guest.setBytes(put(call, 1, objref.length), objref);
+                return;
+            }
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    guest.set32(put(call, 4, 4), USER_MARSHAL_MARKER);
+                }
+                const from = put(call, user.alignment, 0);
+                userBufferEnd(call, from, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.MARSHALL, user.routines[1], [from, memory]));
                 return;
             }
             default:
@@ -1235,7 +1357,7 @@ export function createNdr(host){
      * @returns {Promise<void>}
      */
     const unmarshall = async(call, ppMemory, format, mustAlloc)=>{
-        const fc = u8(format);
+        const fc = guest.u8(format);
         const base = baseType(fc);
         if (base)
         {
@@ -1243,7 +1365,7 @@ export function createNdr(host){
             {
                 const at = take(call, base.wire, base.wire);
                 keepInPlace(call, at, base.wire);
-                w32(ppMemory, at);
+                guest.set32(ppMemory, at);
                 return;
             }
             unmarshallBase(call, await destination(call, ppMemory, mustAlloc, base.memory), fc);
@@ -1263,12 +1385,12 @@ export function createNdr(host){
                 {
                     const at = take(call, shape.alignment, shape.size);
                     keepInPlace(call, at, shape.size);
-                    w32(ppMemory, at);
+                    guest.set32(ppMemory, at);
                     return;
                 }
                 const copy = take(call, shape.alignment, shape.size);
                 const memory = await destination(call, ppMemory, mustAlloc, shape.size);
-                host.writeMemory(memory, host.readMemory(copy, shape.size).slice());
+                guest.copy(memory, copy, shape.size);
                 if (shape.pointers.length > 0)
                 {
                     await unmarshallEmbedded(call, memory, copy, shape.pointers, mustAlloc);
@@ -1279,16 +1401,16 @@ export function createNdr(host){
             case FC.C_WSTRING: {
                 const unit = charSize(format);
                 const header = take(call, 4, 12);
-                const maximum = u32(header);
-                const offset = u32(header + 4);
-                const length = u32(header + 8);
+                const maximum = guest.u32(header);
+                const offset = guest.u32(header + 4);
+                const length = guest.u32(header + 8);
                 if (offset !== 0 || length > maximum || length === 0)
                 {
                     throw new RpcException(RPC_STATUS.X_INVALID_BOUND);
                 }
                 const at = take(call, 1, length * unit);
-                const last = host.readMemory(at + (length - 1) * unit, unit);
-                if (last[0] !== 0 || (unit === 2 && last[1] !== 0))
+                const last = at + (length - 1) * unit;
+                if ((unit === 2 ? guest.u16(last) : guest.u8(last)) !== 0)
                 {
                     throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
                         'a string without its terminator');
@@ -1296,11 +1418,11 @@ export function createNdr(host){
                 if (mayUseBuffer(call, ppMemory, mustAlloc))
                 {
                     keepInPlace(call, at, length * unit);
-                    w32(ppMemory, at);
+                    guest.set32(ppMemory, at);
                     return;
                 }
                 const memory = await destination(call, ppMemory, mustAlloc, maximum * unit);
-                host.writeMemory(memory, host.readMemory(at, length * unit).slice());
+                guest.copy(memory, at, length * unit);
                 return;
             }
             case FC.CARRAY:
@@ -1314,9 +1436,9 @@ export function createNdr(host){
                 if (shape.conformant)
                 {
                     const header = take(call, 4, shape.varying ? 12 : 4);
-                    count = u32(header);
-                    offset = shape.varying ? u32(header + 4) : 0;
-                    length = shape.varying ? u32(header + 8) : count;
+                    count = guest.u32(header);
+                    offset = shape.varying ? guest.u32(header + 4) : 0;
+                    length = shape.varying ? guest.u32(header + 8) : count;
                     if (offset + length > count || offset + length < offset)
                     {
                         throw new RpcException(RPC_STATUS.X_INVALID_BOUND);
@@ -1328,13 +1450,13 @@ export function createNdr(host){
                     && mayUseBuffer(call, ppMemory, mustAlloc))
                 {
                     keepInPlace(call, copy, bytes);
-                    w32(ppMemory, copy);
+                    guest.set32(ppMemory, copy);
                     return;
                 }
                 const memory = await destination(call, ppMemory, mustAlloc,
                     count * shape.elementSize);
                 const first = memory + offset * shape.elementSize;
-                host.writeMemory(first, host.readMemory(copy, bytes).slice());
+                guest.copy(first, copy, bytes);
                 if (shape.layout !== 0)
                 {
                     await unmarshallEmbedded(call, first, copy,
@@ -1343,20 +1465,20 @@ export function createNdr(host){
                 return;
             }
             case FC.IP: {
-                const id = u32(take(call, 4, 4));
+                const id = guest.u32(take(call, 4, 4));
                 if (id === 0)
                 {
-                    w32(ppMemory, 0);
+                    guest.set32(ppMemory, 0);
                     return;
                 }
                 const header = take(call, 4, 8);
-                const bytes = u32(header + 4);
-                if (u32(header) !== bytes)
+                const bytes = guest.u32(header + 4);
+                if (guest.u32(header) !== bytes)
                 {
                     throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA,
                         'an interface pointer whose two counts differ');
                 }
-                const objref = host.readMemory(take(call, 1, bytes), bytes).slice();
+                const objref = guest.bytes(take(call, 1, bytes), bytes);
                 // No IID: the one the OBJREF carries, as NdrInterfacePointerUnmarshall
                 // passes IID_NULL. An iid_is correlation is set by the generated
                 // code only for sizing and marshalling, and reads nothing here.
@@ -1365,7 +1487,26 @@ export function createNdr(host){
                 {
                     state(call).imported.add(pointer);
                 }
-                w32(ppMemory, pointer);
+                guest.set32(ppMemory, pointer);
+                return;
+            }
+            case FC.USER_MARSHAL: {
+                const user = userType(call, format);
+                if (user.pointer)
+                {
+                    take(call, 4, 4);
+                }
+                const from = take(call, user.alignment, 0);
+                // What the routine reads into starts empty when it is new: one
+                // that frees what the slot held (a BSTR's) finds nothing to free.
+                const fresh = guest.u32(ppMemory) === 0 || mustAlloc;
+                const memory = await destination(call, ppMemory, mustAlloc, user.memoryBytes);
+                if (fresh)
+                {
+                    guest.fill(memory, 0, user.memoryBytes);
+                }
+                userBufferEnd(call, from, await callUser(call, format,
+                    USER_MARSHAL_CB_TYPE.UNMARSHALL, user.routines[2], [from, memory]));
                 return;
             }
             default:
@@ -1381,7 +1522,7 @@ export function createNdr(host){
      * @returns {Promise<void>}
      */
     const free = async(call, memory, format)=>{
-        const fc = u8(format);
+        const fc = guest.u8(format);
         if (baseType(fc))
         {
             return;
@@ -1422,6 +1563,13 @@ export function createNdr(host){
                     await host.releaseInterface(call, memory);
                 }
                 return;
+            case FC.USER_MARSHAL:
+                if (memory !== 0)
+                {
+                    await callUser(call, format, USER_MARSHAL_CB_TYPE.FREE,
+                        userType(call, format).routines[3], [memory]);
+                }
+                return;
             default:
                 throw unknownType(format);
         }
@@ -1434,7 +1582,7 @@ export function createNdr(host){
      * @param {number} format
      */
     const memorySize = format=>{
-        const fc = u8(format);
+        const fc = guest.u8(format);
         const base = baseType(fc);
         if (base)
         {
@@ -1449,9 +1597,11 @@ export function createNdr(host){
             case FC.STRUCT:
             case FC.PSTRUCT:
             case FC.SMFARRAY:
-                return u16(format + 2);
+                return guest.u16(format + 2);
             case FC.LGFARRAY:
-                return u32(format + 2);
+                return guest.u32(format + 2);
+            case FC.USER_MARSHAL:
+                return guest.u16(format + 4);
             default:
                 return 0;
         }
@@ -1468,7 +1618,7 @@ export function createNdr(host){
      */
     const dropMade = async(call, value, format)=>{
         const held = state(call);
-        const fc = u8(format);
+        const fc = guest.u8(format);
         if (fc === FC.IP)
         {
             if (held.imported.delete(value))
@@ -1482,9 +1632,9 @@ export function createNdr(host){
             return;
         }
         const pointee = pointeeOf(format);
-        if ((u8(format + 1) & POINTER.DEREF) !== 0)
+        if ((guest.u8(format + 1) & POINTER.DEREF) !== 0)
         {
-            await dropMade(call, u32(value), pointee);
+            await dropMade(call, guest.u32(value), pointee);
         }
         else
         {
@@ -1499,13 +1649,13 @@ export function createNdr(host){
      * @param {NdrCall} call @param {number} memory @param {number} format
      */
     const dropHeld = async(call, memory, format)=>{
-        if (u8(format) !== FC.PSTRUCT)
+        if (guest.u8(format) !== FC.PSTRUCT)
         {
             return;
         }
         for (const entry of structShape(format).pointers)
         {
-            await dropMade(call, u32(memory + entry.memory), entry.format);
+            await dropMade(call, guest.u32(memory + entry.memory), entry.format);
         }
     };
 
@@ -1566,12 +1716,12 @@ export function createNdr(host){
                 return;
             }
             let size = memorySize(format);
-            if (POINTER_TYPES.has(u8(format)))
+            if (POINTER_TYPES.has(guest.u8(format)))
             {
                 const pointee = pointeeOf(format);
-                if ((u8(format + 1) & POINTER.DEREF) !== 0)
+                if ((guest.u8(format + 1) & POINTER.DEREF) !== 0)
                 {
-                    await dropMade(call, u32(argument), pointee);
+                    await dropMade(call, guest.u32(argument), pointee);
                     size = 4;
                 }
                 else
@@ -1582,7 +1732,7 @@ export function createNdr(host){
             }
             if (size > 0)
             {
-                host.writeMemory(argument, new Uint8Array(size));
+                guest.fill(argument, 0, size);
             }
         },
     };

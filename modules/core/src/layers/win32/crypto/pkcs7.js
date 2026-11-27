@@ -29,6 +29,10 @@ export const PKCS7 = Object.freeze({
     MESSAGE_DIGEST: '1.2.840.113549.1.9.4',
     SIGNING_TIME: '1.2.840.113549.1.9.5',
     COUNTER_SIGNATURE: '1.2.840.113549.1.9.6',
+    /** An RFC 3161 time-stamp token among a signer's unauthenticated attributes, as Microsoft carries it. */
+    RFC3161_TIME_STAMP: '1.3.6.1.4.1.311.3.3.1',
+    /** The content type of a time-stamp token's signed content (RFC 3161, id-ct-TSTInfo). */
+    TST_INFO: '1.2.840.113549.1.9.16.1.4',
 });
 
 /**
@@ -228,4 +232,55 @@ export function checkSigner(signer, key, covered){
 export function signingTime(signer){
     const value = signer.authenticated?.values.get(PKCS7.SIGNING_TIME)?.[0];
     return value ? readTime(value) : null;
+}
+
+/**
+ * An RFC 3161 time-stamp token as a signature carries it (its SignedData, a
+ * TSTInfo signed by the authority) checked against what it stamps:
+ *
+ * - `result` `'ok'`: the authority's signature over the TSTInfo holds, and its
+ *   message imprint is the digest of `stamped`; `time` is its genTime and
+ *   `authority` the certificate that signed it, with the certificates the
+ *   token carried to build its chain from;
+ * - `'imprint'`: the token stamps something else;
+ * - `'digest'`, `'signature'`, `'unsupported'`: as `checkSigner` says of the
+ *   authority, or `'signature'` when no certificate it carries signed it.
+ *
+ * @param {DerNode} token  The attribute's value: a ContentInfo.
+ * @param {Uint8Array} stamped  What the token is over: the signer's encrypted digest.
+ * @returns {{ result: 'ok' | 'imprint' | 'digest' | 'signature' | 'unsupported',
+ *     time: number | null, authority: Certificate | null, certificates: Certificate[] }}
+ * @throws {DerError} when it is no token.
+ */
+export function checkTimeStampToken(token, stamped){
+    const signed = parseSignedData(encoding(token));
+    if (signed.contentType !== PKCS7.TST_INFO || !signed.content)
+    {
+        throw new DerError('a time-stamp token that holds no TSTInfo');
+    }
+    const info = contents(expect(signed.content, TAG.OCTET_STRING, 'a TSTInfo'));
+    const fields = childrenOf(expect(readNode(info), TAG.SEQUENCE, 'a TSTInfo'));
+    const [algorithm, hashed] = childrenOf(expect(fields[2], TAG.SEQUENCE, 'a message imprint'));
+    const imprint = contents(expect(hashed, TAG.OCTET_STRING, 'a hashed message'));
+    const time = readTime(fields[4]);
+    const [signer] = signed.signers;
+    const authority = signer ? signerCertificate(signed.certificates, signer) : null;
+    const none = { time: null, authority, certificates: signed.certificates };
+    if (!signer || !authority)
+    {
+        return { result: 'signature', ...none };
+    }
+    const checked = checkSigner(signer, authority.publicKey, info);
+    if (checked !== 'ok')
+    {
+        return { result: checked, ...none };
+    }
+    const expected = digestOf(readOid(childrenOf(algorithm)[0]), stamped);
+    if (!expected)
+    {
+        return { result: 'unsupported', ...none };
+    }
+    return sameBytes(expected, imprint)
+        ? { result: 'ok', time, authority, certificates: signed.certificates }
+        : { result: 'imprint', ...none };
 }

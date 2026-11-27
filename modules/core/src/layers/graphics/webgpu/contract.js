@@ -49,10 +49,13 @@
  * @property {(desc: any)=>any} createShaderModule
  * @property {(desc: any)=>any} createRenderPipeline
  * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
+ * @property {(desc: any)=>Promise<any>} [createComputePipelineAsync]
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
  * @property {(desc: any)=>any} createQuerySet
  * @property {{ has: (name: string) => boolean }} [features]
  *     The optional features the device was made with.
+ * @property {Record<string, number>} [limits]
+ *     The limits it was made with (`maxTextureArrayLayers`, ...).
  */
 
 /**
@@ -67,6 +70,7 @@
 /**
  * @typedef {Object} GpuCommandEncoderLike
  * @property {(desc: any)=>any} beginRenderPass
+ * @property {(desc?: any)=>any} [beginComputePass]
  * @property {(source: any, destination: any, size: any)=>void} copyBufferToTexture
  * @property {(source: any, destination: any, size: any)=>void} copyTextureToBuffer
  * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,
@@ -83,6 +87,8 @@
  * @typedef {Object} Surface
  * @property {any} texture
  * @property {any} view
+ * @property {any} [srgbView]  The same texels through the format's sRGB twin, for a
+ *           surface made with that twin among its `viewFormats`.
  * @property {number} width
  * @property {number} height
  * @property {string} format

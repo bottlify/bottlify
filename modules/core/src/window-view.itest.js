@@ -50,7 +50,6 @@ test('a tool sees every process\'s windows and the screen they compose', { timeo
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\overlap.exe',
-            engine: 'cork',
             concurrency: 1,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\overlap.exe', bytes: program }],

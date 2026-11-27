@@ -33,6 +33,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The handle a page description is copied under can never be this small. */
 const MAX_INTRESOURCE = 0x10000;
@@ -47,14 +48,14 @@ export const PSP = Object.freeze({
     pfnDlgProc: 24, lParam: 28, pfnCallback: 32, pcRefParent: 36, V1_SIZE: 40,
     pszHeaderTitle: 40, pszHeaderSubTitle: 44, V2_SIZE: 48,
 });
-export const PSP_DLGINDIRECT = 0x0001;
+const PSP_DLGINDIRECT = 0x0001;
 export const PSP_USETITLE = 0x0008;
 export const PSP_HASHELP = 0x0020;
 export const PSP_USECALLBACK = 0x0080;
 export const PSP_PREMATURE = 0x0400;
-export const PSP_HIDEHEADER = 0x0800;
-export const PSP_USEHEADERTITLE = 0x1000;
-export const PSP_USEHEADERSUBTITLE = 0x2000;
+const PSP_HIDEHEADER = 0x0800;
+const PSP_USEHEADERTITLE = 0x1000;
+const PSP_USEHEADERSUBTITLE = 0x2000;
 export const PSPCB_ADDREF = 0;
 export const PSPCB_RELEASE = 1;
 export const PSPCB_CREATE = 2;
@@ -64,19 +65,19 @@ export const PSH = Object.freeze({
     dwSize: 0, dwFlags: 4, hwndParent: 8, hInstance: 12, hIcon: 16, pszCaption: 20,
     nPages: 24, nStartPage: 28, phpage: 32, pfnCallback: 36, V1_SIZE: 40,
 });
-export const PSH_PROPTITLE = 0x0001;
+const PSH_PROPTITLE = 0x0001;
 export const PSH_PROPSHEETPAGE = 0x0008;
-export const PSH_WIZARDHASFINISH = 0x0010;
+const PSH_WIZARDHASFINISH = 0x0010;
 export const PSH_WIZARD = 0x0020;
-export const PSH_USEPSTARTPAGE = 0x0040;
+const PSH_USEPSTARTPAGE = 0x0040;
 export const PSH_NOAPPLYNOW = 0x0080;
 export const PSH_USECALLBACK = 0x0100;
-export const PSH_HASHELP = 0x0200;
+const PSH_HASHELP = 0x0200;
 export const PSH_MODELESS = 0x0400;
 /** Wizard97, under the value the older headers gave it and the newer. */
-export const PSH_WIZARD97_OLD = 0x00002000;
-export const PSH_WIZARD_LITE = 0x00400000;
-export const PSH_WIZARD97 = 0x01000000;
+const PSH_WIZARD97_OLD = 0x00002000;
+const PSH_WIZARD_LITE = 0x00400000;
+const PSH_WIZARD97 = 0x01000000;
 export const PSCB_INITIALIZED = 1;
 export const PSCB_PRECREATE = 2;
 
@@ -85,14 +86,14 @@ export const PSN_SETACTIVE = -200;
 export const PSN_KILLACTIVE = -201;
 export const PSN_APPLY = -202;
 export const PSN_RESET = -203;
-export const PSN_HELP = -205;
+const PSN_HELP = -205;
 export const PSN_WIZBACK = -206;
 export const PSN_WIZNEXT = -207;
 export const PSN_WIZFINISH = -208;
 export const PSN_QUERYCANCEL = -209;
 export const PSN_QUERYINITIALFOCUS = -213;
-export const PSNRET_INVALID = 1;
-export const PSNRET_INVALID_NOCHANGEPAGE = 2;
+const PSNRET_INVALID = 1;
+const PSNRET_INVALID_NOCHANGEPAGE = 2;
 
 /** The messages a sheet answers, WM_USER + 101 on. */
 export const PSM_SETCURSEL = 0x0465;
@@ -101,37 +102,37 @@ export const PSM_ADDPAGE = 0x0467;
 export const PSM_CHANGED = 0x0468;
 export const PSM_RESTARTWINDOWS = 0x0469;
 export const PSM_REBOOTSYSTEM = 0x046a;
-export const PSM_CANCELTOCLOSE = 0x046b;
+const PSM_CANCELTOCLOSE = 0x046b;
 export const PSM_QUERYSIBLINGS = 0x046c;
 export const PSM_UNCHANGED = 0x046d;
-export const PSM_APPLY = 0x046e;
+const PSM_APPLY = 0x046e;
 export const PSM_SETTITLEA = 0x046f;
 export const PSM_SETWIZBUTTONS = 0x0470;
 export const PSM_PRESSBUTTON = 0x0471;
-export const PSM_SETCURSELID = 0x0472;
-export const PSM_SETFINISHTEXTA = 0x0473;
+const PSM_SETCURSELID = 0x0472;
+const PSM_SETFINISHTEXTA = 0x0473;
 export const PSM_GETTABCONTROL = 0x0474;
 export const PSM_ISDIALOGMESSAGE = 0x0475;
 export const PSM_GETCURRENTPAGEHWND = 0x0476;
 export const PSM_INSERTPAGE = 0x0477;
 export const PSM_SETTITLEW = 0x0478;
-export const PSM_SETFINISHTEXTW = 0x0479;
-export const PSM_SETHEADERTITLEA = 0x047d;
-export const PSM_SETHEADERTITLEW = 0x047e;
-export const PSM_SETHEADERSUBTITLEA = 0x047f;
-export const PSM_SETHEADERSUBTITLEW = 0x0480;
+const PSM_SETFINISHTEXTW = 0x0479;
+const PSM_SETHEADERTITLEA = 0x047d;
+const PSM_SETHEADERTITLEW = 0x047e;
+const PSM_SETHEADERSUBTITLEA = 0x047f;
+const PSM_SETHEADERSUBTITLEW = 0x0480;
 export const PSM_HWNDTOINDEX = 0x0481;
 export const PSM_INDEXTOHWND = 0x0482;
 export const PSM_PAGETOINDEX = 0x0483;
 export const PSM_INDEXTOPAGE = 0x0484;
 export const PSM_IDTOINDEX = 0x0485;
 export const PSM_INDEXTOID = 0x0486;
-export const PSM_GETRESULT = 0x0487;
-export const PSM_RECALCPAGESIZES = 0x0488;
+const PSM_GETRESULT = 0x0487;
+const PSM_RECALCPAGESIZES = 0x0488;
 export const PSWIZB_BACK = 0x1;
 export const PSWIZB_NEXT = 0x2;
 export const PSWIZB_FINISH = 0x4;
-export const PSWIZB_DISABLEDFINISH = 0x8;
+const PSWIZB_DISABLEDFINISH = 0x8;
 export const PSBTN_BACK = 0;
 export const PSBTN_NEXT = 1;
 export const PSBTN_FINISH = 2;
@@ -146,15 +147,15 @@ export const ID_PSREBOOTSYSTEM = 0x3;
 export const IDOK = 1;
 export const IDCANCEL = 2;
 export const IDHELP = 9;
-export const IDC_TABCONTROL = 12320;
+const IDC_TABCONTROL = 12320;
 export const IDC_APPLY_BUTTON = 12321;
 export const IDC_BACK_BUTTON = 12323;
 export const IDC_NEXT_BUTTON = 12324;
-export const IDC_FINISH_BUTTON = 12325;
-export const IDC_SUNKEN_LINE = 12326;
+const IDC_FINISH_BUTTON = 12325;
+const IDC_SUNKEN_LINE = 12326;
 export const IDC_SUNKEN_LINEHEADER = 12327;
 /** A Wizard97 header's own controls: the band, and the title and subtitle on it. */
-export const IDC_HEADER_BAND = 12328;
+const IDC_HEADER_BAND = 12328;
 export const IDC_HEADER_TITLE = 12329;
 export const IDC_HEADER_SUBTITLE = 12330;
 
@@ -357,26 +358,26 @@ export function createPropertySheetFunctions(host){
 
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address */
     const u16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
     const putU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {boolean} wide */
     const readText = (address, wide)=>{
         let text = '';
         /** @type {number[]} */
         const bytes = [];
-        for (let at = address >>> 0, count = 0; count < 1024; count++)
+        for (let at = wholeAddress(address), count = 0; count < 1024; count++)
         {
             const unit = wide ? u16(at) : host.readMemory(at, 1)[0];
             if (unit === 0)
@@ -559,7 +560,7 @@ export function createPropertySheetFunctions(host){
         {
             return 0;
         }
-        const handle = place(host.readMemory(address >>> 0, size));
+        const handle = place(host.readMemory(wholeAddress(address), size));
         if (handle === 0)
         {
             return 0;
@@ -987,7 +988,7 @@ export function createPropertySheetFunctions(host){
             return after(api('CreateDialogIndirectParamA', [u32(page.handle + PSP.hInstance),
                 copy, sheet.hwnd, u32(page.handle + PSP.pfnDlgProc), page.handle]), made=>{
                 free(copy);
-                const hwnd = made >>> 0;
+                const hwnd = wholeAddress(made);
                 if (hwnd === 0)
                 {
                     return 0;
@@ -1495,7 +1496,7 @@ export function createPropertySheetFunctions(host){
             return 0;
         }
         const index = wParam | 0;
-        const handle = lParam >>> 0;
+        const handle = wholeAddress(lParam);
         switch (message >>> 0){
             case WM_COMMAND: {
                 const done = (wParam >>> 16) === BN_CLICKED ? press(sheet, wParam & 0xffff, thread)
@@ -1554,7 +1555,7 @@ export function createPropertySheetFunctions(host){
                 return after(insertPage(sheet, sheet.entries.length, handle, thread), added=>
                     answer(sheet, added));
             case PSM_INSERTPAGE: {
-                const where = wParam >>> 0;
+                const where = wholeAddress(wParam);
                 const at = where < MAX_INTRESOURCE ? where
                     : sheet.entries.findIndex(entry=>entry.page.handle === where) + 1;
                 return at === 0 && where >= MAX_INTRESOURCE ? answer(sheet, 0)
@@ -1596,7 +1597,7 @@ export function createPropertySheetFunctions(host){
                     ? `Properties for ${text}` : text), ()=>answer(sheet, 0));
             }
             case PSM_SETWIZBUTTONS: {
-                const flags = lParam >>> 0;
+                const flags = wholeAddress(lParam);
                 const finishing = (flags & (PSWIZB_FINISH | PSWIZB_DISABLEDFINISH)) !== 0;
                 /** @param {number} id @param {number} bit */
                 const enable = (id, bit)=>()=>api('EnableWindow',
@@ -1672,7 +1673,7 @@ export function createPropertySheetFunctions(host){
             case PSM_SETHEADERSUBTITLEA:
             case PSM_SETHEADERSUBTITLEW: {
                 const entry = sheet.entries[index];
-                const kind = message >>> 0;
+                const kind = wholeAddress(message);
                 if (!entry)
                 {
                     return answer(sheet, 0);
@@ -1797,7 +1798,7 @@ export function createPropertySheetFunctions(host){
                 {
                     return after(api('CreateDialogIndirectParamA', args), hwnd=>{
                         pending.delete(key);
-                        return hwnd >>> 0;
+                        return wholeAddress(hwnd);
                     });
                 }
                 // The owner is disabled before the sheet exists: its

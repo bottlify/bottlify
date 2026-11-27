@@ -12,13 +12,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { graphicsModule, uncoveredRegion } from './module.js';
+import { clientDrawable, clientUncovered, graphicsModule, swapChainShows, uncoveredRegion,
+    windowShown,
+    windowsAbove }
+    from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
+import { createLogModule } from '../log/module.js';
+import { createLogReader } from '../log/reader.js';
 import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
+import { noCache } from '../cache/module.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -34,6 +40,10 @@ function hostWith(/** @type {any} */ memory){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
+        // No run's cache: what the layer would keep there it keeps nowhere.
+        cache: noCache,
+        // A log with nowhere to publish: the layer's figures are another test's.
+        log: {},
     };
     return /** @type {any} */ ({
         requireApi: (/** @type {string} */ name)=>{
@@ -63,6 +73,25 @@ test('a build with no GPU still comes up', async()=>{
     assert.throws(()=>api.backend(), /no GPU device/);
 
     await graphicsModule.dispose();
+});
+
+test('the layer publishes the figures a live view reads into the log, not on request', async()=>{
+    // The overlay follows these once a second through the log keeper; the
+    // layer copies them into the log's tables as a frame closes, and a device
+    // that keeps none is said as not measured rather than as zero draws.
+    const logModule = createLogModule();
+    const log = await logModule.create({ now: ()=>0 });
+    const host = hostWith(fakeMemory());
+    const apis = { log };
+    const given = host.requireApi;
+    host.requireApi = (/** @type {string} */ name)=>(name === 'log' ? apis.log : given(name));
+    await graphicsModule.create({}, host);
+    log.endFrame();
+    const live = createLogReader({ memory: log.memory() }).live();
+    assert.deepEqual(live.graphics, { shown: 0, shownBy: {}, device: null, lastFrame: null,
+        worker: null });
+    await graphicsModule.dispose();
+    await logModule.dispose();
 });
 
 test('the backend is built once, on first use', async()=>{
@@ -296,7 +325,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
             compressedTextures: true,
             guestNow: ()=>1234,
         }, hostWith(fakeMemory()));
-        const options = api.create('d3d10');
+        const { options } = api.create('d3d10');
         const granted = features.length > 0;
         assert.equal(options.compressedTextures, granted, 'block compression');
         assert.equal(options.depthClipControl, granted, 'depth clip control');
@@ -304,7 +333,7 @@ test('Direct3D 10 is handed block compression as 8 and 9 are, the guest clock an
         await graphicsModule.dispose();
     }
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));
-    const headless = api.create('d3d10');
+    const headless = api.create('d3d10').options;
     assert.equal(headless.compressedTextures, false);
     assert.equal(headless.depthClipControl, false);
     await graphicsModule.dispose();
@@ -667,6 +696,56 @@ test('a GPU device the host destroys does not lose the program\'s devices', asyn
     await graphicsModule.dispose();
 });
 
+test('a machine gone from the run\'s GPU device leaves nothing of itself on the device', async()=>{
+    // The device is the run's and outlives every process; a reaction on its
+    // lost promise cannot be taken back, so one made per machine held each
+    // machine, its memory with it, until the run ended. A machine still built
+    // on it is lost when it goes; one gone is not reached at all.
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    const { createGraphicsModule } = await import('./module.js');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** @type {(info: any) => void} */
+    let lose = ()=>{};
+    gpuDevice.lost = new Promise(resolve=>{
+        lose = resolve;
+    });
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    await (async()=>{
+        const module = createGraphicsModule();
+        const memory = ramMemory();
+        memoryOfGone = new WeakRef(memory);
+        await module.create({ device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} } },
+            hostWith(memory));
+        await module.dispose();
+    })();
+    const staying = createGraphicsModule();
+    const api = await staying.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    await new Promise(done=>setImmediate(done));
+    gc();
+    assert.equal(memoryOfGone.deref(), undefined, 'the gone machine\'s memory is nobody\'s');
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(api.create('d3d9').CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    lose({ reason: 'unknown', message: 'the GPU process went away' });
+    await gpuDevice.lost;
+    await Promise.resolve();
+    assert.equal(out.device.TestCooperativeLevel(), D3DERR_DEVICELOST,
+        'and the one still standing hears the loss');
+    await staying.dispose();
+});
+
 test('GDI drawing binds a memory context to the bytes of its bitmap in guest memory', async()=>{
     // A program draws into a DIB section and reads the pixels back through the
     // pointer it was given, so the surface has to be the bytes themselves; a
@@ -919,8 +998,8 @@ test('a primary is its window\'s client area windowed, and the screen with the w
     await graphicsModule.dispose();
 });
 
-test('a window\'s surface survives the emulator growing its memory under it', async()=>{
-    // A view of the emulator's memory is a view of one buffer, and growing
+test('a window\'s surface survives guest memory growing under it', async()=>{
+    // A view of guest memory is a view of one buffer, and growing
     // the memory replaces the buffer: every view of the old one empties. The
     // pixels are still at the same guest address, so the surface takes its
     // view again rather than drawing into nothing from then on.
@@ -1196,4 +1275,112 @@ test('the card\'s memory is the choice\'s era, and a configured figure overrides
     assert.equal((await reported({})).module, 256 * MB, 'no choice is a DirectX 9 card');
     const configured = await reported({ choice: 'directx10', videoMemory: 512 });
     assert.equal(configured.module, 512 * MB, 'the configuration names the figure');
+});
+
+test('OpenGL draws on a window\'s client area, whichever of its DCs names it', ()=>{
+    // Wine's opengl32 test_window_dc: a context made on GetWindowDC's DC, whose
+    // bounds span the frame, still has the client area for its viewport.
+    const windows = [
+        { hwnd: 0x20, client: { left: 8, top: 30, right: 108, bottom: 130 } },
+        { hwnd: 0x10, client: { left: 4, top: 26, right: 204, bottom: 176 } },
+    ];
+    const framed = { key: 'window:16', window: 0x10, width: 216, height: 184, memory: false };
+    assert.deepEqual(clientDrawable(framed, windows),
+        { key: 'window:16', window: 0x10, width: 200, height: 150, memory: false });
+    const memory = { key: 'dc:5', window: 0, width: 16, height: 16, memory: true };
+    assert.equal(clientDrawable(memory, windows), memory, 'a memory DC is as gdi32 says');
+    const stranger = { ...framed, window: 0x30 };
+    assert.equal(clientDrawable(stranger, windows), stranger, 'a window not listed too');
+    assert.equal(clientDrawable(null, windows), null);
+});
+
+test('a swap chain\'s window that has the screen shows its frame with the windows over it laid'
+    + ' over it, not its own surface', ()=>{
+    // A box over a DXGI picture that had the screen stood on the window's own
+    // surface, black, where the frame was; full screen, it was not seen at all.
+    const size = { width: 1280, height: 720 };
+    const whole = { left: 0, top: 0, right: 1280, bottom: 720 };
+    const game = { hwnd: '0x36', rect: whole, client: whole, visible: true, parent: null };
+    const box = { hwnd: '0x50', rect: { left: 100, top: 100, right: 300, bottom: 200 },
+        client: { left: 103, top: 122, right: 297, bottom: 197 }, visible: true, parent: null };
+    for (const fullscreen of [false, true])
+    {
+        const into = { window: 0x36, fullscreen };
+        assert.equal(swapChainShows([game], into, size), 'frame', 'nothing over it');
+        assert.equal(swapChainShows([game, box], into, size), 'veil', 'a box over it');
+        assert.equal(swapChainShows([box, game], into, size), 'frame', 'a box under it');
+        assert.equal(swapChainShows([{ ...game, visible: false }, box], into, size), 'desktop',
+            'its window hidden');
+    }
+    // A windowed one smaller than the screen: the desktop, its ceiling.
+    const small = { ...game, client: { left: 100, top: 100, right: 900, bottom: 600 } };
+    assert.equal(swapChainShows([small], { window: 0x36, fullscreen: false }, size), 'frame');
+    assert.equal(swapChainShows([small, box], { window: 0x36, fullscreen: false }, size),
+        'desktop');
+});
+
+test('a device\'s window holds the screen only while it is shown, it and what it is inside',
+    ()=>{
+        // A WinForms title's device is made on its form before the form shows;
+        // the box it then put up was laid over a frame never drawn.
+        const whole = { left: 0, top: 0, right: 640, bottom: 480 };
+        const form = { hwnd: '0x40', rect: whole, client: whole, visible: false, parent: null };
+        const panel = { hwnd: '0x44', rect: whole, client: whole, visible: true, child: true,
+            parent: '0x40' };
+        assert.equal(windowShown([form, panel], 0x40), false, 'a hidden form');
+        assert.equal(windowShown([form, panel], 0x44), false, 'a shown child of a hidden form');
+        assert.equal(windowShown([{ ...form, visible: true }, panel], 0x44), true);
+        assert.equal(windowShown([form], 0x99), false, 'no such window');
+    });
+
+test('a device\'s window is the picture while nothing over it reaches its client', ()=>{
+    // 3DMark 11's demo presents a windowed swap chain into a window the size
+    // of the screen; the desktop composed at each paint put the window's own
+    // surface, black, over every frame but the moment after a present.
+    const size = { width: 1280, height: 720 };
+    const whole = { left: 0, top: 0, right: 1280, bottom: 720 };
+    const gui = { hwnd: '0x32', rect: { left: -32000, top: -32000, right: -31130, bottom: -31458 },
+        client: { left: -31997, top: -31978, right: -31997, bottom: -31978 }, visible: true,
+        parent: null };
+    const demo = { hwnd: '0x36', rect: whole, client: whole, visible: true, parent: null };
+    assert.equal(clientUncovered([gui, demo], 0x36, size), true);
+    assert.equal(clientUncovered([demo, gui], 0x36, size), true,
+        'a minimised window over it is off the screen');
+    const dialog = { hwnd: '0x50', rect: { left: 100, top: 100, right: 300, bottom: 200 },
+        client: { left: 103, top: 122, right: 297, bottom: 197 }, visible: true, parent: null };
+    assert.equal(clientUncovered([demo, dialog], 0x36, size), false, 'a window over it shows');
+    assert.equal(clientUncovered([dialog, demo], 0x36, size), true, 'one under it does not');
+    assert.equal(clientUncovered([gui, { ...demo, visible: false }], 0x36, size), false);
+    // A windowed game smaller than the screen: its window repainting its frame
+    // at a click composed the desktop over the frame, its own surface white.
+    const small = { ...demo, client: { left: 100, top: 100, right: 900, bottom: 600 } };
+    assert.equal(clientUncovered([gui, small], 0x36, size), true,
+        'a window smaller than the screen, nothing over it');
+    assert.equal(clientUncovered([small, dialog], 0x36, size), false, 'a window over its client');
+    const aside = { ...dialog, rect: { left: 950, top: 100, right: 1200, bottom: 200 } };
+    assert.equal(clientUncovered([small, aside], 0x36, size), true,
+        'one over the desktop beside it is not over the picture');
+    assert.equal(clientUncovered([gui, demo], 0x99, size), false, 'no such window');
+    const pane = { hwnd: '0x40', rect: whole, client: whole, visible: true, child: true,
+        parent: '0x36' };
+    assert.equal(clientUncovered([gui, demo, pane], 0x40, size), true,
+        'a child window filling it, its top-level window topmost');
+});
+
+test('the windows over a window that has the screen are the shown top-levels above it', ()=>{
+    const screen = { left: 0, top: 0, right: 640, bottom: 480 };
+    const under = { hwnd: '0x9', rect: screen, client: screen, visible: true, parent: null };
+    const game = { hwnd: '0x10', rect: screen, client: screen, visible: true, parent: null };
+    const button = { hwnd: '0x11', rect: { left: 10, top: 10, right: 50, bottom: 30 },
+        client: { left: 10, top: 10, right: 50, bottom: 30 }, visible: true, child: true,
+        parent: '0x10' };
+    const box = { hwnd: '0x12', rect: { left: 500, top: 400, right: 800, bottom: 520 },
+        client: { left: 500, top: 400, right: 800, bottom: 520 }, visible: true, parent: null };
+    const hidden = { ...box, hwnd: '0x13', visible: false };
+    assert.deepEqual(windowsAbove([under, game, button, box, hidden], 0x10, screen),
+        [{ left: 500, top: 400, right: 640, bottom: 480 }],
+        'the box, on the screen; not the one under, the child inside, the hidden one');
+    assert.deepEqual(windowsAbove([under, game, button, box], 0x11, screen).length, 1,
+        'a child stands for its top-level window');
+    assert.deepEqual(windowsAbove([game, box], 0x77, screen), [], 'a window not listed');
 });

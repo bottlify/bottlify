@@ -19,7 +19,12 @@
  * does not exist is an assertion, not a missing slider.
  *
  * Defaults are the ones Windows answers (Wine's conformance tests): a range
- * of 0..100, position 0, a line of 1, a page of 20, a tic every 1.
+ * of 0..100, position 0, a line of 1, a page of a fifth of the range until
+ * one is set, a tic every 1. The thumb is placed when the position is set
+ * with a redraw, the range changes with one, the tic frequency changes, the
+ * window is sized or a person moves it; a TBM_SETPOS without a redraw moves
+ * the position and leaves the thumb where it was (Wine's trackbar test,
+ * test_position and test_tic_settings).
  */
 
 import {
@@ -28,6 +33,7 @@ import {
     WM_CTLCOLORSTATIC, COLOR_3DFACE, COLOR_3DSHADOW, COLOR_3DHILIGHT, COLOR_HIGHLIGHT,
     COLOR_BTNTEXT, after,
 } from '../user32/controls.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const TRACKBAR_CLASS = 'msctls_trackbar32';
@@ -41,7 +47,7 @@ export const TBS_VERT = 0x0002;
 export const TBS_NOTICKS = 0x0010;
 export const TBS_ENABLESELRANGE = 0x0020;
 export const TBS_FIXEDLENGTH = 0x0040;
-export const TBS_NOTHUMB = 0x0080;
+const TBS_NOTHUMB = 0x0080;
 
 /** Messages, numbered off WM_USER as the header numbers them. */
 const WM_USER = 0x0400;
@@ -58,6 +64,8 @@ export const TBM_CLEARTICS = WM_USER + 9;
 export const TBM_SETSEL = WM_USER + 10;
 export const TBM_SETSELSTART = WM_USER + 11;
 export const TBM_SETSELEND = WM_USER + 12;
+export const TBM_GETPTICS = WM_USER + 14;
+export const TBM_GETTICPOS = WM_USER + 15;
 export const TBM_GETNUMTICS = WM_USER + 16;
 export const TBM_GETSELSTART = WM_USER + 17;
 export const TBM_GETSELEND = WM_USER + 18;
@@ -71,11 +79,21 @@ export const TBM_GETTHUMBRECT = WM_USER + 25;
 export const TBM_GETCHANNELRECT = WM_USER + 26;
 export const TBM_SETTHUMBLENGTH = WM_USER + 27;
 export const TBM_GETTHUMBLENGTH = WM_USER + 28;
+const TBM_SETTOOLTIPS = WM_USER + 29;
+const TBM_GETTOOLTIPS = WM_USER + 30;
+const TBM_SETTIPSIDE = WM_USER + 31;
+export const TBM_SETBUDDY = WM_USER + 32;
+export const TBM_GETBUDDY = WM_USER + 33;
+const TBM_SETUNICODEFORMAT = 0x2005;
+const TBM_GETUNICODEFORMAT = 0x2006;
+const WM_SIZE = 0x0005;
+/** The page TBM_SETPAGESIZE sets to have a fifth of the range again. */
+const PAGE_DEFAULT = -1;
 
 /** The codes a WM_HSCROLL from a trackbar carries in its low word. */
 export const TB_LINEUP = 0;
 export const TB_LINEDOWN = 1;
-export const TB_PAGEUP = 2;
+const TB_PAGEUP = 2;
 export const TB_PAGEDOWN = 3;
 export const TB_THUMBPOSITION = 4;
 export const TB_THUMBTRACK = 5;
@@ -122,7 +140,7 @@ export function createTrackbarProcedure(host, tk){
         held.max ??= 100;
         held.pos ??= 0;
         held.line ??= 1;
-        held.page ??= 20;
+        held.page ??= PAGE_DEFAULT;
         held.freq ??= 1;
         held.selStart ??= 0;
         held.selEnd ??= 0;
@@ -130,8 +148,59 @@ export function createTrackbarProcedure(host, tk){
         /** @type {number[]} */
         held.tics ??= [];
         held.dragging ??= false;
+        /** @type {Rect | null} where the thumb was last placed */
+        held.thumb ??= null;
+        held.buddies ??= { left: 0, right: 0 };
+        held.tooltips ??= 0;
+        held.tipSide ??= 0;
+        held.unicode ??= false;
         return held;
     };
+
+    /** The page a PgUp or PgDn moves by. @param {any} held */
+    const pageOf = held=>(held.page === PAGE_DEFAULT ? Math.trunc((held.max - held.min) / 5)
+        : held.page);
+
+    /**
+     * An auto-ticked bar's tics are one every `freq` strictly inside the
+     * range, made again when the range or the frequency changes and not
+     * before (Wine's trackbar test_TBS_AUTOTICKS: a new bar counts only its
+     * two ends).
+     *
+     * @param {any} record
+     */
+    const autoTics = record=>{
+        const held = state(record);
+        if ((record.style & TBS_AUTOTICKS) === 0)
+        {
+            return;
+        }
+        held.tics = [];
+        for (let pos = held.min + held.freq; held.freq > 0 && pos < held.max; pos += held.freq)
+        {
+            held.tics.push(pos);
+        }
+    };
+
+    /**
+     * A range set: the position follows it, the tics too, and the thumb
+     * with a redraw.
+     *
+     * @param {any} record @param {number} redraw
+     */
+    const ranged = (record, redraw)=>{
+        const held = state(record);
+        held.pos = clamp(held, held.pos);
+        autoTics(record);
+        if (redraw !== 0)
+        {
+            held.thumb = null;
+            host.invalidate(record);
+        }
+    };
+
+    /** Whether the bar keeps a selection at all. @param {any} record */
+    const selects = record=>(record.style & TBS_ENABLESELRANGE) !== 0;
 
     /** @param {any} held @param {number} pos */
     const clamp = (held, pos)=>Math.min(Math.max(pos, held.min), Math.max(held.min, held.max));
@@ -171,10 +240,11 @@ export function createTrackbarProcedure(host, tk){
         const box = (a0, a1, b0, b1)=>(turned
             ? { left: b0, top: a0, right: b1, bottom: a1 }
             : { left: a0, top: b0, right: a1, bottom: b1 });
+        held.thumb ??= box(centre - half, centre + half + 1, across, across + thumbLength);
         const channelFrom = middle - Math.floor(CHANNEL_BREADTH / 2);
         return {
             channel: box(from - 2, to + 2, channelFrom, channelFrom + CHANNEL_BREADTH),
-            thumb: box(centre - half, centre + half + 1, across, across + thumbLength),
+            thumb: /** @type {Rect} */ (held.thumb),
             along,
             at,
         };
@@ -187,14 +257,14 @@ export function createTrackbarProcedure(host, tk){
      * @param {any} record @param {number} code @param {unknown} thread
      */
     const tell = (record, code, thread)=>{
-        if (!record.parent)
+        if (!notifyWindow(record))
         {
             return 0;
         }
         const wParam = code === TB_THUMBTRACK || code === TB_THUMBPOSITION
             ? ((state(record).pos & 0xffff) << 16 | code) >>> 0
             : code;
-        return host.send(record.parent, vertical(record) ? WM_VSCROLL : WM_HSCROLL,
+        return host.send(notifyWindow(record), vertical(record) ? WM_VSCROLL : WM_HSCROLL,
             wParam, record.hwnd, thread);
     };
 
@@ -211,6 +281,7 @@ export function createTrackbarProcedure(host, tk){
         {
             return 0;
         }
+        held.thumb = null;
         host.invalidate(record);
         return tell(record, code, thread);
     };
@@ -235,13 +306,6 @@ export function createTrackbarProcedure(host, tk){
         if ((record.style & TBS_NOTICKS) === 0)
         {
             const marks = new Set([held.min, held.max, ...held.tics]);
-            if ((record.style & TBS_AUTOTICKS) !== 0 && held.freq > 0)
-            {
-                for (let pos = held.min; pos < held.max; pos += held.freq)
-                {
-                    marks.add(pos);
-                }
-            }
             const base = turned ? thumb.right + 1 : thumb.bottom + 1;
             for (const pos of marks)
             {
@@ -282,6 +346,9 @@ export function createTrackbarProcedure(host, tk){
                     }));
             case WM_ERASEBKGND:
                 return 1;
+            case WM_SIZE:
+                held.thumb = null;
+                return tk.common(record, message, thread);
             case WM_GETDLGCODE:
                 return DLGC_WANTARROWS;
             case WM_KEYDOWN: {
@@ -292,9 +359,9 @@ export function createTrackbarProcedure(host, tk){
                     case VK_RIGHT: case VK_DOWN:
                         return step(record, held.pos + held.line, TB_LINEDOWN, thread);
                     case VK_PRIOR:
-                        return step(record, held.pos - held.page, TB_PAGEUP, thread);
+                        return step(record, held.pos - pageOf(held), TB_PAGEUP, thread);
                     case VK_NEXT:
-                        return step(record, held.pos + held.page, TB_PAGEDOWN, thread);
+                        return step(record, held.pos + pageOf(held), TB_PAGEDOWN, thread);
                     case VK_HOME:
                         return step(record, held.min, TB_TOP, thread);
                     case VK_END:
@@ -322,8 +389,8 @@ export function createTrackbarProcedure(host, tk){
                     held.paging = true;
                     const pixel = vertical(record) ? point.y : point.x;
                     return pixel < along(held.pos)
-                        ? step(record, held.pos - held.page, TB_PAGEUP, thread)
-                        : step(record, held.pos + held.page, TB_PAGEDOWN, thread);
+                        ? step(record, held.pos - pageOf(held), TB_PAGEUP, thread)
+                        : step(record, held.pos + pageOf(held), TB_PAGEDOWN, thread);
                 });
             }
             case WM_MOUSEMOVE: {
@@ -361,37 +428,38 @@ export function createTrackbarProcedure(host, tk){
                 return held.min;
             case TBM_GETRANGEMAX:
                 return held.max;
-            case TBM_SETPOS:
+            case TBM_SETPOS: {
+                const previous = held.pos;
                 held.pos = clamp(held, message.lParam | 0);
-                if ((message.wParam >>> 0) !== 0)
+                if ((message.wParam >>> 0) !== 0 && held.pos !== previous)
                 {
+                    held.thumb = null;
                     host.invalidate(record);
                 }
                 return 0;
+            }
             case TBM_SETRANGE:
                 // Two signed words, as the header's MAKELONG of two shorts.
                 held.min = (message.lParam << 16) >> 16;
                 held.max = message.lParam >> 16;
-                held.pos = clamp(held, held.pos);
-                host.invalidate(record);
+                ranged(record, message.wParam);
                 return 0;
             case TBM_SETRANGEMIN:
                 held.min = message.lParam | 0;
-                held.pos = clamp(held, held.pos);
-                host.invalidate(record);
+                ranged(record, message.wParam);
                 return 0;
             case TBM_SETRANGEMAX:
                 held.max = message.lParam | 0;
-                held.pos = clamp(held, held.pos);
-                host.invalidate(record);
+                ranged(record, message.wParam);
                 return 0;
             case TBM_SETPAGESIZE: {
-                const previous = held.page;
+                // The answer is the page in effect; -1 has the fifth back.
+                const previous = pageOf(held);
                 held.page = message.lParam | 0;
                 return previous;
             }
             case TBM_GETPAGESIZE:
-                return held.page;
+                return pageOf(held);
             case TBM_SETLINESIZE: {
                 const previous = held.line;
                 held.line = message.lParam | 0;
@@ -401,6 +469,8 @@ export function createTrackbarProcedure(host, tk){
                 return held.line;
             case TBM_SETTICFREQ:
                 held.freq = message.wParam | 0;
+                autoTics(record);
+                held.thumb = null;
                 host.invalidate(record);
                 return 0;
             case TBM_SETTIC: {
@@ -420,6 +490,33 @@ export function createTrackbarProcedure(host, tk){
                 const index = message.wParam | 0;
                 return index >= 0 && index < held.tics.length ? held.tics[index] : -1;
             }
+            case TBM_GETTICPOS: {
+                const index = message.wParam | 0;
+                return index >= 0 && index < held.tics.length
+                    ? layout(record).along(held.tics[index]) : -1;
+            }
+            case TBM_GETPTICS: {
+                // The array is the bar's, good until the tics change; a new
+                // one is taken when they outgrow it.
+                if (held.tics.length === 0)
+                {
+                    return 0;
+                }
+                if (!held.ticArray || held.ticArray.capacity < held.tics.length)
+                {
+                    const capacity = Math.max(16, held.tics.length);
+                    const address = host.allocate?.(capacity * 4) ?? 0;
+                    if (address === 0)
+                    {
+                        host.divergence?.('TBM_GETPTICS', 'no memory for the tics: NULL');
+                        return 0;
+                    }
+                    held.ticArray = { address, capacity };
+                }
+                held.tics.forEach((/** @type {number} */ pos, /** @type {number} */ at)=>
+                    tk.writeU32(held.ticArray.address + at * 4, pos));
+                return held.ticArray.address;
+            }
             case TBM_CLEARTICS:
                 held.tics = [];
                 host.invalidate(record);
@@ -427,18 +524,31 @@ export function createTrackbarProcedure(host, tk){
             case TBM_GETNUMTICS:
                 // The ends count, beside every tic set on the way.
                 return (record.style & TBS_NOTICKS) !== 0 ? 0 : held.tics.length + 2;
+            // A selection is kept only with TBS_ENABLESELRANGE; SETSEL keeps
+            // both ends in the range, SETSELSTART only the start above the
+            // bottom and SETSELEND only the end below the top (Wine's
+            // trackbar test_selection and test_ignore_selection).
             case TBM_SETSEL:
-                held.selStart = (message.lParam << 16) >> 16;
-                held.selEnd = message.lParam >> 16;
-                host.invalidate(record);
+                if (selects(record))
+                {
+                    held.selStart = clamp(held, (message.lParam << 16) >> 16);
+                    held.selEnd = clamp(held, message.lParam >> 16);
+                    host.invalidate(record);
+                }
                 return 0;
             case TBM_SETSELSTART:
-                held.selStart = message.lParam | 0;
-                host.invalidate(record);
+                if (selects(record))
+                {
+                    held.selStart = Math.max(held.min, message.lParam | 0);
+                    host.invalidate(record);
+                }
                 return 0;
             case TBM_SETSELEND:
-                held.selEnd = message.lParam | 0;
-                host.invalidate(record);
+                if (selects(record))
+                {
+                    held.selEnd = Math.min(held.max, message.lParam | 0);
+                    host.invalidate(record);
+                }
                 return 0;
             case TBM_GETSELSTART:
                 return held.selStart;
@@ -468,11 +578,43 @@ export function createTrackbarProcedure(host, tk){
                 if ((record.style & TBS_FIXEDLENGTH) !== 0)
                 {
                     held.thumbLength = message.wParam >>> 0;
+                    held.thumb = null;
                     host.invalidate(record);
                 }
                 return 0;
             case TBM_GETTHUMBLENGTH:
                 return held.thumbLength;
+            case TBM_SETTOOLTIPS:
+                held.tooltips = message.wParam >>> 0;
+                return 0;
+            case TBM_GETTOOLTIPS:
+                return held.tooltips;
+            case TBM_SETTIPSIDE: {
+                const previous = held.tipSide;
+                held.tipSide = message.wParam | 0;
+                return previous;
+            }
+            case TBM_SETBUDDY: {
+                // TRUE is the buddy at the left or top, FALSE the other end.
+                const side = message.wParam !== 0 ? 'left' : 'right';
+                const previous = held.buddies[side];
+                held.buddies[side] = message.lParam >>> 0;
+                if (held.buddies[side] !== 0)
+                {
+                    host.divergence?.('TBM_SETBUDDY',
+                        'the buddy is kept, not moved beside the bar');
+                }
+                return previous;
+            }
+            case TBM_GETBUDDY:
+                return held.buddies[message.wParam !== 0 ? 'left' : 'right'];
+            case TBM_SETUNICODEFORMAT: {
+                const previous = held.unicode ? 1 : 0;
+                held.unicode = message.wParam !== 0;
+                return previous;
+            }
+            case TBM_GETUNICODEFORMAT:
+                return held.unicode ? 1 : 0;
             default:
                 return tk.common(record, message, thread);
         }

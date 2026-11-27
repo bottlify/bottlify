@@ -4,15 +4,14 @@
  * See LICENSE for details
  */
 
-import { createRing } from './ring.js';
 import {
-    SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
+    SLOT_BYTES, PCM_MASK, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
     LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_BYTES, DEVICE_LEAD_MS,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
-    slotHeaderOffset, slotPcmOffset,
+    FLOAT_SAMPLES, pcmSample, sampleBytes, tableViews,
 } from './mix.js';
 
 /**
@@ -23,457 +22,65 @@ import {
  * them together. There is exactly one device underneath, so the adding happens
  * here.
  *
- * Two backends share one surface (`open`, `pump`, `consumed`, `diagnostics`,
- * a track's `write`, `played`, `playedBytes`, `pending`, `reset`, `close`,
- * `gain`, `balance`, `paused`, `retune`), chosen by `shared`:
- *
- * - Without it (the default, and what every caller that does not ask
- *   otherwise gets): `createEngineMixer`, unchanged from before this file grew
- *   a second backend. Every source converts to float on write and is mixed
- *   into one ring on the engine thread; a reader without shared memory -- the
- *   test-page harness, any page that is not cross-origin isolated -- can only
- *   read on that same thread, so this is the only backend it can use.
- * - With it: `createSharedMixer`. Every source's raw guest PCM goes into its
- *   own ring inside one shared "track table"; converting and mixing happen on
- *   the audio thread instead, in `worklet.js`, which is the only place that
- *   was ever measured costing anything (B12, superseded by the measurement
- *   this file was built for).
- *
- * Which one an assembling caller gets is an environment question -- shared
- * memory is what a worklet needs to read the far end at all -- not a mixer
- * question, so it is asked for explicitly rather than guessed from
- * `typeof SharedArrayBuffer`: guessing would flip every existing test in this
- * file onto the new backend the moment it ran somewhere `SharedArrayBuffer`
- * happens to exist, such as Node.
+ * The engine writes every source's raw guest PCM into its own ring inside one
+ * shared "track table"; converting and mixing happen on the audio thread, in
+ * `worklet.js`, which reads the same table in place.
  */
 
 /** What comes out: the rate a browser's audio graph runs at anyway. */
 const OUTPUT_RATE_DEFAULT = 48000;
 const OUTPUT_CHANNELS = 2;
 
-/** Two hundred milliseconds of slack before a write is refused. */
-const CAPACITY_FRAMES = OUTPUT_RATE_DEFAULT / 5;
-
 /**
  * @typedef {Object} PcmFormat
  * @property {number} sampleRate
  * @property {number} channels
- * @property {number} bitsPerSample  8 (unsigned) or 16 (signed), as Win32 has it.
+ * @property {number} bitsPerSample  8 (unsigned), or 16, 24 or 32 (signed), as Win32 has it.
+ * @property {boolean} [float]  32-bit IEEE floats rather than integers (WAVE_FORMAT_IEEE_FLOAT).
  */
 
 /**
- * @overload
+ * A format as a slot's `BITS` holds it: the width, and whether its samples are floats.
+ *
+ * @param {PcmFormat} format
+ */
+const sampleCodeOf = format=>format.bitsPerSample | (format.float ? FLOAT_SAMPLES : 0);
+
+/**
+ * A sound output's memory: the track table (`TABLE_BYTES`), a view of memory
+ * shared with whoever plays it, and what lets it go once the output closes.
+ *
+ * @typedef {{ table: Uint8Array, release?: () => void }} SoundMemory
+ *     `release` only where it is made (`made`); what crosses to a worker is `{ table }`
+ */
+
+/**
+ * The mixer over a track table (`createSharedMixer`).
+ *
+ * `fill` is asked for more sound before each mix. A wave device pushes its
+ * audio in when the program hands a buffer over, but a DirectSound buffer is a
+ * region the program wrote into long ago and plays out of at its own pace:
+ * somebody has to read out the part its cursor has just passed, and the only
+ * moment that makes sense is just before mixing.
+ *
+ * `memory` is the table of the output an earlier machine made. Given, this
+ * mixer's output is that same table rather than a new one: the process was
+ * replaced, not the device, and whoever reads the far end -- a worklet, a
+ * person's own sound card -- still holds it.
+ *
+ * `made` is memory made for a new output (`SoundMemory`, the run's cache
+ * holds it); with neither, the mixer makes a buffer of its own, for a mixer
+ * with no run around it.
+ *
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
- * @param {number} [options.capacityFrames]
  * @param {() => void} [options.fill]
- * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
- * @param {false} [options.shared]
- * @param {any} [options.beside]
- * @returns {ReturnType<typeof createEngineMixer>}
- */
-/**
- * @overload
- * @param {Object} options
- * @param {number} [options.sampleRate]
- * @param {() => void} [options.fill]
- * @param {{ table: ArrayBufferLike }} [options.memory]
- * @param {true} options.shared
+ * @param {SoundMemory} [options.memory]
+ * @param {SoundMemory} [options.made]
  * @param {{ arena: [number, number] | null }} [options.beside]
- * @returns {ReturnType<typeof createSharedMixer>}
- */
-/**
- * Picks a backend by `options.shared` (default `false`) -- see the file
- * comment above for what each one is and why the choice is made here rather
- * than guessed from `typeof SharedArrayBuffer`.
- *
- * `fill` is asked for more sound before each mix in both backends. A wave
- * device pushes its audio in when the program hands a buffer over, but a
- * DirectSound buffer is a region the program wrote into long ago and plays
- * out of at its own pace: somebody has to read out the part its cursor has
- * just passed, and the only moment that makes sense is just before mixing.
- *
- * `memory` is the storage of the output an earlier machine made -- `{
- * control, samples }` for the engine backend, `{ table }` for the shared one.
- * Given, this mixer's output is that same storage rather than a new one: the
- * process was replaced, not the device, and whoever reads the far end -- a
- * worklet, a person's own sound card, this same thread -- still holds it.
- *
- * @param {any} [options]
  */
 export function createMixer(options = {}){
-    return options.shared ? createSharedMixer(options) : createEngineMixer(options);
-}
-
-/**
- * @param {Object} [options]
- * @param {number} [options.sampleRate]
- * @param {number} [options.capacityFrames]
- * @param {() => void} [options.fill]
- * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
- */
-function createEngineMixer(
-    { sampleRate = OUTPUT_RATE_DEFAULT, capacityFrames = CAPACITY_FRAMES, fill, memory } = {})
-{
-    const ring = createRing({
-        channels: OUTPUT_CHANNELS,
-        capacityFrames,
-        memory,
-    });
-
-    /** @type {Set<any>} */
-    const tracks = new Set();
-    /**
-     * How many output frames have been handed to the ring. A machine that
-     * replaced another starts from what the shared storage already holds, so
-     * this is the device's count rather than one mixer's.
-     */
-    let produced = ring.written();
-    /**
-     * Frames a track was mixed short by while another track was carrying the
-     * block. A block is as long as the longest track has to give, so a track
-     * with nothing ready has silence written into its own stream for the rest
-     * of it -- a hole that arrives at the ear as a break in that one sound,
-     * with the ring never running dry and nothing else showing it happened.
-     */
-    let shortfall = 0;
-    /** Pumps that found nothing to write while at least one track was open. */
-    let idlePumps = 0;
-    let pumps = 0;
-
-    return {
-        sampleRate,
-        channels: OUTPUT_CHANNELS,
-        ring,
-        memory: ring.memory,
-        /**
-         * How far ahead a track may run before what it is handing over is worth
-         * less than the memory it occupies.
-         *
-         * A source that pushes -- a wave device -- is bounded by the program
-         * itself, which writes a buffer and waits for it back. A source that is
-         * pulled at the rate of a clock has nothing bounding it: if the clock
-         * outruns the device, every mix leaves more behind than it took, and the
-         * queue grows for as long as the sound plays.
-         */
-        capacityFrames,
-
-        /**
-         * A source of sound: one wave device, or one sound buffer.
-         *
-         * @param {PcmFormat} format
-         */
-        open(format){
-            if (!(format.sampleRate > 0) || !(format.channels > 0))
-            {
-                throw new Error('audio: a track needs a rate and a channel count');
-            }
-            const track = {
-                format,
-                capacityFrames,
-                /**
-                 * Output frames waiting to be mixed. A flat array of
-                 * interleaved stereo, appended to and consumed from the front.
-                 *
-                 * @type {Float32Array[]}
-                 */
-                queue: [],
-                /** Frames of `queue[0]` already mixed. */
-                offset: 0,
-                /**
-                 * What each queued buffer cost the guest, in the guest's own
-                 * bytes, in the order they were mixed.
-                 *
-                 * Kept because converting frames back into guest bytes by the
-                 * rate ratio does not round-trip: the conversion floors, so a
-                 * buffer that has been played in full reports back as slightly
-                 * fewer bytes than the guest wrote. Over a stream the shortfall
-                 * is covered by the next buffer, but a program that writes one
-                 * small buffer and waits for it -- which is how a sound library
-                 * probes a device -- waits for ever.
-                 *
-                 * @type {{ frames: number, bytes: number }[]}
-                 */
-                ledger: [],
-                /**
-                 * What the ledger no longer holds.
-                 *
-                 * The cursor only moves forward, so an entry behind it is never
-                 * read again. Dropping those and carrying their totals is what
-                 * keeps `playedBytes` from walking every buffer the program has
-                 * ever written -- and it is called from every winmm entry point,
-                 * so a ledger that only grew made a game that streams sound get
-                 * steadily slower for as long as it played.
-                 */
-                retiredFrames: 0,
-                retiredBytes: 0,
-                /** Output frames this track has contributed to the ring. */
-                mixed: 0,
-                /**
-                 * Frames written as silence into this track s own stream while
-                 * another track was carrying a longer block. A total across
-                 * tracks cannot say whether that silence fell on the stream
-                 * somebody is listening to or on one that had simply stopped,
-                 * and those are opposite findings.
-                 */
-                short: 0,
-                /** Of those, the ones the device has already played. */
-                heard: 0,
-                gain: 1,
-                /** Each side's share of `gain`, left then right: a pan. */
-                balance: [1, 1],
-                paused: false,
-
-                /**
-                 * The resampler's seam between the buffers streamed into this
-                 * track, so the pieces of one continuous signal join without a
-                 * discontinuity where they meet. One per track, because two
-                 * tracks are two independent streams.
-                 *
-                 * @type {ResampleState}
-                 */
-                resample: { pos: 0, tail: null },
-
-                /** The rate `played()` counts in. */
-                rate: sampleRate,
-
-                /**
-                 * Output frames of this track the device has actually played.
-                 *
-                 * Everything mixed, less whatever is still sitting in the ring.
-                 * That is exact for one track and close for several -- they are
-                 * mixed into the same blocks, so they drain together -- and it
-                 * is the only figure tied to the sound rather than to a clock.
-                 * Held monotonic, because a cursor that went backwards would be
-                 * read by a program as the buffer wrapping.
-                 */
-                played(){
-                    track.heard = Math.max(track.heard, track.mixed - ring.filled());
-                    return track.heard;
-                },
-
-                /**
-                 * Converts and queues one buffer of the guest's own PCM.
-                 *
-                 * @param {Uint8Array} pcm
-                 * @returns {number} output frames this became
-                 */
-                write(pcm){
-                    const frames = convert(pcm, track.format, sampleRate, track.resample);
-                    if (frames.length > 0)
-                    {
-                        track.queue.push(frames);
-                    }
-                    // Credited for what it gave up, not for what came out of
-                    // it. A buffer shorter than the resampler needs to reach
-                    // its next output frame yields nothing now and is carried
-                    // into the seam instead, so its samples are absorbed and
-                    // it is finished with -- while a ledger that only counted
-                    // emitted frames left it uncredited for ever. A program
-                    // that probes a device with one frame and waits for it
-                    // back then waits for ever, and every sound it would have
-                    // made afterwards is never made.
-                    if (pcm.length > 0)
-                    {
-                        track.ledger.push({
-                            frames: frames.length / OUTPUT_CHANNELS,
-                            bytes: pcm.length,
-                        });
-                    }
-                    return frames.length / OUTPUT_CHANNELS;
-                },
-
-                /**
-                 * Guest bytes this track has actually played.
-                 *
-                 * Exact by construction rather than reconstructed from a rate:
-                 * when the last frame a buffer became has been heard, the whole
-                 * of that buffer's byte count is credited, so a caller waiting
-                 * for a buffer to come back is never left a fraction short.
-                 */
-                playedBytes(){
-                    let remaining = track.played() - track.retiredFrames;
-                    while (track.ledger.length > 0
-                        && remaining >= track.ledger[0].frames)
-                    {
-                        const done = /** @type {{ frames: number, bytes: number }} */
-                            (track.ledger.shift());
-                        track.retiredFrames += done.frames;
-                        track.retiredBytes += done.bytes;
-                        remaining -= done.frames;
-                    }
-                    const head = track.ledger[0];
-                    // Part-way through a buffer: credit the same share of its
-                    // bytes, so the cursor moves smoothly inside one.
-                    return track.retiredBytes
-                        + (head ? head.bytes * (remaining / head.frames) : 0);
-                },
-
-                /** Frames of output this track still has to give. */
-                pending(){
-                    let total = -track.offset;
-                    for (const block of track.queue)
-                    {
-                        total += block.length / OUTPUT_CHANNELS;
-                    }
-                    return Math.max(0, total);
-                },
-
-                /**
-                 * Reads what is written from now on as recorded at another
-                 * rate. What is queued was converted already and stays as it
-                 * was, so the change is heard exactly where the bytes change.
-                 *
-                 * @param {number} rate
-                 */
-                retune(rate){
-                    // A track at the output's rate copies and leaves the seam
-                    // alone, so what it holds is from before that and is no
-                    // place to resume a resample from.
-                    if (track.format.sampleRate === sampleRate)
-                    {
-                        track.resample = { pos: 0, tail: null };
-                    }
-                    track.format = { ...track.format, sampleRate: rate };
-                },
-
-                /** Drops everything queued; the device was stopped. */
-                reset(){
-                    track.queue = [];
-                    track.ledger = [];
-                    track.retiredFrames = 0;
-                    track.retiredBytes = 0;
-                    track.offset = 0;
-                    track.mixed = 0;
-                    track.heard = 0;
-                },
-
-                close(){
-                    track.reset();
-                    tracks.delete(track);
-                },
-            };
-            tracks.add(track);
-            return track;
-        },
-
-        /** No arena here to lend. @returns {number} */
-        lend: ()=>-1,
-        takeBack(){},
-        /** Closes every track this mixer opened. */
-        close(){
-            for (const track of [...tracks])
-            {
-                track.close();
-            }
-        },
-
-        /** How many output frames the device has actually played. */
-        consumed: ()=>ring.consumed(),
-
-        /**
-         * Mixes up to `frames` of every open track into the ring.
-         *
-         * Called once a scheduler turn by whoever is driving the machine, which
-         * is the only place that knows a turn has happened. It writes ahead
-         * rather than on demand -- the device reads on its own thread and must
-         * never find the ring empty because the emulator was busy.
-         *
-         * @param {number} [frames]  Ceiling; the ring's room is the real one.
-         * @returns {number} frames written
-         */
-        pump(frames = ring.room()){
-            fill?.();
-            pumps++;
-            const room = Math.min(frames, ring.room());
-            if (room <= 0 || tracks.size === 0)
-            {
-                return 0;
-            }
-            let wanted = 0;
-            for (const track of tracks)
-            {
-                if (!track.paused)
-                {
-                    wanted = Math.max(wanted, Math.min(room, track.pending()));
-                }
-            }
-            if (wanted === 0)
-            {
-                idlePumps++;
-                return 0;
-            }
-
-            const block = new Float32Array(wanted * OUTPUT_CHANNELS);
-            for (const track of tracks)
-            {
-                if (track.paused)
-                {
-                    continue;
-                }
-                const had = mixInto(block, track, wanted);
-                shortfall += wanted - had;
-                track.short += wanted - had;
-            }
-            const written = ring.write(block);
-            produced += written;
-            return written;
-        },
-
-        /** For a report: what is open and how far ahead the ring is. */
-        diagnostics: ()=>({
-            tracks: tracks.size,
-            queuedFrames: [...tracks].reduce((sum, track)=>sum + track.pending(), 0),
-            ringFilled: ring.filled(),
-            produced,
-            consumed: ring.consumed(),
-            deviceBlocks: ring.starved().asked,
-            starvedBlocks: ring.starved().blocks,
-            starvedFrames: ring.starved().frames,
-            shortfall,
-            perTrack: [...tracks].map(t=>`short=${t.short} mixed=${t.mixed}`),
-            idlePumps,
-            pumps,
-        }),
-    };
-}
-
-/**
- * Adds one track's next `frames` into a block, and remembers how far it got.
- *
- * A track with less than that left contributes what it has and the rest of the
- * block keeps whatever the other tracks put there. Padding it with silence
- * would be the same thing written more slowly.
- *
- * @param {Float32Array} block @param {any} track @param {number} frames
- * @returns {number} frames this track actually had
- */
-function mixInto(block, track, frames){
-    let at = 0;
-    while (at < frames && track.queue.length > 0)
-    {
-        const head = track.queue[0];
-        const available = head.length / OUTPUT_CHANNELS - track.offset;
-        const take = Math.min(available, frames - at);
-        const from = track.offset * OUTPUT_CHANNELS;
-        const to = at * OUTPUT_CHANNELS;
-        const left = track.gain * track.balance[0];
-        const right = track.gain * track.balance[1];
-        for (let sample = 0; sample < take * OUTPUT_CHANNELS; sample += OUTPUT_CHANNELS)
-        {
-            block[to + sample] += head[from + sample] * left;
-            block[to + sample + 1] += head[from + sample + 1] * right;
-        }
-        at += take;
-        track.offset += take;
-        if (track.offset * OUTPUT_CHANNELS >= head.length)
-        {
-            track.queue.shift();
-            track.offset = 0;
-        }
-    }
-    track.mixed += at;
-    return at;
+    return createSharedMixer(options);
 }
 
 /**
@@ -516,7 +123,8 @@ function mixInto(block, track, frames){
  * @returns {Float32Array}
  */
 export function convert(pcm, format, rate, state){
-    const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+    const code = sampleCodeOf(format);
+    const bytesPerSample = sampleBytes(code);
     const stride = bytesPerSample * format.channels;
     const inputFrames = Math.floor(pcm.length / stride);
     if (inputFrames === 0)
@@ -525,7 +133,6 @@ export function convert(pcm, format, rate, state){
     }
 
     const ratio = rate / format.sampleRate;
-    const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 
     /**
      * A channel of an input frame. Frame -1 is the previous buffer's last
@@ -540,13 +147,11 @@ export function convert(pcm, format, rate, state){
         {
             return state.tail ? state.tail[channel] : sample(0, channel);
         }
-        const at = Math.min(frame, inputFrames - 1) * stride + channel * bytesPerSample;
-        // Eight-bit wave audio is unsigned with silence at 128; sixteen-bit is
-        // signed with silence at zero. Reading either as the other is not a
-        // subtle difference -- it is a loud constant offset.
-        return bytesPerSample === 1
-            ? (view.getUint8(at) - 128) / 128
-            : view.getInt16(at, true) / 32768;
+        // Eight-bit wave audio is unsigned with silence at 128; the wider kinds
+        // are signed with silence at zero, or floats. Reading one as another
+        // is no subtle difference -- it is a loud constant offset, or noise.
+        return pcmSample(pcm, Math.min(frame, inputFrames - 1) * stride
+            + channel * bytesPerSample, code, -1);
     };
 
     // At the output's own rate there is nothing to resample: one input frame is
@@ -617,30 +222,35 @@ export function convert(pcm, format, rate, state){
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
- * @param {{ table: ArrayBufferLike }} [options.memory]
+ * @param {SoundMemory} [options.memory]
+ * @param {SoundMemory} [options.made]
  * @param {{ arena: [number, number] | null }} [options.beside]
  *     A process beside another on the same table rather than in its place:
  *     the other's slots are left as they are, and the arena this one mirrors
  *     its voices in is the span the other lent it, or none.
  */
-function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, beside } = {}){
-    const buffer = memory?.table ?? allocateTable();
+function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, made, beside } = {}){
     const isFresh = !memory?.table;
-    const global = new Int32Array(buffer, 0, GLOBAL_HEADER_INT32);
+    /** @type {SoundMemory} */
+    const kept = memory?.table ? memory : made ?? { table: new Uint8Array(allocateTable()) };
+    const table = kept.table;
+    /** What lets the memory go, where this mixer's output was made over it (`release`). */
+    let owned = kept === made ? made.release : undefined;
+    const { global, slots, arena } = tableViews(table);
     if (isFresh)
     {
+        // Memory held for it may hold what was there before: every header a
+        // reader goes by begins empty. A ring's or the arena's bytes are read
+        // only where a header says they were written, and are left untouched,
+        // so a page of them is memory only once a voice writes it.
+        global.fill(0);
+        for (const { header } of slots)
+        {
+            header.fill(0);
+        }
         Atomics.store(global, OUTPUT_RATE, sampleRate);
     }
 
-    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
-    const slots = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(buffer, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(buffer, slotPcmOffset(slot), SLOT_BYTES),
-        });
-    }
     if (!isFresh && !beside)
     {
         // A process replacement, not a device replacement: the parent's track
@@ -665,10 +275,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     const openVoices = new Set();
     let fallbackTracks = 0;
 
-    // The arena behind the slots: the DMA voices' mirrors. A table made before
-    // it had one has none, and every sound buffer then plays through a queue.
-    const arena = buffer.byteLength >= ARENA_OFFSET + ARENA_BYTES
-        ? new Uint8Array(buffer, ARENA_OFFSET, ARENA_BYTES) : null;
+    // The arena behind the slots, the DMA voices' mirrors (`tableViews`): a
+    // table made before it had one has none, and every sound buffer then
+    // plays through a queue.
     /**
      * Its free spans, [offset, bytes], in offset order. A voice takes the first
      * that fits, rounded to sixteen bytes; closing one gives its span back and
@@ -728,8 +337,21 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     return {
         sampleRate,
         channels: OUTPUT_CHANNELS,
-        table: buffer,
-        memory: { table: buffer },
+        table,
+        // What a rebuilt machine or another thread is handed: the table alone,
+        // which crosses to a worker as it is.
+        memory: { table },
+
+        /**
+         * Lets go of the memory this output was made over, once nothing will
+         * play it again: a process's own output, as the process goes. An
+         * output inherited is its maker's to let go of. Once.
+         */
+        release(){
+            const releasing = owned;
+            owned = undefined;
+            releasing?.();
+        },
         capacityFrames,
 
         /** @param {PcmFormat} format */
@@ -777,7 +399,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             for (const [field, value] of [
                 [KIND, KIND_DMA], [BASE, base], [LENGTH, format.bytes],
                 [RATE, format.sampleRate], [CHANNELS, format.channels],
-                [BITS, format.bitsPerSample],
+                [BITS, sampleCodeOf(format)],
                 [GAIN, GAIN_SCALE], [LEFT_CUT, 0], [RIGHT_CUT, 0], [PAUSED, 0],
                 [POSITION, 0], [LOOPING, 0], [PLAYING, 0], [MIXED_FRAMES, 0],
                 [FRESH, 0], [STREAMING, 0], [HELD, 0],
@@ -970,6 +592,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             return 0;
         },
 
+        /** The tracks open: what the run loop asks each turn, without the report. */
+        tracks: ()=>openTracks.size,
+
         diagnostics: ()=>({
             tracks: openTracks.size,
             queuedFrames: [...openTracks].reduce((sum, track)=>sum + track.pending(), 0),
@@ -996,13 +621,13 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
      */
     function createSlotTrack(format, slot, view){
         const { header, pcm } = view;
-        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const bytesPerSample = sampleBytes(sampleCodeOf(format));
         const stride = bytesPerSample * format.channels;
 
         Atomics.store(header, KIND, KIND_QUEUE);
         Atomics.store(header, RATE, format.sampleRate);
         Atomics.store(header, CHANNELS, format.channels);
-        Atomics.store(header, BITS, format.bitsPerSample);
+        Atomics.store(header, BITS, sampleCodeOf(format));
         Atomics.store(header, GAIN, GAIN_SCALE);
         Atomics.store(header, LEFT_CUT, 0);
         Atomics.store(header, RIGHT_CUT, 0);
@@ -1020,6 +645,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
         // a previous reset. The bases below are what gets subtracted back off.
         let bytesBase = 0;
         let framesBase = 0;
+        /** What `playedBytes()` last told, held so it never goes back. */
+        let told = 0;
+        const leadBytes = ()=>Math.round(track.format.sampleRate * DEVICE_LEAD_MS / 1000) * stride;
 
         const track = {
             format,
@@ -1088,6 +716,15 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             },
 
             /**
+             * Bytes the next `write` takes whole: a caller that must lose
+             * nothing (a film's sound) offers that much and keeps the rest.
+             */
+            room(){
+                return Math.max(0, SLOT_BYTES
+                    - ((Atomics.load(header, WRITTEN) - Atomics.load(header, READ)) | 0));
+            },
+
+            /**
              * Tells the reader the rate to resample from. It applies to what
              * is still unread in the slot as well, a turn's worth at most,
              * because the slot has one rate and no marker in its bytes.
@@ -1117,9 +754,18 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
              * slot's whole life, including whatever this track played before
              * a previous reset, and a caller like `waveOutReset` expects the
              * cursor to restart at zero, the way its own `trackBytes` does.
+             *
+             * Taken, not heard: `DEVICE_LEAD_MS` ahead of `READ` while the
+             * track is not held (a stream before its Start is), never past what
+             * was written, and never back.
              */
             playedBytes(){
-                return Math.max(0, (Atomics.load(header, READ) - bytesBase) | 0);
+                const written = Atomics.load(header, WRITTEN);
+                const read = Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
+                const ahead = track.paused ? 0 : leadBytes();
+                const taken = Math.min((written - bytesBase) | 0, (read - bytesBase + ahead) | 0);
+                told = Math.max(told, taken, 0);
+                return told;
             },
 
             /** Guest frames of this track still queued, by its own rate. */
@@ -1139,6 +785,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             reset(){
                 bytesBase = Atomics.load(header, WRITTEN);
                 framesBase = Atomics.load(header, MIXED_FRAMES);
+                told = 0;
                 Atomics.store(header, DROP_TO, bytesBase);
                 Atomics.add(header, GENERATION, 1);
             },
@@ -1171,7 +818,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
         let writtenBytes = 0;
         let localGain = 1;
         let localPaused = false;
-        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const bytesPerSample = sampleBytes(sampleCodeOf(format));
         const stride = bytesPerSample * format.channels;
         const track = {
             format,
@@ -1220,9 +867,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     }
 }
 
-/** @returns {ArrayBufferLike} a fresh, zeroed track table. */
+/** @returns {SharedArrayBuffer} a fresh, zeroed track table of a mixer's own. */
 function allocateTable(){
-    return typeof SharedArrayBuffer === 'function'
-        ? new SharedArrayBuffer(TABLE_BYTES)
-        : new ArrayBuffer(TABLE_BYTES);
+    return new SharedArrayBuffer(TABLE_BYTES);
 }

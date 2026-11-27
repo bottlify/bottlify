@@ -32,6 +32,45 @@ import { isDriven } from './drive.js';
  * @property {boolean} [lastError]  Whether the function can leave a thread
  *     error behind, so the trace reads it afterwards. Default true; a COM
  *     method answers with an HRESULT and never touches it.
+ * @property {number[]} [quadwords]  Where an argument the signature counts as
+ *     two dwords -- an `__int64`, a LARGE_INTEGER by value -- begins, by its
+ *     first dword's index: one argument, one register or stack slot whole, to
+ *     an x86-64 caller, which `readLongCall` splits back into the two.
+ * @property {Record<number, 'f32' | 'f64'>} [floats]  The arguments that are a
+ *     float or a double, by their first dword's index: an x86-64 caller passes
+ *     one among its first four in the XMM register of its position, and
+ *     `readLongCall` reads it from there into the dwords the 32-bit signature
+ *     has it in -- a double's two, low first.
+ * @property {number[]} [addresses]  The dwords that carry an address a
+ *     64-bit caller may keep past 4 GiB and the handler takes whole - an
+ *     image's instance, a parameter handed on to a callback: `readLongCall`
+ *     gives such an argument as low + high * 2^32 where its high half names
+ *     an address (not zero, below 2^21), and as its dword otherwise, so a
+ *     process in 4 GiB sees what it always saw. A handler that declares one
+ *     must not cut it with `>>> 0` or `| 0`. The win32 layer declares each
+ *     function's from its signature comment where its spec does not
+ *     (`declareAddresses`).
+ * @property {number[]} [sizes]  The dwords that carry a `size_t` / `SIZE_T`: a
+ *     64-bit caller's is eight bytes, and one past a dword is handed as the
+ *     largest dword (0xFFFFFFFF) - a request no handler can meet, which it
+ *     refuses as it refuses any too large - never as its low half, which
+ *     would answer a request of 4 GiB + 16 bytes with sixteen.
+ * @property {string} [returns]  'pointer': the answer is an address or an
+ *     unsigned size (a pointer, an HMODULE, a SIZE_T), and a 64-bit caller
+ *     finds it in RAX zero-extended. 'u32': the function has guest code that
+ *     answers an unsigned dword (`@returns {u32}`), which leaves RAX
+ *     zero-extended, and its handler answers the same quadword. Every other
+ *     dword answer is sign-extended there, as a HANDLE of -1 is
+ *     INVALID_HANDLE_VALUE whole; the callers of a function that answers a
+ *     dword read EAX alone, and its high half is no one's.
+ *     `tools/checks/check-wide-arguments.mjs` holds each spec to the return
+ *     type its signature comment writes; a function with guest code takes
+ *     its `returns` from the type its source declares (`guestExport`).
+ * @property {Record<number, number>} [structs]  The structures wider than eight
+ *     bytes passed by value -- a GUID, a VARIANT -- by their first dword's index,
+ *     and how many dwords each is: the 32-bit signature has them inline, an
+ *     x86-64 caller passes a pointer to a copy in one slot, which
+ *     `readLongCall` reads the dwords through.
  * @property {boolean} [hook]
  *     A slot hook: `handler` answers `true` (it computed the call itself) or
  *     `false` (run the guest's own code, at `target`). Which of the two
@@ -103,8 +142,18 @@ import { isDriven } from './drive.js';
  * @property {number} calls        Calls made to it.
  * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
- * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
- * @property {number} [windowMs]     `sampledMs` when it began.
+ * @property {number} sampledCalls  How many of them were timed.
+ * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
+ * @property {number[] | null} addresses  Of `fn`, checked; null for none.
+ * @property {number[] | null} sizes  Of `fn`, checked; null for none.
+ * @property {boolean} zeroExtends  `zeroExtendsOf(fn)`: RAX takes the answer zero-extended.
+ * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
+ *     in `args`, for a function with quadwords or floating-point arguments;
+ *     null when every slot is one dword.
+ * @property {number[] | null} highs  A 64-bit call's high halves, by dword (`args.high`).
+ * @property {Set<number> | null} cutSkip  Its dwords that are no address of their own
+ *     (`skippedWords`), made at its first watched call.
+ * @property {boolean} cutSaid  An address past 4 GiB it took as its low dword was said.
  */
 
 /**
@@ -115,6 +164,8 @@ import { isDriven } from './drive.js';
  *     is here and the stack arguments above it.
  * @property {number} restingStack Where the stack will be once the stub returns.
  * @property {number} hostReturn
+ * @property {boolean} zeroExtends  A 64-bit caller of a function that answers an address:
+ *     an answer that comes after a wait goes into RAX zero-extended, as one in place does.
  * @property {any} thread           Whose call this is: parking stamps it as the call begins.
  */
 
@@ -139,6 +190,26 @@ const CALL_RING = 4096;
 const KEPT_ARGS = 12;
 
 /** How a call ended, as the ring keeps it, by the number it keeps. */
+/**
+ * What a handler's call becomes in the guest rather than the end of the run,
+ * told by its code: this layer imports neither memory's nor win32's. Memory's
+ * refused guest access (`memory/internal/faults.js`), and an exception a
+ * handler raises on purpose (`win32/common/raise.js`). `call` is the host
+ * function it was met in, which the trace names.
+ *
+ * @typedef {Error & { code: 'GUEST_ACCESS', address: number, length: number,
+ *     mode: 'read' | 'write' | 'execute', call?: string }} GuestAccess
+ * @typedef {Error & { code: 'GUEST_EXCEPTION', status: number, flags: number,
+ *     parameters: number[], call?: string }} GuestException
+ * @typedef {GuestAccess | GuestException} GuestRaise
+ */
+
+/** @param {unknown} e @returns {e is GuestRaise} */
+const isGuestRaise = e=>{
+    const code = /** @type {{ code?: unknown }} */ (e)?.code;
+    return code === 'GUEST_ACCESS' || code === 'GUEST_EXCEPTION';
+};
+
 const KINDS = ['threw', 'answered', 'fellThrough', 'parked', 'waiting', 'forwarded'];
 const THREW = 0;
 const ANSWERED = 1;
@@ -217,8 +288,59 @@ const HOOK_AREA = 'call.hook';
 
 /** How many calls one timed crossing stands for, on average (`sampleInterval`). */
 const TRAP_SAMPLE = 32;
+
+/**
+ * The host ms a function's `calls` stand for, from the `timed` of them, which
+ * took `ms`: each timed call weighed by the calls made per timed one of this
+ * function, not by TRAP_SAMPLE. A function called a few times a second is
+ * timed once in a while, and that once weighed by 32 read a 7 ms call as
+ * 239 ms of the second. Null when none was timed: not measured, not zero.
+ *
+ * @param {number} ms @param {number} timed @param {number} calls
+ * @returns {number | null}
+ */
+const estimatedMs = (ms, timed, calls)=>(timed === 0 ? null : ms * calls / timed);
 /** How many return addresses each function's sampled crossings are counted at. */
 const CALLERS_KEPT = 64;
+
+/**
+ * Where an x86-64 call's first four arguments are when the trap reads them:
+ * RCX, RDX -- which the stub keeps in R11 before it spends DX -- R8 and R9.
+ */
+const LONG_ARGUMENT_REGISTERS = Object.freeze(['rcx', 'r11', 'r8', 'r9']);
+
+/**
+ * One x64 argument slot of a function: the first of its dwords in the 32-bit
+ * signature, how many it is there, whether an XMM register carries it when it
+ * is among the first four, and whether it is a pointer to a structure the
+ * signature has inline (`ref`).
+ *
+ * @typedef {{ word: number, words: number, xmm: boolean, ref: boolean }} LongSlot
+ */
+
+/**
+ * The x64 slots of a signature of `count` dwords: one per argument, an
+ * argument of two dwords -- a quadword or a double -- one slot, and a
+ * structure passed by value one slot holding a pointer to it.
+ *
+ * @param {number} count @param {number[] | null} quadwords
+ * @param {Record<number, 'f32' | 'f64'> | null} floats
+ * @param {Record<number, number> | null} [structs]
+ * @returns {LongSlot[]}
+ */
+const longSlotsOf = (count, quadwords, floats, structs = null)=>{
+    /** @type {LongSlot[]} */
+    const slots = [];
+    for (let word = 0; word < count;)
+    {
+        const kind = floats?.[word];
+        const struct = structs?.[word];
+        const words = struct ?? (quadwords?.includes(word) || kind === 'f64' ? 2 : 1);
+        slots.push({ word, words, xmm: kind !== undefined, ref: struct !== undefined });
+        word += words;
+    }
+    return slots;
+};
 
 /**
  * A function's sampled frame chains as text and counts: "0xA<0xB", the first
@@ -230,6 +352,64 @@ const CALLERS_KEPT = 64;
 const chainCounts = chains=>[...chains].flatMap(([first, below])=>[...below].map(
     ([second, count])=>/** @type {[string, number]} */ ([first === 0 ? ''
         : `0x${first.toString(16)}${second === 0 ? '' : `<0x${second.toString(16)}`}`, count])));
+
+/** The high halves an address can have: user space ends below 2^53 (and Windows' below 2^47). */
+const ADDRESS_HIGH = 2 ** 21;
+
+/**
+ * Makes each declared address argument whole where its high half names an
+ * address past 4 GiB (`Entry.addresses`): any other - zero, a sign's ones, an
+ * integer's leftover - leaves the dword as every handler has always had it.
+ *
+ * @param {number[] | null} addresses @param {any[]} args @param {number[]} high
+ */
+export const wholeAddresses = (addresses, args, high)=>{
+    if (addresses === null)
+    {
+        return;
+    }
+    for (let i = 0; i < addresses.length; i++)
+    {
+        const at = addresses[i];
+        const upper = high[at];
+        if (upper !== 0 && upper < ADDRESS_HIGH)
+        {
+            args[at] = upper * 2 ** 32 + (args[at] >>> 0);
+        }
+    }
+};
+
+/**
+ * The dwords of a 64-bit call that are not an address in their own slot: the
+ * declared addresses and sizes, and a quadword's, a float's or a structure's
+ * slot, which hold their high half or their bits as their own.
+ *
+ * @param {Entry} entry
+ * @returns {Set<number>}
+ */
+const skippedWords = entry=>new Set([...entry.addresses ?? [], ...entry.sizes ?? [],
+    ...(entry.longSlots ?? []).filter(slot=>slot.words !== 1 || slot.xmm || slot.ref)
+        .flatMap(slot=>[slot.word, slot.word + 1])]);
+
+/**
+ * Makes each declared size argument the largest dword where a 64-bit caller's
+ * is past one (`HostFunction.sizes`).
+ *
+ * @param {number[] | null} sizes @param {any[]} args @param {number[]} high
+ */
+const largestSizes = (sizes, args, high)=>{
+    if (sizes === null)
+    {
+        return;
+    }
+    for (let i = 0; i < sizes.length; i++)
+    {
+        if (high[sizes[i]] !== 0)
+        {
+            args[sizes[i]] = -1;
+        }
+    }
+};
 
 /**
  * A call's argument array, made to hold each word as a value from the start.
@@ -314,14 +494,57 @@ function makeRecord(){
 const NO_ERROR = ()=>0;
 
 /**
+ * Whether RAX takes a function's answer zero-extended in a 64-bit process
+ * (`longAnswer`): an address (`returns: 'pointer'`), or the unsigned dword
+ * of a function whose guest code leaves RAX so (`returns: 'u32'`) - the
+ * handler and the code are one function, and a caller that reads RAX whole
+ * must not be able to tell which answered.
+ *
+ * @param {{ returns?: string }} fn
+ */
+export const zeroExtendsOf = fn=>fn.returns === 'pointer' || fn.returns === 'u32';
+
+/**
+ * RAX as a 64-bit call's answer leaves it, as the function's type has it: a
+ * bigint whole; a quadword answered the 32-bit way, its high half for EDX
+ * (`high`), the two halves whole; an address zero-extended, or whole where
+ * the handler answered one past 4 GiB; any other dword sign-extended - a
+ * handle of -1 is INVALID_HANDLE_VALUE whole.
+ *
+ * @param {number | bigint} result @param {number | null} high @param {boolean} zeroExtends
+ * @returns {bigint}
+ */
+export function longAnswer(result, high, zeroExtends){
+    if (typeof result === 'bigint')
+    {
+        return BigInt.asUintN(64, result);
+    }
+    if (high !== null)
+    {
+        return BigInt(high) << 32n | BigInt(result >>> 0);
+    }
+    return zeroExtends ? BigInt(unsignedAddress(result)) : BigInt.asUintN(64, BigInt(result | 0));
+}
+
+/**
+ * An answer typed an address or an unsigned dword, as a number RAX takes
+ * zero-extended: a dword by its low 32 bits, whatever sign it was computed
+ * with, and an address past 4 GiB a handler answered whole as it is.
+ *
+ * @param {number} result
+ */
+export const unsignedAddress = result=>(result >= 2 ** 32 && result < 2 ** 53 ? result
+    : result >>> 0);
+
+/**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
  * @param {(answer: Promise<number> | import('./drive.js').Driven, frame: any) => void}
  *     [deps.suspend]
- * @param {() => number} [deps.now]  The clock call rates are measured by;
- *        performance.now unless a test keeps its own.
+ * @param {() => number} [deps.now]  The dispatcher's clock: call rates and each
+ *        timed call's host time; performance.now unless a test keeps its own.
  *        What to do with a handler that has not finished; wired by the module.
  * @param {() => number} [deps.lastError]
  *        The running thread's last error, for the trace. Injected because it
@@ -349,6 +572,9 @@ const NO_ERROR = ()=>0;
  *        of guest memory per pointer argument on every recorded call. On, it
  *        is the only way to see a string a program built on its own stack,
  *        which by the end of a run is somebody else's stack.
+ * @param {(api: string, detail: string, kind?: string) => void} [deps.divergence]
+ *        Where a call that lost part of what it was handed is said: an address
+ *        past 4 GiB a handler took as its low dword (`watchCut`).
  * @param {(name: string) => boolean} [deps.wantsCall]
  *        Whether `onCall` wants the calls of a function, asked once for each
  *        and again only when the journal's revision moves (`revisionCell`):
@@ -404,8 +630,8 @@ class Dispatcher {
          * (`cpu.registerFile`): ESP read and EAX written in place rather than
          * through `readReg32` and `writeReg32`, each a walk through the cpu
          * layer's api, its host and a search of the register names. Taken
-         * again when it reads empty -- an emulator that grows its memory
-         * detaches the buffer the view was on -- and never asked for again
+         * again when it reads empty -- a memory that grows detaches the
+         * buffer the view was on -- and never asked for again
          * once the cpu says it has none.
          *
          * @type {Int32Array | null}
@@ -423,6 +649,15 @@ class Dispatcher {
 
         /** @type {Parameters<typeof createDispatcher>[0]['journal'] | null} */
         this.journal = deps.journal ?? null;
+        /** Where a lost argument is said (`watchCut`). */
+        this.divergence = deps.divergence ?? null;
+        /**
+         * The call whose arguments past 4 GiB are watched while its handler runs:
+         * those it was handed, by index, and the ones it read whole.
+         *
+         * @type {{ entry: Entry, at: number[], read: Set<number>, high: number[] } | null}
+         */
+        this.cutWatch = null;
 
         /** The clock the call rates are measured by (`chatty`). */
         this.now = deps.now ?? (()=>performance.now());
@@ -435,6 +670,11 @@ class Dispatcher {
          * @type {string[]}
          */
         this.chatty = [];
+        /**
+         * Each function's `calls`, `sampledMs` and `sampledCalls` when the
+         * rate window began, three by id (`measureRates`).
+         */
+        this.windowBegan = new Float64Array(0);
         /** The names already written to the journal as chatty, once each. @type {Set<string>} */
         this.chattyNoted = new Set();
         /**
@@ -482,6 +722,14 @@ class Dispatcher {
         // archives made up its mind thousands of calls earlier. A sink keeps
         // all of it, for whoever is willing to pay for the file.
         this.onCall = deps.onCall ?? null;
+        /**
+         * Raises a handler's refused guest access, or the exception it
+         * raised, in the guest, answering as the call would after it -- set
+         * by whoever has the exception dispatch, which is not this layer.
+         *
+         * @type {((raised: GuestRaise) => Promise<number>) | null}
+         */
+        this.guestFault = null;
         /** @type {((name: string) => boolean) | null} */
         this.wantsCall = null;
         /** @type {Int32Array | null} */
@@ -526,6 +774,15 @@ class Dispatcher {
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
         this.functions = [];
+        /** Spans named by asking (`placedSpan`). @type {{ base: number, size: number, nameAt: (address: number) => string | null }[]} */
+        this.spans = [];
+        /**
+         * Functions registered and not yet called, by id: their records are
+         * made at their first call (`entry`).
+         *
+         * @type {any[]}
+         */
+        this.pending = [];
         this.implemented = 0;
         /**
          * Frames by depth of nesting, reused: a guest callback can trap into
@@ -542,6 +799,14 @@ class Dispatcher {
          */
         this.frames = [null];
         this.depth = 0;
+        /**
+         * The high half of the answer the handler running now gives, when it
+         * answers a quadword the 32-bit way, in EDX beside EAX (`answerHigh`);
+         * null for a dword. In a 64-bit process the two make RAX.
+         *
+         * @type {number | null}
+         */
+        this.wideHigh = null;
         /**
          * The names of recent calls, as a ring.
          *
@@ -655,7 +920,9 @@ class Dispatcher {
     /**
      * The return addresses of the two frames an EBP chain names from `ebp`,
      * into `chainFirst` and `chainSecond`, zero where the chain ends sooner; a
-     * frame outside mapped memory ends it. Numbers rather than text: a sampled
+     * frame outside mapped memory, or in a region nothing may read (the
+     * engine's range of a growing memory, which an EBP a program uses as a
+     * plain register may point into), ends it. Numbers rather than text: a sampled
      * crossing runs this tens of thousands of times a second, and text made
      * at each was megabytes of garbage a second for a statistic.
      *
@@ -668,7 +935,7 @@ class Dispatcher {
         for (let depth = 0; depth < 2 && frame !== 0; depth++)
         {
             const region = this.memory.find?.(frame);
-            if (!region || frame + 8 > region.base + region.size)
+            if (!region || region.access === 'none' || frame + 8 > region.base + region.size)
             {
                 break;
             }
@@ -917,28 +1184,183 @@ class Dispatcher {
     }
 
     /**
+     * The high half of a quadword the handler running now answers, which a
+     * 32-bit caller finds in EDX and a 64-bit one in RAX's upper half.
+     *
+     * @param {number} value
+     */
+    answerHigh(value){
+        this.wideHigh = value >>> 0;
+    }
+
+    /**
+     * The quadword return address at RSP, whole.
+     *
+     * @param {number} rsp
+     */
+    longReturn(rsp){
+        return (this.memory.readU32(rsp) >>> 0) + (this.memory.readU32(rsp + 4) >>> 0) * 2 ** 32;
+    }
+
+    /**
      * An x86-64 call's arguments, as the x64 convention passes them: the first
      * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
      * the trap spent DX -- and the rest on the stack past the return address
      * and the 32 bytes of home space the caller leaves for the four. Each
-     * argument is its slot's low dword: a handler takes dwords, and every
-     * address lies in the window below 4 GiB. A quadword argument the 32-bit
-     * signature counts as two is not split yet.
+     * argument is its slot's low dword: a handler takes dwords. Its high dword
+     * goes into `args.high` beside it, for a handler that takes a pointer past
+     * 4 GiB whole (`pointerArg`): a wide window's image and its data lie
+     * there. A quadword or a float the function declares (`quadwords`,
+     * `floats`) is read whole into the dwords the 32-bit signature has it in.
      *
      * @param {Entry} entry @param {number} rsp
-     * @returns {number} the return address at RSP
+     * @returns {number} the return address at RSP, whole: a caller in an image
+     *     past 4 GiB is not its low dword
      */
     readLongCall(entry, rsp){
         const args = entry.args;
         const count = entry.registerArgs + entry.stackWords;
-        const registers = ['rcx', 'r11', 'r8', 'r9'];
+        const registers = LONG_ARGUMENT_REGISTERS;
+        const slots = entry.longSlots;
+        const high = entry.highs ??= argumentArray(count);
+        /** @type {any} */ (args).high = high;
+        if (slots === null)
+        {
+            for (let i = 0; i < count; i++)
+            {
+                if (i < 4)
+                {
+                    const whole = this.cpu.readReg64(registers[i]);
+                    args[i] = Number(BigInt.asIntN(32, whole));
+                    high[i] = Number(BigInt.asUintN(32, whole >> 32n));
+                }
+                else
+                {
+                    const at = rsp + 8 + 0x20 + (i - 4) * 8;
+                    args[i] = this.memory.readU32(at) | 0;
+                    high[i] = this.memory.readU32(at + 4) >>> 0;
+                }
+            }
+            wholeAddresses(entry.addresses, args, high);
+            largestSizes(entry.sizes, args, high);
+            this.watchCut(entry, args, high, count);
+            return this.longReturn(rsp);
+        }
+        // An argument the signature counts as two dwords is one slot here,
+        // both its halves: the slots after it come one earlier. A float or a
+        // double among the first four is in the XMM register of its slot, and
+        // on the stack past them as any other slot is.
+        for (let slot = 0; slot < slots.length; slot++)
+        {
+            const { word, words, xmm, ref } = slots[slot];
+            if (ref)
+            {
+                // A structure passed by value: the slot is a pointer to the
+                // caller's copy, whose dwords the 32-bit signature has inline.
+                const at = slot < 4
+                    ? Number(BigInt.asUintN(32, this.cpu.readReg64(registers[slot])))
+                    : this.memory.readU32(rsp + 8 + 0x20 + (slot - 4) * 8) >>> 0;
+                for (let k = 0; k < words && word + k < count; k++)
+                {
+                    args[word + k] = at === 0 ? 0 : this.memory.readU32(at + k * 4) | 0;
+                }
+                continue;
+            }
+            if (slot >= 4)
+            {
+                const at = rsp + 8 + 0x20 + (slot - 4) * 8;
+                args[word] = this.memory.readU32(at) | 0;
+                high[word] = this.memory.readU32(at + 4) >>> 0;
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = this.memory.readU32(at + 4) | 0;
+                }
+            }
+            else if (xmm)
+            {
+                const lanes = this.cpu.readXmm(slot);
+                args[word] = lanes[0] | 0;
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = lanes[1] | 0;
+                }
+            }
+            else
+            {
+                const whole = this.cpu.readReg64(registers[slot]);
+                args[word] = Number(BigInt.asIntN(32, whole));
+                high[word] = Number(BigInt.asUintN(32, whole >> 32n));
+                if (words === 2 && word + 1 < count)
+                {
+                    args[word + 1] = Number(BigInt.asIntN(32, whole >> 32n));
+                }
+            }
+        }
+        wholeAddresses(entry.addresses, args, high);
+        largestSizes(entry.sizes, args, high);
+        this.watchCut(entry, args, high, count);
+        return this.longReturn(rsp);
+    }
+
+    /**
+     * An argument whose high half names an address past 4 GiB that the function
+     * does not declare whole (`addresses`, `sizes`, a quadword's slot): its
+     * handler reads it whole through `args.high` (`pointerArg`), or takes the
+     * low dword, which is other memory - a block a wide window gave out past
+     * 4 GiB read or written 4 GiB below. Such a call's `args.high` is watched
+     * while the handler runs, and a high half it never read is a loss said once
+     * a function (`settleCut`). A call with none costs a look at its halves.
+     *
+     * @param {Entry} entry @param {any} args @param {number[]} high @param {number} count
+     */
+    watchCut(entry, args, high, count){
+        if (this.divergence === null || entry.cutSaid)
+        {
+            return;
+        }
+        /** @type {number[] | null} */
+        let at = null;
         for (let i = 0; i < count; i++)
         {
-            args[i] = i < 4
-                ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[i])))
-                : this.memory.readU32(rsp + 8 + 0x20 + (i - 4) * 8) | 0;
+            const upper = high[i];
+            if (upper !== 0 && upper < ADDRESS_HIGH && args[i] !== -1 && args[i] < 2 ** 32
+                && !(entry.cutSkip ??= skippedWords(entry)).has(i))
+            {
+                (at ??= []).push(i);
+            }
         }
-        return this.memory.readU32(rsp);
+        if (at === null)
+        {
+            return;
+        }
+        /** @type {Set<number>} */
+        const read = new Set();
+        this.cutWatch = { entry, at, read, high };
+        args.high = new Proxy(high, {
+            get: (target, key)=>{
+                if (typeof key === 'string')
+                {
+                    read.add(Number(key));
+                }
+                return target[/** @type {any} */ (key)];
+            },
+        });
+    }
+
+    /** The watched call's handler is done: a high half it did not read is said. */
+    settleCut(){
+        const watch = /** @type {NonNullable<Dispatcher['cutWatch']>} */ (this.cutWatch);
+        this.cutWatch = null;
+        /** @type {any} */ (watch.entry.args).high = watch.high;
+        const lost = watch.at.filter(i=>!watch.read.has(i));
+        if (lost.length > 0)
+        {
+            watch.entry.cutSaid = true;
+            const i = lost[0];
+            /** @type {NonNullable<Dispatcher['divergence']>} */ (this.divergence)(watch.entry.name,
+                `argument ${i}, 0x${(watch.high[i] * 2 ** 32 + (watch.entry.args[i] >>> 0))
+                    .toString(16)}, an address past 4 GiB taken as its low dword`, 'loss');
+        }
     }
 
     /**
@@ -1145,7 +1567,7 @@ class Dispatcher {
      * @param {number} id
      */
     cross(id){
-        const entry = this.functions[id];
+        const entry = this.entry(id);
         if (entry === undefined)
         {
             throw new Error(`bridge: trap ${id} has no implementation`);
@@ -1188,7 +1610,7 @@ class Dispatcher {
         const depth = this.depth;
         const frame = this.frames[depth] ??= {
             name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
-            thread: null,
+            zeroExtends: false, thread: null,
         };
         frame.name = entry.name;
         frame.freeStack = pushed;
@@ -1197,6 +1619,7 @@ class Dispatcher {
         // cleans up whatever the convention.
         frame.restingStack = long ? esp + 8 : esp + 4 + entry.cleanup;
         frame.hostReturn = hostReturn;
+        frame.zeroExtends = long && entry.zeroExtends;
 
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that
@@ -1297,6 +1720,10 @@ class Dispatcher {
         }
         let result;
         let late = false;
+        // Whatever the handler answers in EDX, its own: the one before was
+        // the call that set it. Read once it is done, in this same crossing:
+        // the guest it calls back runs once the crossing is over.
+        this.wideHigh = null;
         // A hook's `ms` times only the handler call itself, every time --
         // unlike the sampled `trap` phase this is the number a kernel's own
         // cost is read from, so it is not sampled.
@@ -1314,6 +1741,10 @@ class Dispatcher {
             // the mutable object built above, not `args` (which stays the
             // pristine reading a fallthrough restores from).
             result = entry.handler(entry.site ? entry.registers : args, frame);
+            if (this.cutWatch !== null)
+            {
+                this.settleCut();
+            }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null)
             {
                 entry.hookStats.ms += hookClock() - hookStart;
@@ -1373,12 +1804,36 @@ class Dispatcher {
             {
                 kinds[at] = WAITING;
                 late = true;
+                const raise = this.guestFault;
+                if (raise !== null && !entry.hook)
+                {
+                    // The same fault, met after the handler waited.
+                    result = /** @type {Promise<number>} */ (result).catch(
+                        (/** @type {unknown} */ e)=>(isGuestRaise(e)
+                            ? raise(Object.assign(e, { call: entry.name })) : Promise.reject(e)));
+                }
             }
             else
             {
                 kinds[at] = ANSWERED;
                 this.answers[at] = Number(result);
             }
+        }
+        catch (e){
+            // A guest pointer the handler was handed and memory refused: on
+            // Windows the DLL's own instruction faults there and the
+            // program's handlers see STATUS_ACCESS_VIOLATION, so the call
+            // becomes that exception rather than the end of the run -- as
+            // does an exception the handler raises as Windows' function
+            // does. Nothing else is turned: any other error here is ours,
+            // and stops the run.
+            if (this.guestFault === null || entry.hook || !isGuestRaise(e))
+            {
+                throw e;
+            }
+            result = this.guestFault(Object.assign(e, { call: entry.name }));
+            kinds[at] = WAITING;
+            late = true;
         }
         finally
         {
@@ -1463,15 +1918,16 @@ class Dispatcher {
         }
         if (long)
         {
-            // Sign-extended, as a dword the host computes is meant: a handle
-            // of -1 is INVALID_HANDLE_VALUE whole, and every address below
-            // 2 GiB reads the same either way.
-            this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
-                : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
+            // As the function's type has it (`returns`): an address
+            // zero-extended, any other dword sign-extended - a handle of -1 is
+            // INVALID_HANDLE_VALUE whole. A quadword answered the 32-bit way,
+            // its high half for EDX, is the two halves whole.
+            this.cpu.writeReg64('rax', longAnswer(/** @type {number | bigint} */ (result),
+                this.wideHigh, entry.zeroExtends));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
-        // grown the emulator's memory under the view.
+        // grown guest memory under the view.
         const answerTo = this.registers();
         if (answerTo === null)
         {
@@ -1488,30 +1944,45 @@ class Dispatcher {
      * @param {HostFunction} fn
      */
     register(id, fn){
-        if (this.functions[id] !== undefined)
+        if (this.functions[id] !== undefined || this.pending[id] !== undefined)
         {
             throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
         }
-        const site = fn.site === true;
-        // A site hook marshals nothing through a convention: its eight
-        // registers come straight off the pushad block, not off a
-        // calling convention nobody chose -- the call was never a call.
-        // `convention`/`argBytes` are optional only for a `site` entry;
-        // every other caller still provides them, checked at `register`'s
-        // own call sites (`bridge/module.js`).
-        const convention = /** @type {string} */ (fn.convention);
-        const argBytes = /** @type {number} */ (fn.argBytes);
-        const registerArgs = site ? 0 : registerArgumentCount(convention);
-        // Validates the convention and the byte count here, once, rather
-        // than on every call.
-        const cleanup = site ? 0 : calleeCleanup(convention, argBytes);
-        const stackWords = site ? 0 : (argBytes - registerArgs * 4) >>> 2;
-        // A site hook shares a slot hook's counters and journal record --
-        // both are "a guest call this engine decided by a sidecar word,
-        // rather than by declaration" -- so it is a `hook` for every
-        // purpose downstream except how its registers are marshalled.
-        const hook = fn.hook === true || site;
-        this.functions[id] = {
+        // Checked now, made when first called (`entry`): a process registers
+        // every export of every system library, and calls a few hundred.
+        const { hook } = this.shape(fn);
+        this.pending[id] = fn;
+        this.implemented++;
+        if (hook)
+        {
+            this.hooksByName.set(fn.name, id);
+            this.entry(id);
+        }
+    }
+
+    /**
+     * A function's record, made from its declaration the first time it is
+     * asked for, and undefined for an id nothing registered.
+     *
+     * @param {number} id
+     */
+    entry(id){
+        /** @type {Entry | undefined} */
+        const ready = this.functions[id];
+        if (ready !== undefined)
+        {
+            return ready;
+        }
+        const fn = this.pending[id];
+        if (fn === undefined)
+        {
+            return undefined;
+        }
+        this.pending[id] = undefined;
+        const { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words } = this.shape(fn);
+        /** @type {Entry} */
+        const made = this.functions[id] = {
             fn,
             name: fn.name,
             handler: fn.handler,
@@ -1532,25 +2003,109 @@ class Dispatcher {
             hookStats: hook
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
+            quadwords,
+            addresses,
+            sizes,
+            zeroExtends: zeroExtendsOf(fn),
+            longSlots: quadwords || floats || structs
+                ? longSlotsOf(words, quadwords, floats, structs) : null,
             args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             chainCount: 0,
+            highs: null,
+            cutSkip: null,
+            cutSaid: false,
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
             sinkRevision: -1,
             sinkOn: true,
             calls: 0,
             sampledMs: 0,
+            sampledCalls: 0,
         };
-        if (hook)
+        return made;
+    }
+
+    /**
+     * What a function's declaration says of its call, checked: thrown where it
+     * does not hold together, at registration, not at its first call.
+     *
+     * @param {any} fn
+     */
+    shape(fn){
+        const site = fn.site === true;
+        // A site hook marshals nothing through a convention: its eight
+        // registers come straight off the pushad block, not off a
+        // calling convention nobody chose -- the call was never a call.
+        // `convention`/`argBytes` are optional only for a `site` entry;
+        // every other caller still provides them, checked at `register`'s
+        // own call sites (`bridge/module.js`).
+        const convention = /** @type {string} */ (fn.convention);
+        const argBytes = /** @type {number} */ (fn.argBytes);
+        const registerArgs = site ? 0 : registerArgumentCount(convention);
+        // Validates the convention and the byte count here, once, rather
+        // than on every call.
+        const cleanup = site ? 0 : calleeCleanup(convention, argBytes);
+        const stackWords = site ? 0 : (argBytes - registerArgs * 4) >>> 2;
+        // A site hook shares a slot hook's counters and journal record --
+        // both are "a guest call this engine decided by a sidecar word,
+        // rather than by declaration" -- so it is a `hook` for every
+        // purpose downstream except how its registers are marshalled.
+        const hook = fn.hook === true || site;
+        const quadwords = fn.quadwords !== undefined && fn.quadwords.length > 0
+            ? [...fn.quadwords] : null;
+        const words = stackWords + registerArgs;
+        if (quadwords?.some(at=>!Number.isInteger(at) || at < 0 || at + 1 >= words))
         {
-            this.hooksByName.set(fn.name, id);
+            throw new Error(`bridge: ${fn.name}'s quadwords ${quadwords.join(', ')} are not two`
+                + ' of its argument dwords');
         }
-        this.implemented++;
+        const floats = fn.floats !== undefined && Object.keys(fn.floats).length > 0
+            ? { ...fn.floats } : null;
+        for (const [at, kind] of Object.entries(floats ?? {}))
+        {
+            const word = Number(at);
+            if (!Number.isInteger(word) || word < 0 || word + (kind === 'f64' ? 1 : 0) >= words
+                || (kind !== 'f32' && kind !== 'f64') || quadwords?.includes(word))
+            {
+                throw new Error(`bridge: ${fn.name}'s ${kind} at dword ${at} is not among its`
+                    + ' arguments');
+            }
+        }
+        const structs = fn.structs !== undefined && Object.keys(fn.structs).length > 0
+            ? { ...fn.structs } : null;
+        for (const [at, size] of Object.entries(structs ?? {}))
+        {
+            const word = Number(at);
+            if (!Number.isInteger(word) || word < 0 || !Number.isInteger(size) || size < 3
+                || word + size > words || quadwords?.includes(word) || floats?.[word])
+            {
+                throw new Error(`bridge: ${fn.name}'s structure of ${size} dwords at dword ${at}`
+                    + ' is not among its arguments');
+            }
+        }
+        const addresses = fn.addresses !== undefined && fn.addresses.length > 0
+            ? [...fn.addresses] : null;
+        if (addresses?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]))
+        {
+            throw new Error(`bridge: ${fn.name}'s addresses ${addresses.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
+        }
+        const sizes = fn.sizes !== undefined && fn.sizes.length > 0 ? [...fn.sizes] : null;
+        if (sizes?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]
+            || addresses?.includes(at)))
+        {
+            throw new Error(`bridge: ${fn.name}'s sizes ${sizes.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
+        }
+        return { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words };
     }
 
     /** @param {number} id */
     lookup(id){
-        return this.functions[id]?.fn ?? null;
+        return this.functions[id]?.fn ?? this.pending[id] ?? null;
     }
 
     /**
@@ -1560,7 +2115,31 @@ class Dispatcher {
      * @returns {string | null}
      */
     symbolize(address){
-        return this.byAddress.get(address >>> 0) ?? null;
+        const at = address >>> 0;
+        const named = this.byAddress.get(at);
+        if (named !== undefined)
+        {
+            return named;
+        }
+        for (const span of this.spans)
+        {
+            if (at >= span.base && at < span.base + span.size)
+            {
+                return span.nameAt(at);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Names the addresses of a span by asking it, as they are asked for: a
+     * module's exports, named only if a report ever stands on one.
+     *
+     * @param {number} base @param {number} size
+     * @param {(address: number) => string | null} nameAt
+     */
+    placedSpan(base, size, nameAt){
+        this.spans.push({ base: base >>> 0, size, nameAt });
     }
 
     /**
@@ -1621,7 +2200,7 @@ class Dispatcher {
         {
             this.innerWeight = TRAP_SAMPLE;
         }
-        const began = performance.now();
+        const began = this.now();
         try
         {
             this.cross(id);
@@ -1631,7 +2210,8 @@ class Dispatcher {
             const entry = this.functions[id];
             if (entry !== undefined)
             {
-                entry.sampledMs += performance.now() - began;
+                entry.sampledMs += this.now() - began;
+                entry.sampledCalls++;
             }
             this.innerWeight = outer;
             profiler?.end('trap', TRAP_WEIGHT);
@@ -1693,16 +2273,34 @@ class Dispatcher {
         this.windowStart = now;
         /** @type {{ name: string, perSecond: number, msPerSecond: number }[]} */
         const over = [];
-        for (const entry of this.functions)
+        // By index: run once a second it stays in the interpreter, where an
+        // iterator over the table - tens of thousands of ids, most of them
+        // holes - made a result object for each.
+        // Where each function's window began, by id in typed arrays: a
+        // fraction stored on an entry whose field holds anything but numbers
+        // is boxed, for every function each second.
+        const functions = this.functions;
+        if (this.windowBegan.length < functions.length * 3)
         {
+            const grown = new Float64Array(functions.length * 3 + 3 * 1024);
+            grown.set(this.windowBegan);
+            this.windowBegan = grown;
+        }
+        const began = this.windowBegan;
+        for (let id = 0; id < functions.length; id++)
+        {
+            const entry = functions[id];
             if (!entry)
             {
                 continue;
             }
-            const calls = entry.calls - (entry.windowCalls ?? 0);
-            const ms = (entry.sampledMs - (entry.windowMs ?? 0)) * TRAP_SAMPLE;
-            entry.windowCalls = entry.calls;
-            entry.windowMs = entry.sampledMs;
+            const at = id * 3;
+            const calls = entry.calls - began[at];
+            const ms = estimatedMs(entry.sampledMs - began[at + 1],
+                entry.sampledCalls - began[at + 2], calls) ?? 0;
+            began[at] = entry.calls;
+            began[at + 1] = entry.sampledMs;
+            began[at + 2] = entry.sampledCalls;
             const perSecond = calls * 1000 / elapsed;
             const msPerSecond = ms * 1000 / elapsed;
             if (perSecond >= CHATTY_CALLS_PER_SECOND || msPerSecond >= CHATTY_MS_PER_SECOND)
@@ -1750,10 +2348,13 @@ class Dispatcher {
                 * TRAP_SAMPLE),
             byFunction: entries
                 .filter(entry=>entry.calls > 0)
-                .sort((left, right)=>right.sampledMs - left.sampledMs || right.calls - left.calls)
+                .map(entry=>({ entry, ms: estimatedMs(entry.sampledMs, entry.sampledCalls,
+                    entry.calls) }))
+                .sort((left, right)=>(right.ms ?? 0) - (left.ms ?? 0)
+                    || right.entry.calls - left.entry.calls)
                 .slice(0, BY_FUNCTION_KEPT)
-                .map(entry=>`${entry.name} ${entry.calls} ${
-                    Math.round(entry.sampledMs * TRAP_SAMPLE)}ms${entry.callers
+                .map(({ entry, ms })=>`${entry.name} ${entry.calls} ${
+                    ms === null ? 'untimed' : `${Math.round(ms)}ms`}${entry.callers
                     ? ` from ${[...entry.callers].sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
                         .join(',')}` : ''}${entry.chains
@@ -1779,14 +2380,17 @@ class Dispatcher {
         this.ringSkip.clear();
         /** @type {string[]} */
         const skipped = [];
-        this.functions.forEach((entry, id)=>{
-            const bare = entry?.name.slice(entry.name.indexOf('!') + 1) ?? '';
-            if (entry && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
+        const length = Math.max(this.functions.length, this.pending.length);
+        for (let id = 0; id < length; id++)
+        {
+            const name = this.functions[id]?.name ?? this.pending[id]?.name;
+            const bare = name?.slice(name.indexOf('!') + 1) ?? '';
+            if (name && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
             {
                 this.ringSkip.add(id);
-                skipped.push(entry.name);
+                skipped.push(name);
             }
-        });
+        }
         return skipped;
     }
 

@@ -13,7 +13,7 @@ import { createTable, readTable } from '../../log/internal/table.js';
 function account(rows = WRITER_ROWS){
     /** @type {string[]} */
     const words = [];
-    const table = createTable({ rows, columns: WRITER_COLUMNS, shared: false });
+    const table = createTable({ rows, columns: WRITER_COLUMNS });
     const made = createWriterAccount({
         table,
         intern: text=>{

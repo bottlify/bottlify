@@ -7,7 +7,7 @@
 /**
  * The decoder in long mode, judged by LLVM's disassembler on code a compiler
  * and an assembler made (`x64-objdump.txt.gz`, built by
- * `tools/x64-decode-fixture.mjs`): for every instruction shape, the length,
+ * `tools/generators/x64-decode-fixture.mjs`): for every instruction shape, the length,
  * the mnemonic and each operand -- registers by name, memory by base, index,
  * scale and displacement (RIP-relative by its absolute target), immediates
  * by value at the operand's width.
@@ -356,4 +356,22 @@ test('a RIP-relative operand carries its absolute address; a 64-bit immediate it
     const signed = /** @type {any} */ (at([0x48, 0x83, 0xc0, 0xff])); // add rax, -1
     assert.deepEqual([signed.operands[1].value, signed.operands[1].upper],
         [0xffffffff, 0xffffffff]);
+});
+
+test('each REX byte is its instruction\'s own, a bare 40 too, though records are shared', ()=>{
+    // setb ch, and with 40, 41, 48, 4f: setb bpl, setb r13b; behind 66 and f3.
+    for (const legacy of [[], [0x66], [0xf3], [0x66, 0xf3]])
+    {
+        for (const rex of [0, 0x40, 0x41, 0x48, 0x4f])
+        {
+            const decoded = /** @type {any} */ (at([...legacy, ...rex === 0 ? [] : [rex],
+                0x0f, 0x92, 0xc5]));
+            assert.equal(decoded.prefixes.rex, rex);
+            assert.equal(decoded.prefixes.operand, legacy.includes(0x66));
+            assert.equal(decoded.prefixes.rep, legacy.includes(0xf3));
+            assert.ok(Object.isFrozen(decoded.prefixes));
+        }
+    }
+    // Outside long mode there is no REX byte to name.
+    assert.equal('rex' in /** @type {any} */ (decode(()=>0x90, 0)).prefixes, false);
 });

@@ -19,7 +19,7 @@
  */
 
 import { versionTokenOf } from './hlsl-ir.js';
-import { float32Bits } from './hlsl-math.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** D3DSPR, the register types. */
 export const REG = Object.freeze({
@@ -85,7 +85,6 @@ export const COMPARISON = Object.freeze({ gt: 1, eq: 2, ge: 3, lt: 4, ne: 5, le:
 const OP_DCL = 31;
 const OP_DEF = 81;
 const OP_DEFI = 48;
-const OP_COMMENT = 0xfffe;
 const END = 0x0000ffff;
 
 /**
@@ -191,7 +190,7 @@ export function encodeProgram(program){
     for (const def of program.defs)
     {
         instruction(OP_DEF, 0, [destToken({ type: REG.CONST, index: def.index, mask: 0xf }),
-            ...def.values.map(float32Bits)]);
+            ...def.values.map(floatBits)]);
     }
     for (const def of program.intDefs ?? [])
     {
@@ -233,7 +232,3 @@ export function encodeProgram(program){
     return Uint32Array.from(tokens);
 }
 
-/** The comment token and its payload words. @param {number[]} words @returns {number[]} */
-export function commentTokens(words){
-    return [(OP_COMMENT | words.length << 16) >>> 0, ...words];
-}

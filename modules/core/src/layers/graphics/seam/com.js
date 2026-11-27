@@ -17,9 +17,12 @@
  * So each is published through the seam's adapter, and what this file adds is
  * how that adapter counts: every count is the API object's own, what the guest
  * did to it in a command ring is settled first, a count can live in a word of
- * guest memory (`createCountCells`), and the release that ends the object
- * tells each interface (`released`) and gives up the way back from all its
- * pointers.
+ * guest memory (`createCountCells`), the release that ends the object tells
+ * each interface (`released`) and gives up the way back from all its
+ * pointers, and what that release owes the program is called before it
+ * answers (`owe`). Which interfaces an object has now (`supports`), answers
+ * to (`answers`) and refuses with a word of its own (`refusal`) are the API
+ * object's to say.
  */
 
 import { createComPublisher } from '../../bridge/com-seam.js';
@@ -32,10 +35,13 @@ import { createComPublisher } from '../../bridge/com-seam.js';
 
 /**
  * @param {CountCells | null} cells
+ * @param {() => unknown} settleOwed  Makes the calls into the program a
+ *        release left owing (`createPublisher`'s `owe`).
  * @returns {(seat: import('../../bridge/com-seam.js').ComSeat) =>
  *     import('../../bridge/com-seam.js').ComCounting}
  */
-const countedByTheApi = cells=>({ api, declared, pointers, remember, forgetAll })=>{
+const countedByTheApi = (cells, settleOwed)=>({ api, declared, pointers, remember,
+    forgetAll })=>{
     /**
      * What the guest did that the object's count has to meet before it is
      * read or lowered here -- a binding it made in a command ring that holds
@@ -59,6 +65,12 @@ const countedByTheApi = cells=>({ api, declared, pointers, remember, forgetAll }
         // Where the guest's AddRef and Release find the object's count, or
         // nothing for an object that keeps it on the host.
         countCell: ()=>(cells ? cells.of(api.counter) : 0),
+        // Where the count its crossings of zero move is kept, for an object
+        // whose first reference is one on another (`ReferenceCount.owner`).
+        ownerCell: ()=>(cells && api.counter?.owner ? cells.of(api.counter.owner) : 0),
+        // The calls into the program a release left owing (`owe`), which the
+        // bridge makes and waits for before it answers the Release.
+        afterRelease: settleOwed,
 
         // Forwarded with the interface it was called through, because an API
         // whose generations count separately needs to know which one. A
@@ -236,13 +248,60 @@ export function createCountCells({ allocate, memory }){
  *        given back leaves only this file's way back to it.
  * @param {CountCells} [deps.cells]  Where objects that can keep their count in
  *        the guest keep it; on the host, without.
- * @returns {import('../../bridge/com-seam.js').ComPublisher
- *     & { countCell: (api: any) => number }}
+ * @param {() => unknown} [deps.currentThread]  The thread whose call is being answered.
+ * @returns {import('../../bridge/com-seam.js').ComPublisher & {
+ *             owe: (call: (thread: unknown) => unknown) => void,
+ *             countCell: (api: any) => number }}
  */
-export function createPublisher({ publishInterface, unpublishInterface, cells }){
+export function createPublisher({ publishInterface, unpublishInterface, cells, currentThread }){
+    /**
+     * Calls into the program that an object going owes it -- the Release of
+     * an interface of the program's that its private data held -- made one
+     * after another on the releasing thread once the Release that ended it
+     * is done, and waited for before the program hears its answer.
+     *
+     * @type {((thread: unknown) => unknown)[]}
+     */
+    const owed = [];
+    /** @returns {unknown} a promise while the calls are made */
+    const settleOwed = ()=>{
+        if (owed.length === 0)
+        {
+            return undefined;
+        }
+        const thread = currentThread?.();
+        /** @returns {unknown} */
+        const next = ()=>{
+            const call = owed.shift();
+            if (!call)
+            {
+                return 0;
+            }
+            const made = call(thread);
+            return typeof (/** @type {any} */ (made))?.then === 'function'
+                ? /** @type {Promise<unknown>} */ (made).then(next) : next();
+        };
+        return next();
+    };
+
     return {
-        ...createComPublisher({ publishInterface, unpublishInterface,
-            counting: countedByTheApi(cells ?? null) }),
+        ...createComPublisher({
+            publishInterface,
+            unpublishInterface,
+            counting: countedByTheApi(cells ?? null, settleOwed),
+            offers: (api, id)=>typeof api.supports !== 'function' || api.supports(id),
+            answers: (api, id)=>typeof api.answers !== 'function' || api.answers(id),
+            refusal: (api, id)=>(typeof api.refusal === 'function' ? api.refusal(id) : undefined),
+        }),
+        /**
+         * A call into the program to make once the Release being answered is
+         * done (`settleOwed`).
+         *
+         * @param {(thread: unknown) => unknown} call
+         */
+        owe(call){
+            owed.push(call);
+        },
         /**
          * The word of guest memory an object's count is kept in, placed there
          * now if it is not yet; 0 for an object that keeps it on the host.

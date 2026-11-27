@@ -18,7 +18,7 @@ import { readFile } from 'node:fs/promises';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
-import { FLAG_SLOW_PATH, QUERY, SHADOW } from './shadow.js';
+import { FLAG_SLOW_PATH, QUERY, SHADOW } from './block.js';
 
 const { same } = equivalence(COMPILED, sources);
 const HANDED = { host: ()=>0x8876086c };
@@ -33,6 +33,7 @@ test('the offsets the guest code reads are the blocks\'', async()=>{
     /** @param {string} name */
     const literal = name=>Number(new RegExp(`^const ${name} = (\\d+);`, 'm').exec(text)?.[1]);
     assert.equal(literal('COOPERATIVE'), SHADOW.COOPERATIVE);
+    assert.equal(literal('CREATION'), SHADOW.CREATION);
     assert.equal(literal('QUERY_TYPE'), QUERY.TYPE);
     assert.equal(literal('QUERY_STATE'), QUERY.STATE);
     assert.equal(literal('QUERY_COUNT'), QUERY.COUNT);
@@ -50,6 +51,22 @@ test('TestCooperativeLevel in the guest answers as its JavaScript', ()=>{
         view.setUint32(0x10, next() % 5 === 0 ? 1 + next() % 4 : 0, true);
         view.setUint32(0x10 + SHADOW.COOPERATIVE, next() % 3 === 0 ? next() : 0, true);
         same('TestCooperativeLevel', { stack: [SELF], memory: [[DATA, bytes]] }, HANDED);
+    }
+});
+
+test('GetCreationParameters in the guest answers and writes as its JavaScript', ()=>{
+    const next = random(7);
+    for (let round = 0; round < 200; round++)
+    {
+        const bytes = new Uint8Array(SHADOW.SIZE + 0x20);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(4, next() % 8 === 0 ? 0 : BLOCK, true);
+        for (let word = 0; word < 4; word++)
+        {
+            view.setUint32(0x10 + SHADOW.CREATION + word * 4, next() % 6 === 0 ? 0 : next(), true);
+        }
+        const out = next() % 6 === 0 ? 0 : DATA + SHADOW.SIZE;
+        same('GetCreationParameters', { stack: [SELF, out], memory: [[DATA, bytes]] }, HANDED);
     }
 });
 

@@ -10,13 +10,13 @@
  *     node modules/cork/bench/calls/chromium.mjs turbofan tf.json [runs] [ms]
  *     node modules/cork/bench/calls/chromium.mjs liftoff lo.json
  *
- * The browser is CDP_TEST_CHROME or the first `tools/cdp_test` finds.
+ * The browser is CDP_TEST_CHROME or the first `tools/lib/browser.mjs` finds.
  */
 
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { CdpEndpoint } from '../../../../tools/cdp_test/cdp.mjs';
-import { launchWithGpu, shutdown } from '../../../../tools/cdp_test/browser.mjs';
+import { CdpEndpoint } from '../../../../tools/lib/cdp.mjs';
+import { launchWithGpu, shutdown } from '../../../../tools/lib/browser.mjs';
 
 const [tier = 'turbofan', out = 'calls.json', runs = '9', ms = '200'] = process.argv.slice(2);
 const FLAGS = /** @type {Record<string, string>} */ ({

@@ -35,6 +35,7 @@
  */
 
 import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
+import { functionLength } from '../../win32/common/shader-tokens.js';
 
 /** The two shader kinds, as the version token's high word spells them. */
 export const SHADER_KIND = Object.freeze({ VERTEX: 'vertex', PIXEL: 'pixel' });
@@ -99,7 +100,7 @@ export const REGISTER = Object.freeze({
  *
  * @type {Readonly<Record<number, { name: string, dest: number, sources: number }>>}
  */
-export const OPCODE_INFO = Object.freeze(Object.fromEntries(/** @type {[number, string, number, number][]} */ ([
+const OPCODE_INFO = Object.freeze(Object.fromEntries(/** @type {[number, string, number, number][]} */ ([
     [0, 'nop', 0, 0], [1, 'mov', 1, 1], [2, 'add', 1, 2], [3, 'sub', 1, 2], [4, 'mad', 1, 3],
     [5, 'mul', 1, 2], [6, 'rcp', 1, 1], [7, 'rsq', 1, 1], [8, 'dp3', 1, 2], [9, 'dp4', 1, 2],
     [10, 'min', 1, 2], [11, 'max', 1, 2], [12, 'slt', 1, 2], [13, 'sge', 1, 2],
@@ -450,7 +451,59 @@ export function validateShader(tokens, kind, supported){
     {
         return D3DERR_INVALIDCALL;
     }
+    // A constant register past the version's last is refused (Wine's
+    // test_vertex_shader_constant and test_pixel_shader_constant).
+    const limits = constantLimits(kind, major, parsed.version.minor);
+    for (const instruction of parsed.instructions)
+    {
+        // A model 3 pixel shader's input of POSITION0 is the pixel's own
+        // place, which it reads through vPos, not a varying (Wine's d3d9
+        // test_position_index: POSITION1 is taken, POSITION0 refused).
+        const declared = instruction.declaration;
+        if (kind === SHADER_KIND.PIXEL && major >= 3 && declared && 'usage' in declared
+            && instruction.dest?.type === REGISTER.INPUT && declared.usage === 0
+            && declared.usageIndex === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        for (const operand of [instruction.dest, ...instruction.sources])
+        {
+            const limit = operand ? limits[operand.type] : undefined;
+            if (operand && limit !== undefined && operand.relative === null
+                && operand.index >= limit)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+        }
+    }
     return D3D_OK;
+}
+
+/**
+ * How many float, integer and boolean constants a version has, by register
+ * type: vertex shaders 256 floats and 16 of each other kind; pixel shaders 8
+ * floats in 1.x, 32 in 2.0 with no integer or boolean ones (2_x has 16 of
+ * each), and 224 floats in 3.0.
+ *
+ * @param {string} kind @param {number} major @param {number} minor
+ * @returns {Record<number, number>}
+ */
+function constantLimits(kind, major, minor){
+    if (kind === SHADER_KIND.VERTEX)
+    {
+        return { [REGISTER.CONST]: 256, [REGISTER.CONSTINT]: 16, [REGISTER.CONSTBOOL]: 16 };
+    }
+    if (major < 2)
+    {
+        return { [REGISTER.CONST]: 8, [REGISTER.CONSTINT]: 0, [REGISTER.CONSTBOOL]: 0 };
+    }
+    if (major === 2)
+    {
+        const extended = minor === 1;
+        return { [REGISTER.CONST]: 32, [REGISTER.CONSTINT]: extended ? 16 : 0,
+            [REGISTER.CONSTBOOL]: extended ? 16 : 0 };
+    }
+    return { [REGISTER.CONST]: 224, [REGISTER.CONSTINT]: 16, [REGISTER.CONSTBOOL]: 16 };
 }
 
 /**
@@ -461,21 +514,8 @@ export function validateShader(tokens, kind, supported){
  * @returns {Uint32Array}
  */
 export function functionOf(tokens){
-    let length = tokens.length;
-    for (let at = 1; at < tokens.length; at++)
-    {
-        const token = tokens[at] >>> 0;
-        if ((token & 0xffff) === COMMENT_OPCODE)
-        {
-            at += (token >>> 16) & 0x7fff;
-            continue;
-        }
-        if (token === END_TOKEN)
-        {
-            length = at + 1;
-            break;
-        }
-    }
+    const length = functionLength(at=>(at < tokens.length ? tokens[at] >>> 0 : undefined))
+        || tokens.length;
     return Uint32Array.from({ length }, (_, at)=>tokens[at] >>> 0);
 }
 
@@ -488,6 +528,7 @@ export function functionOf(tokens){
  * @property {ParsedShader} parsed
  * @property {number} refCount
  * @property {boolean} destroyed  whether its last reference has gone for good
+ * @property {any} counter  its count, which guest code may keep (`ReferenceCount.place`)
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: { bytes?: number, tokens?: Uint32Array }, room?: number | null) => number}
@@ -521,6 +562,9 @@ export function createShader(options){
         get destroyed(){
             return options.count.destroyed;
         },
+        // Where guest code may count its references (`ReferenceCount.place`),
+        // as a declaration's: set before every draw, as a declaration is.
+        counter: options.count,
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
 

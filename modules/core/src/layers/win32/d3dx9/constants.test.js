@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConstantTables, registerValues } from './constants.js';
+import { COMPILED as SETTERS_LONG } from './constants-setters.x64.js';
+import { COMPILED as SETTERS_32 } from './constants-setters.x86.js';
 
 /**
  * A vertex shader's bytecode as a compiler writes it: the version token, then
@@ -73,8 +75,8 @@ function shader(constants, types){
     return new Uint8Array([...head, ...bytes, ...end]);
 }
 
-/** @param {Uint8Array} [code] */
-function machine(code = shader()){
+/** @param {Uint8Array} [code] @param {{ drive?: boolean, pointerSize?: 4 | 8 }} [options] */
+function machine(code = shader(), options = {}){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     let free = 0x4000;
@@ -85,11 +87,13 @@ function machine(code = shader()){
     // A device whose vtable's slot n holds n, so a call names its method.
     const DEVICE = 0x100;
     view.setUint32(DEVICE, 0x200, true);
+    const pointer = options.pointerSize ?? 4;
     for (let slot = 0; slot < 120; slot++)
     {
-        view.setUint32(0x200 + slot * 4, slot, true);
+        view.setUint32(0x200 + slot * pointer, slot, true);
     }
     const tables = createConstantTables({
+        ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap: { allocate: bytes=>{
@@ -101,22 +105,36 @@ function machine(code = shader()){
             published.push(object);
             return 0x300;
         } },
-        callGuest: ({ entry, args })=>{
-            const [, , data, count] = args;
-            const integer = entry === 96 || entry === 98 || entry === 111 || entry === 113;
-            calls.push({ slot: entry, args, data: Array.from({ length: count * 4 }, (_, i)=>
-                (integer ? view.getInt32(data + i * 4, true)
-                    : view.getFloat32(data + i * 4, true))) });
+        callGuest: call=>{
+            record(call);
             return Promise.resolve(0);
         },
+        // The bridge's steps, run at once as the bridge runs them in the slice.
+        ...options.drive ? { drive: (/** @type {any} */ steps)=>{
+            let next = steps.next();
+            while (!next.done)
+            {
+                record(next.value);
+                next = steps.next(0);
+            }
+            return next.value;
+        } } : {},
     });
+    /** @param {{ entry: number, args: number[] }} call */
+    function record({ entry, args }){
+        const [, , data, count] = args;
+        const integer = entry === 96 || entry === 98 || entry === 111 || entry === 113;
+        calls.push({ slot: entry, args, data: Array.from({ length: count * 4 }, (_, i)=>
+            (integer ? view.getInt32(data + i * 4, true)
+                : view.getFloat32(data + i * 4, true))) });
+    }
     memory.set(code, 0x1000);
     /** @param {string} text */
     const put = (text, at = 0x3000)=>{
         memory.set([...new TextEncoder().encode(text), 0], at);
         return at;
     };
-    return { memory, view, tables, published, calls, DEVICE, put };
+    return { memory, view, tables, published, calls, DEVICE, put, record };
 }
 
 test('a shader\'s constants come out of its CTAB comment, by name and by register', ()=>{
@@ -213,4 +231,195 @@ test('a name in two register sets is set in both, as a model 3 loop count needs 
     assert.equal(await setInt.invoke(table, [m.DEVICE, m.put('limit'), 7]), 0);
     assert.deepEqual(m.calls.map(c=>[c.slot, c.args[1], c.data[0]]), [[94, 0, 7], [96, 0, 7]],
         'SetVertexShaderConstantF and SetVertexShaderConstantI');
+});
+
+test('the gate: a setter driven in the slice makes the calls and answers promises make',
+    async()=>{
+    // Seeded random setters, down both paths: the device must be told the same.
+        let seed = 1234567;
+        const random = ()=>{
+            seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+            return seed / 2 ** 32;
+        };
+        const plan = Array.from({ length: 60 }, ()=>({
+            method: ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetFloat', 'SetDefaults',
+                'SetVectorArray'][Math.floor(random() * 6)],
+            name: ['WorldViewProj', 'Color', 'Lights', 'Missing'][Math.floor(random() * 4)],
+            values: Array.from({ length: 16 }, ()=>Math.round(random() * 2000 - 1000) / 8),
+        }));
+        /** @param {boolean} drive */
+        const run = async drive=>{
+            const m = machine(shader(), { drive });
+            m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]);
+            const [table] = m.published;
+            const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+            const answers = [];
+            for (const step of plan)
+            {
+                new Float32Array(m.memory.buffer, 0x2000, 16).set(step.values);
+                const method = methods.find((/** @type {any} */ one)=>one.name === step.method);
+                const bits = new Uint32Array(Float32Array.of(step.values[0]).buffer)[0];
+                const named = m.put(step.name);
+                const args = step.method === 'SetDefaults' ? [m.DEVICE]
+                    : step.method === 'SetFloat' ? [m.DEVICE, named, bits]
+                        : step.method === 'SetVectorArray' ? [m.DEVICE, named, 0x2000, 2]
+                            : [m.DEVICE, named, 0x2000];
+                answers.push((await method.invoke(table, args)) >>> 0);
+            }
+            return { answers, calls: m.calls.map(c=>[c.slot, c.args[1], c.args[3], c.data]) };
+        };
+        const driven = await run(true);
+        const promised = await run(false);
+        assert.ok(driven.calls.length > 20, 'the plan reached the device');
+        assert.deepEqual(driven, promised);
+    });
+
+test('the gate: the table\'s methods in the guest answer and call the device as the host\'s',
+    async()=>{
+    // A matrix by columns and one given three registers of four, by rows in an
+    // array, a scalar, a vector array, a sampler, and a loop count with its twin.
+        const constants = [['WorldViewProj', 2, 0, 4, 0, 0], ['Color', 2, 4, 1, 1, 0],
+            ['Lights', 2, 5, 2, 2, 1], ['Diffuse', 3, 0, 1, 3, 0], ['Bones', 2, 7, 9, 4, 0],
+            ['Scale', 2, 16, 1, 5, 0], ['Short', 2, 17, 3, 0, 0], ['limit', 2, 20, 1, 6, 1],
+            ['limit', 1, 0, 1, 6, 0]];
+        const types = [[3, 3, 4, 4, 1], [1, 3, 1, 4, 1], [1, 3, 1, 4, 2], [4, 12, 1, 1, 1],
+            [2, 3, 3, 4, 3], [0, 3, 1, 1, 1], [0, 2, 1, 1, 1]];
+        const names = ['WorldViewProj', 'Color', 'Lights', 'Diffuse', 'Bones', 'Scale', 'Short',
+            'limit', 'Lights[1]', 'Missing'];
+        let seed = 7654321;
+        const random = ()=>{
+            seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+            return seed / 2 ** 32;
+        };
+        const plan = Array.from({ length: 400 }, ()=>({
+            method: ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetFloat', 'GetConstantDesc',
+                'GetConstantElement', 'SetDefaults'][Math.floor(random() * 7)],
+            name: names[Math.floor(random() * names.length)],
+            how: Math.floor(random() * 6),
+            index: Math.floor(random() * 4),
+            values: Array.from({ length: 16 }, ()=>Math.round(random() * 2000 - 1000) / 8),
+        }));
+        const sources = await import('./constants-setters.js');
+        /** @param {boolean} guest */
+        const run = async guest=>{
+            const m = machine(shader(constants, types), { drive: true });
+            m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]);
+            const [table] = m.published;
+            m.view.setUint32(0x304, table.guestState(), true);
+            const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+            const method = (/** @type {string} */ name)=>methods.find((/** @type {any} */ one)=>
+                one.name === name);
+            const answers = [];
+            let handed = 0;
+            for (const step of plan)
+            {
+                new Float32Array(m.memory.buffer, 0x2000, 16).set(step.values);
+                const named = m.put(step.name);
+                // A handle the host handed out, an element's, a name, or none.
+                const handle = step.how < 2 ? method('GetConstantByName').invoke(table, [0, named])
+                    : step.how === 2 ? method('GetConstantElement').invoke(table,
+                        [method('GetConstantByName').invoke(table, [0, named]), step.index])
+                        : step.how === 3 ? 0 : named;
+                const bits = new Uint32Array(Float32Array.of(step.values[0]).buffer)[0];
+                const args = step.method === 'SetDefaults' ? [step.how === 3 ? 0 : m.DEVICE]
+                    : step.method === 'GetConstantDesc' ? [handle, 0x2800, 0x2840]
+                        : step.method === 'GetConstantElement' ? [handle, step.index]
+                            : step.method === 'SetFloat' ? [m.DEVICE, handle, bits]
+                                : [m.DEVICE, handle, 0x2000];
+                m.memory.fill(0, 0x2800, 0x2850);
+                const host = ()=>{
+                    handed++;
+                    return method(step.method).invoke(table, args);
+                };
+                const answer = guest ? /** @type {any} */ (sources)[step.method]({
+                    u32: (/** @type {number} */ at)=>m.view.getUint32(at, true),
+                    setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                        m.view.setUint32(at, value >>> 0, true),
+                    callStd: (/** @type {number} */ entry, /** @type {number[]} */ ...rest)=>{
+                        m.record({ entry, args: rest });
+                        return 0;
+                    },
+                    host,
+                    pointerBytes: 4,
+                }, 0x300, ...args) : host();
+                let said = (await answer) >>> 0;
+                if (step.method === 'GetConstantElement' && said !== 0)
+                {
+                    // Where a handle is differs as the host's setters take blocks
+                    // off the heap; what it names is what is compared.
+                    method('GetConstantDesc').invoke(table, [said, 0x2800, 0]);
+                    said = 1;
+                }
+                answers.push([said, [...m.memory.subarray(0x2800, 0x2850)]]);
+            }
+            return { answers, calls: m.calls.map(c=>[c.slot, c.args[1], c.args[3], c.data]),
+                handed };
+        };
+        const guest = await run(true);
+        const host = await run(false);
+        assert.ok(host.calls.length > 100, 'the plan reached the device');
+        // Names, twins, samplers and shapes a setter does not take go to the host.
+        assert.ok(plan.length - guest.handed > 40,
+            `the guest answered its own: ${plan.length - guest.handed}`);
+        assert.deepEqual({ ...guest, handed: 0 }, { ...host, handed: 0 });
+    });
+
+test('a 64-bit process gets its table, the table\'s description and a constant\'s in quadword'
+    + ' pointers, and the device\'s methods from quadword slots', async()=>{
+    // D3DXCONSTANTTABLE_DESC: LPCSTR Creator at 0, Version at 8, Constants at 12.
+    // D3DXCONSTANT_DESC: LPCSTR Name at 0, ten counts from 8, LPCVOID DefaultValue at 48.
+    const m = machine(shader(), { pointerSize: 8 });
+    m.memory.fill(0xcc, 0x50, 0x100);
+    assert.equal(m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]), 0);
+    assert.deepEqual([m.view.getUint32(0x50, true), m.view.getUint32(0x54, true)], [0x300, 0],
+        'the interface pointer, whole');
+    assert.equal(m.view.getUint32(0x58, true), 0xcccccccc, 'and nothing after it');
+    const [table] = m.published;
+    const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+    /** @param {string} name @param {number[]} args */
+    const call = (name, ...args)=>methods.find((/** @type {any} */ one)=>one.name === name)
+        .invoke(table, args);
+
+    assert.equal(call('GetDesc', 0x60), 0);
+    const creator = m.view.getUint32(0x60, true);
+    assert.equal(new TextDecoder().decode(m.memory.subarray(creator, creator + 13)),
+        'test compiler');
+    assert.deepEqual([4, 8, 12, 16].map(at=>m.view.getUint32(0x60 + at, true)),
+        [0, 0xfffe0300, 4, 0xcccccccc]);
+
+    const lights = call('GetConstantByName', 0, m.put('Lights'));
+    assert.equal(call('GetConstantDesc', lights, 0x80, 0x70), 0);
+    const desc = Array.from({ length: 15 }, (_, i)=>m.view.getUint32(0x80 + i * 4, true));
+    assert.equal(new TextDecoder().decode(m.memory.subarray(desc[0], desc[0] + 6)), 'Lights');
+    assert.deepEqual(desc.slice(1, 12), [0, 2, 5, 2, 1, 3, 1, 4, 2, 0, 32],
+        'the name\'s high half, then FLOAT4 c5, two registers, two vectors, 32 bytes');
+    assert.notEqual(desc[12], 0, 'the default value');
+    assert.deepEqual(desc.slice(13), [0, 0xcccccccc], 'its high half, and no byte past 56');
+
+    new Float32Array(m.memory.buffer, 0x2000, 16).set(Array.from({ length: 16 }, (_, i)=>i));
+    new DataView(m.memory.buffer).setBigUint64(0x2100, 0x2000n, true);
+    new DataView(m.memory.buffer).setBigUint64(0x2108, 0x2000n, true);
+    assert.equal(await call('SetMatrixPointerArray', m.DEVICE, m.put('WorldViewProj'), 0x2100,
+        1), 0);
+    assert.equal(m.calls[0].slot, 94, 'SetVertexShaderConstantF, read from the quadword slot');
+});
+
+test('a 64-bit process takes the setters\' x86-64 through their guest slot, every one the'
+    + ' i386 has', ()=>{
+    const m = machine(shader(), { pointerSize: 8 });
+    assert.equal(m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]), 0);
+    const [table] = m.published;
+    const methods = /** @type {any[]} */ (table.interfaceFor(
+        '{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods);
+    const named = (/** @type {string} */ name)=>methods.find(method=>method.name === name);
+    assert.deepEqual(Object.keys(SETTERS_LONG).sort(), Object.keys(SETTERS_32).sort());
+    for (const name of Object.keys(SETTERS_LONG))
+    {
+        const { guest } = named(name);
+        assert.equal(guest?.wide, true, `${name}: built for the process's width`);
+        const at = guest({ trap: 0x7000 });
+        const { code, host } = /** @type {Record<string, any>} */ (SETTERS_LONG)[name];
+        assert.deepEqual([...m.memory.subarray(at, at + host - 1)], [...code.subarray(0, host - 1)],
+            `${name}: its x86-64`);
+    }
 });

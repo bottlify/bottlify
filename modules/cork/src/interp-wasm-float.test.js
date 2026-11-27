@@ -26,6 +26,7 @@ import { ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
 import { createPageTable } from './runtime/pages.js';
 import { eflagsOf } from './emit/flags.js';
 import { fpremStatus, fpremValue } from './ir-x87.js';
+import { UNDERFLOW_CASES, enterCase, leftByCase } from './testing/x87-underflow.js';
 
 const RAM = 1 << 20;
 const CODE = 0x1000;
@@ -845,6 +846,24 @@ test('an x87 access faults before its effect, and a store into translated code l
         assert.equal(m.view.getUint32(m.layout.eip, true), CODE + 3, 'past the store');
         assert.equal(m.view.getUint8(m.layout.x87Top), 1, 'popped');
     });
+
+for (const { name, start, code, want } of UNDERFLOW_CASES)
+{
+    test(`a stack underflow as the processor answers it, run by the tier: ${name}`, ()=>{
+        // Unless precise, IE, ZE, UE and C1 may differ, as the model's test of it has them.
+        for (const precise of [true, false])
+        {
+            const m = machine({ precise });
+            reset(m, [...code, 0xf4], random(3));
+            enterCase(m.view, m.layout, start);
+            assert.equal(m.tier.run(100), WasmExit.HALT, 'the tier ran every instruction');
+            const left = leftByCase(m.view, m.layout);
+            const loose = precise ? 0 : 0x1 | 0x4 | 0x10 | 0x200;
+            assert.deepEqual({ ...left, status: left.status & ~loose },
+                { ...want, status: want.status & ~loose }, precise ? 'precise' : 'relaxed');
+        }
+    });
+}
 
 test('fcomi\'s flags replace a lazy record, and fcmov reads one folded', ()=>{
     const m = machine();

@@ -95,14 +95,21 @@ export function createGuardedCaller(host){
                     (host.readU32(record + 12) >>> 0).toString(16));
                 return host.unwind(frame >>> 0, call.resume,
                     { record: record >>> 0, thread: call.thread })
-                    .then(()=>host.continueAt({ eip: call.resume, esp: call.frameBase },
-                        { below: call.frameBase }));
+                    .then(()=>{
+                        // The routine's own return, as the call was built: one
+                        // that ended in a jump to an import (`jmp
+                        // RaiseException`) gave that call its return slot, and
+                        // a host call that waits has the park written there.
+                        host.writeU32(call.frameBase, call.returnTo);
+                        return host.continueAt({ eip: call.resume, esp: call.frameBase },
+                            { below: call.frameBase });
+                    });
             },
         });
     };
 
     /**
-     * @param {{ entry: number, args: number[], thread: any, failed: number,
+     * @param {{ entry: number, args: (number | bigint)[], thread: any, failed: number,
      *     report?: (code: string, address: string) => void }} call
      * @returns {Promise<number>} what the routine answered, `failed` when it raised
      */
@@ -128,7 +135,10 @@ export function createGuardedCaller(host){
             guarded.delete(record);
             host.writeU32(teb, previous);
         };
-        return host.callGuest({ entry, args, thread, stackAtRest: record })
+        const called = host.callGuest({ entry, args, thread, stackAtRest: record });
+        // Built by now: the bridge writes the frame before the call is sent.
+        /** @type {any} */ (guarded.get(record)).returnTo = host.readU32(frameBase) >>> 0;
+        return called
             .then(answer=>{
                 done();
                 return answer;
@@ -151,15 +161,23 @@ export function createEntryPointCaller(host){
     const call = createGuardedCaller(host);
     /**
      * @param {{ routines: number[], base: number, reason: number, reserved: number,
-     *     thread: any }} image
+     *     thread: any, raised?: (code: number) => void }} image  `raised`: told the
+     *     code of an exception a routine raised, which ends the routines there
      * @returns {Promise<number>} what the last routine answered, 0 when it raised
      */
-    return ({ routines, base, reason, reserved, thread })=>routines.reduce(
-        (told, entry)=>told.then(()=>call({
-            entry, args: [base, reason, reserved], thread, failed: 0,
-            report: code=>host.divergence?.(`exception 0x${code} in the routine at 0x${
-                (entry >>> 0).toString(16)} of the image at 0x${(base >>> 0).toString(16)}`
-                + ` (reason ${reason}), taken by the loader`),
-        })),
-        Promise.resolve(0));
+    return ({ routines, base, reason, reserved, thread, raised })=>{
+        let failed = false;
+        return routines.reduce(
+            (told, entry)=>told.then(answer=>(failed ? answer : call({
+                entry, args: [base, reason, reserved], thread, failed: 0,
+                report: code=>{
+                    failed = raised !== undefined;
+                    raised?.(Number.parseInt(String(code), 16) >>> 0);
+                    host.divergence?.(`exception 0x${code} in the routine at 0x${
+                        (entry >>> 0).toString(16)} of the image at 0x${
+                        (base >>> 0).toString(16)} (reason ${reason}), taken by the loader`);
+                },
+            }))),
+            Promise.resolve(0));
+    };
 }

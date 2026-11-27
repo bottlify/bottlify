@@ -26,6 +26,7 @@
  */
 
 import { D3DRS } from './constants.js';
+import { MAX_STREAMS } from './declaration.js';
 import { IDENTITY } from '../d3d8/render.js';
 import { D3DSAMP, D3DTSS9, SAMPLER_STATE_KEY } from './samplerstates.js';
 
@@ -252,12 +253,11 @@ export function fillRecord(record, type, view){
         record.material = null;
         record.viewport = null;
         record.scissor = null;
-        for (const index of view.streams.keys())
+        // Every stream, set or not: a capture of a block of everything takes
+        // a stream set after it was made.
+        for (let index = 0; index < MAX_STREAMS; index++)
         {
             record.streams.set(index, { buffer: null, offset: 0, stride: 0 });
-        }
-        for (const index of view.streamFrequencies.keys())
-        {
             record.streamFrequencies.set(index, 1);
         }
         record.indices = null;
@@ -317,8 +317,12 @@ function applyConstants(floats, ints, bools, file){
  *
  * @param {StateBlockRecord} record
  * @param {StateView} view
+ * @param {{ keepOffsets?: boolean }} [options]  keepOffsets: a stream keeps
+ *     the offset it had, as Capture does on Windows: it takes a stream's
+ *     buffer and stride, not its offset (Wine's stateblock test, a block made
+ *     with D3DSBT_ALL, captured, then applied).
  */
-export function captureRecord(record, view){
+export function captureRecord(record, view, options = {}){
     for (const state of record.renderStates.keys())
     {
         record.renderStates.set(state, view.renderStates.get(state) ?? 0);
@@ -354,9 +358,11 @@ export function captureRecord(record, view){
     for (const index of record.streams.keys())
     {
         const held = view.streams.get(index);
+        const offset = options.keepOffsets ? record.streams.get(index)?.offset ?? 0
+            : held?.offset ?? 0;
         record.streams.set(index, held
-            ? { buffer: held.buffer, offset: held.offset, stride: held.stride }
-            : { buffer: null, offset: 0, stride: 0 });
+            ? { buffer: held.buffer, offset, stride: held.stride }
+            : { buffer: null, offset, stride: 0 });
     }
     for (const index of record.streamFrequencies.keys())
     {

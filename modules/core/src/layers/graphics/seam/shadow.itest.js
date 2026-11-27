@@ -21,11 +21,12 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
+import { BUFFER, FLAG_SLOW_PATH, HELD_GUEST, LOCK_IN_PLACE, SHADOW, TEXTURE } from './block.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, HELD_GUEST, LOCK_IN_PLACE, SHADOW, TEXTURE, getRenderStateCode,
-    getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode, lockCode,
-    unlockCode,
-} from './shadow.js';
+    getRenderStateCode, getSurfaceLevelCode, getTargetCode, getTextureStageStateCode,
+    getTransformCode,
+} from './routines/getters.js';
+import { lockCode, unlockCode } from './routines/locks.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
 /** Direct3D 8's stage state types, a bit each: what the stage-state getter answers. */
@@ -138,7 +139,7 @@ function program(){
 function processor(){
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     return {
         host,
@@ -352,8 +353,8 @@ test('the target getters hand out the block\'s pair with the reference it owes, 
     const EIGHT = 0x30400;
     const TRAPPED = 0x30600;
     const CELLS = 0x31000;
-    const TARGET = 0x4711;
-    const SURFACE = 0x4722;
+    const TARGET = 0x32000;
+    const SURFACE = 0x32040;
     const NOTFOUND = 0x88760866;
     host.writePhysical(NINE, getTargetCode(NINE, TRAPPED, { depth: false, indexed: true }));
     host.writePhysical(DEPTH, getTargetCode(DEPTH, TRAPPED, { depth: true, indexed: false }));
@@ -413,9 +414,22 @@ test('the target getters hand out the block\'s pair with the reference it owes, 
     assert.equal(call(NINE, [0, 0]), 'trap', 'and a null pointer');
     assert.equal(call(DEPTH, [0]), 'trap');
     write(CELLS, 0);
-    assert.equal(call(NINE, [0, OUT]), 'trap', 'a count at zero: a first reference is the host\'s');
+    write(TARGET + 12, 0);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'no owner: a first reference is the host\'s');
     assert.equal(read(CELLS), 0);
     assert.equal(read(BLOCK + SHADOW.HELD), 0, 'the lock let go on the way');
+    const OWNER = CELLS + 8;
+    write(TARGET + 12, OWNER);
+    write(OWNER, 0);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'an owner already gone: the host\'s');
+    assert.equal(read(CELLS), 0);
+    write(OWNER, 1);
+    assert.equal(call(NINE, [0, OUT]), 0, 'a live owner: the first reference crosses in the guest');
+    assert.equal(read(CELLS), 1, 'the count up from zero');
+    assert.equal(read(OWNER), 2, 'and the owner\'s reference it holds again');
+    write(CELLS, 0);
+    write(OWNER, 1);
+    write(TARGET + 12, 0);
     write(CELLS, 1);
     mirror([TARGET, 0, SURFACE, CELLS + 4], 3);
     assert.equal(call(NINE, [0, OUT]), 'trap', 'a count the host keeps');

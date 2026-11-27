@@ -79,6 +79,9 @@ export function createMp3AcmCodec(){
         short: 'MPEG Layer-3 Codec',
         long: 'MPEG Layer-3 Codec (decode only)',
         comp: 'l3ac',
+        // MM_FRAUNHOFER_IIS and MM_FHGIIS_MPEGLAYER3_DECODE: Windows' codec is theirs.
+        mid: 0xac,
+        pid: 9,
         tagName: 'MPEG Layer-3',
         formats: listFormats(),
         // As the Windows codec: decode only, to 16-bit PCM of the stream's

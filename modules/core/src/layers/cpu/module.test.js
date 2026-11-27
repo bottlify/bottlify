@@ -6,13 +6,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { noCache } from '../cache/module.js';
 import { CPU_COUNTERS, cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
 
 test('the cpu registers its counters with the log layer and samples them once a frame',
     async()=>{
-        const metrics = createMetrics({ shared: false });
+        const metrics = createMetrics();
         await cpuModule.create({}, /** @type {any} */ ({
             requireApi: ()=>({ metrics, intern: ()=>-1 }),
             provide: ()=>{},
@@ -20,9 +21,8 @@ test('the cpu registers its counters with the log layer and samples them once a 
         const table = metrics.describe().cpu.counters;
         assert.deepEqual(table.columns, CPU_COUNTERS);
         assert.ok(CPU_COUNTERS.includes('instructions'));
-        assert.ok(CPU_COUNTERS.includes('jit.compiledSteps'));
 
-        // Before boot there is no emulator to read; a frame closing then must
+        // Before boot there is no machine to read; a frame closing then must
         // not throw and must leave the row as it was.
         metrics.sample();
         assert.equal(readTable(table).row(0).instructions, 0);
@@ -31,7 +31,7 @@ test('the cpu registers its counters with the log layer and samples them once a 
 
 test('a build without a log registry still creates', async()=>{
     const api = await cpuModule.create({}, /** @type {any} */ ({
-        requireApi: ()=>({}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
         provide: ()=>{},
     }));
     assert.equal(typeof api.boot, 'function');
@@ -39,17 +39,17 @@ test('a build without a log registry still creates', async()=>{
     await cpuModule.dispose();
 });
 
-/** A cpu instance with no log registry, for tests that never boot the emulator. */
+/** A cpu instance with no log registry, for tests that never boot the machine. */
 async function open(){
     return cpuModule.create({}, /** @type {any} */ ({
-        requireApi: ()=>({}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
         provide: ()=>{},
     }));
 }
 
 test('a second instance in one realm does not take the first one\'s state', async()=>{
-    // Booting a real emulator is an integration concern (module.itest.js has
-    // the prebuilt-artifact test for `boot()` itself); this pins the same
+    // Booting a real machine is an integration concern (module.itest.js has
+    // the tests of `boot()` itself); this pins the same
     // class of bug on the state a fresh, unbooted instance already owns --
     // the fault record -- which used to live at module scope alongside `host`.
     const first = await open();
@@ -76,38 +76,11 @@ test('a disposed cpu answers harmlessly rather than throwing', async()=>{
     assert.equal(api.fault(), null, 'raiseFault is a no-op once disposed');
     api.stop();
     assert.throws(()=>api.run(), /cpu: boot\(\) must be called before the guest can run/,
-        'every method that needs a running emulator answers as a never-booted instance does');
+        'every method that needs a running machine answers as a never-booted instance does');
     assert.throws(()=>api.runSlice(1),
         /cpu: boot\(\) must be called before the guest can run/);
     assert.throws(()=>api.readPhysical(0, 4),
         /cpu: boot\(\) must be called before the guest can run/);
-});
-
-test('an engine a launch may select is named, and one that is not is refused', async()=>{
-    await assert.rejects(cpuModule.create({ engine: 'x' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    })), { message: 'cpu: unknown engine "x" (emulator, cork)' });
-
-    await cpuModule.create({ engine: 'cork' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    }));
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork',
-        'cork is built and reports before boot');
-    await cpuModule.dispose();
-
-    await open();
-    assert.equal(cpuModule.diagnostics().metrics?.engine, 'cork', 'the default');
-    await cpuModule.dispose();
-});
-
-test('the emulator says it is not installed when the launch passes none', async()=>{
-    // The package carries no emulator: a launch that selects it is told so
-    // rather than failing deeper on an absent file.
-    const api = await cpuModule.create({ engine: 'emulator' }, /** @type {any} */ ({
-        requireApi: ()=>({}), provide: ()=>{},
-    }));
-    await assert.rejects(api.boot(), { message: /^cpu: the emulator is not installed/ });
-    await cpuModule.dispose();
 });
 
 test('diagnostics answers for the live instance', async()=>{
@@ -144,12 +117,17 @@ test('a resume can carry the flags word the code it enters starts with', async()
     // An exception handler starts with DF clear whatever the faulting code
     // had, and the context it continues from gives the flags back.
     const api = await open();
-    const context = { eip: 0, inHlt: 1, reg32: new Int32Array(8), flags: 0x8d7, flagsChanged: 1 };
+    const block = new Uint8Array(512);
+    const view = new DataView(block.buffer);
+    view.setUint32(40, 0x8d7, true);
+    view.setUint32(44, 3, true); // the record of a region's last arithmetic
+    const context = { block, layout: { bits: 32, regs: 0, eflags: 40, flagRecord: 44 }, eip: 0,
+        inHlt: 1, reg32: new Int32Array(8) };
 
     api.resumeContextAt(context, { eip: 0x401000, returnValue: 0, registers: { eflags: 0x202 } });
 
-    assert.equal(context.flags, 0x202);
-    assert.equal(context.flagsChanged, 0, 'the word is literal, nothing lazy recomputes over it');
+    assert.equal(view.getUint32(40, true), 0x202);
+    assert.equal(view.getUint32(44, true), 0, 'the word is whole, no record folds over it');
     assert.deepEqual([...context.reg32], [0, 0, 0, 0, 0, 0, 0, 0], 'and it is no register');
     await cpuModule.dispose();
 });

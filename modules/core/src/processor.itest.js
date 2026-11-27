@@ -8,8 +8,8 @@
  * The processor is described once, in `kernel32/processor.js`, and every way
  * a program asks about it answers from that record. This runs the program
  * that asks all of them -- the CPUID instruction included -- and holds the
- * record to what the emulated processor itself says, so the two cannot drift
- * apart when the emulator does.
+ * record to what the engine's processor itself says, so the two cannot drift
+ * apart when the engine's answer changes.
  */
 
 import { test } from 'node:test';

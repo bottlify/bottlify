@@ -7,9 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SETTINGS, processorName, readSettings } from './settings.js';
+import { version } from '../../cork/src/index.js';
 
 test('the file this build ships with names every setting it tunes', ()=>{
-    assert.equal(processorName(SETTINGS), `Bottlify Cork x86 v${SETTINGS.processor.version}`);
+    // The version is the translator's, as its entry module says.
+    assert.equal(processorName(SETTINGS, version), `Bottlify Cork x86 v${version}`);
+    assert.equal(processorName(SETTINGS), 'Bottlify Cork x86');
     assert.equal(SETTINGS.qpc.frequency, 1_000_000_000);
     assert.equal(SETTINGS.frame.maxFps, 60);
     assert.ok(Number.isInteger(SETTINGS.cork.cacheVersion));

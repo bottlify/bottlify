@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProfileFunctions } from './profile.js';
 import { decodeAnsi } from './locale.js';
+import { readIntoBy } from './vfs.js';
 
 /** Addresses the fixtures use; nothing about them matters but that they differ. */
 const SECTION = 0x100;
@@ -52,6 +53,30 @@ function fakeMemory(){
 }
 
 /** The slice of the filesystem contract the profile family uses. */
+/**
+ * A volume's numbering as the filesystem keeps it: a number per file, given
+ * the first time it is asked for, the same for the same path whatever its case.
+ */
+function numbering(){
+    /** @type {Map<string, { id: number, path: string }>} */
+    const ids = new Map();
+    return {
+        /** @param {string} path */
+        fileId: path=>{
+            const key = path.toLowerCase();
+            if (!ids.has(key))
+            {
+                ids.set(key, { id: 64 + ids.size, path });
+            }
+            return /** @type {{ id: number }} */ (ids.get(key)).id;
+        },
+        /** @param {string} path @param {number} id */
+        pathOfFileId: (path, id)=>[...ids.values()].find(one=>one.id === id
+            && one.path.slice(0, 2).toLowerCase() === path.slice(0, 2).toLowerCase())?.path
+            ?? null,
+    };
+}
+
 function fakeFiles(){
     /** @type {Map<string, Uint8Array>} */
     const nodes = new Map();
@@ -83,6 +108,9 @@ function fakeFiles(){
         read(node, offset, length){
             return /** @type {Uint8Array} */ (nodes.get(node.path)).slice(offset, offset + length);
         },
+        /** @param {{ path: string }} node @param {number} offset @param {number} length */
+        readInto: readIntoBy((node, offset, length)=>
+            /** @type {Uint8Array} */ (nodes.get(node.path)).slice(offset, offset + length)),
         /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
             const grown = new Uint8Array(offset + bytes.length);
@@ -97,6 +125,7 @@ function fakeFiles(){
         mkdir: ()=>false,
         rename: ()=>false,
         list: ()=>[],
+        ...numbering(),
         currentDirectory: ()=>'C:\\WORK',
         setCurrentDirectory(){},
     };
@@ -105,12 +134,17 @@ function fakeFiles(){
 function setup(){
     const memory = fakeMemory();
     const files = fakeFiles();
+    /** @type {number[]} */
+    const errors = [];
     const fns = createProfileFunctions({
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         files,
+        setLastError: code=>{
+            errors.push(code);
+        },
     });
-    return { memory, files, fns };
+    return { memory, files, fns, errors };
 }
 
 const INI = [
@@ -252,6 +286,21 @@ test('a write replaces a key in place, adds what is missing, and removes with NU
         'a write creates the file');
     assert.equal(fns.WritePrivateProfileStringA.handler([0, KEY, VALUE, FILE]), 0,
         'a NULL section is refused');
+});
+
+test('a file\'s text ends at a NUL, which a rewrite does not carry on', ()=>{
+    // A program that writes its file as a C string writes the terminator too;
+    // the section added after it has to be readable, not hidden behind it.
+    const { memory, files, fns } = setup();
+    files.put('C:\\test.ini', '[TestApp]\r\nAnotherKey=asdf\r\n\0');
+    memory.put(FILE, 'C:\\test.ini');
+    memory.put(SECTION, 'AnotherApp');
+    memory.put(KEY, 'NewKey');
+    memory.put(VALUE, 'AValue');
+
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+    assert.equal(files.text('C:\\test.ini'),
+        '[TestApp]\r\nAnotherKey=asdf\r\n[AnotherApp]\r\nNewKey=AValue\r\n');
 });
 
 test('a section is read back as its entries, key=value each, and win.ini is a fixed name', ()=>{
@@ -656,4 +705,133 @@ test('the win.ini section calls are the private ones on win.ini, in both widths'
     assert.equal(fns.WriteProfileSectionA.handler([memory.put(SECTION, 'fonts'), 0]), 1);
     assert.equal(files.text('C:\\WINDOWS\\win.ini'), '', 'a NULL list removes it');
     assert.equal(fns.GetProfileSectionA.handler([SECTION, OUT, 64]), 0);
+});
+
+test('a file that begins with a byte order mark is read in its encoding and written back in it',
+    ()=>{
+    // Windows reads a profile in UTF-16 (either order) or UTF-8 when the file
+    // says so with its mark, and a write keeps the file as it was (Wine's
+    // profile tests): the .NET Framework 3.5 setup keeps its setup.sdb in
+    // UTF-16, and read as ANSI it ended at its first zero byte, empty.
+        const { memory, files, fns } = setup();
+        /** @param {string} text */
+        const utf16le = text=>Uint8Array.from([0xff, 0xfe,
+            ...[...text].flatMap(character=>[character.charCodeAt(0) & 0xff,
+                character.charCodeAt(0) >> 8])]);
+        /** @param {string} text */
+        const utf16be = text=>Uint8Array.from([0xfe, 0xff,
+            ...[...text].flatMap(character=>[character.charCodeAt(0) >> 8,
+                character.charCodeAt(0) & 0xff])]);
+        files.nodes.set('C:\\setup.sdb',
+            utf16le('[Product Information]\r\nNullString=\u00e9t\u00e9\r\n'));
+        files.nodes.set('C:\\big.ini', utf16be('[S]\r\nK=Big\r\n'));
+        files.nodes.set('C:\\eight.ini',
+            Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('[S]\r\nK=Eight\r\n')]));
+        memory.put(SECTION, 'Product Information');
+        memory.put(KEY, 'NullString');
+        memory.put(DEFAULT, '');
+        memory.put(FILE, 'C:\\setup.sdb');
+        assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]),
+            3);
+        assert.equal(decodeAnsi(memory.bytes.subarray(OUT, OUT + 3)), '\u00e9t\u00e9');
+        memory.put(SECTION, 'S');
+        memory.put(KEY, 'K');
+        for (const [file, value] of [['C:\\big.ini', 'Big'], ['C:\\eight.ini', 'Eight']])
+        {
+            memory.put(FILE, file);
+            assert.equal(fns.GetPrivateProfileStringA.handler(
+                [SECTION, KEY, DEFAULT, OUT, 64, FILE]), value.length, file);
+            assert.equal(memory.readCString(OUT, 64), value, file);
+        }
+
+        memory.put(FILE, 'C:\\setup.sdb');
+        memory.put(SECTION, 'Product Information');
+        memory.put(KEY, 'Added');
+        memory.put(VALUE, 'yes');
+        assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+        assert.deepEqual([...files.nodes.get('C:\\setup.sdb') ?? []],
+            [...utf16le('[Product Information]\r\nNullString=\u00e9t\u00e9\r\nAdded=yes\r\n')],
+            'still UTF-16, its mark first');
+    });
+
+test('a line ends at a bare CR as at CRLF or LF', ()=>{
+    const { memory, files, fns } = setup();
+    files.put('C:\\WORK\\CR.INI', '[one]\rname1=val1\rname2="val2"\r[two]\r');
+    memory.put(FILE, 'C:\\WORK\\CR.INI');
+    memory.put(SECTION, 'one');
+    memory.put(KEY, 'name2');
+    memory.put(DEFAULT, 'default');
+    assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]), 4);
+    assert.equal(memory.readCString(OUT, 64), 'val2');
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 64, FILE]), 8);
+    assert.equal(memory.raw(OUT, 9), 'one\0two\0\0');
+});
+
+test('the section names fit only with a character to spare; a list that fits exactly is cut', ()=>{
+    const { memory, files, fns } = setup();
+    files.put('C:\\WORK\\S.INI', '[ section1 ]\r\n[section2]\r\n[section3]\r\n');
+    memory.put(FILE, 'C:\\WORK\\S.INI');
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 29, FILE]), 27);
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 28, FILE]), 26);
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 27, FILE]), 25);
+});
+
+test('GetPrivateProfileSection refuses a missing name, buffer or file, and clears the error'
+    + ' when it reads', ()=>{
+    const { memory, files, fns, errors } = setup();
+    files.put('C:\\WORK\\T.INI', '[section1]\r\nname1=val1\r\nname3\r\n[section2]\r\n');
+    memory.put(FILE, 'C:\\WORK\\T.INI');
+    memory.put(SECTION, 'section1');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([0, OUT, 64, FILE]), 0);
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, 0, 0, FILE]), 0);
+    assert.deepEqual(errors, [87, 87], 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, 0]), 0);
+    assert.equal(errors.at(-1), 2, 'no file named is ERROR_FILE_NOT_FOUND');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, FILE]), 17);
+    assert.equal(memory.raw(OUT, 18), 'name1=val1\0name3\0\0');
+    assert.equal(errors.at(-1), 0);
+});
+
+test('a write that changes nothing still leaves the file; a NULL section writes nothing', ()=>{
+    const { memory, files, fns, errors } = setup();
+    memory.put(FILE, 'C:\\WORK\\NEW.INI');
+    memory.put(SECTION, 'App');
+    memory.put(VALUE, 'string');
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, 0, VALUE, FILE]), 1);
+    assert.equal(files.text('C:\\WORK\\NEW.INI'), '', 'made, and empty');
+    files.nodes.delete('C:\\WORK\\NEW.INI');
+    memory.put(KEY, 'key');
+    assert.equal(fns.WritePrivateProfileStringA.handler([0, KEY, VALUE, FILE]), 0);
+    assert.equal(errors.at(-1), 2);
+    assert.equal(files.stat('C:\\WORK\\NEW.INI'), null);
+});
+
+test('the file is opened sharing reads and writes, and a refused open says why', ()=>{
+    const { memory, files, fns, errors } = setup();
+    /** @type {any[]} */
+    const modes = [];
+    let refuse = false;
+    const open = files.open;
+    Object.assign(files, {
+        /** @param {string} path @param {any} mode */
+        open: (path, mode)=>{
+            modes.push(mode);
+            return refuse ? null : open(path, mode);
+        },
+        openRefusal: ()=>(refuse ? 'SHARING_VIOLATION' : null),
+    });
+    files.put('C:\\WORK\\H.INI', '[s]\r\nk=1\r\n');
+    memory.put(FILE, 'C:\\WORK\\H.INI');
+    memory.put(SECTION, 's');
+    memory.put(KEY, 'k');
+    memory.put(VALUE, '2');
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+    assert.ok(modes.every(mode=>mode.shareRead && mode.shareWrite));
+    assert.ok(modes.some(mode=>mode.write && mode.read));
+
+    refuse = true;
+    assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 0);
+    assert.equal(errors.at(-1), 32, 'ERROR_SHARING_VIOLATION');
+    assert.equal(fns.GetPrivateProfileIntA.handler([SECTION, KEY, 7, FILE]), 7,
+        'a read it refuses answers as for no file');
 });

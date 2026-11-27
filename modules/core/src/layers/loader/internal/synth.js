@@ -29,6 +29,11 @@ const COFF_DLL = 0x2000;
 const COFF_RELOCS_STRIPPED = 0x0001;
 
 const OPTIONAL_HEADER_SIZE = 0xe0;
+/** A 64-bit module's (PE32+): AMD64, its optional header the wider one. */
+const MACHINE_AMD64 = 0x8664;
+const PE32_PLUS_MAGIC = 0x020b;
+const OPTIONAL_HEADER_SIZE_PLUS = 0xf0;
+const COFF_LARGE_ADDRESS_AWARE = 0x0020;
 const SUBSYSTEM_CONSOLE = 3;
 const SUBSYSTEM_WINDOWS_GUI = 2;
 /** What a program's linker asks for by default: a megabyte of stack, and of heap. */
@@ -61,6 +66,13 @@ const JMP_REL32 = 0xe9;
  * -- a jump out of the module as the first instruction -- refuses to run.
  */
 const HOT_PATCH_PROLOGUE = [0x8b, 0xff];
+/**
+ * The same two bytes' worth of nothing for a 64-bit process, `xchg ax, ax`:
+ * in long mode `mov edi, edi` is no no-op, since a 32-bit move clears the
+ * register's upper half, and RDI is one a callee must keep -- a caller
+ * holding a quadword there across an imported call would find it cut.
+ */
+const LONG_HOT_PATCH_PROLOGUE = [0x66, 0x90];
 const INT3 = 0xcc;
 
 const EXPORT_DIRECTORY_SIZE = 40;
@@ -114,6 +126,8 @@ const encoder = new TextEncoder();
  *   the module exports no variable and is one read-only section.
  * @property {(name: string) => number | null} addressOf  Guest address of the trampoline.
  * @property {(name: string) => number | null} ordinalOf
+ * @property {(ordinal: number) => number | null} addressOfOrdinal
+ * @property {() => [string, number][]} entries  Every export's name and address.
  */
 
 /**
@@ -125,9 +139,13 @@ const encoder = new TextEncoder();
  *   The export that is the module's DllMain. A library a program loads at
  *   run time is initialised through its entry point, and a system module
  *   that has to announce itself to another library on being loaded needs one.
+ * @param {boolean} [options.long]
+ *   The module serves an x86-64 process: its trampolines open with a no-op
+ *   that is one in long mode (`LONG_HOT_PATCH_PROLOGUE`).
  * @returns {SynthesisedModule}
  */
-export function synthesiseModule({ name, base, exports, entryPoint }){
+export function synthesiseModule({ name, base, exports, entryPoint, long = false }){
+    const prologue = long ? LONG_HOT_PATCH_PROLOGUE : HOT_PATCH_PROLOGUE;
     requireAscii(name, 'module name');
     const entryIndex = entryPoint === undefined ? -1
         : exports.findIndex(entry=>entry.name === entryPoint);
@@ -213,7 +231,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
 
     writeHeaders(bytes, view, {
         base, size, sectionSize, dataRva, dataSize,
-        exportDirectoryRva, exportDirectorySize, entryPointRva,
+        exportDirectoryRva, exportDirectorySize, entryPointRva, long,
     });
 
     exports.forEach((entry, index)=>{
@@ -248,8 +266,8 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         }
         else
         {
-            bytes.set(HOT_PATCH_PROLOGUE, rva);
-            const jump = rva + HOT_PATCH_PROLOGUE.length;
+            bytes.set(prologue, rva);
+            const jump = rva + prologue.length;
             bytes[jump] = JMP_REL32;
             // Relative to the instruction after the jump; 32-bit EIP arithmetic wraps,
             // so any pair of guest addresses is reachable regardless of sign.
@@ -292,8 +310,34 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         exportDirectoryRva,
         entryPointRva,
         dataRva,
+        ...lookupsOf(table),
+    };
+}
+
+/**
+ * A module's two lookups over its export table, made outside the function that
+ * built its bytes: a closure made there would hold every variable of that
+ * function, the image's bytes among them, for as long as the module lives -
+ * every engine library's bytes a second time in each process's heap.
+ *
+ * @param {Map<string, { address: number, ordinal: number }>} table
+ */
+function lookupsOf(table){
+    /** @type {Map<number, number> | null} */
+    let byOrdinal = null;
+    return {
+        /** @param {string} exported */
         addressOf: exported=>table.get(exported)?.address ?? null,
+        /** @param {string} exported */
         ordinalOf: exported=>table.get(exported)?.ordinal ?? null,
+        /** An export's address by its number, indexed at the first ask. @param {number} ordinal */
+        addressOfOrdinal: ordinal=>{
+            byOrdinal ??= new Map([...table.values()].map(entry=>[entry.ordinal, entry.address]));
+            return byOrdinal.get(ordinal) ?? null;
+        },
+        /** Every export's name and address. */
+        /** @returns {[string, number][]} */
+        entries: ()=>[...table].map(([name, entry])=>[name, entry.address]),
     };
 }
 
@@ -301,6 +345,8 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
 const IMPORT_DESCRIPTOR_SIZE = 20;
 const CALL_INDIRECT = [0xff, 0x15];
 const PUSH_EAX = 0x50;
+const SUB_RSP_28 = [0x48, 0x83, 0xec, 0x28];
+const MOV_ECX_EAX = [0x89, 0xc1];
 
 /**
  * @typedef {Object} SynthesisedProgram
@@ -325,9 +371,11 @@ const PUSH_EAX = 0x50;
  * @param {Object} options
  * @param {string} options.library  As an import descriptor names it.
  * @param {string} options.routine  The export of `library` that is the program.
+ * @param {boolean} [options.long]  A 64-bit program (PE32+, AMD64), as the
+ *     system folder of a 64-bit machine holds them; a 32-bit one otherwise.
  * @returns {SynthesisedProgram}
  */
-export function synthesiseProgram({ library, routine }){
+export function synthesiseProgram({ library, routine, long = false }){
     requireAscii(library, 'library name');
     requireAscii(routine, 'routine name');
     const base = PROGRAM_BASE;
@@ -342,9 +390,11 @@ export function synthesiseProgram({ library, routine }){
     // each name's hint and text, and the libraries' names.
     const dataRva = SECTION_RVA + PAGE;
     const descriptorsSize = (imports.length + 1) * IMPORT_DESCRIPTOR_SIZE;
+    // Each table one entry and its terminator: two dwords, or two quadwords in PE32+.
+    const table = long ? 16 : 8;
     const iatRva = dataRva + descriptorsSize;
-    const iltRva = iatRva + imports.length * 8;
-    let cursor = iltRva + imports.length * 8;
+    const iltRva = iatRva + imports.length * table;
+    let cursor = iltRva + imports.length * table;
     const hintRvas = imports.map(entry=>{
         const at = align(cursor, 2);
         cursor = at + 2 + entry.name.length + 1;
@@ -358,8 +408,17 @@ export function synthesiseProgram({ library, routine }){
     const dataSize = cursor - dataRva;
 
     /** @param {number} index */
-    const iatSlot = index=>iatRva + index * 8;
-    const code = [
+    const iatSlot = index=>iatRva + index * table;
+    // 64-bit: the shadow space and the stack aligned to 16 for the calls
+    // (sub rsp, 0x28), each import through its slot relative to the next
+    // instruction, and the routine's answer handed on in ecx.
+    const code = long ? [
+        ...SUB_RSP_28,
+        ...CALL_INDIRECT, ...le32(iatSlot(0) - (SECTION_RVA + 10)),
+        ...MOV_ECX_EAX,
+        ...CALL_INDIRECT, ...le32(iatSlot(1) - (SECTION_RVA + 18)),
+        INT3,
+    ] : [
         ...CALL_INDIRECT, ...le32(base + iatSlot(0)),
         PUSH_EAX,
         ...CALL_INDIRECT, ...le32(base + iatSlot(1)),
@@ -370,10 +429,10 @@ export function synthesiseProgram({ library, routine }){
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
     writeHeaders(bytes, view, {
-        base, size, sectionSize: code.length, dataRva, dataSize,
+        base, size, sectionSize: code.length, dataRva, dataSize, long,
         exportDirectoryRva: 0, exportDirectorySize: 0, entryPointRva: SECTION_RVA,
         program: { base, importDirectoryRva: dataRva, importDirectorySize: descriptorsSize,
-            iatRva, iatSize: imports.length * 8 },
+            iatRva, iatSize: imports.length * table },
     });
     bytes.set(code, SECTION_RVA);
 
@@ -381,10 +440,10 @@ export function synthesiseProgram({ library, routine }){
     // address table of one entry and a terminator.
     imports.forEach((entry, index)=>{
         const descriptor = dataRva + index * IMPORT_DESCRIPTOR_SIZE;
-        view.setUint32(descriptor, iltRva + index * 8, true); // OriginalFirstThunk
+        view.setUint32(descriptor, iltRva + index * table, true); // OriginalFirstThunk
         view.setUint32(descriptor + 12, libraryRvas[index], true); // Name
         view.setUint32(descriptor + 16, iatSlot(index), true); // FirstThunk
-        view.setUint32(iltRva + index * 8, hintRvas[index], true);
+        view.setUint32(iltRva + index * table, hintRvas[index], true);
         view.setUint32(iatSlot(index), hintRvas[index], true);
         bytes.set(encoder.encode(entry.name), hintRvas[index] + 2);
         bytes.set(encoder.encode(entry.library), libraryRvas[index]);
@@ -461,6 +520,8 @@ function assignOrdinals(exports){
  * @param {number} layout.exportDirectoryRva
  * @param {number} layout.exportDirectorySize
  * @param {number} layout.entryPointRva
+ * @param {boolean} [layout.long]  a 64-bit process's module: PE32+, as the program
+ *     that walks its headers itself (a packer finding its imports) reads them
  * @param {{ base: number, importDirectoryRva: number, importDirectorySize: number,
  *     iatRva: number, iatSize: number }} [layout.program]
  *     A program rather than a library: loaded at `base` as an executable is,
@@ -474,14 +535,53 @@ function writeHeaders(bytes, view, layout){
     view.setUint32(PE_OFFSET, PE_SIGNATURE, true);
 
     const coff = PE_OFFSET + 4;
-    view.setUint16(coff, MACHINE_I386, true);
+    const plus = layout.long === true;
+    view.setUint16(coff, plus ? MACHINE_AMD64 : MACHINE_I386, true);
     view.setUint16(coff + 2, layout.dataRva === 0 ? 1 : 2, true); // NumberOfSections
-    view.setUint16(coff + 16, OPTIONAL_HEADER_SIZE, true);
-    view.setUint16(coff + 18, layout.program
-        ? COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_RELOCS_STRIPPED
-        : COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_DLL, true);
+    view.setUint16(coff + 16, plus ? OPTIONAL_HEADER_SIZE_PLUS : OPTIONAL_HEADER_SIZE, true);
+    view.setUint16(coff + 18, COFF_EXECUTABLE_IMAGE
+        | (plus ? COFF_LARGE_ADDRESS_AWARE : COFF_32BIT_MACHINE)
+        | (layout.program ? COFF_RELOCS_STRIPPED : COFF_DLL), true);
 
     const optional = coff + 20;
+    if (plus)
+    {
+        // PE32+: no BaseOfData, ImageBase a quadword at 24, the sizes of the stack
+        // and heap quadwords, the data directories from 112.
+        view.setUint16(optional, PE32_PLUS_MAGIC, true);
+        view.setUint32(optional + 4, rawSize, true); // SizeOfCode
+        view.setUint32(optional + 8, align(layout.dataSize, PAGE), true); // SizeOfInitializedData
+        view.setUint32(optional + 16, layout.entryPointRva, true); // AddressOfEntryPoint
+        view.setUint32(optional + 20, SECTION_RVA, true); // BaseOfCode
+        view.setBigUint64(optional + 24, BigInt(layout.base), true); // ImageBase
+        view.setUint32(optional + 32, PAGE, true); // SectionAlignment
+        view.setUint32(optional + 36, PAGE, true); // FileAlignment
+        view.setUint16(optional + 40, 6, true); // MajorOperatingSystemVersion
+        view.setUint16(optional + 48, 6, true); // MajorSubsystemVersion
+        view.setUint32(optional + 56, layout.size, true); // SizeOfImage
+        view.setUint32(optional + 60, HEADERS_SIZE, true); // SizeOfHeaders
+        view.setUint16(optional + 68, layout.program ? SUBSYSTEM_WINDOWS_GUI : SUBSYSTEM_CONSOLE,
+            true);
+        if (layout.program)
+        {
+            view.setBigUint64(optional + 72, BigInt(PROGRAM_STACK_RESERVE), true);
+            view.setBigUint64(optional + 80, BigInt(PAGE), true);
+            view.setBigUint64(optional + 88, BigInt(PROGRAM_STACK_RESERVE), true);
+            view.setBigUint64(optional + 96, BigInt(PAGE), true);
+        }
+        view.setUint32(optional + 108, 16, true); // NumberOfRvaAndSizes
+        view.setUint32(optional + 112, layout.exportDirectoryRva, true);
+        view.setUint32(optional + 116, layout.exportDirectorySize, true);
+        if (layout.program)
+        {
+            view.setUint32(optional + 120, layout.program.importDirectoryRva, true);
+            view.setUint32(optional + 124, layout.program.importDirectorySize, true);
+            view.setUint32(optional + 208, layout.program.iatRva, true); // IAT directory
+            view.setUint32(optional + 212, layout.program.iatSize, true);
+        }
+        writeSections(bytes, view, layout, optional + OPTIONAL_HEADER_SIZE_PLUS, rawSize);
+        return;
+    }
     view.setUint16(optional, PE32_MAGIC, true);
     view.setUint32(optional + 4, rawSize, true); // SizeOfCode
     view.setUint32(optional + 8, align(layout.dataSize, PAGE), true); // SizeOfInitializedData
@@ -513,7 +613,17 @@ function writeHeaders(bytes, view, layout){
         view.setUint32(optional + 196, layout.program.iatSize, true);
     }
 
-    const section = optional + OPTIONAL_HEADER_SIZE;
+    writeSections(bytes, view, layout, optional + OPTIONAL_HEADER_SIZE, rawSize);
+}
+
+/**
+ * The section table, after the optional header of either width.
+ *
+ * @param {Uint8Array} bytes @param {DataView} view
+ * @param {{ sectionSize: number, dataRva: number, dataSize: number }} layout
+ * @param {number} section  where the table starts @param {number} rawSize
+ */
+function writeSections(bytes, view, layout, section, rawSize){
     bytes.set(encoder.encode('.text'), section);
     view.setUint32(section + 8, layout.sectionSize, true); // VirtualSize
     view.setUint32(section + 12, SECTION_RVA, true);
@@ -552,4 +662,81 @@ function requireAscii(text, what){
  */
 function align(value, to){
     return Math.ceil(value / to) * to;
+}
+
+/**
+ * The headers a synthesised module carries when the real library's file is
+ * installed beside it: the file's own, as the loader would have mapped them
+ * -- its DOS header and stub, and its NT headers through the first section
+ * header -- with ImageBase where the module is placed. A program that opens
+ * the file a module was loaded from and compares the two (a DRM wrapper
+ * checking the Steam client it loaded) finds them the same; the rest of the
+ * module is the engine's. Null for a file too short to be an image, or one
+ * whose headers would not fit before the module's first section.
+ *
+ * @param {Uint8Array} file @param {number} base
+ * @returns {Uint8Array | null}
+ */
+export function installedHeaders(file, base){
+    if (file.length < 0x40)
+    {
+        return null;
+    }
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const nt = view.getUint32(0x3c, true);
+    // Signature, file header, the optional header the file header sizes, and
+    // one section header.
+    const optionalSize = nt + 0x18 <= file.length ? view.getUint16(nt + 0x14, true) : 0;
+    const end = nt + 0x18 + optionalSize + 0x28;
+    if (optionalSize === 0 || end > file.length || end > HEADERS_SIZE
+        || view.getUint32(nt, true) !== 0x00004550)
+    {
+        return null;
+    }
+    const headers = file.slice(0, end);
+    const out = new DataView(headers.buffer);
+    const magic = out.getUint16(nt + 0x18, true);
+    if (magic === 0x20b)
+    {
+        out.setBigUint64(nt + 0x30, BigInt(base >>> 0), true);
+    }
+    else
+    {
+        out.setUint32(nt + 0x34, base >>> 0, true);
+    }
+    return headers;
+}
+
+/**
+ * Where the image a file holds says it belongs: its ImageBase and the span its
+ * sections occupy, as Windows loads a DLL at its preferred base when that base
+ * is free. A relocatable image is placed there too: DYNAMIC_BASE allows a
+ * relocation, it does not ask for one, and a program that reads the file and
+ * compares it with the module it loaded finds the ImageBase the file names --
+ * a module placed elsewhere has its own there, which is what a DRM wrapper
+ * refuses (Proton keeps Valve's own client DLL where it says it belongs for
+ * the same reason).
+ *
+ * @param {Uint8Array} file
+ * @returns {{ base: number, span: number } | null}  Null for a file too short to
+ *     be an image, or one that is not a PE.
+ */
+export function imagePlacementOf(file){
+    if (file.length < 0x40)
+    {
+        return null;
+    }
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const nt = view.getUint32(0x3c, true);
+    if (nt + 0x40 > file.length || view.getUint32(nt, true) !== 0x00004550)
+    {
+        return null;
+    }
+    const magic = view.getUint16(nt + 0x18, true);
+    const base = magic === 0x20b ? Number(view.getBigUint64(nt + 0x30, true))
+        : magic === 0x10b ? view.getUint32(nt + 0x34, true) : 0;
+    // SizeOfImage: the optional header's, 0x38 into it, after the signature and
+    // the file header.
+    const span = view.getUint32(nt + 0x50, true);
+    return base !== 0 && span !== 0 ? { base, span } : null;
 }

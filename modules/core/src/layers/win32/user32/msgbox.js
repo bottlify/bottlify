@@ -23,6 +23,8 @@
 
 import { readText } from './unicode.js';
 import { after } from './controls.js';
+import { isFatalBox } from './fatal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
@@ -37,6 +39,7 @@ const WS_GROUP = 0x00020000;
 const WS_TABSTOP = 0x00010000;
 const WS_EX_TOPMOST = 0x00000008;
 const DS_MODALFRAME = 0x0080;
+const DS_SYSMODAL = 0x0002;
 const DS_SETFONT = 0x0040;
 const DS_NOIDLEMSG = 0x0100;
 const BS_PUSHBUTTON = 0;
@@ -51,6 +54,7 @@ const MB_TYPEMASK = 0x000f;
 const MB_DEFMASK = 0x0300;
 const MB_HELP = 0x4000;
 const MB_SYSTEMMODAL = 0x1000;
+const MB_TASKMODAL = 0x2000;
 const MB_TOPMOST = 0x40000;
 const MB_RIGHT = 0x80000;
 
@@ -139,6 +143,10 @@ const TEXT_SHARE = 5 / 8;
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's table: MessageBoxIndirect's text and
  *           caption may be named by id.
+ * @property {() => boolean} [faultReported]
+ *           Whether the process has reported a fault (`fatal.js`).
+ * @property {(notice: { text: string, caption: string, type: number }) => void} [fatal]
+ *           Told of a box that reports the program is going down, before it is shown.
  */
 
 /**
@@ -327,8 +335,13 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
                 bytes.push(0);
             }
         };
-        const topmost = (type & (MB_TOPMOST | MB_SYSTEMMODAL)) !== 0;
-        u32(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT | DS_NOIDLEMSG);
+        // A system-modal box - MB_SYSTEMMODAL without MB_TASKMODAL, which
+        // overrides it - is a DS_SYSMODAL dialog: topmost, and without the
+        // modal frame's WS_EX_DLGMODALFRAME every other box has.
+        const systemModal = (type & (MB_SYSTEMMODAL | MB_TASKMODAL)) === MB_SYSTEMMODAL;
+        const topmost = systemModal || (type & MB_TOPMOST) !== 0;
+        u32(WS_POPUP | WS_CAPTION | WS_SYSMENU | (systemModal ? DS_SYSMODAL : DS_MODALFRAME)
+            | DS_SETFONT | DS_NOIDLEMSG);
         u32(topmost ? WS_EX_TOPMOST : 0);
         u16(1 + buttons.length);
         for (let index = 0; index < 4; index++)
@@ -375,6 +388,10 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
     const messageBox = (owner, text, title, type, wide)=>{
         const buttons = messageBoxButtons(type);
         host.say?.(title.length > 0 ? `${title}: ${text}` : text);
+        if (isFatalBox(type, host.faultReported?.() === true))
+        {
+            host.fatal?.({ text, caption: title, type });
+        }
         if ((type & MB_HELP) !== 0)
         {
             host.divergence?.('MessageBox', 'MB_HELP: the Help button is not shown');
@@ -448,7 +465,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      * @param {number} params @param {boolean} wide
      */
     const indirect = (params, wide)=>{
-        const bytes = host.readMemory(params >>> 0, 24);
+        const bytes = host.readMemory(wholeAddress(params), 24);
         /** @param {number} at */
         const field = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
             | bytes[at + 3] << 24) >>> 0;

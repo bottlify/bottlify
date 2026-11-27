@@ -39,7 +39,7 @@ test('a bottle\'s graphics is one of the engine\'s five choices, or none', ()=>{
     for (const wrong of ['glide', 'd3d8', 'DirectX8', '', 8])
     {
         assert.throws(()=>graphicsChoice(wrong),
-            /unknown graphics choice .*: the choices are directx7, directx8, directx9, directx10, opengl/,
+            /unknown graphics choice .*: the choices are directx7, directx8, directx9, directx10, directx11, opengl/,
             JSON.stringify(wrong));
     }
 });

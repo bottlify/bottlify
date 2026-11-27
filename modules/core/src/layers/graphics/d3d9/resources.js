@@ -33,11 +33,12 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, offsetOfRect,
-    surfaceBytes, surfacePitch,
+    D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, lockPitch,
+    offsetOfRect, pitchedRows, pixelRowsTaken, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
-import { halvesToStored, toHalf } from './half.js';
+import { halvesToStored } from './half.js';
+import { toHalf } from '../../../system/floats.js';
 
 /**
  * D3DLOCK_READONLY, which is the same number in both versions of the API. Here
@@ -78,6 +79,10 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {(cell: CountCell | null) => void} place  Keeps the count in the
  *           cell from now on, or, given null, back on the host.
  * @property {number} placed  The address of the cell it is kept in, or 0.
+ * @property {ReferenceCount} [owner]  The count a first reference is one on:
+ *           an implicit resource's device, whose count its crossings of zero
+ *           move by one -- here, or in the guest's AddRef and Release when
+ *           both counts are kept in cells.
  */
 
 /**
@@ -124,7 +129,7 @@ export class HeldBindings extends Map {
  * probe through memory long out of the cache.
  */
 class Count {
-    /** @type {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} */
+    /** @type {CountOptions} */
     #options;
     #implicit;
     /** The program's count while no cell keeps it. */
@@ -140,7 +145,7 @@ class Count {
      */
     #held = 0;
 
-    /** @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} options */
+    /** @param {CountOptions} options */
     constructor(options){
         this.#options = options;
         this.#implicit = options.implicit === true;
@@ -198,7 +203,12 @@ class Count {
 
     #gone(){
         this.#options.onLastRef?.();
+        this.#options.owner?.release();
         this.#destroyed = !this.#implicit;
+    }
+
+    get owner(){
+        return this.#options.owner;
     }
 
     /**
@@ -215,13 +225,16 @@ class Count {
         {
             throw new Error('AddRef on a resource whose last reference was released');
         }
-        // A count at 0 moves only here -- the guest's AddRef asks the host
-        // there -- so what is read as 0 stays 0 until this step.
-        if (this.value === 0)
+        // The first reference is whoever's step took the count from 0: the
+        // guest's AddRef takes it too for a count with an owner, and moves
+        // the owner's as this does, once for the one crossing.
+        const { was, now } = this.#move(1);
+        if (was === 0)
         {
             this.#options.onFirstRef?.();
+            this.#options.owner?.addRef();
         }
-        return this.#move(1).now;
+        return now;
     }
 
     release(){
@@ -282,10 +295,16 @@ class Count {
 }
 
 /**
- * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
- *           onZero?: () => void }} [options]
+ * @typedef {{ implicit?: boolean, owner?: ReferenceCount, onFirstRef?: () => void,
+ *     onLastRef?: () => void, onZero?: () => void }} CountOptions
+ */
+
+/**
+ * @param {CountOptions} [options]
  *        `onZero`: the program's count reached zero, whether or not the device
- *        still holds the resource bound.
+ *        still holds the resource bound. `owner`: the count the first
+ *        reference takes one on and the last gives it back to
+ *        (`ReferenceCount.owner`).
  * @returns {ReferenceCount}
  */
 export function createReferenceCount(options = {}){
@@ -357,6 +376,10 @@ class SharedCount {
     get placed(){
         return this.#count.placed;
     }
+
+    get owner(){
+        return this.#count.owner;
+    }
 }
 
 /**
@@ -398,7 +421,7 @@ const COUNTED = {
  * @param {T} body
  * @returns {NoInfer<T> & { readonly refCount: number, readonly destroyed: boolean }}
  */
-export const counted = body=>Object.setPrototypeOf(body, COUNTED);
+const counted = body=>Object.setPrototypeOf(body, COUNTED);
 
 /** A buffer's prototype: `COUNTED`'s, and how many of its locks are held, which nest. */
 const COUNTED_BUFFER = {
@@ -501,7 +524,7 @@ export function createPriority(pool){
  * since a level has to be made somehow. GenerateMipSubLevels is the
  * renderer's to answer; here it does nothing.
  */
-export function createAutoGenFilter(){
+function createAutoGenFilter(){
     let filter = D3DTEXF_LINEAR;
     return {
         /** @param {number} next @returns {number} */
@@ -563,6 +586,7 @@ const D3DTEXF_LINEAR = 2;
 /**
  * @typedef {Object} Surface
  * @property {number} base            Byte address the surface's own storage starts at.
+ * @property {number} pitch           The bytes from one row to the next.
  * @property {string} kind            A SURFACE_TYPE.
  * @property {number} refCount
  * @property {boolean} destroyed      Whether its last reference has gone for good.
@@ -580,6 +604,7 @@ const D3DTEXF_LINEAR = 2;
  * @property {() => number} UnlockRect
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
+ * @property {boolean} locked      Whether the program holds a lock on it.
  * @property {any} [container]    The texture a level belongs to; absent for a surface of its own.
  * @property {(rect: LockRectangle | null) => void} noteWritten
  * @property {(gdi: SurfaceGdi, out: { dc?: number }) => number | Promise<number>} GetDC
@@ -589,7 +614,8 @@ const D3DTEXF_LINEAR = 2;
 /**
  * @typedef {Object} SurfaceGdi  How a device context over guest pixels is made and unmade.
  * @property {(attributes: { width: number, height: number, pitch: number, bitCount: number,
- *   bits: number, palette: null, format: '565' | '555' }) => number} createSurfaceDc
+ *   bits: number, palette: null, format: '565' | '555', sizeImage?: number,
+ *   compression?: number, bitfields?: number[] }) => number} createSurfaceDc
  * @property {(handle: number) => void} deleteSurfaceDc
  *
  * @typedef {Object} SurfaceFamily
@@ -604,15 +630,19 @@ const D3DTEXF_LINEAR = 2;
  * the bit count GDI is told, and for sixteen bits which layout. R8G8B8 is on
  * that list too, and no surface here is made in it.
  *
- * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555' }>>}
+ * @type {Readonly<Record<number, { bitCount: number, format: '565' | '555',
+ *     bitfields?: number[] }>>}
  */
 const DC_FORMATS = Object.freeze({
     [D3DFMT.A8R8G8B8]: { bitCount: 32, format: '555' },
     [D3DFMT.X8R8G8B8]: { bitCount: 32, format: '555' },
-    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565' },
-    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555' },
-    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555' },
+    [D3DFMT.R5G6B5]: { bitCount: 16, format: '565', bitfields: [0xf800, 0x07e0, 0x001f] },
+    [D3DFMT.X1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
+    [D3DFMT.A1R5G5B5]: { bitCount: 16, format: '555', bitfields: [0x7c00, 0x03e0, 0x001f] },
 });
+
+/** BI_BITFIELDS: what GetObject says a 16-bit surface's section is laid out as. */
+const BI_BITFIELDS = 3;
 
 /**
  * @typedef {Object} SurfaceOptions
@@ -625,14 +655,25 @@ const DC_FORMATS = Object.freeze({
  * @property {number} base
  * @property {ReferenceCount} count
  * @property {boolean} [lockable]     Only a render target is asked this at creation.
+ * @property {boolean} [tight]        Rows with no gap between them, as in memory a Direct3D
+ *           9Ex program hands over for the surface (Wine's d3d9ex test_user_memory: an
+ *           L8 row of 33 pixels is 33 bytes), where a surface of the runtime's own starts
+ *           each row on four bytes.
  * @property {boolean} [forgivesDoubleUnlock]
  * @property {boolean} [rejectsMalformedRects]
  *           Whether a lock rectangle outside the surface, or with its edges
  *           the wrong way round, is refused. The later runtime refuses it;
  *           the earlier accepted it and programs relied on that, so which
  *           applies is the device's to say.
+ * @property {boolean} [checksRectsInEveryPool]
+ *           Such a rectangle is refused in every pool, not only video
+ *           memory: Direct3D 8's image surfaces and cube faces.
+ * @property {boolean} [clearsFailedLock]
+ *           A lock refused hands back a null address and a pitch of zero:
+ *           Direct3D 8's image surfaces and cube faces (Wine's d3d8
+ *           test_lockrect_invalid).
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
- * @property {((api: string, detail: string) => void) | null} [divergence]
+ * @property {((api: string, detail: string, severity?: 'loss') => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes. A render target lives on the GPU; without `pixels` its bytes
  *           are not read back into the guest's copy, so a lock of one hands out
@@ -661,10 +702,16 @@ const DC_FORMATS = Object.freeze({
  * @returns {Surface}
  */
 export function createSurface(options){
-    const pitch = surfacePitch(options.format, options.width);
+    const pitch = options.tight === true
+        ? options.width * (FORMAT_INFO[options.format]?.bytesPerPixel ?? 0) || surfacePitch(
+            options.format, options.width)
+        : surfacePitch(options.format, options.width);
+    /** What a lock hands out: the width for ATI1 and ATI2 (`pixelRowsTaken`). */
+    const handedPitch = options.tight === true ? pitch : lockPitch(options.format, options.width);
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     const rejectsMalformedRects = options.rejectsMalformedRects === true;
+    const checksRectsInEveryPool = options.checksRectsInEveryPool === true;
     let locked = false;
     let lockFlags = 0;
     /** @type {LockRectangle | null} */
@@ -695,8 +742,16 @@ export function createSurface(options){
     /** @type {Surface} */
     const self = counted({
         base: options.base,
+        /** The distance between its rows: `surfacePitch`, or tight in the program's memory. */
+        pitch,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
+        /** A refused lock hands back a null address and a zero pitch (`clearsFailedLock`). */
+        clearsFailedLock: options.clearsFailedLock === true,
+        /** Whether the program holds a lock on it: a copy from it is refused then. */
+        get locked(){
+            return locked;
+        },
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
@@ -730,10 +785,26 @@ export function createSurface(options){
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (rect && rejectsMalformedRects
+            // Only video memory checks the rectangle: a lock of system,
+            // scratch or managed memory takes any, as Windows does
+            // (test_surface_blocks, test_lockrect_invalid).
+            if (rect && ((rejectsMalformedRects && options.pool === D3DPOOL.DEFAULT)
+                || checksRectsInEveryPool)
                 && !(rect.left >= 0 && rect.top >= 0 && rect.left < rect.right
                     && rect.top < rect.bottom && rect.right <= options.width
                     && rect.bottom <= options.height))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            // A compressed surface in video memory locks whole blocks: a
+            // rectangle that cuts one is refused there, and taken in every
+            // other pool (test_surface_blocks).
+            const block = FORMAT_INFO[options.format]?.blockSize ?? 1;
+            if (rect && block > 1 && options.pool === D3DPOOL.DEFAULT
+                && options.format !== D3DFMT.ATI1 && options.format !== D3DFMT.ATI2
+                && ((rect.left | rect.top) % block !== 0
+                    || (rect.right % block !== 0 && rect.right !== options.width)
+                    || (rect.bottom % block !== 0 && rect.bottom !== options.height)))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -764,9 +835,9 @@ export function createSurface(options){
             locked = true;
             family.locks++;
             lockRect = rect;
-            out.Pitch = pitch;
+            out.Pitch = handedPitch;
             out.pBits = options.base
-                + (rect ? offsetOfRect(options.format, pitch, rect) : 0);
+                + (rect ? offsetOfRect(options.format, handedPitch, rect) : 0);
             // The flags decide whether the backend may rename the storage or
             // must write into it; whoever consumes this must see them.
             lockFlags = flags;
@@ -784,7 +855,10 @@ export function createSurface(options){
             {
                 // A context held on another surface of the resource is the
                 // resource's lock, and this is one of its surfaces.
-                return forgivesDoubleUnlock || (family.dc !== null && family.dc !== self)
+                // Only a level that could have been locked forgives: one in
+                // video memory that never could refuses (test_resource_access).
+                return (forgivesDoubleUnlock && lockable)
+                    || (family.dc !== null && family.dc !== self)
                     ? D3D_OK
                     : D3DERR_INVALIDCALL;
             }
@@ -826,7 +900,10 @@ export function createSurface(options){
          */
         GetDC(gdi, out){
             const layout = DC_FORMATS[options.format];
-            if (!layout || locked || family.dc !== null || family.locks > 0)
+            // A surface that cannot be locked has no DC either: a back buffer
+            // made without D3DPRESENTFLAG_LOCKABLE_BACKBUFFER (Wine's
+            // test_lockable_backbuffer).
+            if (!layout || !lockable || locked || family.dc !== null || family.locks > 0)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -834,6 +911,11 @@ export function createSurface(options){
                 width: options.width, height: options.height, pitch,
                 bitCount: layout.bitCount, bits: options.base, palette: null,
                 format: layout.format,
+                // The section GetObject describes says no image size, and a
+                // 16-bit one its masks (Wine's test_getdc).
+                sizeImage: 0,
+                ...(layout.bitfields ? { compression: BI_BITFIELDS, bitfields: layout.bitfields }
+                    : {}),
             });
             if (handle === 0)
             {
@@ -905,8 +987,8 @@ export function rectMoveOf(source, rect, destination, point){
     const info = FORMAT_INFO[from.Format];
     const block = info.blockSize ?? 1;
     const blockBytes = info.blockBytes ?? info.bytesPerPixel;
-    const fromPitch = surfacePitch(from.Format, from.Width);
-    const toPitch = surfacePitch(to.Format, to.Width);
+    const fromPitch = source.pitch ?? surfacePitch(from.Format, from.Width);
+    const toPitch = destination.pitch ?? surfacePitch(to.Format, to.Width);
     return {
         from: source.base + Math.floor(rect.top / block) * fromPitch
             + Math.floor(rect.left / block) * blockBytes,
@@ -991,11 +1073,20 @@ export function packColour(format, colour){
     if (wide)
     {
         // Each channel the colour's fraction of 255, red first, as many as the
-        // format has.
+        // format has, in the format's own precision: a 32-bit float keeps all
+        // of it and a 16-bit fraction spreads the byte over both of its bytes
+        // (Wine's d3d9 test_colorfill), where through a half each lost bits.
         const channels = [16, 8, 0, 24].slice(0, wide.channels)
-            .map(shift=>toHalf(((colour >>> shift) & 0xff) / 0xff));
-        return halvesToStored(wide.stored, new Uint8Array(Uint16Array.from(channels).buffer),
-            wide.channels);
+            .map(shift=>(colour >>> shift) & 0xff);
+        if (wide.stored === 'float')
+        {
+            return new Uint8Array(Float32Array.from(channels, byte=>byte / 0xff).buffer);
+        }
+        if (wide.stored === 'unorm16')
+        {
+            return new Uint8Array(Uint16Array.from(channels, byte=>byte * 0x101).buffer);
+        }
+        return new Uint8Array(Uint16Array.from(channels, byte=>toHalf(byte / 0xff)).buffer);
     }
     const width = FORMAT_INFO[format]?.bytesPerPixel ?? 4;
     const bits = packBits(format, colour);
@@ -1021,12 +1112,25 @@ export function writePixels(surface, pixels, writeMemory){
     const wide = FORMAT_INFO[desc.Format].wide;
     if (wide)
     {
-        // Its rows lie at its pitch with nothing between them, as the read-back's do.
+        // Its rows lie tight in the read-back, and at its pitch in the surface.
         // A device that keeps 32-bit floats whole reads them back as they are stored.
         const count = desc.Width * desc.Height * wide.channels;
-        writeMemory(surface.base, wide.stored === 'float' && pixels.length === count * 4
+        if (wide.luminance)
+        {
+            // Four halves a texel on the GPU, the luminance in red.
+            const halves = new DataView(pixels.buffer, pixels.byteOffset, count * 8);
+            const red = new Uint16Array(count);
+            for (let index = 0; index < count; index++)
+            {
+                red[index] = halves.getUint16(index * 8, true);
+            }
+            writeMemory(surface.base, pitchedRows(halvesToStored(wide.stored,
+                new Uint8Array(red.buffer), count), desc.Format, desc.Width, desc.Height));
+            return;
+        }
+        writeMemory(surface.base, pitchedRows(wide.stored === 'float' && pixels.length === count * 4
             ? pixels.subarray(0, count * 4)
-            : halvesToStored(wide.stored, pixels, count));
+            : halvesToStored(wide.stored, pixels, count), desc.Format, desc.Width, desc.Height));
         return;
     }
     // A four-byte surface is laid out exactly as the read-back is, rows at
@@ -1110,8 +1214,14 @@ export function levelExtent(size, level){
  * @property {(address: number) => void} [free]
  *     Gives a level's storage back when the last reference goes. Absent in a
  *     build whose storage is a fabricated address rather than guest memory.
+ * @property {boolean} [tight]  Its one level is the program's memory, its rows tight.
  * @property {boolean} [cube]
  * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
+ * @property {boolean} [strictFaces]  A cube's faces refuse a malformed rectangle in
+ *     every pool and clear a refused lock's answer, as Direct3D 8's do.
+ * @property {boolean} [faceForgivesUnlock]  A cube's UnlockRect of a face not
+ *     locked answers D3D_OK, as Direct3D 9's does (Wine's
+ *     test_lockrect_invalid); its face's own surface still refuses one.
  */
 
 /**
@@ -1128,30 +1238,42 @@ export function createTexture(options){
     const faces = cube ? 6 : 1;
     /** @type {Map<string, Surface>} */
     const surfaces = new Map();
-    // Each face's levels lie one after another in one block, as Windows lays
-    // a texture's chain out: a program that locks the top level and writes
-    // on past its end writes the next levels (Wine's d3d8 test_mipmap_upload).
-    /** @type {number[]} */
-    const chains = new Array(faces).fill(0);
-    /** @param {number} level @returns {number} bytes before it in its face's block */
+    // Each face's levels lie one after another, and a cube's faces one after
+    // another, each from a 16-byte boundary, in one block, as Windows lays a
+    // texture out: a program that locks the top level and writes on past its
+    // end writes the next levels (Wine's d3d8 test_mipmap_upload, d3d9
+    // test_miptree_layout). ATI1 and ATI2, which the runtime does not know as
+    // blocks, take a pitch -- their width -- for every row of pixels.
+    const rowsTaken = pixelRowsTaken(options.format);
+    /** @param {number} level @returns {number} bytes before it in its face's chain */
     const offsetOf = level=>{
         let bytes = 0;
         for (let before = 0; before < level; before++)
         {
-            bytes += surfaceBytes(options.format, levelExtent(options.width, before),
-                levelExtent(options.height, before));
+            const width = levelExtent(options.width, before);
+            const height = levelExtent(options.height, before);
+            bytes += rowsTaken ? lockPitch(options.format, width) * height
+                : surfaceBytes(options.format, width, height);
         }
         return bytes;
     };
+    const faceBytes = cube ? Math.ceil(offsetOf(options.levels) / 16) * 16
+        : offsetOf(options.levels);
+    // The last level's blocks may reach past its rows -- a 1x1 ATI2 level is
+    // a block of sixteen bytes in one row of one -- and are read whole.
+    const last = options.levels - 1;
+    const past = Math.max(0, offsetOf(last) + surfaceBytes(options.format,
+        levelExtent(options.width, last), levelExtent(options.height, last)) - faceBytes);
+    let block = 0;
+    /** @param {number} face @returns {number} where its chain starts */
+    const chainOf = face=>(block ||= options.allocate(faceBytes * faces + past))
+        + face * faceBytes;
     const count = sharedCount(options.count, ()=>{
-        for (const base of chains)
+        if (block)
         {
-            if (base)
-            {
-                options.free?.(base);
-            }
+            options.free?.(block);
         }
-        chains.fill(0);
+        block = 0;
         surfaces.clear();
     });
     /** @type {SurfaceFamily} */
@@ -1160,10 +1282,7 @@ export function createTexture(options){
     // level's at once and the others at the first draw that samples them; a
     // device made without one would place them later, and elsewhere, than its
     // twin with one (`remote/replay.js`) is given them.
-    for (let face = 0; face < faces; face++)
-    {
-        chains[face] = options.allocate(offsetOf(options.levels));
-    }
+    chainOf(0);
 
     /** @returns {LockRectangle} the whole top level */
     const whole = ()=>({ left: 0, top: 0, right: options.width, bottom: options.height });
@@ -1216,14 +1335,16 @@ export function createTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: (chains[face] ||= options.allocate(offsetOf(options.levels)))
-                + offsetOf(level),
+            base: chainOf(face) + offsetOf(level),
             count,
+            tight: options.tight,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is
             // measured rather than reasoned about.
             forgivesDoubleUnlock: !cube,
             rejectsMalformedRects: options.rejectsMalformedRects,
+            checksRectsInEveryPool: cube && options.strictFaces === true,
+            clearsFailedLock: cube && options.strictFaces === true,
             family,
             // A level's rectangle is a region of the top level scaled up; a
             // rectangle that is not one is all of it.
@@ -1390,7 +1511,8 @@ export function createTexture(options){
          */
         UnlockCubeRect(face, level){
             const surface = surfaceFor(face, level);
-            return surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            const hr = surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
+            return surface && hr !== D3D_OK && options.faceForgivesUnlock === true ? D3D_OK : hr;
         },
     });
     return texture;
@@ -1435,7 +1557,7 @@ export function createTexture(options){
  *
  * @param {LockBox} box @param {number} width @param {number} height @param {number} depth
  */
-export function boxWithin(box, width, height, depth){
+function boxWithin(box, width, height, depth){
     return box.left < box.right && box.top < box.bottom && box.front < box.back
         && box.right <= width && box.bottom <= height && box.back <= depth;
 }
@@ -1448,7 +1570,7 @@ export function boxWithin(box, width, height, depth){
  * @param {number} width @param {number} height @param {number} depth  The level's own extent.
  * @returns {LockBox}
  */
-export function boxAtLevel(box, level, width, height, depth){
+function boxAtLevel(box, level, width, height, depth){
     const round = (/** @type {number} */ edge)=>(edge + (1 << level) - 1) >>> level;
     return {
         left: Math.min(box.left >>> level, width - 1),
@@ -1481,7 +1603,7 @@ export function boxAtLevel(box, level, width, height, depth){
  *
  * @param {VolumeOptions} options
  */
-export function createVolume(options){
+function createVolume(options){
     const rowPitch = surfacePitch(options.format, options.width);
     const slicePitch = surfaceBytes(options.format, options.width, options.height);
     const texelBytes = FORMAT_INFO[options.format]?.bytesPerPixel ?? 4;

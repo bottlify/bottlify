@@ -64,7 +64,7 @@ import { createRemoteApp } from './remote.js';
 const hosts = new WeakMap();
 
 /** How long a canvas may be out of the page before its host is closed. */
-export const DETACHED_MS = 10_000;
+const DETACHED_MS = 10_000;
 
 /**
  * Calls `gone` once a canvas has been out of the page for `wait` ms on end;

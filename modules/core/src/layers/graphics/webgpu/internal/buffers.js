@@ -57,7 +57,16 @@ export const LockFlags = {
 const COPY_SRC = 0x0004;
 
 /** `writeBuffer` wants both the destination offset and the size in whole words. */
-export const UPLOAD_ALIGNMENT = 4;
+const UPLOAD_ALIGNMENT = 4;
+
+/**
+ * Frames submitted with no rename after which a buffer's spare backings go
+ * back to the GPU. A buffer renamed now and then -- its contents replaced
+ * while a draw still read them, once in a level's load -- kept a spare as
+ * large as itself for the rest of the run; one renamed every frame, a ring,
+ * reuses its spares long before this.
+ */
+export const SPARE_FRAMES = 30;
 
 /**
  * Grows a range to the alignment on both sides. Never inward: a byte the guest
@@ -128,6 +137,14 @@ let nextDynamicId = 1;
  * @param {boolean} [options.keep]  False for a buffer whose draws read only
  *     what was written since its last DISCARD -- a renderer's own scratch
  *     ring: a rename then carries nothing over and resends nothing.
+ * @param {boolean} [options.gpuOnly]  For a buffer only the GPU writes (a
+ *     renderer's buffer between compute passes): no copy is kept on the
+ *     processor, and it is never locked.
+ * @param {()=>Uint8Array} [options.source]  The caller's own whole copy of the
+ *     contents (an OpenGL buffer object's store), read where it lies: no
+ *     shadow is kept, a lock's `data` is a view on it, and what an unlock names
+ *     goes to the queue at once - the caller may change its copy after, and
+ *     the queue keeps the bytes as they were at the unlock.
  * @param {{ presents: number, submits: number }} [options.frames]  The frames
  *     presented and submitted, counted once for every buffer of a backend; without
  *     it the buffer counts its own `markPresent` and `endFrame` calls.
@@ -144,7 +161,11 @@ export function createDynamicBuffer(options){
     // The shadow copy is padded so an outward-aligned upload of the tail cannot
     // run past the allocation.
     const capacity = Math.ceil(options.size / alignment) * alignment;
-    const shadow = new Uint8Array(capacity);
+    const source = options.source;
+    const shadow = new Uint8Array(options.gpuOnly || source ? 0 : capacity);
+    const content = source ?? (()=>shadow);
+    // A source's last partial word, padded: `writeBuffer` takes whole words.
+    const tail = new Uint8Array(source ? alignment : 0);
 
     /** @type {any[]} */
     const available = [];
@@ -167,6 +188,9 @@ export function createDynamicBuffer(options){
     const touch = ()=>options.touched?.(self);
     let generation = 0;
     let renames = 0;
+    // The submits counted at the last rename, and the spares given back.
+    let renamedAt = 0;
+    let sparesFreed = 0;
     // What the uploads cost, for a report: each write is a trip to the GPU
     // process, and a rename without DISCARD resends the whole buffer.
     let writes = 0;
@@ -275,8 +299,26 @@ export function createDynamicBuffer(options){
             return 0;
         }
         const range = alignOutward(dirtyStart, dirtyEnd, alignment);
-        const bytes = Math.min(range.end, capacity) - range.start;
-        options.queue.writeBuffer(gpu, range.start, shadow, range.start, bytes);
+        let bytes = Math.min(range.end, capacity) - range.start;
+        const data = content();
+        // Past a source's last whole word: its partial word from the padded
+        // tail, and nothing beyond it, which no draw of the caller's reads.
+        const whole = Math.min(range.start + bytes, data.length - data.length % alignment);
+        if (whole > range.start)
+        {
+            options.queue.writeBuffer(gpu, range.start, data, range.start, whole - range.start);
+        }
+        if (whole < range.start + bytes)
+        {
+            bytes = whole - range.start;
+            if (data.length > whole)
+            {
+                tail.fill(0);
+                tail.set(data.subarray(whole));
+                options.queue.writeBuffer(gpu, whole, tail, 0, alignment);
+                bytes += alignment;
+            }
+        }
         writes++;
         written += bytes;
         carryInto?.written.push({ start: range.start, end: range.start + bytes });
@@ -298,6 +340,7 @@ export function createDynamicBuffer(options){
         touch();
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
+        renamedAt = frames.submits;
         // Nothing has read the replacement yet.
         readIn = -1;
         reads = [];
@@ -320,12 +363,21 @@ export function createDynamicBuffer(options){
         get gpu(){
             return gpu;
         },
-        /** Whether a retired backing waits for its frame's submit to come back to the pool. */
+        /**
+         * Whether the frame's end has work for it: a retired backing waiting
+         * for its frame's submit to come back to the pool, or spares waiting
+         * to go back to the GPU.
+         */
         get retiring(){
-            return retired.length > 0;
+            return retired.length > 0 || available.length > 0;
         },
         get renames(){
             return renames;
+        },
+        /** What it holds: the live backing's bytes, its copy on the processor, its spares. */
+        get held(){
+            return { capacity, shadow: shadow.length, spares: available.length + retired.length,
+                sparesFreed };
         },
         size: options.size,
         label,
@@ -376,7 +428,7 @@ export function createDynamicBuffer(options){
             {
                 wholeLocks++;
             }
-            held = { data: shadow.subarray(offset, offset + length), offset, length, flags,
+            held = { data: content().subarray(offset, offset + length), offset, length, flags,
                 renamed: renames !== renamesBefore };
             return held;
         },
@@ -407,6 +459,10 @@ export function createDynamicBuffer(options){
             }
             held = null;
             touch();
+            if (source)
+            {
+                flush();
+            }
         },
 
         flush,
@@ -419,6 +475,10 @@ export function createDynamicBuffer(options){
          * @param {number} offset @param {Uint8Array} bytes
          */
         rewrite(offset, bytes){
+            if (source)
+            {
+                throw new Error(`"${label}" reads its bytes from its source`);
+            }
             shadow.set(bytes, offset);
             marked += bytes.length;
             dirtyStart = dirtyStart < 0 ? offset : Math.min(dirtyStart, offset);
@@ -435,7 +495,7 @@ export function createDynamicBuffer(options){
          * @returns {Uint8Array}
          */
         bytes(offset, length){
-            return shadow.subarray(offset, offset + length);
+            return content().subarray(offset, offset + length);
         },
 
         /**
@@ -516,6 +576,15 @@ export function createDynamicBuffer(options){
                     retired.splice(index, 1);
                 }
             }
+            if (available.length > 0 && submits - renamedAt >= SPARE_FRAMES)
+            {
+                for (const spare of available)
+                {
+                    spare.destroy?.();
+                }
+                sparesFreed += available.length;
+                available.length = 0;
+            }
         },
 
         diagnostics(){
@@ -534,6 +603,8 @@ export function createDynamicBuffer(options){
                 locks,
                 wholeLocks,
                 pooled: available.length + retired.length,
+                capacity,
+                sparesFreed,
                 dirty: dirtyStart < 0 ? 0 : dirtyEnd - dirtyStart,
             };
         },

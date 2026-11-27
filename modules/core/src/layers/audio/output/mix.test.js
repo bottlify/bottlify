@@ -8,11 +8,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    resampleInto, createSeam, slotHeaderOffset, slotPcmOffset, createFeed, playFeed,
+    resampleInto, createSeam, slotHeaderOffset, slotPcmOffset,
     SLOT_HEADER_INT32, SLOT_BYTES, GLOBAL_HEADER_INT32,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO,
     STATE_OPEN, GAIN_SCALE, TABLE_BYTES, KIND, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES, FLOAT_SAMPLES, pcmSample,
 } from './mix.js';
 import { convert, createMixer } from './mixer.js';
 
@@ -165,7 +165,7 @@ test('gain scales the samples and a paused slot contributes nothing', ()=>{
 });
 
 test('a mixer over the table stays within TABLE_BYTES', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     assert.equal(mixer.table.byteLength, TABLE_BYTES);
 });
 
@@ -301,32 +301,26 @@ test('a stream nobody writes for a quarter of a second is played on round the ci
     assert.deepEqual(mix(2).left, [100, 200]);
 });
 
-/** @param {number} at @param {number[]} values */
-const chunk = (at, values)=>({ at, frames: Float32Array.from(values) });
-
-test('a feed plays the chunks posted to it in order, across their edges', ()=>{
-    const queue = createFeed();
-    queue.chunks.push(chunk(0, [1, -1, 2, -2, 3, -3]), chunk(3, [4, -4, 5, -5]));
-    const block = new Float32Array(8);
-    assert.equal(playFeed(queue, block, 4), 4);
-    assert.deepEqual([...block], [1, -1, 2, -2, 3, -3, 4, -4]);
-    assert.equal(queue.position, 4, 'where in the ring it has played to');
-    assert.equal(playFeed(queue, block, 4), 1);
-    assert.deepEqual([...block], [5, -5, 0, 0, 0, 0, 0, 0], 'silence where nothing came');
-    assert.equal(queue.position, 5);
-    assert.deepEqual({ blocks: queue.blocks, starvedBlocks: queue.starvedBlocks,
-        starvedFrames: queue.starvedFrames }, { blocks: 2, starvedBlocks: 1, starvedFrames: 3 });
-    assert.equal(queue.chunks.length, 0);
-});
-
-test('a feed skips to where a chunk says it starts, as after the ring was cleared', ()=>{
-    const queue = createFeed();
-    queue.chunks.push(chunk(100, [7, -7]));
-    const block = new Float32Array(2);
-    assert.equal(playFeed(queue, block, 1), 1);
-    assert.equal(queue.position, 101, 'counted from the ring, not from zero');
-    queue.chunks.push(chunk(150, [8, -8]));
-    playFeed(queue, block, 1);
-    assert.deepEqual([...block], [8, -8]);
-    assert.equal(queue.position, 151);
+test('a sample is read at its own width and kind, a float as a float', ()=>{
+    // SDL2 hands DirectSound thirty-two-bit floats: read as sixteen-bit
+    // integers, a sine was noise.
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setFloat32(0, 0.25, true);
+    view.setInt32(4, -0x40000000, true);
+    view.setInt16(8, 0x4000, true);
+    bytes[10] = 0x00;
+    bytes[11] = 0x00;
+    bytes[12] = 0xc0;
+    bytes[13] = 0xc0;
+    assert.equal(pcmSample(bytes, 0, 32 | FLOAT_SAMPLES, -1), 0.25, 'float');
+    assert.equal(pcmSample(bytes, 4, 32, -1), -0.5, 'thirty-two-bit integer');
+    assert.equal(pcmSample(bytes, 8, 16, -1), 0.5, 'sixteen-bit');
+    assert.equal(pcmSample(bytes, 10, 24, -1), -0.5, 'twenty-four-bit');
+    assert.equal(pcmSample(bytes, 13, 8, -1), (0xc0 - 128) / 128, 'eight-bit unsigned');
+    // Round a ring: a sample whose bytes cross its end reads from its start.
+    const ring = new Uint8Array(4);
+    new DataView(ring.buffer).setFloat32(0, -1, true);
+    const wrapped = new Uint8Array([ring[2], ring[3], ring[0], ring[1]]);
+    assert.equal(pcmSample(wrapped, 2, 32 | FLOAT_SAMPLES, 3), -1, 'across the ring\'s end');
 });

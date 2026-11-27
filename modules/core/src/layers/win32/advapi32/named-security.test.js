@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createNamedSecurityFunctions } from './named-security.js';
 import { createRegistryService } from './registry-service.js';
-import { createHive } from './registry.js';
+import { HKEY_LOCAL_MACHINE, createHive } from './registry.js';
+import { SERVICE_BY_NAME, createServiceFunctions } from './services.js';
 import { createTokenFunctions } from './tokens.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
@@ -17,6 +18,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_ACL = 1336;
 const ERROR_INVALID_SID = 1337;
+const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 
 const SE_FILE_OBJECT = 1;
 const SE_SERVICE = 2;
@@ -24,9 +26,7 @@ const SE_REGISTRY_KEY = 4;
 const OWNER = 0x1;
 const GROUP = 0x2;
 const DACL = 0x4;
-const SACL = 0x8;
 const SE_DACL_PRESENT = 0x0004;
-const SE_SACL_PRESENT = 0x0010;
 const SE_SELF_RELATIVE = 0x8000;
 
 /** Addresses the fixtures use; nothing about them matters but that they differ. */
@@ -34,11 +34,9 @@ const NAME = 0x100;
 const OWNER_OUT = 0x400;
 const GROUP_OUT = 0x404;
 const DACL_OUT = 0x408;
-const SACL_OUT = 0x40c;
 const SD_OUT = 0x410;
 const PART = 0x500;
 
-const EVERYONE = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const ADMINISTRATORS = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0];
 const SYSTEM = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 
@@ -106,38 +104,41 @@ function setup(){
     return { bytes, view, host, fns, dword, narrow, wide, clearOuts, divergences };
 }
 
-test('a file on a volume that keeps no descriptors has the world\'s: Everyone\'s, a null DACL',
-    ()=>{
-        const { bytes, fns, dword, narrow, wide, clearOuts } = setup();
-        assert.equal(fns.GetNamedSecurityInfoA.argBytes, 32);
-        assert.equal(fns.GetNamedSecurityInfoW.argBytes, 32);
+test('a directory that had none set has the NTFS DACL: full control, inheritable', ()=>{
+    const { bytes, fns, dword, narrow, clearOuts } = setup();
+    assert.equal(fns.GetNamedSecurityInfoA.argBytes, 32);
+    assert.equal(fns.GetNamedSecurityInfoW.argBytes, 32);
 
-        clearOuts();
-        assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('C:\\WINDOWS'), SE_FILE_OBJECT,
-            OWNER | GROUP | DACL, OWNER_OUT, GROUP_OUT, DACL_OUT, 0, SD_OUT]), 0);
-        const sd = dword(SD_OUT);
-        assert.ok(sd >= 0x1000, 'in a block of its own, for LocalFree');
-        const control = bytes[sd + 2] | bytes[sd + 3] << 8;
-        assert.equal(bytes[sd], 1, 'SECURITY_DESCRIPTOR_REVISION');
-        assert.equal(control, SE_SELF_RELATIVE | SE_DACL_PRESENT);
-        assert.deepEqual([...bytes.subarray(sd + dword(sd + 4), sd + dword(sd + 4) + 12)],
-            EVERYONE, 'owned by Everyone');
-        assert.deepEqual([...bytes.subarray(sd + dword(sd + 8), sd + dword(sd + 8) + 12)],
-            EVERYONE, 'its group Everyone');
-        assert.equal(dword(sd + 16), 0, 'the DACL present, and null');
-        assert.equal(dword(OWNER_OUT), sd + dword(sd + 4), 'the owner pointer points into it');
-        assert.equal(dword(GROUP_OUT), sd + dword(sd + 8));
-        assert.equal(dword(DACL_OUT), 0, 'a null DACL is a NULL pointer');
+    clearOuts();
+    assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('C:\\WINDOWS'), SE_FILE_OBJECT,
+        OWNER | GROUP | DACL, OWNER_OUT, GROUP_OUT, DACL_OUT, 0, SD_OUT]), 0);
+    const sd = dword(SD_OUT);
+    assert.ok(sd >= 0x1000, 'in a block of its own, for LocalFree');
+    assert.equal(bytes[sd], 1, 'SECURITY_DESCRIPTOR_REVISION');
+    assert.equal(bytes[sd + 2] | bytes[sd + 3] << 8, SE_SELF_RELATIVE | SE_DACL_PRESENT);
+    assert.deepEqual([...bytes.subarray(sd + dword(sd + 4), sd + dword(sd + 4) + 16)],
+        ADMINISTRATORS, 'owned by the administrators');
+    assert.deepEqual([...bytes.subarray(sd + dword(sd + 8), sd + dword(sd + 8) + 12)],
+        SYSTEM, 'its group the system');
+    const acl = dword(DACL_OUT);
+    assert.equal(acl, sd + dword(sd + 16), 'the DACL pointer points into it');
+    assert.equal(view0(bytes, acl + 4), 3, 'three ACEs: administrators, system, creator owner');
+    // The first ACE: allowed, inheritable, full control to the administrators.
+    assert.equal(bytes[acl + 8], 0, 'an allowed ACE');
+    assert.equal(bytes[acl + 9], 0x3, 'OBJECT_INHERIT | CONTAINER_INHERIT on a directory');
+    assert.equal(view0(bytes, acl + 8 + 4), 0x1f01ff, 'FILE_ALL_ACCESS');
 
-        clearOuts();
-        assert.equal(fns.GetNamedSecurityInfoW.handler([wide('c:\\windows\\WIN.INI'),
-            SE_FILE_OBJECT, DACL | SACL, 0, 0, DACL_OUT, SACL_OUT, SD_OUT]), 0, 'the wide form');
-        const asked = dword(SD_OUT);
-        assert.equal(bytes[asked + 2] | bytes[asked + 3] << 8,
-            SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_SACL_PRESENT);
-        assert.deepEqual([dword(asked + 4), dword(asked + 8)], [0, 0], 'no owner or group asked');
-        assert.deepEqual([dword(DACL_OUT), dword(SACL_OUT)], [0, 0]);
-    });
+    clearOuts();
+    assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('C:\\WINDOWS\\win.ini'),
+        SE_FILE_OBJECT, DACL, 0, 0, DACL_OUT, 0, SD_OUT]), 0, 'a file: its ACEs are inherited');
+    const fileAcl = dword(DACL_OUT);
+    assert.equal(bytes[fileAcl + 8 + 1], 0x10, 'INHERITED_ACE');
+});
+
+/** @param {Uint8Array} bytes @param {number} at */
+function view0(bytes, at){
+    return (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
+}
 
 test('what a read needs to be given, and a name that is not there', ()=>{
     // advapi32's security tests (test_GetNamedSecurityInfoA): no descriptor
@@ -152,7 +153,7 @@ test('what a read needs to be given, and a name that is not there', ()=>{
     clearOuts();
     assert.equal(fns.GetNamedSecurityInfoA.handler([name, SE_FILE_OBJECT, DACL,
         0, 0, DACL_OUT, 0, SD_OUT]), 0);
-    assert.equal(dword(DACL_OUT), 0);
+    assert.notEqual(dword(DACL_OUT), 0, 'the DACL the volume gives a directory');
     clearOuts();
     assert.equal(fns.GetNamedSecurityInfoA.handler([name, SE_FILE_OBJECT, DACL,
         0, 0, DACL_OUT, 0, 0]), 0, 'the part alone, when it has a pointer');
@@ -214,7 +215,38 @@ test('an object kind with no security by name here says so, and an unknown kind 
             0, 0, 0, 0]), ERROR_INVALID_PARAMETER);
     });
 
-test('setting an object\'s security succeeds where it is there and changes nothing read back',
+test('a service by name has the service manager\'s security, and what is set is its', ()=>{
+    // An installer's secure-objects step (WiX's ExecSecureObjects) reads a
+    // service's DACL by its name, merges an entry and sets it back.
+    const { bytes, host, fns, dword, narrow, wide } = setup();
+    const services = createServiceFunctions({ readCString: host.readCString,
+        readMemory: host.readMemory, writeMemory: host.writeMemory, hive: host.hive });
+    const manager = /** @type {any} */ (services)[SERVICE_BY_NAME];
+    /** @type {any} */ (host).services = ()=>manager;
+    const hklm = /** @type {number} */ (host.hive.root(HKEY_LOCAL_MACHINE));
+    host.hive.create(hklm, 'SYSTEM\\CurrentControlSet\\Services\\FontCache');
+
+    assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('NoSuchService'), SE_SERVICE, DACL,
+        0, 0, DACL_OUT, 0, SD_OUT]), ERROR_SERVICE_DOES_NOT_EXIST);
+    assert.equal(fns.GetNamedSecurityInfoW.handler([wide('FontCache'), SE_SERVICE,
+        OWNER | DACL, OWNER_OUT, 0, DACL_OUT, 0, SD_OUT]), 0);
+    const block = dword(SD_OUT);
+    assert.equal(dword(OWNER_OUT), block + dword(block + 4), 'the owner points into the block');
+    assert.deepEqual([...bytes.subarray(dword(OWNER_OUT), dword(OWNER_OUT) + 12)], SYSTEM,
+        'a service is the system\'s');
+    assert.notEqual(dword(DACL_OUT), 0);
+
+    const ACL_AT = PART;
+    bytes.set([2, 0, 8, 0, 0, 0, 0, 0], ACL_AT);
+    assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('FontCache'), SE_SERVICE, DACL,
+        0, 0, ACL_AT, 0]), 0);
+    assert.deepEqual([...manager.describe('FontCache', DACL)].slice(-8), [2, 0, 8, 0, 0, 0, 0, 0],
+        'the manager answers the empty DACL that was set');
+    assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('NoSuchService'), SE_SERVICE, DACL,
+        0, 0, ACL_AT, 0]), ERROR_SERVICE_DOES_NOT_EXIST);
+});
+
+test('setting a file\'s security keeps it for the run; a key\'s is accepted and kept nowhere',
     ()=>{
         // advapi32's security tests: SetNamedSecurityInfo of a path that is
         // not there is ERROR_FILE_NOT_FOUND, with the last error untouched --
@@ -236,7 +268,7 @@ test('setting an object\'s security succeeds where it is there and changes nothi
 
         assert.equal(fns.GetNamedSecurityInfoA.handler([narrow('C:\\Program Files'),
             SE_FILE_OBJECT, DACL, 0, 0, DACL_OUT, 0, SD_OUT]), 0);
-        assert.equal(dword(DACL_OUT), 0, 'still the null DACL: nothing was kept');
+        assert.equal(dword(DACL_OUT), 0, 'the null DACL that was set last, read back');
 
         bytes[ACL_AT] = 7;
         assert.equal(fns.SetNamedSecurityInfoA.handler([narrow('C:\\Program Files'),
@@ -268,7 +300,48 @@ test('the permissions step of an installer: read the DACL, merge an entry, set i
         view.setUint32(ENTRY + at * 4, value, true));
     assert.equal(tokens.SetEntriesInAclA.handler([1, ENTRY, dword(DACL_OUT), NEW]), 0);
     const merged = dword(NEW);
-    assert.equal(bytes[merged + 4], 1, 'one ACE, merged into the null DACL\'s nothing');
+    assert.equal(bytes[merged + 4], 4, 'the new ACE merged into the volume\'s three');
     assert.equal(fns.SetNamedSecurityInfoA.handler([name, SE_FILE_OBJECT, DACL,
         0, 0, merged, 0]), 0);
+    // Set back and kept: the next read answers the four ACEs, not the default three.
+    assert.equal(fns.GetNamedSecurityInfoA.handler([name, SE_FILE_OBJECT, DACL,
+        0, 0, DACL_OUT, 0, SD_OUT]), 0);
+    assert.equal(bytes[dword(DACL_OUT) + 4], 4, 'the DACL set on it, kept for the run');
+});
+
+test('DecryptFile: a file that is there is in the clear already; one that is not, fails', ()=>{
+    const { host, fns, narrow, wide } = setup();
+    /** @type {number[]} */
+    const errors = [];
+    const answered = createNamedSecurityFunctions({ ...host,
+        setLastError: code=>errors.push(code) });
+    assert.equal(fns.DecryptFileW.argBytes, 8);
+    assert.equal(answered.DecryptFileW.handler([wide('C:\\WINDOWS\\win.ini'), 0]), 1);
+    assert.equal(answered.DecryptFileA.handler([narrow('C:\\WINDOWS\\win.ini'), 0]), 1);
+    assert.deepEqual(errors, [], 'nothing said of a success');
+    assert.equal(answered.DecryptFileW.handler([wide('C:\\WINDOWS\\gone.ini'), 0]), 0);
+    assert.deepEqual(errors, [ERROR_FILE_NOT_FOUND]);
+});
+
+test('RegGetKeySecurity gives an open key the shape Windows gives its keys; a set is taken', ()=>{
+    // ASP.NET's registration (webengine4.dll) reads a key's descriptor, adds
+    // an entry and writes it back.
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const HKEY = 0x80000002;
+    const SIZE = 0x600;
+    const BUFFER = 0x700;
+    const { bytes, fns, dword } = setup();
+    const view = new DataView(bytes.buffer);
+    view.setUint32(SIZE, 4, true);
+    assert.equal(fns.RegGetKeySecurity.handler([HKEY, OWNER | DACL, BUFFER, SIZE]),
+        ERROR_INSUFFICIENT_BUFFER);
+    const needed = dword(SIZE);
+    assert.ok(needed > 20, 'told the size');
+    assert.equal(fns.RegGetKeySecurity.handler([HKEY, OWNER | DACL, BUFFER, SIZE]), 0);
+    assert.equal(bytes[BUFFER], 1, 'SECURITY_DESCRIPTOR_REVISION');
+    assert.equal(view.getUint16(BUFFER + 2, true) & SE_SELF_RELATIVE, SE_SELF_RELATIVE);
+    const owner = BUFFER + dword(BUFFER + 4);
+    assert.deepEqual([...bytes.subarray(owner, owner + 16)], ADMINISTRATORS);
+    assert.equal(fns.RegSetKeySecurity.handler([HKEY, DACL, BUFFER]), 0);
+    assert.equal(fns.RegGetKeySecurity.handler([0, DACL, BUFFER, SIZE]), 6, 'no key');
 });

@@ -29,6 +29,13 @@
  * association makes the next file's completions land in somebody else's port.
  */
 
+import { STATUS, toDosError } from '../ntdll/status.js';
+import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
+import { dueInMs, readLargeInteger } from './due-time.js';
+import { nameToWalk, readObjectAttributes } from './object-attributes.js';
+import { TAKEN } from './named-objects.js';
+import { pointerArg, pointerIo, wholeAddress } from '../common/pointers.js';
+
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -41,6 +48,22 @@ const ERROR_ABANDONED_WAIT_0 = 735;
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
 
+/** What a native wait on a port that was closed under it answers. */
+const STATUS_ABANDONED_WAIT_0 = 0x00000080;
+
+/**
+ * One packet as OVERLAPPED_ENTRY (GetQueuedCompletionStatusEx) or
+ * FILE_IO_COMPLETION_INFORMATION (NtRemoveIoCompletionEx) holds it: four
+ * pointer-sized fields - the key, the overlapped (ApcContext), the status
+ * (Internal), the bytes (Information).
+ */
+const ENTRY_FIELDS = 4;
+
+/** IO_COMPLETION_INFORMATION_CLASS: IoCompletionBasicInformation, its Depth. */
+const IO_COMPLETION_BASIC_INFORMATION = 0;
+
+/** What an alertable wait an APC ended answers: WAIT_IO_COMPLETION, STATUS_USER_APC. */
+const WAIT_IO_COMPLETION = 0xc0;
 /** INVALID_HANDLE_VALUE, which CreateIoCompletionPort takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
@@ -49,10 +72,6 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
  * its byte count, which is where GetOverlappedResult reads them from; hEvent is
  * signalled as well as the port, because a caller may be waiting on either.
  */
-const OVERLAPPED_INTERNAL = 0;
-const OVERLAPPED_INTERNAL_HIGH = 4;
-const OVERLAPPED_OFFSET = 8;
-const OVERLAPPED_EVENT = 16;
 
 /**
  * How long a thread may wait on a port before the wait is reported as a
@@ -70,6 +89,10 @@ const HANG_AFTER_MS = 10_000;
  * @property {number} transferred
  * @property {number} key
  * @property {number} overlapped
+ * @property {number} [error]  the Win32 error of an operation that did not
+ *           succeed: GetQueuedCompletionStatus answers FALSE with it
+ * @property {number} [status]  its NTSTATUS, which the native calls hand back
+ *           (a packet NtSetIoCompletion queued carries whatever it was given)
  */
 
 /**
@@ -78,13 +101,20 @@ const HANG_AFTER_MS = 10_000;
  * else and these pointers are all that is left of the call.
  *
  * @typedef {Object} CompletionOut
- * @property {number} bytes
+ * @property {'win32' | 'native' | 'entries'} form  GetQueuedCompletionStatus's
+ *     three out-parameters; NtRemoveIoCompletion's key, ApcContext and
+ *     IO_STATUS_BLOCK; or a list of entries (the Ex calls), of which a woken
+ *     waiter is handed one
+ * @property {number} bytes  the bytes' out-parameter, or the IO_STATUS_BLOCK
  * @property {number} key
  * @property {number} overlapped
+ * @property {number} [removed]  where the Ex calls write how many they handed over
  */
 
 /**
  * @typedef {Object} CompletionPortHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
+ *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -94,6 +124,13 @@ const HANG_AFTER_MS = 10_000;
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {(handle: number) => void} signalEvent
+ * @property {(handle: number) => boolean} [synchronous]  a handle opened for synchronous
+ *     I/O, which no port takes
+ * @property {(alertable: boolean, wait: () => any, answer?: () => number) => any} [alertably]
+ *     a wait an APC may end, the routines queued run first (apc.js `waitWith`)
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *     the run's one namespace, where a port made by name is found again
  * @property {(text: string) => void} [trace]
  * @property {() => number} [hostTime]
  *           Host milliseconds, for the hang report alone. The wall clock unless
@@ -105,6 +142,7 @@ const HANG_AFTER_MS = 10_000;
  * @param {CompletionPortHost} host
  */
 export function createIoCompletionPorts(host){
+    const layout = overlappedLayout(host.pointerSize);
     const { kernel } = host;
     const hostTime = host.hostTime ?? (()=>Date.now());
 
@@ -122,7 +160,9 @@ export function createIoCompletionPorts(host){
      * One table for the process rather than one per port: a completion is posted
      * from the file's side, which knows a handle and nothing else.
      *
-     * @type {Map<number, { port: any, key: number }>}
+     * A thread pool I/O object takes its file's completions itself (`sink`).
+     *
+     * @type {Map<number, { port: any, key: number, sink?: (packet: CompletionPacket) => void }>}
      */
     const associations = new Map();
 
@@ -131,10 +171,10 @@ export function createIoCompletionPorts(host){
         // would be handed a packet later, consuming one nobody is there to read.
         for (const port of ports)
         {
-            const at = port.waiters.findIndex((/** @type {any} */ waiter)=>waiter.thread === thread);
+            const at = port.takers.findIndex((/** @type {any} */ waiter)=>waiter.thread === thread);
             if (at >= 0)
             {
-                port.waiters.splice(at, 1);
+                port.takers.splice(at, 1);
             }
         }
     });
@@ -160,6 +200,17 @@ export function createIoCompletionPorts(host){
         }
     };
 
+    /** A pointer-sized field - a key, an OVERLAPPED's address - whole. */
+    const width = host.pointerSize === 8 ? 8 : 4;
+    const { write: writePointer } = pointerIo(host, width);
+    /** @param {number} address @param {number} value */
+    const writePointerIf = (address, value)=>{
+        if (address !== 0)
+        {
+            writePointer(address, value);
+        }
+    };
+
     /** @param {number} address */
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
@@ -178,11 +229,61 @@ export function createIoCompletionPorts(host){
         }
     };
 
+    /** A packet's NTSTATUS, for one posted with a Win32 error only. @param {CompletionPacket} packet */
+    const statusOf = packet=>packet.status ?? (packet.error ? STATUS.UNSUCCESSFUL : 0);
+
+    /**
+     * One packet as an entry of a list: key, overlapped, status, bytes.
+     *
+     * @param {number} at @param {CompletionPacket} packet
+     */
+    const writeEntry = (at, packet)=>{
+        writePointer(at, packet.key);
+        writePointer(at + width, packet.overlapped);
+        writePointer(at + 2 * width, statusOf(packet) >>> 0);
+        writeDword(at + 3 * width, packet.transferred);
+    };
+
     /** @param {CompletionOut} out @param {CompletionPacket | null} packet */
     const answer = (out, packet)=>{
+        if (out.form === 'entries')
+        {
+            if (packet)
+            {
+                writeEntry(out.overlapped, packet);
+            }
+            writeDwordIf(out.removed ?? 0, packet ? 1 : 0);
+            return;
+        }
+        writePointerIf(out.key, packet ? packet.key : 0);
+        writePointerIf(out.overlapped, packet ? packet.overlapped : 0);
+        if (out.form === 'native')
+        {
+            // IO_STATUS_BLOCK: the status, then the information a pointer's width on.
+            if (packet)
+            {
+                writeDword(out.bytes, statusOf(packet));
+                writePointer(out.bytes + width, packet.transferred);
+            }
+            return;
+        }
         writeDwordIf(out.bytes, packet ? packet.transferred : 0);
-        writeDwordIf(out.key, packet ? packet.key : 0);
-        writeDwordIf(out.overlapped, packet ? packet.overlapped : 0);
+    };
+
+    /**
+     * What a waiter is woken with when a packet comes: a native wait's status,
+     * or the Win32 call's BOOL with its last error set.
+     *
+     * @param {{ thread: any, out: CompletionOut, native: boolean }} waiter
+     * @param {CompletionPacket} packet
+     */
+    const wakeValue = (waiter, packet)=>{
+        if (waiter.native)
+        {
+            return STATUS.SUCCESS;
+        }
+        host.setLastErrorFor(waiter.thread, packet.error ?? ERROR_SUCCESS);
+        return waiter.out.form === 'entries' ? 1 : (packet.error ? 0 : 1);
     };
 
     /**
@@ -199,7 +300,7 @@ export function createIoCompletionPorts(host){
         const at = hostTime();
         for (const port of ports)
         {
-            for (const waiter of port.waiters)
+            for (const waiter of port.takers)
             {
                 if (waiter.warned || at - waiter.since < HANG_AFTER_MS)
                 {
@@ -224,19 +325,57 @@ export function createIoCompletionPorts(host){
      * @param {any} port @param {CompletionPacket} packet
      */
     const post = (port, packet)=>{
-        while (port.waiters.length > 0)
+        while (port.takers.length > 0)
         {
-            const waiter = port.waiters.shift();
+            const waiter = port.takers.pop();
+            // A thread that is no longer blocked -- terminated while parked, or
+            // its alertable wait ended by an APC -- takes nothing with it: the
+            // packet goes to whoever is next, and its out-parameters are left
+            // alone.
+            if (waiter.thread.state !== 'blocked')
+            {
+                continue;
+            }
             answer(waiter.out, packet);
-            host.setLastErrorFor(waiter.thread, ERROR_SUCCESS);
-            // A thread that is no longer blocked -- terminated while parked --
-            // takes nothing with it: the packet goes to whoever is next.
-            if (kernel.wake(waiter.thread, 1))
+            if (kernel.wake(waiter.thread, wakeValue(waiter, packet)))
             {
                 return;
             }
         }
         port.queue.push(packet);
+        kernel.setEvent(port);
+    };
+
+    /**
+     * A finished operation's packet, to the port its file is bound to, or to
+     * the thread pool I/O object that took the file.
+     *
+     * @param {{ port: any, sink?: (packet: CompletionPacket) => void }} association
+     * @param {CompletionPacket} packet
+     */
+    const deliver = (association, packet)=>{
+        if (association.sink)
+        {
+            association.sink(packet);
+            return;
+        }
+        post(association.port, packet);
+    };
+
+    /**
+     * The first queued packet taken off, the port's signal following its
+     * queue: signalled while a packet waits.
+     *
+     * @param {any} port
+     * @returns {CompletionPacket | undefined}
+     */
+    const take = port=>{
+        const packet = port.queue.shift();
+        if (packet && port.queue.length === 0)
+        {
+            kernel.resetEvent(port);
+        }
+        return packet;
     };
 
     /**
@@ -249,13 +388,18 @@ export function createIoCompletionPorts(host){
      * @param {any} port
      */
     const abandon = port=>{
-        for (const waiter of port.waiters)
+        for (const waiter of port.takers)
         {
             answer(waiter.out, null);
-            host.setLastErrorFor(waiter.thread, ERROR_ABANDONED_WAIT_0);
-            kernel.wake(waiter.thread, 0);
+            if (!waiter.native)
+            {
+                host.setLastErrorFor(waiter.thread, ERROR_ABANDONED_WAIT_0);
+            }
+            kernel.wake(waiter.thread, waiter.native ? STATUS_ABANDONED_WAIT_0 : 0);
         }
-        port.waiters.length = 0;
+        // And whoever waits on the port's handle itself goes too.
+        kernel.setEvent(port);
+        port.takers.length = 0;
     };
 
     const table = {
@@ -270,7 +414,10 @@ export function createIoCompletionPorts(host){
         CreateIoCompletionPort: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([file, existing, key])=>{
+            handler: args=>{
+                const [file, existing] = args;
+                // The key comes back as it went in, all of a 64-bit caller's.
+                const key = pointerArg(args, 2);
                 reportHangs();
                 const bindable = (file >>> 0) !== INVALID_HANDLE_VALUE && file !== 0;
                 if ((existing >>> 0) !== 0)
@@ -280,20 +427,23 @@ export function createIoCompletionPorts(host){
                     {
                         return fail(ERROR_INVALID_HANDLE);
                     }
-                    if (!bindable)
+                    if (!bindable || host.synchronous?.(file >>> 0))
                     {
-                        // Naming a port and no file asks for nothing at all.
+                        // Naming a port and no file asks for nothing at all; a
+                        // handle opened for synchronous I/O completes nothing.
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    associations.set(file >>> 0, { port, key: key >>> 0 });
-                    return existing >>> 0;
+                    associations.set(file >>> 0, { port, key });
+                    return wholeAddress(existing);
                 }
-                const port = { queue: [], waiters: [], handle: 0 };
-                port.handle = kernel.handles.open('iocp', port);
-                ports.add(port);
+                if (bindable && host.synchronous?.(file >>> 0))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const port = makePort();
                 if (bindable)
                 {
-                    associations.set(file >>> 0, { port, key: key >>> 0 });
+                    associations.set(file >>> 0, { port, key });
                 }
                 return port.handle;
             },
@@ -311,7 +461,8 @@ export function createIoCompletionPorts(host){
         PostQueuedCompletionStatus: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, transferred, key, overlapped])=>{
+            handler: args=>{
+                const [handle, transferred, , overlapped] = args;
                 reportHangs();
                 const port = portOf(handle);
                 if (!port)
@@ -320,8 +471,8 @@ export function createIoCompletionPorts(host){
                 }
                 post(port, {
                     transferred: transferred >>> 0,
-                    key: key >>> 0,
-                    overlapped: overlapped >>> 0,
+                    key: pointerArg(args, 2),
+                    overlapped: wholeAddress(overlapped),
                 });
                 host.setLastError(ERROR_SUCCESS);
                 return 1;
@@ -350,20 +501,23 @@ export function createIoCompletionPorts(host){
                 }
                 /** @type {CompletionOut} */
                 const out = {
-                    bytes: bytes >>> 0, key: key >>> 0, overlapped: overlapped >>> 0,
+                    form: 'win32', bytes: wholeAddress(bytes), key: wholeAddress(key),
+                    overlapped: wholeAddress(overlapped),
                 };
-                const queued = port.queue.shift();
+                const queued = take(port);
                 if (queued)
                 {
                     answer(out, queued);
-                    host.setLastError(ERROR_SUCCESS);
-                    return 1;
+                    // A packet of a failed operation is still dequeued: FALSE,
+                    // its error, and its OVERLAPPED written.
+                    host.setLastError(queued.error ?? ERROR_SUCCESS);
+                    return queued.error ? 0 : 1;
                 }
 
                 // A caller reads lpOverlapped to tell a timeout from a failed
                 // operation, so a stale pointer there is one it dereferences.
                 answer(out, null);
-                const wait = timeout >>> 0;
+                const wait = wholeAddress(timeout);
                 if (wait === 0)
                 {
                     // Zero is a poll, and the one case where not blocking is the
@@ -372,19 +526,388 @@ export function createIoCompletionPorts(host){
                 }
 
                 host.setLastError(WAIT_TIMEOUT);
-                const thread = host.currentThread();
-                port.waiters.push({ thread, out, since: hostTime(), warned: false });
-                kernel.block(thread, `completion port 0x${port.handle.toString(16)}`,
-                    wait === INFINITE
-                        ? undefined
-                        : { deadline: kernel.clock.virtualTime() + wait, result: 0 });
-                return host.park();
+                return parkOn(port, out, false, wait, 0);
+            },
+        },
+
+        /**
+         * BOOL GetQueuedCompletionStatusEx(HANDLE CompletionPort,
+         *   LPOVERLAPPED_ENTRY lpCompletionPortEntries, ULONG ulCount,
+         *   PULONG ulNumEntriesRemoved, DWORD dwMilliseconds, BOOL fAlertable)
+         *
+         * As many queued packets as there are, up to the count; with none, a
+         * wait for the next, which is handed over alone.
+         */
+        GetQueuedCompletionStatusEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, entries, count, removed, timeout, alertable])=>{
+                reportHangs();
+                // Packets queued are taken at once; a wait it would make is one an
+                // APC, queued first or while it waits, ends: FALSE with
+                // WAIT_IO_COMPLETION.
+                return alertable !== 0 && host.alertably && !holdsPackets(handle)
+                    ? host.alertably(true, ()=>dequeueEntries(handle, entries, count, removed,
+                        timeout), ()=>fail(WAIT_IO_COMPLETION))
+                    : dequeueEntries(handle, entries, count, removed, timeout);
             },
         },
     };
 
+    /** Whether a port handle names a port with packets queued. @param {number} handle */
+    const holdsPackets = handle=>(portOf(handle)?.queue.length ?? 0) > 0;
+
+    /**
+     * NtRemoveIoCompletionEx's dequeue, made alertable or not by its caller.
+     *
+     * @param {number} handle @param {number} entries @param {number} count
+     * @param {number} removed @param {number} timeout
+     */
+    const removeEntries = (handle, entries, count, removed, timeout)=>{
+        const port = nativePort(handle);
+        if (typeof port === 'number')
+        {
+            return port;
+        }
+        if ((entries >>> 0) === 0 || (removed >>> 0) === 0)
+        {
+            return STATUS.ACCESS_VIOLATION;
+        }
+        if ((count >>> 0) === 0)
+        {
+            return STATUS.INVALID_PARAMETER;
+        }
+        if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
+        {
+            return STATUS.SUCCESS;
+        }
+        const wait = nativeWait(timeout);
+        return wait === 0 ? STATUS.TIMEOUT
+            : parkOn(port, { form: 'entries', bytes: 0, key: 0, overlapped: entries >>> 0,
+                removed: removed >>> 0 }, true, wait, STATUS.TIMEOUT);
+    };
+
+    /**
+     * GetQueuedCompletionStatusEx's dequeue, made alertable or not by its caller.
+     *
+     * @param {number} handle @param {number} entries @param {number} count
+     * @param {number} removed @param {number} timeout
+     */
+    const dequeueEntries = (handle, entries, count, removed, timeout)=>{
+        const port = portOf(handle);
+        if (!port)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if ((entries >>> 0) === 0 || (count >>> 0) === 0 || (removed >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
+        {
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        }
+        if ((timeout >>> 0) === 0)
+        {
+            return fail(WAIT_TIMEOUT);
+        }
+        host.setLastError(WAIT_TIMEOUT);
+        return parkOn(port, { form: 'entries', bytes: 0, key: 0,
+            overlapped: entries >>> 0, removed: removed >>> 0 }, false, timeout >>> 0, 0);
+    };
+
+    /**
+     * The queued packets handed over as entries, up to `count`; how many.
+     *
+     * @param {any} port @param {number} entries @param {number} count @param {number} removed
+     */
+    const drain = (port, entries, count, removed)=>{
+        let taken = 0;
+        const size = ENTRY_FIELDS * (host.pointerSize ?? 4);
+        for (let packet = take(port); packet; packet = taken < count ? take(port) : undefined)
+        {
+            writeEntry(entries + taken * size, packet);
+            taken++;
+        }
+        writeDword(removed, taken);
+        return taken;
+    };
+
+    /**
+     * Parks the calling thread on a port until a packet comes or the wait
+     * runs out, `expired` the value it then answers.
+     *
+     * @param {any} port @param {CompletionOut} out @param {boolean} native
+     * @param {number} wait  milliseconds, INFINITE for none
+     * @param {number} expired
+     */
+    const parkOn = (port, out, native, wait, expired)=>{
+        const thread = host.currentThread();
+        port.takers.push({ thread, out, native, since: hostTime(), warned: false });
+        kernel.block(thread, `completion port 0x${port.handle.toString(16)}`,
+            wait === INFINITE
+                ? undefined
+                : { deadline: kernel.clock.virtualTime() + wait, result: expired });
+        return host.park();
+    };
+
+    /**
+     * A native timeout, as the milliseconds a port wait takes: no pointer is
+     * no limit.
+     *
+     * @param {number} pointer
+     */
+    const nativeWait = pointer=>((pointer >>> 0) === 0 ? INFINITE
+        : Math.min(INFINITE - 1, Math.ceil(dueInMs(readLargeInteger(host.readMemory, pointer),
+            kernel.clock.wallClock()))));
+
+    /** @param {number} handle @returns {any | number} the port, or the status for a handle that names none */
+    const nativePort = handle=>portOf(handle)
+        ?? (kernel.handles.has?.(handle >>> 0) ? STATUS.OBJECT_TYPE_MISMATCH
+            : STATUS.INVALID_HANDLE);
+
+    /**
+     * A port made, its handle open. A port is a dispatcher object on Windows,
+     * which a thread may wait on as on any other: signalled while a packet is
+     * queued, and released when the port is closed. It is made as the kernel's
+     * manual-reset event, its queue beside, so a wait on its handle is a wait
+     * on that.
+     */
+    const makePort = ()=>{
+        const port = Object.assign(kernel.createEvent({ manualReset: true, signalled: false,
+            name: 'completion port' }), { queue: [], takers: [], handle: 0 });
+        port.handle = kernel.handles.open('iocp', port);
+        ports.add(port);
+        return port;
+    };
+
+    /**
+     * The Win32 name an OBJECT_ATTRIBUTES gives a port, null for none, or the
+     * status a path outside the Win32 directory answers.
+     *
+     * @param {number} attributes @param {boolean} [opening]
+     * @returns {string | null | number}
+     */
+    const portName = (attributes, opening = false)=>{
+        const given = readObjectAttributes(host.readMemory, attributes,
+            host.pointerSize === 8 ? 8 : 4);
+        const walked = nameToWalk(given, opening);
+        if ('status' in walked)
+        {
+            return walked.status;
+        }
+        if (given === null || walked.name === null)
+        {
+            return null;
+        }
+        return host.namedObjects?.keyOf(given, 'iocp') ?? STATUS.OBJECT_PATH_NOT_FOUND;
+    };
+
+    /**
+     * The native calls over the same ports, which ntdll publishes: a packet
+     * one front door queues the other dequeues. A native packet's status is
+     * the caller's own; a Win32 completion's is its operation's.
+     */
+    const natives = {
+        /**
+         * NTSTATUS NtCreateIoCompletion(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+         *                               ULONG NumberOfConcurrentThreads)
+         *
+         * A port made by name is found again by NtOpenIoCompletion, in the
+         * namespace every named kernel object shares.
+         */
+        NtCreateIoCompletion: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([out, , attributes])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const named = portName(attributes);
+                if (typeof named === 'number')
+                {
+                    return named;
+                }
+                const found = named === null ? null : host.namedObjects?.existing(named, 'iocp');
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (found)
+                {
+                    return STATUS.OBJECT_NAME_COLLISION;
+                }
+                const port = makePort();
+                host.namedObjects?.remember(named, 'iocp', port, false, ()=>{});
+                writeDword(wholeAddress(out), port.handle);
+                return STATUS.SUCCESS;
+            },
+        },
+        /** NTSTATUS NtOpenIoCompletion(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES) */
+        NtOpenIoCompletion: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, , attributes])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const named = portName(attributes, true);
+                if (typeof named === 'number')
+                {
+                    return named;
+                }
+                if (named === null)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const found = host.namedObjects?.existing(named, 'iocp');
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (!found)
+                {
+                    return STATUS.OBJECT_NAME_NOT_FOUND;
+                }
+                host.namedObjects?.reference(found);
+                writeDword(wholeAddress(out), kernel.handles.open('iocp', found));
+                return STATUS.SUCCESS;
+            },
+        },
+        /**
+         * NTSTATUS NtSetIoCompletion(HANDLE, PVOID KeyContext, PVOID ApcContext,
+         *                            NTSTATUS IoStatus, ULONG_PTR IoStatusInformation)
+         */
+        NtSetIoCompletion: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, key, apc, status, information])=>
+                setCompletion(handle, key, apc, status, information),
+        },
+        /**
+         * NTSTATUS NtSetIoCompletionEx(HANDLE, HANDLE ReserveObject, PVOID KeyContext,
+         *   PVOID ApcContext, NTSTATUS IoStatus, ULONG_PTR IoStatusInformation)
+         */
+        NtSetIoCompletionEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, , key, apc, status, information])=>
+                setCompletion(handle, key, apc, status, information),
+        },
+        /**
+         * NTSTATUS NtRemoveIoCompletion(HANDLE, PVOID *KeyContext, PVOID *ApcContext,
+         *                               PIO_STATUS_BLOCK, PLARGE_INTEGER Timeout)
+         */
+        NtRemoveIoCompletion: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, key, apc, iosb, timeout])=>{
+                const port = nativePort(handle);
+                if (typeof port === 'number')
+                {
+                    return port;
+                }
+                if (wholeAddress(key) === 0 || wholeAddress(apc) === 0 || wholeAddress(iosb) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                /** @type {CompletionOut} */
+                const out = { form: 'native', bytes: wholeAddress(iosb), key: wholeAddress(key),
+                    overlapped: wholeAddress(apc) };
+                const queued = take(port);
+                if (queued)
+                {
+                    answer(out, queued);
+                    return STATUS.SUCCESS;
+                }
+                const wait = nativeWait(timeout);
+                return wait === 0 ? STATUS.TIMEOUT : parkOn(port, out, true, wait, STATUS.TIMEOUT);
+            },
+        },
+        /**
+         * NTSTATUS NtRemoveIoCompletionEx(HANDLE,
+         *   PFILE_IO_COMPLETION_INFORMATION Information, ULONG Count, PULONG Removed,
+         *   PLARGE_INTEGER Timeout, BOOLEAN Alertable)
+         */
+        NtRemoveIoCompletionEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, entries, count, removed, timeout, alertable])=>
+                // Packets queued are taken at once; a wait it would make is one an
+                // APC, queued first or while it waits, ends with STATUS_USER_APC
+                // (WAIT_IO_COMPLETION's value).
+                ((alertable & 0xff) !== 0 && host.alertably && !holdsPackets(handle)
+                    ? host.alertably(true, ()=>removeEntries(handle, entries, count, removed,
+                        timeout))
+                    : removeEntries(handle, entries, count, removed, timeout)),
+        },
+        /**
+         * NTSTATUS NtQueryIoCompletion(HANDLE, IO_COMPLETION_INFORMATION_CLASS,
+         *                              PVOID, ULONG, PULONG)
+         *
+         * IO_COMPLETION_BASIC_INFORMATION: Depth, the packets queued.
+         */
+        NtQueryIoCompletion: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, kind, buffer, length, returned])=>{
+                const port = nativePort(handle);
+                if (typeof port === 'number')
+                {
+                    return port;
+                }
+                if (kind !== IO_COMPLETION_BASIC_INFORMATION)
+                {
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                if ((length >>> 0) < 4)
+                {
+                    return STATUS.INFO_LENGTH_MISMATCH;
+                }
+                if (wholeAddress(buffer) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                writeDword(wholeAddress(buffer), port.queue.length);
+                writeDwordIf(wholeAddress(returned), 4);
+                return STATUS.SUCCESS;
+            },
+        },
+    };
+
+    /**
+     * A packet the caller made queued, as NtSetIoCompletion does.
+     *
+     * @param {number} handle @param {number} key @param {number} apc
+     * @param {number} status @param {number} information
+     */
+    const setCompletion = (handle, key, apc, status, information)=>{
+        const port = nativePort(handle);
+        if (typeof port === 'number')
+        {
+            return port;
+        }
+        const error = (status >>> 0) >>> 30 === 3 ? toDosError(status >>> 0) : 0;
+        post(port, { transferred: information >>> 0, key: wholeAddress(key),
+            overlapped: wholeAddress(apc),
+            status: status >>> 0, ...error !== 0 ? { error } : {} });
+        return STATUS.SUCCESS;
+    };
+    /** @type {any} */ (table.CreateIoCompletionPort).natives = natives;
+
     return {
         table,
+
+        /**
+         * A packet posted to a port object, as PostQueuedCompletionStatus
+         * posts one: what a job tells the port it was associated with.
+         *
+         * @param {any} port @param {CompletionPacket} packet
+         */
+        postTo: (port, packet)=>post(port, packet),
 
         /**
          * Where an overlapped operation was asked to start.
@@ -395,38 +918,131 @@ export function createIoCompletionPorts(host){
          *
          * @param {number} overlapped
          */
-        offsetOf: overlapped=>readDword((overlapped >>> 0) + OVERLAPPED_OFFSET),
+        offsetOf: overlapped=>overlappedPosition(readDword, layout, overlapped >>> 0),
 
         /**
          * Finishes an overlapped operation: the OVERLAPPED's own status fields,
          * then its event, then a packet on whichever port the handle is bound to.
+         * An operation that ended in an error status still posts, and the
+         * packet answers FALSE with its error; `skip` is what the handle's
+         * completion modes leave out of one that succeeded at once.
          *
          * @param {number} file @param {number} transferred @param {number} overlapped
+         * @param {number} [status]  NTSTATUS, success by default
+         * @param {{ port?: boolean, event?: boolean }} [skip]
          * @returns {boolean} whether a packet was posted -- false when the handle
          *   belongs to no port, which is the ordinary case rather than a failure
          */
-        completed(file, transferred, overlapped){
-            const pointer = overlapped >>> 0;
+        completed(file, transferred, overlapped, status = 0, skip = {}){
+            const pointer = wholeAddress(overlapped);
             if (pointer !== 0)
             {
-                writeDword(pointer + OVERLAPPED_INTERNAL, ERROR_SUCCESS);
-                writeDword(pointer + OVERLAPPED_INTERNAL_HIGH, transferred >>> 0);
-                const event = readDword(pointer + OVERLAPPED_EVENT);
-                if (event !== 0)
+                overlappedResult(writeDword, layout, pointer, status, transferred);
+                const event = readDword(pointer + layout.event);
+                if (event !== 0 && !skip.event)
                 {
                     host.signalEvent(event);
                 }
             }
             const association = associations.get(file >>> 0);
+            if (!association || skip.port)
+            {
+                return false;
+            }
+            const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
+            deliver(association, {
+                transferred: transferred >>> 0,
+                key: association.key,
+                overlapped: pointer,
+                status: status >>> 0,
+                ...error !== 0 ? { error } : {},
+            });
+            return true;
+        },
+
+        /**
+         * A native call on an asynchronous handle has finished: its packet goes
+         * to the port the handle is bound to with the call's ApcContext as the
+         * completion value, which is what NtReadFile and NtWriteFile hand a
+         * port where ReadFile hands its OVERLAPPED. Nothing is written for it:
+         * the call's own IO_STATUS_BLOCK is the caller's to fill.
+         *
+         * @param {number} file @param {number} transferred @param {number} status
+         * @param {number} value
+         * @returns {boolean} whether a port took it
+         */
+        posted(file, transferred, status, value){
+            const association = associations.get(file >>> 0);
             if (!association)
             {
                 return false;
             }
-            post(association.port, {
+            const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
+            deliver(association, {
                 transferred: transferred >>> 0,
                 key: association.key,
-                overlapped: pointer,
+                overlapped: value >>> 0,
+                status: status >>> 0,
+                ...error !== 0 ? { error } : {},
             });
+            return true;
+        },
+
+        /**
+         * Binds a file handle to a thread pool I/O object (CreateThreadpoolIo):
+         * its completions go to `sink` instead of a port, as Windows binds the
+         * file to the pool's own port.
+         *
+         * @param {number} file @param {((packet: CompletionPacket) => void) | null} sink
+         *     null takes the binding away
+         * @returns {boolean | 'synchronous'} 'synchronous' for a handle opened
+         *     for synchronous I/O, which no port takes
+         */
+        bindSink(file, sink){
+            if (sink === null)
+            {
+                if (associations.get(file >>> 0)?.sink)
+                {
+                    associations.delete(file >>> 0);
+                }
+                return true;
+            }
+            if (host.synchronous?.(file >>> 0))
+            {
+                return 'synchronous';
+            }
+            associations.set(file >>> 0, { port: null, key: 0, sink });
+            return true;
+        },
+
+        /**
+         * Whether a handle's completions go to a port: a request on such a
+         * file cannot also ask for an APC, its completion being the port's.
+         *
+         * @param {number} file
+         */
+        bound: file=>Boolean(associations.get(file >>> 0)?.port),
+
+        /**
+         * Binds a file handle to a port under a key: what CreateIoCompletionPort
+         * does with an existing port, and NtSetInformationFile's
+         * FileCompletionInformation, which is the same binding.
+         *
+         * @param {number} file @param {number} portHandle @param {number} key
+         * @returns {boolean | 'synchronous'} false when the port handle names no
+         *     port, 'synchronous' for a handle opened for synchronous I/O
+         */
+        bind(file, portHandle, key){
+            const port = portOf(portHandle);
+            if (!port)
+            {
+                return false;
+            }
+            if (host.synchronous?.(file >>> 0))
+            {
+                return 'synchronous';
+            }
+            associations.set(file >>> 0, { port, key: key >>> 0 });
             return true;
         },
 
@@ -462,7 +1078,7 @@ export function createIoCompletionPorts(host){
         snapshot(){
             reportHangs();
             const at = hostTime();
-            return [...ports].flatMap(port=>port.waiters.map((/** @type {any} */ waiter)=>({
+            return [...ports].flatMap(port=>port.takers.map((/** @type {any} */ waiter)=>({
                 port: `0x${port.handle.toString(16)}`,
                 thread: waiter.thread?.name ?? null,
                 waitedMs: at - waiter.since,

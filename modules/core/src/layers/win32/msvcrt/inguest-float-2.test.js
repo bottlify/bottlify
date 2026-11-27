@@ -108,6 +108,12 @@ test('strtod and atof: Wine\'s cases, the fast path\'s edges and random numbers'
                 - TEXT, scanned ? scanned.end : 0, `strtod("${text}")'s end`);
         }
     }
+    // No text at all is the handler's, as the code hands it over.
+    for (const control of CONTROLS)
+    {
+        same('strtod', { stack: [0, END], control }, { host: handler });
+        same('atof', { stack: [0], control }, { host: handler });
+    }
     for (const [text, end, value] of WINE)
     {
         const scanned = scanDecimal(text);

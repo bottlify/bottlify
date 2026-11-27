@@ -70,7 +70,7 @@ export function createRegistryService(hive){
     /** @param {number} id */
     const keyOf = id=>keys.get(id) ?? null;
 
-    return {
+    const service = {
         /** @param {number} root @returns {number | null} */
         root: root=>numberOf(hive.root(root)),
 
@@ -81,10 +81,10 @@ export function createRegistryService(hive){
         },
 
         /**
-         * @param {number} key @param {string | null} [path]
+         * @param {number} key @param {string | null} [path] @param {string} [keyClass]
          * @returns {{ key: number, created: boolean }}
          */
-        create(key, path){
+        create(key, path, keyClass = ''){
             const at = keyOf(key);
             if (!at)
             {
@@ -92,7 +92,7 @@ export function createRegistryService(hive){
                 // not a key that went away: a deleted key keeps its number.
                 throw new Error(`registry: no key numbered ${key}`);
             }
-            const made = hive.create(at, path);
+            const made = hive.create(at, path, keyClass);
             return { key: /** @type {number} */ (numberOf(made.key)), created: made.created };
         },
 
@@ -109,6 +109,18 @@ export function createRegistryService(hive){
         subkeys(key){
             const at = keyOf(key);
             return at ? hive.subkeys(at) : [];
+        },
+
+        /** @param {number} key @returns {string} the key's class, "" for none */
+        classOf(key){
+            const at = keyOf(key);
+            return at ? hive.classOf(at) : '';
+        },
+
+        /** @param {number} key @returns {number} the longest immediate-subkey class length */
+        maxSubkeyClassLength(key){
+            const at = keyOf(key);
+            return at ? hive.maxSubkeyClassLength(at) : 0;
         },
 
         /** @param {number} key @returns {import('./registry.js').RegistryValue[]} */
@@ -128,11 +140,12 @@ export function createRegistryService(hive){
 
         /**
          * @param {number} key @param {string} name @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]  the bytes as they are (`createHive`'s setValue)
          * @returns {import('./registry.js').RegistryValue | null}
          */
-        setValue(key, name, type, data){
+        setValue(key, name, type, data, exact = false){
             const at = keyOf(key);
-            return at ? hive.setValue(at, name, type, data) : null;
+            return at ? hive.setValue(at, name, type, data, exact) : null;
         },
 
         /**
@@ -196,6 +209,26 @@ export function createRegistryService(hive){
         },
 
         revision: ()=>hive.revision(),
+        /**
+         * @template T
+         * @param {() => T} write  the machine laying its own keys (`hive.asMachine`)
+         * @returns {T}
+         */
+        asMachine: write=>hive.asMachine(write),
+        /**
+         * One write, `create` or `setValue`, made as the machine laying its own
+         * keys: what a process across a link sends for a write inside its
+         * `asMachine`, whose function cannot cross.
+         *
+         * @param {'create' | 'setValue'} method @param {any[]} args
+         */
+        machineWrite(method, args){
+            if (method !== 'create' && method !== 'setValue')
+            {
+                throw new Error(`registry: ${String(method)} is no write the machine makes`);
+            }
+            return hive.asMachine(()=>/** @type {any} */ (service)[method](...args));
+        },
         /** @param {() => void} listener */
         onChanged: listener=>hive.onChanged(listener),
         toJSON: ()=>hive.toJSON(),
@@ -205,4 +238,5 @@ export function createRegistryService(hive){
         /** @param {any} stored @param {boolean} [over] */
         fillFromJSON: (stored, over)=>hive.fillFromJSON(stored, over),
     };
+    return service;
 }

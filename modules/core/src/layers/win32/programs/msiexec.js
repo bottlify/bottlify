@@ -84,10 +84,11 @@ const PROPERTY = /^[A-Za-z_][A-Za-z0-9_.]*=/;
 
 /**
  * @typedef {Object} MsiexecPlan
- * @property {MsiexecAction | 'service' | 'usage'} action
+ * @property {MsiexecAction | 'service' | 'server' | 'usage'} action
  *     `service` for the options that register msiexec as the installer's
- *     service, which there is nothing to do for; `usage` for a line msiexec
- *     would not take, or a request for its help.
+ *     service, which there is nothing to do for; `server` for -Embedding, a
+ *     custom action server an installation of another width started;
+ *     `usage` for a line msiexec would not take, or a request for its help.
  * @property {string} target    The package, the product code, or for a patch the
  *     patch -- several separated by semicolons.
  * @property {string} [image]   The administrative image a patch is applied to.
@@ -104,7 +105,7 @@ const PROPERTY = /^[A-Za-z_][A-Za-z0-9_.]*=/;
  */
 
 /** @param {string} text */
-export const isProductCode = text=>PRODUCT_CODE.test(text);
+const isProductCode = text=>PRODUCT_CODE.test(text);
 
 /**
  * The letters of a /q option as an interface level, or null when they are
@@ -270,6 +271,11 @@ export function parseMsiexec(line){
             asked.push({ kind: 'service', target: '' });
             continue;
         }
+        if (word === 'embedding')
+        {
+            asked.push({ kind: 'server', target: '' });
+            continue;
+        }
         if (word === 'package' || word === 'uninstall' || word === 'update' || word === 'log')
         {
             const target = argumentOf('');
@@ -425,12 +431,19 @@ export function parseMsiexec(line){
  * @property {(text: string) => number} ansi  The same, in the ANSI code page.
  * @property {(address: number, length: number) => Uint8Array} read
  *     A copy of guest memory: what a call the program made wrote there.
+ * @property {(address: number, data: Uint8Array) => void} write
+ *     Bytes into guest memory the program holds - a buffer it allocated.
  * @property {(size: number) => number} block
  *     Zeroed guest memory for a call to write into, held until the program ends.
  * @property {(data: Uint8Array) => number} bytes
  *     A copy of a structure in the guest, for a call to read, held the same way.
  * @property {(text: string, caption: string, type: number) => Promise<number>} message
  *     A message box, as the program shows one.
+ * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
+ *     machine lacks, by its name (`layer-needed`).
+ * @property {() => Promise<number>} [serveCustomActions]  The custom action
+ *     server Windows Installer starts as `msiexec -Embedding`: a library action
+ *     of this process's width, for an installation in another (msi `remote.js`).
  */
 
 const USAGE = 'Windows Installer\n\n'
@@ -464,6 +477,10 @@ export async function runMsiexec(context){
     if (plan.action === 'service')
     {
         return ERROR_SUCCESS;
+    }
+    if (plan.action === 'server')
+    {
+        return context.serveCustomActions?.() ?? ERROR_INVALID_COMMAND_LINE;
     }
     // Without a /q option msiexec runs with the full interface, which is not
     // msi.dll's own default.

@@ -17,7 +17,7 @@
  */
 
 import { RS, registersOf } from './hlsl-ir.js';
-import { float32Bits } from './hlsl-math.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('./hlsl-ir.js').Const} Const */
 /** @typedef {import('./hlsl-ir.js').CtabType} CtabType */
@@ -45,7 +45,7 @@ const SET = { f: RS.FLOAT4, i: RS.INT4, b: RS.BOOL, s: RS.SAMPLER };
  * @param {ConstantTableOptions} options
  * @returns {Uint8Array}
  */
-export function buildConstantTable(options){
+function buildConstantTable(options){
     const { constants } = options;
     /** @type {Map<string, number>} */
     const strings = new Map();
@@ -178,7 +178,7 @@ export function buildConstantTable(options){
     for (const block of defaultBlocks)
     {
         block.values.forEach((value, i)=>
-            view.setUint32(block.offset + i * 4, float32Bits(value), true));
+            view.setUint32(block.offset + i * 4, floatBits(value), true));
     }
     return bytes;
 }

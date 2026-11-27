@@ -46,6 +46,12 @@ const MAX_SECTION_NAME = 255;
 /** A [Strings] value is kept to this many characters. */
 const MAX_STRING_VALUE = 511;
 
+/**
+ * A field is kept to this many characters once its strings are put in, as
+ * Windows 10 from 1709 keeps it (MAX_INF_STRING_LENGTH).
+ */
+const MAX_FIELD = 4096;
+
 /** The signatures that make an INF a Windows one. */
 const WIN4_SIGNATURES = new Set(['$chicago$', '$windows nt$', '$windows 95$']);
 
@@ -355,7 +361,7 @@ export function parseInf(source, options = {}){
     for (const section of sections.values())
     {
         section.lines = raw[index++].map(entry=>{
-            const fields = entry.fields.map(substitute);
+            const fields = entry.fields.map(field=>substitute(field).slice(0, MAX_FIELD));
             /** @type {string | null} */
             let key = entry.key === null ? null : substitute(entry.key);
             if (entry.key === null && fields.length === 1)

@@ -27,7 +27,7 @@
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D_OK, DDERR_NOTFOUND } from '../d3d7/constants.js';
 import { DDCKEY_SRCBLT, DDSCAPS_ZBUFFER } from '../ddraw/constants.js';
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 
 /** The calls whose answer only the renderer has. */
 const ANSWERED = new Set(['diagnostics', 'idle', 'ReadBack']);
@@ -54,6 +54,10 @@ export function direct3D7Root(ddraw, services, surfaces = null){
         UpdateSurface: (surface, description)=>{
             surfaces?.update(surface, description);
         },
+        /** @param {number} buffer  pixels DirectDraw gave back */
+        SurfaceFreed: buffer=>{
+            surfaces?.freed(buffer);
+        },
     };
 }
 
@@ -66,7 +70,8 @@ export function direct3D7Root(ddraw, services, surfaces = null){
  * @property {boolean} palette
  * @property {number} mipMapCount
  * @property {{ buffer: number, width: number, height: number, pitch: number,
- *     uniqueness: number }[]} levels  the surface and each of its mip levels
+ *     bytesPerPixel: number, uniqueness: number }[]} levels  the surface and each of its
+ *     mip levels
  * @property {number | null} colorKey  the source blit key's low colour
  * @property {any} depth  the depth buffer attached, a surface already described
  */
@@ -100,18 +105,27 @@ function levelsOf(surface){
 /**
  * The played side's surfaces: a stand-in for each one described, with what a
  * Direct3D 7 device asks of a surface, kept as the description last said.
+ * The pixels of each level are memory its device reads at a later batch than
+ * the one that sent them - a texture at the draw that first samples it, a
+ * target the program wrote at its next draw - so a stand-in holds them in
+ * the mirror while it describes them, until DirectDraw gives them back.
+ *
+ * @param {Pick<import('./replay.js').PlayedMemory, 'hold' | 'release'>} memory
  */
-export function createStandIns(){
+export function createStandIns(memory){
+    /** The ranges each stand-in holds. @type {Map<object, [number, number][]>} */
+    const held = new Map();
     /** @param {any} level @param {SurfaceDescription['levels'][number]} described */
     const setLevel = (level, described)=>{
         level.buffer = described.buffer;
         level.width = described.width;
         level.height = described.height;
         level.pitch = described.pitch;
+        level.bytesPerPixel = described.bytesPerPixel;
         level.uniqueness = described.uniqueness;
     };
     const level = ()=>({
-        buffer: 0, width: 0, height: 0, pitch: 0, uniqueness: 0,
+        buffer: 0, width: 0, height: 0, pitch: 0, bytesPerPixel: 0, uniqueness: 0,
         /** @type {any} */
         mipNext: null,
         uniquenessValue(){
@@ -120,6 +134,18 @@ export function createStandIns(){
     });
     /** @param {any} surface @param {SurfaceDescription} description */
     const apply = (surface, description)=>{
+        for (const [address, length] of held.get(surface) ?? [])
+        {
+            memory.release(address, length);
+        }
+        /** @type {[number, number][]} */
+        const ranges = description.levels.filter(one=>one.buffer !== 0 && one.pitch > 0)
+            .map(one=>[one.buffer >>> 0, one.pitch * one.height]);
+        for (const [address, length] of ranges)
+        {
+            memory.hold(address, length);
+        }
+        held.set(surface, ranges);
         surface.width = description.width;
         surface.height = description.height;
         surface.caps = description.caps;
@@ -174,6 +200,30 @@ export function createStandIns(){
             return surface;
         },
         update: apply,
+        /**
+         * The pixels at an address given back: no stand-in reads them now,
+         * whatever it was last described as - a flip moves buffers between
+         * a chain's members without a description.
+         *
+         * @param {number} buffer
+         */
+        freed(buffer){
+            for (const [surface, ranges] of held)
+            {
+                const kept = ranges.filter(([address, length])=>{
+                    if (address !== buffer >>> 0)
+                    {
+                        return true;
+                    }
+                    memory.release(address, length);
+                    return false;
+                });
+                if (kept.length < ranges.length)
+                {
+                    held.set(surface, kept);
+                }
+            }
+        },
     };
 }
 
@@ -267,7 +317,8 @@ export function recordedDirect3D7(ddraw, services, transport){
         palette: surface.palette !== null,
         mipMapCount: surface.mipMapCount,
         levels: levelsOf(surface).map(level=>({ buffer: level.buffer, width: level.width,
-            height: level.height, pitch: level.pitch, uniqueness: level.uniquenessValue() })),
+            height: level.height, pitch: level.pitch, bytesPerPixel: level.bytesPerPixel,
+            uniqueness: level.uniquenessValue() })),
         colorKey: surface.getColorKey(DDCKEY_SRCBLT).key?.low ?? null,
         depth,
     });
@@ -357,10 +408,20 @@ export function recordedDirect3D7(ddraw, services, transport){
         return null;
     };
 
+    /**
+     * The device that draws into a surface, or tests against it: a depth
+     * buffer is read back and written as a target is.
+     *
+     * @param {any} surface
+     */
+    const userOf = surface=>((surface.caps & DDSCAPS_ZBUFFER) === 0
+        ? drawingInto(surface)
+        : [...devices].find(device=>depthOf(device.target) === surface) ?? null);
+
     // What DirectDraw tells a device of its surfaces, told the played one.
     const stopWatchingPixels = ddraw.watchPixels?.({
         readBack: (/** @type {any} */ surface)=>{
-            const device = (surface.caps & DDSCAPS_ZBUFFER) === 0 ? drawingInto(surface) : null;
+            const device = userOf(surface);
             if (!device)
             {
                 return null;
@@ -370,12 +431,19 @@ export function recordedDirect3D7(ddraw, services, transport){
             return answer instanceof Promise ? answer.then(()=>undefined) : null;
         },
         written: (/** @type {any} */ surface)=>{
-            const device = (surface.caps & DDSCAPS_ZBUFFER) === 0 ? drawingInto(surface) : null;
+            const device = userOf(surface);
             if (device)
             {
                 ship(surface.buffer, surface.pitch * surface.height);
                 ensure(surface);
                 device.proxy.PixelsWritten(surface);
+            }
+        },
+        // The played side holds a described surface's pixels until then.
+        freed: (/** @type {number} */ buffer)=>{
+            if (known.size > 0)
+            {
+                recorded.SurfaceFreed(buffer);
             }
         },
     }) ?? (()=>{});
@@ -526,52 +594,24 @@ export function recordedDirect3D7(ddraw, services, transport){
  * @param {import('../d3d7/device.js').RenderServices} services  what the device
  *     is given but for memory: `writeMemory` is where pixels read back go
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => number | undefined }}
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
+ *         => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  */
 export function playedDirect3D7(services){
-    const mirror = createMirror();
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    let playing = false;
-    const write = services.writeMemory;
-    const ddraw = {
+    return playedOverMirror(memory=>direct3D7Root({
         addRef: ()=>1,
         release: ()=>1,
-        allocateStorage: ()=>/** @type {ReturnType<typeof createPlayer>} */ (player).allocate(),
-        freeStorage: ()=>{},
+        allocateStorage: memory.allocate,
+        freeStorage: memory.free,
         watchDepthFills: ()=>()=>{},
         watchPixels: ()=>()=>{},
-    };
-    const root = direct3D7Root(ddraw, {
+    }, {
         ...services,
-        readMemory: mirror.read,
-        watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
-            mirror.watch(address, length),
-        writeMemory: (address, bytes)=>{
-            mirror.write(address, bytes);
-            if (!playing)
-            {
-                write?.(address, bytes);
-            }
-        },
+        readMemory: memory.read,
+        watchWrites: memory.watch,
+        writeMemory: memory.write,
         presenter: undefined,
-    }, createStandIns());
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read });
-    const live = player;
-    return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                return live.play(call);
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: live.read,
-    };
+    }, createStandIns(memory)), { write: services.writeMemory });
 }

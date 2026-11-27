@@ -141,10 +141,117 @@ export const OPCODE = Object.freeze({
     GATHER4: 109,
     SAMPLE_POS: 110,
     SAMPLE_INFO: 111,
+    // Shader Model 5.
+    HS_DECLS: 113,
+    HS_CONTROL_POINT_PHASE: 114,
+    HS_FORK_PHASE: 115,
+    HS_JOIN_PHASE: 116,
+    EMIT_STREAM: 117,
+    CUT_STREAM: 118,
+    EMITTHENCUT_STREAM: 119,
+    INTERFACE_CALL: 120,
+    BUFINFO: 121,
+    DERIV_RTX_COARSE: 122,
+    DERIV_RTX_FINE: 123,
+    DERIV_RTY_COARSE: 124,
+    DERIV_RTY_FINE: 125,
+    GATHER4_C: 126,
+    GATHER4_PO: 127,
+    GATHER4_PO_C: 128,
+    RCP: 129,
+    F32TOF16: 130,
+    F16TOF32: 131,
+    UADDC: 132,
+    USUBB: 133,
+    COUNTBITS: 134,
+    FIRSTBIT_HI: 135,
+    FIRSTBIT_LO: 136,
+    FIRSTBIT_SHI: 137,
+    UBFE: 138,
+    IBFE: 139,
+    BFI: 140,
+    BFREV: 141,
+    SWAPC: 142,
+    DCL_STREAM: 143,
+    DCL_FUNCTION_BODY: 144,
+    DCL_FUNCTION_TABLE: 145,
+    DCL_INTERFACE: 146,
+    DCL_INPUT_CONTROL_POINT_COUNT: 147,
+    DCL_OUTPUT_CONTROL_POINT_COUNT: 148,
+    DCL_TESS_DOMAIN: 149,
+    DCL_TESS_PARTITIONING: 150,
+    DCL_TESS_OUTPUT_PRIMITIVE: 151,
+    DCL_HS_MAX_TESSFACTOR: 152,
+    DCL_HS_FORK_PHASE_INSTANCE_COUNT: 153,
+    DCL_HS_JOIN_PHASE_INSTANCE_COUNT: 154,
+    DCL_THREAD_GROUP: 155,
+    DCL_UAV_TYPED: 156,
+    DCL_UAV_RAW: 157,
+    DCL_UAV_STRUCTURED: 158,
+    DCL_TGSM_RAW: 159,
+    DCL_TGSM_STRUCTURED: 160,
+    DCL_RESOURCE_RAW: 161,
+    DCL_RESOURCE_STRUCTURED: 162,
+    LD_UAV_TYPED: 163,
+    STORE_UAV_TYPED: 164,
+    LD_RAW: 165,
+    STORE_RAW: 166,
+    LD_STRUCTURED: 167,
+    STORE_STRUCTURED: 168,
+    ATOMIC_AND: 169,
+    ATOMIC_OR: 170,
+    ATOMIC_XOR: 171,
+    ATOMIC_CMP_STORE: 172,
+    ATOMIC_IADD: 173,
+    ATOMIC_IMAX: 174,
+    ATOMIC_IMIN: 175,
+    ATOMIC_UMAX: 176,
+    ATOMIC_UMIN: 177,
+    IMM_ATOMIC_ALLOC: 178,
+    IMM_ATOMIC_CONSUME: 179,
+    IMM_ATOMIC_IADD: 180,
+    IMM_ATOMIC_AND: 181,
+    IMM_ATOMIC_OR: 182,
+    IMM_ATOMIC_XOR: 183,
+    IMM_ATOMIC_EXCH: 184,
+    IMM_ATOMIC_CMP_EXCH: 185,
+    IMM_ATOMIC_IMAX: 186,
+    IMM_ATOMIC_IMIN: 187,
+    IMM_ATOMIC_UMAX: 188,
+    IMM_ATOMIC_UMIN: 189,
+    SYNC: 190,
+    // Double precision: two dwords a value, .xy and .zw of a register, low
+    // dword first; 210-217 are the extended set (D3D11_OPTIONS).
+    DADD: 191,
+    DMAX: 192,
+    DMIN: 193,
+    DMUL: 194,
+    DEQ: 195,
+    DGE: 196,
+    DLT: 197,
+    DNE: 198,
+    DMOV: 199,
+    DMOVC: 200,
+    DTOF: 201,
+    FTOD: 202,
+    EVAL_SNAPPED: 203,
+    EVAL_SAMPLE_INDEX: 204,
+    EVAL_CENTROID: 205,
+    DCL_GS_INSTANCE_COUNT: 206,
+    ABORT: 207,
+    DEBUG_BREAK: 208,
+    DDIV: 210,
+    DFMA: 211,
+    DRCP: 212,
+    MSAD: 213,
+    DTOI: 214,
+    DTOU: 215,
+    ITOD: 216,
+    UTOD: 217,
 });
 
 /** The name each opcode number prints as, for a divergence or a dump. */
-export const OPCODE_NAME = Object.freeze(Object.fromEntries(
+const OPCODE_NAME = Object.freeze(Object.fromEntries(
     Object.entries(OPCODE).map(([name, code])=>[code, name.toLowerCase()])));
 
 /** What an operand token names. */
@@ -165,6 +272,39 @@ export const OPERAND = Object.freeze({
     NULL: 13,
     RASTERIZER: 14,
     OUTPUT_COVERAGE_MASK: 15,
+    // Shader Model 5: class linkage (fb#, ft#, fp#, this[#]), the
+    // tessellation stages' own, then the rest.
+    FUNCTION_BODY: 17,
+    FUNCTION_TABLE: 18,
+    INTERFACE: 19,
+    FUNCTION_INPUT: 20,
+    FUNCTION_OUTPUT: 21,
+    OUTPUT_CONTROL_POINT_ID: 22,
+    INPUT_FORK_INSTANCE_ID: 23,
+    INPUT_JOIN_INSTANCE_ID: 24,
+    INPUT_CONTROL_POINT: 25,
+    OUTPUT_CONTROL_POINT: 26,
+    INPUT_PATCH_CONSTANT: 27,
+    INPUT_DOMAIN_POINT: 28,
+    THIS_POINTER: 29,
+    UNORDERED_ACCESS_VIEW: 30,
+    THREAD_GROUP_SHARED_MEMORY: 31,
+    INPUT_THREAD_ID: 32,
+    INPUT_THREAD_GROUP_ID: 33,
+    INPUT_THREAD_ID_IN_GROUP: 34,
+    INPUT_COVERAGE_MASK: 35,
+    INPUT_THREAD_ID_IN_GROUP_FLATTENED: 36,
+    INPUT_GS_INSTANCE_ID: 37,
+    OUTPUT_DEPTH_GREATER_EQUAL: 38,
+    OUTPUT_DEPTH_LESS_EQUAL: 39,
+});
+
+/** `sync`'s flags, in its control bits. */
+export const SYNC_FLAG = Object.freeze({
+    THREADS_IN_GROUP: 0x1,
+    THREAD_GROUP_SHARED_MEMORY: 0x2,
+    UAV_MEMORY_GROUP: 0x4,
+    UAV_MEMORY_GLOBAL: 0x8,
 });
 
 export const SELECTION = Object.freeze({
@@ -218,7 +358,7 @@ export const CUSTOMDATA = Object.freeze({
 });
 
 /** The identity swizzle, `.xyzw`. */
-export const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
+const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
 
 /**
  * @typedef {Object} OperandIndex
@@ -249,6 +389,10 @@ export const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
  * @property {number[]} extra       Dwords after the operands: a system value, a
  *                                  return type, a constant count.
  * @property {number[]} [customData] The payload of a customdata block.
+ * @property {number[]} [offset]   A sample's immediate texel offset (`aoffimmi`), u, v
+ *                                  and w, from its extended token; absent for none.
+ * @property {number} [callSite]  `fcall`'s: which of a function table's bodies it calls,
+ *                                  the dword before its interface operand.
  * @property {number} length        In dwords, this instruction and its operands.
  */
 
@@ -311,7 +455,8 @@ export function decodeOperand(tokens, at){
     }
     else if (type === OPERAND.IMMEDIATE64)
     {
-        const count = (componentCount === 0 ? 1 : componentCount) * 2;
+        // One double, or two (a vec4 of dwords): never four.
+        const count = componentCount === 0 || componentCount === 1 ? 2 : 4;
         for (let index = 0; index < count; index++)
         {
             immediate.push(tokens[next++]);
@@ -381,6 +526,28 @@ const OPERAND_COUNT = Object.freeze({
     [OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY]: 0,
     [OPCODE.DCL_GS_INPUT_PRIMITIVE]: 0,
     [OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT]: 0,
+    [OPCODE.DCL_THREAD_GROUP]: 0,
+    [OPCODE.DCL_UAV_TYPED]: 1,
+    [OPCODE.DCL_UAV_RAW]: 1,
+    [OPCODE.DCL_UAV_STRUCTURED]: 1,
+    [OPCODE.DCL_TGSM_RAW]: 1,
+    [OPCODE.DCL_TGSM_STRUCTURED]: 1,
+    [OPCODE.DCL_RESOURCE_RAW]: 1,
+    [OPCODE.DCL_RESOURCE_STRUCTURED]: 1,
+    [OPCODE.DCL_STREAM]: 1,
+    [OPCODE.DCL_GS_INSTANCE_COUNT]: 0,
+    [OPCODE.DCL_INPUT_CONTROL_POINT_COUNT]: 0,
+    [OPCODE.DCL_OUTPUT_CONTROL_POINT_COUNT]: 0,
+    [OPCODE.DCL_TESS_DOMAIN]: 0,
+    [OPCODE.DCL_TESS_PARTITIONING]: 0,
+    [OPCODE.DCL_TESS_OUTPUT_PRIMITIVE]: 0,
+    [OPCODE.DCL_HS_MAX_TESSFACTOR]: 0,
+    [OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT]: 0,
+    [OPCODE.DCL_HS_JOIN_PHASE_INSTANCE_COUNT]: 0,
+    [OPCODE.DCL_FUNCTION_BODY]: 0,
+    [OPCODE.DCL_FUNCTION_TABLE]: 0,
+    [OPCODE.DCL_INTERFACE]: 0,
+    [OPCODE.SYNC]: 0,
 });
 
 /**
@@ -423,13 +590,22 @@ export function decodeSm4(tokens){
         let extended = (token & 0x80000000) !== 0;
         /** @type {number[]} */
         const extendedTokens = [];
+        /** @type {number[] | undefined} */
+        let offset;
         while (extended && next < end)
         {
             const extra = tokens[next++];
             extendedTokens.push(extra);
             extended = (extra & 0x80000000) !== 0;
+            // Sample controls: three signed four-bit texel offsets.
+            if ((extra & 0x3f) === 1)
+            {
+                offset = [9, 13, 17].map(shift=>((extra >>> shift) & 0xf) << 28 >> 28);
+            }
         }
 
+        // `fcall` names the call site before its operand.
+        const callSite = opcode === OPCODE.INTERFACE_CALL && next < end ? tokens[next++] : null;
         const wanted = OPERAND_COUNT[opcode] ?? Infinity;
         /** @type {Operand[]} */
         const operands = [];
@@ -449,6 +625,8 @@ export function decodeSm4(tokens){
             operands,
             extra: [...extendedTokens, ...Array.from(tokens.subarray(next, end))],
             length: end - at,
+            ...(offset && offset.some(Boolean) ? { offset } : {}),
+            ...(callSite === null ? {} : { callSite }),
         });
         at = end;
     }
@@ -468,6 +646,8 @@ export function registerName(operand){
         [OPERAND.IMMEDIATE_CONSTANT_BUFFER]: 'icb',
         [OPERAND.OUTPUT_DEPTH]: 'oDepth',
         [OPERAND.NULL]: 'null',
+        [OPERAND.UNORDERED_ACCESS_VIEW]: 'u',
+        [OPERAND.THREAD_GROUP_SHARED_MEMORY]: 'g',
     }[operand.type] ?? `op${operand.type}`;
     const first = operand.indices[0];
     return first ? `${prefix}${first.value}` : prefix;

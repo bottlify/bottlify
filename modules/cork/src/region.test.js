@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { emptyCode, formRegion, inlineReturns } from './region.js';
+import { emptyCode, formRegion, formShared, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
 function regionOf(bytes, base = 0x1000, options = {}){
@@ -17,6 +17,8 @@ function regionOf(bytes, base = 0x1000, options = {}){
 
 /** @param {number} value */
 const rel8 = value=>value & 0xff;
+/** @param {number} value */
+const le32 = value=>[value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, value >>> 24];
 
 test('a countdown loop forms three blocks with one back-edge into the loop head', ()=>{
     // 1000: mov ecx, 10   (b9 0a 00 00 00)
@@ -180,6 +182,36 @@ test('a function past the caps is formed whole in its own room, its callees with
     assert.equal(starts({ maxBlocks: 16 }).includes(0x1100), true);
 });
 
+test('a callee is formed in whole or not at all: the caps never cut one in its middle', ()=>{
+    // 1000: call F; ret. F = 1100: test eax, eax; jz 1106; inc eax; ret; 1106: dec eax; ret
+    // -- three blocks, after the caller's two.
+    const code = [0xe8, 0xfb, 0x00, 0x00, 0x00, 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc),
+        0x85, 0xc0, 0x74, 0x02, 0x40, 0xc3, 0x48, 0xc3];
+    const none = { blocks: 0, bytes: 0 };
+    const starts = (/** @type {number} */ maxBlocks)=>regionOf(image, 0x1000,
+        { maxBlocks, ownRoom: none }).blocks.map(block=>block.start);
+    assert.deepEqual(starts(5), [0x1000, 0x1005, 0x1100, 0x1104, 0x1106], 'room for all of F');
+    // Room for two of F's three blocks: none of F, the call a wasm call to it.
+    assert.deepEqual(starts(4), [0x1000, 0x1005]);
+    const region = regionOf(image, 0x1000, { maxBlocks: 4, ownRoom: none });
+    assert.equal(region.blocks[0].exit.kind, 'call');
+    assert.deepEqual(region.blocks[0].exit.targets, [0x1100]);
+    assert.equal(region.blocks[0].exit.apart, undefined, 'apart only for the room: counted full');
+});
+
+test('the room a callee needs counts the blocks it shares with a callee taken in once', ()=>{
+    // 1000: call F; call G; ret. F = 1100: test eax, eax; jz 1106; inc eax; ret;
+    // 1106: dec eax; ret. G = 1108: test ecx, ecx; jz 1106; ret -- G's branch goes to F's
+    // last block: three blocks of the caller's, three of F's, two more of G's.
+    const code = [0xe8, 0xfb, 0x00, 0x00, 0x00, 0xe8, 0xfe, 0x00, 0x00, 0x00, 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc),
+        0x85, 0xc0, 0x74, 0x02, 0x40, 0xc3, 0x48, 0xc3, 0x85, 0xc9, 0x74, 0xfa, 0xc3];
+    const starts = regionOf(image, 0x1000, { maxBlocks: 8, ownRoom: { blocks: 0, bytes: 0 } })
+        .blocks.map(block=>block.start);
+    assert.deepEqual(starts, [0x1000, 0x1005, 0x100a, 0x1100, 0x1104, 0x1106, 0x1108, 0x110c]);
+});
+
 test('a page the runtime refuses is not entered, and the edge to it stays an exit', ()=>{
     // 1000: jmp 0x2000 (e9 fb 0f 00 00)
     const image = new Uint8Array(0x2000);
@@ -255,6 +287,55 @@ test('a small leaf callee is formed into its caller, and only its rets return in
     assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
 });
 
+test('a callee whose far conditional branch goes to cold code is formed in without it', ()=>{
+    // 1000: call F; ret   F = 1006: test ecx, ecx; je COLD (0f 84 rel32); inc eax; ret
+    // COLD = 3000: call 4000; jmp back to F's ret -- a reporting routine's call, far away.
+    const image = new Map();
+    const place = (/** @type {number} */ at, /** @type {number[]} */ bytes)=>bytes
+        .forEach((one, index)=>image.set(at + index, one));
+    const cold = 0x3000;
+    place(0x1000, [0xe8, 1, 0, 0, 0, 0xc3, 0x85, 0xc9,
+        0x0f, 0x84, ...le32(cold - 0x100e), 0x40, 0xc3]);
+    // call 4000 (e8 rel32); jmp 100f (e9 rel32)
+    place(cold, [0xe8, ...le32(0x4000 - (cold + 5)), 0xe9, ...le32(0x100f - (cold + 10))]);
+    place(0x4000, [0xc3]);
+    const form = (/** @type {object} */ options)=>formRegion(address=>image.get(address) ?? 0xcc,
+        0x1000, { formDepth: 0, ...options });
+    const formed = form({});
+    assert.deepEqual(formed.entries, [0x1000, 0x1005, 0x1006, 0x100e],
+        'F formed in, its cold path left out');
+    const branch = formed.blocks.find(block=>block.start === 0x1006)?.exit;
+    assert.deepEqual(branch?.targets, [cold, 0x100e], 'the branch still names its cold target');
+    assert.deepEqual(branch?.cold, [cold], 'and says which of them was left out as cold');
+    assert.deepEqual([...inlineReturns(formed)], [[0x100e, [0x1005]]]);
+    // A branch the run saw taken often is no cold path: followed, F is no leaf either.
+    const hot = form({ callTargets: new Map([[0x1008, [cold]]]) });
+    assert.deepEqual(hot.entries, [0x1000, 0x1005]);
+    assert.equal(hot.blocks[0].exit.apart, 'nested');
+    // Named hot for another target, or for none (its samples said cold: `quiet`), it is cold.
+    assert.deepEqual(form({ callTargets: new Map([[0x1008, [0x100e]]]) }).entries,
+        formed.entries);
+    const quiet = form({ callTargets: new Map([[0x1008, []]]) });
+    assert.deepEqual(quiet.entries, formed.entries);
+    assert.equal(quiet.blocks.find(block=>block.start === 0x1006)?.exit.quiet, true);
+    assert.notEqual(quiet.hash, formed.hash, 'a quiet branch decides code: hashed');
+    // Sharing what forming found keeps each region's own profile: the leaf found cold for
+    // one region is not the one found hot for another.
+    const shared = formShared();
+    assert.deepEqual(form({ shared }).entries, formed.entries);
+    assert.deepEqual(form({ shared, callTargets: new Map([[0x1008, [cold]]]) }).entries,
+        hot.entries);
+    assert.deepEqual(form({ shared }).entries, formed.entries);
+    // Followed, the cold path's call makes F no leaf: the call stays a call out.
+    const followed = form({ coldReach: 0 });
+    assert.deepEqual(followed.entries, [0x1000, 0x1005]);
+    assert.equal(followed.blocks[0].exit.apart, 'nested');
+    // A branch within the reach is the callee's own and is followed.
+    assert.deepEqual(form({ coldReach: 0x3000 }).entries, [0x1000, 0x1005]);
+    // The entry's own function follows its far branches: 1006 as an entry.
+    assert.ok(formRegion(address=>image.get(address) ?? 0xcc, 0x1006).entries.includes(cold));
+});
+
 test('an indirect call\'s predicted callees are formed in as a direct call\'s are, and'
     + ' only then', ()=>{
     // 1000: call eax (ff d0)   1002: ret   F = 1003: inc eax; ret   G = 1005: dec eax; ret
@@ -318,6 +399,24 @@ test('a predicted callee is formed into a region its own function fills, within 
         .filter(block=>block.start < 0x1100).length, 12, 'the function itself in its own room');
     // The room is the callees' alone: a call the runtime did not predict has none.
     assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 12);
+});
+
+test('a region formed again with a predicted callee keeps the callees it had: the predicted'
+    + ' one is counted against its own room', ()=>{
+    // 1000: call ebx   1002: call F   1007: ret -- three blocks of its own;
+    // G = 1100: three of inc eax; jz +0, then ret -- four blocks; F = 1200: inc eax; ret.
+    const pad = (/** @type {number[]} */ bytes, /** @type {number} */ to)=>
+        [...bytes, ...Array.from({ length: to - bytes.length }, ()=>0xcc)];
+    const image = [
+        ...pad([0xff, 0xd3, 0xe8, 0xf9, 0x01, 0x00, 0x00, 0xc3], 0x100),
+        ...pad([...Array.from({ length: 3 }, ()=>[0x40, 0x74, 0x00]).flat(), 0xc3], 0x100),
+        0x40, 0xc3];
+    const starts = (/** @type {object} */ options)=>regionOf(image, 0x1000,
+        { maxBlocks: 4, ...options }).blocks.map(block=>block.start);
+    assert.ok(starts({}).includes(0x1200), 'F fits under the cap beside the function');
+    const again = starts({ callTargets: new Map([[0x1000, [0x1100]]]) });
+    assert.ok(again.includes(0x1100), 'G in, in the room past the cap');
+    assert.ok(again.includes(0x1200), 'and F still in: G took none of its room');
 });
 
 test('a call through a fixed slot predicts the leaf the slot holds', ()=>{
@@ -493,7 +592,7 @@ test('a region\'s sources copied a span at once are the bytes read one at a time
     // Every cork-bench image, a region at its start and at each block start of that one,
     // formed with a copy of each span at once (`bytesOf`) and without: the same in every
     // field, the sources among them.
-    const images = new URL('../../../tools/cork-bench/images/', import.meta.url);
+    const images = new URL('../bench/micro/images/', import.meta.url);
     let regions = 0;
     for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
     {
@@ -511,4 +610,46 @@ test('a region\'s sources copied a span at once are the bytes read one at a time
         }
     }
     assert.equal(regions, 160);
+});
+
+test('a region formed beside others is the one formed alone, what it read and asked too', ()=>{
+    // Every cork-bench image, a region at each direct call's target, formed after all the
+    // others with what they found (`formShared`) and alone: the same in every field - its
+    // blocks, the bytes it read (`sources`, `reads`) and the pages it was granted
+    // (`formable`). A leaf test answered for another region read the callee and asked about
+    // its pages; taken from there unsaid, the region's sources lacked the callee, and one
+    // kept for other runtimes passed for unchanged after the callee was written over.
+    // `translatable` refuses every third page, so the tests ask and are refused too.
+    const images = new URL('../bench/micro/images/', import.meta.url);
+    const translatable = (/** @type {number} */ address)=>(address >>> 12) % 3 !== 2;
+    let regions = 0;
+    let shared = 0;
+    for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
+    {
+        const image = readFileSync(new URL(name, images));
+        const read = (/** @type {number} */ address)=>image[address - 0x401000] ?? 0;
+        /** @type {Set<number>} */
+        const targets = new Set([0x401000]);
+        for (let at = 0; at + 5 <= image.length && targets.size < 48; at++)
+        {
+            const to = at + 5 + new DataView(image.buffer, image.byteOffset).getInt32(at + 1, true);
+            if (image[at] === 0xe8 && to >= 0 && to < image.length)
+            {
+                targets.add(0x401000 + to);
+            }
+        }
+        const found = formShared();
+        for (const entry of targets)
+        {
+            formRegion(read, entry, { translatable, shared: found });
+        }
+        shared += found.leaves.size;
+        for (const entry of targets)
+        {
+            assert.deepEqual(formRegion(read, entry, { translatable, shared: found }),
+                formRegion(read, entry, { translatable }), `${name} at ${entry.toString(16)}`);
+            regions++;
+        }
+    }
+    assert.ok(regions > 100 && shared > 50, `${regions} regions, ${shared} leaf tests shared`);
 });

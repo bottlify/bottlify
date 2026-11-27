@@ -50,6 +50,14 @@ export const DLL_PROCESS_DETACH = 0;
  */
 const LOADED_STATICALLY = 1;
 
+/**
+ * Where the thread block keeps the pointer to its thread-local array,
+ * ThreadLocalStoragePointer: FS:[0x2c] in a 32-bit process, GS:[0x58] in a
+ * 64-bit one. Fixed by the layout every program was compiled against.
+ */
+const TLS_POINTER = 0x2c;
+const TLS_POINTER_LONG = 0x58;
+
 /** @param {number} value */
 const u32 = value=>[
     value & 0xff,
@@ -57,10 +65,13 @@ const u32 = value=>[
     value >>> 16 & 0xff,
     value >>> 24 & 0xff,
 ];
+/** A quadword, a number below 2^53, little-endian. @param {number} value */
+const u64 = value=>[...u32(value >>> 0), ...u32(Math.floor(value / 2 ** 32))];
 
 /**
  * @typedef {Object} TlsSetup
- * @property {number} indexAddress  The dword to write the slot number into.
+ * @property {number} index         The image's index in the thread-local array,
+ *                                  already in its _tls_index: the program's 0.
  * @property {number} blockAddress  This image's thread-local block, already filled.
  * @property {number[]} callbacks   Addresses to call, in order, before DllMain.
  */
@@ -72,10 +83,6 @@ const u32 = value=>[
  *        In dependency order. One with no entry point is skipped: a library
  *        without DllMain is ordinary, not an error.
  * @param {number} options.entryPoint  Where the program itself starts.
- * @param {{ alloc: number, set: number }} [options.tlsApi]
- *        Guest addresses of TlsAlloc and TlsSetValue. Required if any image
- *        carries thread-local storage; the slot has to come from the same pool
- *        the program's own calls draw on, and only the guest can ask for one.
  * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
  *        The loader lock -- a CRITICAL_SECTION, and the guest addresses of
  *        EnterCriticalSection and LeaveCriticalSection -- held from the first
@@ -84,11 +91,25 @@ const u32 = value=>[
  *        than being told of one whose DLL_PROCESS_ATTACH has not run: "new
  *        threads can be created, but they do not begin execution until DLL
  *        initialization is done for the process".
+ * @param {boolean} [options.long]  The process is an x86-64 one: the same
+ *        calls in x86-64 code and the x64 convention (`longProcessInit`).
+ * @param {number} [options.prelude]  A routine of no arguments called first,
+ *        before any library is attached: the logon's RunOnce pass, in a
+ *        session's first process.
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
+export function synthesiseProcessInit(options){
+    const { libraries, entryPoint, loaderLock, long = false, prelude = 0 } = options;
+    if (long)
+    {
+        return longProcessInit({ libraries, entryPoint, loaderLock, prelude });
+    }
     /** @type {number[]} */
-    const code = [];
+    const code = prelude
+        ? [0xb8, ...u32(prelude), 0xff, 0xd0] // mov eax, prelude; call eax
+        : [];
+    /** What runs under the loader lock: the attaches and the TLS set-up. @type {number[]} */
+    const body = [];
     /** @type {string[]} */
     const attached = [];
     let tlsImages = 0;
@@ -100,29 +121,23 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
             0xff, 0xd0, //                       call eax
         ]
         : []);
-    code.push(...locked(loaderLock?.enter ?? 0));
-
     for (const library of libraries)
     {
         // Thread-local storage first: a library's initialisers and its DllMain
-        // both expect to be able to reach it, and a runtime whose slot was
-        // never written reads slot zero -- a wrong answer rather than a
-        // missing one, and one that surfaces far from here.
-        if (library.tls && tlsApi)
+        // both expect to be able to reach it. The first thread's array holds
+        // the block at the image's index, which the image's _tls_index
+        // already names; a later thread is given its own copy as it is made.
+        if (library.tls)
         {
-            code.push(
-                0xb8, ...u32(tlsApi.alloc), // mov eax, TlsAlloc
-                0xff, 0xd0, //                 call eax        -> eax = slot
-                0xa3, ...u32(library.tls.indexAddress), // mov [index], eax
-                0x68, ...u32(library.tls.blockAddress), // push block
-                0x50, //                                   push eax  (the slot)
-                0xb8, ...u32(tlsApi.set), // mov eax, TlsSetValue
-                0xff, 0xd0, //               call eax
+            body.push(
+                0x64, 0xa1, ...u32(TLS_POINTER), // mov eax, fs:[0x2c]
+                // mov dword [eax+index*4], block
+                0xc7, 0x80, ...u32(library.tls.index * 4), ...u32(library.tls.blockAddress),
             );
             for (const callback of library.tls.callbacks)
             {
                 // A TLS callback takes exactly DllMain's three arguments.
-                code.push(
+                body.push(
                     0x6a, LOADED_STATICALLY, //        push 1
                     0x6a, DLL_PROCESS_ATTACH, //       push 1
                     0x68, ...u32(library.base), //     push hinstDLL
@@ -139,7 +154,7 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
         }
         // BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) -- stdcall, so it pops
         // its own three arguments and nothing is cleaned up here.
-        code.push(
+        body.push(
             0x6a, LOADED_STATICALLY, //    push 1            (lpvReserved)
             0x6a, DLL_PROCESS_ATTACH, //    push 1            (fdwReason)
             0x68, ...u32(library.base), //  push hinstDLL
@@ -152,11 +167,129 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
         attached.push(library.name);
     }
 
+    // The lock only around work: a start that attaches nothing - a prelude
+    // alone - takes no lock, as a start with no stub at all takes none.
+    if (body.length > 0)
+    {
+        code.push(...locked(loaderLock?.enter ?? 0), ...body, ...locked(loaderLock?.leave ?? 0));
+    }
     code.push(
-        ...locked(loaderLock?.leave ?? 0),
         0xb8, ...u32(entryPoint), // mov eax, entry
         0xff, 0xe0, //               jmp eax
     );
 
     return { bytes: new Uint8Array(code), attached, tlsImages };
+}
+
+/**
+ * The same start-up as `synthesiseProcessInit`'s, for an x86-64 process: the
+ * first four arguments in RCX, RDX, R8 and R9, 32 bytes of home space above
+ * the return address for the callee to spill them into, and RSP a multiple of
+ * 16 at every call. The thread enters here as a function is entered, eight
+ * past a multiple of 16, so 40 bytes below that are both; the program's entry
+ * point is jumped to with RSP as it came, as though the thread had started
+ * there. Every address lies below 4 GiB, so a 32-bit move zero-extends it
+ * whole.
+ *
+ * @param {Object} options
+ * @param {{ base: number, entryPoint: number, name: string, tls?: TlsSetup }[]}
+ *        options.libraries
+ * @param {number} options.entryPoint
+ * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
+ * @param {number} [options.prelude]
+ * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
+ */
+function longProcessInit({ libraries, entryPoint, loaderLock, prelude = 0 }){
+    /** @type {number[]} */
+    const code = [0x48, 0x83, 0xec, 0x28]; //  sub rsp, 40
+    /** @type {string[]} */
+    const attached = [];
+    let tlsImages = 0;
+    /** @param {number} routine */
+    // Every address a whole quadword: a wide window's image lies past 4 GiB.
+    const call = routine=>[
+        0x48, 0xb8, ...u64(routine), //         mov rax, routine
+        0xff, 0xd0, //                          call rax
+    ];
+    /** DllMain's three arguments, and the call. @param {number} base @param {number} routine */
+    const attach = (base, routine)=>[
+        0x48, 0xb9, ...u64(base), //            mov rcx, hinstDLL
+        0xba, ...u32(DLL_PROCESS_ATTACH), //    mov edx, fdwReason
+        0x41, 0xb8, ...u32(LOADED_STATICALLY), // mov r8d, lpvReserved
+        ...call(routine),
+    ];
+    /** @param {number} routine */
+    const locked = routine=>(loaderLock
+        ? [0xb9, ...u32(loaderLock.address), ...call(routine)] // mov ecx, lock
+        : []);
+    if (prelude)
+    {
+        code.push(...call(prelude));
+    }
+    /** What runs under the loader lock. @type {number[]} */
+    const body = [];
+
+    for (const library of libraries)
+    {
+        if (library.tls)
+        {
+            body.push(
+                0x65, 0x48, 0x8b, 0x04, 0x25, ...u32(TLS_POINTER_LONG), // mov rax, gs:[0x58]
+                0xba, ...u32(library.tls.blockAddress), //              mov edx, block
+                0x48, 0x89, 0x90, ...u32(library.tls.index * 8), //     mov [rax+index*8], rdx
+            );
+            for (const callback of library.tls.callbacks)
+            {
+                body.push(...attach(library.base, callback));
+            }
+            tlsImages++;
+        }
+        if (!library.entryPoint || library.entryPoint === library.base)
+        {
+            continue;
+        }
+        body.push(...attach(library.base, library.entryPoint));
+        attached.push(library.name);
+    }
+
+    if (body.length > 0)
+    {
+        code.push(...locked(loaderLock?.enter ?? 0), ...body, ...locked(loaderLock?.leave ?? 0));
+    }
+    code.push(
+        0x48, 0x83, 0xc4, 0x28, //              add rsp, 40
+        0x48, 0xb8, ...u64(entryPoint), //      mov rax, entry
+        0xff, 0xe0, //                          jmp rax
+    );
+    return { bytes: new Uint8Array(code), attached, tlsImages };
+}
+
+/**
+ * The start of a process the loader refuses: one of its static imports is a
+ * library found nowhere. Windows' loader ends such a process in its first
+ * thread, before any DllMain or TLS callback, with STATUS_DLL_NOT_FOUND as its
+ * exit code; this is that thread's only work.
+ *
+ * @param {Object} options
+ * @param {number} options.exitProcess  The guest address of ExitProcess: nothing
+ *        is attached yet, so it detaches nothing and ends with the code given.
+ * @param {number} options.status       The exit code.
+ * @param {boolean} [options.long]      An x86-64 process: the x64 convention.
+ * @returns {Uint8Array}
+ */
+export function synthesiseStartRefused({ exitProcess, status, long = false }){
+    return new Uint8Array(long
+        ? [
+            0x48, 0x83, 0xec, 0x28, //              sub rsp, 40: the shadow space, aligned
+            0xb9, ...u32(status), //                mov ecx, status
+            0x48, 0xb8, ...u64(exitProcess), //     mov rax, ExitProcess
+            0xff, 0xd0, //                          call rax
+            0xeb, 0xfe, //                          jmp $: ExitProcess does not return
+        ]
+        : [
+            0x68, ...u32(status), //                push status
+            0xb8, ...u32(exitProcess), //           mov eax, ExitProcess
+            0xff, 0xd0, //                          call eax
+            0xeb, 0xfe, //                          jmp $
+        ]);
 }

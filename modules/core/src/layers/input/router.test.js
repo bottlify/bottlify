@@ -30,9 +30,11 @@ const WM_XBUTTONDOWN = 0x020b;
  *
  * @param {{ bounds?: (() => { width: number, height: number }) | null,
  *           window?: () => number,
- *           exclusive?: (device: 'keyboard' | 'mouse') => boolean }} [options]
+ *           exclusive?: (device: 'keyboard' | 'mouse') => boolean,
+ *           origin?: (width: number, height: number)
+ *               => { x: number, y: number } | null }} [options]
  */
-function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
+function harness({ bounds = null, window = ()=>HWND, exclusive, origin } = {}){
     /** @type {any[]} */
     const messages = [];
     /** @type {any[]} */
@@ -67,6 +69,7 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         exclusive,
         rawInput: report=>reports.push(report),
         moved: (x, y)=>at.push([x, y]),
+        origin,
     });
 
     return {
@@ -194,11 +197,39 @@ test('ALT turns a key into a system key, and the context bit follows ALT itself'
     assert.deepEqual(h.drain().map(m=>[m.message, m.wParam, m.lParam]),
         [[WM.SYSKEYUP, 0x41, 0xe01e0001]]);
 
-    // Releasing ALT is still a system message, but ALT is no longer down, so
-    // the context bit is clear.
+    // ALT let go after another key was pressed is a plain key-up, the
+    // context bit clear (Wine's user32:input lmenu_vkey, as Windows sends it).
+    h.send({ kind: 'key', code: 'AltLeft', down: false });
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam, m.lParam]),
+        [[WM.KEYUP, VK_MENU, 0xc0380001]]);
+
+    // Pressed and let go alone, it is the system's: the menu's key.
+    h.send({ kind: 'key', code: 'AltLeft', down: true });
+    h.drain();
     h.send({ kind: 'key', code: 'AltLeft', down: false });
     assert.deepEqual(h.drain().map(m=>[m.message, m.wParam, m.lParam]),
         [[WM.SYSKEYUP, VK_MENU, 0xc0380001]]);
+
+    // CONTROL with ALT is no system key, though the context bit says ALT is down.
+    h.send({ kind: 'key', code: 'AltLeft', down: true });
+    h.send({ kind: 'key', code: 'ControlLeft', down: true });
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam, m.lParam]),
+        [[WM.SYSKEYDOWN, VK_MENU, 0x20380001], [WM.KEYDOWN, 0x11, 0x201d0001]]);
+    h.send({ kind: 'key', code: 'ControlLeft', down: false });
+    assert.deepEqual(h.drain().map(m=>m.message), [WM.SYSKEYUP], 'ALT alone held again');
+});
+
+test('a key SendInput names by virtual key carries the scan code given beside it, and a '
+    + 'control or alt is the right one by the extended flag', ()=>{
+    const h = harness();
+    h.send({ kind: 'key', vk: 0x41, scanGiven: 7, down: true });
+    assert.equal(h.drain()[0].lParam, 0x00070001, 'the scan code written, not the key\'s');
+    h.send({ kind: 'key', vk: 0xa3, down: true });
+    assert.equal(h.drain()[0].side, 0xa2, 'VK_RCONTROL without the flag is the left control');
+    h.send({ kind: 'key', vk: 0xa2, extended: true, down: true });
+    assert.equal(h.drain()[0].side, 0xa3, 'VK_LCONTROL with it the right');
+    h.send({ kind: 'key', vk: 0xa1, down: true });
+    assert.equal(h.drain()[0].side, 0xa1, 'VK_RSHIFT is the right shift');
 });
 
 test('F10 is a system key with no ALT held', ()=>{
@@ -875,4 +906,19 @@ test('every event also goes out as the device reported it, for WM_INPUT', ()=>{
         { device: 'key', scan: 0x1d, extended: true, vk: 0x11, down: true, message: WM.KEYDOWN },
         { device: 'key', scan: 0x1e, extended: false, vk: 0x41, down: false, message: WM.KEYUP },
     ], 'a motion of nothing is no report');
+});
+
+test('a viewport showing one window\'s picture points into that window, wherever it lies', ()=>{
+    // A windowed program centred on a 1024x768 desktop: the page shows its
+    // 800x600 client alone, which starts at (114, 104) on the screen. Taken as
+    // the screen's own pixels, a pointer reached only the client's upper left
+    // and the buttons along its bottom could not be clicked.
+    const h = harness({ origin: (width, height)=>(width === 800 && height === 600
+        ? { x: 114, y: 104 } : null) });
+    h.router.confineTo(()=>({ width: 800, height: 600 }));
+    h.send({ kind: 'pointerMove', x: 692, y: 508 });
+    assert.deepEqual(h.router.cursor(), { x: 806, y: 612 });
+    h.send({ kind: 'pointerMove', x: 799, y: 599 });
+    assert.deepEqual(h.router.cursor(), { x: 913, y: 703 }, 'the client\'s far corner');
+    assert.deepEqual(h.at.at(-1), [799 / 800, 599 / 600], 'said back in the viewport\'s terms');
 });

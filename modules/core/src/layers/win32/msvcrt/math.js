@@ -29,7 +29,8 @@
  * Both shapes need the FPU seam, so this whole table is conditional on it.
  */
 
-import { readDouble, returningDouble } from './float.js';
+import { guestException } from '../common/raise.js';
+import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 import { guestEntry, guestExport } from './guest-code.js';
 import * as inGuest from './inguest.js';
@@ -38,6 +39,7 @@ import * as inGuestFloat from './inguest-float.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * div_t div(int numerator, int denominator), and ldiv, its long twin: the
@@ -47,7 +49,27 @@ import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
  *
  *   mov eax, [esp+4]; cdq; idiv dword [esp+8]; ret
  */
+/** The exceptions `idiv` raises, as Windows reports them. */
+const STATUS_INTEGER_DIVIDE_BY_ZERO = 0xc0000094;
+const STATUS_INTEGER_OVERFLOW = 0xc0000095;
+
 const DIVIDE_CODE = Uint8Array.of(0x8b, 0x44, 0x24, 0x04, 0x99, 0xf7, 0x7c, 0x24, 0x08, 0xc3);
+
+/**
+ * div and ldiv for a 64-bit process, whose div_t of two ints comes back
+ * whole in RAX, the quotient low and the remainder high:
+ *
+ *     mov eax, ecx
+ *     mov ecx, edx
+ *     cdq
+ *     idiv ecx
+ *     shl rdx, 32
+ *     mov eax, eax
+ *     or rax, rdx
+ *     ret
+ */
+const DIVIDE_LONG = Uint8Array.of(0x89, 0xc8, 0x89, 0xd1, 0x99, 0xf7, 0xf9, 0x48, 0xc1, 0xe2, 0x20,
+    0x89, 0xc0, 0x48, 0x09, 0xd0, 0xc3);
 
 /**
  * The double next to x toward y, from its bits: what `_nextafter`'s code
@@ -83,6 +105,8 @@ function nextAfter(x, y){
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *     Where `_ftol`'s handler puts EDX; without it `_ftol` is its x86 alone.
  * @property {(code: number) => void} [errno]  The calling thread's errno.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose runtime has
+ *     the float forms and passes a structure of sixteen bytes by its address.
  */
 
 /**
@@ -115,6 +139,37 @@ const UNARY = {
  * itself -- its payload kept, as the x87 hands an operand NaN through.
  */
 const NAN_IS_DOMAIN = new Set(['atan', 'tanh', 'exp']);
+
+/**
+ * The bridge's `floats` of a function taking one double, or two: where a
+ * 64-bit caller passes them, in XMM0 and XMM1.
+ */
+const ONE_DOUBLE = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
+const TWO_DOUBLES = Object.freeze({ 0: /** @type {'f64'} */ ('f64'),
+    2: /** @type {'f64'} */ ('f64') });
+const ONE_FLOAT = Object.freeze({ 0: /** @type {'f32'} */ ('f32') });
+const TWO_FLOATS = Object.freeze({ 0: /** @type {'f32'} */ ('f32'),
+    1: /** @type {'f32'} */ ('f32') });
+
+/**
+ * The float forms a 64-bit msvcrt exports beside the double ones, which the
+ * 32-bit one has not: their arguments and result are floats, rounded so.
+ */
+const SINGLE_FORMS = ['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+    'exp', 'log', 'log10', 'sqrt', 'floor', 'ceil', 'pow', 'atan2', 'fmod'];
+const NAN_BITS = new DataView(new ArrayBuffer(8));
+
+/**
+ * A NaN as the x87 answers it for an operand NaN: the operand itself, its
+ * payload kept and its quiet bit set -- a signalling NaN goes out quiet.
+ *
+ * @param {number} nan
+ */
+function quieted(nan){
+    NAN_BITS.setFloat64(0, nan, true);
+    NAN_BITS.setUint8(6, NAN_BITS.getUint8(6) | 0x08);
+    return NAN_BITS.getFloat64(0, true);
+}
 
 /** @type {Record<string, (left: number, right: number) => number>} */
 const BINARY = {
@@ -235,10 +290,13 @@ export function createMathFunctions(host){
 
     /** @param {string} name @param {(value: number) => number} compute */
     const unary = (name, compute)=>(/** @type {number} */ value)=>{
-        if (Number.isNaN(value) && NAN_IS_DOMAIN.has(name))
+        if (Number.isNaN(value))
         {
-            host.errno?.(EDOM);
-            return value;
+            if (NAN_IS_DOMAIN.has(name))
+            {
+                host.errno?.(EDOM);
+            }
+            return quieted(value);
         }
         return answer([value], compute(value));
     };
@@ -246,7 +304,7 @@ export function createMathFunctions(host){
     for (const [name, compute] of Object.entries(UNARY))
     {
         const respond = unary(name, compute);
-        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)));
+        handlers[name] = returningDouble(fpu, 8, args=>respond(readDouble(args, 0)), ONE_DOUBLE);
 
         // The FPU-stack form: one argument, consumed, replaced by the result.
         handlers[`_CI${name}`] = {
@@ -267,7 +325,7 @@ export function createMathFunctions(host){
             const left = readDouble(args, 0);
             const right = readDouble(args, 2);
             return answer([left, right], compute(left, right));
-        });
+        }, TWO_DOUBLES);
 
         // ST(1) is the left operand and ST(0) the right, because the left was
         // pushed first. Getting these the wrong way round is undetectable for
@@ -290,7 +348,7 @@ export function createMathFunctions(host){
     handlers.ldexp = returningDouble(fpu, 12, args=>{
         const value = readDouble(args, 0);
         return answer([value], value * Math.pow(2, args[2] | 0));
-    });
+    }, ONE_DOUBLE);
 
     /** double _scalb(double value, long exponent): ldexp under another name. */
     handlers._scalb = handlers.ldexp;
@@ -298,28 +356,90 @@ export function createMathFunctions(host){
     /**
      * double _cabs(struct _complex z): the magnitude, _hypot of the two parts.
      * The structure is passed by value, its two doubles on the stack where
-     * _hypot's two arguments are, so the one code serves both.
+     * _hypot's two arguments are, so the one code serves both. At 64 bits a
+     * structure of sixteen bytes is passed by its address.
      */
-    handlers._cabs = handlers._hypot;
+    const read = host.readMemory;
+    handlers._cabs = host.pointerSize === 8 && read
+        ? returningDouble(fpu, 4, ([at])=>{
+            const parts = new DataView(read(wholeAddress(at), 16).buffer);
+            const real = parts.getFloat64(0, true);
+            const imaginary = parts.getFloat64(8, true);
+            return answer([real, imaginary], Math.hypot(real, imaginary));
+        })
+        : handlers._hypot;
 
     /** double _logb(double x): only a zero comes here, -infinity and ERANGE. */
     handlers._logb = returningDouble(fpu, 8, args=>{
         const value = readDouble(args, 0);
         return answer([value], value === 0 ? -Infinity : value);
-    });
+    }, ONE_DOUBLE);
 
     /** double _nextafter(double x, double y): only a step to an infinity, ERANGE. */
     handlers._nextafter = returningDouble(fpu, 16, args=>{
         const x = readDouble(args, 0);
         const y = readDouble(args, 2);
         return answer([x, y], nextAfter(x, y));
-    });
+    }, TWO_DOUBLES);
 
     /** double _j0(double x), double _j1(double x) */
-    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)));
-    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)));
+    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)), ONE_DOUBLE);
+    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)), ONE_DOUBLE);
     /** double _jn(int n, double x) */
-    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)));
+    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)),
+        { 1: 'f64' });
+
+    // sqrtf and the rest: a 64-bit runtime's, computed as the double form
+    // is and rounded to a float, errno as it sets it.
+    /** @type {Record<string, ReturnType<typeof returningSingle>>} */
+    const singles = {};
+    if (host.pointerSize === 8)
+    {
+        for (const name of SINGLE_FORMS)
+        {
+            if (Object.hasOwn(UNARY, name))
+            {
+                const respond = unary(name, UNARY[/** @type {keyof typeof UNARY} */ (name)]);
+                singles[`${name}f`] = returningSingle(fpu, 4,
+                    args=>respond(readSingle(args, 0)), ONE_FLOAT);
+            }
+            else
+            {
+                const compute = BINARY[name];
+                singles[`${name}f`] = returningSingle(fpu, 8, args=>{
+                    const left = readSingle(args, 0);
+                    const right = readSingle(args, 1);
+                    return answer([left, right], compute(left, right));
+                }, TWO_FLOATS);
+            }
+        }
+    }
+    // logf and expf in the guest (`inguest.js`): the host answers what sets errno or is
+    // not normal, as the handler above does.
+    if (singles.logf)
+    {
+        singles.logf = guestEntry(inGuest.logf, COMPILED.logf, host, singles.logf);
+    }
+    if (singles.expf)
+    {
+        singles.expf = guestEntry(inGuest.expf, COMPILED.expf, host, singles.expf);
+    }
+    // The float forms of one instruction, or of a few, in the guest too.
+    for (const name of /** @type {const} */ (['sinf', 'cosf', 'tanf', 'asinf', 'acosf',
+        'atanf', 'atan2f', 'sqrtf', 'floorf', 'ceilf', 'fmodf']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuest[name], COMPILED[name], host, singles[name]);
+        }
+    }
+    for (const name of /** @type {const} */ (['sinhf', 'coshf', 'tanhf', 'log10f', 'powf']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuestMath[name], MATH_CODE[name], host, singles[name]);
+        }
+    }
 
     const guest = {
         readMemory: host.readMemory,
@@ -332,6 +452,10 @@ export function createMathFunctions(host){
     const inTheGuest = {};
     for (const name of [...Object.keys(handlers), 'frexp', 'modf'])
     {
+        if (name === '_cabs' && host.pointerSize === 8)
+        {
+            continue;
+        }
         const code = CODE_OF[name] ?? name;
         // Through unknown: the float module exports its tables beside its functions.
         const source = /** @type {Record<string, Function>} */ (inGuestMath)[code]
@@ -360,18 +484,25 @@ export function createMathFunctions(host){
         convention: 'cdecl',
         argBytes: 8,
         code: ()=>DIVIDE_CODE,
+        long: ()=>DIVIDE_LONG,
         ...setRegisters ? {
             /** @param {number[]} args */
             handler: ([numerator, denominator])=>{
                 const n = numerator | 0;
                 const d = denominator | 0;
-                if (d === 0 || n === -0x80000000 && d === -1)
+                // What `idiv` raises: a divide fault for zero, and the same
+                // fault for INT_MIN by -1, which Windows reports as overflow.
+                if (d === 0)
                 {
-                    throw new Error('div: the guest divided by zero, or INT_MIN by -1');
+                    throw guestException(STATUS_INTEGER_DIVIDE_BY_ZERO);
+                }
+                if (n === -0x80000000 && d === -1)
+                {
+                    throw guestException(STATUS_INTEGER_OVERFLOW);
                 }
                 const quotient = Math.trunc(n / d);
                 setRegisters({ edx: (n - quotient * d) >>> 0 });
-                return quotient >>> 0;
+                return wholeAddress(quotient);
             },
         } : {},
     };
@@ -379,6 +510,7 @@ export function createMathFunctions(host){
     return {
         ...handlers,
         ...inTheGuest,
+        ...singles,
 
         /** double floor(double x) -- in the guest */
         floor: guestEntry(inGuest.floor, COMPILED.floor, host),
@@ -396,8 +528,12 @@ export function createMathFunctions(host){
         div: divide,
         ldiv: divide,
 
-        /** double _copysign(double x, double y) -- in the guest */
-        _copysign: guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+        /**
+         * double _copysign(double x, double y) -- in the guest, which reads y's
+         * sign bit from its bits (`doubleHigh`); a 64-bit caller passes it in XMM1.
+         */
+        _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
+            floats: TWO_DOUBLES },
 
         /** double _chgsign(double x) -- in the guest */
         _chgsign: guestEntry(inGuestFloat._chgsign, FLOAT_CODE._chgsign, guest),

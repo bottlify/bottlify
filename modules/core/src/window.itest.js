@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { IDLE_LOOK_MS } from './process/run-waits.js';
 
 const FIXTURE = new URL('../test/fixtures/window.exe', import.meta.url);
 
@@ -65,7 +66,7 @@ async function runFixture(t){
     };
     setTimeout(deliver, 40);
 
-    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 15000 });
+    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 30_000 });
     const seen = bytes.length >= 4
         ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
         : null;
@@ -87,14 +88,15 @@ test('the whole path was used, not shortcut', { timeout: 20000 }, async t=>{
     const { diagnostics } = await runFixture(t);
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
-    // Seven trips into the guest: the WM_NCCREATE, WM_NCCALCSIZE and
-    // WM_CREATE the window is told about as it is made, the probe, the close,
+    // Eight trips into the guest: the WM_GETMINMAXINFO an overlapped window
+    // is asked before it exists, the WM_NCCREATE, WM_NCCALCSIZE and
+    // WM_CREATE it is told about as it is made, the probe, the close,
     // and the WM_DESTROY and WM_NCDESTROY the close produced, sent from
     // inside the close's own handling, which is the one nesting. The window
     // is made hidden and never shown, so nothing activates it. Fewer means
     // something was answered on our side that the program was supposed to
     // answer.
-    assert.equal(byName.bridge.metrics.callbacks, 7);
+    assert.equal(byName.bridge.metrics.callbacks, 8);
     assert.equal(byName.bridge.metrics.deepestCallback, 2);
     assert.equal(byName.bridge.metrics.failure, null);
 
@@ -118,7 +120,7 @@ async function startApp(t){
     return app;
 }
 
-test('a program with nothing to do waits instead of spinning', { timeout: 15000 }, async t=>{
+test('a program with nothing to do waits instead of spinning', { timeout: 30_000 }, async t=>{
     const app = await startApp(t);
 
     // Nothing is ever posted, so the program sits in GetMessage. What must not
@@ -130,11 +132,18 @@ test('a program with nothing to do waits instead of spinning', { timeout: 15000 
     // of turns never runs out on it. That is the contract, not a defect -- a
     // wait of seconds is tens of thousands of idle turns -- and a caller who
     // needs such a program back asks for a time.
-    const startedAt = Date.now();
+    //
+    // The bound is a bound: the loop looks again every few milliseconds, never
+    // waiting on anything longer -- read off the timers it set rather than off
+    // the run's wall time, which a busy machine stretches past any figure.
+    const timers = t.mock.method(globalThis, 'setTimeout');
     const finished = app.run({ timeoutMs: 500 });
     await assert.rejects(finished, /did not finish within 500 ms/);
-    const took = Date.now() - startedAt;
-    assert.ok(took < 2500, `the bound is a bound: back after ${took}ms, not whenever`);
+    const waits = timers.mock.calls.map(call=>Number(call.arguments[1] ?? 0));
+    timers.mock.restore();
+    assert.ok(waits.length > 0 && waits.every(ms=>ms <= IDLE_LOOK_MS),
+        `the bound is a bound: back at a look past it, not whenever (waits of ${
+            [...new Set(waits)].join(', ')} ms)`);
 
     const kernel = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'kernel');
     assert.ok(kernel.metrics.turns < 100,

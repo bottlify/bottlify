@@ -71,7 +71,7 @@ jobs:
       # root; each package's README is given links to this commit instead.
       - env:
           NAMES: ${{ steps.named.outputs.names }}
-        run: node tools/readme-links.mjs "$GITHUB_SHA" $(for name in $NAMES; do echo "modules/$name"; done)
+        run: node tools/ci/readme-links.mjs "$GITHUB_SHA" $(for name in $NAMES; do echo "modules/$name"; done)
       - name: pack
         env:
           NAMES: ${{ steps.named.outputs.names }}

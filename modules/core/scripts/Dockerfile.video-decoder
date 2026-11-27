@@ -19,14 +19,14 @@
 # The FFmpeg libraries are built into an image layer, so a change to decoder.c
 # alone costs a link rather than the twenty-minute compile in front of it, and
 # the container that runs from this image only links and copies out.
-FROM emscripten/emsdk:3.1.64
+FROM emscripten/emsdk:6.0.13
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make pkg-config python3 git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-ARG FFMPEG_TAG=n6.1
-ARG FFMPEG_COMMIT=d4ff0020b40b524a490cf62eccbd3a318f4c0e58
+ARG FFMPEG_TAG=n9.0.2
+ARG FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
 RUN git clone --depth 1 --branch "${FFMPEG_TAG}" https://github.com/FFmpeg/FFmpeg /ffmpeg \
  && cd /ffmpeg \
  && test "$(git rev-parse HEAD)" = "${FFMPEG_COMMIT}" \

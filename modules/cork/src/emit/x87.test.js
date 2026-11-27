@@ -12,6 +12,7 @@ import { formRegion } from '../region.js';
 import { CF, PF, ZF } from '../decode/table.js';
 import { step, trackRegion } from './x87.js';
 import { fpremStatus, fpremValue } from '../ir-x87.js';
+import { UNDERFLOW_CASES, enterCase, leftByCase } from '../testing/x87-underflow.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -21,11 +22,13 @@ const DATA = 0x2000;
  *
  * @param {number[]} bytes
  * @param {{ data?: number[], top?: number, empty?: number, st?: Record<number, number>,
- *     regs?: Record<string, number>, eflags?: number, tagged?: [number, number[]][] }} [start]
+ *     regs?: Record<string, number>, eflags?: number, tagged?: [number, number[]][],
+ *     features?: { defaultNaNNegative: boolean } }} [start]
  */
 function run(bytes, start = {}){
-    const { data = [], top = 0, empty = 0xff, st = {}, regs = {}, eflags = 2, tagged = [] } = start;
-    const m = createTestMachine();
+    const { data = [], top = 0, empty = 0xff, st = {}, regs = {}, eflags = 2, tagged = [],
+        features } = start;
+    const m = createTestMachine(features ? { features } : {});
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Top, top);
     view.setUint8(m.layout.x87Empty, empty);
@@ -93,6 +96,31 @@ test('the tracker: pushes, pops and the exchange as a permutation', ()=>{
     state = /** @type {any} */ (step(/** @type {any} */ (decode(a=>xchg[a], 2)), state));
     assert.deepEqual(state.slot, [0, 7, 2, 3, 4, 5, 6, 1],
         'ST0 (register 7) and ST2 (register 1) swap locals');
+});
+
+test('the code after a call through a register or a slot is compiled for the float the callee'
+    + ' returns, whatever chain of calls guessed its block', ()=>{
+    // 1000: call esi            a call out: its return address is guessed
+    // 1002: call [0x4000]       and so is this one's, in the same pass
+    // 1008: fstp dword [esp-8]  reads ST0 first: the callee returned a float
+    // 100c: ret
+    const m = createTestMachine();
+    m.write(CODE, [0xff, 0xd6, 0xff, 0x15, 0x00, 0x40, 0x00, 0x00, 0xd9, 0x5c, 0x24, 0xf8, 0xc3]);
+    const region = formRegion(a=>new Uint8Array(m.memory.buffer)[m.layout.ramBase + a], CODE);
+    const second = region.blocks.findIndex(block=>block.start === 0x1002);
+    const after = region.blocks.findIndex(block=>block.start === 0x1008);
+    assert.ok(second >= 0 && after >= 0);
+    // Without the calls as edges every return address is guessed; with them the
+    // edge carries the top. Either way the block that pops the float starts one
+    // below the call's top - the top the test after the call asks of the callee.
+    for (const callReturn of [false, true])
+    {
+        const { states } = trackRegion(region, 0, callReturn);
+        assert.equal(states[second]?.top, 0, 'nothing reads a register after the first call');
+        assert.equal(states[after]?.top, 7, `callReturn ${callReturn}: the float is in register 7`);
+    }
+    const from5 = trackRegion(region, 5, false);
+    assert.equal(from5.states[after]?.top, 4, 'from the top the region was entered with');
 });
 
 test('the tracker compiles a block met with two tops for one of them, and cuts it only when'
@@ -259,9 +287,7 @@ test('fcomi sets ZF PF CF as cmp would; fcom sets the condition bits', ()=>{
     assert.equal(com.m.reg('eax') >>> 11 & 7, 6, 'the top in the word');
 });
 
-test('a region entered with top 6 reads the emulator tagged form without the import', ()=>{
-    // The state block in cork's own layout holds f64; the tagged form is the
-    // emulator's. Both are read: here the own form, with two registers held.
+test('a region entered with top 6 reads the two registers it holds, each an f64', ()=>{
     const r = run([
         0xde, 0xc1,                          // faddp st1, st0
         0xdd, 0x1d, 0x00, 0x20, 0, 0,        // fstp qword [DATA]
@@ -585,19 +611,20 @@ test('the plain forms write the stack words once, on every way out of the block'
     assert.deepEqual([loop.st(0), loop.st(1)], [1, 1]);
 });
 
-test('an empty source register faults: IE and SF, the indefinite, the mask kept', ()=>{
+test('an empty source register faults: IE and SF, the indefinite, the destination held', ()=>{
     // fadd st0, st1 with both registers empty (a fresh FPU).
     const both = run([0xd8, 0xc1, 0xdf, 0xe0]);            // fadd; fnstsw ax
     assert.equal(both.exit.kind, 3, `left out ${[...both.exit.unsupported]}`);
     assert.equal(both.m.reg('eax') & 0x41, 0x41, 'IE and SF');
     assert.ok(Number.isNaN(both.st(0)), 'the indefinite into ST(0)');
-    assert.equal(both.empty(), 0xff, 'the empty mask is unchanged');
+    // As the processor tags it (`testing/x87-underflow.js`).
+    assert.equal(both.empty(), 0xfe, 'ST(0) is held');
     // fld1; ffree st0; fadd st0, st0 -- the source emptied by hand.
     const freed = run([0xd9, 0xe8, 0xdd, 0xc0, 0xd8, 0xc0, 0xdf, 0xe0]);
     assert.equal(freed.exit.kind, 3, `left out ${[...freed.exit.unsupported]}`);
     assert.equal(freed.m.reg('eax') & 0x41, 0x41, 'IE and SF again');
     assert.ok(Number.isNaN(freed.st(0)));
-    assert.equal(freed.empty(), 0xff);
+    assert.equal(freed.empty(), 0x7f);
     // fld1; fcom st1 with st1 empty: IE and SF are raised, and ST(0) is left
     // as it was (a compare reads, it does not write).
     const compared = run([0xd9, 0xe8, 0xd8, 0xd1, 0xdf, 0xe0]); // fld1; fcom st1; fnstsw ax
@@ -650,6 +677,35 @@ test('a signalling NaN from memory raises IE and goes on quiet, a quiet one does
     assert.equal(r.status() & 0x4501, 0x4501, 'unordered, and IE');
 });
 
+for (const defaultNaNNegative of [false, true])
+{
+    test('arithmetic on a register holding a signalling NaN raises IE, a quiet one does not'
+        + ` (the host's default NaN ${defaultNaNNegative ? 'negative' : 'positive'})`, ()=>{
+        const d = [DATA & 255, DATA >> 8, 0, 0];
+        /** @param {bigint} value */
+        const register = value=>[...new Uint8Array(BigUint64Array.of(value).buffer),
+            ...Array(8).fill(0)];
+        const features = { defaultNaNNegative };
+        /** ST(0) at physical 7 holds `value`; `bytes` run on it. @param {bigint} value @param {number[]} bytes */
+        const on = (value, bytes, data = [0, 0, 0x80, 0x3f])=>run(bytes,
+            { top: 7, empty: 0x7f, tagged: [[7, register(value)]], data, features });
+        // fadd st0, st0
+        let r = on(0x7ff0000000000001n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 1, 'fadd st0, st0 of a signalling NaN: IE');
+        assert.ok(Number.isNaN(r.st(0)));
+        // fmul dword [DATA], the operand 1.0
+        r = on(0xfff0000000000001n, [0xd8, 0x0d, ...d]);
+        assert.equal(r.status() & 1, 1, 'fmul m32 into a signalling NaN: IE');
+        // fiadd dword [DATA]
+        r = on(0x7ff0000000000001n, [0xda, 0x05, ...d], [1, 0, 0, 0]);
+        assert.equal(r.status() & 1, 1, 'fiadd into a signalling NaN: IE');
+        r = on(0x7ff8000000000001n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 0, 'fadd st0, st0 of a quiet NaN: no IE');
+        r = on(0x3ff0000000000000n, [0xd8, 0xc0]);
+        assert.equal(r.status() & 1, 0, 'fadd of 1.0: no IE');
+    });
+}
+
 test('arithmetic on two NaNs answers the x87\'s choice: quiet first, the larger significand',
     ()=>{
         const d = [DATA & 255, DATA >> 8, 0, 0];
@@ -673,3 +729,19 @@ test('arithmetic on two NaNs answers the x87\'s choice: quiet first, the larger 
             { data: [...qword(0xfff8000000000005n), ...qword(0x7ff8000000000005n)] });
         assert.equal(bits(r), 0x7ff8000000000005n, 'of equal significands, the positive');
     });
+
+for (const { name, start, code, want } of UNDERFLOW_CASES)
+{
+    test(`a stack underflow as the processor answers it, translated: ${name}`, ()=>{
+        const m = createTestMachine();
+        const view = new DataView(m.memory.buffer);
+        enterCase(view, m.layout, start);
+        m.write(CODE, [...code, 0xf4]);
+        m.setReg('esp', 0x80000);
+        const exit = m.runProgram(CODE);
+        // The machine has no interpreter: what ran, ran translated.
+        assert.equal(exit.kind, 3, `left out ${[...exit.unsupported]}`);
+        assert.equal(exit.unsupported.size, 0);
+        assert.deepEqual(leftByCase(view, m.layout), want);
+    });
+}

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDescriptors, createIoFunctions } from './io.js';
+import { IOINFO_LAYOUTS, createDescriptors, createIoFunctions, ioinfoExport } from './io.js';
 import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
 
 const O_RDONLY = 0x0000;
@@ -173,6 +173,32 @@ test('a text-mode _write puts CR before each LF and answers with the caller\'s c
     assert.equal(fns._write.handler([fd, memory.put(MYTEXT), MYTEXT.length]), MYTEXT.length);
     assert.equal(String.fromCharCode(...files.files['C:\\game\\t.txt']), DOSTEXT);
     fns._close.handler([fd]);
+});
+
+test('_read copies what it reads once: binary straight to the buffer, text folded in place', ()=>{
+    const { files, open, read, tell } = build({
+        'C:\\game\\b.bin': bytesOf(DOSTEXT), 'C:\\game\\t.txt': bytesOf(DOSTEXT),
+    });
+    /** @type {Uint8Array[]} */
+    const answered = [];
+    const plain = files.read;
+    files.read = (/** @type {string} */ node, /** @type {number} */ at, /** @type {number} */ length)=>{
+        const bytes = /** @type {Uint8Array<ArrayBuffer>} */ (plain(node, at, length));
+        answered.push(bytes);
+        return bytes;
+    };
+
+    const binary = open('C:\\game\\b.bin', O_RDONLY | O_BINARY);
+    assert.equal(read(binary, 10), DOSTEXT.slice(0, 10));
+    assert.equal(tell(binary), 10);
+    assert.equal(answered.length, 0,
+        'a binary read goes from the volume to the buffer, no array of its own');
+
+    const text = open('C:\\game\\t.txt', O_RDONLY | O_TEXT);
+    assert.equal(read(text, 256), MYTEXT);
+    assert.equal(answered.length, 1);
+    assert.equal(String.fromCharCode(...answered[0].subarray(0, MYTEXT.length)), MYTEXT,
+        'the volume\'s answer is the one folded, no second array');
 });
 
 test('a text-mode _read folds CR LF to LF, and a CR last in the read looks one further', ()=>{
@@ -348,6 +374,20 @@ test('_stati64 answers as _stat does, into the record with the 64-bit size', ()=
     assert.equal(fns._stati64.handler([memory.put('C:\\game\\none'), stat]), -1);
     assert.equal(fns._stati64.handler([0, stat]), -1);
     assert.deepEqual(errno, [ENOENT, ENOENT, EINVAL]);
+});
+
+test('the wide stats read their path wide and answer into the same records', ()=>{
+    const { memory, fns, errno } = build({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+    assert.equal(fns._wstati64.handler([memory.putWide('C:\\game\\data.bin'), stat]), 0);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    for (const name of ['_wstat', '_wstat64', '_wstat64i32'])
+    {
+        assert.equal(fns[name].handler([memory.putWide('C:\\game\\data.bin'), stat]), 0, name);
+    }
+    assert.equal(fns._wstat64.handler([memory.putWide('C:\\game\\none'), stat]), -1);
+    assert.deepEqual(errno, [ENOENT]);
 });
 
 test('_stati64 reports a size past 4 GiB whole', ()=>{
@@ -833,7 +873,8 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     const TABLE = 0x80000;
     let placed = 0;
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>placed,
+        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory,
+        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt }]),
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
@@ -860,6 +901,68 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
         'no handle until one is asked for');
     const asked = fns._get_osfhandle.handler([opened]);
     assert.deepEqual(entry(opened), { handle: asked, wxflag: WX_OPEN | WX_TEXT });
+
+    // exflag: the Unicode translation and the lock made, kept past the close.
+    /** @param {number} fd */
+    const exflag = fd=>view.getInt32(TABLE + 256 + fd * 36 + 8, true);
+    const unicode = fns._open.handler([memory.put('C:\\game\\info.tst'),
+        O_CREAT | O_TRUNC | O_WRONLY | O_WTEXT, 0]);
+    assert.equal(exflag(unicode), 0x02 | 0x04 | 0x08, 'EF_UTF16 | EF_CRIT_INIT | EF_UNK_UNICODE');
+    assert.equal(fns._close.handler([unicode]), 0);
+    assert.equal(exflag(unicode), 0x0e);
+    assert.equal(entry(unicode).wxflag, 0);
+    assert.equal(exflag(unicode + 4), 0, 'a number never opened');
+    const utf8 = fns._open.handler([memory.put('C:\\game\\info.tst'), O_RDONLY | O_U8TEXT, 0]);
+    assert.equal(exflag(utf8), 0x01 | 0x04);
+});
+
+test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and unicode', ()=>{
+    // Wine's msvcr80 test_ioinfo_flags: the word at 8 is 1 once a number
+    // was opened, and the byte at 36 holds `textmode` (0 ANSI, 1 UTF-8,
+    // 2 UTF-16) under `unicode`, set by _O_WTEXT; both kept past the close.
+    const WX_OPEN = 0x01;
+    const WX_TEXT = 0x80;
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\game\\info.tst': new Uint8Array(0) },
+        { directories: ['C:\\', 'C:\\game'] });
+    const handles = fakeHandles(files);
+    const [OLD, NEW] = [0x80000, 0x90000];
+    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt },
+        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80 }];
+    const descriptors = createDescriptors({
+        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>tables,
+    });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
+        descriptors));
+    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80);
+    assert.equal(later.data().length, 256 + 32 * 64);
+    memory.writeMemory(OLD, fns.__pioinfo.data());
+    memory.writeMemory(NEW, later.data());
+    const view = new DataView(memory.bytes.buffer);
+    /** @param {number} fd */
+    const entry = fd=>{
+        const at = NEW + 256 + fd * 64;
+        return { handle: view.getInt32(at, true), wxflag: memory.bytes[at + 4],
+            lock: view.getInt32(at + 8, true), mode: memory.bytes[at + 36] };
+    };
+    const open = (/** @type {number} */ flags)=>fns._open.handler(
+        [memory.put('C:\\game\\info.tst'), O_CREAT | O_TRUNC | O_WRONLY | flags, 0]);
+
+    const wtext = open(O_WTEXT);
+    const handle = fns._get_osfhandle.handler([wtext]);
+    assert.deepEqual(entry(wtext), { handle, wxflag: WX_OPEN | WX_TEXT, lock: 1, mode: 0x80 | 2 });
+    assert.equal(view.getInt32(OLD + 256 + wtext * 36, true), handle, 'msvcrt\'s table too');
+    assert.equal(fns._close.handler([wtext]), 0);
+    assert.deepEqual(entry(wtext),
+        { handle: INVALID_HANDLE_VALUE, wxflag: 0, lock: 1, mode: 0x82 });
+    assert.deepEqual(entry(wtext + 4),
+        { handle: INVALID_HANDLE_VALUE, wxflag: 0, lock: 0, mode: 0 });
+    const text = open(O_TEXT);
+    assert.deepEqual([entry(text).wxflag, entry(text).lock, entry(text).mode],
+        [WX_OPEN | WX_TEXT, 1, 0]);
+    assert.equal(fns._close.handler([text]), 0);
+    const utf8 = open(O_U8TEXT);
+    assert.deepEqual([entry(utf8).lock, entry(utf8).mode], [1, 1]);
 });
 
 test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{
@@ -908,4 +1011,120 @@ test('_isatty: the console\'s descriptors are character devices, a file is not',
     assert.equal(fns._isatty.handler([77]), 0, 'a number not open');
     assert.deepEqual(errno, [9], 'EBADF');
     assert.equal(fns._isatty.convention, 'cdecl');
+});
+
+test('_creat makes or truncates a file for reading and writing, in _fmode\'s translation', ()=>{
+    // Wine's msvcrt test__creat: four bytes written, read back after a seek;
+    // in text mode the two LFs take a CR each.
+    const data = bytesOf('a\nb\n');
+    for (const [fmode, length] of [[O_TEXT, 6], [O_BINARY, 4]])
+    {
+        const { memory, fns } = build({ 'C:\\game\\old.tst': bytesOf('old contents') },
+            { fmode });
+        const fd = fns._creat.handler([memory.put('C:\\game\\old.tst'), 0]);
+        assert.ok(fd > 2);
+        const buffer = memory.allocate(8);
+        memory.writeMemory(buffer, data);
+        assert.equal(fns._write.handler([fd, buffer, 4]), 4);
+        assert.equal(fns._tell.handler([fd]), length);
+        assert.equal(fns._lseek.handler([fd, 0, SEEK_SET]), 0);
+        assert.equal(fns._read.handler([fd, buffer, 6]), 4, 'the old contents are gone');
+        assert.deepEqual([...memory.bytes.subarray(buffer, buffer + 4)], [...data]);
+    }
+    const { memory, fns } = build();
+    assert.ok(fns._wcreat.handler([memory.putWide('C:\\game\\new.tst'), 0]) > 2);
+});
+
+test('a read or write the descriptor is not open for leaves ERROR_ACCESS_DENIED in _doserrno', ()=>{
+    // Wine's msvcrt test_fileops: read on a write-only descriptor, write on a read-only one.
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\game\\data.bin': bytesOf('abc') });
+    /** @type {number[]} */
+    const reasons = [];
+    const descriptors = createDescriptors({ files, errno: ()=>{} });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({
+        ...memory, files, errno: ()=>{}, doserrno: code=>reasons.push(code),
+    }, descriptors));
+    const path = memory.put('C:\\game\\data.bin');
+    const writeOnly = fns._open.handler([path, O_WRONLY, 0]);
+    const readOnly = fns._open.handler([path, O_RDONLY, 0]);
+    const scratch = memory.allocate(4);
+    assert.equal(fns._read.handler([writeOnly, scratch, 1]), -1);
+    assert.equal(fns._write.handler([readOnly, scratch, 1]), -1);
+    assert.equal(fns._read.handler([77, scratch, 1]), -1);
+    assert.deepEqual(reasons, [5, 5], 'a number not open leaves it alone');
+});
+
+test('_O_SEQUENTIAL and fopen\'s S give the handle the sequential hint; R before S does not',
+    async()=>{
+        // Wine's msvcrt test_open_hints and test_fopen_hints: the handle's
+        // FileModeInformation says FILE_SEQUENTIAL_ONLY.
+        const { createStdioFunctions } = await import('./stdio.js');
+        const O_RANDOM = 0x0010;
+        const O_SEQUENTIAL = 0x0020;
+        const { memory, handles, fns, open, files } = withHandles({
+            'C:\\game\\hint.tst': new Uint8Array(0),
+        });
+        /** @param {number} fd */
+        const hinted = fd=>Boolean(handles.file(fns._get_osfhandle.handler([fd]))?.sequential);
+        for (const [flags, expected] of /** @type {[number, boolean][]} */ ([
+            [O_BINARY, false], [O_BINARY | O_SEQUENTIAL, true], [O_BINARY | O_RANDOM, false],
+            [O_BINARY | O_RANDOM | O_SEQUENTIAL, true]]))
+        {
+            const fd = open('C:\\game\\hint.tst', flags);
+            assert.equal(hinted(fd), expected, `_open ${flags.toString(16)}`);
+            fns._close.handler([fd]);
+        }
+        const descriptors = createDescriptors({ files, handles, errno: ()=>0, write: ()=>0 });
+        const io = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files,
+            errno: ()=>0 }, descriptors));
+        const stdio = /** @type {Record<string, any>} */ (createStdioFunctions(/** @type {any} */ ({
+            ...memory, files, errno: ()=>0, iob: ()=>memory.allocate(32 * 20), descriptors,
+            free: ()=>true })));
+        for (const [mode, expected] of /** @type {[string, boolean][]} */ ([['rb', false],
+            ['rbS', true], ['rbR', false], ['rbSR', true], ['rbRS', false]]))
+        {
+            const stream = stdio.fopen.handler([memory.put('C:\\game\\hint.tst'),
+                memory.put(mode)]);
+            const fd = stdio._fileno.handler([stream]);
+            assert.equal(Boolean(handles.file(io._get_osfhandle.handler([fd]))?.sequential),
+                expected, mode);
+            stdio.fclose.handler([stream]);
+        }
+    });
+
+test('__badioinfo is the entry of no descriptor: an invalid handle, text mode, not open', ()=>{
+    const { fns } = build();
+    const bytes = fns.__badioinfo.data();
+    const view = new DataView(bytes.buffer);
+    assert.equal(view.getInt32(0, true), -1);
+    assert.equal(bytes[4], 0x80, 'WX_TEXT, and not WX_OPEN');
+    assert.equal(bytes.length, 36);
+});
+
+test('_utime64 and _utime32 set a file\'s modification time; null is now; no file is ENOENT', ()=>{
+    const { memory, files, fns, errno, open } = build({ 'C:\\game\\a.txt': bytesOf('a') });
+    /** @type {[string, number][]} */
+    const stamps = [];
+    /** @param {string} path @param {number} ms */
+    const setModified = (path, ms)=>stamps.push([path, ms]);
+    /** @type {any} */ (files).setModified = setModified;
+    const times = memory.allocate(16);
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigInt64(times, 100n, true);
+    view.setBigInt64(times + 8, 1700000000n, true);
+    assert.equal(fns._utime64.handler([memory.put('C:\\game\\a.txt'), times]), 0);
+    assert.deepEqual(stamps.at(-1), ['C:\\game\\a.txt', 1700000000000], 'the second time');
+    view.setInt32(times, 5, true);
+    view.setInt32(times + 4, 1000000000, true);
+    assert.equal(fns._utime32.handler([memory.put('C:\\game\\a.txt'), times]), 0);
+    assert.equal(stamps.at(-1)?.[1], 1000000000000);
+    assert.equal(fns._utime64.handler([memory.put('C:\\game\\missing.txt'), times]), -1);
+    assert.equal(errno.at(-1), 2);
+    const fd = open('C:\\game\\a.txt', 0);
+    view.setBigInt64(times + 8, 1234n, true);
+    assert.equal(fns._futime64.handler([fd, times]), 0);
+    assert.equal(stamps.at(-1)?.[1], 1234000);
+    assert.equal(fns._futime64.handler([99, times]), -1);
+    assert.equal(errno.at(-1), 9, 'EBADF');
 });

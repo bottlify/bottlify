@@ -20,6 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bridgeModule } from './module.js';
+import { withPointers } from '../memory/pointers.fixture.js';
 
 /** Where a held thread spins. */
 const PARK = 0x00900000;
@@ -43,7 +44,10 @@ async function bridge(){
     let onTrap = null;
     let nextTrap = 1;
 
-    /** @param {string} name @param {{ top: number, limit: number }} stack */
+    /**
+     * @param {string} name @param {{ top: number, limit: number }} stack
+     * @returns {{ name: string, stackTop: number, stackLimit: number, state?: string }}
+     */
     const thread = (name, stack)=>({ name, stackTop: stack.top, stackLimit: stack.limit });
     const main = thread('main', MAIN);
     const worker = thread('thread-3', WORKER);
@@ -79,7 +83,7 @@ async function bridge(){
             /** @param {any} which @param {any} where */
             scheduleResume: (which, where)=>resumed.push({ thread: which.name, ...where }),
         },
-        memory: {
+        memory: withPointers({
             /** @param {number} at */
             readU32: at=>cells.get(at >>> 0) ?? 0,
             /** @param {number} at @param {number} value */
@@ -105,7 +109,7 @@ async function bridge(){
                 }
                 return bytes;
             },
-        },
+        }),
         log: { begin: ()=>{}, end: ()=>{} },
     };
 
@@ -226,7 +230,7 @@ test('a handler that awaited and named its thread builds on that thread\'s stack
     }
 });
 
-test('a frame that would land off its thread\'s stack is refused, whatever led there', async()=>{
+test('a frame that would land on another thread\'s stack is refused, whatever led there', async()=>{
     // The backstop under the rule above. Wherever a resting position comes from
     // -- a frame, a suspended call, a caller that worked one out -- a callback
     // frame belongs on the stack of the thread that will run it, and anything
@@ -263,7 +267,43 @@ test('a frame that would land off its thread\'s stack is refused, whatever led t
     machine.trap(wild, machine.main, MAIN.top - 0x100);
     await settle();
 
-    assert.match(String(refused), /callback frame for thread-3 .* is outside its stack/);
+    assert.match(String(refused), /callback frame for thread-3 .* is on main's stack/);
+});
+
+test('a thread running on a stack of its own choosing is called back there', async()=>{
+    // A program may switch a thread onto any memory it owns - a coroutine's
+    // stack in its heap - and Windows calls it back on that stack. Only another
+    // thread's stack is refused (above).
+    const machine = await bridge();
+    const HEAP_STACK = 0x0e3b0000;
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        handler: ()=>machine.api.callGuest({ entry: 0x00402000, args: [1] }),
+    });
+    machine.trap(machine.lastTrap(), machine.main, HEAP_STACK - 0x100);
+    await settle();
+
+    const built = machine.resumed.filter(frame=>frame.eip === 0x00402000);
+    assert.equal(built.length, 1, 'the callback was started');
+    assert.ok(built[0].esp < HEAP_STACK && built[0].esp > HEAP_STACK - 0x1000,
+        `0x${built[0].esp.toString(16)} is on the stack the thread was running on`);
+});
+
+test('a stack an ended thread gave back is the next thread\'s to be called back on', async()=>{
+    // The ended thread's record stays while a handle to it is open, with the
+    // bounds of a stack the kernel has since handed to a new thread.
+    const machine = await bridge();
+    Object.assign(machine.worker,
+        { state: 'terminated', stackTop: MAIN.top, stackLimit: MAIN.limit });
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        handler: ()=>machine.api.callGuest({ entry: 0x00402000, args: [1] }),
+    });
+    machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    await settle();
+
+    assert.equal(machine.resumed.filter(frame=>frame.eip === 0x00402000).length, 1,
+        'the callback was started on the stack main runs on');
 });
 
 test('a second instance in one realm does not take the first one\'s state', async()=>{
@@ -570,4 +610,23 @@ test('steps mixing calls answered in place with calls into the guest enter the g
     assert.deepEqual(made, [[1], [5]], 'the third made in place with what the guest answered');
     assert.equal(machine.regs.eax, 50);
     assert.equal(machine.regs.eip, 0x00401000);
+});
+
+test('a host call that fails is named in the failure, with where it was thrown', async()=>{
+    const machine = await bridge();
+    machine.api.register('TEST.dll!Broken', {
+        argBytes: 0,
+        handler: async()=>{
+            await settle();
+            new DataView(new ArrayBuffer(4)).getUint32(8);
+            return 0;
+        },
+    });
+    machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    await settle();
+    await settle();
+    const failure = machine.api.failure();
+    assert.ok(failure, 'the run is told');
+    assert.match(failure.message, /^TEST\.dll!Broken: Offset is outside the bounds of the DataView/);
+    assert.match(failure.message, /\(at .*module\.test\.js:\d+:\d+\)+$/, 'and where in our code');
 });

@@ -26,7 +26,7 @@ import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.
 import { IDIRECT3DDEVICE9_SLOTS, IDIRECT3DTEXTURE9_SLOTS, IDIRECT3DVERTEXBUFFER9_SLOTS }
     from './layers/graphics/d3d9/interfaces.js';
 import { IDIRECT3D9_SLOTS } from './layers/graphics/seam/vtables.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** Buffers and textures the program makes. */
 const BUFFERS = 6;

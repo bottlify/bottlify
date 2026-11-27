@@ -46,7 +46,27 @@ export const SeekFrom = {
  * @typedef {Object} AccessFlags
  * @property {boolean} read
  * @property {boolean} write
+ * @property {boolean} [delete]  DELETE access, or FILE_SHARE_DELETE: what a
+ *           rename or a deletion of the file needs every open to allow.
+ * @property {boolean} [image]  An image section's hold on the file: no access
+ *           of its own, yet it refuses any open that would write the file.
  */
+
+/**
+ * What a section mapping a file holds it on, once the handle it was made
+ * from is closed: a read-only one nothing, a read-write one writing that
+ * every other open has to share, an image one a refusal of every writer.
+ *
+ * @type {Readonly<Record<string, { access: AccessFlags, share: AccessFlags }>>}
+ */
+const SECTION_TERMS = Object.freeze({
+    readonly: { access: { read: false, write: false },
+        share: { read: true, write: true, delete: true } },
+    readwrite: { access: { read: false, write: true },
+        share: { read: true, write: true, delete: true } },
+    image: { access: { read: false, write: false, image: true },
+        share: { read: true, write: false, delete: true } },
+});
 
 /**
  * @typedef {Object} FileHandle
@@ -60,6 +80,7 @@ export const SeekFrom = {
  * @property {number} position
  * @property {boolean} closed
  * @property {number} token       Its open as the volume's sharing records it.
+ * @property {'readonly' | 'readwrite' | 'image'} [section]  A section's hold on the file.
  */
 
 /**
@@ -87,7 +108,45 @@ export const SeekFrom = {
  *     processes opening at once cannot both get in.
  * @property {(token: number) => void} release
  * @property {(key: string) => boolean} isOpen
+ * @property {(move: FileMove) => void} [moved]
+ *     A file was renamed: its opens are kept under the new name, and every
+ *     table following the volume's renames (`follow`) is told.
+ * @property {(table: (move: FileMove) => void) => () => void} [follow]
+ *     Tells a table of open files of every rename; answers how to stop.
  */
+
+/**
+ * A file given a new name, which the handles open on it follow: an open file
+ * is the file, under whatever name it has now, as on Windows.
+ *
+ * @typedef {Object} FileMove
+ * @property {any} tree          The overlay the file lives in.
+ * @property {string} from       Its key before, drive plus folded path.
+ * @property {string} to         Its key now.
+ * @property {string[]} components  Its path in the tree now.
+ * @property {string} path       As its new name is spelled.
+ */
+
+/**
+ * Whether an open takes part in sharing at all: one that reads, writes or
+ * deletes does; one opened for none of them -- to ask a file's attributes,
+ * its times -- is settled against nothing and refuses nothing.
+ *
+ * @param {OpenTerms} terms
+ */
+const holdsAccess = terms=>Boolean(terms.access.read || terms.access.write
+    || terms.access.delete || terms.access.image);
+
+/**
+ * What renaming or deleting a file asks of its opens: DELETE access, every
+ * other kind shared. Refused when an open that holds access does not share
+ * deletion.
+ *
+ * @param {string} key @param {string} path
+ * @returns {OpenTerms}
+ */
+export const removal = (key, path)=>({ key, path, access: { read: false, write: false,
+    delete: true }, share: { read: true, write: true, delete: true } });
 
 /**
  * The sharing of a volume kept here, for the processes on this thread.
@@ -97,6 +156,9 @@ export const SeekFrom = {
 export function createSharing(){
     /** @type {Map<number, OpenTerms>} */
     const opens = new Map();
+    /** Every table of open files on the volume, told of its renames. */
+    /** @type {Set<(move: FileMove) => void>} */
+    const tables = new Set();
     let next = 1;
     return {
         admit(terms){
@@ -108,10 +170,13 @@ export function createSharing(){
                     {
                         continue;
                     }
-                    const denied = (terms.access.read && !other.share.read)
+                    const denied = holdsAccess(terms) && holdsAccess(other)
+                        && ((terms.access.read && !other.share.read)
                         || (terms.access.write && !other.share.write)
+                        || (terms.access.delete && !other.share.delete)
                         || (other.access.read && !terms.share.read)
-                        || (other.access.write && !terms.share.write);
+                        || (other.access.write && !terms.share.write)
+                        || (other.access.delete && !terms.share.delete));
                     if (denied)
                     {
                         throw fsError(ErrorCode.SHARING_VIOLATION,
@@ -128,19 +193,39 @@ export function createSharing(){
             opens.delete(token);
         },
         isOpen: key=>[...opens.values()].some(terms=>terms.key === key),
+        moved(move){
+            for (const terms of opens.values())
+            {
+                if (terms.key === move.from)
+                {
+                    terms.key = move.to;
+                    terms.path = move.path;
+                }
+            }
+            for (const table of tables)
+            {
+                table(move);
+            }
+        },
+        follow(table){
+            tables.add(table);
+            return ()=>void tables.delete(table);
+        },
     };
 }
+
+/** Most files a process holds open at once. */
+const OPEN_FILE_LIMIT = 4096;
 
 /**
  * Builds the table of open files.
  *
  * @param {Object} [options]
- * @param {number} [options.limit]  Most files open at once.
  * @param {Sharing} [options.sharing]
  *     The volume's: every process's opens, which a new one is settled
  *     against. A table with no one to share the volume with keeps its own.
  */
-export function createFileTable({ limit = 4096, sharing = createSharing() } = {}){
+export function createFileTable({ sharing = createSharing() } = {}){
     /** This process's own. @type {Set<FileHandle>} */
     const open = new Set();
     let nextId = 1;
@@ -170,6 +255,20 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
         return fresh;
     };
 
+    /** This process's opens of a file renamed, under its new name. @param {FileMove} move */
+    const follow = move=>{
+        for (const handle of open)
+        {
+            if (handle.tree === move.tree && handle.key === move.from)
+            {
+                handle.key = move.to;
+                handle.components = move.components;
+                handle.path = move.path;
+            }
+        }
+    };
+    const unfollow = sharing.follow?.(follow) ?? (()=>{});
+
     /** @param {FileHandle} handle */
     const live = handle=>{
         if (!handle || handle.closed || !open.has(handle))
@@ -177,6 +276,27 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
             throw fsError(ErrorCode.INVALID_HANDLE, 'That file handle is not open');
         }
         return handle;
+    };
+
+    /**
+     * How many of `length` bytes a read at the handle's position finds, once
+     * the handle may be read at all.
+     *
+     * @param {FileHandle} handle @param {number} length
+     */
+    const readable = (handle, length)=>{
+        live(handle);
+        if (!handle.access.read)
+        {
+            throw fsError(ErrorCode.ACCESS_DENIED,
+                `"${handle.path}" was not opened for reading`);
+        }
+        if (length < 0)
+        {
+            throw fsError(ErrorCode.INVALID_PARAMETER, 'A read cannot be of negative length');
+        }
+        const size = handle.tree.size(handle.components);
+        return Math.max(0, Math.min(length, size - handle.position));
     };
 
     return {
@@ -193,6 +313,8 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
          * @param {AccessFlags} request.access
          * @param {AccessFlags} [request.share]
          * @param {string} [request.disposition]
+         * @param {'readonly' | 'readwrite' | 'image'} [request.section]  The open
+         *     is a section's hold on the file, on the section's terms.
          * @param {boolean} [request.inherited]  The open is one a process was
          *     handed by another, the same file it already holds: no new terms
          *     are agreed, so none are checked.
@@ -202,7 +324,7 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
             const { tree, key, components, access } = request;
             const share = request.share ?? { read: true, write: false };
             const disposition = request.disposition ?? Disposition.OPEN_EXISTING;
-            if (open.size >= limit)
+            if (open.size >= OPEN_FILE_LIMIT)
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, 'Too many files open');
             }
@@ -225,10 +347,15 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
             // does not cover what the first already took: a program that
             // opens a save file for writing and then again for reading relies
             // on the second.
+            // A section rides on an open already admitted: its own terms are
+            // recorded, not settled.
+            const section = request.section ? SECTION_TERMS[request.section] : null;
             const token = sharing.admit({ key, path: existing?.path ?? components.join('\\'),
-                access: { read: !!access.read, write: !!access.write },
-                share: { read: !!share.read, write: !!share.write },
-                inherited: request.inherited === true });
+                ...section ?? {
+                    access: { read: !!access.read, write: !!access.write, delete: !!access.delete },
+                    share: { read: !!share.read, write: !!share.write, delete: !!share.delete },
+                },
+                inherited: section !== null || request.inherited === true });
             /** @type {any} */
             let entry;
             try
@@ -260,11 +387,12 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
                 path: entry.path,
                 components,
                 tree,
-                access: { read: !!access.read, write: !!access.write },
-                share: { read: !!share.read, write: !!share.write },
+                access: { read: !!access.read, write: !!access.write, delete: !!access.delete },
+                share: { read: !!share.read, write: !!share.write, delete: !!share.delete },
                 position: 0,
                 closed: false,
                 token,
+                ...request.section ? { section: request.section } : {},
             };
             open.add(handle);
             opened++;
@@ -282,24 +410,33 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
          * @returns {Uint8Array}
          */
         read(handle, length){
-            live(handle);
-            if (!handle.access.read)
-            {
-                throw fsError(ErrorCode.ACCESS_DENIED,
-                    `"${handle.path}" was not opened for reading`);
-            }
-            if (length < 0)
-            {
-                throw fsError(ErrorCode.INVALID_PARAMETER, 'A read cannot be of negative length');
-            }
-            const size = handle.tree.size(handle.components);
-            const available = Math.max(0, Math.min(length, size - handle.position));
+            const available = readable(handle, length);
             const data = available > 0
                 ? handle.tree.read(handle.components, handle.position, available)
                 : new Uint8Array(0);
             handle.position += data.length;
             track(handle.path).read += data.length;
             return data;
+        },
+
+        /**
+         * read, the bytes handed to `put(bytes, at)` where the store holds
+         * them (`at` from the read's start) rather than copied into an array
+         * of their own; how many there were. `bytes` is valid only inside the
+         * call and is never written to.
+         *
+         * @param {FileHandle} handle @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         * @returns {number}
+         */
+        readInto(handle, length, put){
+            const available = readable(handle, length);
+            const count = available > 0
+                ? handle.tree.readInto(handle.components, handle.position, available, put)
+                : 0;
+            handle.position += count;
+            track(handle.path).read += count;
+            return count;
         },
 
         /**
@@ -390,6 +527,24 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
                 closed++;
             }
             open.clear();
+            unfollow();
+        },
+
+        /**
+         * A file renamed: every open of it, in this process and every other
+         * the volume's sharing reaches, follows it to its new name.
+         *
+         * @param {FileMove} move
+         */
+        moved(move){
+            if (sharing.moved)
+            {
+                sharing.moved(move);
+            }
+            else
+            {
+                follow(move);
+            }
         },
 
         /**
@@ -398,6 +553,43 @@ export function createFileTable({ limit = 4096, sharing = createSharing() } = {}
          * @param {string} key
          */
         isOpen: key=>sharing.isOpen(key),
+
+        /**
+         * Whether a section of this process maps the file: what CreateFile
+         * refuses to empty.
+         *
+         * @param {string} key @returns {'readonly' | 'readwrite' | 'image' | null}
+         */
+        mappedAs: key=>[...open].find(handle=>handle.key === key && !handle.closed
+            && handle.section)?.section ?? null,
+
+        /**
+         * Whether the file may be renamed or deleted as its opens stand:
+         * SHARING_VIOLATION thrown when one that holds access does not
+         * share deletion, across every process on the volume.
+         *
+         * @param {string} key @param {string} path
+         */
+        mayRemove(key, path){
+            sharing.release(sharing.admit(removal(key, path)));
+        },
+
+        /**
+         * Holds a directory open on the terms its open agreed to: a
+         * directory has no bytes to hand out, but its opens share and refuse
+         * as a file's do - another open, a rename, a RemoveDirectory is
+         * settled against them. Its number, or SHARING_VIOLATION thrown.
+         *
+         * @param {OpenTerms} terms @returns {number}
+         */
+        holdDirectory(terms){
+            return sharing.admit(terms);
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            sharing.release(token);
+        },
 
         /** @returns {FileHandle[]} */
         list(){

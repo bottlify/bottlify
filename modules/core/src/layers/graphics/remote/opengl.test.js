@@ -11,6 +11,7 @@ import { GL } from '../opengl/constants.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createReceiver, createSender } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { playedAtOnce } from './direct3d.js';
 import { playedOpengl, recordedOpengl } from './opengl.js';
 
@@ -256,40 +257,248 @@ test('a recorded context answers the program as a context on a device does', asy
 });
 
 /**
- * A recorded OpenGL root whose calls cross a port to their played twin, as
- * they cross to the graphics worker.
+ * glReadPixels through OPENGL32's exports on a device: the window's colour
+ * filled on the fake device (its top row blue, the rest red, BGRA), a 2x2
+ * read across its top edge, and what lands in the program's memory.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number[]>}
+ */
+async function readThrough(remote){
+    const gpu = createFakeDevice();
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    const opengl = createOpengl({
+        readMemory: (at, length)=>bytes.subarray(at, at + length),
+        windowMemory: (at, length)=>bytes.subarray(at, at + length),
+        writeMemory: (at, value)=>bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glClear', GL.COLOR_BUFFER_BIT);
+    // The played side makes the window's surfaces when the context is made current there.
+    let colour = null;
+    while (!colour)
+    {
+        colour = gpu.of('createTexture').map((/** @type {any} */ call)=>call.texture)
+            .reverse().find((/** @type {any} */ texture)=>/gl-colour/.test(
+                texture.descriptor.label ?? ''));
+        if (!colour)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    for (let at = 0; at < colour.bytes.length; at += 4)
+    {
+        colour.bytes.set(at < colour.extent.width * 4 ? [255, 0, 0, 255] : [0, 0, 255, 255], at);
+    }
+    const height = colour.extent.height;
+    const answer = gl('glReadPixels', 0, height - 1, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x4000);
+    assert.ok(answer instanceof Promise, 'the call waits for the pixels');
+    assert.equal(await answer, 0);
+    return [...bytes.subarray(0x4000, 0x4010)];
+}
+
+/**
+ * An occlusion query around one triangle through OPENGL32's exports on a
+ * device that counts no samples, and the result the program reads.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number>}
+ */
+async function queryThrough(remote){
+    const gpu = createFakeDevice({ occlusionSamples: ()=>7 });
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    /** @param {number} at @param {number} length */
+    const read = (at, length)=>bytes.subarray(at, at + length);
+    const opengl = createOpengl({
+        readMemory: read,
+        windowMemory: read,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glGenQueries', 1, 0x4000);
+    const name = new DataView(bytes.buffer).getUint32(0x4000, true);
+    gl('glBeginQuery', GL.SAMPLES_PASSED, name);
+    gl('glBegin', GL.TRIANGLES);
+    gl('glVertex2f', floatBits(0), floatBits(0));
+    gl('glVertex2f', floatBits(1), floatBits(0));
+    gl('glVertex2f', floatBits(0), floatBits(1));
+    gl('glEnd');
+    gl('glEndQuery', GL.SAMPLES_PASSED);
+    await gl('glGetQueryObjectuiv', name, 0x8866, 0x4010);
+    return new DataView(bytes.buffer).getUint32(0x4010, true);
+}
+
+test('an occlusion query answers what the device counted, wherever the device is', async()=>{
+    assert.equal(await queryThrough(), 7);
+    assert.equal(await queryThrough(loopback), 7);
+    try
+    {
+        assert.equal(await queryThrough(acrossRings), 7);
+    }
+    finally
+    {
+        for (const end of ends.splice(0))
+        {
+            end();
+        }
+    }
+});
+
+test('glReadPixels on a device writes what was drawn, wherever the device is', async()=>{
+    // Bottom row first: the window's top row is the read's bottom one.
+    const expected = [0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert.deepEqual(await readThrough(), expected);
+    assert.deepEqual(await readThrough(loopback), expected);
+    try
+    {
+        assert.deepEqual(await readThrough(acrossRings), expected);
+    }
+    finally
+    {
+        for (const end of ends.splice(0))
+        {
+            end();
+        }
+    }
+});
+
+/**
+ * A texture's level read back through OPENGL32's exports once a draw has put
+ * it on the device: uploaded, drawn with, the window swapped, then
+ * glGetTexImage into the program's memory.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number[]>}
+ */
+async function texelsThrough(remote){
+    const gpu = createFakeDevice();
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    /** @param {number} at @param {number} length */
+    const read = (at, length)=>bytes.subarray(at, at + length);
+    const opengl = createOpengl({
+        readMemory: read,
+        windowMemory: read,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glGenTextures', 1, 0x4000);
+    const name = new DataView(bytes.buffer).getUint32(0x4000, true);
+    gl('glBindTexture', GL.TEXTURE_2D, name);
+    gl('glTexParameteri', GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    bytes.set(Uint8Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff), 0x6000);
+    gl('glTexImage2D', GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x6000);
+    gl('glEnable', GL.TEXTURE_2D);
+    gl('glBegin', GL.TRIANGLES);
+    gl('glVertex2f', floatBits(0), floatBits(0));
+    gl('glVertex2f', floatBits(1), floatBits(0));
+    gl('glVertex2f', floatBits(0), floatBits(1));
+    gl('glEnd');
+    await gl('wglSwapBuffers', 0x900d);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    await gl('glGetTexImage', GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x7000);
+    return [...bytes.subarray(0x7000, 0x7040)];
+}
+
+test('a level read back answers what was uploaded, wherever the device is', async()=>{
+    // The program's side of a graphics worker keeps no texels at all: the
+    // read is answered by the side that draws, which reads the device.
+    const expected = Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff);
+    assert.deepEqual(await texelsThrough(), expected);
+    assert.deepEqual(await texelsThrough(loopback), expected);
+    try
+    {
+        assert.deepEqual(await texelsThrough(acrossRings), expected);
+    }
+    finally
+    {
+        for (const end of ends.splice(0))
+        {
+            end();
+        }
+    }
+});
+
+/**
+ * A recorded OpenGL root whose calls cross a root's rings to their played
+ * twin, as they cross to the graphics worker, each side read as its bell rings.
  *
  * @param {any} factory @param {any} services
  */
-const acrossAPort = (factory, services)=>{
-    const { port1, port2 } = new MessageChannel();
+const acrossRings = (factory, services)=>{
+    const rings = { calls: createRingMemory(CALLS_BYTES),
+        replies: createRingMemory(REPLIES_BYTES) };
     const played = playedOpengl(factory, services);
-    const receiver = createReceiver({ played: /** @type {any} */ (played),
-        post: (message, transfer)=>port2.postMessage(message, transfer ?? []) });
-    port2.onmessage = event=>receiver.receive(event.data);
-    const sender = createSender({
-        post: (message, transfer)=>port1.postMessage(message, transfer),
+    const receiver = createReceiver({ played: /** @type {any} */ (played), rings });
+    const sender = createSender({ rings });
+    ends.push(()=>{
+        sender.close();
+        receiver.close();
     });
-    port1.onmessage = event=>sender.receive(event.data);
-    ports.push(port1, port2);
     return recordedOpengl(factory, services, sender);
 };
-/** @type {MessagePort[]} */
-const ports = [];
+/** @type {(() => void)[]} */
+const ends = [];
 
-test('OpenGL frames whose calls cross a port draw as the contexts themselves drew, and the '
-    + 'renderer\'s account of them comes back', async()=>{
+test('OpenGL frames whose calls cross a root\'s rings draw as the contexts themselves drew, and the'
+    + ' renderer\'s account of them comes back', async()=>{
     try
     {
         const direct = await framesThrough();
-        const played = await framesThrough(acrossAPort);
+        const played = await framesThrough(acrossRings);
         played.frames.forEach((frame, index)=>assert.ok(frame === direct.frames[index],
             `frame ${index} asked the same`));
         // The account is the one the played renderer gave when last asked:
-        // it comes back once the question has crossed the port and the answer
+        // it comes back once the question has crossed the ring and the answer
         // crossed back, however long a loaded machine takes to carry them.
         let account = played.opengl.diagnostics();
-        for (let turn = 0; turn < 500 && account.gpu?.frames !== 3; turn++)
+        while (account.gpu?.frames !== 3)
         {
             await new Promise(resolve=>setTimeout(resolve, 2));
             account = played.opengl.diagnostics();
@@ -298,9 +507,9 @@ test('OpenGL frames whose calls cross a port draw as the contexts themselves dre
     }
     finally
     {
-        for (const port of ports.splice(0))
+        for (const end of ends.splice(0))
         {
-            port.close();
+            end();
         }
     }
 });

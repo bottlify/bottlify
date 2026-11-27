@@ -8,10 +8,72 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { serveGraphics } from './worker.js';
 import { createSender, sharedNow } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { recordedDirect3D } from './direct3d.js';
-import { createDirect3D9 } from '../d3d9/device.js';
+import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
+import { COUNT_STATE, QUERY } from '../seam/block.js';
 import { D3DCLEAR, D3DFMT, D3DSWAPEFFECT, D3D_OK } from '../d3d8/constants.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+
+/** The roots made here, numbered as the program's thread numbers them. */
+let rootsMade = 0;
+
+/**
+ * A root made through a way in -- the worker's own messages, or a client's
+ * port -- over rings of its own, and the sender that records for it.
+ *
+ * @param {(data: any) => void} send @param {Record<string, any>} data
+ */
+function rootOn(send, data){
+    const rings = { calls: createRingMemory(CALLS_BYTES),
+        replies: createRingMemory(REPLIES_BYTES) };
+    const id = ++rootsMade;
+    send({ ...data, type: 'root', id, rings });
+    return Object.assign(createSender({ rings, framesAhead: 100 }), { id });
+}
+
+/** A worker over the fake GPU, opened, with every message it posted kept. */
+async function openedWorker(){
+    const gpu = createFakeDevice();
+    Object.assign(gpu.device, { queue: gpu.queue });
+    /** @type {any[]} */
+    const posted = [];
+    /** @type {any} */
+    const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+        onmessage: null };
+    const served = serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+            transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'count' } });
+    await settle();
+    return { gpu, scope, posted, served };
+}
+
+/**
+ * A device of a recorded root, and a frame of it: cleared and presented.
+ *
+ * @param {ReturnType<typeof createSender>} sender @param {any} [services]
+ */
+const deviceOn = (sender, services = {})=>{
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(recordedDirect3D(createDirect3D9, services, sender).CreateDevice({
+        swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 8,
+        backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out), D3D_OK);
+    const device = out.device;
+    return {
+        device,
+        frame(){
+            device.BeginScene();
+            device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+            device.EndScene();
+            return device.Present();
+        },
+    };
+};
 
 /** Turns of the event loop, for what crosses ports and settles in promises. */
 const settle = async(turns = 20)=>{
@@ -39,11 +101,7 @@ test('the worker sends one frame at a time, the newest, and counts those replace
         });
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
-        const { port1, port2 } = new MessageChannel();
-        scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-            transfer), framesAhead: 100 });
-        port1.onmessage = event=>sender.receive(event.data);
+        const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
         const d3d = recordedDirect3D(createDirect3D9, {}, sender);
         /** @type {{ device?: any }} */
         const out = {};
@@ -82,8 +140,7 @@ test('the worker sends one frame at a time, the newest, and counts those replace
         }
         finally
         {
-            port1.close();
-            port2.close();
+            sender.close();
         }
     });
 
@@ -107,11 +164,7 @@ async function presentingWorker(){
     });
     scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
     await settle();
-    const { port1, port2 } = new MessageChannel();
-    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-        transfer), framesAhead: 100 });
-    port1.onmessage = event=>sender.receive(event.data);
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -131,8 +184,7 @@ async function presentingWorker(){
             await settle();
         },
         close: ()=>{
-            port1.close();
-            port2.close();
+            sender.close();
         },
     };
 }
@@ -269,11 +321,8 @@ test('counting, the worker says every frame presented, without its picture', asy
     });
     scope.onmessage({ data: { type: 'open', frames: 'count' } });
     await settle();
-    const { port1, port2 } = new MessageChannel();
-    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2, source: 7 } });
-    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-        transfer), framesAhead: 100 });
-    port1.onmessage = event=>sender.receive(event.data);
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
+        source: 7 });
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -300,10 +349,57 @@ test('counting, the worker says every frame presented, without its picture', asy
     }
     finally
     {
-        port1.close();
-        port2.close();
+        sender.close();
     }
 });
+
+test('on SwiftShader the worker sends its frames as bytes, asked for pictures or not',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any[]} */
+        const posted = [];
+        /** @type {any} */
+        const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+            onmessage: null };
+        let canvases = 0;
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(),
+                info: { vendor: 'google', architecture: 'swiftshader',
+                    description: 'SwiftShader Device (Subzero)' },
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>{
+                canvases++;
+                return Object.assign(gpu.canvas, { width, height,
+                    transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) });
+            },
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        try
+        {
+            out.device.BeginScene();
+            out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000001, 1, 0);
+            out.device.EndScene();
+            await out.device.Present();
+            await out.device.idle();
+            await settle();
+            const frame = posted.find(message=>message.type === 'frame');
+            assert.equal(frame?.bitmap, undefined);
+            assert.ok(frame?.pixels instanceof Uint8Array, 'bytes');
+            assert.equal(canvases, 0, 'no WebGPU canvas made in the worker');
+        }
+        finally
+        {
+            sender.close();
+        }
+    });
 
 test('told to, the worker sends its frames as bytes from then on', async()=>{
     const gpu = createFakeDevice();
@@ -321,11 +417,7 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
     });
     scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
     await settle();
-    const { port1, port2 } = new MessageChannel();
-    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-        transfer), framesAhead: 100 });
-    port1.onmessage = event=>sender.receive(event.data);
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -351,11 +443,18 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
         assert.equal(frames()[1].bitmap, undefined);
         assert.ok(frames()[1].pixels instanceof Uint8Array, 'then bytes');
         assert.equal(frames()[1].width, 8);
+        scope.onmessage({ data: { type: 'shown' } });
+        await draw(0xff000003);
+        assert.equal(frames().length, 3);
+        assert.deepEqual([frames()[1].pixels[0], frames()[2].pixels[0]], [2, 3],
+            'each frame its own picture, the one sent before left as it was');
+        const readBacks = gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+            (call.descriptor.usage & 1) !== 0);
+        assert.equal(readBacks.length, 1, 'frames of one size read back through one buffer');
     }
     finally
     {
-        port1.close();
-        port2.close();
+        sender.close();
     }
 });
 
@@ -373,11 +472,7 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
         });
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
-        const { port1, port2 } = new MessageChannel();
-        scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-            transfer), framesAhead: 100 });
-        port1.onmessage = event=>sender.receive(event.data);
+        const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
         const d3d = recordedDirect3D(createDirect3D9, {}, sender);
         /** @type {{ device?: any }} */
         const out = {};
@@ -398,8 +493,7 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
         }
         finally
         {
-            port1.close();
-            port2.close();
+            sender.close();
         }
     });
 
@@ -424,12 +518,8 @@ async function presentedPastTheGpu(frameLatency){
     });
     scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
     await settle();
-    const { port1, port2 } = new MessageChannel();
-    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2,
-        ...frameLatency === undefined ? {} : { frameLatency } } });
-    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-        transfer), framesAhead: 100 });
-    port1.onmessage = event=>sender.receive(event.data);
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
+        ...frameLatency === undefined ? {} : { frameLatency } });
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -455,8 +545,7 @@ async function presentedPastTheGpu(frameLatency){
     }
     finally
     {
-        port1.close();
-        port2.close();
+        sender.close();
     }
 }
 
@@ -496,7 +585,7 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
     async()=>{
         const gpu = createFakeDevice();
         Object.assign(gpu.device, { queue: gpu.queue });
-        /** @type {(info: { reason: string }) => void} */
+        /** @type {(info: { reason: string, message?: string }) => void} */
         let loseDevice = ()=>{};
         Object.assign(gpu.device, { lost: new Promise(resolve=>{
             loseDevice = resolve;
@@ -520,12 +609,7 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
         /** @type {any[]} */
         const told = [];
         client.port1.onmessage = event=>told.push(event.data);
-        const { port1, port2 } = new MessageChannel();
-        client.port1.postMessage({ type: 'root', api: 'd3d9', options: {}, port: port2 },
-            [port2]);
-        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-            transfer), framesAhead: 100 });
-        port1.onmessage = event=>sender.receive(event.data);
+        const sender = rootOn(data=>client.port1.postMessage(data), { api: 'd3d9', options: {} });
         const d3d = recordedDirect3D(createDirect3D9, {}, sender);
         /** @type {{ device?: any }} */
         const out = {};
@@ -542,15 +626,18 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
             await settle();
             assert.equal(posted.filter(message=>message.type === 'frame').length, 1,
                 'its frames come back to the thread that shows them, as every root\'s do');
-            loseDevice({ reason: 'unknown' });
+            loseDevice({ reason: 'unknown', message: 'the adapter went away' });
             await settle();
-            assert.deepEqual(told, [{ type: 'lost', reason: 'unknown' }],
+            assert.deepEqual(told.map(({ type, reason, message })=>({ type, reason, message })),
+                [{ type: 'lost', reason: 'unknown', message: 'the adapter went away' }],
                 'and its devices are lost with the GPU');
+            assert.ok(told[0].recent.some((/** @type {string} */ made)=>/^buffer /.test(made)),
+                `with the last large things the device made: ${told[0].recent.join('; ')}`);
             assert.ok(posted.some(message=>message.type === 'lost'));
         }
         finally
         {
-            port1.close();
+            sender.close();
             client.port1.close();
         }
     });
@@ -572,17 +659,13 @@ test('each process\'s frames keep a slot of their own, say whose they are, and a
         });
         scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
         await settle();
-        /** @type {MessagePort[]} */
-        const ports = [];
+        /** @type {ReturnType<typeof createSender>[]} */
+        const senders = [];
         /** @param {number} source @param {number} size */
         const deviceOf = (source, size)=>{
-            const { port1, port2 } = new MessageChannel();
-            ports.push(port1, port2);
-            scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2,
-                source } });
-            const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-                transfer), framesAhead: 100 });
-            port1.onmessage = event=>sender.receive(event.data);
+            const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
+                source });
+            senders.push(sender);
             /** @type {{ device?: any }} */
             const out = {};
             recordedDirect3D(createDirect3D9, {}, sender).CreateDevice({
@@ -622,9 +705,9 @@ test('each process\'s frames keep a slot of their own, say whose they are, and a
         }
         finally
         {
-            for (const port of ports)
+            for (const sender of senders)
             {
-                port.close();
+                sender.close();
             }
         }
     });
@@ -680,11 +763,7 @@ test('frozen on a shown frame, the worker sends what a message can carry', async
     });
     scope.onmessage({ data: { type: 'open', frames: 'pixels' } });
     await settle();
-    const { port1, port2 } = new MessageChannel();
-    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-        transfer), framesAhead: 100 });
-    port1.onmessage = event=>sender.receive(event.data);
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {} });
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -707,7 +786,196 @@ test('frozen on a shown frame, the worker sends what a message can carry', async
     {
         // The replay's timer stops whatever the answer did.
         scope.onmessage({ data: { type: 'debug', freeze: false } });
-        port1.close();
-        port2.close();
+        sender.close();
+    }
+});
+
+test('a client\'s process gone however it went takes every root made through it with it',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any[]} */
+        const posted = [];
+        /** @type {any} */
+        const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+            onmessage: null };
+        const served = serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+                transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const client = new MessageChannel();
+        scope.onmessage({ data: { type: 'client', port: client.port2, client: 0x2010 } });
+        /** @type {string[]} */
+        const gone = [];
+        /** @type {any} */ (client.port1).once('close', ()=>gone.push('client'));
+        const sender = rootOn(data=>client.port1.postMessage(data), { api: 'd3d9', options: {},
+            source: 0x2010 });
+        /** @type {{ device?: any }} */
+        const out = {};
+        recordedDirect3D(createDirect3D9, {}, sender).CreateDevice({
+            swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 8,
+            backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        out.device.BeginScene();
+        out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+        out.device.EndScene();
+        await out.device.Present();
+        await out.device.idle();
+        await settle();
+        assert.equal(posted.filter(message=>message.type === 'frame').length, 1);
+        assert.equal(served.roots(), 1);
+        // Its worker failed: no root of it closed its rings.
+        scope.onmessage({ data: { type: 'forget', client: 0x2010 } });
+        await settle();
+        assert.deepEqual(gone, ['client'], 'its way in is closed here');
+        assert.equal(sender.closed(), true, 'and its root\'s rings, both sides\' waits ended');
+        assert.equal(served.roots(), 0, 'no root of it left open');
+        scope.onmessage({ data: { type: 'forget', client: 0x2010 } });
+        scope.onmessage({ data: { type: 'forget', client: 0x3000 } });
+        await settle();
+        assert.deepEqual(gone, ['client'],
+            'and a second word, or one for a client never seen, closes nothing more');
+    });
+
+test('an occlusion count that lands in its query\'s block is not sent to the program\'s thread'
+    + ' as well; one the program is told is', async()=>{
+    const gpu = createFakeDevice({ occlusionSamples: index=>17 + index });
+    Object.assign(gpu.device, { queue: gpu.queue });
+    const memory = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const words = new Int32Array(memory.buffer);
+    /** @type {any} */
+    const scope = { postMessage: ()=>{}, onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+            transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+    await settle();
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {},
+        memory });
+    /** @type {any[]} */
+    const told = [];
+    sender.hearCounts(counts=>told.push(counts));
+    const d3d = recordedDirect3D(createDirect3D9, { countsInGuest: true }, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const device = out.device;
+    const block = 0x1000;
+    /** @param {boolean} inGuest  whether the count goes into the block @returns {Promise<void>} */
+    const measure = async inGuest=>{
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+        if (inGuest)
+        {
+            // As the seam numbers a measurement whose count the played side writes.
+            words[(block + QUERY.STATE) >> 2] = (1 << COUNT_STATE.SHIFT) | COUNT_STATE.WRITTEN;
+            made.query.countInto(block, 1);
+        }
+        device.BeginScene();
+        made.query.Issue(D3DISSUE.BEGIN);
+        device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+        made.query.Issue(D3DISSUE.END);
+        device.EndScene();
+        await device.Present();
+        await device.idle();
+        await settle(40);
+    };
+    try
+    {
+        await measure(true);
+        assert.equal(words[(block + QUERY.STATE) >> 2],
+            (1 << COUNT_STATE.SHIFT) | COUNT_STATE.BACK, 'the count landed in the block');
+        assert.equal(told.length, 0, 'and nothing more was sent for it');
+        await measure(false);
+        assert.equal(told.length, 1, 'a count the guest does not read goes to the program');
+        assert.equal(told[0].length, 2, 'with every count held not sent before');
+    }
+    finally
+    {
+        sender.close();
+    }
+});
+
+test('roots opened and closed every way leave nothing open: every ring closed, both sides\' waits'
+    + ' ended, no root left', async t=>{
+    const { scope, posted, served } = await openedWorker();
+    const client = new MessageChannel();
+    scope.onmessage({ data: { type: 'client', port: client.port2, client: 0x4000 } });
+    const own = [0, 1, 2].map(()=>rootOn(data=>scope.onmessage({ data }),
+        { api: 'd3d9', options: {} }));
+    const through = [0, 1].map(()=>rootOn(data=>client.port1.postMessage(data),
+        { api: 'd3d9', options: {}, source: 0x4000 }));
+    const all = [...own, ...through];
+    // Open, a ring's waits keep the process alive: closed however the test ends.
+    t.after(()=>{
+        all.forEach(sender=>sender.close());
+        client.port1.close();
+    });
+    for (const sender of all)
+    {
+        await deviceOn(sender).frame();
+    }
+    await settle();
+    assert.equal(served.roots(), 5);
+    assert.ok(posted.filter(message=>message.type === 'frame').length >= 5);
+    // The program's side lets go of two of its roots; the client's process goes
+    // without a word for its own; the third root's worker side is closed for it.
+    own[0].close();
+    own[1].close();
+    scope.onmessage({ data: { type: 'forget', client: 0x4000 } });
+    await settle();
+    assert.equal(served.roots(), 1, 'what was let go and what was forgotten is gone');
+    assert.deepEqual(all.map(sender=>sender.closed()), [true, true, false, true, true],
+        'and the rings of each, on the program\'s side too');
+    own[2].close();
+    await settle();
+    assert.equal(served.roots(), 0, 'nothing left open');
+    const before = posted.length;
+    own[2].flush();
+    await settle();
+    assert.equal(posted.length, before, 'a closed root sends nothing more');
+    client.port1.close();
+});
+
+test('a batch sent after the guest\'s memory grew waits for the longer view, sent by message,'
+    + ' and is played once it has come', async()=>{
+    const { scope, posted } = await openedWorker();
+    const memory = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const sender = rootOn(data=>scope.onmessage({ data }), { api: 'd3d9', options: {}, memory });
+    try
+    {
+        const on = deviceOn(sender);
+        await on.frame();
+        await settle();
+        const frames = ()=>posted.filter(message=>message.type === 'frame').length;
+        assert.equal(frames(), 1);
+        sender.grew(1);
+        const held = on.frame();
+        await settle();
+        assert.equal(frames(), 1, 'the frame after the mark waits');
+        const grown = new Uint8Array(new SharedArrayBuffer(1 << 17));
+        scope.onmessage({ data: { type: 'memory', root: sender.id, memory: grown, number: 1 } });
+        await held;
+        await settle();
+        assert.equal(frames(), 2, 'and is played once the view has come');
+        // A view that came before its mark lets the mark pass at once.
+        scope.onmessage({ data: { type: 'memory', root: sender.id, memory: grown, number: 2 } });
+        sender.grew(2);
+        await on.frame();
+        await settle();
+        assert.equal(frames(), 3);
+    }
+    finally
+    {
+        sender.close();
     }
 });

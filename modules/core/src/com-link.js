@@ -29,9 +29,20 @@
  */
 
 const RPC_E_DISCONNECTED = 0x80010108 | 0;
+const RPC_E_SERVER_DIED = 0x80010007 | 0;
 
 /** What a call to an endpoint that is gone answers. */
 const GONE = Object.freeze({ hr: RPC_E_DISCONNECTED, disconnected: true });
+
+/**
+ * What a call answers whose server's process ended while it was delivered:
+ * its link closed, and nothing will answer it. A proxy takes it as a server
+ * gone (`disconnected`).
+ */
+const DIED = Object.freeze({ hr: RPC_E_SERVER_DIED, disconnected: true });
+
+/** @param {Promise<any>} delivered */
+const orDied = delivered=>delivered.catch(()=>DIED);
 
 /**
  * The link's handlers that answer for the run's class table, for one process
@@ -41,7 +52,7 @@ const GONE = Object.freeze({ hr: RPC_E_DISCONNECTED, disconnected: true });
  * @param {Object} side
  * @param {(method: string, args: any[]) => Promise<any>} side.call
  *     a call to the process, which does not block
- * @param {((request: { command: string, clsid: string }) =>
+ * @param {((request: { command: string, clsid: string, service?: string }) =>
  *     { exited: Promise<unknown> } | null) | null} [side.launch]
  *     starts a server the process asked for in a worker of its own, or says
  *     there is no room
@@ -73,7 +84,7 @@ export function comHandlers(table, side){
                 const endpoint = {
                     process: key,
                     alive: true,
-                    deliver: message=>side.call('deliver', [id, message]),
+                    deliver: message=>orDied(side.call('deliver', [id, message])),
                     // What its proxies held it gave back itself, as it ended.
                     rundown: async()=>{},
                 };
@@ -119,7 +130,7 @@ export function comHandlers(table, side){
              * Starts a server, and names it by a number to wait on: 0 when the
              * run has no room for one.
              *
-             * @param {{ command: string, clsid: string }} request
+             * @param {{ command: string, clsid: string, service?: string }} request
              */
             launch(request){
                 const started = side.launch?.(request) ?? null;
@@ -132,11 +143,42 @@ export function comHandlers(table, side){
                 started.exited.finally(()=>launched.delete(number)).catch(()=>{});
                 return number;
             },
+            /**
+             * A service's process for the run, standing or started now in a worker of
+             * its own: named by a number to wait on, and whether it was started now.
+             * Null when the run has no room: the process starts it beside itself
+             * (`holdService`).
+             *
+             * @param {{ command: string, service: string, clsid?: string }} request
+             */
+            serviceProcess(request){
+                const one = table.serviceProcess(request, null, side.launch ?? (()=>null));
+                if (!one)
+                {
+                    return null;
+                }
+                const number = nextLaunch++;
+                launched.set(number, one.exited);
+                one.exited.finally(()=>launched.delete(number)).catch(()=>{});
+                return { number, fresh: one.fresh };
+            },
+            /** @param {string} name */
+            serviceRunning: name=>table.serviceRunning(name),
+            /** @param {string} name */
+            holdService: name=>table.holdService(name),
+            /** @param {string} name */
+            releaseService: name=>table.releaseService(name),
             /** @param {number} number */
             exited: number=>launched.get(number) ?? null,
-            /** @param {string} clsid @param {number} number */
+            /**
+             * Number 0 names no server of the run's (one started beside the
+             * process, which waits on its end itself); any other the run does
+             * not know is one that ended already.
+             *
+             * @param {string} clsid @param {number} number
+             */
             whenRegistered: (clsid, number)=>table.whenRegistered(clsid,
-                launched.get(number) ?? new Promise(()=>{})),
+                number === 0 ? new Promise(()=>{}) : launched.get(number) ?? Promise.resolve()),
             /** @param {number[]} ids */
             ended: async ids=>{
                 for (const id of ids)
@@ -173,6 +215,8 @@ export function remoteClassTable(link, hooks = {}){
     const local = new Map();
     /** A server the run started, by the promise of its end. @type {WeakMap<Promise<unknown>, number>} */
     const started = new WeakMap();
+    // Once per link: the worker's one app keeps one class table, which holds
+    // every endpoint of every machine on the link.
     link.handlers.com = {
         /** @param {number} id @param {any} message */
         deliver: (id, message)=>local.get(id)?.deliver(message) ?? GONE,
@@ -180,19 +224,67 @@ export function remoteClassTable(link, hooks = {}){
     return {
         hooks: {
             /**
-             * @param {{ command: string, clsid: string }} request @param {unknown} process
+             * @param {{ command: string, clsid: string, service?: string }} request
+             * @param {unknown} process
              */
             launch(request, process){
                 const number = link.ask('launch', [request]);
                 if (number)
                 {
-                    const exited = link.call('exited', [number]);
+                    // A link closed with it is this process ending: nobody waits.
+                    const exited = link.call('exited', [number]).catch(()=>null);
                     started.set(exited, number);
                     return { exited };
                 }
                 return hooks.launch?.(request, process) ?? null;
             },
         },
+
+        /**
+         * A service's process for the run: started in a worker of the run's, or,
+         * where the run has no room, beside this process and held in the run's
+         * table while it stands.
+         *
+         * @param {{ command: string, service: string, clsid?: string }} request
+         * @param {unknown} process
+         * @returns {{ exited: Promise<unknown>, fresh: boolean } | null}
+         */
+        serviceProcess(request, process){
+            const answer = link.ask('serviceProcess', [request]);
+            if (answer)
+            {
+                const exited = link.call('exited', [answer.number]).catch(()=>null);
+                started.set(exited, answer.number);
+                return { exited, fresh: answer.fresh };
+            }
+            if (!link.ask('holdService', [request.service]))
+            {
+                // Another process started it meanwhile.
+                return this.serviceProcess(request, process);
+            }
+            const launched = hooks.launch?.({ command: request.command, service: request.service,
+                clsid: request.clsid ?? '' }, process) ?? null;
+            if (!launched)
+            {
+                link.ask('releaseService', [request.service]);
+                return null;
+            }
+            const release = ()=>link.call('releaseService', [request.service]).catch(()=>{});
+            launched.exited.then(release, release);
+            return { exited: launched.exited, fresh: true };
+        },
+
+        /**
+         * @param {{ command: string, service: string }} request @param {unknown} process
+         * @returns {'started' | 'running' | null}
+         */
+        startService(request, process){
+            const one = this.serviceProcess(request, process);
+            return one === null ? null : one.fresh ? 'started' : 'running';
+        },
+
+        /** @param {string} name */
+        serviceRunning: name=>link.ask('serviceRunning', [name]) === true,
 
         /** @param {import('./layers/win32/ole32/remote.js').Endpoint} endpoint */
         attach(endpoint){
@@ -213,7 +305,7 @@ export function remoteClassTable(link, hooks = {}){
                 get alive(){
                     return link.ask('alive', [id]) === true;
                 },
-                deliver: (/** @type {any} */ message)=>link.call('deliver', [id, message]),
+                deliver: (/** @type {any} */ message)=>orDied(link.call('deliver', [id, message])),
                 rundown: async()=>{},
             };
         },

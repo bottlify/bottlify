@@ -34,6 +34,7 @@ node src/server/cli.js --port 8787 --origin https://play.example.com
 | `--allow host` | nothing | A host the relay may open real connections to; `*.example.net` allows a suffix. Repeat for more. |
 | `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
 | `--resume-seconds n` | 10 | How long a peer whose link dropped is kept for its page to come back to; 0 ends it with the link. |
+| `--proxy http://host:port` | none | Every real TCP connection goes through that HTTP proxy's `CONNECT`, asking for the name the page resolved where there is one: for a relay whose machine has no other way out. A refusal reaches the guest as a refused connection, a 504 as a timeout. UDP is not carried. |
 | `--address-header name` | none | Behind a proxy, the header with the client's address (`cf-connecting-ip`), which the per-address limit counts by. Only when nothing but that proxy reaches the relay. |
 
 With no `--allow`, a relay is a private LAN per room, never an open proxy. Whatever the policy
@@ -54,7 +55,7 @@ httpsServer.listen(443, ()=>relay.listen());
 
 `policy` decides every outbound connection. It sees the host *name* when the page looked it up
 through the relay, so an allowlist reads the way it was meant. `createRelayServer({ port })` runs
-standalone.
+standalone. `dial: proxyDialer(url)` is the `--proxy` option from code.
 
 ## Give a Bottlify program the network
 

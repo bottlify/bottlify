@@ -20,6 +20,8 @@ import { findResource, listResources } from '../../loader/internal/resources.js'
 const PAGE = 0x1000;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_FILE_INVALID = 1006;
 
@@ -127,6 +129,7 @@ function setup(){
         }),
         fullPath: name=>(name.includes('\\') ? name : `C:\\WORK\\${name}`),
         readMemory: (at, length)=>memory.slice(at, at + length),
+        writeMemory: (at, data)=>memory.set(data, at),
         readCString: at=>{
             let text = '';
             for (let i = at; memory[i] !== 0; i++)
@@ -179,7 +182,7 @@ function setup(){
         const bytes = /** @type {Uint8Array} */ (disk.get(PATH));
         return { bytes, pe: parsePe(bytes), view: new DataView(bytes.buffer) };
     };
-    return { fns, disk, errors, ansi, put, NAME, PATH, onDisk };
+    return { fns, disk, errors, ansi, put, NAME, PATH, onDisk, memory };
 }
 
 /** @param {any} pe @param {Uint8Array} bytes */
@@ -348,4 +351,106 @@ test('Begin refuses what is not an image, End with discard writes nothing', ()=>
     assert.equal(fns.UpdateResourceA.handler([h, 1, 1, 0, 0, 0]), 0);
     assert.deepEqual([fns.BeginUpdateResourceA.argBytes, fns.UpdateResourceA.argBytes,
         fns.EndUpdateResourceA.argBytes], [8, 24, 8]);
+});
+
+/**
+ * A MUI resource as kernel32's test writes one: a language-neutral main
+ * file's (type 2, kept as 1), its checksums 's' and 'c', RT_CURSOR named
+ * "MUI" for itself and RT_STRING for its MUI file, and en-US to fall back on.
+ */
+function muiResource(){
+    const bytes = new Uint8Array(204);
+    const view = new DataView(bytes.buffer);
+    const wide = (/** @type {string} */ text, /** @type {number} */ at)=>
+        bytes.set([...text].flatMap(c=>[c.charCodeAt(0), 0]), at);
+    [0xfecdfecd, 204, 0x10000, 0, 1].forEach((value, at)=>view.setUint32(at * 4, value, true));
+    bytes[28] = 0x73;
+    bytes[44] = 0x63;
+    [[84, 132, 10], [92, 148, 4], [100, 152, 10], [108, 168, 4], [124, 188, 12]]
+        .forEach(([field, offset, size])=>{
+            view.setUint32(field, offset, true);
+            view.setUint32(field + 4, size, true);
+        });
+    wide('MUI', 132);
+    view.setUint32(148, 1, true);
+    wide('MUI', 152);
+    view.setUint32(168, 6, true);
+    wide('en-US', 188);
+    return bytes;
+}
+
+test('a resource section with no bytes in the file gets some after the headers', ()=>{
+    // PointerToRawData 0 is a section with nothing in the file: its new body
+    // goes after the headers, not over them.
+    const { fns, disk, PATH, NAME, ansi, put, onDisk } = setup();
+    disk.set(PATH, image([{ name: '.rsrc', va: PAGE, vsize: 0, raw: 0, rawSize: PAGE }],
+        { resources: PAGE }));
+    const handle = fns.BeginUpdateResourceA.handler([NAME, 1]);
+    assert.ok(handle > 0);
+    assert.equal(fns.UpdateResourceA.handler([handle, ansi(0x10000, 'MUI'), 1, 0,
+        put(0x300, [1, 2, 3, 4]), 4]), 1);
+    assert.equal(fns.EndUpdateResourceA.handler([handle, 0]), 1);
+    const { bytes, pe } = onDisk();
+    assert.equal(new DataView(bytes.buffer).getUint16(0, true), 0x5a4d, 'the headers kept');
+    assert.ok(pe.sections[0].rawOffset >= PAGE);
+    assert.ok(findResource(bytes, pe, 'MUI', 1, 0));
+});
+
+test('GetFileMUIInfo reads an image\'s MUI resource into a FILEMUIINFO', ()=>{
+    const { fns, disk, PATH, NAME, ansi, put, memory, errors } = setup();
+    const wideName = put(0x600, [...'test_.exe'].flatMap(c=>[c.charCodeAt(0), 0]).concat([0, 0]));
+    const info = 0x1000;
+    const size = 0x900;
+    const dword = (/** @type {number} */ at)=>new DataView(memory.buffer).getUint32(at, true);
+    const setDword = (/** @type {number} */ at, /** @type {number} */ value)=>
+        new DataView(memory.buffer).setUint32(at, value, true);
+    const all = 0x2 | 0x4 | 0x8 | 0x1;
+    assert.equal(fns.GetFileMUIInfo.argBytes, 16);
+    assert.equal(fns.GetFileMUIInfo.handler([0, wideName, 0, size]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
+
+    // No MUI resource: the fixed part alone, not language neutral, all zero.
+    disk.set(PATH, image([section('.rsrc', 3 * PAGE, 1)]));
+    setDword(size, 0);
+    assert.equal(fns.GetFileMUIInfo.handler([0, wideName, 0, size]), 1);
+    assert.equal(dword(size), 80);
+    memory.fill(0xfe, info, info + 128);
+    setDword(size, 128);
+    setDword(info + 4, 0);
+    assert.equal(fns.GetFileMUIInfo.handler([0, wideName, info, size]), 0);
+    assert.deepEqual([errors.at(-1), dword(size)], [ERROR_INVALID_PARAMETER, 0], 'version 0');
+    setDword(size, 128);
+    setDword(info + 4, 1);
+    assert.equal(fns.GetFileMUIInfo.handler([0, wideName, info, size]), 1);
+    assert.equal(dword(info + 8), 1, 'MUI_FILETYPE_NOT_LANGUAGE_NEUTRAL');
+    assert.ok(memory.subarray(info + 12, info + 80).every(byte=>byte === 0));
+
+    // A resource too short to be one.
+    let handle = fns.BeginUpdateResourceA.handler([NAME, 1]);
+    fns.UpdateResourceA.handler([handle, ansi(0x10000, 'MUI'), 1, 0, put(0x300, [1, 2, 3, 4]), 4]);
+    fns.EndUpdateResourceA.handler([handle, 0]);
+    assert.equal(fns.GetFileMUIInfo.handler([all, wideName, 0, size]), 0);
+    assert.equal(errors.at(-1), ERROR_BAD_EXE_FORMAT);
+
+    // A language-neutral main file: the language, then its types, then its MUI file's.
+    handle = fns.BeginUpdateResourceA.handler([NAME, 1]);
+    const mui = muiResource();
+    fns.UpdateResourceA.handler([handle, 0x10000, 1, 0, put(0x300, [...mui]), mui.length]);
+    fns.EndUpdateResourceA.handler([handle, 0]);
+    setDword(size, 0);
+    assert.equal(fns.GetFileMUIInfo.handler([all, wideName, 0, size]), 0);
+    assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(dword(size), 112);
+    memory.fill(0xfe, info, info + 128);
+    setDword(info, 128);
+    setDword(info + 4, 1);
+    setDword(size, 128);
+    assert.equal(fns.GetFileMUIInfo.handler([all, wideName, info, size]), 1);
+    assert.deepEqual([dword(info), dword(info + 4), dword(info + 8)], [128, 1, 2]);
+    assert.deepEqual([memory[info + 12], memory[info + 28]], [0x63, 0x73], 'checksum, service');
+    assert.deepEqual([44, 48, 52, 56, 60, 64, 68].map(at=>dword(info + at)),
+        [72, 1, 84, 88, 1, 98, 102]);
+    assert.equal(String.fromCharCode(...memory.subarray(info + 72, info + 82).filter((_, at)=>
+        at % 2 === 0)), 'en-US');
+    assert.deepEqual([dword(info + 84), dword(info + 98)], [1, 6], 'RT_CURSOR, RT_STRING');
 });

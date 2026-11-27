@@ -12,8 +12,14 @@
 const DS_OK = 0;
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 
-/** IDirectSound3DListener, after IUnknown's three. */
-export const IDIRECTSOUND3DLISTENER_SLOTS = /** @type {[string, number][]} */ ([
+/**
+ * A vector passed by value: three D3DVALUEs after `this`, which a 64-bit
+ * caller passes in XMM1 to XMM3.
+ */
+const XYZ = [1, 2, 3];
+
+/** IDirectSound3DListener, after IUnknown's three. A third element names the float arguments. */
+export const IDIRECTSOUND3DLISTENER_SLOTS = /** @type {[string, number, number[]?][]} */ ([
     ['GetAllParameters', 1],
     ['GetDistanceFactor', 1],
     ['GetDopplerFactor', 1],
@@ -22,17 +28,17 @@ export const IDIRECTSOUND3DLISTENER_SLOTS = /** @type {[string, number][]} */ ([
     ['GetRolloffFactor', 1],
     ['GetVelocity', 1],
     ['SetAllParameters', 2],
-    ['SetDistanceFactor', 2],
-    ['SetDopplerFactor', 2],
-    ['SetOrientation', 7],
-    ['SetPosition', 4],
-    ['SetRolloffFactor', 2],
-    ['SetVelocity', 4],
+    ['SetDistanceFactor', 2, [1]],
+    ['SetDopplerFactor', 2, [1]],
+    ['SetOrientation', 7, [1, 2, 3, 4, 5, 6]],
+    ['SetPosition', 4, XYZ],
+    ['SetRolloffFactor', 2, [1]],
+    ['SetVelocity', 4, XYZ],
     ['CommitDeferredSettings', 0],
 ]);
 
 /** IDirectSound3DBuffer, after IUnknown's three. */
-export const IDIRECTSOUND3DBUFFER_SLOTS = /** @type {[string, number][]} */ ([
+export const IDIRECTSOUND3DBUFFER_SLOTS = /** @type {[string, number, number[]?][]} */ ([
     ['GetAllParameters', 1],
     ['GetConeAngles', 2],
     ['GetConeOrientation', 1],
@@ -44,13 +50,13 @@ export const IDIRECTSOUND3DBUFFER_SLOTS = /** @type {[string, number][]} */ ([
     ['GetVelocity', 1],
     ['SetAllParameters', 2],
     ['SetConeAngles', 3],
-    ['SetConeOrientation', 4],
+    ['SetConeOrientation', 4, XYZ],
     ['SetConeOutsideVolume', 2],
-    ['SetMaxDistance', 2],
-    ['SetMinDistance', 2],
+    ['SetMaxDistance', 2, [1]],
+    ['SetMinDistance', 2, [1]],
     ['SetMode', 2],
-    ['SetPosition', 4],
-    ['SetVelocity', 4],
+    ['SetPosition', 4, XYZ],
+    ['SetVelocity', 4, XYZ],
 ]);
 
 /** DS3DLISTENER, as d3dtypes lays it out: three-float vectors, then floats. */

@@ -32,7 +32,7 @@ import { readCString } from '../vulkan/structs.js';
  * @typedef {Object} VulkanSeamOptions
  * @property {{ create: (name: string, options?: unknown) => VulkanRuntime }} graphics
  * @property {import('../vulkan/structs.js').GuestMemory} memory
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {(width: number, height: number) => void} [resolution]
  */
 

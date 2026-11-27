@@ -9,6 +9,15 @@ import { windowsVersion } from '../kernel32/versions.js';
 import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
+import { DISPLAY_DRIVER } from '../user32/display.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 /**
  * version — what a file says about itself.
@@ -102,6 +111,12 @@ const FIXED_FILE_VERSION_LS = 12;
  *           Whether the engine answers for a library of this file name
  *           itself, with no file behind it. Absent, it answers for none, and
  *           such a library reads as a file that is not there.
+ * @property {() => string} [currentDirectory]  The process's current directory,
+ *           where VerFindFile looks for a copy as OpenFile does.
+ * @property {(path: string) => boolean} [systemProgram]
+ *           Whether a path names a program of the system folder the engine
+ *           runs itself (msiexec, regsvr32 and the like), which carries the
+ *           system's version as the system's libraries do.
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  * @property {string} [directx]  The DirectX version a DirectX library's file names.
  *           The Windows the machine is, whose version its own libraries carry
@@ -128,20 +143,10 @@ const VS_FFI_STRUCVERSION = 0x00010000;
 const VS_FFI_FILEFLAGSMASK = 0x0000003f;
 const VOS_NT_WINDOWS32 = 0x00040004;
 const VFT_DLL = 2;
+const VFT_APP = 1;
 
 /** US English in UTF-16, the one translation the block carries. */
 const TRANSLATION = '040904B0';
-
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /**
  * One node of a version block, laid out as `readNode` walks one: a text value
@@ -153,7 +158,7 @@ const utf16 = text=>{
  */
 function buildNode(key, value, children = []){
     const text = typeof value === 'string';
-    const bytes = text ? utf16(`${value}\0`) : value ?? new Uint8Array(0);
+    const bytes = text ? utf16z(value) : value ?? new Uint8Array(0);
     const valueAt = aligned(6 + (key.length + 1) * 2);
     let end = valueAt + bytes.length;
     const offsets = children.map(child=>{
@@ -193,7 +198,8 @@ export function systemVersionResource(
     // A file the release describes carries its version there -- on XP, the
     // DirectX that is part of the system -- and any other DirectX library the
     // DirectX the bottle reports, as Windows 2000's redistributable left it.
-    const own = component ?? (directX ? directx : null);
+    const own = component ?? (name.toLowerCase() === DISPLAY_DRIVER.file ? DISPLAY_DRIVER.version
+        : directX ? directx : null);
     const quad = own !== null ? own.split('.').map(part=>Number(part)) : system;
     const spelled = own ?? system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
@@ -201,7 +207,7 @@ export function systemVersionResource(
     const most = (quad[0] << 16 | quad[1]) >>> 0;
     const least = (quad[2] << 16 | quad[3]) >>> 0;
     [VS_FFI_SIGNATURE, VS_FFI_STRUCVERSION, most, least, most, least, VS_FFI_FILEFLAGSMASK, 0,
-        VOS_NT_WINDOWS32, VFT_DLL].forEach((field, index)=>view.setUint32(index * 4, field, true));
+        VOS_NT_WINDOWS32, /\.exe$/i.test(name) ? VFT_APP : VFT_DLL].forEach((field, index)=>view.setUint32(index * 4, field, true));
     return buildNode('VS_VERSION_INFO', fixed, [
         buildNode('StringFileInfo', null, [buildNode(TRANSLATION, null, [
             buildNode('FileVersion', spelled),
@@ -216,11 +222,9 @@ export function systemVersionResource(
 }
 
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
-
-/** A path is at most this long; longer is a pointer that is not a string. */
-const MAX_PATH = 260;
 
 /** @param {Uint8Array} block @param {number} at */
 const u16 = (block, at)=>block[at] | block[at + 1] << 8;
@@ -331,7 +335,7 @@ function find(block, path){
  *
  * @param {Uint8Array | null} block
  */
-export function fileVersionOf(block){
+function fileVersionOf(block){
     const root = block ? readNode(block, 0) : null;
     if (!block || !root || root.value + FIXED_FILE_INFO_SIZE > block.length)
     {
@@ -418,6 +422,7 @@ export function createVersionFunctions(host){
         const name = file.includes('.') ? file : `${file}.dll`;
         return (directory === '' || directory.toLowerCase() === SYSTEM_DIRECTORY.toLowerCase())
             && file !== '' && (host.systemLibrary?.(name) || WIN16_SYSTEM_FILE.test(name)
+                || name.toLowerCase() === DISPLAY_DRIVER.file
                 || (host.windows ?? windowsVersion()).components?.files[name.toLowerCase()]
                     !== undefined)
             ? name : null;
@@ -435,25 +440,74 @@ export function createVersionFunctions(host){
      * @param {string} path @param {(code: number) => void} fail
      * @returns {Uint8Array | null | Promise<Uint8Array | null>}
      */
-    const resourceFor = (path, fail)=>after(host.versionInfo?.(path) ?? null, resource=>{
+    const resourceFor = (path, fail)=>{
+        if (path === '')
+        {
+            fail(ERROR_PATH_NOT_FOUND);
+            return null;
+        }
+        return resourceOf(path, fail);
+    };
+
+    /**
+     * The same, for a path that names something.
+     *
+     * @param {string} path @param {(code: number) => void} fail
+     * @returns {Uint8Array | null | Promise<Uint8Array | null>}
+     */
+    const resourceOf = (path, fail)=>after(host.versionInfo?.(path) ?? null, resource=>{
         if (resource)
         {
             return resource;
         }
         const exists = host.files ? (host.files.stat(path)?.exists ?? false) : true;
-        const library = exists ? null : systemName(path);
+        // A library the engine answers for stands in its folder as a file of its
+        // image (A41), which carries no version block: it is told the system's
+        // version as one that is not on the volume is. The .NET Framework 4.8's
+        // setup read D3DCompiler_47.dll as missing and tried to install it.
+        const library = systemName(path);
         if (library !== null)
         {
             return systemVersionResource(library, host.windows, host.directx);
+        }
+        if (host.systemProgram?.(path))
+        {
+            return systemVersionResource(path.slice(Math.max(path.lastIndexOf('\\'),
+                path.lastIndexOf('/')) + 1), host.windows, host.directx);
         }
         fail(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         return null;
     });
 
+    /**
+     * The entry at a path, or null when the path names nothing the volume
+     * has -- a drive that is not there among them.
+     *
+     * @param {string} path
+     */
+    const statOrNull = path=>{
+        try
+        {
+            return host.files?.stat(path) ?? null;
+        }
+        catch (e){
+            if (typeof (/** @type {{ code?: unknown }} */ (e)?.code) === 'string'
+                && /** @type {{ code: string }} */ (e).code !== 'GUEST_ACCESS')
+            {
+                return null;
+            }
+            throw e;
+        }
+    };
+
+    // A NULL string is the empty one: a path that names no file, the root
+    // of a version block.
     /** @param {number} address */
-    const narrow = address=>host.readCString(address >>> 0, MAX_PATH);
+    const narrow = address=>((address >>> 0) === 0 ? ''
+        : host.readCString(wholeAddress(address), WHOLE_NAME));
     /** @param {number} address */
-    const wide = address=>host.readWideString?.(address >>> 0, MAX_PATH) ?? '';
+    const wide = address=>((address >>> 0) === 0 ? ''
+        : host.readWideString?.(address >>> 0, WHOLE_NAME * 2) ?? '');
 
     /**
      * GetFileVersionInfoSize, for either spelling: the block and the room its
@@ -467,7 +521,7 @@ export function createVersionFunctions(host){
             // Documented as always zero, and a caller passes it back to
             // GetFileVersionInfo, so leaving it unwritten leaves it whatever
             // the caller's stack happened to hold.
-            host.writeMemory(handle >>> 0, dword(0));
+            host.writeMemory(wholeAddress(handle), dword(0));
         }
         return after(resourceFor(path, errorSetter()), resource=>
             (resource ? resource.length + scratchFor(resource.length) : 0));
@@ -493,10 +547,10 @@ export function createVersionFunctions(host){
                 fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
                 return 0;
             }
-            host.writeMemory(data >>> 0, resource);
+            host.writeMemory(wholeAddress(data), resource);
             if (ansi && (length >>> 0) >= resource.length + scratchFor(resource.length))
             {
-                host.writeMemory((data >>> 0) + resource.length, ROOM_MARK);
+                host.writeMemory(wholeAddress(data) + resource.length, ROOM_MARK);
             }
             return 1;
         });
@@ -513,7 +567,7 @@ export function createVersionFunctions(host){
         // The head says how long the block is, and the block has to be read
         // whole before it can be walked -- reading the head alone and asking
         // it to parse itself fails its own bounds check.
-        const base = blockAddress >>> 0;
+        const base = wholeAddress(blockAddress);
         const head = host.readMemory(base, 2);
         const total = head[0] | head[1] << 8;
         if (total < 6)
@@ -524,7 +578,10 @@ export function createVersionFunctions(host){
 
         const path = subBlock.split('\\').filter(step=>step.length > 0);
         const node = find(block, path);
-        if (!node || node.valueLength === 0)
+        // A name with no value is still there: Windows answers it as found,
+        // with a length of zero and a pointer to where its value would be.
+        // Only the root has to carry the fixed information to be answered.
+        if (!node || (node.valueLength === 0 && path.length === 0))
         {
             return 0;
         }
@@ -565,8 +622,9 @@ export function createVersionFunctions(host){
             answer = roomy ? base + total + ROOM_MARK.length + (node.value >>> 1) : answer;
             host.writeMemory(answer, text);
         }
-        host.writeMemory(buffer >>> 0, dword(answer));
-        host.writeMemory(length >>> 0, dword(isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
+        host.writeMemory(wholeAddress(buffer), dword(answer));
+        host.writeMemory(wholeAddress(length),
+            dword(isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
         return 1;
     };
 
@@ -586,14 +644,14 @@ export function createVersionFunctions(host){
         {
             return 0;
         }
-        const room = host.readMemory(lengthAt >>> 0, 4);
+        const room = host.readMemory(wholeAddress(lengthAt), 4);
         const have = (room[0] | room[1] << 8 | room[2] << 16 | room[3] << 24) >>> 0;
         const needed = text.length + 1;
         if ((buffer >>> 0) !== 0 && have > 0)
         {
-            host.writeMemory(buffer >>> 0, encodeAnsi(`${text.slice(0, have - 1)}\0`));
+            host.writeMemory(wholeAddress(buffer), encodeAnsi(`${text.slice(0, have - 1)}\0`));
         }
-        host.writeMemory(lengthAt >>> 0, dword(needed));
+        host.writeMemory(wholeAddress(lengthAt), dword(needed));
         return needed > have ? VFF_BUFFTOOSMALL : 0;
     };
 
@@ -607,13 +665,7 @@ export function createVersionFunctions(host){
         VerLanguageNameA: verLanguageName((address, text)=>
             host.writeMemory(address, encodeAnsi(text))),
         VerLanguageNameW: verLanguageName((address, text)=>{
-            const bytes = new Uint8Array(text.length * 2);
-            for (let at = 0; at < text.length; at++)
-            {
-                bytes[at * 2] = text.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-            }
-            host.writeMemory(address, bytes);
+            host.writeMemory(address, utf16(text));
         }),
 
         /**
@@ -627,7 +679,8 @@ export function createVersionFunctions(host){
          * is found -- the destination first, then the Windows directory for a
          * shared file -- and empty when there is none, which is what an
          * installer of a fresh program reads. Zero means "install where
-         * recommended"; VFF_CURNEDEST says a copy lives somewhere else.
+         * recommended"; VFF_CURNEDEST says the two differ - a copy lives
+         * somewhere else, or none lives anywhere and the destination is named.
          *
          * Nothing here can tell whether a file is in use, so VFF_FILEINUSE is
          * never reported: the installer then copies over it, which is what the
@@ -637,16 +690,27 @@ export function createVersionFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([flags, fileName, , appDir, curDir, curDirLen, destDir, destDirLen])=>{
-                const leaf = host.readCString(fileName >>> 0, MAX_PATH);
+                const leaf = narrow(fileName);
                 const shared = ((flags >>> 0) & VFFF_ISSHAREDFILE) !== 0;
-                const destination = shared
-                    ? SYSTEM_DIRECTORY
-                    : host.readCString(appDir >>> 0, MAX_PATH);
-                const candidates = shared ? [destination, WINDOWS_DIRECTORY] : [destination];
-                const current = candidates.find(
-                    dir=>host.files?.stat(joinPath(dir, leaf))?.exists) ?? '';
+                const application = narrow(appDir);
+                const destination = shared ? SYSTEM_DIRECTORY : application;
+                // Where OpenFile would find a copy: the program's directory, the
+                // current one, then the system directory and the Windows directory
+                // - a shared file looked for in the system's first, as it belongs there.
+                const here = host.currentDirectory?.() ?? '';
+                const candidates = (shared
+                    ? [SYSTEM_DIRECTORY, WINDOWS_DIRECTORY, application, here]
+                    : [application, here, SYSTEM_DIRECTORY, WINDOWS_DIRECTORY])
+                    .filter(dir=>dir !== '');
+                const current = candidates.find(dir=>{
+                    const path = joinPath(dir, leaf);
+                    return statOrNull(path)?.exists || host.systemProgram?.(path);
+                }) ?? '';
 
-                let result = current !== '' && current !== destination ? VFF_CURNEDEST : 0;
+                // Any difference counts, a file found nowhere included: its empty
+                // current directory is not where it should go.
+                let result = current.toLowerCase() !== destination.toLowerCase()
+                    ? VFF_CURNEDEST : 0;
                 result |= writeDirectory(curDir, curDirLen, current);
                 result |= writeDirectory(destDir, destDirLen, destination);
                 return result;
@@ -750,12 +814,14 @@ export function createVersionFunctions(host){
                     return VIF_CANNOTCREATE;
                 }
                 /** @param {number} dir @param {number} name */
-                const join = (dir, name)=>joinPath(
-                    host.readCString(dir >>> 0, MAX_PATH), host.readCString(name >>> 0, MAX_PATH));
+                const join = (dir, name)=>joinPath(narrow(dir), narrow(name));
                 const source = join(srcDir, srcName);
                 const destination = join(destDir, destName);
 
-                const stat = host.files.stat(source);
+                // No name, or a drive that is not there, is a source that
+                // cannot be read.
+                const stat = wholeAddress(srcName) === 0 || wholeAddress(destName) === 0 ? null
+                    : statOrNull(source);
                 if (!stat || !stat.exists || stat.isDirectory)
                 {
                     return VIF_CANNOTREADSRC;
@@ -791,13 +857,13 @@ export function createVersionFunctions(host){
                     // The temp-file out-parameters name no temp file, because
                     // none was left: an empty string and a length of zero, which
                     // is what a caller reads when the install completed on its own.
-                    if ((tmpFile >>> 0) !== 0)
+                    if (wholeAddress(tmpFile) !== 0)
                     {
-                        host.writeMemory(tmpFile >>> 0, new Uint8Array([0]));
+                        host.writeMemory(wholeAddress(tmpFile), new Uint8Array([0]));
                     }
-                    if ((tmpLen >>> 0) !== 0)
+                    if (wholeAddress(tmpLen) !== 0)
                     {
-                        host.writeMemory(tmpLen >>> 0, dword(0));
+                        host.writeMemory(wholeAddress(tmpLen), dword(0));
                     }
                     return 0;
                 };

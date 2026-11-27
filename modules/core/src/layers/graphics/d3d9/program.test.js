@@ -17,18 +17,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-    D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK, floatToDword,
-} from './constants.js';
+import { D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DSAMP } from './samplerstates.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
-import { FOG_RANGE_LOCATION, HYBRID_CONSTANTS, varyingLocation } from './wgsl.js';
+import {
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, HYBRID_LIGHTING, varyingLocation,
+} from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
+import { floatBits } from '../../../system/floats.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -103,6 +104,8 @@ function harness(options = {}){
         features: options.features });
     /** @type {string[]} */
     const reports = [];
+    /** What was said as lost. @type {string[]} */
+    const losses = [];
     const backend = createBackend({
         device: gpu.device,
         queue: gpu.queue,
@@ -122,7 +125,8 @@ function harness(options = {}){
             next += bytes + 0x100;
             return address;
         },
-        divergence: (_api, detail)=>reports.push(detail),
+        divergence: (_api, detail, severity)=>(severity === 'loss' ? losses : reports)
+            .push(detail),
         dumpDraws: options.dumpDraws ?? false,
         ...(options.driverRules ? { driverRules: options.driverRules } : {}),
     });
@@ -173,7 +177,7 @@ function harness(options = {}){
     assert.equal(texture.texture.UnlockRect(0), D3D_OK);
 
     return {
-        gpu, device, reports, vb: vb.buffer, declaration: declaration.declaration,
+        gpu, device, reports, losses, vb: vb.buffer, declaration: declaration.declaration,
         texture: texture.texture, vertexBytes: new Uint8Array(vertices.buffer),
         async draw(){
             assert.equal(device.BeginScene(), D3D_OK);
@@ -336,8 +340,8 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         const matrix = [0, 0.5, -0.5, 0];
         [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10, D3DTSS.BUMPENVMAT11]
             .forEach((state, at)=>
-                h.device.SetTextureStageState(1, state, floatToDword(matrix[at])));
-        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatToDword(2));
+                h.device.SetTextureStageState(1, state, floatBits(matrix[at])));
+        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatBits(2));
         h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 4 | 0x100);
 
         await h.draw();
@@ -347,7 +351,8 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(pixelModule.code.includes('var tex1: texture_cube<f32>;'),
             'stage one samples the cube bound there');
-        assert.ok(pixelModule.code.includes('(in.t1 / in.t1.w)'), 'and divides by w');
+        assert.ok(pixelModule.code.includes('select(in.t1 / in.t1.w, vec4f(0.0),'
+            + ' in.t1.w == 0.0)'), 'and divides by w');
         assert.ok(pixelModule.code.includes('const _bump = 0;'));
 
         // The bump registers, two a stage from the first past the constants
@@ -374,12 +379,12 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         assert.equal(h.device.release(), 0);
     });
 
-test('under a vertex shader a ps_1_1 projects by w whatever count the flags name, by the count'
-    + ' under current driver rules', async()=>{
+test('a ps_1_1 projects by w whatever count the flags name,'
+    + ' under either driver rules', async()=>{
     // Prince of Persia: Warrior Within's water writes (u w, v w, w, w) from its
-    // vertex shader and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: drivers of
-    // its time divided by w, Wine divides by the count's last, y, and the
-    // screen it reads was drawn as stripes (decisions.md A44).
+    // vertex shader and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by
+    // y, the screen it reads was drawn as stripes. Windows divides by w
+    // (Wine's d3d9 test_texture_transform_flags, decisions.md A44).
     /** @param {'legacy' | 'current' | undefined} driverRules */
     const divided = async driverRules=>{
         const h = harness({ driverRules });
@@ -414,8 +419,9 @@ test('under a vertex shader a ps_1_1 projects by w whatever count the flags name
         assert.equal(h.device.release(), 0);
         return code;
     };
-    assert.ok((await divided(undefined)).includes('(in.t0 / in.t0.w)'), 'legacy, the default');
-    assert.ok((await divided('current')).includes('(in.t0 / in.t0.y)'), 'current');
+    const byW = 'select(in.t0 / in.t0.w, vec4f(0.0), in.t0.w == 0.0)';
+    assert.ok((await divided(undefined)).includes(byW), 'legacy, the default');
+    assert.ok((await divided('current')).includes(byW), 'current');
 });
 
 test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline for each',
@@ -670,10 +676,6 @@ test('a programmable draw is not blind to the dump: shaders, declaration and sam
 });
 
 test('a dump line names the sRGB states a draw was asked to read and write with', async()=>{
-    // Nothing here decodes or encodes sRGB, so a program that sets the
-    // states without asking CheckDeviceFormat first draws in the wrong
-    // space; whether it did is a question about one frame, answered by its
-    // dump.
     const h = harness({ dumpDraws: true });
     /** @type {{ shader?: any }} */
     const vs = {};
@@ -715,6 +717,59 @@ test('a dump line names the sRGB states a draw was asked to read and write with'
     h.vb.release();
     assert.equal(h.device.release(), 0);
 });
+
+test('a stage read as sRGB samples its texture decoded, and a target written as sRGB is encoded',
+    async()=>{
+        // D3DSAMP_SRGBTEXTURE reads the texels through the texture's sRGB
+        // view, decoded before filtering; D3DRS_SRGBWRITEENABLE has the pixel
+        // shader encode what it writes into an eight-bit target.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        /** The formats of the views the draw's bind groups sampled. */
+        const sampledFormats = ()=>[...h.groupsOfDraw().values()].flatMap(group=>group.descriptor
+            .entries.map((/** @type {any} */ entry)=>entry.resource?.viewDescriptor?.format)
+            .filter(Boolean));
+        const pixelCode = ()=>h.gpu.of('createShaderModule')
+            .map((/** @type {any} */ call)=>call.descriptor.code).filter(code=>code.includes('ps_main'));
+
+        await h.draw();
+        assert.deepEqual(sampledFormats(), [], 'a plain read samples the texture as stored');
+        assert.ok(pixelCode().every(code=>!code.includes('12.92')));
+        const made = h.gpu.of('createTexture').map((/** @type {any} */ call)=>call.descriptor)
+            .find((/** @type {any} */ descriptor)=>descriptor.label === 'texture');
+        assert.deepEqual(made.viewFormats, [`${made.format}-srgb`]);
+
+        assert.equal(h.device.SetSamplerState(0, D3DSAMP.SRGBTEXTURE, 1), D3D_OK);
+        h.gpu.calls.length = 0;
+        await h.draw();
+        assert.deepEqual(sampledFormats(), [`${made.format}-srgb`]);
+
+        assert.equal(h.device.SetRenderState(D3DRS9.SRGBWRITEENABLE, 1), D3D_OK);
+        await h.draw();
+        assert.ok(pixelCode().some(code=>code.includes('12.92')),
+            'the shader encodes its colour to sRGB');
+        assert.deepEqual(h.reports, []);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
 
 test('a screen quad in target pixels draws past a bound vertex shader, which runs again after',
     async()=>{
@@ -778,6 +833,8 @@ test('a screen quad in target pixels draws past a bound vertex shader, which run
 
 test('a pixel shader over fixed-function vertices gets a vertex stage of its own', async()=>{
     const h = harness();
+    // Unlit: the colours go through as the vertex carries them.
+    h.device.SetRenderState(D3DRS.LIGHTING, 0);
     /** @type {{ shader?: any }} */
     const ps = {};
     assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
@@ -886,10 +943,10 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         assert.ok(fragment.code.includes('@group(1) @binding(0) var<uniform> uniforms'));
         assert.ok(fragment.code.includes('@group(2) @binding(0) var texture0'));
         assert.ok(fragment.code.includes('input.diffuse = in.v0;'));
-        assert.ok(fragment.code.includes('input.texCoord0 = in.t0.xy;'));
+        assert.ok(fragment.code.includes('input.coord0 = in.t0;'));
         assert.ok(fragment.code.includes('input.specular = vec4f(0.0);'),
             'a varying the shader does not write is the fixed function default');
-        assert.ok(fragment.code.includes('sampleStage0(input.texCoord0)'));
+        assert.ok(fragment.code.includes('sampleStage0(input.coord0)'));
         assert.ok(fragment.code.includes('current.a > uniforms.alphaRef'));
         assert.ok(!fragment.code.includes('@location(1) v1'),
             'and is not declared as an input the vertex stage would have to supply');
@@ -1156,7 +1213,7 @@ test('a vertex shader that writes no coordinate set leaves a sampling stage read
             .find(module=>module.label.startsWith('ps:'));
         assert.ok(fragment);
         assert.ok(fragment.code.includes('sampleStage0'), 'the stage still samples');
-        assert.match(fragment.code, /input\.texCoord0 = vec2f\(0\.0\);/,
+        assert.match(fragment.code, /input\.coord0 = vec4f\(0\.0\);/,
             'at zero: coordinate set zero is one the shader never wrote');
         h.device.SetTexture(0, null);
         h.device.SetVertexShader(null);
@@ -1186,39 +1243,173 @@ const COLOURLESS_VERTEX_SHADER = [
     END_TOKEN,
 ];
 
-test('a varying the pixel shader reads and the vertex shader never writes is written as zero',
+test('a varying the pixel shader reads and the vertex shader never writes is written, the'
+    + ' diffuse of a shader below model 3 as one', async()=>{
+    // A WebGPU fragment input with no vertex output fails the pipeline
+    // and, with it, the whole frame. So the vertex stage writes it: the
+    // diffuse as Windows leaves it unwritten below model 3, one in every
+    // component (Wine's d3d9 test_default_diffuse), anything else zero.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    assert.equal(h.device.diagnostics().programmable, 1);
+    const vertexModule = h.gpu.of('createShaderModule')
+        .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+    assert.ok(vertexModule);
+    const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+    assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
+        'the colour the pixel shader reads is an output');
+    assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(1.0);`), 'written as one');
+
+    h.device.SetTexture(0, null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    ps.shader.release();
+    vs.shader.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
+test('a sampler declared a volume reads a 2D texture bound to it as 2D, and the other way round',
     async()=>{
-        // Direct3D reads whatever was left in the register; a WebGPU fragment
-        // input with no vertex output fails the pipeline and, with it, the
-        // whole frame. So the vertex stage writes it, as zero.
+        // Wine's d3d9 test_mismatched_sample_types: the texture is read as it
+        // is, from the coordinate's first two or three components, not a blank.
         const h = harness();
+        /** @param {number} type  D3DSAMPLER_TEXTURE_TYPE, 2 or 4 @returns {number[]} */
+        const reading = type=>[
+            versionToken(SHADER_KIND.PIXEL, 2, 0),
+            op(OPCODE.DCL, 2), (type << 27) >>> 0, dst(REGISTER.SAMPLER, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 0),
+            op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),
+            src(REGISTER.SAMPLER, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+            END_TOKEN,
+        ];
+        const lastPixelModule = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .filter(made=>made.label.startsWith('ps:')).at(-1).code;
         /** @type {{ shader?: any }} */
-        const vs = {};
-        /** @type {{ shader?: any }} */
-        const ps = {};
-        assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
-        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
-        h.device.SetVertexShader(vs.shader);
-        h.device.SetPixelShader(ps.shader);
+        const volumeShader = {};
+        assert.equal(h.device.CreatePixelShader(reading(4), volumeShader), D3D_OK);
+        h.device.SetPixelShader(volumeShader.shader);
         h.device.SetTexture(0, h.texture);
         await h.draw();
         assert.deepEqual(h.reports, []);
-        assert.equal(h.device.diagnostics().programmable, 1);
-        const vertexModule = h.gpu.of('createShaderModule')
-            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
-        assert.ok(vertexModule);
-        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
-        assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
-            'the colour the pixel shader reads is an output');
-        assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(0.0);`), 'written as zero');
+        assert.match(lastPixelModule(), /var tex0: texture_2d<f32>;/);
+        assert.match(lastPixelModule(), /textureSample\(tex0, samp0, [^;]*\.xy\)/);
+
+        /** @type {{ texture?: any }} */
+        const volume = {};
+        assert.equal(h.device.CreateVolumeTexture(4, 4, 2, 1, 0, D3DFMT.A8R8G8B8,
+            D3DPOOL.MANAGED, volume), D3D_OK);
+        /** @type {{ shader?: any }} */
+        const flatShader = {};
+        assert.equal(h.device.CreatePixelShader(reading(2), flatShader), D3D_OK);
+        h.device.SetPixelShader(flatShader.shader);
+        h.device.SetTexture(0, volume.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.match(lastPixelModule(), /var tex0: texture_3d<f32>;/);
+        assert.match(lastPixelModule(), /textureSample\(tex0, samp0, [^;]*\.xyz\)/);
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);
-        h.device.SetVertexShader(null);
-        h.device.SetVertexDeclaration(null);
-        h.device.SetStreamSource(0, null, 0, 0);
+        volume.texture.release();
+        volumeShader.shader.release();
+        flatShader.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pixel shader over lit fixed-function vertices reads the colours the lights made',
+    async()=>{
+        // Wine's d3d8 test_specular_shaders: under D3DRS_LIGHTING the fixed
+        // function lights the diffuse it hands a pixel shader, and the
+        // specular is the highlight only under D3DRS_SPECULARENABLE -- the
+        // vertex's own specular otherwise.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader([
+            versionToken(SHADER_KIND.PIXEL, 2, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.INPUT, 0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.INPUT, 1),
+            op(OPCODE.ADD, 3), dst(REGISTER.COLOROUT, 0), src(REGISTER.INPUT, 0),
+            src(REGISTER.INPUT, 1),
+            END_TOKEN,
+        ], ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        const colour = (/** @type {number} */ r, /** @type {number} */ g,
+            /** @type {number} */ b, /** @type {number} */ a)=>({ r, g, b, a });
+        const material = {
+            Diffuse: colour(0.5, 0.25, 0.125, 1), Ambient: colour(0.25, 0, 0, 1),
+            Specular: colour(0.75, 0.5, 0.25, 1), Emissive: colour(0, 0.125, 0, 1), Power: 6,
+        };
+        assert.equal(h.device.SetMaterial(material), D3D_OK);
+        const light = {
+            Type: 3, Diffuse: colour(1, 0.5, 0.25, 1), Specular: colour(0.5, 0.25, 0.125, 1),
+            Ambient: colour(0.125, 0.0625, 0.03125, 1), Position: { x: 1, y: 2, z: 3 },
+            Direction: { x: 0, y: 0, z: 2 }, Range: 50, Falloff: 1, Attenuation0: 1,
+            Attenuation1: 0, Attenuation2: 0, Theta: 0.5, Phi: 1,
+        };
+        assert.equal(h.device.SetLight(0, light), D3D_OK);
+        assert.equal(h.device.LightEnable(0, true), D3D_OK);
+        h.device.SetRenderState(D3DRS.AMBIENT, 0xff406080);
+        h.device.SetRenderState(D3DRS.SPECULARENABLE, 1);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const module = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .filter(made=>made.label.startsWith('vs:')).at(-1);
+        const diffuse = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        const specular = varyingLocation(D3DDECLUSAGE.COLOR, 1);
+        const lit = module().code;
+        assert.ok(lit.includes(`out.o${diffuse} = litDiffuse;`), 'diffuse lit');
+        assert.ok(lit.includes(`out.o${specular} = vec4f(litSpecular.rgb, 1.0);`),
+            'the highlight, of the alpha the vertex has none of');
+        assert.ok(lit.includes('let worldNormal = vec3f(0.0);'), 'no normal: lit by none');
+
+        // The rows past the fixed stage's own: world, its inverse transpose,
+        // the material, the scene's ambient, the eye with the power, the light.
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(0), 0).buffer);
+        const at = HYBRID_CONSTANTS.COUNT * 4;
+        assert.equal(floats.length, at + (HYBRID_LIGHTING.LIGHTS + HYBRID_LIGHTING.LIGHT_ROWS) * 4);
+        const row = (/** @type {number} */ index)=>[...floats.subarray(at + index * 4,
+            at + index * 4 + 4)];
+        assert.deepEqual(row(HYBRID_LIGHTING.WORLD), [1, 0, 0, 0]);
+        assert.deepEqual(row(HYBRID_LIGHTING.MATERIAL), [0.5, 0.25, 0.125, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.MATERIAL + 3), [0, 0.125, 0, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.AMBIENT), [0x40 / 255, 0x60 / 255, 0x80 / 255, 1]
+            .map(Math.fround));
+        assert.equal(row(HYBRID_LIGHTING.EYE)[3], 6);
+        assert.deepEqual(row(HYBRID_LIGHTING.LIGHTS), [1, 0.5, 0.25, 1]);
+        assert.deepEqual(row(HYBRID_LIGHTING.LIGHTS + 4), [0, 0, 1, 0], 'direction, unit');
+
+        // The specular term off: the vertex's specular goes through, and a
+        // vertex with none hands on black of alpha one.
+        h.device.SetRenderState(D3DRS.SPECULARENABLE, 0);
+        await h.draw();
+        assert.ok(module().code.includes(`out.o${specular} = vec4f(0.0, 0.0, 0.0, 1.0);`));
+        assert.ok(module().code.includes(`out.o${diffuse} = litDiffuse;`));
+        // Lighting off: the colours as the vertex carries them.
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
+        await h.draw();
+        assert.ok(!module().code.includes('litDiffuse'));
         ps.shader.release();
-        vs.shader.release();
         h.texture.release();
         h.declaration.release();
         h.vb.release();
@@ -1231,6 +1422,7 @@ test('a pixel shader over a declaration that carries only a position is given wh
         // vertex has no colour and zero where it has no coordinate set; a
         // fragment input the vertex stage does not write fails the pipeline.
         const h = harness();
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
         /** @type {{ declaration?: any }} */
         const positionOnly = {};
         assert.equal(h.device.CreateVertexDeclaration([ELEMENTS[0]], positionOnly), D3D_OK);
@@ -1332,23 +1524,24 @@ async()=>{
     const row = HYBRID_CONSTANTS.TRANSFORMS + 4;
     const modules = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
         .filter(module=>module.label.startsWith('vs:'));
-    assert.ok(modules().some(module=>module.code.includes(
-        `out.o${t1} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`)),
+    assert.ok(modules().some(module=>module.code
+        .includes('let generated1 = vec4f(cameraPosition, 0.0);')
+        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], vec4f(generated1.xyz, 1.0)),`)),
     'generated for the disabled stage the shader samples');
 
     // Stage 1 reading the vertex's set 0 through its own transform: (u, v, 1)
-    // through stage 1's rows, not the set 1 the vertex does not have.
+    // through stage 1's columns, not the set 1 the vertex does not have.
     h.device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0);
     await h.draw();
     assert.ok(modules().some(module=>module.code.includes(`let set1 = vec4f(`)
-        && module.code.includes(`.xy, 1.0, 0.0);`)
-        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], set1),`)),
+        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], vec4f(set1.xy, 1.0, 0.0)),`)),
     'set 0 through the transform of stage 1');
-    // Untransformed, the set as it stands under stage 1's number.
+    // Untransformed, the set as it stands, w zero, under stage 1's number.
     h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 0);
     await h.draw();
-    assert.ok(modules().some(module=>module.code.includes(`out.o${t1} = vec4f(in.v`)),
-        'set 0 carried to t1');
+    assert.ok(modules().some(module=>module.code.includes(`out.o${t1} = set1;`)
+        && /let set1 = vec4f\(vec4f\(in\.v\d+, 0\.0, 1\.0\)\.xy, 0\.0, 0\.0\);/.test(module.code)),
+    'set 0 carried to t1');
 
     h.device.SetTexture(1, null);
     h.device.SetPixelShader(null);
@@ -1368,6 +1561,7 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         // from the vertex through world-view and the transform, and its
         // constants carry both, whatever set the declaration has.
         const h = harness();
+        h.device.SetRenderState(D3DRS.LIGHTING, 0);
         /** @type {{ shader?: any }} */
         const ps = {};
         assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
@@ -1396,7 +1590,7 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
         const row = HYBRID_CONSTANTS.TRANSFORMS;
         assert.ok(vertexModule.code.includes(
-            `out.o${t0} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`),
+            `out.o${t0} = vec4f(dot(c[${row}], vec4f(generated0.xyz, 1.0)),`),
         'the set the pixel shader reads is generated');
         assert.ok(!vertexModule.code.includes(`out.o${t0} = vec4f(in.v2`),
             'the carried set is not sent');
@@ -1452,6 +1646,8 @@ test('a pipeline the GPU refuses loses its draw and names the reason; the frame 
             ['Fragment input at location 2 has no vertex output']);
         assert.equal(h.gpu.count('submit'), 1, 'the frame is still submitted');
         assert.equal(h.gpu.count('draw'), 0, 'without the draw');
+        assert.deepEqual(h.losses, ['lost: Fragment input at location 2 has no vertex output'],
+            'said as a loss, an error in the journal');
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);
@@ -1603,12 +1799,12 @@ test('an indexed draw is instanced by stream zero\'s count, a stream stepping by
             .map(call=>call.offset), [4], 'the instance stream at its own offset');
 
         // A stream stepping every second instance is not what a vertex
-        // buffer can do: the draw is not drawn, and that is said.
+        // buffer can do: the draw is not drawn, and that is said as lost.
         assert.equal(h.device.SetStreamSourceFreq(1, (0x80000000 | 2) >>> 0), D3D_OK);
         await draw();
         assert.equal(h.gpu.of('drawIndexed').length, 1);
         assert.equal(h.device.diagnostics().skipped.instancing, 1);
-        assert.equal(h.reports.length, 1);
+        assert.equal(h.losses.length, 1, 'said as a loss');
 
         h.device.SetStreamSourceFreq(0, 1);
         h.device.SetStreamSourceFreq(1, 1);
@@ -1865,16 +2061,18 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         assert.equal(h.device.BeginScene(), D3D_OK);
         h.device.SetVertexShader(vs.shader);
         h.device.SetPixelShader(ps.shader);
-        for (const bias of [0, -0.5, 0])
+        // A program that moves the bias a little at every draw, as a texture
+        // streamed in fades its levels, makes one translation for them all.
+        for (const bias of [0, -0.5, -0.75, 0])
         {
             // D3DSAMP_MIPMAPLODBIAS.
-            assert.equal(h.device.SetSamplerState(0, 8, floatToDword(bias)), D3D_OK);
+            assert.equal(h.device.SetSamplerState(0, 8, floatBits(bias)), D3D_OK);
             assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
         }
         h.device.SetVertexShader(vs.shader);
         h.device.SetPixelShader(null);
         assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
-        assert.equal(h.device.SetSamplerState(0, 8, floatToDword(-0.5)), D3D_OK);
+        assert.equal(h.device.SetSamplerState(0, 8, floatBits(-0.5)), D3D_OK);
         assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
         assert.equal(h.device.EndScene(), D3D_OK);
         assert.equal(h.device.Present(), D3D_OK);
@@ -1884,7 +2082,8 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         assert.equal(pixels.length, 4, 'a translation and a fixed stage each with the bias and'
             + ' without; the draw back at zero shares the first');
         assert.ok(pixels[0].includes('textureSample(tex0, samp0, in.t0.xy)'));
-        assert.ok(pixels[1].includes('textureSampleBias(tex0, samp0, in.t0.xy, -0.5)'));
+        assert.ok(pixels[1].includes('textureSampleBias(tex0, samp0, in.t0.xy, c[_lodBias + 0].x)'),
+            pixels[1]);
         assert.ok(!pixels[2].includes(' + -0.5'));
         assert.ok(pixels[3].includes('1.0e-12)) + -0.5,'), pixels[3]);
         h.device.SetTexture(0, null);
@@ -2054,13 +2253,12 @@ test('a shader draw into a texture bound to its own sampler samples a copy taken
 });
 
 test('table fog through a vertex shader without oFog runs over z or w as the projection says,'
-    + ' or over z by later rules', async()=>{
+    + ' by either rules', async()=>{
     // A program of the shader-model-2 generation sets an eye-unit range for
     // its shader draws (Far Cry's R300 path: LINEAR 30..350, no oFog) and
     // leaves a perspective projection set for its fixed ones: its drivers
-    // took the curve over w then, as the fixed function does. Later drivers
-    // and Wine's fog rules take it over z whatever the projection
-    // (fog_with_shader_test), which is `driverRules: 'current'`.
+    // took the curve over w then, as the fixed function does, and Windows
+    // still does (Wine's d3d9 test_fog, the shader rows without ortho).
     /**
      * @param {'legacy' | 'current' | undefined} driverRules
      * @param {number[]} projection
@@ -2078,8 +2276,8 @@ test('table fog through a vertex shader without oFog runs over z or w as the pro
         h.device.SetTransform(D3DTS.PROJECTION, projection);
         h.device.SetRenderState(D3DRS.FOGENABLE, 1);
         h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
-        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(30));
-        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(350));
+        h.device.SetRenderState(D3DRS.FOGSTART, floatBits(30));
+        h.device.SetRenderState(D3DRS.FOGEND, floatBits(350));
         await h.draw();
         const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
         // The range is the block's last register: start, end, density, and
@@ -2091,7 +2289,8 @@ test('table fog through a vertex shader without oFog runs over z or w as the pro
     assert.deepEqual(await rangeOf(undefined, perspective), [30, 350, 1, 0], 'over w, density 1');
     assert.deepEqual(await rangeOf('legacy', perspective), [30, 350, 1, 0]);
     assert.deepEqual(await rangeOf('legacy', affine), [30, 350, 1, 1], 'over z');
-    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 1]);
+    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 0]);
+    assert.deepEqual(await rangeOf('current', affine), [30, 350, 1, 1]);
 });
 
 test('table fog through a shader that writes oFog runs over it, or over the depth by later rules',
@@ -2124,3 +2323,74 @@ test('table fog through a shader that writes oFog runs over it, or over the dept
         assert.match(await rangeLine('legacy'), /= vec4f\(c\[\d+\]\.xyz, 2\.0\);$/);
         assert.match(await rangeLine('current'), /= c\[\d+\];$/);
     });
+
+test('a sampler\'s level-of-detail bias reaches the GPU in the draw\'s own registers', async()=>{
+    // The translation reads the bias from a register the draw fills, so the
+    // value has to travel with the draw: one that did not would sample every
+    // texture at its unbiased level, without a word.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetTexture(0, h.texture);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    // D3DSAMP_MIPMAPLODBIAS.
+    assert.equal(h.device.SetSamplerState(0, 8, floatBits(-0.75)), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const pixel = modulesOf(h, 'ps:').find(code=>code.includes('_lodBias'));
+    assert.ok(pixel, 'the pixel translation reads its bias from a register');
+    const register = Number(/const _lodBias = (\d+);/.exec(pixel)?.[1]);
+    const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(1), 0).buffer);
+    assert.equal(floats[register * 4], -0.75, 'sampler 0\'s bias, where the module reads it');
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+});
+
+test('cylindrical wrapping, accepted and not done, is said', async()=>{
+    const h = harness();
+    // D3DRS_WRAP0, wrapping u.
+    assert.equal(h.device.SetRenderState(128, 1), D3D_OK);
+    await h.draw();
+    assert.ok(h.reports.some(detail=>/cylindrical wrapping \(D3DRS_WRAP0\.\.15\)/.test(detail)),
+        JSON.stringify(h.reports));
+    assert.equal(h.gpu.count('draw'), 1, 'and the draw is made');
+    h.device.SetRenderState(128, 0);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
+test('a blend, compare or cull value outside Direct3D\'s draws as its default, said', async()=>{
+    // A driver ignores a value it does not know; WebGPU has no pipeline for
+    // one, and the draw was lost (`lookUp` threw).
+    for (const [state, value] of [[D3DRS9.SRCBLEND, 0], [D3DRS9.SRCBLEND, 16],
+        [D3DRS9.BLENDOP, 0], [D3DRS9.ZFUNC, 0], [D3DRS9.CULLMODE, 0]])
+    {
+        const h = harness();
+        assert.equal(h.device.SetRenderState(D3DRS9.ALPHABLENDENABLE, 1), D3D_OK);
+        assert.equal(h.device.SetRenderState(state, value), D3D_OK);
+        await h.draw();
+        assert.equal(h.gpu.count('draw'), 1, `state ${state} at ${value}: drawn`);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        assert.deepEqual(h.losses, []);
+        assert.ok(h.reports.some(detail=>/is not one this device draws/.test(detail)),
+            JSON.stringify(h.reports));
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    }
+});

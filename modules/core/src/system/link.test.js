@@ -298,3 +298,115 @@ test('an answer that cannot cross reaches the caller as a failure, and the link 
         assert.match(answer.failed, /cannot|codec|encode/i);
         assert.equal(answer.after, 42);
     });
+
+test('a closed link fails the calls still waiting on it and every call after, on both sides',
+    { timeout: 20000 }, async()=>{
+        const { a, b } = createLinkMemory();
+        const system = openLink(a, {});
+        const serving = system.serve();
+        // The process side never answers: a process that died.
+        const process = openLink(b, {});
+        const asked = system.call('endpoint', 'find', [7]);
+        const told = process.call('events', 'emit', [1]);
+        system.close();
+        await serving;
+        await assert.rejects(asked, (/** @type {any} */ e)=>e.closed === true
+            && /endpoint\.find/.test(e.message), 'the run\'s waiting call fails');
+        await assert.rejects(system.call('endpoint', 'find', [8]), { closed: true },
+            'and a call after the close fails at once');
+        assert.throws(()=>system.callWaiting('endpoint', 'find', [9]), { closed: true },
+            'a blocking one too, rather than waiting for good');
+        process.close();
+        await assert.rejects(told, { closed: true },
+            'the side that serves nothing fails its own at the close');
+    });
+
+test('a record is decoded where it lies in the ring, not copied out of it first', ()=>{
+    const { a, b } = createLinkMemory();
+    /** @type {number[][]} */
+    const taken = [];
+    const system = openLink(a, {});
+    const process = openLink(b, { endpoint: {
+        take: (/** @type {number[]} */ values)=>void taken.push(values),
+    } });
+    const values = Array.from({ length: 200 }, (_, i)=>i * 7);
+    void system.call('endpoint', 'take', [values]);
+    /** @type {number[]} */
+    const copied = [];
+    const slice = Uint8Array.prototype.slice;
+    Uint8Array.prototype.slice = function(/** @type {any[]} */ ...args){
+        if (this.buffer instanceof SharedArrayBuffer)
+        {
+            copied.push(this.length);
+        }
+        return slice.apply(this, /** @type {any} */ (args));
+    };
+    try
+    {
+        process.pump();
+    }
+    finally
+    {
+        Uint8Array.prototype.slice = slice;
+    }
+    assert.deepEqual(taken, [values]);
+    // What the decoder copies are the record's short strings: the target and
+    // the method's names. A copy of the whole record is the bytes of 200 values.
+    assert.ok(copied.every(length=>length < 64), `copied out of the ring: ${copied.join(', ')}`);
+});
+
+test('a side that closes the link closes it for the other: its calls fail, its serve ends, and'
+    + ' a call in another thread waiting for room to write is let go', { timeout: 60000 },
+async t=>{
+    const memory = createLinkMemory({ capacity: 4096 });
+    const here = openLink(memory.a, {});
+    const there = openLink(memory.b, { echo: { back: (/** @type {any} */ value)=>value } });
+    const serving = there.serve();
+    here.close();
+    await serving;
+    await assert.rejects(there.call('echo', 'back', [6]), /closed/);
+    assert.throws(()=>there.callWaiting('echo', 'back', [7], 5000), /closed/);
+
+    // A call far longer than the ring, from a thread that may block: its parts
+    // fill the ring nobody here reads, and it waits for room - until the close.
+    const other = createLinkMemory({ capacity: 4096 });
+    const quiet = openLink(other.a, {});
+    const caller = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        import(workerData.module).then(({ openLink })=>{
+            const link = openLink(workerData.end, {});
+            parentPort.postMessage('calling');
+            try
+            {
+                link.callWaiting('nobody', 'home', [new Uint8Array(1 << 16)]);
+                parentPort.postMessage('answered');
+            }
+            catch (e)
+            {
+                parentPort.postMessage(e.message);
+            }
+        });`, { eval: true, workerData: { module: LINK, end: other.b } });
+    // A wait a lost close left for good must not hold the test's process.
+    caller.unref();
+    t.after(()=>caller.terminate());
+    /** @type {string[]} */
+    const said = [];
+    const ended = new Promise((resolve, reject)=>{
+        caller.on('message', message=>{
+            said.push(message);
+            if (message !== 'calling')
+            {
+                resolve(message);
+            }
+        });
+        caller.once('error', reject);
+    });
+    while (said.length === 0)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 5));
+    }
+    // Long enough for the call's parts to fill the ring and the caller to sleep.
+    await new Promise(resolve=>setTimeout(resolve, 200));
+    quiet.close();
+    assert.match(String(await ended), /closed/, 'the waiting call was let go');
+});

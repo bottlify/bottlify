@@ -1,4 +1,5 @@
 node_modules/**
+node_modules
 # The master plan stays private; the per-phase roadmaps are tracked.
 roadmap/00-*
 .ghidra/
@@ -14,7 +15,7 @@ modules/cork/LICENSE
 modules/installer/LICENSE
 modules/networking/LICENSE
 modules/core/THIRD-PARTY-NOTICES.md
-tools/cdp_test/reports/
+tools/*/reports/
 *.log
 # No trailing slash: a symlink at this path (a worktree pointing at the main
 # checkout's artifacts) is ignored too, not committed.
@@ -32,10 +33,6 @@ bundles/
 # Frames and textures dumped out of a running game to be looked at: someone
 # else's artwork, and megabytes of it.
 dbg/
-
-# The nasm corpus the translator tests fetch, pinned by modules/cork/corpus-lock.json.
-# No trailing slash, as for the prebuilt artifacts above: a link here is ignored too.
-modules/cork/vendor
 
 # AppleDouble files the host writes on the shared checkout
 ._*

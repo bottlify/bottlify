@@ -86,11 +86,96 @@ const EMITTED = {
     97: '2d93d78aa3f4461b',
     98: '930ad71a5c370912',
     99: 'b502a528beab61b1',
+    100: 'b502a528beab61b1',
+    101: 'b502a528beab61b1',
+    102: 'b502a528beab61b1',
+    103: 'b502a528beab61b1',
+    104: '774d6a5315dfa3d8',
+    105: '774d6a5315dfa3d8',
+    106: '774d6a5315dfa3d8',
+    107: '774d6a5315dfa3d8',
+    108: '774d6a5315dfa3d8',
+    109: '774d6a5315dfa3d8',
+    110: '774d6a5315dfa3d8',
+    111: '774d6a5315dfa3d8',
+    112: '6d8c8bb662514d78',
+    113: '8cc24535f1f9876a',
+    114: 'e4f559ea29955300',
+    115: '0097b65a2e8adedd',
+    116: '37d0f4ea7b1bd167',
+    117: '37d0f4ea7b1bd167',
+    118: '79c660aa3e6d877c',
+    119: '660a774c16776f5d',
+    120: '99056538bc6f8d3a',
+    121: '1e8eb545a1c4160b',
+    122: 'f02b60b4c5039b44',
+    123: '1d137d09c71739e4',
+    124: 'fd1ffaf5511f5f9b',
+    125: '187e0d1393bb7a19',
+    126: '0d361513b22b2434',
+    127: '1c99df7486765689',
+    128: '619d106ddceb1e30',
+    129: '81f253700daacd86',
+    130: '0ac9c83831291b76',
+    131: '3b7e5f4adab3218a',
+    132: 'e40cc79ac1ee68cc',
+    133: 'e40cc79ac1ee68cc',
+    134: 'e67c503e46de4a04',
+    135: '180dd5b5a6ee4c3c',
+    136: '70a44ff59debe3e2',
+    137: 'b001336f2c642699',
+    138: 'adee9637a067da7d',
+    139: 'adee9637a067da7d',
+    140: 'adee9637a067da7d',
+    141: 'adee9637a067da7d',
+    142: 'adee9637a067da7d',
+    143: 'adee9637a067da7d',
+    144: 'adee9637a067da7d',
+    145: 'adee9637a067da7d',
+    146: 'adee9637a067da7d',
+    147: 'ef1d070d764208d6',
+    148: '91f4649ece9f6f8b',
+    149: 'f990e70f1858c23f',
+    150: 'f990e70f1858c23f',
+    151: 'f990e70f1858c23f',
+    152: 'dd4e0c4c72b1d6af',
+    153: 'dd4e0c4c72b1d6af',
+    154: 'd1b9411be9a7f2a4',
+    155: 'eb7953cd0bceec4d',
+    156: '838395c55708bfd2',
+    157: '838395c55708bfd2',
+    158: '838395c55708bfd2',
+    159: '838395c55708bfd2',
+    160: '838395c55708bfd2',
+    161: '838395c55708bfd2',
+    162: '838395c55708bfd2',
+    163: '838395c55708bfd2',
+    164: 'bc0029bcb0842fa4',
+    165: 'bc0029bcb0842fa4',
+    166: 'bc0029bcb0842fa4',
+    167: 'bc0029bcb0842fa4',
+    168: 'bc0029bcb0842fa4',
+    169: 'bc0029bcb0842fa4',
+    170: 'bc0029bcb0842fa4',
+    171: 'bc0029bcb0842fa4',
+    172: 'bc0029bcb0842fa4',
+    // The same code: 173 is for a wide window's (the resume's block test, far exits).
+    173: 'bc0029bcb0842fa4',
+    // The same code: 174 is for a wide window's (its lane accesses as they are where the
+    // engine reads them past 4 GiB, `wideLanes`).
+    174: 'bc0029bcb0842fa4',
+    // rdtsc's import answers a double, truncated in the region: no BigInt a read.
+    175: 'e8b7c430989bf65f',
+    // The same code: 176 is for a wide window's (its modules import the RAM, `wideRam`).
+    176: 'e8b7c430989bf65f',
+    // Each region's function marks its entry entered (`Tables.USED`): a run's store keeps
+    // only the regions it made and entered.
+    177: '32b496aa781ac959',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
 const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
-const IMAGES = new URL('../../../../tools/cork-bench/images/', import.meta.url);
+const IMAGES = new URL('../../bench/micro/images/', import.meta.url);
 const BASE = 0x401000;
 const ENTRIES = [0x401000, 0x401010];
 
@@ -132,15 +217,6 @@ function digest(){
     finishModule(context, [translation.functionIndex]);
     m.exportFunction('region', translation.functionIndex);
     hash.update('predicted:').update(m.toBytes());
-    // The same unpredicted, its call looking for an empty callee in place (`emptySites`).
-    const plain = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000, {});
-    const sites = new ModuleBuilder();
-    const sitesContext = prepareModule(sites, layout, FEATURES, {}, { hash: true,
-        trapPort: 0xb077, resume: true, callReturn: true, emptySites: true });
-    const atSites = emitRegion(sitesContext, plain, { entryTop: 0, checked: false });
-    finishModule(sitesContext, [atSites.functionIndex]);
-    sites.exportFunction('region', atSites.functionIndex);
-    hash.update('empty sites:').update(sites.toBytes());
     // A call into the host from inside a region (`out dx, eax` to the trap port), the integer
     // registers alone and with x87 ones live: what the handler's answer does to the run --
     // EIP moved, the turn ended -- is emitted after the call. mov ebx, 1; mov dx, 0xb077;
@@ -150,6 +226,25 @@ function digest(){
         ['trap x87', [0xd9, 0xe8, ...trapped]]]))
     {
         const call = formRegion(address=>bytes[address - 0x1000] ?? 0, 0x1000, {});
+        const calls = new ModuleBuilder();
+        const callsContext = prepareModule(calls, layout, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true });
+        const atCall = emitRegion(callsContext, call, { entryTop: 0, checked: false });
+        finishModule(callsContext, [atCall.functionIndex]);
+        calls.exportFunction('region', atCall.functionIndex);
+        hash.update(`${name}:`).update(calls.toBytes());
+    }
+    // A direct call to an import thunk, formed as the call through its slot (`thunkCall`):
+    // call 0x1010; hlt; at 0x1010 jmp [0x1100], whose slot names 0x1200: mov eax, [ecx+8]; ret.
+    // Formed in from the slot, and with a callee too large to form in, as a wasm call.
+    const thunked = new Uint8Array(0x300);
+    thunked.set([0xe8, 0x0b, 0, 0, 0, 0xf4], 0);
+    thunked.set([0xff, 0x25, 0x00, 0x11, 0, 0], 0x10);
+    thunked.set([0x00, 0x12, 0, 0], 0x100);
+    thunked.set([0x8b, 0x41, 0x08, 0xc3], 0x200);
+    for (const [name, leafBlocks] of /** @type {const} */ ([['thunk', 16], ['thunk apart', 0]]))
+    {
+        const call = formRegion(address=>thunked[address - 0x1000] ?? 0, 0x1000, { leafBlocks });
         const calls = new ModuleBuilder();
         const callsContext = prepareModule(calls, layout, FEATURES, {}, { hash: true,
             trapPort: 0xb077, resume: true, callReturn: true });

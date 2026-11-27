@@ -10,6 +10,7 @@ import {
     createSeh, RECORD, CONTEXT, Disposition, EFLAGS_AC, EFLAGS_DF, EFLAGS_TF, END_OF_CHAIN,
     EH_UNWINDING, SELECTORS, STATUS,
 } from './seh.js';
+import { floatImages, restoreFloatImages } from '../../cpu/internal/fpu-image.js';
 
 const TEB = 0x8000;
 const STACK = 0x40000;
@@ -36,7 +37,7 @@ function machine(options = {}){
 
     const host = {
         /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>bytes.subarray(at, at + length),
+        readMemory: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
         writeMemory: (at, value)=>bytes.set(value, at),
         // Everything inside the buffer is there; nothing outside is. A bounds
@@ -104,7 +105,7 @@ test('the record is eighty bytes, and the parameters are where a handler reads t
 });
 
 test('the guest context is the layout a handler was compiled against', ()=>{
-    // Not the shape the emulator keeps. Every one of these is a translation,
+    // Not the shape the engine keeps. Every one of these is a translation,
     // and a wrong offset hands a handler a plausible number from the next
     // field along.
     assert.equal(CONTEXT.SIZE, 0x2cc);
@@ -221,6 +222,109 @@ test('a context a handler changed is what execution continues with', async()=>{
     assert.equal(result.registers?.esp, 0x3f000, 'the stack pointer too, not only the address');
     assert.equal(result.registers?.eax, 0xabc);
 });
+
+test("a handler's context carries the thread's debug registers, and continuing gives it new ones",
+    async()=>{
+        // A handler reads Dr6 for what stopped the thread and sets Dr0-Dr3/Dr7
+        // in the record it continues from; the thread keeps what it set.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        const thread = {
+            debugRegisters: { dr0: 0x1000, dr1: 0, dr2: 0, dr3: 0, dr6: 0x4000, dr7: 0 },
+        };
+        /** @type {any} */ (m.host).currentThread = ()=>thread;
+        m.registerFrames([0x51000]);
+        /** @type {number[]} */
+        let seen = [];
+        let flags = 0;
+        const original = m.host.callGuest;
+        m.host.callGuest = async call=>{
+            const at = call.args[2];
+            flags = m.get(at);
+            seen = [4, 8, 0xc, 0x10, 0x14, 0x18].map(offset=>m.get(at + offset));
+            m.put(at + 4, 0x42424240);
+            m.put(at + 0x18, 0x115);
+            return original(call);
+        };
+        const result = await m.seh.dispatch({ code: 0xc0000005, address: 0x401000 });
+        assert.equal(result.handled, true);
+        assert.equal(flags & 0x10010, 0x10010, 'the record names the debug registers');
+        assert.deepEqual(seen, [0x1000, 0, 0, 0, 0x4000, 0]);
+        assert.deepEqual(thread.debugRegisters,
+            { dr0: 0x42424240, dr1: 0, dr2: 0, dr3: 0, dr6: 0x4000, dr7: 0x115 });
+    });
+
+test("a handler's context carries the thread's x87 and SSE state, and continuing puts it back",
+    async()=>{
+        // A .NET runtime resumes a thread it redirected for a collection by
+        // raising an exception whose handler lays the thread's saved context
+        // over the record and continues. The state was not in the record and
+        // not put back: a thread stopped between a call that left its result
+        // in ST(0) and the multiply that takes it went on with whatever the
+        // runtime's own code had left there, and a world generator drew the
+        // same random number for ever.
+        const layout = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,
+            x87Exact: 198, xmm: 208, mxcsr: 336 };
+        const block = new Uint8Array(512);
+        const state = new DataView(block.buffer);
+        /** @param {number} top @param {number} value @param {number} lane */
+        const load = (top, value, lane)=>{
+            block.fill(0);
+            block[layout.x87Top] = top;
+            block[layout.x87Empty] = 0xff & ~(1 << top);
+            state.setUint16(layout.x87Control, 0x27f, true);
+            state.setFloat64(layout.x87 + top * 16, value, true);
+            block.fill(lane, layout.xmm, layout.xmm + 16);
+            state.setUint32(layout.mxcsr, 0x1f80, true);
+        };
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        // The processor's images, the running thread's with no context given.
+        /** @type {any} */ (m.host).float = {
+            images: (/** @type {any} */ context)=>floatImages(context ?? { block, layout }),
+            restore: (/** @type {any} */ context, /** @type {any} */ images)=>
+                restoreFloatImages(context ?? { block, layout }, images),
+        };
+        // What the thread's resume does with the registers a continuation
+        // names (`resumeContextAt`): the floating-point images among them.
+        /** @param {any} result */
+        const resume = result=>restoreFloatImages({ block, layout }, result.registers.float);
+        m.registerFrames([0x51000]);
+        const original = m.host.callGuest;
+
+        // The handler's own code leaves the registers changed; the record wins.
+        load(7, 0.25, 0x11);
+        let flags = 0;
+        m.host.callGuest = async call=>{
+            flags = m.get(call.args[2] + CONTEXT.FLAGS);
+            load(3, 99, 0x77);
+            return original(call);
+        };
+        const first = await m.seh.dispatch({ code: 1, address: 0x401000 });
+        assert.equal(flags, 0x1003f,
+            'CONTEXT_FULL with the debug, floating-point and extended groups (CONTEXT_ALL)');
+        assert.equal(block[layout.x87Top], 3, 'not written where the handler returned:'
+            + ' another thread may be on the processor by then');
+        resume(first);
+        assert.deepEqual([block[layout.x87Top], block[layout.x87Empty],
+            state.getFloat64(layout.x87 + 7 * 16, true), block[layout.xmm]],
+        [7, 0x7f, 0.25, 0x11], 'as it was at the exception');
+
+        // A context laid over the record is what the thread goes on with.
+        load(6, 1.5, 0x22);
+        const saved = new Uint8Array(CONTEXT.SIZE);
+        m.host.callGuest = async call=>{
+            saved.set(m.host.readMemory(call.args[2], CONTEXT.SIZE));
+            return Disposition.CONTINUE_SEARCH;
+        };
+        await m.seh.dispatch({ code: 1, address: 0x401000 });
+        load(0, -3, 0x55);
+        m.host.callGuest = async call=>{
+            m.host.writeMemory(call.args[2], saved);
+            return original(call);
+        };
+        resume(await m.seh.dispatch({ code: 1, address: 0x401000 }));
+        assert.deepEqual([block[layout.x87Top], state.getFloat64(layout.x87 + 6 * 16, true),
+            block[layout.xmm]], [6, 1.5, 0x22], "the saved thread's state");
+    });
 
 test('a frame whose handler is not there is passed over, not refused', async()=>{
     // The check is a bounds test. Demanding execute permission rejects the
@@ -354,6 +458,53 @@ test('a processor fault becomes an exception a program can handle', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 1, 'error code bit 1 says it was a write');
 });
 
+test('a guard page touched inside the stack grows it, elsewhere it is the program\'s', async()=>{
+    // Windows answers a stack's guard page itself: the page becomes the
+    // committed limit, the one below the next guard, and the touch runs
+    // again; with no room left above the reservation's bottom it is
+    // STATUS_STACK_OVERFLOW, and a guard page anywhere else is
+    // STATUS_GUARD_PAGE_VIOLATION with the access and address.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    /** @type {Set<number>} */
+    const guarded = new Set([0x3f000, 0x31000, 0x60000]);
+    /** @type {number[]} */
+    const committed = [];
+    const seh = createSeh({ ...m.host, guardPages: {
+        touch: (/** @type {number} */ address)=>guarded.delete(address & ~0xfff),
+        commitGuard: (/** @type {number} */ page)=>{
+            committed.push(page);
+            guarded.add(page);
+            return true;
+        },
+    } });
+    m.put(TEB + 4, 0x40000);
+    m.put(TEB + 0xe0c, 0x30000);
+    const at = { ...m.registers(), eip: 0x401500 };
+
+    const grown = await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2,
+        address: 0x3fffc }, at);
+    assert.deepEqual(grown, { handled: true, registers: at }, 'the touch runs again');
+    assert.deepEqual(committed, [0x3e000]);
+    assert.equal(m.get(TEB + 8), 0x3f000, 'StackLimit');
+    assert.equal(m.called.length, 0, 'no handler sees it');
+
+    assert.equal((await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2,
+        address: 0x31010 }, at)).handled, true);
+    assert.deepEqual(committed, [0x3e000], 'no page left above the bottom');
+    assert.equal(m.get(m.called[0].args[0] + RECORD.CODE), STATUS.STACK_OVERFLOW);
+
+    await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 0, address: 0x60008 }, at);
+    const record = m.called[1].args[0];
+    assert.equal(m.get(record + RECORD.CODE), STATUS.GUARD_PAGE_VIOLATION);
+    assert.deepEqual([m.get(record + RECORD.INFORMATION), m.get(record + RECORD.INFORMATION + 4)],
+        [0, 0x60008]);
+
+    await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 0, address: 0x60008 }, at);
+    assert.equal(m.get(m.called[2].args[0] + RECORD.CODE), STATUS.ACCESS_VIOLATION,
+        'the guard went with the first touch');
+});
+
 test('an instruction the processor refused is traced with its bytes', async()=>{
     // UD2 a protection raises on purpose and an opcode the translator lacks
     // both arrive as vector 6; only the bytes tell them apart.
@@ -369,6 +520,40 @@ test('an instruction the processor refused is traced with its bytes', async()=>{
 
     assert.ok(said.some(line=>line.includes('at 0x41000 (0f 0b eb 07 22 22 22 00)')),
         said.join('\n'));
+});
+
+test('an access the program\'s own code was refused is traced with its registers, bytes and stack',
+    async()=>{
+        // A process that ends on it leaves nothing else to read, and code a
+        // protection decrypts at run time is not in the file to disassemble.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        /** @type {string[]} */
+        const said = [];
+        const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+        m.registerFrames([0x51000]);
+        m.host.writeMemory(0x41000,
+            new Uint8Array([0x8b, 0x46, 0x0c, 0x90, 0x90, 0x90, 0x90, 0x90]));
+        m.host.writeMemory(0x60000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
+        await seh.onFault({ vector: 14, eip: 0x41000, errorCode: 0, address: 0xc },
+            { ...m.registers(), eip: 0x41000, esi: 0, eax: 1, esp: 0x60000 });
+        const line = said.find(one=>one.includes('reading 0xc')) ?? '';
+        assert.match(line, /eax=0x1 .*esi=0x0 .*esp=0x60000/, said.join('\n'));
+        assert.ok(line.includes('code 8b 46 0c 90 90 90 90 90'), line);
+        assert.ok(line.includes('stack 0x12345678'), line);
+    });
+
+test('a refused access met in a host function is traced with that function\'s name', async()=>{
+    // The address it was raised at is the function's trap, which names
+    // nothing: the function and the pointer it was handed are the lead.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    /** @type {string[]} */
+    const said = [];
+    const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+    m.registerFrames([0x51000]);
+    await seh.raiseAccess({ address: 0x801601e0, mode: 'read',
+        call: 'KERNEL32.dll!LCMapStringEx' });
+    assert.ok(said.some(line=>line.includes('reading 0x801601e0 in KERNEL32.dll!LCMapStringEx, '
+        + 'raised from')), said.join('\n'));
 });
 
 test('a fault\'s context holds the registers the faulting code had', async()=>{
@@ -387,6 +572,36 @@ test('a fault\'s context holds the registers the faulting code had', async()=>{
     assert.equal(m.get(context + CONTEXT.ESP), 0x60000);
     assert.ok(record < 0x60000, 'and the record is built below the faulting stack');
     assert.equal(result.registers?.eax, 0xa1, 'continuing resumes with them');
+});
+
+test('the debug service with no debugger is a breakpoint after it, or nothing at all', async()=>{
+    // `int 0x2d`: eax the service, ecx and edx its arguments. A breakpoint or
+    // prompt is raised as EXCEPTION_BREAKPOINT just past the instruction with
+    // the three as parameters; a print or a symbol load goes on one byte past
+    // it, raising nothing - the byte a protection's check hides there.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const at = { ...m.registers(), eip: 0x401502, eax: 0, ecx: 0x1111, edx: 0x2222 };
+
+    const raised = await m.seh.onFault({ vector: 0x2d, eip: 0x401502, errorCode: null }, at);
+
+    const [{ args: [record, , context] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), STATUS.BREAKPOINT);
+    assert.equal(m.get(record + RECORD.ADDRESS), 0x401502);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 3);
+    assert.deepEqual([0, 4, 8].map(offset=>m.get(record + RECORD.INFORMATION + offset)),
+        [0, 0x1111, 0x2222]);
+    assert.equal(m.get(context + CONTEXT.EIP), 0x401502);
+    assert.equal(raised.registers?.eip, 0x401502);
+
+    for (const service of [1, 3, 4])
+    {
+        const quiet = await m.seh.onFault({ vector: 0x2d, eip: 0x401502, errorCode: null },
+            { ...at, eax: service });
+        assert.equal(quiet.handled, true);
+        assert.equal(quiet.registers?.eip, 0x401503, `service ${service} skips a byte`);
+    }
+    assert.equal(m.called.length, 1, 'and offers no handler anything');
 });
 
 test('a protection fault is an access violation with no address to give', async()=>{
@@ -437,6 +652,23 @@ test('the top-level filter is guest code, and is called', async()=>{
     assert.deepEqual(m.called, [{ entry: 0x61000, args: [0x1234] }]);
 });
 
+test('under a debugger the top-level filter is not called: the debugger has the exception',
+    async()=>{
+        // Wine's kernel32 debugger.c test_unhandled_exception_filter: with a
+        // debug port UnhandledExceptionFilter answers EXCEPTION_CONTINUE_SEARCH
+        // and calls nothing; without one it calls the filter.
+        const m = machine({ answer: ()=>1 });
+        let debugged = true;
+        const seh = createSeh({ ...m.host, debugReport: ()=>Promise.resolve(0),
+            debugged: ()=>debugged });
+        seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x1234]), 0);
+        assert.deepEqual(m.called, []);
+        debugged = false;
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x1234]), 1);
+        assert.deepEqual(m.called, [{ entry: 0x61000, args: [0x1234] }]);
+    });
+
 test('RaiseException dispatches instead of throwing', async()=>{
     const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
     m.registerFrames([0x51000]);
@@ -450,6 +682,53 @@ test('RaiseException dispatches instead of throwing', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 0xaa);
     assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xbb);
 });
+
+test('RaiseException continues where the handler\'s context says, not back in its caller',
+    async()=>{
+        // Windows continues from the context whole (NtContinue). A .NET runtime
+        // resumes a thread it redirected for a collection by raising an
+        // exception whose handler lays the thread's saved context over the
+        // record: returned to RaiseException's caller with only the other
+        // registers taken, the thread went on in the runtime's stub with the
+        // frame pointer of the code it was redirected from, the stub's epilogue
+        // wrote that frame's locals into the handler chain and returned out of
+        // the function the thread had been stopped in.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        /** @type {Record<string, number>[]} */
+        const continued = [];
+        /** @type {any} */ (m.host).continueAt = (/** @type {Record<string, number>} */ registers)=>{
+            continued.push(registers);
+            return 'continued';
+        };
+        m.registerFrames([0x51000]);
+        // The call: its return address at the stack pointer, four arguments above.
+        m.put(STACK, 0x402222);
+        const original = m.host.callGuest;
+
+        // Left as it was, the context is the caller's once the call has returned.
+        let shown = { eip: 0, esp: 0 };
+        m.host.callGuest = async call=>{
+            shown = { eip: m.get(call.args[2] + CONTEXT.EIP),
+                esp: m.get(call.args[2] + CONTEXT.ESP) };
+            return original(call);
+        };
+        assert.equal(await m.seh.table.RaiseException.handler([0xe0000001, 0, 0, 0]), 'continued');
+        assert.deepEqual(shown, { eip: 0x402222, esp: STACK + 20 },
+            'the return address, and the stack past it and the four arguments');
+        assert.deepEqual([continued[0].eip, continued[0].esp], [0x402222, STACK + 20]);
+
+        // Laid over with another context, that one is where the thread goes.
+        m.host.callGuest = async call=>{
+            m.put(call.args[2] + CONTEXT.EIP, 0x77000);
+            m.put(call.args[2] + CONTEXT.ESP, 0x3f000);
+            m.put(call.args[2] + CONTEXT.EBP, 0x3f100);
+            m.put(call.args[2] + CONTEXT.EAX, 0xabc);
+            return original(call);
+        };
+        await m.seh.table.RaiseException.handler([0xe0434f4e, 0, 0, 0]);
+        assert.deepEqual([continued[1].eip, continued[1].esp, continued[1].ebp, continued[1].eax],
+            [0x77000, 0x3f000, 0x3f100, 0xabc]);
+    });
 
 test('an exception nothing handles ends the process with its code, and never returns', async()=>{
     /** @type {any[]} */
@@ -681,4 +960,121 @@ test('a handler that declines leaves the head where it was', async()=>{
     await seh.dispatch({ code: 1, address: 0x401000 });
 
     assert.equal(m.get(TEB), frames[0]);
+});
+
+test('a refused guest access is STATUS_ACCESS_VIOLATION, read or write and where', async()=>{
+    // Windows faults at the DLL's own instruction when a program hands it a
+    // pointer that is not there, and the program's handlers see the access
+    // violation: what it did and the address it could not reach.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const answer = await m.seh.raiseAccess({ address: 0xdeadbeef, mode: 'write' });
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), 0xc0000005);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 2);
+    assert.equal(m.get(record + RECORD.INFORMATION), 1, 'a write');
+    assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xdeadbeef);
+    assert.equal(answer, 0, 'continued, the call answers zero');
+
+    const read = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    read.registerFrames([0x51000]);
+    await read.seh.raiseAccess({ address: 0, mode: 'read' });
+    const [{ args: [readRecord] }] = read.called;
+    assert.deepEqual([read.get(readRecord + RECORD.INFORMATION),
+        read.get(readRecord + RECORD.INFORMATION + 4)], [0, 0]);
+});
+
+test('an exception a handler raises reaches the program with its code and '
+    + 'information', async()=>{
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const answer = await m.seh.raiseException({ status: 0xc0000094, flags: 0, parameters: [7] });
+    const [{ args: [record] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), 0xc0000094);
+    assert.equal(m.get(record + RECORD.FLAGS), 0);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 1);
+    assert.equal(m.get(record + RECORD.INFORMATION), 7);
+    assert.equal(answer, 0, 'continued, the call answers zero');
+});
+
+test('what a program hands its last-chance filter is traced: registers, chain and words', async()=>{
+    // A fail-fast calls the filter and ends: the trace is all that is left.
+    const m = machine({ answer: ()=>1 });
+    /** @type {string[]} */
+    const said = [];
+    const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+    m.registerFrames([0x51000]);
+    const record = 0x30000;
+    const context = 0x31000;
+    m.put(record, 0xc0000409);
+    m.put(record + 0x0c, 0x401234);
+    m.put(context + 0xb4, 0x40100);
+    m.put(context + 0xc4, 0x40000);
+    m.put(0x40100 - 64, 0xfeedface);
+    m.put(0x40000 + 0x2c4, 0xc0ffee);
+    m.put(0x2000, record);
+    m.put(0x2004, context);
+    seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+    await seh.table.UnhandledExceptionFilter.handler([0x2000]);
+
+    const text = said.join('\n');
+    assert.ok(text.includes('last chance: code 0xc0000409 at 0x401234'), text);
+    assert.ok(text.includes('ebp=0x40100') && text.includes('esp=0x40000'), text);
+    assert.ok(text.includes('[ebp-64] 0xfeedface'), text);
+    assert.ok(/0x402c0: \S+ 0xc0ffee /.test(text), 'the stack above esp, row by row');
+    assert.ok(text.includes('0x20000>0x51000'), 'the handler chain');
+});
+
+test('the last-chance trace reads nothing below a small register, and never fails the call',
+    async()=>{
+    // A register holding 3 named 3 - 64 as a place to read from: unsigned,
+    // the top of the address space, which a memory may say is mapped.
+        const m = machine({ answer: ()=>1 });
+        /** @type {string[]} */
+        const said = [];
+        const seh = createSeh({ ...m.host,
+            isMapped: (/** @type {number} */ at)=>m.host.isMapped(at) || (at >>> 0) >= 0xffffff00,
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                if ((at >>> 0) >= 0xffffff00)
+                {
+                    throw new Error('access violation');
+                }
+                return m.host.readMemory(at, length);
+            },
+            trace: (/** @type {string} */ line)=>said.push(line) });
+        m.put(0x30000, 0xc0000409);
+        m.put(0x31000 + 0xb0, 3);
+        m.put(0x2000, 0x30000);
+        m.put(0x2004, 0x31000);
+        seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x2000]), 1,
+            'the filter answered');
+        assert.ok(said.some(line=>line.includes('eax=0x3')), said.join('\n'));
+    });
+
+test('RtlUnwind shows the caller\'s context and answers the Eax its handlers leave', async()=>{
+    // Wine's exception test, test_unwind: the handlers see Eip at the return
+    // from RtlUnwind and ReturnValue in Eax; one that adds to Eax changes
+    // what the call returns.
+    const m = machine({ answer: (_entry, args)=>{
+        m.put(args[2] + CONTEXT.EAX, m.get(args[2] + CONTEXT.EAX) + 1);
+        return Disposition.CONTINUE_SEARCH;
+    } });
+    const frames = m.registerFrames([0x51000, 0x52000]);
+    m.put(STACK, 0x401234);
+    const answer = await /** @type {any} */ (m.seh.table).RtlUnwind
+        .handler([frames[1], 0x401999, 0, 0xdead0000]);
+
+    assert.equal(answer >>> 0, 0xdead0001, 'one handler ran, and its Eax is the answer');
+    const [{ args: [record, , context] }] = m.called;
+    assert.equal(m.get(context + CONTEXT.EIP), 0x401234, 'the return address, not the trap');
+    assert.equal(m.get(context + CONTEXT.ESP), STACK + 4 + 16, 'past the four arguments');
+    assert.equal(m.get(record + RECORD.CODE), STATUS.UNWIND);
+    assert.equal(m.get(record + RECORD.ADDRESS), 0x401234);
+
+    const none = await /** @type {any} */ (m.seh.table).RtlUnwind
+        .handler([frames[1], 0, 0, 0xdead0000]);
+    assert.equal(none >>> 0, 0xdead0000, 'with no frame left to unwind, ReturnValue as given');
 });

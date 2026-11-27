@@ -27,23 +27,41 @@
  */
 
 import { describe as describeSlots } from './vtables.js';
+import { compiledAt } from './block.js';
+import { createDeviceRing } from './d3d10-ring.js';
+import { createDirect3D11Seam } from './d3d11.js';
+import { COMPILED } from './d3d10-inguest.x86.js';
+import { COMPILED as COMPILED_LONG } from './d3d10-inguest.x64.js';
+
+/**
+ * The routines by name, for each width: one source (`d3d10-inguest.js`), a
+ * 64-bit process placing its x86-64.
+ *
+ * @type {Record<4 | 8, Record<string, any>>}
+ */
+const IN_GUEST = { 4: COMPILED, 8: COMPILED_LONG };
+/**
+ * The routines a 64-bit process leaves to the trap: ClearDepthStencilView's
+ * depth is a FLOAT by value, the fourth argument, which the x64 convention
+ * passes in XMM3 where the routine reads R9.
+ */
+const NARROW = new Set(['ClearDepthStencilView']);
+import { ID3D10DEVICE_SLOTS } from '../d3d10/slots.js';
 import { createEffectSeam } from './d3d10-effect.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 import { describeAdapter } from './adapter.js';
 import { createFields } from './structs.js';
+import { SHADER_KIND } from '../d3d10/dxbc.js';
 import {
-    D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
+    D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT,
+    D3D10_RESOURCE_DIMENSION, D3D10_USAGE,
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA, DXGI_ERROR_UNSUPPORTED, E_FAIL, E_INVALIDARG,
-    E_NOTIMPL, E_OUTOFMEMORY, IID, S_OK, formatPitch,
+    E_NOINTERFACE, E_NOTIMPL, E_OUTOFMEMORY, IID, S_OK, formatPitch,
 } from '../d3d10/constants.js';
 import {
-    D3D10CreateDevice, D3D10CreateDevice1, D3D10CreateDeviceAndSwapChain,
-    D3D10CreateDeviceAndSwapChain1,
-} from '../d3d10/device.js';
-import { CreateDXGIFactory, CreateDXGIFactory1 } from '../d3d10/dxgi.js';
-import {
-    DXGI_MODE_DESC, VIEW_UNION, readModeDesc, readSwapChainDesc, readViewDesc, writeModeDesc,
-    writeSwapChainDesc, writeViewDesc,
+    DXGI_MODE_DESC, VIEW_UNION, readModeDesc, readSwapChainDesc, readSwapChainDesc1,
+    readViewDesc, writeFullscreenDesc, writeModeDesc, writeSwapChainDesc, writeSwapChainDesc1,
+    writeViewDesc,
 } from '../d3d10/structs.js';
 import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
 import {
@@ -52,6 +70,7 @@ import {
     createShaderReflection, debugInfoOf, reflectShader,
 } from '../d3d10/reflection.js';
 import { STATE_BLOCK_MASK_SIZE, createStateBlock, stateBlockMask } from '../d3d10/stateblock.js';
+import { createCompilerSeam } from './d3dcompiler.js';
 
 /**
  * A method here may answer nothing: the setters of this API are `void`, and
@@ -64,14 +83,58 @@ import { STATE_BLOCK_MASK_SIZE, createStateBlock, stateBlockMask } from '../d3d1
  * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
  *     implemented
  */
-const describe = (id, slots, implemented)=>describeSlots(id, slots,
-    /** @type {Record<string, (target: any, args: number[]) => number>} */ (implemented));
+/**
+ * @param {string} id @param {[string, number][]} slots
+ * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
+ *     implemented
+ * @param {Record<string, (builder: { trap: number }) => number>} [guests]
+ * @param {(target: any, pointers: Iterable<number>) => void} [released]
+ */
+const describeAt = (id, slots, implemented, guests = {}, released = undefined)=>describeSlots(id,
+    slots, /** @type {Record<string, (target: any, args: number[]) => number>} */ (implemented),
+    guests, released);
+
+/**
+ * ID3D10Device's methods that run in the guest (`d3d10-inguest.js`): each
+ * writes its call into the device's command ring.
+ */
+const RING_METHODS = Object.freeze(['UpdateSubresource', 'VSSetShader', 'PSSetShader',
+    'GSSetShader', 'IASetInputLayout', 'IASetPrimitiveTopology', 'RSSetState',
+    'VSSetConstantBuffers', 'PSSetConstantBuffers', 'GSSetConstantBuffers', 'VSSetShaderResources',
+    'PSSetShaderResources', 'GSSetShaderResources', 'VSSetSamplers', 'PSSetSamplers',
+    'GSSetSamplers', 'IASetVertexBuffers', 'IASetIndexBuffer', 'OMSetRenderTargets',
+    'OMSetBlendState', 'OMSetDepthStencilState', 'RSSetViewports', 'RSSetScissorRects', 'Draw',
+    'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced', 'ClearRenderTargetView',
+    'ClearDepthStencilView']);
+
+/**
+ * Direct3D 11's immediate context's methods that run in the guest, by the
+ * routine that carries each: 10's own where the two calls mean the same, a
+ * routine of the context's where 11's arguments differ.
+ */
+export const CONTEXT_RING = Object.freeze({
+    ...Object.fromEntries(['IASetInputLayout', 'IASetPrimitiveTopology', 'RSSetState',
+        'VSSetConstantBuffers', 'PSSetConstantBuffers', 'GSSetConstantBuffers',
+        'VSSetShaderResources', 'PSSetShaderResources', 'GSSetShaderResources', 'VSSetSamplers',
+        'PSSetSamplers', 'GSSetSamplers', 'IASetVertexBuffers', 'IASetIndexBuffer',
+        'OMSetRenderTargets', 'OMSetBlendState', 'OMSetDepthStencilState', 'RSSetScissorRects',
+        'Draw', 'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced', 'ClearRenderTargetView',
+        'ClearDepthStencilView'].map(name=>[name, name])),
+    VSSetShader: 'ContextVSSetShader',
+    PSSetShader: 'ContextPSSetShader',
+    GSSetShader: 'ContextGSSetShader',
+    RSSetViewports: 'ContextRSSetViewports',
+    Map: 'ContextMap',
+    Unmap: 'ContextUnmap',
+});
 
 /** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, for what a browser has no counterpart of. */
 const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022 | 0;
 
 /** DXGI_RESIDENCY_FULLY_RESIDENT. */
 const DXGI_RESIDENCY_FULLY_RESIDENT = 1;
+/** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
+const DXGI_PRESENT_TEST = 0x1;
 
 // --- structures, by offset ---
 
@@ -98,6 +161,11 @@ const D3D10_TEXTURE3D_DESC = Object.freeze({
 
 const D3D10_SUBRESOURCE_DATA = Object.freeze({
     pSysMem: 0x00, SysMemPitch: 0x04, SysMemSlicePitch: 0x08, SIZE: 0x0c,
+});
+
+/** The same in a 64-bit process: pSysMem a quadword. */
+const D3D10_SUBRESOURCE_DATA_64 = Object.freeze({
+    pSysMem: 0x00, SysMemPitch: 0x08, SysMemSlicePitch: 0x0c, SIZE: 0x10,
 });
 
 const D3D10_BLEND_DESC = Object.freeze({
@@ -135,6 +203,12 @@ const D3D10_VIEWPORT = Object.freeze({
 const D3D10_INPUT_ELEMENT_DESC = Object.freeze({
     SemanticName: 0x00, SemanticIndex: 0x04, Format: 0x08, InputSlot: 0x0c,
     AlignedByteOffset: 0x10, InputSlotClass: 0x14, InstanceDataStepRate: 0x18, SIZE: 0x1c,
+});
+
+/** The same in a 64-bit process: SemanticName a quadword. */
+const D3D10_INPUT_ELEMENT_DESC_64 = Object.freeze({
+    SemanticName: 0x00, SemanticIndex: 0x08, Format: 0x0c, InputSlot: 0x10,
+    AlignedByteOffset: 0x14, InputSlotClass: 0x18, InstanceDataStepRate: 0x1c, SIZE: 0x20,
 });
 
 const D3D10_BOX = Object.freeze({
@@ -181,11 +255,29 @@ const DXGI_ADAPTER_DESC = Object.freeze({
     AdapterLuidLow: 0x11c, AdapterLuidHigh: 0x120, SIZE: 0x124,
 });
 
+/** The same in a 64-bit process: the three memories SIZE_T, quadwords. */
+const DXGI_ADAPTER_DESC_64 = Object.freeze({
+    Description: 0x000, VendorId: 0x100, DeviceId: 0x104, SubSysId: 0x108, Revision: 0x10c,
+    DedicatedVideoMemory: 0x110, DedicatedSystemMemory: 0x118, SharedSystemMemory: 0x120,
+    AdapterLuidLow: 0x128, AdapterLuidHigh: 0x12c, SIZE: 0x130,
+});
+
 /** DXGI_OUTPUT_DESC: a 32-wide-character name first. */
 const DXGI_OUTPUT_DESC = Object.freeze({
     DeviceName: 0x00, DesktopCoordinates: 0x40, AttachedToDesktop: 0x50, Rotation: 0x54,
     Monitor: 0x58, SIZE: 0x5c,
 });
+
+/** The same in a 64-bit process: Monitor an HMONITOR, a quadword. */
+const DXGI_OUTPUT_DESC_64 = Object.freeze({ ...DXGI_OUTPUT_DESC, SIZE: 0x60 });
+
+/**
+ * DXGI_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY and
+ * DXGI_COMPUTE_PREEMPTION_DISPATCH_BOUNDARY: where a GPU of today's driver
+ * model can stop a draw and a dispatch.
+ */
+const PREEMPTION_DMA_BUFFER = 0;
+const PREEMPTION_DISPATCH = 1;
 
 /** What the adapter claims to have, in bytes: enough that no program budgets down. */
 const REPORTED_VIDEO_MEMORY = 1 << 30;
@@ -237,6 +329,19 @@ export const IDXGIRESOURCE_SLOTS = /** @type {[string, number][]} */ ([
     ['GetUsage', 1],
     ['SetEvictionPriority', 1],
     ['GetEvictionPriority', 1],
+]);
+
+export const IDXGIRESOURCE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIRESOURCE_SLOTS,
+    ['CreateSubresourceSurface', 2],
+    ['CreateSharedHandle', 4],
+]);
+
+/** AcquireSync(UINT64 Key, DWORD ms) and ReleaseSync(UINT64 Key): a key is two words. */
+export const IDXGIKEYEDMUTEX_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIDEVICESUBOBJECT_SLOTS,
+    ['AcquireSync', 3],
+    ['ReleaseSync', 2],
 ]);
 
 export const IDXGISURFACE_SLOTS = /** @type {[string, number][]} */ ([
@@ -298,6 +403,146 @@ export const IDXGIDEVICE1_SLOTS = /** @type {[string, number][]} */ ([
     ['GetMaximumFrameLatency', 1],
 ]);
 
+// DXGI 1.2 to 1.6, each a prefix of the next (Wine's dxgi1_2.idl to dxgi1_6.idl).
+
+export const IDXGIFACTORY2_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY1_SLOTS,
+    ['IsWindowedStereoEnabled', 0],
+    ['CreateSwapChainForHwnd', 6],
+    ['CreateSwapChainForCoreWindow', 5],
+    ['GetSharedResourceAdapterLuid', 2],
+    ['RegisterStereoStatusWindow', 3],
+    ['RegisterStereoStatusEvent', 2],
+    ['UnregisterStereoStatus', 1],
+    ['RegisterOcclusionStatusWindow', 3],
+    ['RegisterOcclusionStatusEvent', 2],
+    ['UnregisterOcclusionStatus', 1],
+    ['CreateSwapChainForComposition', 4],
+]);
+const IDXGIFACTORY3_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY2_SLOTS,
+    ['GetCreationFlags', 0],
+]);
+export const IDXGIFACTORY4_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY3_SLOTS,
+    // A LUID by value: two dwords.
+    ['EnumAdapterByLuid', 4],
+    ['EnumWarpAdapter', 2],
+]);
+export const IDXGIFACTORY5_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY4_SLOTS,
+    ['CheckFeatureSupport', 3],
+]);
+const IDXGIFACTORY6_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY5_SLOTS,
+    ['EnumAdapterByGpuPreference', 4],
+]);
+const IDXGIFACTORY7_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIFACTORY6_SLOTS,
+    ['RegisterAdaptersChangedEvent', 2],
+    ['UnregisterAdaptersChangedEvent', 1],
+]);
+
+const IDXGIADAPTER2_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIADAPTER1_SLOTS,
+    ['GetDesc2', 1],
+]);
+export const IDXGIADAPTER3_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIADAPTER2_SLOTS,
+    ['RegisterHardwareContentProtectionTeardownStatusEvent', 2],
+    ['UnregisterHardwareContentProtectionTeardownStatus', 1],
+    ['QueryVideoMemoryInfo', 3],
+    // A UINT64 by value: two dwords.
+    ['SetVideoMemoryReservation', 4],
+    ['RegisterVideoMemoryBudgetChangeNotificationEvent', 2],
+    ['UnregisterVideoMemoryBudgetChangeNotification', 1],
+]);
+const IDXGIADAPTER4_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIADAPTER3_SLOTS,
+    ['GetDesc3', 1],
+]);
+
+const IDXGIOUTPUT1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT_SLOTS,
+    ['GetDisplayModeList1', 4],
+    ['FindClosestMatchingMode1', 3],
+    ['GetDisplaySurfaceData1', 1],
+    ['DuplicateOutput', 2],
+]);
+const IDXGIOUTPUT2_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT1_SLOTS,
+    ['SupportsOverlays', 0],
+]);
+const IDXGIOUTPUT3_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT2_SLOTS,
+    ['CheckOverlaySupport', 3],
+]);
+const IDXGIOUTPUT4_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT3_SLOTS,
+    ['CheckOverlayColorSpaceSupport', 4],
+]);
+const IDXGIOUTPUT5_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT4_SLOTS,
+    ['DuplicateOutput1', 5],
+]);
+const IDXGIOUTPUT6_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIOUTPUT5_SLOTS,
+    ['GetDesc1', 1],
+    ['CheckHardwareCompositionSupport', 1],
+]);
+
+export const IDXGISWAPCHAIN1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISWAPCHAIN_SLOTS,
+    ['GetDesc1', 1],
+    ['GetFullscreenDesc', 1],
+    ['GetHwnd', 1],
+    ['GetCoreWindow', 2],
+    ['Present1', 3],
+    ['IsTemporaryMonoSupported', 0],
+    ['GetRestrictToOutput', 1],
+    ['SetBackgroundColor', 1],
+    ['GetBackgroundColor', 1],
+    ['SetRotation', 1],
+    ['GetRotation', 1],
+]);
+const IDXGISWAPCHAIN2_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISWAPCHAIN1_SLOTS,
+    ['SetSourceSize', 2],
+    ['GetSourceSize', 2],
+    ['SetMaximumFrameLatency', 1],
+    ['GetMaximumFrameLatency', 1],
+    ['GetFrameLatencyWaitableObject', 0],
+    ['SetMatrixTransform', 1],
+    ['GetMatrixTransform', 1],
+]);
+export const IDXGISWAPCHAIN3_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISWAPCHAIN2_SLOTS,
+    ['GetCurrentBackBufferIndex', 0],
+    ['CheckColorSpaceSupport', 2],
+    ['SetColorSpace1', 1],
+    ['ResizeBuffers1', 7],
+]);
+const IDXGISWAPCHAIN4_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISWAPCHAIN3_SLOTS,
+    ['SetHDRMetaData', 3],
+]);
+
+const IDXGIDEVICE2_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIDEVICE1_SLOTS,
+    ['OfferResources', 3],
+    ['ReclaimResources', 3],
+    ['EnqueueSetEvent', 1],
+]);
+const IDXGIDEVICE3_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIDEVICE2_SLOTS,
+    ['Trim', 0],
+]);
+const IDXGIDEVICE4_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGIDEVICE3_SLOTS,
+    ['OfferResources1', 4],
+    ['ReclaimResources1', 3],
+]);
+
 export const ID3D10MULTITHREAD_SLOTS = /** @type {[string, number][]} */ ([
     ['Enter', 0],
     ['Leave', 0],
@@ -305,14 +550,14 @@ export const ID3D10MULTITHREAD_SLOTS = /** @type {[string, number][]} */ ([
     ['GetMultithreadProtected', 0],
 ]);
 
-export const ID3D10DEVICECHILD_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10DEVICECHILD_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['GetPrivateData', 3],
     ['SetPrivateData', 3],
     ['SetPrivateDataInterface', 2],
 ]);
 
-export const ID3D10RESOURCE_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10RESOURCE_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D10DEVICECHILD_SLOTS,
     ['GetType', 1],
     ['SetEvictionPriority', 1],
@@ -358,7 +603,7 @@ export const ID3D10BLENDSTATE1_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDesc1', 1],
 ]);
 
-export const ID3D10SHADER_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10SHADER_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D10DEVICECHILD_SLOTS,
 ]);
 
@@ -414,6 +659,48 @@ export const ID3D10SHADERREFLECTIONTYPE_SLOTS = /** @type {[string, number][]} *
     ['GetMemberTypeName', 1],
 ]);
 
+/** ID3D11ShaderReflection, D3DReflect's: Direct3D 10's methods, then its own. */
+export const ID3D11SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10SHADERREFLECTION_SLOTS,
+    ['GetPatchConstantParameterDesc', 2],
+    ['GetVariableByName', 1],
+    ['GetResourceBindingDescByName', 2],
+    ['GetMovInstructionCount', 0],
+    ['GetMovcInstructionCount', 0],
+    ['GetConversionInstructionCount', 0],
+    ['GetBitwiseInstructionCount', 0],
+    ['GetGSInputPrimitive', 0],
+    ['IsSampleFrequencyShader', 0],
+    ['GetNumInterfaceSlots', 0],
+    ['GetMinFeatureLevel', 1],
+    ['GetThreadGroupSize', 3],
+    ['GetRequiresFlags', 0],
+]);
+
+const ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetVariableByIndex', 1],
+    ['GetVariableByName', 1],
+]);
+
+export const ID3D11SHADERREFLECTIONVARIABLE_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetDesc', 1],
+    ['GetType', 0],
+    ['GetBuffer', 0],
+    ['GetInterfaceSlot', 1],
+]);
+
+export const ID3D11SHADERREFLECTIONTYPE_SLOTS = /** @type {[string, number][]} */ ([
+    ...ID3D10SHADERREFLECTIONTYPE_SLOTS,
+    ['IsEqual', 1],
+    ['GetSubType', 0],
+    ['GetBaseClass', 0],
+    ['GetNumInterfaces', 0],
+    ['GetInterfaceByIndex', 1],
+    ['IsOfType', 1],
+    ['ImplementsInterface', 1],
+]);
+
 /** D3D10_BLEND_DESC1: two words, then eight targets of thirty-two bytes. */
 const D3D10_BLEND_DESC1 = Object.freeze({
     AlphaToCoverageEnable: 0x00, IndependentBlendEnable: 0x04, RenderTarget: 0x08,
@@ -429,109 +716,7 @@ const D3D10_RENDER_TARGET_BLEND_DESC1 = Object.freeze({
 /** Where the write mask byte of a D3D10_RENDER_TARGET_BLEND_DESC1 sits. */
 const RENDER_TARGET_WRITE_MASK1 = 0x1c;
 
-/**
- * ID3D10Device, after IUnknown's three: ninety-five slots, transcribed from
- * the header in its order. The `Set` family comes first, the `Get` family
- * mirrors it, and the creates come last -- the opposite of how a program
- * uses them.
- */
-export const ID3D10DEVICE_SLOTS = /** @type {[string, number][]} */ ([
-    ['VSSetConstantBuffers', 3],
-    ['PSSetShaderResources', 3],
-    ['PSSetShader', 1],
-    ['PSSetSamplers', 3],
-    ['VSSetShader', 1],
-    ['DrawIndexed', 3],
-    ['Draw', 2],
-    ['PSSetConstantBuffers', 3],
-    ['IASetInputLayout', 1],
-    ['IASetVertexBuffers', 5],
-    ['IASetIndexBuffer', 3],
-    ['DrawIndexedInstanced', 5],
-    ['DrawInstanced', 4],
-    ['GSSetConstantBuffers', 3],
-    ['GSSetShader', 1],
-    ['IASetPrimitiveTopology', 1],
-    ['VSSetShaderResources', 3],
-    ['VSSetSamplers', 3],
-    ['SetPredication', 2],
-    ['GSSetShaderResources', 3],
-    ['GSSetSamplers', 3],
-    ['OMSetRenderTargets', 3],
-    ['OMSetBlendState', 3],
-    ['OMSetDepthStencilState', 2],
-    ['SOSetTargets', 3],
-    ['DrawAuto', 0],
-    ['RSSetState', 1],
-    ['RSSetViewports', 2],
-    ['RSSetScissorRects', 2],
-    ['CopySubresourceRegion', 8],
-    ['CopyResource', 2],
-    ['UpdateSubresource', 6],
-    ['ClearRenderTargetView', 2],
-    ['ClearDepthStencilView', 4],
-    ['GenerateMips', 1],
-    ['ResolveSubresource', 5],
-    ['VSGetConstantBuffers', 3],
-    ['PSGetShaderResources', 3],
-    ['PSGetShader', 1],
-    ['PSGetSamplers', 3],
-    ['VSGetShader', 1],
-    ['PSGetConstantBuffers', 3],
-    ['IAGetInputLayout', 1],
-    ['IAGetVertexBuffers', 5],
-    ['IAGetIndexBuffer', 3],
-    ['GSGetConstantBuffers', 3],
-    ['GSGetShader', 1],
-    ['IAGetPrimitiveTopology', 1],
-    ['VSGetShaderResources', 3],
-    ['VSGetSamplers', 3],
-    ['GetPredication', 2],
-    ['GSGetShaderResources', 3],
-    ['GSGetSamplers', 3],
-    ['OMGetRenderTargets', 3],
-    ['OMGetBlendState', 3],
-    ['OMGetDepthStencilState', 2],
-    ['SOGetTargets', 3],
-    ['RSGetState', 1],
-    ['RSGetViewports', 2],
-    ['RSGetScissorRects', 2],
-    ['GetDeviceRemovedReason', 0],
-    ['SetExceptionMode', 1],
-    ['GetExceptionMode', 0],
-    ['GetPrivateData', 3],
-    ['SetPrivateData', 3],
-    ['SetPrivateDataInterface', 2],
-    ['ClearState', 0],
-    ['Flush', 0],
-    ['CreateBuffer', 3],
-    ['CreateTexture1D', 3],
-    ['CreateTexture2D', 3],
-    ['CreateTexture3D', 3],
-    ['CreateShaderResourceView', 3],
-    ['CreateRenderTargetView', 3],
-    ['CreateDepthStencilView', 3],
-    ['CreateInputLayout', 5],
-    ['CreateVertexShader', 3],
-    ['CreateGeometryShader', 3],
-    ['CreateGeometryShaderWithStreamOutput', 6],
-    ['CreatePixelShader', 3],
-    ['CreateBlendState', 2],
-    ['CreateDepthStencilState', 2],
-    ['CreateRasterizerState', 2],
-    ['CreateSamplerState', 2],
-    ['CreateQuery', 2],
-    ['CreatePredicate', 2],
-    ['CreateCounter', 2],
-    ['CheckFormatSupport', 2],
-    ['CheckMultisampleQualityLevels', 3],
-    ['CheckCounterInfo', 1],
-    ['CheckCounter', 9],
-    ['GetCreationFlags', 0],
-    ['OpenSharedResource', 3],
-    ['SetTextFilterSize', 2],
-    ['GetTextFilterSize', 2],
-]);
+export { ID3D10DEVICE_SLOTS };
 
 /** ID3D10Device1: the device, and three methods Direct3D 10.1 added after it. */
 export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
@@ -547,9 +732,19 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @property {any} memory      readMemory/writeMemory.
  * @property {(bytes: number) => number} [allocate]  Guest memory a map hands out.
  * @property {(address: number) => void} [free]
- * @property {() => import('../d3d10/device.js').DeviceOptions} deviceOptions
- *     What a device draws with: the backend and the GPU's sampler and texture
- *     makers, reached when a program creates one rather than before.
+ * @property {(bytes: number) => number} [ringAllocate]  Guest memory for a device's
+ *     command ring (`d3d10-ring.js`); absent, every call of a device traps.
+ * @property {(bytes: number, unbroken?: boolean) => number} [allocateCode]  Where the
+ *     ring's routines are placed.
+ * @property {Set<string>} [traps]  Methods kept as traps whatever runs in the guest.
+ * @property {number} [ringBytes]
+ * @property {4 | 8} [pointerSize]  8 for a 64-bit process, whose structures lay out a
+ *     pointer, an HWND or a SIZE_T in eight bytes and whose pointer outs are written whole
+ * @property {(factoryOptions: import('../d3d10/dxgi.js').FactoryOptions) => any} root
+ *     The entry points every factory and device comes from (`d3d10/root.js`), made with
+ *     what a device draws with -- here, or recorded for the graphics worker -- when a
+ *     program first asks for one rather than before.
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {import('../d3d10/dxgi.js').FactoryOptions} [factoryOptions]
  * @property {() => { width: number, height: number, displayWidth?: number,
  *                     displayHeight?: number }} [screen]
@@ -562,21 +757,260 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
  * @property {import('./ddraw.js').SurfaceDcServices} [gdi]
  *     Device contexts over guest memory, for IDXGISurface1::GetDC; absent, none is handed out.
+ * @property {(value: number) => void} [floatResult]  Sets the float a method answers on
+ *     the floating-point stack (GetResourceMinLOD).
+ * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
+ *     [callGuest]   Into the program, for the ID3DInclude a compile is given.
+ * @property {() => any} [currentThread]  The thread a compile's include calls run on.
+ * @property {(window: number, fullscreen: boolean) => void} [shownIn]  Hears each frame a
+ *     swap chain shows, with its window: the seam's one record across the APIs.
+ * @property {{ create: (options: { manualReset: boolean, signalled: boolean }) => number,
+ *     set: (handle: number) => void }} [events]  Kernel events by handle: a swap chain's
+ *     frame latency object, and the event IDXGIDevice2::EnqueueSetEvent sets.
+ * @property {{ open: (key: number) => number, resolve: (handle: number) => number | null }}
+ *     [sharedHandles]  The NT handles of shared resources (`d3d10/sharing.js`): one opened
+ *     over a share's key, and the key a handle names.
  */
+
+/**
+ * The bytes an update of `depth` slices of `packed.rows` rows reads, at the
+ * pitches given, zero among them (every row from the same bytes): the last
+ * row of the last slice ends a row's bytes past its start, so a pitch
+ * shorter than a row (rows that overlap, as test_update_subresource gives
+ * them) reads no less than a row.
+ *
+ * @param {{ rowPitch: number, rows: number }} packed @param {number} depth
+ * @param {number} rowPitch @param {number} depthPitch
+ * @returns {number}
+ */
+export function updateSpan(packed, depth, rowPitch, depthPitch){
+    return depthPitch * (depth - 1) + rowPitch * (packed.rows - 1) + packed.rowPitch;
+}
 
 /**
  * @param {Deps} deps
  */
-export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions: given, screen, identity, videoMemory, resolution, gdi })
+export function createDirect3D10Seam({ publisher, memory, allocate, free, root: makeRoot,
+    divergence, factoryOptions: given, screen, identity, videoMemory, resolution, gdi,
+    ringAllocate, allocateCode, traps = new Set(), ringBytes, floatResult, events,
+    sharedHandles, callGuest, currentThread, shownIn, pointerSize = 4 })
 {
+    const setEvent = events?.set;
     const fields = createFields(memory);
+    /**
+     * Guest bytes in place where the memory has a window, for a caller that
+     * copies them at once (an unmap or a DC let go of writes them into the
+     * resource's own bytes): a copy first would be a second one.
+     *
+     * @param {number} address @param {number} length @returns {Uint8Array}
+     */
+    const windowOf = (address, length)=>(memory.windowMemory
+        ? memory.windowMemory(address, length)
+        : memory.readMemory(address, length));
+    const long = pointerSize === 8;
+    /**
+     * An interface, an address or a handle written to an out parameter: in a
+     * 64-bit process the parameter is eight bytes and its high half is written
+     * too, as zero -- whatever the program left there would otherwise make the
+     * pointer it reads back another one.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointer = (address, value)=>fields.writePointer(address, value, long ? 8 : 4);
+    const SUBRESOURCE_DATA = long ? D3D10_SUBRESOURCE_DATA_64 : D3D10_SUBRESOURCE_DATA;
+    const INPUT_ELEMENT_DESC = long ? D3D10_INPUT_ELEMENT_DESC_64 : D3D10_INPUT_ELEMENT_DESC;
+    const ADAPTER_DESC = long ? DXGI_ADAPTER_DESC_64 : DXGI_ADAPTER_DESC;
+    const OUTPUT_DESC = long ? DXGI_OUTPUT_DESC_64 : DXGI_OUTPUT_DESC;
+
+    /**
+     * Each device's command ring (`d3d10-ring.js`), where its calls in the
+     * guest wait for the host.
+     *
+     * @type {Set<NonNullable<ReturnType<typeof createDeviceRing>>>}
+     */
+    const rings = new Set();
+    /**
+     * What the guest's routines wrote, made on the devices: before any call
+     * the host makes, so that a call the program made after them meets them
+     * made, and before a count is read or lowered on the host, since a record
+     * may name the object.
+     */
+    const syncRings = ()=>{
+        for (const ring of rings)
+        {
+            ring.sync();
+        }
+    };
+    /**
+     * Each method of a map, after the rings are played.
+     *
+     * @template {Record<string, any>} T @param {T} implemented @returns {T}
+     */
+    const synced = implemented=>/** @type {T} */ (Object.fromEntries(Object.entries(implemented)
+        .map(([name, method])=>[name, typeof method !== 'function' ? method
+            : (/** @type {any} */ target, /** @type {number[]} */ args)=>{
+                syncRings();
+                return method(target, args);
+            }])));
+    /**
+     * An interface whose methods the host makes after the rings are played.
+     *
+     * @param {string} id @param {[string, number][]} slots
+     * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
+     *     implemented
+     * @param {Record<string, (options: { trap: number }) => number>} [guests]
+     * @param {(target: any, pointers: Iterable<number>) => void} [released]
+     */
+    const describe = (id, slots, implemented, guests, released)=>describeAt(id, slots,
+        synced(implemented), guests, released);
+    /** @param {(at: number) => Uint8Array} code */
+    const placeCode = code=>{
+        // Sized by a throwaway rendering: the bytes depend on where they land
+        // only through relative jumps, never in length.
+        const length = code(0).length;
+        const at = allocateCode ? allocateCode(length, true)
+            : /** @type {(bytes: number) => number} */ (ringAllocate)(length);
+        if (at !== 0)
+        {
+            memory.writeMemory(at, code(at));
+        }
+        return at;
+    };
+    /**
+     * The ring each device has, and each buffer whose map and unmap run in
+     * the guest the ring of its device.
+     *
+     * @type {WeakMap<object, NonNullable<ReturnType<typeof createDeviceRing>>>}
+     */
+    const ringsOf = new WeakMap();
+    /** @param {any} object */
+    const ringOf = object=>ringsOf.get(object) ?? null;
+    /**
+     * A buffer gets a block made before it is published, since publishing
+     * writes the block's address beside each of its interface pointers: a
+     * dynamic one the program writes, whose bytes live in guest memory, for
+     * its map and unmap in the guest (`BufferMap`), every other for its whole
+     * updates (`UpdateSubresource`).
+     *
+     * @param {any} device @param {any} buffer
+     */
+    const attachBuffer = (device, buffer)=>{
+        const ring = ringOf(device);
+        if (!ring)
+        {
+            return;
+        }
+        const mapped = buffer.desc?.Usage === D3D10_USAGE.DYNAMIC
+            && ((buffer.desc?.CPUAccessFlags ?? 0) & D3D10_CPU_ACCESS.WRITE) !== 0;
+        const block = ring.attachBuffer(buffer, mapped);
+        if (block !== 0)
+        {
+            ringsOf.set(buffer, ring);
+            buffer.guestState = ()=>block;
+            if (mapped)
+            {
+                mappedInGuest.add(buffer);
+            }
+        }
+    };
+    /** The buffers whose maps the guest makes. @type {WeakSet<object>} */
+    const mappedInGuest = new WeakSet();
+    /** @type {Record<string, number>} usage -> maps of buffers the guest does not map */
+    const unattachedMaps = {};
+    /** @param {any} buffer */
+    const countUnattached = buffer=>{
+        if (!mappedInGuest.has(buffer))
+        {
+            const usage = String(buffer.desc?.Usage ?? '?');
+            unattachedMaps[usage] = (unattachedMaps[usage] ?? 0) + 1;
+        }
+    };
+    /**
+     * A routine's guest slot: its code of the process's width placed, or the
+     * trap where there was no room. Built for either width, so a 64-bit
+     * process takes it as a 32-bit one does (`wide`, `createVtables`).
+     *
+     * @param {string} routine
+     */
+    const guestOf = routine=>Object.assign((/** @type {{ trap: number }} */ { trap })=>
+        placeCode(at=>compiledAt(IN_GUEST[long ? 8 : 4][routine], at, trap)) || trap,
+    { wide: /** @type {true} */ (true) });
+    /** A dynamic buffer's map and unmap, in the guest, where devices have rings. */
+    const bufferGuests = ringAllocate
+        ? Object.fromEntries([['Map', 'BufferMap'], ['Unmap', 'BufferUnmap']]
+            .filter(([name])=>!traps.has(`Buffer.${name}`)).map(([name, routine])=>[name,
+                guestOf(routine)]))
+        : {};
+    /** The device's methods that run in the guest, where a device has a ring. */
+    const ringGuests = ringAllocate
+        ? Object.fromEntries(RING_METHODS.filter(name=>!traps.has(name)
+            && !(long && NARROW.has(name))).map(name=>[name, guestOf(name)]))
+        : {};
+    /** Direct3D 11's immediate context's, into its device's ring. */
+    const contextGuests = ringAllocate
+        ? Object.fromEntries(Object.entries(CONTEXT_RING)
+            .filter(([name, routine])=>!traps.has(`Context.${name}`)
+                && !(long && NARROW.has(routine))).map(([name, routine])=>[name,
+                guestOf(routine)]))
+        : {};
+    /**
+     * A device's command ring, made before the device is published: publishing
+     * is when the block's address is written one word past each of its
+     * interface pointers, where the routines look for it.
+     *
+     * @param {any} device
+     */
+    const attachRing = device=>{
+        if (!ringAllocate)
+        {
+            return;
+        }
+        const ring = createDeviceRing({
+            allocate: ringAllocate,
+            // A word in place where the memory reads one; through the bytes otherwise.
+            memory: { ...memory, readU32: memory.readU32 ?? (address=>fields.readU32(address)) },
+            device,
+            objectAt: pointer=>publisher.objectAt(pointer),
+            refuse: detail=>divergence?.('Direct3D 10', `the command ring: ${detail}`),
+            ringBytes,
+        });
+        if (ring)
+        {
+            rings.add(ring);
+            ringsOf.set(device, ring);
+            device.guestState = ()=>ring.address();
+        }
+    };
     /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
     const factoryOptions = {
         ...(screen ? { display: ()=>screen() } : {}),
         ...(resolution ? { resolution } : {}),
         ...(identity ? { vendorId: ()=>describeAdapter(identity()).vendorId } : {}),
+        ...(events ? { createEvent: events.create } : {}),
         ...given,
+    };
+    /** @type {any} */
+    let rootMade = null;
+    /** The entry points, made once: every factory and device of the process comes from them. */
+    const root = ()=>(rootMade ??= makeRoot(factoryOptions));
+
+    /**
+     * A swap chain's description with its extent the window's where it asks
+     * for zero, measured here, where the window is: a device drawn elsewhere
+     * makes its buffers from what it is told.
+     *
+     * @param {import('../d3d10/structs.js').SwapChainFields | null} desc
+     */
+    const sized = desc=>{
+        if (!desc || (desc.bufferDesc.width !== 0 && desc.bufferDesc.height !== 0))
+        {
+            return desc;
+        }
+        const client = factoryOptions.windowClientSize?.(desc.outputWindow)
+            ?? { width: 0, height: 0 };
+        return { ...desc, bufferDesc: { ...desc.bufferDesc,
+            width: desc.bufferDesc.width || client.width || 8,
+            height: desc.bufferDesc.height || client.height || 8 } };
     };
 
     /** @param {number} address @param {number} count @returns {number[]} */
@@ -585,7 +1019,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const pointers = [];
         for (let index = 0; index < count; index++)
         {
-            pointers.push((address >>> 0) === 0 ? 0 : fields.readU32(address + index * 4));
+            // A pointer's low half: every object the seam publishes lies below 4 GiB.
+            pointers.push((address >>> 0) === 0 ? 0
+                : fields.readU32(address + index * pointerSize));
         }
         return pointers;
     };
@@ -608,16 +1044,6 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** @param {number} address @param {number} count */
     const readFloats = (address, count)=>readDwords(address, count).map(fields.asFloat);
 
-    /**
-     * The descriptors an object answers to: an interface it does not claim is
-     * left out, so QueryInterface refuses it rather than answering for it.
-     *
-     * @param {any} object
-     * @param {import('./com.js').InterfaceDescriptor[]} interfaces
-     */
-    const answeredBy = (object, interfaces)=>(typeof object?.supports === 'function'
-        ? interfaces.filter(entry=>object.supports(entry.id))
-        : interfaces);
 
     /**
      * Objects an API `Get` handed back, written as published pointers. Each
@@ -638,8 +1064,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return;
         }
         objects.forEach((object, index)=>{
-            fields.writeU32(address + index * 4,
-                object ? publisher.publish(object, answeredBy(object, interfaces), id) : 0);
+            writePointer(address + index * pointerSize,
+                object ? publisher.publish(object, interfaces, id) : 0);
         });
     };
 
@@ -655,8 +1081,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             object.release();
             return S_OK;
         }
-        const pointer = publisher.publish(object, answeredBy(object, interfaces), id);
-        fields.writeU32(out, pointer);
+        // A record in a ring may name it: the rings are played before its
+        // count is touched on the host.
+        object.settleGuestRefs ??= syncRings;
+        const pointer = publisher.publish(object, interfaces, id);
+        writePointer(out, pointer);
         return pointer === 0 ? E_INVALIDARG : S_OK;
     };
 
@@ -669,7 +1098,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     /** @param {any} object @param {number[]} args */
     const setPrivateDataInterface = (object, [guid, pointer])=>object.SetPrivateDataInterface(
-        readGuid(memory, guid), publisher.objectAt(pointer));
+        readGuid(memory, guid), publisher.objectAt(pointer), pointer >>> 0);
 
     /**
      * An interface entry is answered as the pointer of a published IUnknown;
@@ -696,8 +1125,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         }
         else
         {
+            // The pointer the program stored, through whichever interface it
+            // was; one stored before the pointer was kept, as IUnknown.
             fields.writeU32(data, answer.object
-                ? publisher.publish(answer.object, [], IID.IUnknown)
+                ? answer.pointer || publisher.publish(answer.object, [], IID.IUnknown)
                 : 0);
         }
         return answer.hr;
@@ -709,11 +1140,23 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetPrivateData: getPrivateData,
     };
 
-    /** @param {any} child @param {number[]} args */
+    /**
+     * A child's device, as Direct3D 10's. An object Direct3D 11 made answers
+     * Direct3D 10's interfaces too, but its device does not: it hands back
+     * none (test_buffer_interfaces).
+     *
+     * @param {any} child @param {number[]} args
+     */
     const getDevice = (child, [out])=>{
         /** @type {{ device?: any }} */
         const held = {};
         child.GetDevice(held);
+        if (!held.device?.supports(IID.ID3D10Device))
+        {
+            held.device?.release();
+            fields.writeU32(out, 0);
+            return;
+        }
         handBack(held.device, deviceInterfaces, IID.ID3D10Device, out);
     };
 
@@ -756,11 +1199,77 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {Record<string, (target: any, args: number[]) => number | void | Promise<number>>}
      *     methods
      */
-    const describeAll = (faces, methods)=>faces.map(([id, slots])=>describe(id, slots, methods));
+    /**
+     * The longest of the faces' slot lists this one is a prefix of: every version of an
+     * interface the object has, its vtable whole. Windows hands one object out under
+     * IDXGIFactory1 to 7 with one vtable, and a program calls IDXGIFactory2's methods
+     * through the pointer CreateDXGIFactory1 gave it; a vtable cut at the asked
+     * version's end sent such a call to whatever lay past it.
+     *
+     * @param {[string, number][]} slots @param {[string, [string, number][]][]} faces
+     * @returns {[string, number][]}
+     */
+    const widest = (slots, faces)=>faces.reduce((best, [, other])=>(other.length > best.length
+        && slots.every(([name], index)=>other[index]?.[0] === name) ? other : best), slots);
+
+    /**
+     * @param {[string, [string, number][]][]} faces @param {any} methods
+     * @param {Record<string, (builder: { trap: number }) => number>} [guests]
+     */
+    const describeAll =(faces, methods, guests)=>faces.map(([id, slots])=>describe(id,
+        widest(slots, faces), methods, guests));
+
+    /**
+     * A notice registered by cookie, which is never sent here (nothing is
+     * occluded, turned stereo or taken away).
+     *
+     * @param {any} object  what keeps the cookies @param {number} cookieAt
+     */
+    const registered = (object, cookieAt)=>{
+        if ((cookieAt >>> 0) === 0)
+        {
+            return E_INVALIDARG;
+        }
+        fields.writeU32(cookieAt, object.register());
+        return S_OK;
+    };
+
+    /**
+     * A mode list of DXGI_MODE_DESC1 (DXGI_MODE_DESC and its Stereo after),
+     * with the count, as GetDisplayModeList answers it.
+     *
+     * @param {any[]} modes @param {number} countAt @param {number} listAt
+     */
+    const writeModeList1 = (modes, countAt, listAt)=>{
+        if ((countAt >>> 0) === 0)
+        {
+            return DXGI_ERROR_INVALID_CALL;
+        }
+        if ((listAt >>> 0) === 0)
+        {
+            fields.writeU32(countAt, modes.length);
+            return S_OK;
+        }
+        const room = fields.readU32(countAt);
+        modes.slice(0, room).forEach((mode, index)=>{
+            const at = listAt + index * (DXGI_MODE_DESC.SIZE + 4);
+            writeModeDesc(memory, at, mode);
+            fields.writeU32(at + DXGI_MODE_DESC.SIZE, 0);
+        });
+        if (room < modes.length)
+        {
+            return DXGI_ERROR_MORE_DATA;
+        }
+        fields.writeU32(countAt, modes.length);
+        return S_OK;
+    };
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const outputInterfaces = describeAll([
-        [IID.IDXGIOutput, IDXGIOUTPUT_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
+        [IID.IDXGIOutput, IDXGIOUTPUT_SLOTS], [IID.IDXGIOutput1, IDXGIOUTPUT1_SLOTS],
+        [IID.IDXGIOutput2, IDXGIOUTPUT2_SLOTS], [IID.IDXGIOutput3, IDXGIOUTPUT3_SLOTS],
+        [IID.IDXGIOutput4, IDXGIOUTPUT4_SLOTS], [IID.IDXGIOutput5, IDXGIOUTPUT5_SLOTS],
+        [IID.IDXGIOutput6, IDXGIOUTPUT6_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
     ], {
         ...privateDataMethods,
         GetParent: getParent,
@@ -773,13 +1282,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             {
                 return hr;
             }
-            writeWide(out + DXGI_OUTPUT_DESC.DeviceName, held.desc.DeviceName, 32);
-            fields.writeStruct(out + DXGI_OUTPUT_DESC.DesktopCoordinates, RECT,
+            writeWide(out + OUTPUT_DESC.DeviceName, held.desc.DeviceName, 32);
+            fields.writeStruct(out + OUTPUT_DESC.DesktopCoordinates, RECT,
                 held.desc.DesktopCoordinates);
-            fields.writeU32(out + DXGI_OUTPUT_DESC.AttachedToDesktop,
+            fields.writeU32(out + OUTPUT_DESC.AttachedToDesktop,
                 held.desc.AttachedToDesktop ? 1 : 0);
-            fields.writeU32(out + DXGI_OUTPUT_DESC.Rotation, held.desc.Rotation);
-            fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, held.desc.Monitor);
+            fields.writeU32(out + OUTPUT_DESC.Rotation, held.desc.Rotation);
+            writePointer(out + OUTPUT_DESC.Monitor, held.desc.Monitor);
             return S_OK;
         },
         /**
@@ -838,6 +1347,107 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         SetDisplaySurface: ()=>DXGI_ERROR_INVALID_CALL,
         GetDisplaySurfaceData: ()=>DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
         GetFrameStatistics: ()=>DXGI_ERROR_INVALID_CALL,
+        /** @param {any} output @param {number[]} args */
+        GetDisplayModeList1: (output, [format, , countAt, listAt])=>
+            writeModeList1(output.GetDisplayModeList(format >>> 0), countAt, listAt),
+        /** @param {any} output @param {number[]} args */
+        FindClosestMatchingMode1: (output, [wantedAt, closestAt, device])=>{
+            if ((wantedAt >>> 0) === 0 || (closestAt >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            /** @type {{ mode?: any }} */
+            const held = {};
+            const hr = output.FindClosestMatchingMode(readModeDesc(memory, wantedAt),
+                (device >>> 0) !== 0, held);
+            if (hr === S_OK)
+            {
+                writeModeDesc(memory, closestAt, held.mode);
+                fields.writeU32(closestAt + DXGI_MODE_DESC.SIZE, 0);
+            }
+            return hr;
+        },
+        GetDisplaySurfaceData1: ()=>DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+        // Desktop duplication reads what other programs show, which a page
+        // cannot: the call's own answer for a desktop it may not read.
+        /** @param {any} output @param {number[]} args */
+        DuplicateOutput: (output, [, out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            return DXGI_ERROR_UNSUPPORTED;
+        },
+        /** @param {any} output @param {number[]} args */
+        DuplicateOutput1: (output, [, , , , out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            return DXGI_ERROR_UNSUPPORTED;
+        },
+        // No overlay plane, no hardware composition: the page composes.
+        SupportsOverlays: ()=>0,
+        /** @param {any} output @param {number[]} args */
+        CheckOverlaySupport: (output, [, , flagsAt])=>{
+            if ((flagsAt >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            fields.writeU32(flagsAt, 0);
+            return S_OK;
+        },
+        /** @param {any} output @param {number[]} args */
+        CheckOverlayColorSpaceSupport: (output, [, , , flagsAt])=>{
+            if ((flagsAt >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            fields.writeU32(flagsAt, 0);
+            return S_OK;
+        },
+        /** @param {any} output @param {number[]} args */
+        CheckHardwareCompositionSupport: (output, [flagsAt])=>{
+            if ((flagsAt >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            fields.writeU32(flagsAt, 0);
+            return S_OK;
+        },
+        /**
+         * DXGI_OUTPUT_DESC1: the first description, then what a display of
+         * eight bits a channel in sRGB has -- its primaries, white point and
+         * an SDR panel's luminance.
+         *
+         * @param {any} output @param {number[]} args
+         */
+        GetDesc1: (output, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ desc?: any }} */
+            const held = {};
+            const hr = output.GetDesc(held);
+            if (hr !== S_OK)
+            {
+                return hr;
+            }
+            writeWide(out + OUTPUT_DESC.DeviceName, held.desc.DeviceName, 32);
+            fields.writeStruct(out + OUTPUT_DESC.DesktopCoordinates, RECT,
+                held.desc.DesktopCoordinates);
+            fields.writeU32(out + OUTPUT_DESC.AttachedToDesktop,
+                held.desc.AttachedToDesktop ? 1 : 0);
+            fields.writeU32(out + OUTPUT_DESC.Rotation, held.desc.Rotation);
+            writePointer(out + OUTPUT_DESC.Monitor, held.desc.Monitor);
+            const after = out + DXGI_OUTPUT_DESC.SIZE;
+            fields.writeU32(after, 8);
+            fields.writeU32(after + 4, 0);
+            [0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290, 0.5, 270, 270]
+                .forEach((value, index)=>fields.writeF32(after + 8 + index * 4, value));
+            return S_OK;
+        },
     });
 
     /**
@@ -854,25 +1464,61 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         {
             return hr === S_OK ? E_INVALIDARG : hr;
         }
-        writeWide(out + DXGI_ADAPTER_DESC.Description, held.desc.Description, 128);
-        fields.writeStruct(out, DXGI_ADAPTER_DESC, {
+        writeWide(out + ADAPTER_DESC.Description, held.desc.Description, 128);
+        const memories = {
+            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+            DedicatedSystemMemory: 0,
+            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+        };
+        fields.writeStruct(out, ADAPTER_DESC, {
             VendorId: held.desc.VendorId,
             DeviceId: held.desc.DeviceId,
             SubSysId: held.desc.SubSysId,
             Revision: held.desc.Revision,
-            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
-            DedicatedSystemMemory: 0,
-            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
-            AdapterLuidLow: 1,
-            AdapterLuidHigh: 0,
+            ...memories,
+            AdapterLuidLow: held.desc.AdapterLuid?.low ?? 1,
+            AdapterLuidHigh: held.desc.AdapterLuid?.high ?? 0,
         });
+        // The memories are SIZE_Ts, pointer-sized: written whole, their upper
+        // halves too in a 64-bit process.
+        for (const [field, bytes] of Object.entries(memories))
+        {
+            writePointer(out + ADAPTER_DESC[/** @type {keyof typeof memories} */ (field)], bytes);
+        }
+        return S_OK;
+    };
+
+    /**
+     * An adapter's description of DXGI 1.1 and later: the first one, then
+     * its flags, and (DXGI_ADAPTER_DESC2 and DESC3) the preemption
+     * granularities, a DMA buffer's and a dispatch's, as a GPU of today's
+     * driver model has them.
+     *
+     * @param {any} adapter @param {number} out @param {boolean} granularities
+     */
+    const writeAdapterDescAs = (adapter, out, granularities)=>{
+        const hr = writeAdapterDesc(adapter, out);
+        if (hr !== S_OK)
+        {
+            return hr;
+        }
+        /** @type {{ desc?: any }} */
+        const held = {};
+        adapter.GetDesc(held);
+        fields.writeU32(out + ADAPTER_DESC.SIZE, held.desc?.Flags ?? 0);
+        if (granularities)
+        {
+            fields.writeU32(out + ADAPTER_DESC.SIZE + 4, PREEMPTION_DMA_BUFFER);
+            fields.writeU32(out + ADAPTER_DESC.SIZE + 8, PREEMPTION_DISPATCH);
+        }
         return S_OK;
     };
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const adapterInterfaces = describeAll([
         [IID.IDXGIAdapter, IDXGIADAPTER_SLOTS], [IID.IDXGIAdapter1, IDXGIADAPTER1_SLOTS],
-        [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
+        [IID.IDXGIAdapter2, IDXGIADAPTER2_SLOTS], [IID.IDXGIAdapter3, IDXGIADAPTER3_SLOTS],
+        [IID.IDXGIAdapter4, IDXGIADAPTER4_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
     ], {
         ...privateDataMethods,
         GetParent: getParent,
@@ -900,14 +1546,52 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
          *
          * @param {any} adapter @param {number[]} args
          */
-        GetDesc1: (adapter, [out])=>{
-            const hr = writeAdapterDesc(adapter, out);
-            if (hr === S_OK)
+        GetDesc1: (adapter, [out])=>writeAdapterDescAs(adapter, out, false),
+        /** @param {any} adapter @param {number[]} args */
+        GetDesc2: (adapter, [out])=>writeAdapterDescAs(adapter, out, true),
+        /** @param {any} adapter @param {number[]} args */
+        GetDesc3: (adapter, [out])=>writeAdapterDescAs(adapter, out, true),
+        /** @param {any} adapter @param {number[]} args */
+        QueryVideoMemoryInfo: (adapter, [node, group, out])=>{
+            if ((out >>> 0) === 0)
             {
-                fields.writeU32(out + DXGI_ADAPTER_DESC.SIZE, 0);
+                return E_INVALIDARG;
             }
-            return hr;
+            const answer = adapter.QueryVideoMemoryInfo(node >>> 0, group >>> 0,
+                videoMemory?.() ?? REPORTED_VIDEO_MEMORY);
+            if (answer.hr === S_OK && answer.info)
+            {
+                const { budget, usage, reservable, reserved } = answer.info;
+                [budget, usage, reservable, reserved].forEach((value, index)=>{
+                    fields.writeU32(out + index * 8, value % 0x100000000);
+                    fields.writeU32(out + index * 8 + 4, Math.floor(value / 0x100000000));
+                });
+            }
+            return answer.hr;
         },
+        /** @param {any} adapter @param {number[]} args */
+        SetVideoMemoryReservation: (adapter, [node, group, low, high])=>
+            adapter.SetVideoMemoryReservation(node >>> 0, group >>> 0,
+                (high >>> 0) * 0x100000000 + (low >>> 0)),
+        /** @param {any} adapter @param {number[]} args */
+        RegisterHardwareContentProtectionTeardownStatusEvent: (adapter, [, cookie])=>
+            registered(adapter, cookie),
+        UnregisterHardwareContentProtectionTeardownStatus: ()=>{},
+        /**
+         * The budget is told at once, as Windows does on registering: the
+         * event is set, and never again, as the budget never moves here.
+         *
+         * @param {any} adapter @param {number[]} args
+         */
+        RegisterVideoMemoryBudgetChangeNotificationEvent: (adapter, [event, cookie])=>{
+            if ((event >>> 0) === 0 || (cookie >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            setEvent?.(event >>> 0);
+            return registered(adapter, cookie);
+        },
+        UnregisterVideoMemoryBudgetChangeNotification: ()=>{},
         /** @param {any} adapter @param {number[]} args */
         CheckInterfaceSupport: (adapter, [guid, version])=>{
             /** @type {{ version?: { low: number, high: number } }} */
@@ -922,10 +1606,43 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
+    /** @param {string} id @returns {string} the factory face a pointer for `id` is */
+    const factoryFace = id=>(factoryInterfaces.some(face=>face.id === id)
+        && id !== IID.IDXGIObject ? id : IID.IDXGIFactory);
+
+    /**
+     * An adapter a factory found, handed back as the interface asked for.
+     *
+     * @param {number} hr @param {any} adapter @param {number} guid @param {number} out
+     */
+    const adapterAs = (hr, adapter, guid, out)=>{
+        if ((out >>> 0) === 0)
+        {
+            adapter?.release();
+            return DXGI_ERROR_INVALID_CALL;
+        }
+        if (hr !== S_OK)
+        {
+            fields.writeU32(out, 0);
+            return hr;
+        }
+        const id = readGuid(memory, guid);
+        if (!adapter.supports(id))
+        {
+            adapter.release();
+            fields.writeU32(out, 0);
+            return E_NOINTERFACE;
+        }
+        return handBack(adapter, adapterInterfaces, id, out);
+    };
+
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const factoryInterfaces = describeAll([
         [IID.IDXGIFactory, IDXGIFACTORY_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
-        [IID.IDXGIFactory1, IDXGIFACTORY1_SLOTS],
+        [IID.IDXGIFactory1, IDXGIFACTORY1_SLOTS], [IID.IDXGIFactory2, IDXGIFACTORY2_SLOTS],
+        [IID.IDXGIFactory3, IDXGIFACTORY3_SLOTS], [IID.IDXGIFactory4, IDXGIFACTORY4_SLOTS],
+        [IID.IDXGIFactory5, IDXGIFACTORY5_SLOTS], [IID.IDXGIFactory6, IDXGIFACTORY6_SLOTS],
+        [IID.IDXGIFactory7, IDXGIFACTORY7_SLOTS],
     ], {
         ...privateDataMethods,
         GetParent: getParent,
@@ -974,13 +1691,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         /** @param {any} factory @param {number[]} args */
         CreateSwapChain: (factory, [devicePointer, descAt, out])=>{
             const device = publisher.objectAt(devicePointer);
-            if (!device || (descAt >>> 0) === 0)
+            if (!device || (descAt >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
             /** @type {{ swapChain?: any }} */
             const held = {};
-            const hr = factory.CreateSwapChain(device, readSwapChainDesc(memory, descAt), held);
+            const hr = factory.CreateSwapChain(device,
+                sized(readSwapChainDesc(memory, descAt, pointerSize)),
+                held);
             if (hr !== S_OK)
             {
                 fields.writeU32(out, 0);
@@ -989,6 +1708,108 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             swapChainDevices.set(held.swapChain, device);
             return handBack(held.swapChain, swapChainInterfaces, IID.IDXGISwapChain, out);
         },
+        /** @param {any} factory */
+        IsWindowedStereoEnabled: factory=>(factory.IsWindowedStereoEnabled() ? 1 : 0),
+        /** @param {any} factory @param {number[]} args */
+        CreateSwapChainForHwnd: (factory, args)=>{
+            const [devicePointer, window, descAt, fullscreenAt, restrictAt, out] = args;
+            const device = publisher.objectAt(devicePointer);
+            if (!device || (descAt >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out, 0);
+                }
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            /** @type {{ swapChain?: any }} */
+            const held = {};
+            const hr = factory.CreateSwapChainForHwnd(device, window >>> 0,
+                readSwapChainDesc1(memory, descAt >>> 0, fullscreenAt >>> 0),
+                (restrictAt >>> 0) === 0 ? null : publisher.objectAt(restrictAt), held);
+            if (hr !== S_OK)
+            {
+                fields.writeU32(out, 0);
+                return hr;
+            }
+            swapChainDevices.set(held.swapChain, device);
+            return handBack(held.swapChain, swapChainInterfaces, IID.IDXGISwapChain1, out);
+        },
+        // A program of the desktop has no core window, and nothing here
+        // composes a swap chain into a visual tree (decision A82, temporary).
+        /** @param {any} factory @param {number[]} args */
+        CreateSwapChainForCoreWindow: (factory, [, , , , out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            return DXGI_ERROR_INVALID_CALL;
+        },
+        /** @param {any} factory @param {number[]} args */
+        CreateSwapChainForComposition: (factory, [, , , out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            divergence?.('dxgi', 'a swap chain for composition is refused: nothing here'
+                + ' composes one into a visual tree (decision A82, temporary)');
+            return DXGI_ERROR_UNSUPPORTED;
+        },
+        // No resource is shared by handle across adapters yet.
+        GetSharedResourceAdapterLuid: ()=>E_INVALIDARG,
+        /** @param {any} factory @param {number[]} args */
+        RegisterStereoStatusWindow: (factory, [, , cookie])=>registered(factory, cookie),
+        /** @param {any} factory @param {number[]} args */
+        RegisterStereoStatusEvent: (factory, [, cookie])=>registered(factory, cookie),
+        UnregisterStereoStatus: ()=>{},
+        /** @param {any} factory @param {number[]} args */
+        RegisterOcclusionStatusWindow: (factory, [, , cookie])=>registered(factory, cookie),
+        /** @param {any} factory @param {number[]} args */
+        RegisterOcclusionStatusEvent: (factory, [, cookie])=>registered(factory, cookie),
+        UnregisterOcclusionStatus: ()=>{},
+        /** @param {any} factory */
+        GetCreationFlags: factory=>factory.GetCreationFlags(),
+        /** @param {any} factory @param {number[]} args */
+        EnumAdapterByLuid: (factory, [low, high, guid, out])=>{
+            /** @type {{ adapter?: any }} */
+            const held = {};
+            const hr = factory.EnumAdapterByLuid(low >>> 0, high >>> 0, held);
+            return adapterAs(hr, held.adapter, guid, out);
+        },
+        /** @param {any} factory @param {number[]} args */
+        EnumWarpAdapter: (factory, [guid, out])=>{
+            /** @type {{ adapter?: any }} */
+            const held = {};
+            return adapterAs(factory.EnumWarpAdapter(held), held.adapter, guid, out);
+        },
+        /** @param {any} factory @param {number[]} args */
+        CheckFeatureSupport: (factory, [feature, dataAt, size])=>{
+            const answer = factory.CheckFeatureSupport(feature >>> 0, size >>> 0);
+            if (answer.hr !== S_OK || (dataAt >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            fields.writeU32(dataAt, answer.value ?? 0);
+            return S_OK;
+        },
+        // One adapter: the one of every preference.
+        /** @param {any} factory @param {number[]} args */
+        EnumAdapterByGpuPreference: (factory, [index, preference, guid, out])=>{
+            if ((preference >>> 0) > 2)
+            {
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out, 0);
+                }
+                return E_INVALIDARG;
+            }
+            /** @type {{ adapter?: any }} */
+            const held = {};
+            return adapterAs(factory.EnumAdapters(index >>> 0, held), held.adapter, guid, out);
+        },
+        /** @param {any} factory @param {number[]} args */
+        RegisterAdaptersChangedEvent: (factory, [, cookie])=>registered(factory, cookie),
+        UnregisterAdaptersChangedEvent: ()=>S_OK,
         /**
          * A software rasteriser is a module a program loads; nothing here can
          * run one.
@@ -1006,9 +1827,30 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
+    /**
+     * ResizeBuffers and ResizeBuffers1: a size of zero is the window's.
+     *
+     * @param {any} swapChain @param {number[]} args
+     */
+    const resizeBuffers = (swapChain, [count, width, height, format, flags])=>{
+        /** @type {{ desc?: any }} */
+        const held = {};
+        const asked = (width >>> 0) === 0 || (height >>> 0) === 0
+            ? sized(swapChain.GetDesc(held) === S_OK && held.desc
+                ? { ...held.desc, bufferDesc: { ...held.desc.bufferDesc, width: width >>> 0,
+                    height: height >>> 0 } }
+                : null)
+            : null;
+        return swapChain.ResizeBuffers(count >>> 0,
+            asked ? asked.bufferDesc.width : width >>> 0,
+            asked ? asked.bufferDesc.height : height >>> 0, format >>> 0, flags >>> 0);
+    };
+
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const swapChainInterfaces = describeAll([
-        [IID.IDXGISwapChain, IDXGISWAPCHAIN_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
+        [IID.IDXGISwapChain, IDXGISWAPCHAIN_SLOTS], [IID.IDXGISwapChain1, IDXGISWAPCHAIN1_SLOTS],
+        [IID.IDXGISwapChain2, IDXGISWAPCHAIN2_SLOTS], [IID.IDXGISwapChain3, IDXGISWAPCHAIN3_SLOTS],
+        [IID.IDXGISwapChain4, IDXGISWAPCHAIN4_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
         [IID.IDXGIDeviceSubObject, IDXGIDEVICESUBOBJECT_SLOTS],
     ], {
         ...privateDataMethods,
@@ -1028,7 +1870,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return handBack(device, deviceInterfaces, id, out);
         },
         /** @param {any} swapChain @param {number[]} args */
-        Present: (swapChain, [interval, flags])=>swapChain.Present(interval >>> 0, flags >>> 0),
+        Present: (swapChain, [interval, flags])=>presented(swapChain,
+            swapChain.Present(interval >>> 0, flags >>> 0), flags >>> 0),
         /** @param {any} swapChain @param {number[]} args */
         GetBuffer: (swapChain, [index, guid, out])=>{
             const id = readGuid(memory, guid);
@@ -1081,14 +1924,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             const hr = swapChain.GetDesc(held);
             if (hr === S_OK && (out >>> 0) !== 0)
             {
-                writeSwapChainDesc(memory, out, held.desc);
+                writeSwapChainDesc(memory, out, held.desc, pointerSize);
             }
             return hr;
         },
-        /** @param {any} swapChain @param {number[]} args */
-        ResizeBuffers: (swapChain, [count, width, height, format, flags])=>
-            swapChain.ResizeBuffers(count >>> 0, width >>> 0, height >>> 0, format >>> 0,
-                flags >>> 0),
+        ResizeBuffers: resizeBuffers,
+        // The queues of a Direct3D 12 chain's buffers have no meaning for 10 and 11.
+        ResizeBuffers1: resizeBuffers,
         /** @param {any} swapChain @param {number[]} args */
         ResizeTarget: (swapChain, [mode])=>swapChain.ResizeTarget((mode >>> 0) === 0
             ? null
@@ -1112,6 +1954,156 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         // Frame statistics are kept for a fullscreen swap chain only.
         GetFrameStatistics: ()=>DXGI_ERROR_INVALID_CALL,
         /** @param {any} swapChain @param {number[]} args */
+        GetDesc1: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ desc?: any }} */
+            const held = {};
+            swapChain.GetDesc1(held);
+            writeSwapChainDesc1(memory, out, held.desc);
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        GetFullscreenDesc: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ desc?: any }} */
+            const held = {};
+            swapChain.GetDesc(held);
+            writeFullscreenDesc(memory, out, held.desc);
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        GetHwnd: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ desc?: any }} */
+            const held = {};
+            swapChain.GetDesc(held);
+            writePointer(out, held.desc.outputWindow);
+            return S_OK;
+        },
+        // A window's swap chain has no core window.
+        /** @param {any} swapChain @param {number[]} args */
+        GetCoreWindow: (swapChain, [, out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            return DXGI_ERROR_INVALID_CALL;
+        },
+        // Dirty rectangles and scrolling only say what changed: the whole is shown.
+        /** @param {any} swapChain @param {number[]} args */
+        Present1: (swapChain, [interval, flags])=>presented(swapChain,
+            swapChain.Present(interval >>> 0, flags >>> 0), flags >>> 0),
+        /** @param {any} swapChain */
+        IsTemporaryMonoSupported: swapChain=>(swapChain.IsTemporaryMonoSupported() ? 1 : 0),
+        /** @param {any} swapChain @param {number[]} args */
+        GetRestrictToOutput: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ output?: any }} */
+            const held = {};
+            swapChain.GetRestrictToOutput(held);
+            if (!held.output)
+            {
+                fields.writeU32(out, 0);
+                return S_OK;
+            }
+            return handBack(held.output, outputInterfaces, IID.IDXGIOutput, out);
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        SetBackgroundColor: (swapChain, [rgbaAt])=>swapChain.SetBackgroundColor(
+            (rgbaAt >>> 0) === 0 ? null : readFloats(rgbaAt, 4)),
+        /** @param {any} swapChain @param {number[]} args */
+        GetBackgroundColor: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ rgba?: number[] }} */
+            const held = {};
+            swapChain.GetBackgroundColor(held);
+            (held.rgba ?? []).forEach((value, index)=>fields.writeF32(out + index * 4, value));
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        SetRotation: (swapChain, [rotation])=>swapChain.SetRotation(rotation >>> 0),
+        /** @param {any} swapChain @param {number[]} args */
+        GetRotation: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ rotation?: number }} */
+            const held = {};
+            swapChain.GetRotation(held);
+            fields.writeU32(out, held.rotation ?? 1);
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        SetSourceSize: (swapChain, [width, height])=>swapChain.SetSourceSize(width >>> 0,
+            height >>> 0),
+        /** @param {any} swapChain @param {number[]} args */
+        GetSourceSize: (swapChain, [widthAt, heightAt])=>{
+            if ((widthAt >>> 0) === 0 || (heightAt >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            /** @type {{ width?: number, height?: number }} */
+            const held = {};
+            swapChain.GetSourceSize(held);
+            fields.writeU32(widthAt, held.width ?? 0);
+            fields.writeU32(heightAt, held.height ?? 0);
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        SetMaximumFrameLatency: (swapChain, [frames])=>
+            swapChain.SetMaximumFrameLatency(frames >>> 0),
+        /** @param {any} swapChain @param {number[]} args */
+        GetMaximumFrameLatency: (swapChain, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            /** @type {{ frames?: number }} */
+            const held = {};
+            const hr = swapChain.GetMaximumFrameLatency(held);
+            if (hr === S_OK)
+            {
+                fields.writeU32(out, held.frames ?? 1);
+            }
+            return hr;
+        },
+        /** @param {any} swapChain */
+        GetFrameLatencyWaitableObject: swapChain=>swapChain.GetFrameLatencyWaitableObject(),
+        // A matrix scales a composition swap chain, which a window's is not.
+        SetMatrixTransform: ()=>DXGI_ERROR_INVALID_CALL,
+        GetMatrixTransform: ()=>DXGI_ERROR_INVALID_CALL,
+        /** @param {any} swapChain */
+        GetCurrentBackBufferIndex: swapChain=>swapChain.GetCurrentBackBufferIndex(),
+        /** @param {any} swapChain @param {number[]} args */
+        CheckColorSpaceSupport: (swapChain, [colorSpace, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            fields.writeU32(out, swapChain.CheckColorSpaceSupport(colorSpace >>> 0));
+            return S_OK;
+        },
+        /** @param {any} swapChain @param {number[]} args */
+        SetColorSpace1: (swapChain, [colorSpace])=>swapChain.SetColorSpace1(colorSpace >>> 0),
+        /** @param {any} swapChain @param {number[]} args */
+        SetHDRMetaData: (swapChain, [type])=>swapChain.SetHDRMetaData(type >>> 0),
+        /** @param {any} swapChain @param {number[]} args */
         GetLastPresentCount: (swapChain, [out])=>{
             /** @type {{ count?: number }} */
             const held = {};
@@ -1127,6 +2119,46 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** The device each swap chain presents for, for `GetDevice`. */
     /** @type {WeakMap<object, any>} */
     const swapChainDevices = new WeakMap();
+    /**
+     * The window the last swap chain that showed a frame presents into, and
+     * whether it is full screen: what the screen shows there is that frame,
+     * not the window's own surface (`presentedWindow`). Null until one has.
+     *
+     * @type {{ window: number, fullscreen: boolean } | null}
+     */
+    let presentedInto = null;
+    /**
+     * A present's answer, the window it showed in remembered: one that only
+     * tests (DXGI_PRESENT_TEST) or failed shows nothing. A present held until
+     * the GPU takes the frame answers later, and is remembered then.
+     *
+     * @template {number | Promise<number>} T
+     * @param {any} swapChain @param {T} answer @param {number} flags
+     * @returns {T}
+     */
+    const presented = (swapChain, answer, flags)=>{
+        /** @param {number} hr */
+        const shown = hr=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            if (hr >= 0 && (flags & DXGI_PRESENT_TEST) === 0 && swapChain.GetDesc?.(held) >= 0
+                && held.desc)
+            {
+                presentedInto = { window: held.desc.outputWindow >>> 0,
+                    fullscreen: !held.desc.windowed };
+                shownIn?.(presentedInto.window, presentedInto.fullscreen);
+            }
+        };
+        if (answer instanceof Promise)
+        {
+            answer.then(shown, ()=>{});
+        }
+        else
+        {
+            shown(/** @type {number} */ (answer));
+        }
+        return answer;
+    };
 
     // --- resources ---
 
@@ -1143,12 +2175,35 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {number} subresource
      * @param {number} mapType
      * @param {number} flags
+     * @param {(mapped: { hr: number, address: number, rowPitch: number, depthPitch: number })
+     *     => number} use  what the call answers once the map is made
+     * @returns {number | Promise<number>}
+     */
+    const mapInto = (resource, subresource, mapType, flags, use)=>{
+        /** @type {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number,
+         *     pData?: number }} */
+        const held = {};
+        const made = resource.Map(subresource, mapType, flags, held);
+        // A device drawn elsewhere answers a read map of a staging resource
+        // when its bytes arrive: the map is finished then.
+        return typeof made?.then === 'function'
+            ? made.then((/** @type {number} */ hr)=>use(mappedOf(resource, subresource, hr, held)))
+            : use(mappedOf(resource, subresource, made, held));
+    };
+
+    /**
+     * @param {any} resource @param {number} subresource @param {number} hr
+     * @param {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number,
+     *     pData?: number }} held  what the object's map gave
      * @returns {{ hr: number, address: number, rowPitch: number, depthPitch: number }}
      */
-    const mapInto = (resource, subresource, mapType, flags)=>{
-        /** @type {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number }} */
-        const held = {};
-        const hr = resource.Map(subresource, mapType, flags, held);
+    const mappedOf = (resource, subresource, hr, held)=>{
+        if (hr === S_OK && typeof held.pData === 'number')
+        {
+            // The bytes are in guest memory already: the address is the map.
+            return { hr, address: held.pData, rowPitch: held.rowPitch ?? 0,
+                depthPitch: held.depthPitch ?? 0 };
+        }
         if (hr !== S_OK || !held.data)
         {
             return { hr, address: 0, rowPitch: 0, depthPitch: 0 };
@@ -1193,7 +2248,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      *
      * @param {any} resource
      * @param {number} flags
-     * @param {() => number} run
+     * @param {() => number | Promise<number>} run
      * @returns {number | Promise<number>}
      */
     const whenMappable = (resource, flags, run)=>{
@@ -1208,7 +2263,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const block = mappings.get(resource)?.get(subresource);
         if (block)
         {
-            block.data.set(memory.readMemory(block.address, block.data.length));
+            block.data.set(windowOf(block.address, block.data.length));
             mappings.get(resource)?.delete(subresource);
             free?.(block.address);
         }
@@ -1261,15 +2316,72 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetParent: getParent,
         GetDevice: subObjectDevice,
         /**
-         * Nothing is shared between processes here, so no resource has a
-         * handle to share.
+         * A legacy handle for a texture made shared, none for one that is not,
+         * and nothing written for one only an NT handle names.
          *
          * @param {any} resource @param {number[]} args
          */
         GetSharedHandle: (resource, [out])=>{
-            fields.writeU32(out, 0);
+            /** @type {{ handle?: number }} */
+            const held = {};
+            const hr = resource.GetSharedHandle(held);
+            if (hr === S_OK && (out >>> 0) !== 0)
+            {
+                fields.writeU32(out, held.handle ?? 0);
+            }
+            return hr;
+        },
+        /**
+         * An NT handle to a texture made with SHARED_NTHANDLE, a kernel
+         * object of the process (test_shared_resource); none for any other.
+         * A name is not kept: what OpenSharedResourceByName would find is said.
+         *
+         * @param {any} resource @param {number[]} args
+         */
+        CreateSharedHandle: (resource, [, , name, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const key = resource.ntShareKey();
+            if (key === null || !sharedHandles)
+            {
+                fields.writeU32(out, 0);
+                if (key !== null)
+                {
+                    divergence?.('DXGI', 'an NT handle to a shared resource needs the kernel;'
+                        + ' none is made');
+                }
+                return E_INVALIDARG;
+            }
+            if ((name >>> 0) !== 0)
+            {
+                divergence?.('DXGI', 'a shared resource\'s handle is made without its name:'
+                    + ' it is not found by name');
+            }
+            fields.writeU32(out, sharedHandles.open(key));
             return S_OK;
         },
+        /**
+         * One subresource of a resource as a surface of its own: not made yet,
+         * said, and refused as not implemented.
+         *
+         * @param {any} resource @param {number[]} args
+         */
+        CreateSubresourceSurface: (resource, [, out])=>{
+            if ((out >>> 0) !== 0)
+            {
+                fields.writeU32(out, 0);
+            }
+            divergence?.('DXGI', 'IDXGIResource1::CreateSubresourceSurface is not implemented');
+            return E_NOTIMPL;
+        },
+        /** @param {any} resource @param {number[]} args */
+        AcquireSync: (resource, [low, high, milliseconds])=>
+            resource.AcquireSync((low >>> 0) + (high >>> 0) * 0x100000000, milliseconds >>> 0),
+        /** @param {any} resource @param {number[]} args */
+        ReleaseSync: (resource, [low, high])=>
+            resource.ReleaseSync((low >>> 0) + (high >>> 0) * 0x100000000),
         /** @param {any} resource @param {number[]} args */
         GetUsage: (resource, [out])=>{
             fields.writeU32(out, resource.GetUsage());
@@ -1312,15 +2424,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             {
                 return E_INVALIDARG;
             }
-            return whenMappable(texture, 0, ()=>{
-                const mapped = mapInto(texture, 0, mapType, 0);
+            return whenMappable(texture, 0, ()=>mapInto(texture, 0, mapType, 0, mapped=>{
                 if (mapped.hr === S_OK)
                 {
                     fields.writeU32(rect, mapped.rowPitch);
                     fields.writeU32(rect + 4, mapped.address);
                 }
                 return mapped.hr;
-            });
+            }));
         },
         /** @param {any} texture */
         Unmap: texture=>{
@@ -1355,7 +2466,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 const handle = address === 0 ? 0 : gdi.createSurfaceDc({
                     width: texture.desc.Width, height: texture.desc.Height,
                     pitch: /** @type {number} */ (opened.rowPitch), bitCount: 32,
-                    bits: address, palette: null, format: '555',
+                    bits: address, palette: null, format: '555', sizeImage: 0,
                 });
                 if (handle === 0)
                 {
@@ -1381,7 +2492,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 return DXGI_ERROR_INVALID_CALL;
             }
             contexts.delete(texture);
-            held.data.set(memory.readMemory(held.address, held.data.length));
+            held.data.set(windowOf(held.address, held.data.length));
             gdi.deleteSurfaceDc(held.handle);
             free?.(held.address);
             return texture.CloseDC();
@@ -1397,19 +2508,32 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     const contexts = new WeakMap();
 
     /**
+     * Direct3D 11's faces of the same objects (`d3d11.js`), each list below
+     * ending with its own: what a program reaches through either version.
+     */
+    const eleven = createDirect3D11Seam(describe, ()=>kit, { context: contextGuests });
+
+    /**
      * The interfaces every resource shares, after its own: Direct3D's two
      * bases and DXGI's four faces of the same object. Which of them a given
-     * resource answers to is its own to say (`answeredBy`).
+     * resource answers to is its own to say (its `supports`, which the publisher asks).
      *
      * @type {import('./com.js').InterfaceDescriptor[]}
      */
     const resourceBases = [
         describe(IID.ID3D10Resource, ID3D10RESOURCE_SLOTS, resourceMethods),
         describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, resourceMethods),
+        // IDXGIResource derives from IDXGIDeviceSubObject and IDXGIObject:
+        // asked for either, a resource hands back its IDXGIResource pointer
+        // (test_dxgi_resource).
         ...describeAll([
             [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
             [IID.IDXGIDeviceSubObject, IDXGIDEVICESUBOBJECT_SLOTS],
+        ], dxgiResourceMethods).map(face=>({ ...face, sharedWith: IID.IDXGIResource })),
+        ...describeAll([
             [IID.IDXGIResource, IDXGIRESOURCE_SLOTS],
+            [IID.IDXGIResource1, IDXGIRESOURCE1_SLOTS],
+            [IID.IDXGIKeyedMutex, IDXGIKEYEDMUTEX_SLOTS],
             [IID.IDXGISurface, IDXGISURFACE_SLOTS],
             [IID.IDXGISurface1, IDXGISURFACE1_SLOTS],
         ], dxgiResourceMethods),
@@ -1421,19 +2545,19 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {boolean} pitches  Whether the out structure has room for pitches.
      */
     const mapTexture = (texture, [subresource, mapType, flags, out], pitches)=>
-        whenMappable(texture, flags >>> 0, ()=>{
-            const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
-            if (mapped.hr !== S_OK || (out >>> 0) === 0)
-            {
-                return mapped.hr;
-            }
-            fields.writeU32(out, mapped.address);
-            if (pitches)
-            {
-                fields.writeU32(out + 4, mapped.rowPitch);
-            }
-            return S_OK;
-        });
+        whenMappable(texture, flags >>> 0, ()=>mapInto(texture, subresource >>> 0,
+            mapType >>> 0, flags >>> 0, mapped=>{
+                if (mapped.hr !== S_OK || (out >>> 0) === 0)
+                {
+                    return mapped.hr;
+                }
+                writePointer(out, mapped.address);
+                if (pitches)
+                {
+                    fields.writeU32(out + pointerSize, mapped.rowPitch);
+                }
+                return S_OK;
+            }));
 
     /** @param {any} texture @param {number[]} args */
     const unmapTexture = (texture, [subresource])=>unmapFrom(texture, subresource >>> 0);
@@ -1443,20 +2567,30 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         ...resourceMethods,
         /** @param {any} buffer @param {number[]} args */
         Map: (buffer, [mapType, flags, out])=>whenMappable(buffer, flags >>> 0, ()=>{
-            const mapped = mapInto(buffer, 0, mapType >>> 0, flags >>> 0);
-            if (mapped.hr === S_OK && (out >>> 0) !== 0)
-            {
-                fields.writeU32(out, mapped.address);
-            }
-            return mapped.hr;
+            countUnattached(buffer);
+            ringOf(buffer)?.hostMap(buffer, mapType >>> 0);
+            return mapInto(buffer, 0, mapType >>> 0, flags >>> 0, mapped=>{
+                if (mapped.hr === S_OK && (out >>> 0) !== 0)
+                {
+                    writePointer(out, mapped.address);
+                }
+                return mapped.hr;
+            });
         }),
         /** @param {any} buffer */
-        Unmap: buffer=>unmapFrom(buffer, 0),
+        Unmap: buffer=>{
+            // A map the guest made, unmapped here when its ring had no room.
+            if (!ringOf(buffer)?.hostUnmap(buffer))
+            {
+                unmapFrom(buffer, 0);
+            }
+        },
         /** @param {any} buffer @param {number[]} args */
         GetDesc: (buffer, [out])=>{
             fields.writeStruct(out, D3D10_BUFFER_DESC, buffer.desc);
         },
-    }), ...resourceBases];
+    }, bufferGuests, buffer=>ringOf(buffer)?.released(buffer)), ...resourceBases,
+    ...eleven.faces.buffer];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture1DInterfaces = [describe(IID.ID3D10Texture1D, ID3D10TEXTURE_SLOTS, {
@@ -1468,7 +2602,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetDesc: (texture, [out])=>{
             fields.writeStruct(out, D3D10_TEXTURE1D_DESC, texture.desc);
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture1D];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture2DInterfaces = [describe(IID.ID3D10Texture2D, ID3D10TEXTURE_SLOTS, {
@@ -1484,30 +2618,29 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 SampleQuality: texture.desc.SampleDesc.Quality,
             });
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture2D];
 
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const texture3DInterfaces = [describe(IID.ID3D10Texture3D, ID3D10TEXTURE_SLOTS, {
         ...resourceMethods,
         /** @param {any} texture @param {number[]} args */
         Map: (texture, [subresource, mapType, flags, out])=>whenMappable(texture, flags >>> 0,
-            ()=>{
-                const mapped = mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0);
+            ()=>mapInto(texture, subresource >>> 0, mapType >>> 0, flags >>> 0, mapped=>{
                 if (mapped.hr !== S_OK || (out >>> 0) === 0)
                 {
                     return mapped.hr;
                 }
-                fields.writeU32(out, mapped.address);
-                fields.writeU32(out + 4, mapped.rowPitch);
-                fields.writeU32(out + 8, mapped.depthPitch);
+                writePointer(out, mapped.address);
+                fields.writeU32(out + pointerSize, mapped.rowPitch);
+                fields.writeU32(out + pointerSize + 4, mapped.depthPitch);
                 return S_OK;
-            }),
+            })),
         Unmap: unmapTexture,
         /** @param {any} texture @param {number[]} args */
         GetDesc: (texture, [out])=>{
             fields.writeStruct(out, D3D10_TEXTURE3D_DESC, texture.desc);
         },
-    }), ...resourceBases];
+    }), ...resourceBases, ...eleven.faces.texture3D];
 
     /**
      * The interface list a resource is published as, by what it is.
@@ -1567,13 +2700,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
     });
 
-    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView,
-        VIEW_UNION.RENDER_TARGET);
-    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView,
-        VIEW_UNION.DEPTH_STENCIL);
-    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView,
+    const renderTargetViewInterfaces = [...viewInterfaces(IID.ID3D10RenderTargetView,
+        VIEW_UNION.RENDER_TARGET), ...eleven.faces.rtv];
+    const depthStencilViewInterfaces = [...viewInterfaces(IID.ID3D10DepthStencilView,
+        VIEW_UNION.DEPTH_STENCIL), ...eleven.faces.dsv];
+    const shaderResourceViewInterfaces = [...viewInterfaces(IID.ID3D10ShaderResourceView,
         VIEW_UNION.SHADER_RESOURCE, [[IID.ID3D10ShaderResourceView1,
-            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1);
+            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1),
+    ...eleven.faces.srv];
 
     /**
      * @param {string} id
@@ -1617,10 +2751,17 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         });
     };
 
+    /**
+     * A BOOL as its word: a description an effect computed keeps the word its
+     * expression gave (0xffffffff), one made of booleans reads 1 or 0.
+     *
+     * @param {boolean | number} value
+     */
+    const boolWord = value=>(typeof value === 'number' ? value >>> 0 : value ? 1 : 0);
     /** @param {any} desc @param {number} out */
     const writeBlendDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_BLEND_DESC, {
-            AlphaToCoverageEnable: desc.AlphaToCoverageEnable ? 1 : 0,
+            AlphaToCoverageEnable: boolWord(desc.AlphaToCoverageEnable),
             SrcBlend: desc.SrcBlend,
             DestBlend: desc.DestBlend,
             BlendOp: desc.BlendOp,
@@ -1631,7 +2772,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         for (let index = 0; index < 8; index++)
         {
             fields.writeU32(out + D3D10_BLEND_DESC.BlendEnable + index * 4,
-                desc.BlendEnable[index] ? 1 : 0);
+                boolWord(desc.BlendEnable[index]));
         }
         memory.writeMemory(out + D3D10_BLEND_DESC.RenderTargetWriteMask,
             Uint8Array.from(desc.RenderTargetWriteMask));
@@ -1639,10 +2780,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     /** @param {any} desc @param {number} out */
     const writeDepthStencilDesc = (desc, out)=>{
         fields.writeStruct(out, D3D10_DEPTH_STENCIL_DESC, {
-            DepthEnable: desc.DepthEnable ? 1 : 0,
+            DepthEnable: boolWord(desc.DepthEnable),
             DepthWriteMask: desc.DepthWriteMask,
             DepthFunc: desc.DepthFunc,
-            StencilEnable: desc.StencilEnable ? 1 : 0,
+            StencilEnable: boolWord(desc.StencilEnable),
         });
         memory.writeMemory(out + D3D10_DEPTH_STENCIL_DESC.StencilReadMask,
             Uint8Array.from([desc.StencilReadMask, desc.StencilWriteMask, 0, 0]));
@@ -1654,14 +2795,14 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         fields.writeStruct(out, D3D10_RASTERIZER_DESC, {
             FillMode: desc.FillMode,
             CullMode: desc.CullMode,
-            FrontCounterClockwise: desc.FrontCounterClockwise ? 1 : 0,
+            FrontCounterClockwise: boolWord(desc.FrontCounterClockwise),
             DepthBias: desc.DepthBias,
             DepthBiasClamp: desc.DepthBiasClamp,
             SlopeScaledDepthBias: desc.SlopeScaledDepthBias,
-            DepthClipEnable: desc.DepthClipEnable ? 1 : 0,
-            ScissorEnable: desc.ScissorEnable ? 1 : 0,
-            MultisampleEnable: desc.MultisampleEnable ? 1 : 0,
-            AntialiasedLineEnable: desc.AntialiasedLineEnable ? 1 : 0,
+            DepthClipEnable: boolWord(desc.DepthClipEnable),
+            ScissorEnable: boolWord(desc.ScissorEnable),
+            MultisampleEnable: boolWord(desc.MultisampleEnable),
+            AntialiasedLineEnable: boolWord(desc.AntialiasedLineEnable),
         }, ['DepthBiasClamp', 'SlopeScaledDepthBias']);
     };
     /** @param {any} desc @param {number} out */
@@ -1681,24 +2822,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             fields.writeF32(out + D3D10_SAMPLER_DESC.BorderColor + index * 4, value);
         });
     };
-    const blendStateInterfaces = stateInterfaces(IID.ID3D10BlendState, writeBlendDesc,
-        [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]);
-    const depthStencilStateInterfaces = stateInterfaces(IID.ID3D10DepthStencilState,
-        writeDepthStencilDesc);
-    const rasterizerStateInterfaces = stateInterfaces(IID.ID3D10RasterizerState,
-        writeRasterizerDesc);
-    const samplerStateInterfaces = stateInterfaces(IID.ID3D10SamplerState, writeSamplerDesc);
+    const blendStateInterfaces = [...stateInterfaces(IID.ID3D10BlendState, writeBlendDesc,
+        [[IID.ID3D10BlendState1, ID3D10BLENDSTATE1_SLOTS]]), ...eleven.faces.blend];
+    const depthStencilStateInterfaces = [...stateInterfaces(IID.ID3D10DepthStencilState,
+        writeDepthStencilDesc), ...eleven.faces.depthStencil];
+    const rasterizerStateInterfaces = [...stateInterfaces(IID.ID3D10RasterizerState,
+        writeRasterizerDesc), ...eleven.faces.rasterizer];
+    const samplerStateInterfaces = [...stateInterfaces(IID.ID3D10SamplerState,
+        writeSamplerDesc), ...eleven.faces.sampler];
 
     const childMethods = { GetDevice: getDevice, ...privateDataMethods };
     const childBase = describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, childMethods);
     const vertexShaderInterfaces = [describe(IID.ID3D10VertexShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.vs];
     const geometryShaderInterfaces = [describe(IID.ID3D10GeometryShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.gs];
     const pixelShaderInterfaces = [describe(IID.ID3D10PixelShader, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.ps];
     const inputLayoutInterfaces = [describe(IID.ID3D10InputLayout, ID3D10SHADER_SLOTS,
-        childMethods), childBase];
+        childMethods), childBase, ...eleven.faces.inputLayout];
     const queryMethods = {
         ...childMethods,
         /** @param {any} query */
@@ -1731,7 +2873,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     // for all three; which of them an object answers to is its own to say.
     const queryDescriptors = [IID.ID3D10Query, IID.ID3D10Asynchronous, IID.ID3D10Predicate]
         .map(id=>describe(id, ID3D10QUERY_SLOTS, queryMethods))
-        .concat(describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, queryMethods));
+        .concat(describe(IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS, queryMethods),
+            eleven.faces.query);
 
     // --- reading descriptions ---
 
@@ -1789,8 +2932,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const data = [];
         for (let index = 0; index < levels * slices; index++)
         {
-            const entry = fields.readStruct(address + index * D3D10_SUBRESOURCE_DATA.SIZE,
-                D3D10_SUBRESOURCE_DATA);
+            const entry = fields.readStruct(address + index * SUBRESOURCE_DATA.SIZE,
+                SUBRESOURCE_DATA);
             const bytes = dimension === D3D10_RESOURCE_DIMENSION.BUFFER
                 ? desc.ByteWidth
                 : subresourceBytes(desc, dimension, index % levels, entry.SysMemPitch,
@@ -1838,14 +2981,47 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const elements = [];
         for (let index = 0; index < count; index++)
         {
-            const raw = fields.readStruct(address + index * D3D10_INPUT_ELEMENT_DESC.SIZE,
-                D3D10_INPUT_ELEMENT_DESC);
+            const raw = fields.readStruct(address + index * INPUT_ELEMENT_DESC.SIZE,
+                INPUT_ELEMENT_DESC);
             elements.push({
                 ...raw,
                 SemanticName: raw.SemanticName === 0 ? '' : readCString(raw.SemanticName),
             });
         }
         return elements;
+    };
+
+    /**
+     * A stream-output declaration: null where the program gave none, and
+     * empty where it gave a list of no entries or a count with no list.
+     * Direct3D 10's entry has no stream; 11's begins with one.
+     *
+     * @param {number} at @param {number} count @param {boolean} streamed
+     * @returns {import('../d3d10/streamout.js').StreamOutputEntry[] | null}
+     */
+    const readStreamOutput = (at, count, streamed)=>{
+        if ((at >>> 0) === 0 || (count >>> 0) === 0)
+        {
+            return (at >>> 0) === 0 && (count >>> 0) === 0 ? null : [];
+        }
+        // The name on a pointer's boundary, past the stream where 11 has one: 12 or 16
+        // bytes an entry in a 32-bit process, 16 or 24 in a 64-bit one.
+        const nameAt = streamed ? pointerSize : 0;
+        const size = nameAt + pointerSize + 8;
+        return Array.from({ length: count >>> 0 }, (_, index)=>{
+            const entry = (at >>> 0) + index * size;
+            const named = entry + nameAt;
+            const name = fields.readU32(named);
+            const bytes = fields.readU32(named + pointerSize + 4);
+            return {
+                Stream: streamed ? fields.readU32(entry) : 0,
+                SemanticName: name === 0 ? null : readCString(name),
+                SemanticIndex: fields.readU32(named + pointerSize),
+                StartComponent: bytes & 0xff,
+                ComponentCount: (bytes >>> 8) & 0xff,
+                OutputSlot: (bytes >>> 16) & 0xff,
+            };
+        });
     };
 
     /** @param {number} address */
@@ -1964,10 +3140,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             : resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? levelExtent(resource.desc.Depth, level)
                 : 1;
-        const packed = formatPitch(resource.desc.Format, width, height);
-        const pitch = rowPitch || packed.rowPitch;
-        const slicePitch = depthPitch || pitch * packed.rows;
-        return slicePitch * (depth - 1) + pitch * packed.rows;
+        return updateSpan(formatPitch(resource.desc.Format, width, height), depth, rowPitch,
+            depthPitch);
     };
 
     /** @param {number} address @param {number} count */
@@ -2132,6 +3306,37 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             const [interfaces, id] = resourceInterfaces(held.resource);
             return handBack(held.resource, interfaces, id, out);
         };
+
+    /**
+     * A device's object over a shared texture, handed back as the interface
+     * asked for: by a legacy handle (`OpenSharedResource`) or by the key an
+     * NT handle names (`OpenSharedResource1`).
+     *
+     * @param {any} device @param {string} method @param {number | null} key
+     * @param {number} iid @param {number} out
+     * @returns {number}
+     */
+    const openShared = (device, method, key, iid, out)=>{
+        if ((out >>> 0) === 0)
+        {
+            return E_INVALIDARG;
+        }
+        fields.writeU32(out, 0);
+        /** @type {{ resource?: any }} */
+        const held = {};
+        const hr = key === null ? E_INVALIDARG : device[method](key, held);
+        if (hr !== S_OK)
+        {
+            return hr;
+        }
+        const id = readGuid(memory, iid);
+        if (!held.resource.supports(id))
+        {
+            held.resource.release();
+            return E_NOINTERFACE;
+        }
+        return handBack(held.resource, resourceInterfaces(held.resource)[0], id, out);
+    };
 
     /**
      * @param {string} method
@@ -2446,8 +3651,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 {
                     return;
                 }
+                // The program's bytes where they lie: the device copies them at
+                // the call, as Direct3D does.
                 device.UpdateSubresource(resource, subresource >>> 0, box,
-                    memory.readMemory(data >>> 0, bytes), rowPitch >>> 0, depthPitch >>> 0);
+                    (memory.windowMemory ?? memory.readMemory)(data >>> 0, bytes), rowPitch >>> 0,
+                    depthPitch >>> 0);
             },
             /** @param {any} device @param {number[]} args */
             ClearRenderTargetView: (device, [view, colorAt])=>{
@@ -2503,6 +3711,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     }
                     return hr;
                 }
+                attachBuffer(device, held.resource);
                 return handBack(held.resource, bufferInterfaces, IID.ID3D10Buffer, out);
             },
             CreateTexture1D: textureCreate('CreateTexture1D', D3D10_RESOURCE_DIMENSION.TEXTURE1D,
@@ -2542,12 +3751,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             CreateGeometryShader: shaderCreate('CreateGeometryShader', geometryShaderInterfaces,
                 IID.ID3D10GeometryShader),
             /** @param {any} device @param {number[]} args */
-            CreateGeometryShaderWithStreamOutput: (device, [, , , , , out])=>{
-                if ((out >>> 0) !== 0)
+            CreateGeometryShaderWithStreamOutput: (device,
+                [code, length, declarationAt, count, stride, out])=>
+            {
+                /** @type {{ shader?: any }} */
+                const held = {};
+                const hr = device.CreateGeometryShaderWithStreamOutput(
+                    (code >>> 0) === 0 ? null : memory.readMemory(code >>> 0, length >>> 0),
+                    readStreamOutput(declarationAt, count, false),
+                    stride >>> 0 ? [stride >>> 0] : null, 0, held);
+                if (hr !== S_OK)
                 {
-                    fields.writeU32(out, 0);
+                    if ((out >>> 0) !== 0)
+                    {
+                        fields.writeU32(out, 0);
+                    }
+                    return hr;
                 }
-                return device.CreateGeometryShaderWithStreamOutput(null, [], 0, {});
+                return handBack(held.shader, geometryShaderInterfaces, IID.ID3D10GeometryShader,
+                    out);
             },
             CreatePixelShader: shaderCreate('CreatePixelShader', pixelShaderInterfaces,
                 IID.ID3D10PixelShader),
@@ -2647,13 +3869,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             /** @param {any} device */
             GetCreationFlags: device=>device.GetCreationFlags(),
             /** @param {any} device @param {number[]} args */
-            OpenSharedResource: (device, [, , out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    fields.writeU32(out, 0);
-                }
-                return device.OpenSharedResource();
-            },
+            OpenSharedResource: (device, [handle, iid, out])=>
+                openShared(device, 'OpenSharedResource', handle >>> 0, iid, out),
             /** @param {any} device @param {number[]} args */
             SetTextFilterSize: (device, [width, height])=>{
                 device.SetTextFilterSize(width >>> 0, height >>> 0);
@@ -2672,14 +3889,53 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     fields.writeU32(heightAt, held.height ?? 0);
                 }
             },
-        }),
+        }, ringGuests),
 
         // The same object answers as a DXGI device: what a program asks the
         // adapter through.
         ...describeAll([
             [IID.IDXGIDevice, IDXGIDEVICE_SLOTS], [IID.IDXGIDevice1, IDXGIDEVICE1_SLOTS],
-            [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
+            [IID.IDXGIDevice2, IDXGIDEVICE2_SLOTS], [IID.IDXGIDevice3, IDXGIDEVICE3_SLOTS],
+            [IID.IDXGIDevice4, IDXGIDEVICE4_SLOTS], [IID.IDXGIObject, IDXGIOBJECT_SLOTS],
         ], {
+            // Nothing is evicted, so an offered resource is never discarded:
+            // what a program reclaims has its contents.
+            OfferResources: ()=>S_OK,
+            /** @param {any} device @param {number[]} args */
+            ReclaimResources: (device, [count, , discardedAt])=>{
+                const reclaimed = (discardedAt >>> 0) === 0 ? 0 : count >>> 0;
+                for (let index = 0; index < reclaimed; index++)
+                {
+                    fields.writeU32(discardedAt + index * 4, 0);
+                }
+                return S_OK;
+            },
+            OfferResources1: ()=>S_OK,
+            /** @param {any} device @param {number[]} args */
+            ReclaimResources1: (device, [count, , resultsAt])=>{
+                const reclaimed = (resultsAt >>> 0) === 0 ? 0 : count >>> 0;
+                for (let index = 0; index < reclaimed; index++)
+                {
+                    fields.writeU32(resultsAt + index * 4, 0);
+                }
+                return S_OK;
+            },
+            /**
+             * The event is set once the GPU has run what was handed to it.
+             *
+             * @param {any} device @param {number[]} args
+             */
+            EnqueueSetEvent: (device, [event])=>{
+                if ((event >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                device.Flush?.();
+                Promise.resolve(device.idle?.()).then(()=>setEvent?.(event >>> 0));
+                return S_OK;
+            },
+            // Nothing temporary is kept that a trim would give back.
+            Trim: ()=>{},
             ...privateDataMethods,
             GetParent: getParent,
             /** @param {any} device @param {number[]} args */
@@ -2723,7 +3979,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 }
                 made.forEach((surface, index)=>{
                     fields.writeU32(out + index * 4, publisher.publish(surface,
-                        answeredBy(surface, texture2DInterfaces), IID.IDXGISurface));
+                        texture2DInterfaces, IID.IDXGISurface));
                 });
                 return S_OK;
             },
@@ -2779,7 +4035,72 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             /** @param {any} device */
             GetMultithreadProtected: device=>(device.GetMultithreadProtected() ? 1 : 0),
         }),
+        // Direct3D 11's device: the same object, created by either version.
+        ...eleven.faces.device,
     ];
+
+    /** What Direct3D 11's half of the seam reads of this one, when its calls run. */
+    /** @type {import('./d3d11.js').Direct3D11Kit} */
+    const kit = {
+        publisher, memory, fields, handBack, writeObjects, readObjects, readDwords, readFloats,
+        pointerSize, writePointer, privateDataMethods, readInitialData, readTexture2DDesc,
+        readStreamOutput,
+        readTexture1DDesc: address=>fields.readStruct(address, D3D10_TEXTURE1D_DESC),
+        readTexture3DDesc: address=>fields.readStruct(address, D3D10_TEXTURE3D_DESC),
+        writeTextureDesc: (texture, out)=>{
+            switch (texture.dimension)
+            {
+                case D3D10_RESOURCE_DIMENSION.TEXTURE1D:
+                    fields.writeStruct(out, D3D10_TEXTURE1D_DESC, texture.desc);
+                    break;
+                case D3D10_RESOURCE_DIMENSION.TEXTURE3D:
+                    fields.writeStruct(out, D3D10_TEXTURE3D_DESC, texture.desc);
+                    break;
+                default:
+                    fields.writeStruct(out, D3D10_TEXTURE2D_DESC, {
+                        ...texture.desc,
+                        SampleCount: texture.desc.SampleDesc.Count,
+                        SampleQuality: texture.desc.SampleDesc.Quality,
+                    });
+            }
+        },
+        readBox, updateBytesOf, readInputElements, readRects, readBlendDesc1,
+        readDepthStencilDesc, readRasterizerDesc, readSamplerDesc, writeBlendDesc1,
+        writeDepthStencilDesc, writeRasterizerDesc, writeSamplerDesc,
+        readQueryDesc: address=>fields.readStruct(address, D3D10_QUERY_DESC),
+        writeQueryDesc: (desc, out)=>{
+            fields.writeStruct(out, D3D10_QUERY_DESC, desc);
+        },
+        mapInto, unmapFrom, whenMappable, ringOf, countUnattached, attachRing, attachBuffer,
+        created: device=>{
+            created.push(device);
+        },
+        pairSwapChain: (swapChain, device)=>{
+            swapChainDevices.set(swapChain, device);
+        },
+        readSwapChainDesc: address=>sized(readSwapChainDesc(memory, address, pointerSize)),
+        root,
+        floatResult,
+        diverge: detail=>divergence?.('Direct3D 11', detail),
+        lose: detail=>divergence?.('Direct3D 11', `lost: ${detail}`, 'loss'),
+        allocate,
+        free,
+        lists: {
+            device: deviceInterfaces, buffer: bufferInterfaces,
+            srv: shaderResourceViewInterfaces, rtv: renderTargetViewInterfaces,
+            dsv: depthStencilViewInterfaces, uav: eleven.lists.uav,
+            blend: blendStateInterfaces, depthStencil: depthStencilStateInterfaces,
+            rasterizer: rasterizerStateInterfaces, sampler: samplerStateInterfaces,
+            vs: vertexShaderInterfaces, hs: eleven.lists.hs, ds: eleven.lists.ds,
+            gs: geometryShaderInterfaces, ps: pixelShaderInterfaces, cs: eleven.lists.cs,
+            inputLayout: inputLayoutInterfaces, query: queryDescriptors,
+            swapChain: swapChainInterfaces,
+        },
+        resourceInterfaces: resource=>resourceInterfaces(resource)[0],
+        openShared,
+        /** @param {number} handle @returns {number | null} the key an NT handle names */
+        sharedKeyOf: handle=>sharedHandles?.resolve(handle >>> 0) ?? null,
+    };
 
     // --- blobs and reflection ---
 
@@ -2791,7 +4112,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     const LARGEST_BLOB = 0x10000000;
 
     /** @param {string} detail */
-    const report = detail=>deviceOptions().divergence?.('d3d10', detail);
+    const report = detail=>divergence?.('d3d10', detail);
 
     /**
      * An ID3D10Blob holding these bytes in guest memory, which the program
@@ -3008,8 +4329,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 if (hr === S_OK)
                 {
                     const entry = held.entry;
+                    // The flags (a texture's component count) are Direct3D 11's
+                    // reflector's: Direct3D 10's answers none (test_reflection_bound_resources).
                     [pointerInto(reflection, entry.nameAt), entry.type, entry.bindPoint,
-                        entry.bindCount, entry.flags, entry.returnType, entry.dimension,
+                        entry.bindCount, 0, entry.returnType, entry.dimension,
                         entry.sampleCount]
                         .forEach((value, position)=>fields.writeU32(out + position * 4, value));
                 }
@@ -3042,34 +4365,297 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         return constants.get(text) ?? 0;
     };
 
-    /**
-     * No HLSL compiler runs here. A compile is answered the way a failed one
-     * is -- E_FAIL, no output, and the reason in the error blob when the
-     * program asked for one -- so a program that logs its compiler's errors
-     * says why.
-     *
-     * @param {string} entry
-     * @param {number} outputAt
-     * @param {number} errorsAt
-     */
-    const refuseCompile = (entry, outputAt, errorsAt)=>{
-        if ((outputAt >>> 0) !== 0)
-        {
-            fields.writeU32(outputAt, 0);
-        }
-        if ((errorsAt >>> 0) !== 0)
-        {
-            const message = `${entry}: this runtime has no HLSL compiler\n`;
-            const hr = blobInto(errorsAt,
-                Uint8Array.from([...message].map(char=>char.charCodeAt(0)).concat(0)), E_FAIL);
-            if (hr !== S_OK)
-            {
-                fields.writeU32(errorsAt, 0);
-            }
-        }
-        report(`${entry}: no HLSL compiler; the program was told the compile failed`);
-        return E_FAIL;
+    // --- Direct3D 11's reflection, D3DReflect's ---
+
+    /** D3D_NAME of a pixel shader's output named by its semantic alone, as fxc writes them. */
+    const OUTPUT_NAMES = /** @type {Record<string, number>} */ ({ SV_TARGET: 64, SV_DEPTH: 65,
+        SV_COVERAGE: 66, SV_DEPTHGREATEREQUAL: 67, SV_DEPTHLESSEQUAL: 68 });
+
+    /** @param {any} reflection @param {any} entry @param {boolean} output */
+    const systemValueOf = (reflection, entry, output)=>{
+        const pixel = (reflection.reflection.desc.Version >>> 16) === 0;
+        return output && pixel && entry.systemValue === 0
+            ? OUTPUT_NAMES[entry.name.toUpperCase()] ?? 0 : entry.systemValue;
     };
+
+    /** The name of a type as model 5's RDEF gives it, or the one its shape spells. */
+    const typeNameOf = (/** @type {any} */ type)=>{
+        const entry = type.entry;
+        if (!entry)
+        {
+            return 0;
+        }
+        if (entry.nameAt !== undefined)
+        {
+            return pointerInto(type.owner, entry.nameAt);
+        }
+        const base = /** @type {Record<number, string>} */ ({ 1: 'bool', 2: 'int', 3: 'float',
+            19: 'uint' })[entry.type] ?? 'void';
+        const shape = entry.class === 0 ? base : entry.class === 1 ? `${base}${entry.columns}`
+            : entry.class <= 3 ? `${base}${entry.rows}x${entry.columns}` : '';
+        return constantString(shape);
+    };
+
+    /**
+     * The interfaces of one version of ID3D11ShaderReflection: 43's signature description is
+     * seven dwords, 46 and 47 add MinPrecision.
+     *
+     * @param {string} id   The interface's identifier.
+     * @param {boolean} precision   Whether the signature description has MinPrecision.
+     */
+    const reflection11 = (id, precision)=>{
+        /** @param {any} type @returns {number} */
+        const publishType11 = type=>publisher.publish(type, typeInterfaces,
+            IID.ID3D11ShaderReflectionType);
+        /** @param {any} variable @returns {number} */
+        const publishVariable11 = variable=>publisher.publish(variable, variableInterfaces,
+            IID.ID3D11ShaderReflectionVariable);
+        /** @param {any} buffer @returns {number} */
+        const publishBuffer11 = buffer=>publisher.publish(buffer, bufferInterfaces11,
+            IID.ID3D11ShaderReflectionConstantBuffer);
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const typeInterfaces = [bare(describe(IID.ID3D11ShaderReflectionType,
+            ID3D11SHADERREFLECTIONTYPE_SLOTS, {
+                /** @param {any} type @param {number[]} args */
+                GetDesc: (type, [out])=>{
+                    const hr = describedAs(SHADER_TYPE_DESC_FIELDS)(type, [out]);
+                    if (hr === S_OK)
+                    {
+                        fields.writeU32(out + 28, typeNameOf(type));
+                    }
+                    return hr;
+                },
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeByIndex: (type, [index])=>
+                    publishType11(type.GetMemberTypeByIndex(index >>> 0)),
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeByName: (type, [name])=>
+                    publishType11(type.GetMemberTypeByName(nameArgument(name))),
+                /** @param {any} type @param {number[]} args */
+                GetMemberTypeName: (type, [index])=>{
+                    const name = type.GetMemberTypeName(index >>> 0);
+                    if (!name)
+                    {
+                        return 0;
+                    }
+                    return 'text' in name ? constantString(name.text)
+                        : pointerInto(type.owner, name.at);
+                },
+                /** @param {any} type @param {number[]} args */
+                IsEqual: (type, [other])=>(publisher.objectAt(other) === type ? S_OK : 1),
+                GetSubType: ()=>0,
+                GetBaseClass: ()=>0,
+                GetNumInterfaces: ()=>0,
+                GetInterfaceByIndex: ()=>0,
+                IsOfType: ()=>1,
+                ImplementsInterface: ()=>1,
+            }))];
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const variableInterfaces = [bare(describe(IID.ID3D11ShaderReflectionVariable,
+            ID3D11SHADERREFLECTIONVARIABLE_SLOTS, {
+                /** @param {any} variable @param {number[]} args */
+                GetDesc: (variable, [out])=>{
+                    const hr = describedAs(SHADER_VARIABLE_DESC_FIELDS)(variable, [out]);
+                    if (hr === S_OK)
+                    {
+                        // Where a model 5 entry says it binds textures and samplers; a model
+                        // 4 one binds none.
+                        (variable.entry?.bindings ?? [0xffffffff, 0, 0xffffffff, 0])
+                            .forEach((/** @type {number} */ word, /** @type {number} */ i)=>
+                                fields.writeU32(out + 20 + i * 4, word));
+                    }
+                    return hr;
+                },
+                /** @param {any} variable */
+                GetType: variable=>publishType11(variable.GetType()),
+                /** @param {any} variable */
+                GetBuffer: variable=>(variable.GetBuffer
+                    ? publishBuffer11(variable.GetBuffer()) : 0),
+                GetInterfaceSlot: ()=>0xffffffff,
+            }))];
+        /** @type {import('./com.js').InterfaceDescriptor[]} */
+        const bufferInterfaces11 = [bare(describe(IID.ID3D11ShaderReflectionConstantBuffer,
+            ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS, {
+                GetDesc: describedAs(SHADER_BUFFER_DESC_FIELDS),
+                /** @param {any} buffer @param {number[]} args */
+                GetVariableByIndex: (buffer, [index])=>
+                    publishVariable11(buffer.GetVariableByIndex(index >>> 0)),
+                /** @param {any} buffer @param {number[]} args */
+                GetVariableByName: (buffer, [name])=>
+                    publishVariable11(buffer.GetVariableByName(nameArgument(name))),
+            }))];
+        /** @param {'GetInputParameterDesc' | 'GetOutputParameterDesc'} method */
+        const signature = method=>{
+            /** @param {any} reflection @param {number[]} args */
+            const write = (reflection, [index, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection[method](index >>> 0, (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    const entry = held.entry;
+                    [pointerInto(reflection, entry.nameAt), entry.index, entry.register,
+                        systemValueOf(reflection, entry, method === 'GetOutputParameterDesc'),
+                        entry.componentType, entry.mask | (entry.readWriteMask << 8), 0,
+                        ...(precision ? [0] : [])]
+                        .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+                }
+                return hr;
+            };
+            return write;
+        };
+        /** @param {any} reflection @param {number} index */
+        const stat = (reflection, index)=>reflection.reflection.statistics?.[index] ?? 0;
+        /** @param {any} reflection @param {any} entry @param {number} out */
+        const writeBinding = (reflection, entry, out)=>{
+            [pointerInto(reflection, entry.nameAt), entry.type, entry.bindPoint,
+                entry.bindCount, entry.flags, entry.returnType, entry.dimension,
+                entry.sampleCount]
+                .forEach((value, position)=>fields.writeU32(out + position * 4, value));
+        };
+        return [describe(id, ID3D11SHADERREFLECTION_SLOTS, {
+            /** @param {any} reflection @param {number[]} args */
+            GetDesc: (reflection, [out])=>{
+                /** @type {{ desc?: Record<string, number> }} */
+                const held = {};
+                const hr = reflection.GetDesc((out >>> 0) === 0 ? null : held);
+                if (hr === S_OK && held.desc)
+                {
+                    const desc = held.desc;
+                    SHADER_DESC_FIELDS.forEach((field, index)=>fields.writeU32(out + index * 4,
+                        field === 'Creator' ? pointerInto(reflection, desc.Creator)
+                            : desc[field]));
+                    // InputPrimitive, then the hull, domain and compute fields: none here.
+                    fields.writeU32(out + SHADER_DESC_FIELDS.length * 4, stat(reflection, 23));
+                    for (let i = SHADER_DESC_FIELDS.length + 1; i < 38; i++)
+                    {
+                        fields.writeU32(out + i * 4, 0);
+                    }
+                }
+                return hr;
+            },
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByIndex: (reflection, [index])=>
+                publishBuffer11(reflection.GetConstantBufferByIndex(index >>> 0)),
+            /** @param {any} reflection @param {number[]} args */
+            GetConstantBufferByName: (reflection, [name])=>
+                publishBuffer11(reflection.GetConstantBufferByName(nameArgument(name))),
+            /** @param {any} reflection @param {number[]} args */
+            GetResourceBindingDesc: (reflection, [index, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection.GetResourceBindingDesc(index >>> 0,
+                    (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    writeBinding(reflection, held.entry, out);
+                }
+                return hr;
+            },
+            GetInputParameterDesc: signature('GetInputParameterDesc'),
+            GetOutputParameterDesc: signature('GetOutputParameterDesc'),
+            GetPatchConstantParameterDesc: ()=>E_INVALIDARG,
+            /** @param {any} reflection @param {number[]} args */
+            GetVariableByName: (reflection, [name])=>
+                publishVariable11(reflection.GetVariableByName(nameArgument(name))),
+            /** @param {any} reflection @param {number[]} args */
+            GetResourceBindingDescByName: (reflection, [name, out])=>{
+                /** @type {{ entry?: any }} */
+                const held = {};
+                const hr = reflection.GetResourceBindingDescByName(nameArgument(name),
+                    (out >>> 0) === 0 ? null : held);
+                if (hr === S_OK)
+                {
+                    writeBinding(reflection, held.entry, out);
+                }
+                return hr;
+            },
+            /** @param {any} reflection */
+            GetMovInstructionCount: reflection=>stat(reflection, 19),
+            /** @param {any} reflection */
+            GetMovcInstructionCount: reflection=>stat(reflection, 20),
+            /** @param {any} reflection */
+            GetConversionInstructionCount: reflection=>stat(reflection, 21),
+            GetBitwiseInstructionCount: ()=>{
+                report('ID3D11ShaderReflection::GetBitwiseInstructionCount: not counted here; '
+                    + 'answered 0');
+                return 0;
+            },
+            /** @param {any} reflection */
+            GetGSInputPrimitive: reflection=>stat(reflection, 23),
+            IsSampleFrequencyShader: ()=>0,
+            GetNumInterfaceSlots: ()=>0,
+            /** @param {any} reflection @param {number[]} args */
+            GetMinFeatureLevel: (reflection, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const major = (reflection.reflection.desc.Version >>> 4) & 0xf;
+                fields.writeU32(out, major >= 5 ? 0xb000 : 0xa000);
+                return S_OK;
+            },
+            /** @param {any} reflection @param {number[]} args */
+            GetThreadGroupSize: (reflection, [x, y, z])=>{
+                for (const out of [x, y, z])
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        fields.writeU32(out, 0);
+                    }
+                }
+                return 0;
+            },
+            GetRequiresFlags: ()=>0,
+        })];
+    };
+    const reflection11Interfaces43 = reflection11(IID.ID3D11ShaderReflection43, false);
+    const reflection11Interfaces = reflection11(IID.ID3D11ShaderReflection, true);
+
+    /**
+     * D3DReflect: an ID3D11ShaderReflection of either version over a copy of the container,
+     * or of Direct3D 10 when that is what was asked.
+     *
+     * @param {Uint8Array} bytes @param {number} riid @param {number} out
+     */
+    const reflectInto = (bytes, riid, out)=>{
+        const id = readGuid(memory, riid);
+        /** @type {string[]} */
+        const ids = [IID.ID3D11ShaderReflection43, IID.ID3D11ShaderReflection,
+            IID.ID3D10ShaderReflection];
+        if (!ids.includes(id))
+        {
+            fields.writeU32(out, 0);
+            return 0x80004002 | 0;
+        }
+        const reflected = reflectShader(bytes);
+        if (!reflected)
+        {
+            fields.writeU32(out, 0);
+            return E_FAIL;
+        }
+        const copy = allocate ? allocate(bytes.length) : 0;
+        if (!copy)
+        {
+            fields.writeU32(out, 0);
+            return E_OUTOFMEMORY;
+        }
+        memory.writeMemory(copy, bytes);
+        const reflection = createShaderReflection(reflected, ()=>{
+            for (const child of reflection.children())
+            {
+                publisher.unpublish(child);
+            }
+            free?.(copy);
+        }, [id]);
+        reflectionCopies.set(reflection, copy);
+        const interfaces = id === IID.ID3D11ShaderReflection43 ? reflection11Interfaces43
+            : id === IID.ID3D11ShaderReflection ? reflection11Interfaces : reflectionInterfaces;
+        return handBack(reflection, interfaces, id, out);
+    };
+
+    const compiler = createCompilerSeam({ fields, memory, allocate, free, report, blobInto,
+        readCString, callGuest, currentThread, reflect: reflectInto });
 
     /** @param {string[]} chunks */
     const signatureEntry = chunks=>({
@@ -3115,6 +4701,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     });
 
     const effects = createEffectSeam({
+        sync: syncRings,
         publisher, fields, memory, allocate, free, report, constantString, readCString, handBack,
         writeObjects, deviceInterfaces: ()=>deviceInterfaces,
         children: {
@@ -3222,17 +4809,16 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const deviceOut = {};
         /** @type {{ swapChain?: any }} */
         const chainOut = {};
-        const options = { ...deviceOptions(), factoryOptions };
         let hr;
         let out;
         if (withSwapChain)
         {
             const [, , , , , descAt, chainAt, deviceAt] = args;
             out = deviceAt;
-            hr = D3D10CreateDeviceAndSwapChain(adapter, driverType >>> 0, softwareModule,
+            hr = root().CreateDeviceAndSwapChain(adapter, driverType >>> 0, softwareModule,
                 flags >>> 0, sdkVersion >>> 0,
-                (descAt >>> 0) === 0 ? null : readSwapChainDesc(memory, descAt),
-                chainOut, deviceOut, options);
+                (descAt >>> 0) === 0 ? null : sized(readSwapChainDesc(memory, descAt, pointerSize)),
+                chainOut, deviceOut);
             if ((chainAt >>> 0) !== 0)
             {
                 fields.writeU32(chainAt, 0);
@@ -3254,8 +4840,8 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         else
         {
             out = args[5];
-            hr = D3D10CreateDevice(adapter, driverType >>> 0, softwareModule, flags >>> 0,
-                sdkVersion >>> 0, deviceOut, options);
+            hr = root().CreateDevice(adapter, driverType >>> 0, softwareModule, flags >>> 0,
+                sdkVersion >>> 0, deviceOut);
         }
         if (hr !== S_OK)
         {
@@ -3273,6 +4859,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return S_OK;
         }
         created.push(deviceOut.device);
+        attachRing(deviceOut.device);
         return handBack(deviceOut.device, deviceInterfaces, IID.ID3D10Device, out);
     };
 
@@ -3291,16 +4878,16 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         const deviceOut = (deviceAt >>> 0) === 0 ? null : {};
         /** @type {{ swapChain?: any } | null} */
         const chainOut = (chainAt >>> 0) === 0 ? null : {};
-        const options = { ...deviceOptions(), factoryOptions };
         const adapter = publisher.objectAt(adapterPointer);
         const softwareModule = (software >>> 0) === 0 ? null : { module: software >>> 0 };
         const hr = withSwapChain
-            ? D3D10CreateDeviceAndSwapChain1(adapter, driverType >>> 0, softwareModule,
+            ? root().CreateDeviceAndSwapChain1(adapter, driverType >>> 0, softwareModule,
                 flags >>> 0, featureLevel >>> 0, sdkVersion >>> 0,
-                (descAt >>> 0) === 0 ? null : readSwapChainDesc(memory, descAt), chainOut,
-                deviceOut, options)
-            : D3D10CreateDevice1(adapter, driverType >>> 0, softwareModule, flags >>> 0,
-                featureLevel >>> 0, sdkVersion >>> 0, deviceOut, options);
+                (descAt >>> 0) === 0 ? null : sized(readSwapChainDesc(memory, descAt, pointerSize)),
+                chainOut,
+                deviceOut)
+            : root().CreateDevice1(adapter, driverType >>> 0, softwareModule, flags >>> 0,
+                featureLevel >>> 0, sdkVersion >>> 0, deviceOut);
         if ((chainAt >>> 0) !== 0)
         {
             fields.writeU32(chainAt, 0);
@@ -3320,6 +4907,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 IID.IDXGISwapChain));
         }
         created.push(deviceOut.device);
+        attachRing(deviceOut.device);
         return handBack(deviceOut.device, deviceInterfaces, IID.ID3D10Device1, deviceAt);
     };
 
@@ -3399,6 +4987,19 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     fields.writeU32(out, 0);
                     return E_FAIL;
                 }
+                // Direct3D 10's reflector knows the vertex, geometry and pixel
+                // stages up to shader model 5.0, and reads a program through its
+                // resource definitions: a stage Direct3D 11 added, model 5.1, or
+                // a container stripped of its RDEF is refused (reflection.c as
+                // d3d10 builds it: test_reflection_cs, _desc_ps_output,
+                // _bound_resources).
+                const version = reflected.desc.Version;
+                if ((version >>> 16) > SHADER_KIND.GEOMETRY || (version & 0xff) > 0x50
+                    || !reflected.hasDefinitions)
+                {
+                    fields.writeU32(out, 0);
+                    return E_INVALIDARG;
+                }
                 const copy = allocate ? allocate(bytes.length) : 0;
                 if (!copy)
                 {
@@ -3427,8 +5028,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
          * HRESULT D3D10CreateEffectPoolFromMemory(void*, SIZE_T, UINT, ID3D10Device*,
          *     ID3D10EffectPool**)
          */
-        D3D10CreateEffectPoolFromMemory: refusal(20, 4, 'D3D10CreateEffectPoolFromMemory:'
-            + ' effect pools are not implemented, nor the effects that share their variables'),
+        D3D10CreateEffectPoolFromMemory: { argBytes: 20, handler: effects.poolFromMemory },
         /** HRESULT D3D10DisassembleEffect(ID3D10Effect*, BOOL, ID3D10Blob**) */
         D3D10DisassembleEffect: refusal(12, 2, 'D3D10DisassembleEffect: no disassembler is'
             + ' kept here'),
@@ -3491,32 +5091,25 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
         D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
         /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
-        D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
+        D3D10GetVertexShaderProfile: { ...profileEntry(SHADER_PROFILE.VERTEX), returns: 'pointer' },
         /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
-        D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
+        D3D10GetPixelShaderProfile: { ...profileEntry(SHADER_PROFILE.PIXEL), returns: 'pointer' },
         /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
-        D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
+        D3D10GetGeometryShaderProfile: {
+            ...profileEntry(SHADER_PROFILE.GEOMETRY), returns: 'pointer',
+        },
         /**
          * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,
          *     UINT, ID3D10Blob**, ID3D10Blob**)
          */
-        D3D10CompileShader: {
-            argBytes: 40,
-            /** @param {number[]} args */
-            handler: args=>refuseCompile('D3D10CompileShader', args[8], args[9]),
-        },
+        D3D10CompileShader: compiler.D3D10CompileShader,
         /**
          * HRESULT D3D10CompileEffectFromMemory(void*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, UINT, UINT, ID3D10Blob**,
          *     ID3D10Blob**)
          */
-        D3D10CompileEffectFromMemory: {
-            argBytes: 36,
-            /** @param {number[]} args */
-            handler: args=>refuseCompile('D3D10CompileEffectFromMemory', args[7],
-                args[8]),
-        },
+        D3D10CompileEffectFromMemory: compiler.D3D10CompileEffectFromMemory,
         /**
          * HRESULT D3D10DisassembleShader(const void*, SIZE_T, BOOL, const char*,
          *     ID3D10Blob**)
@@ -3526,6 +5119,12 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
     };
 
     return {
+        /**
+         * The window the last swap chain presented a frame into and whether
+         * it is full screen, or null: full screen, or windowed over the whole
+         * screen, its frames are the screen.
+         */
+        presentedWindow: ()=>presentedInto,
         deviceInterfaces,
         swapChainInterfaces,
         factoryInterfaces,
@@ -3558,6 +5157,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                     name !== 'D3D10CreateDevice' && name !== 'D3D10CreateDeviceAndSwapChain')),
             },
             'D3D10.dll': d3d10Exports,
+            'D3D11.dll': eleven.library,
+            // D3DCompile, D3DReflect and the blob functions: the June 2010 runtime's library
+            // and the one Windows ships.
+            'D3DCompiler_43.dll': compiler.exports,
+            'D3DCOMPILER_47.dll': compiler.exports,
             'DXGI.dll': {
                 /** HRESULT CreateDXGIFactory(REFIID, void**) */
                 CreateDXGIFactory: {
@@ -3567,13 +5171,30 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                         const id = readGuid(memory, guid);
                         /** @type {{ object?: any }} */
                         const held = {};
-                        const hr = CreateDXGIFactory(id, held, factoryOptions);
+                        const hr = root().CreateDXGIFactory(id, held);
                         if (hr !== S_OK)
                         {
                             fields.writeU32(out, 0);
                             return hr;
                         }
-                        return handBack(held.object, factoryInterfaces, IID.IDXGIFactory, out);
+                        return handBack(held.object, factoryInterfaces, factoryFace(id), out);
+                    },
+                },
+                /** HRESULT CreateDXGIFactory2(UINT, REFIID, void**) */
+                CreateDXGIFactory2: {
+                    argBytes: 12,
+                    /** @param {number[]} args */
+                    handler: ([flags, guid, out])=>{
+                        const id = readGuid(memory, guid);
+                        /** @type {{ object?: any }} */
+                        const held = {};
+                        const hr = root().CreateDXGIFactory2(flags >>> 0, id, held);
+                        if (hr !== S_OK)
+                        {
+                            fields.writeU32(out, 0);
+                            return hr;
+                        }
+                        return handBack(held.object, factoryInterfaces, factoryFace(id), out);
                     },
                 },
                 /** HRESULT CreateDXGIFactory1(REFIID, void**) */
@@ -3584,14 +5205,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                         const id = readGuid(memory, guid);
                         /** @type {{ object?: any }} */
                         const held = {};
-                        const hr = CreateDXGIFactory1(id, held, factoryOptions);
+                        const hr = root().CreateDXGIFactory1(id, held);
                         if (hr !== S_OK)
                         {
                             fields.writeU32(out, 0);
                             return hr;
                         }
-                        return handBack(held.object, factoryInterfaces,
-                            id === IID.IDXGIFactory1 ? IID.IDXGIFactory1 : IID.IDXGIFactory, out);
+                        return handBack(held.object, factoryInterfaces, factoryFace(id), out);
                     },
                 },
             },
@@ -3600,6 +5220,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         diagnostics: ()=>({
             devices: created.length,
             renderer: created.length > 0 ? created[created.length - 1].diagnostics() : null,
+            // Each device's ring: how often and how long it was played, and why
+            // a dynamic buffer's maps reached the host.
+            rings: [...rings].map(ring=>ring.counters()),
+            // Maps of buffers the guest cannot map, by their usage.
+            unattachedMaps: { ...unattachedMaps },
         }),
     };
 }

@@ -6,12 +6,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inputModule } from './module.js';
+import { inputModule, viewportOrigin } from './module.js';
 import { WM } from './router.js';
 import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
 import { createStubApi } from '../../system/stub.js';
-import { writeGuid } from '../win32/ole32/guid.js';
+import { writeGuid } from '../../system/guid.js';
 import { IID_IDirectInput8A, GUID_SysMouse } from './dinput/seam.js';
+import { withPointers } from '../memory/pointers.fixture.js';
 
 const HWND = 0x40;
 
@@ -25,12 +26,12 @@ const HWND = 0x40;
 async function open({ win32, config } = {}){
     const queue = createMessageQueue();
     const bytes = new Uint8Array(0x1000);
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
     const apis = /** @type {Record<string, any>} */ ({
         memory,
         bridge: {},
@@ -264,4 +265,101 @@ test('SetCooperativeLevel asks win32 what a window handle names', async()=>{
     assert.equal(call(mouse, 'SetCooperativeLevel', [0x42, FOREGROUND_NONEXCLUSIVE]), E_HANDLE);
 
     await inputModule.dispose();
+});
+
+test('with no low-level hook installed, device input is posted at once, as before', async()=>{
+    // The hooks' seam is there and empty: nothing waits and nothing is held.
+    const { api, queue, drain } = await open();
+    let asked = 0;
+    queue.lowLevel = { hooked: ()=>false, show: ()=>{
+        asked++;
+        return 0;
+    } };
+    api.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.equal(drain()[0]?.message, WM.KEYDOWN, 'in the queue before send returned');
+    assert.equal(asked, 0);
+});
+
+test('a low-level hook sees device input first, after the cursor moved, and takes away what '
+    + 'it answers non-zero for, in the order it came', async()=>{
+    /** @type {any[]} */
+    const reports = [];
+    const queue = createMessageQueue();
+    const { api } = await open({ win32: {
+        queue: ()=>queue,
+        rawInput: (/** @type {any} */ report)=>reports.push(report),
+    } });
+    const drain = ()=>{
+        /** @type {any[]} */
+        const taken = [];
+        for (let entry = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }); entry;
+            entry = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true }))
+        {
+            taken.push(entry);
+        }
+        return taken;
+    };
+    /** @type {{ kind: string, message: number, x?: number }[]} */
+    const shown = [];
+    /** @type {((answer: number) => void)[]} */
+    const answers = [];
+    queue.lowLevel = {
+        hooked: kind=>kind === 'mouse',
+        show: (kind, message)=>{
+            shown.push({ kind, message: message.message, x: message.x });
+            return new Promise(resolve=>answers.push(resolve));
+        },
+    };
+
+    api.send({ kind: 'pointerMove', x: 30, y: 20 });
+    api.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.deepEqual(drain(), [], 'held while the hook has not answered');
+    assert.equal(reports.length, 0, 'raw input too');
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(shown.map(each=>each.message), [WM.MOUSEMOVE]);
+    assert.equal(shown[0].x, api.cursor()?.x, 'the cursor had moved when the hook was called');
+    answers[0](1);
+    await new Promise(resolve=>setImmediate(resolve));
+    const taken = drain();
+    assert.deepEqual(taken.map(entry=>entry.message), [WM.KEYDOWN],
+        'the move taken away, the key after it let through in turn');
+    assert.deepEqual(reports.map(report=>report.device), ['key']);
+});
+
+test('a viewport the screen\'s size is the screen, whatever window has a client that size', ()=>{
+    // A setup dialog over a game's bordered 1024x768 window, on a 1024x768
+    // screen: taken as that window's picture, every press landed its caption
+    // lower than the dialog's controls.
+    /** @param {number} left @param {number} top @param {number} width @param {number} height */
+    const client = (left, top, width, height)=>({ visible: true, child: false,
+        client: { left, top, right: left + width, bottom: top + height } });
+    const game = client(3, 22, 1024, 768);
+    const dialog = client(300, 250, 430, 135);
+
+    assert.equal(viewportOrigin(1024, 768, { width: 1024, height: 768 }, [game, dialog]), null,
+        'was (3, 22) before');
+    const own = { x: 114, y: 104 };
+    assert.deepEqual(viewportOrigin(800, 600, { width: 1920, height: 1080 },
+        [client(114, 104, 800, 600)]), own, 'a smaller window\'s picture is its own');
+});
+
+test('input a program put in with SendInput is not shown to the low-level hooks again', async()=>{
+    // SendInput shows the hooks itself before it hands the input here; showing
+    // it again had a WH_KEYBOARD_LL hook see each injected key twice.
+    const { api, queue, drain } = await open();
+    /** @type {number[]} */
+    const shown = [];
+    queue.lowLevel = {
+        hooked: ()=>true,
+        show: (/** @type {string} */ _kind, /** @type {any} */ message)=>{
+            shown.push(message.message);
+            return 0;
+        },
+    };
+    api.send({ kind: 'key', code: 'KeyA', down: true, injected: true });
+    assert.equal(drain()[0]?.message, WM.KEYDOWN, 'posted at once, nothing held');
+    assert.deepEqual(shown, [], 'no hook was shown it');
+    api.send({ kind: 'key', code: 'KeyB', down: true });
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(shown, [WM.KEYDOWN], 'a key from the device still is');
 });

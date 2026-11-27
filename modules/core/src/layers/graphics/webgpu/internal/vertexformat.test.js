@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FVF, decodeFvf } from './vertexformat.js';
+import { pipelineRefusal } from './fake-device.js';
 
 /** Two texture coordinate sets, both the default two floats. */
 const twoSets = 2 << FVF.TEXCOUNT_SHIFT;
@@ -64,6 +65,18 @@ test('a pre-transformed position carries four floats and says so', ()=>{
     assert.equal(transformed.attributes[0].format, 'float32x4');
 });
 
+test('an untransformed position of four floats takes sixteen bytes and is read as three', ()=>{
+    // D3DFVF_XYZW (Direct3D 9) is XYZ with bit 0x4000: the w is stepped over,
+    // the fixed function taking it as one (Wine's d3d9 test_ffp_w, test_fog),
+    // and every attribute after it sits four bytes further on.
+    const layout = decodeFvf(0x4002 | FVF.DIFFUSE | FVF.SPECULAR);
+
+    assert.equal(layout.preTransformed, false);
+    assert.equal(layout.attributes[0].format, 'float32x3');
+    assert.deepEqual(layout.attributes.map(attribute=>attribute.offset), [0, 16, 20]);
+    assert.equal(layout.stride, 24);
+});
+
 test('a texture coordinate pair of three means one float, not four', ()=>{
     // The encoding is not a count: 0,1,2,3 mean 2,3,4,1 floats. Read as a count
     // it takes a one-dimensional coordinate for a four-dimensional one and
@@ -92,6 +105,11 @@ test('blend weights come from the position field and follow the position', ()=>{
         assert.equal(layout.attributes[1].name, 'blendWeight');
         assert.equal(layout.attributes[1].offset, 12, 'immediately after the position');
         assert.equal(layout.stride, 12 + weights * 4);
+        // A format WebGPU has: five weights are a float32x4 and one stepped over.
+        assert.equal(layout.attributes[1].format, weights === 1 ? 'float32'
+            : `float32x${Math.min(4, weights)}`);
+        assert.equal(pipelineRefusal({ vertex: { buffers: [{ arrayStride: layout.stride,
+            attributes: layout.attributes }] } }, new Set()), null);
     }
 });
 

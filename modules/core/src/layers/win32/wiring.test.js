@@ -18,7 +18,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
+import { createMemoryModule } from '../memory/module.js';
 import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
+import { noCache } from '../cache/module.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -61,8 +63,20 @@ function hostOver(replace = {}){
                 }
                 return text;
             },
+            /** @param {number} at @param {number} length */
+            window: (at, length)=>bytes.subarray(at, at + length),
+            /** @param {number} at */
+            readU8: at=>bytes[at],
+            /** @param {number} at */
+            readU16: at=>view.getUint16(at, true),
             /** @param {number} at */
             readU32: at=>view.getUint32(at, true),
+            /** @param {number} at @param {number} value */
+            writeU8: (at, value)=>view.setUint8(at, value & 0xff),
+            /** @param {number} at @param {number} value */
+            writeU16: (at, value)=>view.setUint16(at, value & 0xffff, true),
+            /** @param {number} at @param {number} value */
+            writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
             find: ()=>null,
             scanCString: ()=>({ index: 0, byte: 0 }),
         },
@@ -97,7 +111,13 @@ function hostOver(replace = {}){
             label: ()=>{},
         },
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
+        // No run's cache: every read is a miss.
+        cache: noCache,
     };
+    if (replace.memory)
+    {
+        apis.memory = replace.memory;
+    }
     Object.assign(apis.kernel, replace.kernel ?? {});
     Object.assign(apis.bridge, replace.bridge ?? {});
     const host = /** @type {any} */ ({
@@ -157,6 +177,26 @@ test('DirectX 8.1\'s NAT helper is one of the machine\'s libraries, so it loads'
     assert.equal(typeof libraries['DPNHPAST.dll']?.DllGetClassObject?.handler, 'function');
     await win32Module.dispose();
 });
+
+test('AVRT takes a thread\'s registration and writes its task index; PSAPI names the image',
+    async()=>{
+        // 3DMark 11's workloads link both and register their render thread.
+        const thread = { id: 1 };
+        const { view, libraries, lastError } = await build({
+            kernel: { currentThread: ()=>thread },
+        });
+        const avrt = libraries['AVRT.dll'];
+        const handle = avrt.AvSetMmThreadCharacteristicsA.handler([0x1000, 0x2000]);
+        assert.notEqual(handle, 0);
+        assert.equal(view.getUint32(0x2000, true), 1, 'the task index');
+        assert.equal(avrt.AvSetMmThreadCharacteristicsW.handler([0x1000, 0]), 0);
+        assert.equal(lastError(), 87, 'ERROR_INVALID_PARAMETER for no index');
+        assert.equal(avrt.AvRevertMmThreadCharacteristics.handler([handle]), 1);
+        assert.equal(avrt.AvRevertMmThreadCharacteristics.handler([0]), 0);
+        assert.equal(typeof libraries['PSAPI.DLL'].GetProcessImageFileNameA.handler, 'function');
+        assert.equal(libraries['PSAPI.DLL'].GetProcessImageFileNameW.argBytes, 12);
+        await win32Module.dispose();
+    });
 
 test('ADVPACK answers IsNTAdmin from the same token the advapi32 calls read', async()=>{
     const { libraries } = await build();
@@ -714,8 +754,11 @@ test('mmio opens a file by the handle kernel32 gave the program, and closes it w
         bytes.set([...'C:\\riff.bin\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
         const file = kernel32.CreateFileA.handler(
             [0x1000, GENERIC_READ_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
-        bytes.set(Array.from({ length: 64 }, (_, index)=>index), 0x2000);
-        assert.equal(kernel32.WriteFile.handler([file, 0x2000, 64, 0x1100, 0]), 1);
+        // Buffers in memory the process was given: a transfer probes its pages.
+        const pages = kernel32.VirtualAlloc.handler([0, 0x2000, 0x3000, 4]);
+        assert.notEqual(pages, 0);
+        bytes.set(Array.from({ length: 64 }, (_, index)=>index), pages);
+        assert.equal(kernel32.WriteFile.handler([file, pages, 64, 0x1100, 0]), 1);
         assert.equal(kernel32.SetFilePointer.handler([file, 16, 0, FILE_BEGIN]), 16);
 
         const info = 0x3000;
@@ -723,8 +766,8 @@ test('mmio opens a file by the handle kernel32 gave the program, and closes it w
         const handle = winmm.mmioOpenA.handler([0, info, 0]);
         assert.notEqual(handle, 0, `opened, error ${view.getUint32(info + 12, true)}`);
         assert.equal(winmm.mmioSeek.handler([handle, 0, 1]), 16);
-        assert.equal(winmm.mmioRead.handler([handle, 0x4000, 4]), 4);
-        assert.deepEqual([...bytes.subarray(0x4000, 0x4004)], [16, 17, 18, 19]);
+        assert.equal(winmm.mmioRead.handler([handle, pages + 0x1000, 4]), 4);
+        assert.deepEqual([...bytes.subarray(pages + 0x1000, pages + 0x1004)], [16, 17, 18, 19]);
         assert.equal(winmm.mmioClose.handler([handle, 0]), 0);
         assert.equal(handles.entries.has(file), false, 'CloseHandle closed the program\'s handle');
         await win32Module.dispose();
@@ -909,4 +952,33 @@ test('a \\\\?\\ path reaches the volume\'s files as the plain path does', async(
         0xffffffff, 'a slash is no separator there');
     await win32Module.dispose();
     await filesystemModule.dispose();
+});
+
+test('a string past the limit a handler reads is cut there; '
+    + 'memory not there is a fault', async()=>{
+    // The layer's readers over the memory layer's own: a string past a
+    // handler's limit -- an atom name of 300 characters -- is the handler's
+    // to answer, not a host exception; one that runs off its region is the
+    // access violation the processor would take.
+    const bytes = new Uint8Array(0x400000);
+    const memoryModule = createMemoryModule();
+    const memory = await memoryModule.create({}, /** @type {any} */ ({ requireApi: (
+        /** @type {string} */ name)=>(name === 'cpu' ? {
+        readPhysical: (/** @type {number} */ at, /** @type {number} */ n)=>
+            bytes.subarray(at, at + n),
+        writePhysical: (/** @type {number} */ at, /** @type {Uint8Array} */ d)=>bytes.set(d, at),
+    } : {}) }));
+    memory.register({ name: 'data', base: 0x1000, size: 0x3ff000,
+        kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE });
+    const thread = { id: 1 };
+    const { libraries, lastError } = await build({ memory,
+        kernel: { currentThread: ()=>thread } });
+    bytes.fill(0x61, 0x14000, 0x14000 + 300);
+    assert.equal(libraries['KERNEL32.dll'].GlobalAddAtomA.handler([0x14000]), 0);
+    assert.equal(lastError(), 87, 'ERROR_INVALID_PARAMETER');
+    bytes.fill(0x62, 0x3ffff0 - 8, 0x400000);
+    assert.throws(()=>libraries['KERNEL32.dll'].GlobalAddAtomA.handler([0x3ffff0]),
+        (/** @type {any} */ e)=>e.code === 'GUEST_ACCESS' && e.address === 0x400000);
+    await win32Module.dispose();
+    await memoryModule.dispose();
 });

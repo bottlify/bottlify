@@ -7,8 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
+import { floatImages, restoreFloatImages } from '../../cpu/internal/fpu-image.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
-import { INTERLOCKED } from './interlocked.js';
+import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
+import { childThread } from './cross-process.js';
 
 const CS_LOCK_COUNT = 0x04;
 const CS_RECURSION_COUNT = 0x08;
@@ -22,6 +24,7 @@ const WAIT_ABANDONED_0 = 0x00000080;
 const WAIT_TIMEOUT = 0x00000102;
 const WAIT_FAILED = 0xffffffff;
 const ERROR_SIGNAL_REFUSED = 156;
+const ERROR_ACCESS_DENIED = 5;
 
 /** What the bridge hands back for a call that cannot answer yet. */
 const PARKED = Object.freeze({ parked: true });
@@ -297,6 +300,11 @@ test('a critical section is initialised in the guest structure, not beside it', 
     assert.equal(host.readI32(section), -1);
     fns.DeleteCriticalSection.handler([section]);
     assert.equal(host.readI32(section), 0);
+    // Left free, as Wine leaves it: a program that enters it after deleting it
+    // takes it rather than waiting for an owner that is not there.
+    assert.equal(host.readI32(section + CS_LOCK_COUNT), CS_UNLOCKED);
+    assert.equal(host.readI32(section + CS_RECURSION_COUNT), 0);
+    assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
     fns.InitializeCriticalSectionAndSpinCount.handler([section, 4000]);
     assert.equal(host.readI32(section), -1);
 });
@@ -326,7 +334,8 @@ test('entering, leaving and trying a section are guest code, placed once', ()=>{
 
     assert.equal(fns.EnterCriticalSection.guest(builder), enter, 'the same place again');
     assert.equal(builder.registered.length, 2, 'and no more traps');
-    assert.equal('handler' in fns.EnterCriticalSection, false, 'nothing to trap into');
+    // The trap beside it is a 64-bit process's (critical-paths.itest.js).
+    assert.equal(typeof fns.EnterCriticalSection.handler, 'function');
 });
 
 test('the fast paths are placed where the host keeps code, not in the heap beside data',
@@ -401,6 +410,43 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
+test('InitializeCriticalSectionEx makes InitializeCriticalSection\'s section, flags aside', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.bytes.fill(0xcc, 0x200, 0x200 + 0x18);
+
+    assert.equal(fns.InitializeCriticalSectionEx.argBytes, 12);
+    // CRITICAL_SECTION_NO_DEBUG_INFO, as the 2015 runtime passes it.
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 4000, 0x01000000]), 1);
+    assert.equal(host.readI32(0x200), -1, 'no debug record');
+    assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
+    assert.equal(host.readI32(0x200 + CS_RECURSION_COUNT), 0);
+    assert.equal(host.readI32(0x200 + CS_OWNING_THREAD), 0);
+    assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 4000);
+    // The count's top byte holds flags, not count.
+    fns.InitializeCriticalSectionEx.handler([0x200, 0x80000fa0, 0]);
+    assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 0xfa0);
+});
+
+test('InitializeCriticalSectionEx has no debug information unless it is forced', ()=>{
+    // Wine's kernel32 sync.c test_crit_section, as Windows 8 on answers it.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    for (const flags of [0, 0x01000000])
+    {
+        assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 4000, flags]), 1);
+        assert.equal(host.readI32(0x200), -1, 'DebugInfo');
+        assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
+        assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 4000);
+    }
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 0, 0x10000000]), 1);
+    const debug = host.readI32(0x200);
+    assert.ok(debug !== 0 && debug !== -1, 'RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO');
+    assert.equal(host.readI32(debug + 4), 0x200, 'naming its section');
+    assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 0, 0x10]), 0);
+    assert.equal(host.errors.at(-1), 87);
+});
+
 test('SetCriticalSectionSpinCount keeps the count in the section and answers the old one', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
@@ -427,17 +473,19 @@ test('the interlocked exports are guest code, placed once where the host keeps c
     };
     const fns = createSyncFunctions(/** @type {any} */ (host));
     const builder = fakeBuilder();
-    const names = /** @type {(keyof typeof INTERLOCKED)[]} */ (Object.keys(INTERLOCKED));
-    assert.deepEqual(names.sort(), ['InterlockedCompareExchange', 'InterlockedDecrement',
-        'InterlockedExchange', 'InterlockedExchangeAdd', 'InterlockedIncrement']);
+    const every = { ...INTERLOCKED, ...INTERLOCKED_64 };
+    const names = /** @type {(keyof typeof every)[]} */ (Object.keys(every));
+    assert.deepEqual(names.sort(), ['InterlockedCompareExchange',
+        'InterlockedCompareExchange64', 'InterlockedDecrement', 'InterlockedExchange',
+        'InterlockedExchangeAdd', 'InterlockedIncrement']);
     for (const name of names)
     {
         const entry = /** @type {any} */ (fns[name]);
         assert.equal('handler' in entry, false, `${name} has nothing to trap into`);
-        assert.equal(entry.argBytes, INTERLOCKED[name].argBytes);
+        assert.equal(entry.argBytes, every[name].argBytes);
         const at = entry.guest(builder);
         assert.ok(placed.includes(at), `${name} is in the code pages`);
-        const { code } = INTERLOCKED[name];
+        const { code } = every[name];
         assert.deepEqual([...host.bytes.slice(at, at + code.length)], [...code]);
         assert.equal(entry.guest(builder), at, 'the same place again');
     }
@@ -469,6 +517,29 @@ test('each interlocked routine is its one locked instruction, and pops what it w
             assert.deepEqual([...code.slice(0, 4)], [0x8b, 0x4c, 0x24, 0x04],
                 'the pointer from the first argument');
         }
+        // At 64 bits the same instruction on [rcx], the value from EDX and
+        // the comparand from R8D, and a plain ret: x64 has its callers pop.
+        assert.ok(holds(InterlockedIncrement.long, [0xf0, 0x0f, 0xc1, 0x01, 0xff, 0xc0]),
+            'lock xadd [rcx], eax; inc eax');
+        assert.ok(holds(InterlockedDecrement.long, [0xf0, 0x0f, 0xc1, 0x01, 0xff, 0xc8]),
+            'lock xadd [rcx], eax; dec eax');
+        assert.ok(holds(InterlockedExchange.long, [0x89, 0xd0, 0x87, 0x01]),
+            'mov eax, edx; xchg [rcx], eax');
+        assert.ok(holds(InterlockedExchangeAdd.long, [0x89, 0xd0, 0xf0, 0x0f, 0xc1, 0x01]),
+            'mov eax, edx; lock xadd [rcx], eax');
+        assert.ok(holds(InterlockedCompareExchange.long,
+            [0x44, 0x89, 0xc0, 0xf0, 0x0f, 0xb1, 0x11]), 'mov eax, r8d; lock cmpxchg [rcx], edx');
+        for (const { long } of Object.values(INTERLOCKED))
+        {
+            assert.equal(long[long.length - 1], 0xc3, 'ret');
+        }
+        const { InterlockedCompareExchange64 } = INTERLOCKED_64;
+        assert.ok(holds(InterlockedCompareExchange64.code, [0xf0, 0x0f, 0xc7, 0x0e]),
+            'lock cmpxchg8b [esi]');
+        assert.deepEqual([...InterlockedCompareExchange64.code.slice(-5)],
+            [0x5e, 0x5b, 0xc2, 20, 0x00], 'esi and ebx back, ret 20');
+        assert.ok(holds(InterlockedCompareExchange64.long, [0xf0, 0x48, 0x0f, 0xb1, 0x11]),
+            'lock cmpxchg [rcx], rdx');
     });
 
 test('waiting for all of several objects reports one answer, not an index', ()=>{
@@ -502,6 +573,23 @@ test('waiting for any one of them reports which one, as an offset from the base'
 
     assert.equal(fns.WaitForMultipleObjects.handler([2, array, 0, INFINITE]),
         WAIT_OBJECT_0 + 1, 'the second one, which is what makes it a base');
+});
+
+test('a 64-bit caller\'s handle array holds a quadword a handle', ()=>{
+    // HANDLE is a pointer: read four bytes apart, the second handle of the set
+    // was the first's high half -- zero, an invalid handle, and the whole
+    // wait failed.
+    const host = fakeHost();
+    const fns = createSyncFunctions({ ...host, pointerSize: 8 });
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: false }));
+    host.register(0x14, 'event', host.kernel.createEvent({ signalled: true }));
+
+    const array = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setBigUint64(array, 0x10n, true);
+    view.setBigUint64(array + 8, 0x14n, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([2, array, 0, INFINITE]), WAIT_OBJECT_0 + 1);
 });
 
 test('a zero timeout that finds nothing ready times out instead of blocking', ()=>{
@@ -581,6 +669,28 @@ test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=
     // downstream has to decide how far away is far enough.
     fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]);
     assert.equal(host.kernel.state.timed.at(-1), undefined);
+});
+
+test('a wait for all of a set naming one object twice fails; a wait for any of it does not', ()=>{
+    // WaitForMultipleObjects: the array "may not contain multiple copies of the
+    // same handle"; Windows refuses one for all of them with ERROR_INVALID_PARAMETER,
+    // under one handle or two onto the object, and takes one for any of them.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const semaphore = { kind: 'semaphore', count: 1, maximum: 4, waiters: [] };
+    host.register(0x10, 'semaphore', semaphore);
+    host.register(0x14, 'semaphore', semaphore);
+    const view = new DataView(host.bytes.buffer);
+    for (const second of [0x10, 0x14])
+    {
+        view.setUint32(0x400, 0x10, true);
+        view.setUint32(0x404, second, true);
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, INFINITE]), WAIT_FAILED);
+        assert.equal(host.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+        assert.equal(semaphore.count, 1, 'nothing taken');
+    }
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0);
+    assert.equal(semaphore.count, 0, 'one count taken for any of them');
 });
 
 test('a wait on nothing, or on too much, fails rather than guessing', ()=>{
@@ -688,6 +798,33 @@ test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
     assert.equal(host.threads.second.affinityMask, 1, 'nothing changed by a refusal');
 });
 
+test('GetThreadGroupAffinity answers the thread\'s mask in group zero, the mask a pointer wide',
+    ()=>{
+        for (const pointerSize of [4, 8])
+        {
+            const host = fakeHost();
+            /** @type {any} */ (host.kernel).processors = ()=>4;
+            const fns = createSyncFunctions({ ...host, pointerSize });
+            host.register(0x20, 'thread', host.threads.second);
+            assert.equal(fns.SetThreadAffinityMask.handler([0x20, 6]), 0xf);
+            const out = 0x500;
+            host.bytes.fill(0xcc, out, out + 32);
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x20, out]), 1);
+            const view = new DataView(host.bytes.buffer);
+            assert.equal(view.getUint32(out, true), 6, 'the mask');
+            if (pointerSize === 8)
+            {
+                assert.equal(view.getUint32(out + 4, true), 0, 'all eight bytes of it');
+            }
+            assert.deepEqual([...host.bytes.subarray(out + pointerSize, out + pointerSize + 8)],
+                new Array(8).fill(0), 'group zero, the reserved words zero');
+            assert.equal(host.bytes[out + pointerSize + 8], 0xcc, 'and nothing past them');
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x1234, out]), 0, 'not a thread');
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x20, 0]), 0,
+                'no structure to fill is refused, not written through');
+        }
+    });
+
 test('on four processors a thread is kept to the ones its mask names, within its process\'s',
     ()=>{
         const host = fakeHost();
@@ -785,7 +922,6 @@ test('a thread resumed while queued behind a released section takes it', ()=>{
 test('a thread that has ended cannot be suspended', ()=>{
     // Wine's thread test: SuspendThread on a thread that has finished answers
     // (DWORD)-1, with ERROR_ACCESS_DENIED.
-    const ERROR_ACCESS_DENIED = 5;
     const host = fakeHost();
     Object.assign(host.kernel, { ThreadState: { TERMINATED: 'terminated' } });
     const fns = createSyncFunctions(host);
@@ -798,19 +934,42 @@ test('a thread that has ended cannot be suspended', ()=>{
     assert.equal(other.suspendCount ?? 0, 0, 'and nothing is counted');
 });
 
-test('resuming a suspended child is what arms the replacement', ()=>{
+test('resuming a child\'s first thread is asked of the child, where it runs', async()=>{
     // CREATE_SUSPENDED, WriteProcessMemory, ResumeThread is how a launcher
-    // hollows its child. The handle names a process record rather than a
-    // thread -- there is no thread until the child is really running -- so
-    // without this it resolves as nothing and the resume is silently lost.
+    // hollows its child. The thread is the child's, so its count is too: the
+    // call is made there, on the thread of the id CreateProcess answered.
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {any[]} */
+    const asked = [];
+    host.askChild = (/** @type {any} */ record, /** @type {any} */ call)=>{
+        asked.push({ record, call });
+        return Promise.resolve({ result: 1, error: 0, outs: [null] });
+    };
+    /** @type {any[]} */
+    const errors = [];
+    /** @type {any} */ (host).setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+        errors.push({ thread, code });
+    const fns = createSyncFunctions(host);
+    const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
+    host.register(0x24, 'process-thread', childThread(child, 0x2c));
+
+    assert.equal(await fns.ResumeThread.handler([0x24]), 1, 'the count the child\'s thread had');
+    assert.deepEqual(asked, [{ record: child, call: { call: 'ResumeThread',
+        args: [{ thread: 0x2c }] } }]);
+    assert.deepEqual(errors, [{ thread: host.threads.first, code: 0 }],
+        'the last error set on the thread that asked');
+});
+
+test('a child no run can ask fails the resume with ERROR_ACCESS_DENIED', ()=>{
+    // Answering as if resumed would tell the launcher its child is running.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    const child = { imagePath: 'C:\\App\\child.exe', suspended: true };
-    host.register(0x24, 'process-thread', child);
+    host.register(0x24, 'process-thread',
+        childThread({ imagePath: 'C:\\App\\child.exe', threadId: 0x2c }, 0x2c));
 
-    assert.equal(fns.ResumeThread.handler([0x24]), 1, 'a suspended child had a count of one');
-    assert.equal(child.suspended, false);
-    assert.equal(fns.ResumeThread.handler([0x24]), 0, 'and resuming again does nothing');
+    assert.equal(fns.ResumeThread.handler([0x24]), WAIT_FAILED);
+    assert.equal(fns.SuspendThread.handler([0x24]), WAIT_FAILED);
+    assert.deepEqual(host.errors, [ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED]);
 });
 
 test('argument sizes match what the guest compiled against', ()=>{
@@ -829,118 +988,81 @@ test('argument sizes match what the guest compiled against', ()=>{
 
 // --- waiting on a child process ---
 
-test('a wait on a set holding a child process is where the parent hands over', ()=>{
-    // A child never signals while its parent can look: it takes this process's
-    // place rather than running beside it. So the thread stops here for good,
-    // and the replacement is what happens instead of the wait returning. Left
-    // to the ordinary path this joins a queue on an object with no signal and
-    // is reported as a deadlock.
+/**
+ * A child as the kernel records it: running beside its parent, its exit the
+ * manual-reset event the kernel sets when it ends.
+ *
+ * @param {ReturnType<typeof fakeHost>} host
+ */
+const childOf = host=>({ imagePath: 'C:\\App\\child.exe',
+    exited: host.kernel.createEvent({ manualReset: true }) });
+
+test('a wait on a set holding a child is a wait on its exit', ()=>{
+    // The child runs beside its parent, so its exit is an ordinary signal:
+    // the parent blocks on it like on any other object, until it is set.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
+    const child = childOf(host);
     host.register(0x20, 'process', child);
     new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), PARKED);
-    assert.equal(child.waiters.length, 1, 'noted on the child, to be woken when it exits');
-    assert.equal(host.kernel.state.blocked.length, 1);
-    assert.match(host.kernel.state.blocked[0].reason, /child process/);
-    assert.deepEqual(host.kernel.state.timed, [],
-        'and it never went through the ordinary wait at all');
+    assert.equal(host.kernel.state.blocked.length, 1, 'blocked like any other wait');
+
+    child.exited.signalled = true;
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), WAIT_OBJECT_0);
+    assert.equal(child.exited.signalled, true, 'an exit stays signalled for every waiter');
 });
 
-test('a child among other objects still hands over, waiting for all or any', ()=>{
-    // A wait for any is noted on the child, whose own place in the set is the
-    // answer unless something else in it came first; a wait for all cannot be
-    // satisfied by the child alone, and is left to the replacement.
+test('polling a set with a running child times out rather than blocking', ()=>{
+    // A zero timeout is a question, not a wait: a program checking whether
+    // its child has finished is told it has not, and goes on.
     for (const all of [0, 1])
     {
         const host = fakeHost();
         const fns = createSyncFunctions(host);
-        /** @type {any} */
-        const child = { imagePath: 'C:\\App\\war3.exe' };
-        host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-        host.register(0x20, 'process', child);
+        host.register(0x10, 'event',
+            host.kernel.createEvent({ signalled: true, manualReset: true }));
+        host.register(0x20, 'process', childOf(host));
         const view = new DataView(host.bytes.buffer);
-        view.setUint32(0x400, 0x10, true);
-        view.setUint32(0x404, 0x20, true);
+        view.setUint32(0x400, 0x20, true);
+        view.setUint32(0x404, 0x10, true);
 
-        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, INFINITE]), PARKED,
-            `bWaitAll=${all}`);
-        assert.deepEqual(child.waiters?.map((/** @type {any} */ one)=>one.result),
-            all ? undefined : [1], `bWaitAll=${all}`);
-        assert.equal(child.handsOver, all ? true : undefined,
-            'the child alone cannot answer a wait for all of them: the parent hands over');
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, 0]),
+            all ? WAIT_TIMEOUT : WAIT_OBJECT_0 + 1, `bWaitAll=${all}`);
+        assert.equal(host.kernel.state.blocked.length, 0, 'and did not join a queue');
     }
 });
 
-test('polling a set with a child says it is still running rather than blocking', ()=>{
-    // A zero timeout is a question, not a wait. Parking on it would stop a
-    // program that was only checking whether its child had finished.
+test('a child that has exited satisfies a wait for all of a set with it', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
-    host.register(0x20, 'process', child);
-    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
-
-    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
-    assert.equal(host.kernel.state.blocked.length, 0, 'and did not join the queue');
-    assert.equal(child.handsOver, undefined, 'a question hands nothing over');
-});
-
-test('polling for all of a set with a child can never be satisfied', ()=>{
-    // Every other object being ready is not enough: the child is never ready,
-    // so "all of them" never is either -- and answering otherwise tells a
-    // program its child has finished.
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
+    const child = childOf(host);
+    child.exited.signalled = true;
     host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    host.register(0x20, 'process', child);
     const view = new DataView(host.bytes.buffer);
     view.setUint32(0x400, 0x10, true);
     view.setUint32(0x404, 0x20, true);
 
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_TIMEOUT);
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_OBJECT_0);
 });
 
-test('polling for any of a set with a child still reports one that is ready', ()=>{
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
-    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
-    const view = new DataView(host.bytes.buffer);
-    view.setUint32(0x400, 0x20, true);
-    view.setUint32(0x404, 0x10, true);
-
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0,
-        'the event, which is the only thing in the set that can be');
-});
-
-test('an event of the set the child signalled before it exited is the answer, taken', ()=>{
+test('an event the running child signals answers a wait for any before its exit', ()=>{
     // A launcher waits for its game's process or a named event the game sets
-    // once it is running. The game opens the event by name and signals it; on
-    // Windows that wakes the launcher, which goes on while the game runs. Here
-    // the launcher only resumes once the game has exited -- and must still be
-    // told the event came first, not that the game ended.
+    // once it is running; the game, beside it, sets the event, and the
+    // launcher goes on while the game runs.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    /** @type {any} */
-    const child = { imagePath: 'C:\\App\\war3.exe' };
     const event = host.kernel.createEvent({ signalled: false, manualReset: false });
-    host.register(0x20, 'process', child);
+    host.register(0x20, 'process', childOf(host));
     host.register(0x10, 'event', event);
     const view = new DataView(host.bytes.buffer);
     view.setUint32(0x400, 0x20, true);
     view.setUint32(0x404, 0x10, true);
 
-    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, INFINITE]), PARKED);
-    const [waiter] = child.waiters;
-    assert.equal(waiter.settle(), 0, 'nothing signalled: the child exiting is the answer');
-
     event.signalled = true;
-    assert.equal(waiter.settle(), 1, 'the event the child set came before its exit');
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, INFINITE]), WAIT_OBJECT_0 + 1);
     assert.equal(event.signalled, false, 'and the wait took it, as an auto-reset event is taken');
 });
 
@@ -987,7 +1109,8 @@ test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
     assert.deepEqual(host.errors, [87, 87]);
 });
 
-test('GetThreadContext fills the groups asked for, and SetThreadContext is refused', ()=>{
+test('GetThreadContext fills the groups asked for, and SetThreadContext of the calling'
+    + ' thread is refused', ()=>{
     const host = /** @type {any} */ (fakeHost());
     const said = /** @type {string[]} */ ([]);
     host.divergence = (/** @type {string} */ api)=>said.push(api);
@@ -1015,9 +1138,187 @@ test('GetThreadContext fills the groups asked for, and SetThreadContext is refus
     assert.equal(view.getUint32(at + 0xc4, true), 0x6000);
     assert.equal(view.getUint32(at + 0xb0, true), 0xcccccccc, 'integer registers not asked for');
 
-    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0);
+    assert.equal(fns.SetThreadContext.handler([0xfffffffe, at]), 0);
     assert.deepEqual(said, ['SetThreadContext']);
     assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
+});
+
+test('SetThreadContext puts its groups where the thread next runs: a stopped one from them,'
+    + ' a waiting one after its wait', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {any[]} */
+    const scheduled = [];
+    host.kernel.scheduleResume = (/** @type {any} */ thread, /** @type {any} */ where)=>{
+        scheduled.push(where);
+        thread.parkedReturn = where.eip;
+        thread.resumeStack = where.esp ?? null;
+        thread.resumeRegisters = where.registers;
+    };
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(10, 11, 12, 13, 0x6000, 15, 16, 17), eip: 0x402000,
+        flags: 0x202 };
+    host.register(0x20, 'thread', other);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(at, 0x10003, true); // control and integer
+    view.setUint32(at + 0xb8, 0x403000, true); // Eip
+    view.setUint32(at + 0xc4, 0x5f00, true); // Esp
+    view.setUint32(at + 0xa4, 0x1234, true); // Ebx
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+    assert.equal(scheduled[0].eip, 0x403000);
+    assert.equal(scheduled[0].esp, 0x5f00);
+    assert.equal(scheduled[0].registers.ebx, 0x1234);
+    view.setUint32(at + 0xb8, 0, true);
+    view.setUint32(at + 0xa4, 0, true);
+    assert.equal(fns.GetThreadContext.handler([0x20, at]), 1);
+    assert.deepEqual([view.getUint32(at + 0xb8, true), view.getUint32(at + 0xa4, true)],
+        [0x403000, 0x1234], 'read back as it will run');
+
+    // Waiting in a call: integer registers alone keep the wait's continuation.
+    const waiting = { id: 0x108, parkedReturn: 0x404000, resumeStack: 0x5e00,
+        context: { reg32: Int32Array.of(0, 0, 0, 0, 0x5d00, 0, 0, 0), eip: 0x7ff00000 } };
+    host.register(0x24, 'thread', waiting);
+    view.setUint32(at, 0x10002, true);
+    view.setUint32(at + 0xa4, 0x55, true);
+    assert.equal(fns.SetThreadContext.handler([0x24, at]), 1);
+    assert.equal(scheduled.length, 1, 'no new continuation');
+    assert.equal(waiting.parkedReturn, 0x404000);
+    assert.equal(/** @type {any} */ (waiting).resumeRegisters.ebx, 0x55);
+});
+
+test("a stopped thread's x87 and SSE state is read into its CONTEXT and put back from it",
+    ()=>{
+        // A .NET runtime suspends a thread for a collection, takes its context
+        // whole, and puts it back once the collection is over - the
+        // floating-point groups too, which it restores itself. Read as
+        // nothing, the record put back whatever it held before.
+        const host = /** @type {any} */ (fakeHost());
+        host.kernel.scheduleResume = ()=>{};
+        host.float = { images: floatImages, restore: restoreFloatImages };
+        const fns = createSyncFunctions(host);
+        const layout = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,
+            x87Exact: 198, xmm: 208, mxcsr: 336 };
+        const block = new Uint8Array(512);
+        const state = new DataView(block.buffer);
+        block[layout.x87Top] = 7;
+        block[layout.x87Empty] = 0x7f;
+        state.setUint16(layout.x87Control, 0x27f, true);
+        state.setFloat64(layout.x87 + 7 * 16, 1.5, true);
+        block.fill(0xab, layout.xmm, layout.xmm + 16);
+        state.setUint32(layout.mxcsr, 0x9fc0, true);
+        const other = host.threads.second;
+        other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x6000, 0, 0, 0), eip: 0x402000,
+            flags: 0x202, block, layout };
+        host.register(0x20, 'thread', other);
+        const at = 0x400;
+        const view = new DataView(host.bytes.buffer);
+        host.bytes.fill(0xcc, at, at + 0x2cc);
+        const CONTEXT_FLOATING_POINT = 0x10008;
+        const CONTEXT_EXTENDED_REGISTERS = 0x10020;
+        view.setUint32(at, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS, true);
+        assert.equal(fns.GetThreadContext.handler([0x20, at]), 1);
+        // 1.5 is 0x3fff c000000000000000, ST(0) the register at the top.
+        /** The high mantissa word and the exponent of the value at `offset`. @param {number} offset */
+        const highOf = offset=>[view.getUint32(at + offset + 4, true),
+            view.getUint16(at + offset + 8, true)];
+        assert.deepEqual(highOf(0xcc + 32),
+            [0xc0000000, 0x3fff], "FXSAVE's ST(0)");
+        assert.equal(view.getUint16(at + 0xcc + 2, true) >>> 11 & 7, 7, 'its TOP');
+        assert.equal(view.getUint32(at + 0xcc + 24, true), 0x9fc0, 'MXCSR');
+        assert.equal(host.bytes[at + 0xcc + 160], 0xab, 'XMM0');
+        assert.deepEqual(highOf(0x1c + 28),
+            [0xc0000000, 0x3fff], "FLOATING_SAVE_AREA's ST(0)");
+        assert.equal(view.getUint32(at + 0x1c + 8, true) & 0xffff, 0x3fff,
+            'the tag word: R7 valid, the rest empty');
+
+        // A collector's stub ran with other values; the record puts them back.
+        block.fill(0, layout.x87, layout.mxcsr + 4);
+        block[layout.x87Top] = 0;
+        block[layout.x87Empty] = 0xff;
+        view.setUint32(at, 0x10000 | 0x20, true);
+        assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+        assert.equal(state.getFloat64(layout.x87 + 7 * 16, true), 1.5);
+        assert.deepEqual([block[layout.x87Top], block[layout.x87Empty]], [7, 0x7f]);
+        assert.equal(state.getUint32(layout.mxcsr, true), 0x9fc0);
+        assert.equal(block[layout.xmm], 0xab);
+    });
+
+test('GetThreadContext of a thread still running on another executor answers once it has'
+    + ' stopped, with where it stopped', async()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x6000, 0, 0, 0), eip: 0x402000, flags: 0 };
+    host.register(0x20, 'thread', other);
+    // Not brought back at once (the caller answers another executor's call): the
+    // thread goes on running, and stops later at its slice's end.
+    /** @type {() => void} */
+    let stop = ()=>{};
+    host.kernel.settleThread = ()=>false;
+    host.kernel.settledThread = ()=>new Promise(resolve=>{
+        stop = ()=>resolve(undefined);
+    });
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(at, 0x10001, true);
+    view.setUint32(at + 0xc4, 0xcccccccc, true);
+    const answer = fns.GetThreadContext.handler([0x20, at]);
+    assert.ok(answer instanceof Promise, 'the caller waits for the stop');
+    assert.equal(view.getUint32(at + 0xc4, true), 0xcccccccc, 'nothing written while it runs');
+    // Where it stopped, not where it was last placed.
+    other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x5f00, 0, 0, 0), eip: 0x403000, flags: 0 };
+    stop();
+    assert.equal(await answer, 1);
+    assert.deepEqual([view.getUint32(at + 0xb8, true), view.getUint32(at + 0xc4, true)],
+        [0x403000, 0x5f00]);
+});
+
+test('the debug registers a thread is given are the ones it reads back, its own included', ()=>{
+    // Dr0-Dr3, Dr6 and Dr7 after ContextFlags; the values kept, an enabled
+    // breakpoint said because nothing raises it.
+    const host = /** @type {any} */ (fakeHost());
+    const said = /** @type {string[]} */ ([]);
+    host.divergence = (/** @type {string} */ api, /** @type {string} */ detail)=>
+        said.push(`${api}: ${detail}`);
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    const CONTEXT_DEBUG_REGISTERS = 0x10010;
+    const given = [0x42424240, 0, 0x126bb070, 0x0badbad0, 0, 0xffff0115];
+    /** @param {number[]} values */
+    const lay = values=>{
+        view.setUint32(at, CONTEXT_DEBUG_REGISTERS, true);
+        values.forEach((value, index)=>view.setUint32(at + 4 + index * 4, value, true));
+    };
+    const read = ()=>given.map((_, index)=>view.getUint32(at + 4 + index * 4, true));
+    for (const handle of [0x20, 0xfffffffe])
+    {
+        lay(given);
+        assert.equal(fns.SetThreadContext.handler([handle, at]), 1);
+        lay(given.map(()=>0xcccccccc));
+        assert.equal(fns.GetThreadContext.handler([handle, at]), 1);
+        assert.deepEqual(read(), given, `thread ${handle.toString(16)}`);
+    }
+    assert.deepEqual(said, ['SetThreadContext: hardware breakpoints are kept and not raised',
+        'SetThreadContext: hardware breakpoints are kept and not raised']);
+
+    // A thread never given any reads them clear.
+    host.register(0x24, 'thread', { ...host.threads.second, debugRegisters: undefined });
+    lay(given.map(()=>0xcccccccc));
+    assert.equal(fns.GetThreadContext.handler([0x24, at]), 1);
+    assert.deepEqual(read(), [0, 0, 0, 0, 0, 0]);
+
+    // Cleared again, nothing is said.
+    said.length = 0;
+    lay([0, 0, 0, 0, 0, 0]);
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+    assert.deepEqual(said, []);
+
+    view.setUint32(at, CONTEXT_DEBUG_REGISTERS | 0x10001, true);
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0,
+        'with the control registers, refused where nothing resumes it');
 });
 
 test('GetThreadSelectorEntry describes the flat selectors and the thread block behind FS', ()=>{
@@ -1039,77 +1340,6 @@ test('GetThreadSelectorEntry describes the flat selectors and the thread block b
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });
 
-test('a debugged child reports its creation, then its exit, waited for as the child is', ()=>{
-    // Wine's kernel32 process.c test_DebuggingFlag reads events until the
-    // child's exit; WaitForDebugEvent was missing.
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const child = { id: 0x300, threadId: 0x304, handle: 0x40, threadHandle: 0x44,
-        imagePath: 'C:/child.exe', exitCode: 259, completed: false,
-        debugEvents: ['create', 'exit'], waiters: /** @type {any[]} */ ([]) };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
-    /** @type {any[]} */
-    const blocked = [];
-    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why)=>blocked.push(why);
-    const fns = createSyncFunctions(host);
-    const view = new DataView(host.bytes.buffer);
-    const event = ()=>[0, 4, 8, 12, 16, 20].map(at=>view.getUint32(0x200 + at, true));
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), 1);
-    assert.deepEqual(event(), [3, 0x300, 0x304, 0, 0x40, 0x44], 'CREATE_PROCESS_DEBUG_EVENT');
-    assert.equal(/** @type {any} */ (fns.ContinueDebugEvent).handler([0x300, 0x304, 0x10002]), 1);
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'a poll while it runs');
-    assert.equal(host.errors.at(-1), 121, 'ERROR_SEM_TIMEOUT');
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
-    assert.equal(blocked.length, 1, 'the debugger waits on the child');
-    child.exitCode = 7;
-    assert.equal(child.waiters[0].settle(), 1, 'its exit is the answer');
-    assert.deepEqual(event().slice(0, 4), [5, 0x300, 0x304, 7], 'EXIT_PROCESS_DEBUG_EVENT');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 100]), 0, 'and then nothing more');
-    assert.equal(fns.WaitForDebugEvent.argBytes, 8);
-    assert.equal(fns.ContinueDebugEvent.argBytes, 12);
-});
-
-test('the debugger calls act on the children this process debugs and refuse the rest', ()=>{
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const debugged = { id: 0x300, debugEvents: ['create', 'exit'] };
-    const plain = { id: 0x310, debugEvents: null };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[debugged, plain] };
-    /** @type {string[]} */
-    const said = [];
-    const fns = /** @type {any} */ (createSyncFunctions({ ...host, kernel,
-        divergence: (/** @type {string} */ api)=>said.push(api) }));
-    host.register(0x50, 'process', debugged);
-    host.register(0x54, 'process', plain);
-    host.register(0x58, 'event', { kind: 'event' });
-    assert.deepEqual([fns.DebugActiveProcessStop.argBytes, fns.DebugBreakProcess.argBytes,
-        fns.DebugSetProcessKillOnExit.argBytes], [4, 4, 4]);
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1, 'a debugger sets it');
-    assert.equal(/** @type {any} */ (debugged).killOnExit, false);
-
-    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
-    assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
-    assert.equal(fns.DebugBreakProcess.handler([0x50]), 1);
-    assert.deepEqual(said, ['DebugBreakProcess'], 'the debugged child\'s breakpoint is said');
-    assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
-    assert.equal(host.errors.at(-1), 6);
-
-    assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged by us');
-    assert.equal(host.errors.at(-1), 6);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
-    assert.equal(host.errors.at(-1), 87);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
-    assert.equal(debugged.debugEvents, null, 'it reports to nobody now');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'and no event comes');
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([1]), 0,
-        'with no child debugged there is no debug object to set');
-    assert.equal(host.errors.at(-1), 6);
-});
-
 test('ReinitializeCriticalSection makes a section new again, as InitializeCriticalSection does',
     ()=>{
         const host = fakeHost();
@@ -1123,3 +1353,20 @@ test('ReinitializeCriticalSection makes a section new again, as InitializeCritic
         assert.deepEqual(reinitialised, host.bytes.slice(0x100, 0x118));
         assert.equal(host.readI32(0x104), -1, 'LockCount: free');
     });
+
+test('GetSystemTimes: the processors\' time since boot, user what this process ran, idle the'
+    + ' rest, kernel including idle', ()=>{
+    const host = fakeHost();
+    /** @type {any} */ (host.kernel).processCpuMs = ()=>250;
+    /** @type {any} */ (host.kernel).clock.virtualTime = ()=>1000;
+    const fns = createSyncFunctions(host);
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigUint64(at, true);
+    assert.equal(fns.GetSystemTimes.handler([0x300, 0x308, 0x310]), 1);
+    const [idle, kernelTime, user] = [read64(0x300), read64(0x308), read64(0x310)];
+    assert.equal(user, 2500000n);
+    assert.equal(idle, kernelTime);
+    assert.equal((idle + user) % 10000000n, 0n, 'whole seconds of whole processors');
+    assert.ok(idle + user >= 10000000n);
+    assert.equal(fns.GetSystemTimes.handler([0, 0, 0]), 1, 'every pointer may be null');
+});
+

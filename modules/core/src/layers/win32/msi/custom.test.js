@@ -28,7 +28,7 @@ function engineWith(options = {}){
         session: {
             db: { readStream: async()=>Uint8Array.of(1, 2, 3) },
             getProperty: ()=>'',
-            mode: { scheduled: false },
+            scripting: false,
             formatText: (/** @type {string} */ text)=>text,
         },
         ran: new Set(),
@@ -186,4 +186,79 @@ test('a library action that is not run in parallel is called and waited for, as 
     assert.ok(events.includes('call MsiServerStartup'));
     assert.equal(engine.async.length, 0);
     assert.equal(await finishAsync(engine), 0, 'nothing is left to wait for');
+});
+
+test('a program action is run on its command line, and a failure is in the log', async()=>{
+    // Type 34: a program, its command line the target, run in a directory.
+    const row = { action: 'InitService', type: 34, source: 'INSTALLDIR',
+        target: 'C:\\Program Files\\Vendor\\Service.exe /Service' };
+    for (const [code, answer, said] of /** @type {const} */ ([
+        [0, 0, 'ran C:\\Program Files\\Vendor\\Service.exe /Service: exit 0.'],
+        [2, 1603, 'ran C:\\Program Files\\Vendor\\Service.exe /Service: exit 2.'],
+        [null, 1603, 'could not start C:\\Program Files\\Vendor\\Service.exe /Service.'],
+    ]))
+    {
+        const { engine, events } = engineWith();
+        engine.session.folders = new Map();
+        /** @type {string[]} */
+        const ran = [];
+        engine.host.runExe = async(/** @type {string} */ line)=>{
+            ran.push(line);
+            return code;
+        };
+        assert.equal(await runCustomAction(engine, row), answer);
+        assert.deepEqual(ran, [row.target]);
+        assert.ok(events.includes(`log Custom action InitService ${said}`), events.join('\n'));
+    }
+    const { engine } = engineWith();
+    engine.session.folders = new Map();
+    engine.host.runExe = async()=>null;
+    assert.equal(await runCustomAction(engine, { ...row, type: 34 | CONTINUE }), 0,
+        'unless its answer is ignored');
+});
+
+test('a program action run in parallel and not ignored is waited for where the sequence ends,'
+    + ' its exit code then the installation\'s', async()=>{
+    // RegisterHelpers of a vendor package: type 34 | async | in-script, its
+    // server registering itself while the sequence goes on.
+    const row = { action: 'RegisterHelpers', type: 34 | ASYNC | 0x400, source: 'INSTALLDIR',
+        target: '"C:\\Program Files\\Vendor\\Server.exe" /RegServer' };
+    for (const [exit, answer] of [[0, 0], [5, 1603]])
+    {
+        const { engine } = engineWith();
+        engine.session.folders = new Map();
+        /** @type {(code: number) => void} */
+        let end = ()=>{};
+        engine.host.runExe = async()=>assert.fail('not started as one waited for at once');
+        engine.host.startExe = async(/** @type {string} */ line)=>{
+            assert.equal(line, row.target);
+            return { settle: ()=>new Promise(resolve=>{
+                end = resolve;
+            }) };
+        };
+        assert.equal(await runCustomAction(engine, row), 0, 'the sequence goes on');
+        let over = false;
+        const finishing = finishAsync(engine).then(code=>{
+            over = true;
+            return code;
+        });
+        await new Promise(resolve=>setImmediate(resolve));
+        assert.equal(over, false, 'the installation waits for the program');
+        end(exit);
+        assert.equal(await finishing, answer);
+    }
+    const ignored = engineWith();
+    ignored.engine.session.folders = new Map();
+    /** @type {boolean[]} */
+    const waits = [];
+    /** @param {string} line @param {string | null} directory @param {boolean} wait */
+    const leave = async(line, directory, wait)=>{
+        waits.push(wait);
+        return 0;
+    };
+    ignored.engine.host.runExe = leave;
+    ignored.engine.host.startExe = async()=>assert.fail('not waited for at all');
+    assert.equal(await runCustomAction(ignored.engine, { ...row, type: row.type | CONTINUE }), 0);
+    assert.deepEqual(waits, [false], 'with its answer ignored, left to run');
+    assert.equal(ignored.engine.async.length, 0);
 });

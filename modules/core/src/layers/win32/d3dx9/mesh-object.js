@@ -12,6 +12,7 @@ import { DECLTYPE, DECLUSAGE, MAX_FVF_DECL_SIZE, declarationBytes, declaratorFro
 import { NO_FACE, adjacencyFromPointReps, attributeOrder, attributeTable,
     pointRepsFromAdjacency, pointRepsFromPositions } from './mesh-topology.js';
 import { indexBufferOf } from './mesh.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXMesh, D3DX's own: a vertex buffer and an index buffer made on the
@@ -37,8 +38,8 @@ import { indexBufferOf } from './mesh.js';
  * component 1, the others 0) and colours to and from four floats.
  */
 
-export const IID_ID3DXBASEMESH = '{7ED943DD-52E8-40B5-A8D8-76685C406330}';
-export const IID_ID3DXMESH = '{4020E5C2-1403-4929-883F-E2E849FAC195}';
+const IID_ID3DXBASEMESH = '{7ED943DD-52E8-40B5-A8D8-76685C406330}';
+const IID_ID3DXMESH = '{4020E5C2-1403-4929-883F-E2E849FAC195}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -58,7 +59,7 @@ const MESHOPT_BITS = 0x3f400000;
  *
  * @param {number} options
  */
-export function vertexBufferOf(options){
+function vertexBufferOf(options){
     /** @type {[number, number][]} */
     const usages = [[0x2, 0x20], [0x4, 0x40], [0x8, 0x80], [0x4000, 0x100], [0x40, 0x8],
         [0x80, 0x200], [0x8000, 0x10]];
@@ -260,11 +261,11 @@ export function createMeshObjects(host, buffers){
     };
 
     /** An adjacency's DWORDs, three a face. @param {any} state @param {number} at */
-    const adjacencyAt = (state, at)=>[...new Uint32Array(host.readMemory(at >>> 0,
+    const adjacencyAt = (state, at)=>[...new Uint32Array(host.readMemory(wholeAddress(at),
         state.faces * 12).slice().buffer)];
 
     /** @param {number} at @param {number[]} values */
-    const putAll = (at, values)=>host.writeMemory(at >>> 0,
+    const putAll = (at, values)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Uint32Array.from(values).buffer));
 
     /**
@@ -389,9 +390,12 @@ export function createMeshObjects(host, buffers){
      * @param {string} name @param {number} argBytes
      * @param {(state: any, args: number[], thread: any) => Promise<number>} work
      * @param {(state: any, args: number[]) => boolean} [refused]  Checked first, at once.
+     * @param {{ floats?: Record<number, 'f32'> }} [marshal]  A FLOAT by value, by dword
+     *     counting `this`: the bridge's `floats`.
      * @returns {import('../ole32/objects.js').ComMethod}
      */
-    const later = (name, argBytes, work, refused)=>({ name, argBytes,
+    const later = (name, argBytes, work, refused, marshal = {})=>({ name, argBytes,
+        ...marshal,
         invoke: (object, args)=>{
             if (refused?.(object.state, args))
             {
@@ -628,7 +632,7 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            host.writeMemory(out >>> 0, declarationBytes(object.state.elements));
+            host.writeMemory(wholeAddress(out), declarationBytes(object.state.elements));
             return D3D_OK;
         } },
         /** DWORD GetNumBytesPerVertex() */
@@ -719,7 +723,8 @@ export function createMeshObjects(host, buffers){
                 return indices;
             }
             const given = (reps >>> 0) === 0 ? Array.from({ length: state.vertices }, (_, i)=>i)
-                : [...new Uint32Array(host.readMemory(reps >>> 0, state.vertices * 4).slice()
+                : [...new Uint32Array(host.readMemory(wholeAddress(reps),
+                    state.vertices * 4).slice()
                     .buffer)];
             putAll(out, adjacencyFromPointReps(indices, given));
             return D3D_OK;
@@ -753,7 +758,8 @@ export function createMeshObjects(host, buffers){
                 within)));
             return D3D_OK;
         }, (_, [epsilon, out])=>(out >>> 0) === 0
-            || !(new Float32Array(Uint32Array.of(epsilon >>> 0).buffer)[0] >= 0)),
+            || !(new Float32Array(Uint32Array.of(epsilon >>> 0).buffer)[0] >= 0),
+        { floats: { 1: 'f32' } }),
         /**
          * HRESULT UpdateSemantics(D3DVERTEXELEMENT9 Declaration[MAX_FVF_DECL_SIZE]) --
          * the same vertices read another way: a declaration wider than they are is
@@ -851,8 +857,9 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const words = count === 0 ? [] : [...new Uint32Array(host.readMemory(table >>> 0,
-                count * 20).slice().buffer)];
+            const words = count === 0 ? []
+                : [...new Uint32Array(host.readMemory(wholeAddress(table), count * 20)
+                    .slice().buffer)];
             object.state.table = Array.from({ length: count }, (_, i)=>{
                 const [id, faceStart, faceCount, vertexStart, vertexCount]
                     = words.slice(i * 5, i * 5 + 5);
@@ -913,7 +920,7 @@ export function createMeshObjects(host, buffers){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: args=>{
-                    const elements = (args[3] >>> 0) === 0 ? null
+                    const elements = wholeAddress(args[3]) === 0 ? null
                         : readDeclaration(host.readMemory, args[3]);
                     return createMesh(args, elements, elements ? fvfFromDeclarator(elements) ?? 0
                         : 0);

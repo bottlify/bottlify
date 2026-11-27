@@ -24,13 +24,20 @@
  * Each lend is a slot of two words: its state, and where in the stash its
  * bytes are when they are there. The state moves LENT -> READING -> DONE on
  * the played side, or LENT -> STASHED -> DONE when this side claims first; a
- * compare-exchange on each side decides which.
+ * compare-exchange on each side decides which. A claim that waits for a read
+ * sleeps on the slot's state (Cellar's bell), counted in the word after the
+ * slots, and the played side notifies only when one sleeps.
  */
+
+import { deadlineOf, wake, waitFor } from '@bottlify/cellar';
 
 export const LEND = Object.freeze({ FREE: 0, LENT: 1, READING: 2, DONE: 3, STASHED: 4 });
 
 /** How many lends may be outstanding at once; one more is copied as before. */
 export const LEND_SLOTS = 4096;
+
+/** The word after the slots: the claims asleep on a read. */
+const SLEEPS = LEND_SLOTS * 2;
 
 /** The bytes the stash holds: the most the lends outstanding at once may cover. */
 export const STASH_BYTES = 16 << 20;
@@ -49,32 +56,13 @@ export const LEND_LEAST = 64 << 10;
 const WAIT_LIMIT_MS = 10000;
 
 /**
- * Whether this thread may block on a shared word: a browser's window may
- * not, and a lend a claim cannot wait out is never made.
- */
-export function mayWait(){
-    if (typeof SharedArrayBuffer !== 'function')
-    {
-        return false;
-    }
-    try
-    {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 1, 0);
-        return true;
-    }
-    catch {
-        return false;
-    }
-}
-
-/**
  * The shared parts of a lending: the slots and the stash, made on the side
  * that lends and sent once to the side that reads.
  *
  * @returns {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer }}
  */
 export function createLendingBuffers(){
-    return { slots: new SharedArrayBuffer(LEND_SLOTS * 8),
+    return { slots: new SharedArrayBuffer(LEND_SLOTS * 8 + 4),
         stash: new SharedArrayBuffer(STASH_BYTES) };
 }
 
@@ -208,14 +196,14 @@ export function createLender(options){
         }
         const started = now();
         counts.waited++;
-        for (;;)
+        const deadline = deadlineOf(WAIT_LIMIT_MS);
+        for (let state = Atomics.load(states, slot * 2); state !== LEND.DONE;
+            state = Atomics.load(states, slot * 2))
         {
-            const state = Atomics.load(states, slot * 2);
-            if (state === LEND.DONE || now() - started > WAIT_LIMIT_MS)
+            if (waitFor(states, slot * 2, state, SLEEPS, deadline) === 'timed-out')
             {
                 break;
             }
-            Atomics.wait(states, slot * 2, state, 50);
         }
         counts.waitedMs += now() - started;
     };
@@ -296,14 +284,16 @@ export function createLender(options){
  * @param {Object} options
  * @param {SharedArrayBuffer} options.slots
  * @param {SharedArrayBuffer} options.stash
- * @param {Uint8Array} options.memory  the guest's memory
+ * @param {Uint8Array | (() => Uint8Array)} options.memory  the guest's memory, or what
+ *     answers it as it is now: a memory that grows is a longer view after it grew
  * @param {number} [options.base]      the guest address of `memory`'s first byte
  * @returns {(slot: number, address: number, length: number,
- *     use: (bytes: Uint8Array) => void) => void}
- *     a lend's bytes, given to `use` -- in place, so it copies what it keeps --
- *     and the slot done after
+ *     use: (address: number, bytes: Uint8Array) => void) => void}
+ *     a lend's bytes, given to `use` with its address -- in place, so it copies what
+ *     it keeps -- and the slot done after: one `use` takes every lend, made once
  */
 export function createBorrower({ slots, stash, memory, base = 0 }){
+    const view = typeof memory === 'function' ? memory : ()=>memory;
     const states = new Int32Array(slots);
     const stashBytes = new Uint8Array(stash);
     return (slot, address, length, use)=>{
@@ -312,12 +302,12 @@ export function createBorrower({ slots, stash, memory, base = 0 }){
         {
             if (was === LEND.LENT)
             {
-                use(memory.subarray(address - base, address - base + length));
+                use(address, view().subarray(address - base, address - base + length));
             }
             else if (was === LEND.STASHED)
             {
                 const start = Atomics.load(states, slot * 2 + 1);
-                use(stashBytes.subarray(start, start + length));
+                use(address, stashBytes.subarray(start, start + length));
             }
             else
             {
@@ -328,7 +318,7 @@ export function createBorrower({ slots, stash, memory, base = 0 }){
         finally
         {
             Atomics.store(states, slot * 2, LEND.DONE);
-            Atomics.notify(states, slot * 2);
+            wake(states, slot * 2, SLEEPS);
         }
     };
 }

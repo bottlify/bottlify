@@ -27,6 +27,29 @@ import { createXInput } from './xinput.js';
  */
 
 /** The input layer's module for one graph; see `defaultModules`. */
+/**
+ * Where on the screen a viewport of this size begins: the client of the one
+ * visible top-level window that size, whose picture alone it then shows, or
+ * null for the screen itself. A viewport the screen's size is the screen,
+ * even when a window behind a dialog has a client that size.
+ *
+ * @param {number} width @param {number} height
+ * @param {{ width: number, height: number } | null} screen
+ * @param {{ visible: boolean, child: boolean, client: { left: number, top: number,
+ *     right: number, bottom: number } }[]} windows
+ * @returns {{ x: number, y: number } | null}
+ */
+export function viewportOrigin(width, height, screen, windows){
+    if (screen && screen.width === width && screen.height === height)
+    {
+        return null;
+    }
+    const fitting = windows.filter(entry=>entry.visible && !entry.child
+        && entry.client.right - entry.client.left === width
+        && entry.client.bottom - entry.client.top === height);
+    return fitting.length === 1 ? { x: fitting[0].client.left, y: fitting[0].client.top } : null;
+}
+
 export function createInputModule(){
     /**
      * The instance this module object made last, for `diagnostics()` and
@@ -59,15 +82,28 @@ export function createInputModule(){
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     /** @param {number} address @param {Uint8Array} bytes */
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                    writePointer: (address, value, bytes)=>memory.writePointer(address, value,
+                        bytes),
                 },
                 // The guest's clock, for the same reason the sound layer takes one:
                 // an event timestamped from a second clock is one a program can
                 // order wrongly against everything else it knows the time of.
                 now: config?.now ?? (()=>Date.now()),
                 publishInterface: config?.publishInterface ?? (()=>0),
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 divergence: config?.divergence,
                 signal: config?.signal,
                 mouseHeld: config?.mouseHeld,
+                // DirectInput 8 registers the device it holds for raw input,
+                // as a program then sees with GetRegisteredRawInputDevices.
+                rawInput: {
+                    claim: (/** @type {number} */ usage, /** @type {number} */ flags)=>
+                        /** @type {any} */ (win32).claimRawInput?.(usage, flags,
+                            bridge.callerThread()) ?? 0,
+                    release: (/** @type {number} */ usage)=>
+                        /** @type {any} */ (win32).releaseRawInput?.(usage),
+                },
                 // Where a mouse in absolute mode starts when it is taken: the
                 // cursor, as the router keeps it. Made below; asked only later.
                 cursor: ()=>router?.cursor() ?? null,
@@ -130,13 +166,98 @@ export function createInputModule(){
                 }
             })();
 
+            // Device input is shown to the low-level hooks before anything
+            // has it (WH_MOUSE_LL, WH_KEYBOARD_LL, through user32's queue).
+            // With none installed an event goes in as it always did, at once.
+            // With one, what the event makes -- its messages, characters,
+            // DirectInput and raw input -- is held until the hooks have
+            // answered, events in the order they came, and an event a hook
+            // took away makes nothing. The router has moved the cursor by
+            // then, so a hook reads where it is now; a hook of a thread that
+            // does not answer holds input for LowLevelHooksTimeout at most.
+            /** @type {{ run: () => void, message?: any }[] | null} */
+            let holding = null;
+            /** The held events not yet let through, or null when none is. @type {Promise<void> | null} */
+            let behind = null;
+            /** @param {() => void} run @param {any} [message] */
+            const effect = (run, message)=>{
+                if (holding)
+                {
+                    holding.push({ run, message });
+                    return;
+                }
+                run();
+            };
+            /** @param {number} message @returns {'mouse' | 'keyboard' | null} */
+            const hookedAs = message=>{
+                const KEY_MESSAGES = [0x0100, 0x0101, 0x0104, 0x0105];
+                if (KEY_MESSAGES.includes(message))
+                {
+                    return 'keyboard';
+                }
+                return message >= 0x0200 && message <= 0x020e ? 'mouse' : null;
+            };
+            /**
+             * One event through the router, held for the hooks when any is installed.
+             *
+             * @param {import('./router.js').HostInputEvent} event
+             */
+            const sendDevice = event=>{
+                const seam = queue?.lowLevel ?? null;
+                const watched = seam !== null && event.injected !== true
+                    && (seam.hooked('mouse') || seam.hooked('keyboard'));
+                if (!watched && behind === null)
+                {
+                    return router.send(event);
+                }
+                /** @type {{ run: () => void, message?: any }[]} */
+                const held = [];
+                holding = held;
+                let answer;
+                try
+                {
+                    answer = router.send(event);
+                }
+                finally
+                {
+                    holding = null;
+                }
+                const shown = held.filter(each=>event.injected !== true && each.message
+                    && seam !== null
+                    && hookedAs(each.message.message) !== null
+                    && seam.hooked(/** @type {'mouse' | 'keyboard'} */ (hookedAs(each.message.message))));
+                /** @param {number} index @returns {Promise<boolean>} */
+                const ask = async index=>{
+                    const each = shown[index];
+                    if (!each || seam === null)
+                    {
+                        return false;
+                    }
+                    const kind = /** @type {'mouse' | 'keyboard'} */ (hookedAs(each.message.message));
+                    return ((await seam.show(kind, each.message)) | 0) !== 0 || ask(index + 1);
+                };
+                const mine = (behind ?? Promise.resolve()).then(()=>ask(0)).then(taken=>{
+                    if (!taken)
+                    {
+                        held.forEach(each=>each.run());
+                    }
+                }, ()=>held.forEach(each=>each.run())).then(()=>{
+                    if (behind === mine)
+                    {
+                        behind = null;
+                    }
+                });
+                behind = mine;
+                return answer;
+            };
+
             const router = createInputRouter({
                 /** @param {any} message */
-                post: message=>queue?.post(message),
+                post: message=>effect(()=>queue?.post(message), message),
                 /** @param {number} character @param {number} lParam */
-                compose: (character, lParam)=>queue?.compose(character, lParam),
+                compose: (character, lParam)=>effect(()=>queue?.compose(character, lParam)),
                 /** @param {import('./dinput/devices.js').InputEvent} event */
-                device: event=>dinput.post(event),
+                device: event=>effect(()=>dinput.post(event)),
                 now: config?.now ?? (()=>Date.now()),
                 // Which window input is for. Handed down because only whoever
                 // assembled the process knows which one a person is looking at.
@@ -149,12 +270,26 @@ export function createInputModule(){
                 // Where the cursor is on the viewport, for a page drawing it
                 // over a locked pointer.
                 moved: config?.cursorMoved,
+                // A viewport the size of one window's client, and not of the
+                // screen, shows that window's picture alone -- a windowed
+                // program's back buffer -- so it is pointed into from where
+                // that client lies on the screen.
+                origin: (width, height)=>{
+                    try
+                    {
+                        return viewportOrigin(width, height, win32.screenSize?.() ?? null,
+                            win32.windows());
+                    }
+                    catch {
+                        return null;
+                    }
+                },
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),
                 // The device's own report, for a program that registered for raw
                 // input; whether one did, and which window hears it, is user32's.
-                rawInput: report=>{
+                rawInput: report=>effect(()=>{
                     try
                     {
                         win32.rawInput?.(report);
@@ -162,10 +297,10 @@ export function createInputModule(){
                     catch {
                         // No win32: no window to post WM_INPUT to.
                     }
-                },
+                }),
                 // Pasted text is the clipboard's, which is win32's; a build
                 // without it has no clipboard to paste into.
-                paste: text=>{
+                paste: text=>effect(()=>{
                     try
                     {
                         win32.paste(text);
@@ -173,7 +308,7 @@ export function createInputModule(){
                     catch {
                         // No win32: nothing to paste into.
                     }
-                },
+                }),
             });
 
             /** @type {ReturnType<typeof createDomInput> | null} */
@@ -202,7 +337,7 @@ export function createInputModule(){
                  *
                  * @param {import('./router.js').HostInputEvent} event
                  */
-                send: event=>router.send(event),
+                send: event=>sendDevice(event),
 
                 /**
                  * Feeds one event straight to a DirectInput device, in that

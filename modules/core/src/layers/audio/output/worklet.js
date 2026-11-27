@@ -166,12 +166,11 @@ const STATE_CLOSING = 2;
 const GAIN_SCALE = 65536;
 
 /**
- * The arena: the DMA voices' mirrors, after the last slot. Sixteen MiB holds
- * a generation's streaming buffers many times over (a sound library's is a
- * few hundred KiB) and a good many whole sounds; a buffer that does not fit
- * plays through the engine's queue as before.
+ * The table's bytes: the header, the slots and the arena. One segment of the
+ * run's cache, held whole for the output's life: memory the engine writes and
+ * the device reads in place, counted with every other byte the run holds.
  */
-const ARENA_BYTES = 16 << 20;
+const TABLE_BYTES = 16 << 20;
 
 /** Ints in the global header, ahead of the first slot. */
 const GLOBAL_HEADER_INT32 = 8;
@@ -194,6 +193,16 @@ function slotPcmOffset(slot){
     return slotHeaderOffset(slot) + SLOT_HEADER_BYTES;
 }
 
+/** Where the arena starts: after the last slot. */
+const ARENA_OFFSET = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
+/**
+ * The arena: the DMA voices' mirrors, the rest of the table - twelve MiB,
+ * which holds a generation's streaming buffers many times over (a sound
+ * library's is a few hundred KiB) and a good many whole sounds; a buffer that
+ * does not fit plays through the engine's queue as before.
+ */
+const ARENA_BYTES = TABLE_BYTES - ARENA_OFFSET;
+
 /**
  * The resampler's seam between one output block and the next, kept per slot
  * by whoever calls {@link resampleInto} across many blocks.
@@ -212,6 +221,50 @@ function slotPcmOffset(slot){
 /** @returns {Seam} */
 function createSeam(){
     return { pos: 0, tail: null, generation: -1, held: 0 };
+}
+
+/** Added to a slot's `BITS` when its samples are IEEE floats rather than integers. */
+const FLOAT_SAMPLES = 0x10000;
+
+/** Where a float sample's bits are read back, made once. */
+const FLOAT_BITS = new DataView(new ArrayBuffer(4));
+
+/**
+ * Bytes a sample of a slot's `BITS` takes.
+ *
+ * @param {number} code
+ */
+function sampleBytes(code){
+    return Math.max(1, (code & 0xffff) >> 3);
+}
+
+/**
+ * The sample at `at` of `bytes` as a float around zero: unsigned eight-bit
+ * with silence at 128, signed sixteen-, twenty-four- and thirty-two-bit, or a
+ * thirty-two-bit IEEE float, as `code` (a slot's `BITS`) says. `mask` wraps
+ * an offset round a ring, or is -1 for none.
+ *
+ * @param {Uint8Array} bytes @param {number} at @param {number} code @param {number} mask
+ * @returns {number}
+ */
+function pcmSample(bytes, at, code, mask){
+    const width = sampleBytes(code);
+    if (width === 1)
+    {
+        return (bytes[at & mask] - 128) / 128;
+    }
+    let value = 0;
+    for (let index = width - 1; index >= 0; index--)
+    {
+        value = value * 256 + bytes[(at + index) & mask];
+    }
+    if ((code & FLOAT_SAMPLES) !== 0)
+    {
+        FLOAT_BITS.setUint32(0, value);
+        return FLOAT_BITS.getFloat32(0);
+    }
+    const half = 2 ** (width * 8 - 1);
+    return (value >= half ? value - 2 * half : value) / half;
 }
 
 /**
@@ -276,7 +329,7 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
     const gain = Atomics.load(header, GAIN) / GAIN_SCALE;
     const leftGain = gain * (1 - Atomics.load(header, LEFT_CUT) / GAIN_SCALE);
     const rightGain = gain * (1 - Atomics.load(header, RIGHT_CUT) / GAIN_SCALE);
-    const bytesPerSample = bits === 8 ? 1 : 2;
+    const bytesPerSample = sampleBytes(bits);
     const stride = bytesPerSample * channels;
 
     const written = Atomics.load(header, WRITTEN);
@@ -299,19 +352,8 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
             return seam.tail ? seam.tail[channel] : readSample(0, channel);
         }
         const clamped = Math.min(frame, availableFrames - 1);
-        const at = (read0 + clamped * stride + channel * bytesPerSample) & PCM_MASK;
-        if (bytesPerSample === 1)
-        {
-            return (pcm[at] - 128) / 128;
-        }
-        const low = pcm[at];
-        const high = pcm[(at + 1) & PCM_MASK];
-        let value = low | (high << 8);
-        if (value >= 0x8000)
-        {
-            value -= 0x10000;
-        }
-        return value / 32768;
+        return pcmSample(pcm, read0 + clamped * stride + channel * bytesPerSample, bits,
+            PCM_MASK);
     };
 
     /**
@@ -434,7 +476,7 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
     const channels = Atomics.load(header, CHANNELS);
     const bits = Atomics.load(header, BITS);
     const base = Atomics.load(header, BASE);
-    const bytesPerSample = bits === 8 ? 1 : 2;
+    const bytesPerSample = sampleBytes(bits);
     const stride = bytesPerSample * channels;
     const frames = Math.floor(Atomics.load(header, LENGTH) / stride);
     if (rate <= 0 || frames <= 0)
@@ -450,17 +492,8 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
 
     /** @param {number} frame frames from `start` @param {number} channel @returns {number} */
     const sample = (frame, channel)=>{
-        const at = base + ((start + frame) % frames) * stride + channel * bytesPerSample;
-        if (bytesPerSample === 1)
-        {
-            return (arena[at] - 128) / 128;
-        }
-        let value = arena[at] | (arena[at + 1] << 8);
-        if (value >= 0x8000)
-        {
-            value -= 0x10000;
-        }
-        return value / 32768;
+        return pcmSample(arena,
+            base + ((start + frame) % frames) * stride + channel * bytesPerSample, bits, -1);
     };
 
     // Past the last frame a voice that does not loop has nothing: the
@@ -597,60 +630,31 @@ function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena 
 }
 
 /**
- * The audio thread's end of a ring it cannot share: on a page without shared
- * memory the engine posts the frames it mixed, in chunks, each tagged with the
- * frame of the ring it starts at, and this plays them in order. `position` is
- * that same count for the frame played last, so what the audio thread reports
- * back is a place in the ring rather than a number of its own, and a chunk that
- * starts further on -- the engine cleared the ring -- is played from where it
- * says rather than shifted back to close the gap.
+ * A track table's parts as views of where it lies - a view of memory the run
+ * holds, a span of its cache's segment, so every view starts at its offset:
+ * the global header, each slot's header and ring, and the DMA voices'
+ * mirrors after the last slot (null for a table made without them, whose
+ * buffers play through queues alone). One reading of the layout for every
+ * side that maps the table.
  *
- * @typedef {{ chunks: { at: number, frames: Float32Array }[], offset: number,
- *     position: number, blocks: number, starvedBlocks: number,
- *     starvedFrames: number }} Feed
- * @returns {Feed}
+ * @param {Uint8Array} table
  */
-function createFeed(){
-    return { chunks: [], offset: 0, position: 0, blocks: 0, starvedBlocks: 0, starvedFrames: 0 };
-}
-
-/**
- * One block out of a feed, interleaved stereo as `mixBlock` makes it, with
- * silence where nothing has come yet.
- *
- * @param {Feed} feed
- * @param {Float32Array} block
- * @param {number} blockFrames
- * @returns {number} the frames that were sound rather than silence
- */
-function playFeed(feed, block, blockFrames){
-    feed.blocks++;
-    let frame = 0;
-    while (frame < blockFrames && feed.chunks.length > 0)
+function tableViews(table){
+    const { buffer, byteOffset } = table;
+    const slots = [];
+    for (let slot = 0; slot < SLOTS; slot++)
     {
-        const chunk = feed.chunks[0];
-        if (feed.offset === 0 && chunk.at > feed.position)
-        {
-            feed.position = chunk.at;
-        }
-        const take = Math.min(chunk.frames.length / 2 - feed.offset, blockFrames - frame);
-        block.set(chunk.frames.subarray(feed.offset * 2, (feed.offset + take) * 2), frame * 2);
-        frame += take;
-        feed.offset += take;
-        feed.position += take;
-        if (feed.offset * 2 >= chunk.frames.length)
-        {
-            feed.chunks.shift();
-            feed.offset = 0;
-        }
+        slots.push({
+            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
+        });
     }
-    if (frame < blockFrames)
-    {
-        block.fill(0, frame * 2, blockFrames * 2);
-        feed.starvedBlocks++;
-        feed.starvedFrames += blockFrames - frame;
-    }
-    return frame;
+    return {
+        global: new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32),
+        slots,
+        arena: table.byteLength >= ARENA_OFFSET + ARENA_BYTES
+            ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null,
+    };
 }
 
 /* WORKLET-SHARED:END */
@@ -663,38 +667,15 @@ function playFeed(feed, block, blockFrames){
 /**
  * A track table as the output reads it: its header, its slots, and the DMA
  * voices' mirrors after the last slot -- a table made without them plays its
- * queues alone.
+ * queues alone. The table is a view of memory the run holds (a span of its
+ * cache's segment), so every view here starts at its offset.
  *
- * @param {ArrayBufferLike} table
+ * @param {Uint8Array} table
  * @returns {PlayedTable}
  */
 function playedTable(table){
-    const slots = [];
-    const seams = [];
-    for (let slot = 0; slot < SLOTS; slot++)
-    {
-        slots.push({
-            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
-        });
-        seams.push(createSeam());
-    }
-    const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
-    return {
-        global: new Int32Array(table, 0, GLOBAL_HEADER_INT32),
-        slots,
-        seams,
-        arena: table.byteLength >= arenaAt + ARENA_BYTES
-            ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null,
-    };
+    return { ...tableViews(table), seams: Array.from({ length: SLOTS }, ()=>createSeam()) };
 }
-
-/**
- * Blocks between two reports of a feed's progress: about ten milliseconds at
- * 48 kHz, so the engine hears often enough to keep the feed topped up, and the
- * audio thread posts a hundred small messages a second rather than one a block.
- */
-const REPORT_BLOCKS = 4;
 
 class BottlifyOutput extends AudioWorkletProcessor {
     /** @param {any} options */
@@ -707,33 +688,18 @@ class BottlifyOutput extends AudioWorkletProcessor {
         // quantum does not overrun it.
         this.block = new Float32Array(128 * 2);
         this.running = true;
-        /** @type {Feed | null} */
-        this.feed = null;
-        /** @type {MessagePort | null} */
-        this.feedPort = null;
         this.port.onmessage = (/** @type {any} */ event)=>{
             if (event.data === 'stop')
             {
                 this.running = false;
             }
-            else if (event.data?.type === 'table' && event.data.table && !this.feed)
+            else if (event.data?.type === 'table' && event.data.table)
             {
                 this.tables.set(event.data.id, playedTable(event.data.table));
             }
             else if (event.data?.type === 'untable')
             {
                 this.tables.delete(event.data.id);
-            }
-            else if (event.data?.type === 'feed')
-            {
-                // The engine's own end of a channel the page made, so the
-                // frames come straight from the engine's thread rather than
-                // through the page's, which a busy interface would hold up.
-                const port = event.data.port;
-                port.onmessage = (/** @type {any} */ message)=>{
-                    this.feed?.chunks.push(message.data);
-                };
-                this.feedPort = port;
             }
         };
         /**
@@ -745,13 +711,6 @@ class BottlifyOutput extends AudioWorkletProcessor {
          * @type {Map<string | number, PlayedTable>}
          */
         this.tables = new Map();
-        if (!table)
-        {
-            // No shared memory to read a table from: the engine mixes on its
-            // own thread and posts the mix.
-            this.feed = createFeed();
-            return;
-        }
         this.tables.set('run', playedTable(table));
     }
 
@@ -771,30 +730,15 @@ class BottlifyOutput extends AudioWorkletProcessor {
         {
             this.block = new Float32Array(blockFrames * 2);
         }
-        if (this.feed)
+        // The engine's own idea of its output rate, not the audio context's: a
+        // mismatch between the two is a configuration error elsewhere, and
+        // resampling against the rate the engine actually assumed is what keeps
+        // this processor self-consistent regardless.
+        this.block.fill(0, 0, blockFrames * 2);
+        for (const played of this.tables.values())
         {
-            const feed = this.feed;
-            playFeed(feed, this.block, blockFrames);
-            if (feed.blocks % REPORT_BLOCKS === 0)
-            {
-                this.feedPort?.postMessage({
-                    played: feed.position, blocks: feed.blocks,
-                    starvedBlocks: feed.starvedBlocks, starvedFrames: feed.starvedFrames,
-                });
-            }
-        }
-        else
-        {
-            // The engine's own idea of its output rate, not the audio
-            // context's: a mismatch between the two is a configuration error
-            // elsewhere, and resampling against the rate the engine actually
-            // assumed is what keeps this processor self-consistent regardless.
-            this.block.fill(0, 0, blockFrames * 2);
-            for (const played of this.tables.values())
-            {
-                mixBlock({ ...played, block: this.block, blockFrames,
-                    outputRate: Atomics.load(played.global, OUTPUT_RATE) });
-            }
+            mixBlock({ ...played, block: this.block, blockFrames,
+                outputRate: Atomics.load(played.global, OUTPUT_RATE) });
         }
         for (let channel = 0; channel < output.length; channel++)
         {

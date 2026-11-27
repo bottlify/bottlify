@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createFiberFunctions } from './fibers.js';
-import { TEB } from './teb.js';
+import { HAS_FIBER_DATA, NO_FIBER, TEB } from './teb.js';
 
 const TEB_AT = 0x7ffd0000;
 const RETURN_STUB = 0x00777000;
@@ -69,7 +69,10 @@ function setup({ room = true } = {}){
     words.set(TEB_AT + TEB.STACK_BASE, 0x00130000);
     words.set(TEB_AT + TEB.STACK_LIMIT, 0x00030000);
     const word = (/** @type {number} */ at)=>words.get(at >>> 0) ?? 0;
-    return { fns, word, set, errors, released, exits, thread };
+    const setWord = (/** @type {number} */ at, /** @type {number} */ value)=>{
+        words.set(at >>> 0, value >>> 0);
+    };
+    return { fns, word, setWord, set, errors, released, exits, thread };
 }
 
 test('a switch keeps where the caller resumes and takes up the other fiber, thread block and'
@@ -129,4 +132,32 @@ test('what each call refuses: a second conversion, a fiber with no routine or no
     assert.equal(fns.IsThreadAFiber.handler(), 1);
     assert.equal(fns.ConvertFiberToThread.handler(), 1);
     assert.equal(fns.IsThreadAFiber.handler(), 0);
+});
+
+test('a fiber runs with its own fibre-local block and activation stack, and a thread that'
+    + ' runs none reads no fiber whatever FiberData holds', ()=>{
+    const { fns, word, setWord } = setup();
+    setWord(TEB_AT + TEB.FIBER_DATA, NO_FIBER);
+    assert.equal(fns.IsThreadAFiber.handler(), 0, 'FiberData alone does not make a fiber');
+    setWord(TEB_AT + TEB.FLS_SLOTS, 0x00880000);
+    setWord(TEB_AT + TEB.ACTIVATION_STACK, 0x00881000);
+    const home = fns.ConvertThreadToFiber.handler([0]);
+    const flags = word(TEB_AT + (TEB.SAME_TEB_FLAGS & ~3)) >>> (TEB.SAME_TEB_FLAGS & 3) * 8;
+    assert.equal(flags & HAS_FIBER_DATA, HAS_FIBER_DATA, 'SameTebFlags says it now runs one');
+    const fiber = fns.CreateFiber.handler([0, 0x00402000, 0]);
+
+    fns.SwitchToFiber.handler([fiber], { restingStack: 0x0011fff8, hostReturn: 0x00401234 });
+    assert.equal(word(TEB_AT + TEB.FLS_SLOTS), 0, 'a new fiber has no values yet');
+    assert.equal(word(TEB_AT + TEB.ACTIVATION_STACK), 0);
+    setWord(TEB_AT + TEB.FLS_SLOTS, 0x00890000);
+
+    fns.SwitchToFiber.handler([home], { restingStack: 0x0050fff0, hostReturn: 0x00402040 });
+    assert.equal(word(TEB_AT + TEB.FLS_SLOTS), 0x00880000, 'the thread\'s own come back');
+    assert.equal(word(TEB_AT + TEB.ACTIVATION_STACK), 0x00881000);
+    fns.SwitchToFiber.handler([fiber], { restingStack: 0x0011fff8, hostReturn: 0x00401234 });
+    assert.equal(word(TEB_AT + TEB.FLS_SLOTS), 0x00890000, 'and the fiber\'s are kept');
+
+    assert.equal(fns.ConvertFiberToThread.handler(), 1);
+    assert.equal(fns.IsThreadAFiber.handler(), 0);
+    assert.equal(word(TEB_AT + TEB.FIBER_DATA), 0);
 });

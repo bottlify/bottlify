@@ -129,6 +129,27 @@ test('a block records a shader, declaration, indices and stream set to what is i
     assert.deepEqual([stream.buffer, stream.offset, stream.stride], [vertices.buffer, 8, 12]);
 });
 
+test('a capture takes a stream\'s buffer and stride but keeps the offset the block had', ()=>{
+    // Wine's stateblock test (create_stateblock_capture_apply_all_events): a
+    // block made of everything, captured over other streams and applied,
+    // gives back their buffers and strides at the offset it was made with.
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    /** @type {{ block?: any }} */
+    const out = {};
+    assert.equal(device.CreateStateBlock(D3DSBT.ALL, out), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 4, 16), D3D_OK);
+    assert.equal(out.block.Capture(), D3D_OK);
+    assert.equal(device.SetStreamSource(0, null, 0, 0), D3D_OK);
+    assert.equal(out.block.Apply(), D3D_OK);
+    /** @type {{ buffer?: any, offset?: number, stride?: number }} */
+    const stream = {};
+    assert.equal(device.GetStreamSource(0, stream), D3D_OK);
+    assert.deepEqual([stream.buffer, stream.offset, stream.stride], [vertices.buffer, 0, 16]);
+});
+
 test('capture and apply are refused while another block is recording, and so is a create', ()=>{
     const device = createDevice();
     /** @type {{ block?: any }} */

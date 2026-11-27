@@ -147,6 +147,35 @@ test('CommandLineToArgvW answers one block: the pointers, a null, then the strin
     assert.equal(m.shell.CommandLineToArgvW.argBytes, 8);
 });
 
+test('a 64-bit caller\'s argv is an array of quadword pointers', ()=>{
+    // Read as dwords by a 64-bit program, every pointer but the first was
+    // another's high half, and the walk ran off the array's end.
+    const m = machine({ pointerSize: 8 });
+    const line = m.putWide('"C:\\App\\x264.exe" --threads 1', 0x100);
+    const block = m.shell.CommandLineToArgvW.handler([line, 0x80]);
+    assert.equal(m.view.getUint32(0x80, true), 3);
+    /** @type {string[]} */
+    const args = [];
+    for (let at = block; m.view.getBigUint64(at, true) !== 0n; at += 8)
+    {
+        args.push(readWideAt(m.view, Number(m.view.getBigUint64(at, true))));
+    }
+    assert.deepEqual(args, ['C:\\App\\x264.exe', '--threads', '1']);
+    assert.equal(Number(m.view.getBigUint64(block, true)), block + 32,
+        'the strings past four quadwords: three and the null');
+});
+
+/** @param {DataView} view @param {number} at */
+function readWideAt(view, at){
+    let text = '';
+    for (let unit = view.getUint16(at, true); unit !== 0; unit = view.getUint16(at, true))
+    {
+        text += String.fromCharCode(unit);
+        at += 2;
+    }
+    return text;
+}
+
 test('an empty command line is the program\'s own path, alone', ()=>{
     const m = machine();
     const block = m.shell.CommandLineToArgvW.handler([m.putWide('', 0x100), 0x80]);

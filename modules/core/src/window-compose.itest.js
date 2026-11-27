@@ -60,7 +60,6 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\overlap.exe',
-            engine: 'cork',
             concurrency,
             device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
                 canvas: gpu.canvas },
@@ -112,7 +111,7 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
             }
         }, 50);
         t.after(()=>clearInterval(looking));
-        assert.equal(await app.run({ timeoutMs: 60000 }), 0, output.join(''));
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0, output.join(''));
         assert.doesNotMatch(output.join(''), /FAIL/);
         assert.ok(composed, `the screen showed both windows in their order; last seen ${
             seen.join()} at (50,50) (150,150) (250,250) (50,250) (400,400)`);

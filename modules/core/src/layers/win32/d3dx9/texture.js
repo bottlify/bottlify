@@ -4,10 +4,14 @@
  * See LICENSE for details
  */
 
-import { DEVICE, SURFACE, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
+import { DEVICE, LOCKED_RECT_BYTES, POINTER_BYTES, SURFACE, TEXTURE, UNKNOWN_RELEASE,
+    createDeviceCalls } from './device.js';
 import { ImageError, bitmapFile, readImage } from './images.js';
-import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
-    from './pixels.js';
+import {
+    FMT, decodeTexels, encodeTexels, halve, isCompressed, isCopyable, isSupported, keptAsIs,
+    layoutOf, resample,
+} from './pixels.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DX's texture loaders: an image file made into a texture, a cube texture
@@ -41,7 +45,7 @@ const D3DLOCK_READONLY = 0x10;
 const SURFACE_DESC_BYTES = 32;
 
 export const D3DX_DEFAULT = 0xffffffff;
-export const D3DX_DEFAULT_NONPOW2 = 0xfffffffe;
+const D3DX_DEFAULT_NONPOW2 = 0xfffffffe;
 export const D3DX_FROM_FILE = 0xfffffffd;
 
 const D3DPOOL_DEFAULT = 0;
@@ -139,7 +143,7 @@ function formatFromFile(file){
  * @param {TextureHost} host
  */
 export function createTextureLoader(host){
-    const { u32, putU32s, method: call, string } = createDeviceCalls(host);
+    const { u32, putU32s, putPointer, lockedRect, method: call, string } = createDeviceCalls(host);
 
     /**
      * Writes D3DXIMAGE_INFO.
@@ -165,7 +169,7 @@ export function createTextureLoader(host){
     const sources = {
         /** @param {number} data @param {number} size */
         memory: (data, size)=>((data >>> 0) === 0 || (size >>> 0) === 0 ? null
-            : host.readMemory(data >>> 0, size >>> 0).slice()),
+            : host.readMemory(wholeAddress(data), size >>> 0).slice()),
         /**
          * @param {string} api @param {number} at @param {boolean} wide
          * @returns {Promise<Uint8Array | null>}
@@ -424,7 +428,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
         if (ask.out !== 0)
         {
-            putU32s(ask.out, [0]);
+            putPointer(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -458,7 +462,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
         if (ask.out !== 0)
         {
-            putU32s(ask.out, [0]);
+            putPointer(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -498,7 +502,8 @@ export function createTextureLoader(host){
             const fits = own && own.width === lw && own.height === lh;
             if (fits && own.format === target && colorKey === 0)
             {
-                // A compressed level already in the format asked for goes as it is.
+                // A compressed or deep level already in the format asked for
+                // goes as it is.
                 out.push(own.data);
                 previous = null;
                 continue;
@@ -507,7 +512,7 @@ export function createTextureLoader(host){
             let bgra;
             if (fits)
             {
-                bgra = isCompressed(own.format) ? decodeTexels(own.format, own.data, lw, lh)
+                bgra = keptAsIs(own.format) ? decodeTexels(own.format, own.data, lw, lh)
                     : own.data.slice();
             }
             else if (previous && level > 0)
@@ -518,7 +523,7 @@ export function createTextureLoader(host){
             else
             {
                 const top = held[0];
-                const texels = isCompressed(top.format)
+                const texels = keptAsIs(top.format)
                     ? decodeTexels(top.format, top.data, top.width, top.height) : top.data;
                 bgra = resample(texels, top.width, top.height, lw, lh);
             }
@@ -547,7 +552,10 @@ export function createTextureLoader(host){
         // and this one is in flight only once its handler has returned its promise.
         await null;
         const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(16);
+        // The texture's out pointer, then its lock: a rectangle, or a box, which is no
+        // longer than one.
+        const scratch = heap.allocate(POINTER_BYTES + LOCKED_RECT_BYTES);
+        const locked = scratch + POINTER_BYTES;
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -557,7 +565,7 @@ export function createTextureLoader(host){
         let failed = D3D_OK;
         /** @param {number} usage @param {number} pool @returns {Promise<number | null>} */
         const create = async(usage, pool)=>{
-            putU32s(scratch, [0]);
+            putPointer(scratch, 0);
             const answer = plan.cube
                 ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, usage,
                     plan.target, pool, scratch, 0])
@@ -591,15 +599,16 @@ export function createTextureLoader(host){
                     // LockBox and UnlockBox stand where LockRect and UnlockRect
                     // do; the box has a slice pitch between the row pitch and the bits.
                     const answer = await method(filled, TEXTURE.LockRect, [...which, level,
-                        scratch + 4, 0, 0]);
+                        locked, 0, 0]);
                     if (answer !== D3D_OK)
                     {
                         await method(filled, UNKNOWN_RELEASE, []);
                         return answer;
                     }
-                    const pitch = u32(scratch + 4);
-                    const slicePitch = plan.depth ? u32(scratch + 8) : 0;
-                    const bits = u32(scratch + (plan.depth ? 12 : 8));
+                    // A box's pointer follows two pitches, at the same place at both widths.
+                    const pitch = u32(locked);
+                    const slicePitch = plan.depth ? u32(locked + 4) : 0;
+                    const bits = plan.depth ? u32(locked + 8) : lockedRect(locked).bits;
                     const { rowBytes, rows } = layoutOf(plan.target, Math.max(1, plan.w >> level),
                         Math.max(1, plan.h >> level));
                     const bytes = plan.faces[face][level];
@@ -618,7 +627,7 @@ export function createTextureLoader(host){
             }
             if (lockable)
             {
-                putU32s(plan.out, [filled]);
+                putPointer(plan.out, filled);
                 return D3D_OK;
             }
             const placed = await create(plan.usage, plan.pool);
@@ -634,7 +643,7 @@ export function createTextureLoader(host){
                 await method(placed, UNKNOWN_RELEASE, []);
                 return answer;
             }
-            putU32s(plan.out, [placed]);
+            putPointer(plan.out, placed);
             return D3D_OK;
         }
         finally
@@ -661,7 +670,7 @@ export function createTextureLoader(host){
         // As for `upload`: the call into the guest goes below this one once it is in flight.
         await null;
         const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
+        const scratch = heap.allocate(SURFACE_DESC_BYTES + LOCKED_RECT_BYTES);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -676,7 +685,14 @@ export function createTextureLoader(host){
             {
                 return typeof from === 'number' ? from : /** @type {number} */ (to);
             }
-            if (!isSupported(from.format) || !isSupported(to.format)
+            // One format at one size with no key is a copy of the rows, as D3DX
+            // makes it: a compressed one decoded and encoded again took the
+            // Crysis demo's engine a tenth of its time, and changed its blocks.
+            // A format with no codec here goes this way only.
+            const copied = from.format === to.format && from.width === to.width
+                && from.height === to.height && colorKey === 0;
+            const converted = isSupported(from.format) && isSupported(to.format);
+            if (!(converted || (copied && isCopyable(from.format)))
                 || from.width <= 0 || from.height <= 0 || to.width <= 0 || to.height <= 0)
             {
                 host.divergence?.(api, `answered D3DERR_INVALIDCALL:`
@@ -689,11 +705,6 @@ export function createTextureLoader(host){
             {
                 return packed;
             }
-            // One format at one size with no key is a copy of the rows, as D3DX
-            // makes it: a compressed one decoded and encoded again took the
-            // Crysis demo's engine a tenth of its time, and changed its blocks.
-            const copied = from.format === to.format && from.width === to.width
-                && from.height === to.height && colorKey === 0;
             let bgra = copied ? null : decodeTexels(from.format, packed, from.width, from.height);
             if (bgra && (from.width !== to.width || from.height !== to.height))
             {
@@ -705,23 +716,103 @@ export function createTextureLoader(host){
             }
             const bytes = bgra ? encodeTexels(to.format, bgra, to.width, to.height) : packed;
             const locked = scratch + SURFACE_DESC_BYTES;
+            const write = layoutOf(to.format, to.width, to.height);
+            /** The rows into a surface locked at `locked`. */
+            const fill = ()=>{
+                for (let row = 0, { pitch, bits } = lockedRect(locked); row < write.rows; row++)
+                {
+                    host.writeMemory(bits + row * pitch,
+                        bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
+                }
+            };
             const answer = await method(dest, SURFACE.LockRect, [locked, destRect, 0]);
-            if (answer !== D3D_OK)
+            if (answer === D3D_OK)
             {
-                host.divergence?.(api, `the destination would not lock (0x${answer.toString(16)})`);
+                fill();
+                await method(dest, SURFACE.UnlockRect, []);
+                return D3D_OK;
+            }
+            // A destination that will not lock - a render target's surface -
+            // is written as D3DX writes one: into a system-memory surface of
+            // its format, which the device then copies onto it (UpdateSurface).
+            // A program that sets a render target's texels goes this way (XNA's
+            // Texture2D.SetData on a RenderTarget2D, a game's map).
+            const through = await throughCopy(method, dest, destRect, to, locked, fill);
+            if (through !== D3D_OK)
+            {
+                host.divergence?.(api, `the destination would not lock`
+                    + ` (0x${answer.toString(16)}) nor take a copy (0x${through.toString(16)})`);
                 return answer;
             }
-            const write = layoutOf(to.format, to.width, to.height);
-            for (let row = 0, pitch = u32(locked), bits = u32(locked + 4); row < write.rows; row++)
-            {
-                host.writeMemory(bits + row * pitch,
-                    bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
-            }
-            await method(dest, SURFACE.UnlockRect, []);
             return D3D_OK;
         }
         finally
         {
+            heap.free(scratch);
+        }
+    };
+
+    /**
+     * Writes an area of a surface that will not lock through a system-memory
+     * surface of its own: made on the surface's device, filled, copied onto
+     * the area's corner by UpdateSurface.
+     *
+     * @param {GuestMethod} method @param {number} dest @param {number} destRect
+     * @param {{ format: number, width: number, height: number }} to
+     * @param {number} locked  Room for a D3DLOCKED_RECT.
+     * @param {() => void} fill  Writes the rows into what is locked there.
+     * @returns {Promise<number>}
+     */
+    const throughCopy = async(method, dest, destRect, to, locked, fill)=>{
+        const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
+        // The device's pointer, the surface's, and the corner as a POINT.
+        const scratch = heap.allocate(2 * POINTER_BYTES + 8);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const made = scratch + POINTER_BYTES;
+        const corner = made + POINTER_BYTES;
+        let device = 0;
+        let copy = 0;
+        try
+        {
+            putPointer(scratch, 0);
+            let answer = await method(dest, SURFACE.GetDevice, [scratch]);
+            device = answer === D3D_OK ? u32(scratch) : 0;
+            if (device === 0)
+            {
+                return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
+            }
+            putPointer(made, 0);
+            answer = await method(device, DEVICE.CreateOffscreenPlainSurface,
+                [to.width, to.height, to.format, D3DPOOL_SYSTEMMEM, made, 0]);
+            copy = answer === D3D_OK ? u32(made) : 0;
+            if (copy === 0)
+            {
+                return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
+            }
+            answer = await method(copy, SURFACE.LockRect, [locked, 0, 0]);
+            if (answer !== D3D_OK)
+            {
+                return answer;
+            }
+            fill();
+            await method(copy, SURFACE.UnlockRect, []);
+            host.writeMemory(corner, new Uint8Array(new Int32Array(destRect === 0
+                ? [0, 0] : [u32(destRect) | 0, u32(destRect + 4) | 0]).buffer));
+            return await method(device, DEVICE.UpdateSurface, [copy, 0, dest, corner]);
+        }
+        finally
+        {
+            if (copy !== 0)
+            {
+                await method(copy, UNKNOWN_RELEASE, []);
+            }
+            if (device !== 0)
+            {
+                await method(device, UNKNOWN_RELEASE, []);
+            }
             heap.free(scratch);
         }
     };
@@ -794,7 +885,8 @@ export function createTextureLoader(host){
                     host.divergence?.(api, `the source would not lock (0x${answer.toString(16)})`);
                     return answer;
                 }
-                const packed = readRows(from, u32(locked + 4), u32(locked));
+                const { pitch, bits } = lockedRect(locked);
+                const packed = readRows(from, bits, pitch);
                 await method(source, SURFACE.UnlockRect, []);
                 return packed;
             });
@@ -864,7 +956,7 @@ export function createTextureLoader(host){
                 return D3DERR_INVALIDCALL;
             }
             const first = image.levels[0];
-            picked = { left, top, width: first.width, texels: isCompressed(first.format)
+            picked = { left, top, width: first.width, texels: keptAsIs(first.format)
                 ? decodeTexels(first.format, first.data, first.width, first.height)
                 : first.data };
             return { format: FMT.A8R8G8B8, width: right - left, height: bottom - top };

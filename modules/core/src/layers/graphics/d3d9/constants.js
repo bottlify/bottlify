@@ -28,6 +28,10 @@ export const D3DERR_NOTFOUND = 0x88760866;
 export const D3DOK_NOAUTOGEN = 0x0876086f;
 /** Direct3D 9Ex's answer for a device whose adapter is gone. */
 export const D3DERR_DEVICEREMOVED = 0x88760870;
+/** Direct3D 9Ex's success for a full-screen device whose application is not the active one. */
+export const S_PRESENT_OCCLUDED = 0x08760878;
+/** E_FAIL: what a vertex declaration Windows cannot lay out is answered. */
+export const E_FAIL = 0x80004005;
 
 /** D3DRENDERSTATETYPE. Sparse by design: the gaps are states D3D8 dropped. */
 export const D3DRS = Object.freeze({
@@ -271,6 +275,8 @@ export const D3DFMT = Object.freeze({
     // bits band.
     G16R16: 34,
     A16B16G16R16: 36,
+    // Sixteen bits of luminance: a lookup volume or a height map that eight bits band.
+    L16: 81,
     // One floating-point channel: what a shadow map of the Direct3D 9 era keeps its
     // depths in when the card samples no depth texture.
     R16F: 111,
@@ -304,7 +310,10 @@ export const D3DFMT = Object.freeze({
     UYVY: 0x59565955,
 });
 
-/** @typedef {{ channels: 1 | 2 | 4, stored: 'half' | 'float' | 'unorm16' }} WideFormat */
+/**
+ * @typedef {{ channels: 1 | 2 | 4, stored: 'half' | 'float' | 'unorm16', luminance?: true }}
+ *     WideFormat
+ */
 
 /**
  * @param {number} bytesPerPixel @param {boolean} alpha @param {boolean} float
@@ -339,7 +348,9 @@ function wideFormat(bytesPerPixel, alpha, float, channels, stored){
  * every one of them as half floats, red first, `channels` of them a texel;
  * `stored` says how each channel lies in the guest's memory -- a half float, a
  * 32-bit float, or a 16-bit fraction of 65535 -- which is what an upload
- * converts from and a read-back converts to.
+ * converts from and a read-back converts to. A `luminance` one keeps its one
+ * channel in red, green and blue of four, with an opaque alpha, because that is
+ * what Direct3D samples from it.
  *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
@@ -386,7 +397,10 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A32B32G32R32F]: wideFormat(16, true, true, 4, 'float'),
     [D3DFMT.G16R16]: wideFormat(4, false, false, 2, 'unorm16'),
     [D3DFMT.A16B16G16R16]: wideFormat(8, true, false, 4, 'unorm16'),
-    [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    [D3DFMT.L16]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false,
+        wide: Object.freeze({ channels: 1, stored: 'unorm16', luminance: true }) }),
+    // No D32: no card a program of the era meets offers it, and Windows says so
+    // (Wine's test_check_device_format, CheckDepthStencilMatch with D32).
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),
@@ -437,9 +451,40 @@ export const FORMAT_INFO = Object.freeze({
  * @returns {number} zero for a format that samples as it is kept
  */
 export function sampledOnes(format){
-    const channels = FORMAT_INFO[format]?.wide?.channels ?? 4;
+    const wide = FORMAT_INFO[format]?.wide;
+    const channels = wide?.luminance ? 4 : wide?.channels ?? 4;
     return 0b1111 & ~((1 << channels) - 1);
 }
+
+/**
+ * Whether a lock of `format` is addressed as a byte a pixel: ATI1 and ATI2,
+ * drivers' formats the runtime does not know as blocks. Their pitch is the
+ * width and a rectangle starts at its top times that plus its left (Wine's
+ * d3d9 test_lockrect_offset, test_miptree_layout; wined3d's broken pitch),
+ * while the bytes themselves are the blocks, one after another from the start.
+ *
+ * @param {number} format  D3DFMT
+ */
+export const pixelRowsTaken = format=>format === D3DFMT.ATI1 || format === D3DFMT.ATI2;
+
+/**
+ * The pitch a lock of a surface hands out: `surfacePitch`, or the width where
+ * a lock is addressed a byte a pixel (`pixelRowsTaken`).
+ *
+ * @param {number} format  D3DFMT @param {number} width
+ */
+export const lockPitch = (format, width)=>(pixelRowsTaken(format) ? width
+    : surfacePitch(format, width));
+
+/**
+ * The bytes a surface's storage takes: `surfaceBytes`, or for a lock
+ * addressed a byte a pixel as many as its lock reaches, whichever is more.
+ *
+ * @param {number} format  D3DFMT @param {number} width @param {number} height
+ */
+export const storageBytes = (format, width, height)=>(pixelRowsTaken(format)
+    ? Math.max(surfaceBytes(format, width, height), width * height)
+    : surfaceBytes(format, width, height));
 
 /**
  * Where in a locked surface a sub-rectangle begins.
@@ -458,6 +503,10 @@ export function offsetOfRect(format, pitch, rect){
     if (!info)
     {
         return 0;
+    }
+    if (pixelRowsTaken(format))
+    {
+        return rect.top * pitch + rect.left;
     }
     const { blockBytes, blockSize } = info;
     if (blockBytes === undefined || blockSize === undefined)
@@ -499,11 +548,15 @@ export function videoPoolAllowed(pool, plain){
  * Whether a resource's top level is whole blocks of its format: Direct3D 8
  * and 9 refuse a compressed texture or surface that is not, in every pool
  * (Wine's test_surface_blocks), where the levels below it may be any size.
+ * ATI1 and ATI2 are drivers' formats the runtime does not size-check -- the
+ * same test creates them at any size, and its lock tests create 257x257 ones
+ * -- so their storage is rounded up to whole blocks like any lower level.
  *
  * @param {number} format @param {number} width @param {number} height
  */
 export function blockAligned(format, width, height){
-    return !isCompressed(format) || ((width | height) & 3) === 0;
+    return !isCompressed(format) || format === D3DFMT.ATI1 || format === D3DFMT.ATI2
+        || ((width | height) & 3) === 0;
 }
 
 /**
@@ -526,9 +579,60 @@ export function surfacePitch(format, width){
     const { blockBytes, blockSize } = info;
     if (blockBytes === undefined || blockSize === undefined)
     {
-        return width * info.bytesPerPixel;
+        // A row of pixels starts on a four-byte boundary, which a program
+        // may count on (Wine's test_surface_alignment: a 5-pixel R5G6B5 row
+        // is 12 bytes).
+        return Math.ceil(width * info.bytesPerPixel / 4) * 4;
     }
     return Math.ceil(width / blockSize) * blockBytes;
+}
+
+/**
+ * Rows laid at `surfacePitch` taken out tight, one after another, as a
+ * texel upload reads them; the bytes themselves where the two agree, which
+ * is every width but the odd ones of formats under four bytes a pixel.
+ *
+ * @param {Uint8Array} bytes  `rows` rows at the pitch.
+ * @param {number} format @param {number} width @param {number} rows
+ * @param {number} [pitch]  The surface's own, where it is not `surfacePitch`'s.
+ * @returns {Uint8Array}
+ */
+export function tightRows(bytes, format, width, rows, pitch = surfacePitch(format, width)){
+    const info = FORMAT_INFO[format];
+    const row = width * (info?.bytesPerPixel ?? 0);
+    if (!info || info.blockSize !== undefined || row === pitch || row === 0)
+    {
+        return bytes;
+    }
+    const out = new Uint8Array(row * rows);
+    for (let y = 0; y < rows; y++)
+    {
+        out.set(bytes.subarray(y * pitch, y * pitch + row), y * row);
+    }
+    return out;
+}
+
+/**
+ * Tight rows laid out at `surfacePitch`, as a read-back writes them into a
+ * surface's bytes: `tightRows` the other way.
+ *
+ * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} rows
+ * @returns {Uint8Array}
+ */
+export function pitchedRows(bytes, format, width, rows){
+    const info = FORMAT_INFO[format];
+    const pitch = surfacePitch(format, width);
+    const row = width * (info?.bytesPerPixel ?? 0);
+    if (!info || info.blockSize !== undefined || row === pitch || row === 0)
+    {
+        return bytes;
+    }
+    const out = new Uint8Array(pitch * rows);
+    for (let y = 0; y < rows; y++)
+    {
+        out.set(bytes.subarray(y * row, y * row + row), y * pitch);
+    }
+    return out;
 }
 
 /**
@@ -550,14 +654,11 @@ export function surfaceBytes(format, width, height){
         return 0;
     }
     const { blockSize } = info;
-    if (blockSize === undefined)
-    {
-        return width * height * info.bytesPerPixel;
-    }
-    return surfacePitch(format, width) * Math.ceil(height / blockSize);
+    return surfacePitch(format, width) * Math.ceil(height / (blockSize ?? 1));
 }
 
-const reinterpret = new DataView(new ArrayBuffer(4));
+/** The render targets a pixel shader writes at once, oC0 to oC3. */
+export const SIMULTANEOUS_TARGETS = 4;
 
 /**
  * D3DCOLORWRITEENABLE's alpha bit.
@@ -570,21 +671,3 @@ const reinterpret = new DataView(new ArrayBuffer(4));
  * leave in it then decides how opaque the frame is.
  */
 export const COLORWRITEENABLE_ALPHA = 8;
-
-/**
- * @param {number} value
- * @returns {number} the DWORD a float render state is stored as
- */
-export function floatToDword(value){
-    reinterpret.setFloat32(0, value, true);
-    return reinterpret.getUint32(0, true);
-}
-
-/**
- * @param {number} value
- * @returns {number} the float a render-state DWORD stands for
- */
-export function dwordToFloat(value){
-    reinterpret.setUint32(0, value >>> 0, true);
-    return reinterpret.getFloat32(0, true);
-}

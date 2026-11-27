@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     D3DXMatrixDeterminant: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'f32',
         uses: ['f32'],
         code: Uint8Array.of(
@@ -60,8 +60,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixMultiplyTranspose: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00, 0x8b, 0x94, 0x24, 0x8c,
@@ -126,8 +126,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixScaling: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'u32', 'u32', 'u32'],
+        returns: 'ptr',
         uses: ['setU32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x8b, 0x44, 0x24, 0x08, 0x89, 0x02, 0xc7, 0x42,
@@ -144,8 +144,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationX: {
         convention: 'stdcall',
-        params: ['u32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x83, 0xec, 0x18, 0x8b, 0x54, 0x24, 0x1c, 0xd9, 0x44, 0x24, 0x20, 0xd9,
@@ -170,8 +170,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationY: {
         convention: 'stdcall',
-        params: ['u32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x83, 0xec, 0x18, 0x8b, 0x54, 0x24, 0x1c, 0xd9, 0x44, 0x24, 0x20, 0xd9,
@@ -196,8 +196,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationZ: {
         convention: 'stdcall',
-        params: ['u32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x83, 0xec, 0x18, 0x8b, 0x54, 0x24, 0x1c, 0xd9, 0x44, 0x24, 0x20, 0xd9,
@@ -222,8 +222,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationAxis: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'f32'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x83, 0xec, 0x58, 0x8b, 0x54, 0x24, 0x5c, 0x8b, 0x44, 0x24, 0x60, 0xd9,
@@ -271,8 +271,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationYawPitchRoll: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x48, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -317,8 +317,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixRotationQuaternion: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x83, 0xec, 0x10, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b,
@@ -355,8 +355,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixLookAtLH: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x81, 0xec, 0xb0, 0x00, 0x00, 0x00, 0x8b, 0x94, 0x24, 0xb4, 0x00, 0x00,
@@ -429,8 +429,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixLookAtRH: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x81, 0xec, 0xb0, 0x00, 0x00, 0x00, 0x8b, 0x94, 0x24, 0xb4, 0x00, 0x00,
@@ -503,8 +503,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveFovLH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x10, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -533,8 +533,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveFovRH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x10, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -563,8 +563,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveRH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -586,8 +586,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveOffCenterLH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -612,8 +612,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveOffCenterRH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -638,8 +638,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixOrthoRH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -660,8 +660,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixOrthoOffCenterLH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -685,8 +685,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixOrthoOffCenterRH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32', 'f32', 'f32'],
+        returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
             0x8b, 0x54, 0x24, 0x04, 0x68, 0x00, 0x00, 0x00, 0x40, 0xd9, 0x04, 0x24,
@@ -710,8 +710,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixReflect: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x83, 0xec, 0x40, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b,
@@ -754,8 +754,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixShadow: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x83, 0xec, 0x58, 0x8b, 0x74, 0x24, 0x64, 0x8b, 0x5c, 0x24,
@@ -799,8 +799,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixAffineTransformation: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x7c, 0xe8, 0x00, 0x00, 0x00, 0x00,
@@ -872,8 +872,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixTransformation: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr', 'ptr', 'ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0x54, 0x01, 0x00, 0x00, 0xe8, 0x00,
@@ -1111,8 +1111,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixAffineTransformation2D: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'u32', 'f32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'f32', 'ptr', 'f32', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x83, 0xec, 0x30, 0x8b, 0x54, 0x24, 0x34, 0xd9, 0x44, 0x24, 0x40, 0xd9,
@@ -1149,8 +1149,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixTransformation2D: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'f32', 'u32', 'u32', 'f32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'f32', 'ptr', 'ptr', 'f32', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00, 0x00,
@@ -1229,8 +1229,8 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixDecompose: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
-        returns: 'u32',
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
+        returns: 'ptr',
         uses: ['f32', 'u32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x81, 0xec, 0xb0, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00, 0x00,

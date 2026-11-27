@@ -53,6 +53,31 @@ test('each entry pops its stdcall arguments', ()=>{
         CM_Get_Next_Res_Des: 20,
         CM_Get_Res_Des_Data_Size: 12,
         CM_Get_Res_Des_Data: 16,
+        CM_Get_DevNode_Status: 16,
+        CM_Get_Parent: 12,
+        CM_Get_Child: 12,
+        CM_Get_Sibling: 12,
+        CM_Get_Device_IDA: 16,
+        CM_Get_Device_IDW: 16,
         CM_Free_Log_Conf_Handle: 4,
     });
+});
+
+test('the root is up, alone in its tree, and spells its ID in both widths', ()=>{
+    const { fns, dword } = make();
+    assert.equal(fns.CM_Get_DevNode_Status.handler([4, 8, ROOT_DEVNODE, 0]), CR.SUCCESS);
+    assert.equal(dword(4), 0xa, 'DN_DRIVER_LOADED | DN_STARTED');
+    assert.equal(dword(8), 0);
+    assert.equal(fns.CM_Get_DevNode_Status.handler([4, 8, 9, 0]), CR.INVALID_DEVNODE);
+    assert.equal(fns.CM_Get_DevNode_Status.handler([0, 8, ROOT_DEVNODE, 0]), CR.INVALID_POINTER);
+    for (const relative of [fns.CM_Get_Parent, fns.CM_Get_Child, fns.CM_Get_Sibling])
+    {
+        assert.equal(relative.handler([12, ROOT_DEVNODE, 0]), CR.NO_SUCH_DEVNODE);
+        assert.equal(dword(12), 0);
+    }
+    assert.equal(fns.CM_Get_Device_IDA.handler([ROOT_DEVNODE, 16, 20, 0]), CR.SUCCESS);
+    assert.equal(fns.CM_Get_Device_IDA.handler([ROOT_DEVNODE, 16, 4, 0]), CR.BUFFER_SMALL);
+    assert.equal(fns.CM_Get_Device_IDW.handler([ROOT_DEVNODE, 16, 20, 0]), CR.SUCCESS);
+    assert.equal(dword(16) & 0xffff, 'H'.charCodeAt(0));
+    assert.equal(dword(16) >>> 16, 'T'.charCodeAt(0), 'two bytes a character');
 });

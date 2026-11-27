@@ -75,16 +75,6 @@ const valueOf = line=>line.slice(line.indexOf('=') + 1);
 const tagsOf = value=>value.split(',').map(tag=>tag.trim()).filter(tag=>tag !== '');
 
 /**
- * The file with one key set: the section made if missing, the key replaced
- * where it is or added at the section's end.
- *
- * @param {string} text @param {string} section @param {string} key @param {string} value
- */
-export function setIniValue(text, section, key, value){
-    return editIni(text, section, key, value, INI_ACTION.ADD_LINE);
-}
-
-/**
  * The file as one IniFile or RemoveIniFile action leaves it.
  *
  * @param {string} text @param {string} section @param {string} key

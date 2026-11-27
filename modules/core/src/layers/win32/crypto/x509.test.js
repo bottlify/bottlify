@@ -55,6 +55,15 @@ test('a critical extension this build cannot read is listed; a CA flag left out 
     assert.deepEqual(certificate.basicConstraints, { ca: false, pathLength: null });
 });
 
+test('critical certificate policies are an extension this build reads', ()=>{
+    // RFC 5280 has every application recognise them, and Windows' chain engine
+    // does: Microsoft's "Time-Stamp PCA 2010" marks its policies critical, and
+    // every .NET Framework 4.5 to 4.8 package's timestamp chains through it.
+    const certificate = parseCertificate(makeCertificate({ subject: 'Stamping', key: rootKey,
+        extensions: [ext.anyPolicy(), ext.basicConstraints(true)] }));
+    assert.deepEqual(certificate.unknownCritical, []);
+});
+
 test('a signature is checked with the issuer\'s key over the bytes signed', ()=>{
     const root = parseCertificate(makeCertificate({ subject: 'Root', key: rootKey }));
     const leaf = makeCertificate({ subject: 'Leaf', issuer: 'Root', key: leafKey,

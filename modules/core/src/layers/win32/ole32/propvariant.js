@@ -25,6 +25,7 @@
  */
 
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -626,7 +627,7 @@ export function createPropVariantFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dest, src])=>{
-                if ((dest >>> 0) === 0 || (src >>> 0) === 0)
+                if (wholeAddress(dest) === 0 || wholeAddress(src) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -635,14 +636,14 @@ export function createPropVariantFunctions(host){
                 const made = { blocks: [], strings: [], arrays: [] };
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
-                const copy = copyOf(src >>> 0, made, owed);
+                const copy = copyOf(wholeAddress(src), made, owed);
                 if (typeof copy === 'number')
                 {
                     made.blocks.forEach(block=>host.heap.free(block));
                     made.strings.forEach(string=>host.bstr?.free(string));
                     return after(waited(owed), ()=>after(destroyAll(made.arrays), ()=>copy));
                 }
-                host.writeMemory(dest >>> 0, copy);
+                host.writeMemory(wholeAddress(dest), copy);
                 return settle(owed, thread, 'PropVariantCopy');
             },
         },
@@ -657,15 +658,15 @@ export function createPropVariantFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvar])=>{
-                if ((pvar >>> 0) === 0)
+                if (wholeAddress(pvar) === 0)
                 {
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
-                const known = release(pvar >>> 0, owed);
-                host.writeMemory(pvar >>> 0, new Uint8Array(PROPVARIANT_SIZE));
+                const known = release(wholeAddress(pvar), owed);
+                host.writeMemory(wholeAddress(pvar), new Uint8Array(PROPVARIANT_SIZE));
                 if (!known)
                 {
                     return STG_E_INVALIDPARAMETER;
@@ -687,14 +688,26 @@ export function createPropVariantFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([count, rgvars])=>{
-                if ((rgvars >>> 0) === 0)
+                if (wholeAddress(rgvars) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                /** @param {number} index @returns {number | Promise<number>} */
-                const clear = index=>(index >= (count >>> 0) ? S_OK
-                    : after(table.PropVariantClear.handler(
-                        [(rgvars >>> 0) + index * PROPVARIANT_SIZE]), ()=>clear(index + 1)));
+                // A loop while the clears answer at once, and a chain only
+                // from the first that waits on a Release: a count of millions
+                // must not cost a frame of stack each.
+                /** @param {number} start @returns {number | Promise<number>} */
+                const clear = start=>{
+                    for (let index = start; index < (count >>> 0); index++)
+                    {
+                        const answer = table.PropVariantClear.handler(
+                            [wholeAddress(rgvars) + index * PROPVARIANT_SIZE]);
+                        if (answer instanceof Promise)
+                        {
+                            return answer.then(()=>clear(index + 1));
+                        }
+                    }
+                    return S_OK;
+                };
                 return clear(0);
             },
         },

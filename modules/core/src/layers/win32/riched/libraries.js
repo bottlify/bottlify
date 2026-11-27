@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * riched32 and riched20 as libraries a program can load.
  *
@@ -41,11 +43,11 @@ export function createRichedLibraries(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([, , out])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return E_INVALIDARG;
                     }
-                    host.writeMemory(out >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
                     return E_NOTIMPL;
                 },
             },

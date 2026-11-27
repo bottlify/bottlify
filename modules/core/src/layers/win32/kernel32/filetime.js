@@ -24,17 +24,38 @@
  * rather than an invented one.
  */
 
+import { ZONE_KEYS, zoneForYear } from './timezones.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+
 /** Codes this surface reports. */
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
+/** What a call needing a privilege the caller has not enabled answers. */
+const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_MORE_DATA = 234;
+const ERROR_NOACCESS = 998;
+const ERROR_NO_MORE_FILES = 18;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_NO_MORE_ITEMS = 259;
+
+/**
+ * DYNAMIC_TIME_ZONE_INFORMATION: a TIME_ZONE_INFORMATION, the zone's
+ * registry key as WCHAR[128], and whether its year-by-year rules are off.
+ */
+const DYNAMIC_TIME_ZONE = Object.freeze({ KeyName: 172, Disabled: 428, SIZE: 432 });
+/** The key of the zone this machine is in. */
+const MACHINE_ZONE_KEY = 'UTC';
 
 /** GetFileInformationByHandleEx's classes here, and the fixed ones' sizes. */
 const FILE_BASIC_INFO = 0;
 const FILE_STANDARD_INFO = 1;
 const FILE_NAME_INFO = 2;
 const FILE_ATTRIBUTE_TAG_INFO = 9;
+const FILE_ID_BOTH_DIRECTORY_INFO = 10;
+const FILE_ID_BOTH_DIRECTORY_RESTART_INFO = 11;
 const FILE_INFO_SIZES = new Map([
     [FILE_BASIC_INFO, 40], [FILE_STANDARD_INFO, 24], [FILE_ATTRIBUTE_TAG_INFO, 8],
 ]);
@@ -90,7 +111,7 @@ const SYSTEMTIME_SIZE = 16;
  * @param {Uint8Array} bytes
  * @returns {number | null}
  */
-function systemTimeToMs(bytes){
+export function systemTimeToMs(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, SYSTEMTIME_SIZE);
     const [year, month, , day, hour, minute, second, millisecond] =
         Array.from({ length: 8 }, (_, at)=>view.getUint16(at * 2, true));
@@ -151,9 +172,14 @@ function transitionIn(rule, year){
  * happens; a southern zone's daylight time runs across the new year, and is
  * then the part of the year outside the two.
  *
+ * The transitions are the ones of `year`, the year of the moment on the
+ * standard clock unless the caller reads it by another year's rules: then a
+ * moment past that year is after both, and one before it before both.
+ *
  * @param {DataView} zone TIME_ZONE_INFORMATION @param {number} utc
+ * @param {number} [year]
  */
-function biasAt(zone, utc){
+function biasAt(zone, utc, year){
     const bias = zone.getInt32(TIME_ZONE_INFORMATION.Bias, true);
     const standardBias = zone.getInt32(TIME_ZONE_INFORMATION.StandardBias, true);
     const daylightBias = zone.getInt32(TIME_ZONE_INFORMATION.DaylightBias, true);
@@ -166,9 +192,15 @@ function biasAt(zone, utc){
         return bias;
     }
     const minute = 60_000;
-    const year = new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
-    const daylightStarts = transitionIn(daylightRule, year) + (bias + standardBias) * minute;
-    const daylightEnds = transitionIn(standardRule, year) + (bias + daylightBias) * minute;
+    const rulesYear = year ?? new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
+    // Daylight from 1 January at midnight is daylight from before the year:
+    // a moment of the year before read by these rules is inside it.
+    const fromYearStart = daylightRule.getUint16(2, true) === 1
+        && daylightRule.getUint16(6, true) === 1 && daylightRule.getUint16(8, true) === 0
+        && daylightRule.getUint16(12, true) === 0;
+    const daylightStarts = fromYearStart ? -Infinity
+        : transitionIn(daylightRule, rulesYear) + (bias + standardBias) * minute;
+    const daylightEnds = transitionIn(standardRule, rulesYear) + (bias + daylightBias) * minute;
     const daylight = daylightStarts < daylightEnds
         ? utc >= daylightStarts && utc < daylightEnds
         : !(utc >= daylightEnds && utc < daylightStarts);
@@ -229,7 +261,7 @@ export function msToFileTime(ms){
  * @param {bigint} units
  * @returns {number | null}
  */
-export function fileTimeToMs(units){
+function fileTimeToMs(units){
     return units < FILETIME_EPOCH ? null : Number((units - FILETIME_EPOCH) / FILETIME_PER_MS);
 }
 /** The DOS calendar runs from 1980 to 2107, in two-second steps. */
@@ -245,7 +277,7 @@ const DOS_LAST_MS = Date.UTC(2107, 11, 31, 23, 59, 58);
  * @param {number} date @param {number} time
  * @returns {number | null}
  */
-export function dosDateTimeToMs(date, time){
+function dosDateTimeToMs(date, time){
     const year = 1980 + (date >>> 9);
     const month = (date >>> 5) & 0xf;
     const day = date & 0x1f;
@@ -263,17 +295,21 @@ export function dosDateTimeToMs(date, time){
 
 /**
  * The reverse: the two words for a moment, or null when the moment is
- * outside the calendar DOS can write. Seconds round down to the even one.
+ * outside the calendar DOS can write. A moment between two even seconds is
+ * written as the later one, any fraction of a second rounding it up, as
+ * Windows writes it (kernel32's time.c pins 10:20:22.001 as 10:20:24 and
+ * 10:20:59 as 10:21:00).
  *
- * @param {number} ms
+ * @param {number} ms  May carry a fraction of a millisecond.
  * @returns {{ date: number, time: number } | null}
  */
 export function msToDosDateTime(ms){
-    if (!(ms >= DOS_FIRST_MS && ms <= DOS_LAST_MS))
+    const even = Math.ceil(ms / 2000) * 2000;
+    if (!(even >= DOS_FIRST_MS && even <= DOS_LAST_MS))
     {
         return null;
     }
-    const at = new Date(ms);
+    const at = new Date(even);
     return {
         date: ((at.getUTCFullYear() - 1980) << 9) | ((at.getUTCMonth() + 1) << 5)
             | at.getUTCDate(),
@@ -287,6 +323,7 @@ const FILE_ATTRIBUTE_HIDDEN = 0x02;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE = 0x20;
 const FILE_ATTRIBUTE_NORMAL = 0x80;
+const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 
 /**
  * The attributes a name on the volume is reported with.
@@ -301,12 +338,18 @@ const FILE_ATTRIBUTE_NORMAL = 0x80;
  * FILE_ATTRIBUTE_NORMAL means "no other attribute" and is only ever answered
  * alone: a directory set to it is just a directory.
  *
+ * A reparse point - a junction, a symbolic link, a tag of a program's own -
+ * has the reparse-point bit, whatever else it is: a file one beside the
+ * archive bit it carries as any file does.
+ *
  * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
- *           attributes?: number } | null | undefined} entry
+ *           attributes?: number, junction?: string, reparseTag?: number }
+ *           | null | undefined} entry
  * @returns {number}
  */
 export function fileAttributes(entry){
-    const kind = entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+    const kind = (entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0)
+        | (entry?.reparseTag || entry?.junction ? FILE_ATTRIBUTE_REPARSE_POINT : 0);
     const hidden = entry?.hidden ? FILE_ATTRIBUTE_HIDDEN : 0;
     const media = entry?.readOnly ? FILE_ATTRIBUTE_READONLY : 0;
     if (entry?.attributes !== undefined)
@@ -319,7 +362,9 @@ export function fileAttributes(entry){
     {
         return kind | hidden | media;
     }
-    return (kind || FILE_ATTRIBUTE_ARCHIVE) | hidden;
+    // A file is archived until a program clears it; a directory is not, a
+    // reparse point or not.
+    return (entry?.isDirectory ? kind : kind | FILE_ATTRIBUTE_ARCHIVE) | hidden;
 }
 
 /**
@@ -330,28 +375,28 @@ export function fileAttributes(entry){
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(path: string) => { exists: boolean, isDirectory: boolean,
  *                                size: number, modified?: number, readOnly?: boolean,
- *                                hidden?: boolean } | null} stat
+ *                                hidden?: boolean, links?: number,
+ *                                identity?: string } | null} stat
  * @property {(path: string, modified: number) => boolean} [setModified]
  *           Stamps a file's write time, in milliseconds since the epoch.
+ * @property {(path: string, pattern: string) => { name: string, isDirectory: boolean,
+ *     size: number, modified?: number, readOnly?: boolean, hidden?: boolean,
+ *     attributes?: number, identity?: string }[]} [list]
+ *           A directory's entries, for a listing by handle. Absent, a directory
+ *           lists only its dots.
+ * @property {(path: string) => number} fileId
+ *           The file's number on its volume, the same under every name.
  */
 
-/** @param {string} text @returns {Uint8Array} UTF-16, NUL-terminated. */
-const wide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        const code = text.charCodeAt(at);
-        bytes[at * 2] = code & 0xff;
-        bytes[at * 2 + 1] = code >> 8;
-    }
-    return bytes;
-};
+/** FILE_ID_BOTH_DIR_INFO up to its name, and the boundary each entry starts on. */
+const ID_BOTH_DIR_FIXED = 104;
+const ENTRY_ALIGNMENT = 8;
 
 /** The TIME_ZONE_INFORMATION this machine answers with: UTC, no transitions. */
 const currentZone = ()=>{
     const data = new Uint8Array(TIME_ZONE_INFORMATION.SIZE);
-    data.set(wide('UTC'), TIME_ZONE_INFORMATION.StandardName);
-    data.set(wide('UTC'), TIME_ZONE_INFORMATION.DaylightName);
+    data.set(utf16z('UTC'), TIME_ZONE_INFORMATION.StandardName);
+    data.set(utf16z('UTC'), TIME_ZONE_INFORMATION.DaylightName);
     return data;
 };
 
@@ -375,6 +420,56 @@ export function createFileTimeFunctions(host){
     const fail = (code, result = 0)=>{
         host.setLastError(code);
         return result;
+    };
+
+    /** A DYNAMIC_TIME_ZONE_INFORMATION's key. @param {number} address */
+    const zoneKeyOf = address=>{
+        const bytes = host.readMemory(address + DYNAMIC_TIME_ZONE.KeyName, 256);
+        let key = '';
+        for (let at = 0; at < 256; at += 2)
+        {
+            const code = bytes[at] | bytes[at + 1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            key += String.fromCharCode(code);
+        }
+        return key;
+    };
+
+    /**
+     * A zone's TIME_ZONE_INFORMATION for a year, by its key; the machine's
+     * own for its key, null for a key Windows does not have.
+     *
+     * @param {string} key @param {number} year
+     */
+    const zoneByKey = (key, year)=>(key === MACHINE_ZONE_KEY ? currentZone()
+        : zoneForYear(key, year));
+
+    /**
+     * The rules a DYNAMIC_TIME_ZONE_INFORMATION stands for in a year: its
+     * zone's for that year, or the TIME_ZONE_INFORMATION it carries when its
+     * year-by-year rules are off or its key is none Windows has.
+     *
+     * @param {number} address @param {number} year
+     */
+    const dynamicRules = (address, year)=>{
+        const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE);
+        if (carried[DYNAMIC_TIME_ZONE.Disabled] !== 0)
+        {
+            return carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+        }
+        return zoneByKey(zoneKeyOf(address), year)
+            ?? carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
+    };
+
+    /** @param {number} address @param {Uint8Array} zone @param {string} key */
+    const writeDynamic = (address, zone, key)=>{
+        const bytes = new Uint8Array(DYNAMIC_TIME_ZONE.SIZE);
+        bytes.set(zone);
+        bytes.set(utf16z(key).subarray(0, 254), DYNAMIC_TIME_ZONE.KeyName);
+        host.writeMemory(address, bytes);
     };
 
     /** @param {number} address @returns {bigint} */
@@ -403,6 +498,133 @@ export function createFileTimeFunctions(host){
         return { created: written, accessed: written, written };
     };
 
+    /**
+     * Where each open directory's listing by handle has got to: the entries
+     * taken at its first listing, and the next to give. A restart takes them
+     * again.
+     *
+     * @type {WeakMap<object, { entries: any[], next: number }>}
+     */
+    const listings = new WeakMap();
+
+    /**
+     * GetFileInformationByHandleEx's FileIdBothDirectoryInfo: as many of an
+     * open directory's entries as fit, each a FILE_ID_BOTH_DIR_INFO on an
+     * eight-byte boundary chained by NextEntryOffset, the last's zero; the
+     * next call goes on where this one stopped, and one past the end says
+     * ERROR_NO_MORE_FILES. A folder that is not a drive's root lists "." and
+     * ".." first, as a find does. No 8.3 names are kept, so ShortName is empty.
+     *
+     * @param {any} file @param {boolean} restart
+     * @param {number} buffer @param {number} room
+     */
+    const listDirectory = (file, restart, buffer, room)=>{
+        if (room === 0)
+        {
+            return fail(ERROR_BAD_LENGTH);
+        }
+        if (buffer === 0)
+        {
+            return fail(ERROR_NOACCESS);
+        }
+        const holder = host.stat(file.path);
+        if (!holder?.isDirectory)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        let listing = listings.get(file);
+        if (!listing || restart)
+        {
+            const dots = /^[A-Za-z]:\\?$/.test(file.path) ? []
+                : ['.', '..'].map(name=>({ ...holder, name, isDirectory: true, size: 0 }));
+            listing = { entries: [...dots, ...host.list?.(file.path, '*') ?? []], next: 0 };
+            listings.set(file, listing);
+        }
+        if (listing.next >= listing.entries.length)
+        {
+            return fail(ERROR_NO_MORE_FILES);
+        }
+        /** @type {{ start: number, record: Uint8Array }[]} */
+        const records = [];
+        let used = 0;
+        for (; listing.next < listing.entries.length; listing.next++)
+        {
+            const entry = listing.entries[listing.next];
+            const start = (used + ENTRY_ALIGNMENT - 1) & ~(ENTRY_ALIGNMENT - 1);
+            const length = ID_BOTH_DIR_FIXED + entry.name.length * 2;
+            if (start + length > room)
+            {
+                break;
+            }
+            const record = new Uint8Array(length);
+            const view = new DataView(record.buffer);
+            const time = msToFileTime(entry.modified ?? 0);
+            for (const at of [8, 16, 24, 32])
+            {
+                view.setBigUint64(at, time, true);
+            }
+            const size = BigInt(entry.isDirectory ? 0 : entry.size ?? 0);
+            view.setBigUint64(40, size, true);
+            view.setBigUint64(48, (size + 4095n) & ~4095n, true);
+            view.setUint32(56, fileAttributes(entry), true);
+            view.setUint32(60, entry.name.length * 2, true);
+            const own = entry.name === '.' ? file.path
+                : entry.name === '..' ? file.path.replace(/\\[^\\]*$/, '')
+                    : `${file.path}\\${entry.name}`;
+            view.setUint32(96, host.fileId(entry.identity ?? own), true);
+            [...entry.name].forEach((unit, at)=>view.setUint16(ID_BOTH_DIR_FIXED + at * 2,
+                unit.charCodeAt(0), true));
+            records.push({ start, record });
+            used = start + length;
+        }
+        if (records.length === 0)
+        {
+            return fail(ERROR_MORE_DATA);
+        }
+        records.forEach(({ start, record }, index)=>{
+            const after = records[index + 1];
+            new DataView(record.buffer).setUint32(0, after ? after.start - start : 0, true);
+            host.writeMemory(buffer + start, record);
+        });
+        return 1;
+    };
+
+    /**
+     * GetFileInformationByHandleEx on a named pipe's end.
+     *
+     * @param {any} end @param {number} kind @param {number} at @param {number} room
+     */
+    const pipeInformation = (end, kind, at, room)=>{
+        if (kind === FILE_NAME_INFO)
+        {
+            const full = String(end.instance?.pipe?.name ?? '');
+            const name = full.replace(/^\\\\[.?]\\pipe/i, '');
+            const bytes = new Uint8Array(4 + name.length * 2);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(0, name.length * 2, true);
+            [...name].forEach((character, index)=>
+                view.setUint16(4 + index * 2, character.charCodeAt(0), true));
+            if (room < 4 || at === 0)
+            {
+                return fail(ERROR_BAD_LENGTH);
+            }
+            host.writeMemory(at, bytes.subarray(0, Math.min(room, bytes.length)));
+            return room < bytes.length ? fail(ERROR_MORE_DATA) : 1;
+        }
+        if (kind === FILE_STANDARD_INFO)
+        {
+            if (room < 24 || at === 0)
+            {
+                return fail(ERROR_BAD_LENGTH);
+            }
+            const bytes = new Uint8Array(24);
+            new DataView(bytes.buffer).setUint32(16, 1, true);
+            host.writeMemory(at, bytes);
+            return 1;
+        }
+        return fail(ERROR_INVALID_PARAMETER);
+    };
+
     return {
         /**
          * BOOL FileTimeToLocalFileTime(const FILETIME *lpFileTime,
@@ -419,7 +641,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(from >>> 0));
+                writeFileTime(wholeAddress(to), readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -441,7 +663,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(out >>> 0, BigInt(ms) * FILETIME_PER_MS + FILETIME_EPOCH);
+                writeFileTime(wholeAddress(out), BigInt(ms) * FILETIME_PER_MS + FILETIME_EPOCH);
                 return 1;
             },
         },
@@ -455,18 +677,18 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const units = readFileTime(from >>> 0);
+                const units = readFileTime(wholeAddress(from));
                 const packed = units < FILETIME_EPOCH
                     ? null
-                    : msToDosDateTime(Number((units - FILETIME_EPOCH) / FILETIME_PER_MS));
+                    : msToDosDateTime(Number(units - FILETIME_EPOCH) / Number(FILETIME_PER_MS));
                 if (packed === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const word = (/** @type {number} */ value)=>
                     new Uint8Array([value & 0xff, value >>> 8]);
-                host.writeMemory(outDate >>> 0, word(packed.date));
-                host.writeMemory(outTime >>> 0, word(packed.time));
+                host.writeMemory(wholeAddress(outDate), word(packed.date));
+                host.writeMemory(wholeAddress(outTime), word(packed.time));
                 return 1;
             },
         },
@@ -480,7 +702,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(from >>> 0));
+                writeFileTime(wholeAddress(to), readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -503,9 +725,9 @@ export function createFileTimeFunctions(host){
                 }
                 const times = timesOf(file);
                 for (const [address, value] of /** @type {[number, bigint][]} */ ([
-                    [created >>> 0, times.created],
-                    [accessed >>> 0, times.accessed],
-                    [written >>> 0, times.written],
+                    [wholeAddress(created), times.created],
+                    [wholeAddress(accessed), times.accessed],
+                    [wholeAddress(written), times.written],
                 ]))
                 {
                     if (address !== 0)
@@ -537,9 +759,15 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((written >>> 0) !== 0)
+                // Setting a time is writing an attribute, which the handle
+                // has to have been opened for, whatever is set.
+                if (!(file.writeAttributes ?? file.write ?? true))
                 {
-                    const ms = fileTimeToMs(readFileTime(written >>> 0));
+                    return fail(ERROR_ACCESS_DENIED);
+                }
+                if (wholeAddress(written) !== 0)
+                {
+                    const ms = fileTimeToMs(readFileTime(wholeAddress(written)));
                     if (ms !== null)
                     {
                         host.setModified?.(file.path, ms);
@@ -574,7 +802,9 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const size = entry?.size ?? 0;
-                const index = fileIndex(file.path);
+                // Kept on the open file once asked, as NtQueryInformationFile
+                // keeps it: a file's number stays across renames.
+                const index = file.volumeNumber ??= host.fileId(file.path);
 
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
@@ -589,13 +819,22 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeHigh,
                     Math.floor(size / 0x100000000) >>> 0, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeLow, size >>> 0, true);
-                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, 1, true);
+                view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, entry?.links ?? 1, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileIndexLow, index, true);
-                host.writeMemory(information >>> 0, data);
+                host.writeMemory(wholeAddress(information), data);
                 return 1;
             },
         },
 
+        /**
+         * The classes a named pipe's end answers (a crash reporter checks the
+         * name of the pipe it was handed): its name below the pipe file
+         * system's root, \\name for \\.\pipe\name; its standard
+         * information, a file of no size that is no directory; anything
+         * else is refused.
+         *
+         * @param {any} end @param {number} kind @param {number} at @param {number} room
+         */
         /**
          * BOOL GetFileInformationByHandleEx(HANDLE hFile,
          *   FILE_INFO_BY_HANDLE_CLASS FileInformationClass, LPVOID lpFileInformation,
@@ -614,11 +853,19 @@ export function createFileTimeFunctions(host){
                 const file = object(handle, 'file');
                 if (!file)
                 {
-                    return fail(ERROR_INVALID_HANDLE);
+                    const end = object(handle, 'pipe');
+                    return end ? pipeInformation(end, kind >>> 0, wholeAddress(buffer), size >>> 0)
+                        : fail(ERROR_INVALID_HANDLE);
+                }
+                if ((kind >>> 0) === FILE_ID_BOTH_DIRECTORY_INFO
+                    || (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO)
+                {
+                    return listDirectory(file, (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO,
+                        wholeAddress(buffer), size >>> 0);
                 }
                 const entry = host.stat(file.path);
                 const room = size >>> 0;
-                const at = buffer >>> 0;
+                const at = wholeAddress(buffer);
                 if ((kind >>> 0) === FILE_NAME_INFO)
                 {
                     const name = String(file.path).replace(/^[A-Za-z]:/, '');
@@ -673,16 +920,21 @@ export function createFileTimeFunctions(host){
         },
 
         /**
-         * BOOL SetLocalTime(const SYSTEMTIME *lpSystemTime)
+         * BOOL SetLocalTime(const SYSTEMTIME *lpSystemTime) and
+         * BOOL SetSystemTime(const SYSTEMTIME *lpSystemTime)
          *
-         * Refused. The clock is the guest's own and is what every timestamp and
-         * every elapsed-time measurement in the run is taken against; letting a
-         * program move it would make a measurement that spans the call
-         * meaningless, and there is no user whose wall clock this would be.
+         * Refused as Windows refuses a process without SE_SYSTEMTIME_NAME
+         * enabled, which no program here has: ERROR_PRIVILEGE_NOT_HELD. The
+         * clock is what every timestamp and elapsed time in the run is taken
+         * against, and there is no user whose wall clock this would be.
          */
         SetLocalTime: {
             argBytes: 4,
-            handler: ()=>fail(ERROR_INVALID_PARAMETER),
+            handler: ()=>fail(ERROR_PRIVILEGE_NOT_HELD),
+        },
+        SetSystemTime: {
+            argBytes: 4,
+            handler: ()=>fail(ERROR_PRIVILEGE_NOT_HELD),
         },
 
         /**
@@ -700,8 +952,147 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
                 }
-                host.writeMemory(information >>> 0, currentZone());
+                host.writeMemory(wholeAddress(information), currentZone());
                 return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * DWORD GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * GetTimeZoneInformation's answer, and the key of the zone it is.
+         */
+        GetDynamicTimeZoneInformation: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
+                }
+                writeDynamic(wholeAddress(information), currentZone(), MACHINE_ZONE_KEY);
+                return TIME_ZONE_ID_UNKNOWN;
+            },
+        },
+
+        /**
+         * BOOL GetTimeZoneInformationForYear(USHORT wYear,
+         *   PDYNAMIC_TIME_ZONE_INFORMATION pdtzi, LPTIME_ZONE_INFORMATION ptzi)
+         *
+         * A zone's rules as they stood that year (`timezones.js`); a NULL zone
+         * is the machine's. A key Windows has no zone for is
+         * ERROR_FILE_NOT_FOUND, the missing registry key it is there.
+         */
+        GetTimeZoneInformationForYear: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([year, dynamic, information])=>{
+                if (information === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const zone = dynamic === 0 ? currentZone()
+                    : zoneByKey(zoneKeyOf(wholeAddress(dynamic)), year & 0xffff);
+                if (zone === null)
+                {
+                    return fail(ERROR_FILE_NOT_FOUND);
+                }
+                host.writeMemory(wholeAddress(information), zone);
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD EnumDynamicTimeZoneInformation(DWORD dwIndex,
+         *                                      PDYNAMIC_TIME_ZONE_INFORMATION)
+         *
+         * The zones in their keys' order, each with this year's rules.
+         */
+        EnumDynamicTimeZoneInformation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([index, information])=>{
+                if (information === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const key = ZONE_KEYS[index >>> 0];
+                const zone = key === undefined ? null
+                    : zoneByKey(key, new Date().getUTCFullYear());
+                if (key === undefined || zone === null)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                writeDynamic(wholeAddress(information), zone, key);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL SystemTimeToTzSpecificLocalTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         *
+         * As SystemTimeToTzSpecificLocalTime, by the zone's rules for the
+         * year of the time.
+         */
+        SystemTimeToTzSpecificLocalTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, universal, local])=>{
+                if (universal === 0 || local === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const utc = systemTimeToMs(host.readMemory(wholeAddress(universal),
+                    SYSTEMTIME_SIZE));
+                if (utc === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                /** @param {number} year */
+                const localBy = year=>{
+                    const data = zone === 0 ? currentZone() : dynamicRules(wholeAddress(zone),
+                        year);
+                    const rules = new DataView(data.buffer, data.byteOffset);
+                    return utc - biasAt(rules, utc, year) * 60_000;
+                };
+                // Windows reads a time by the rules of its own year, except
+                // that 1 January is read by the year before's first - its
+                // first hours may still be that year's on the local clock -
+                // and a time whose local year is not the one whose rules were
+                // read is read again by the next year's.
+                const moment = new Date(utc);
+                const year = moment.getUTCFullYear()
+                    - (moment.getUTCMonth() === 0 && moment.getUTCDate() === 1 ? 1 : 0);
+                const first = localBy(year);
+                const wall = new Date(first).getUTCFullYear() === year ? first : localBy(year + 1);
+                host.writeMemory(wholeAddress(local), msToSystemTime(wall));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL TzSpecificLocalTimeToSystemTimeEx(
+         *   const DYNAMIC_TIME_ZONE_INFORMATION *, const SYSTEMTIME *, LPSYSTEMTIME)
+         */
+        TzSpecificLocalTimeToSystemTimeEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([zone, local, universal])=>{
+                if (local === 0 || universal === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const wall = systemTimeToMs(host.readMemory(wholeAddress(local), SYSTEMTIME_SIZE));
+                if (wall === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const data = zone === 0 ? currentZone()
+                    : dynamicRules(wholeAddress(zone), new Date(wall).getUTCFullYear());
+                const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
+                host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
+                return 1;
             },
         },
 
@@ -723,16 +1114,17 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                const utc = systemTimeToMs(host.readMemory(wholeAddress(universal),
+                    SYSTEMTIME_SIZE));
                 if (utc === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE);
                 const bias = biasAt(new DataView(data.buffer), utc);
-                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                host.writeMemory(wholeAddress(local), msToSystemTime(utc - bias * 60_000));
                 return 1;
             },
         },
@@ -757,39 +1149,18 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                const wall = systemTimeToMs(host.readMemory(wholeAddress(local), SYSTEMTIME_SIZE));
                 if (wall === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE);
                 const bias = biasOnLocalClock(new DataView(data.buffer), wall);
-                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
+                host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
                 return 1;
             },
         },
     };
-}
-
-/**
- * A stable file index for a path.
- *
- * Windows takes this from the filesystem's own record. There is no such record
- * here, so it is derived from the path -- which gives the one property a caller
- * actually uses: two handles onto the same file report the same index, and two
- * different files almost never do.
- *
- * @param {string} path
- */
-function fileIndex(path){
-    let hash = 2166136261;
-    const text = path.toLowerCase();
-    for (let at = 0; at < text.length; at++)
-    {
-        hash ^= text.charCodeAt(at);
-        hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
 }

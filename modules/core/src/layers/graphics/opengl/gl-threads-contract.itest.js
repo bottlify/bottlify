@@ -50,7 +50,8 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { TEB_GL_CONTEXT, commandCode } from '../seam/shadow.js';
+import { TEB_GL_CONTEXT } from '../seam/routines/assemble.js';
+import { commandCode } from '../seam/routines/command.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { playedAtOnce } from '../remote/direct3d.js';
@@ -137,7 +138,7 @@ const random = seed=>{
 const machine = ()=>{
     const host = createCorkHost({
         memorySize: 16 * 1024 * 1024, trapPort: 0xb077, entryVector: ENTRY,
-        initialStack: STACKS[0], engine: cork, cork: {},
+        initialStack: STACKS[0], engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(ENTRY, new Uint8Array(u32(PROGRAMS[0])));
@@ -557,6 +558,29 @@ function snapshot(context){
         }
     }
     return out;
+}
+
+/**
+ * A snapshot with what it read on a device -- glReadPixels' answer, which
+ * comes once the device has drawn -- in place of the promise of it.
+ *
+ * @param {unknown[] | null} state
+ * @returns {Promise<unknown[] | null>}
+ */
+async function settled(state){
+    if (!state)
+    {
+        return null;
+    }
+    return Promise.all(state.map(async entry=>{
+        const [what, value, error] = /** @type {[string, unknown, number]} */ (entry);
+        if (!(value instanceof Promise))
+        {
+            return entry;
+        }
+        const read = await value;
+        return [what, read ? [...read] : read, error];
+    }));
 }
 
 const TEXTURE_NAMES = [1, 2, 3];
@@ -1266,7 +1290,8 @@ async function play(steps, shared, mode){
     for (const thread of [0, 1])
     {
         calling.thread = thread;
-        const states = sides.map(side=>side.opengl.withContext(snapshot));
+        const states = await Promise.all(sides.map(side=>settled(
+            side.opengl.withContext(snapshot))));
         const differs = states[0]?.findIndex((entry, i)=>!isDeepStrictEqual(entry,
             states[1]?.[i])) ?? -1;
         if (differs >= 0 || (states[0] === null) !== (states[1] === null))

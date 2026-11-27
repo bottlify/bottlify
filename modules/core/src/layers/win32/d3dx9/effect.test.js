@@ -14,6 +14,9 @@ import { assembleShader } from './shader-asm.js';
 import { EFFECT_BLOCK, HANDLE } from './effect.js';
 import { FX_2_0 } from './effect-binary.js';
 import * as sources from './effect-setters.js';
+import { COMPILED as SETTERS_32 } from './effect-setters.x86.js';
+import { COMPILED as SETTERS_64 } from './effect-setters.x64.js';
+import { COMPILED as COMMIT_32 } from './effect-commit.x86.js';
 import * as commitSource from './effect-commit.js';
 import { execute } from './d3d9-machine.fixture.js';
 
@@ -447,6 +450,56 @@ test('the vtables are in the header\'s order, each slot popping its own argument
         ['GetLiteral', 2], ['CompileEffect', 3], ['CompileShader', 6]]);
     assert.equal(latest.poolInterface.id, IID_ID3DXEFFECTPOOL);
     assert.deepEqual(latest.poolInterface.methods, []);
+});
+
+test('each width places its own setters\' code; a 64-bit process commits on the host', ()=>{
+    /** @param {4 | 8} pointerSize */
+    const methodsAt = pointerSize=>{
+        const memory = new Uint8Array(1 << 16);
+        let next = 0x1000;
+        const host = { pointerSize, readMemory: (/** @type {number} */ at,
+            /** @type {number} */ length)=>memory.slice(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+            memory.set(bytes, at);
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        }, free: ()=>{} } };
+        const helpers = { giveBuffer: ()=>0, includer: ()=>async()=>null, macrosAt: ()=>[],
+            publishConstantTable: ()=>0 };
+        const methods = /** @type {any[]} */ (createEffects(host, helpers).effectInterface.methods);
+        return { memory, named: (/** @type {string} */ name)=>methods.find(m=>m.name === name) };
+    };
+    const SETTERS = ['SetMatrix', 'SetVector', 'SetInt', 'SetBool', 'SetTexture',
+        'SetFloatArray', 'SetMatrixPointerArray', 'SetFloat', 'SetValue'];
+    for (const [pointerSize, compiled] of /** @type {const} */ ([[4, SETTERS_32],
+        [8, SETTERS_64]]))
+    {
+        const { memory, named } = methodsAt(pointerSize);
+        for (const name of SETTERS)
+        {
+            const slot = named(name).guest;
+            assert.equal(slot?.wide, true, `${name} at ${pointerSize}: a guest slot`);
+            const at = slot({ trap: 0x7000 });
+            const { code, host } = /** @type {Record<string, any>} */ (compiled)[name];
+            assert.deepEqual([...memory.subarray(at, at + host - 1)],
+                [...code.subarray(0, host - 1)], `${name} at ${pointerSize}: its code`);
+        }
+        const narrow = pointerSize === 8 ? ['CommitChanges', 'BeginPass'] : [];
+        for (const name of narrow)
+        {
+            assert.equal(named(name).guest, undefined, `${name} at 8: the trap`);
+        }
+        if (pointerSize === 4)
+        {
+            const at = named('CommitChanges').guest({ trap: 0x7000 });
+            assert.deepEqual([...memory.subarray(at, at + 8)],
+                [.../** @type {any} */ (COMMIT_32).CommitChanges.code.subarray(0, 8)],
+                'CommitChanges at 4: its code');
+        }
+    }
 });
 
 // ---- making one -----------------------------------------------------------------------
@@ -1676,7 +1729,7 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
     const resolveAt = g.u32(effectB.guestState() + EFFECT_BLOCK.RESOLVE);
     assert.notEqual(resolveAt, 0, 'the effect\'s block names Resolve');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST,
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, pointerBytes: 4,
     callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>{
         assert.equal(fn, resolveAt, 'a setter calls Resolve alone');
         return /** @type {any} */ (sources).Resolve({ u8: (/** @type {number} */ at)=>
@@ -1768,7 +1821,7 @@ test('a parameter made after nine thousand others still has a record the guest\'
         g.view.setUint32(self + 4, effect.guestState(), true);
         const HOST = Symbol('host');
         const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0 };
+            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0, pointerBytes: 4 };
         const last = await g.handle(fx, 'last');
         const value = g.heap.allocate(4);
         g.view.setFloat32(value, 2.5, true);
@@ -1813,7 +1866,7 @@ test('an arena of records goes back to the heap with the last effect that names 
             g.view.setUint32(self + 4, blockOf(fx), true);
             const helpers = { u32: g.u32, setU32: (/** @type {number} */ at,
                 /** @type {number} */ v)=>g.view.setUint32(at, v >>> 0, true),
-            host: ()=>-1, callStd: ()=>0 };
+            host: ()=>-1, callStd: ()=>0, pointerBytes: 4 };
             return /** @type {any} */ (sources).SetFloat(helpers, self, await g.handle(fx, 'x'),
                 0x40200000);
         };
@@ -1838,7 +1891,7 @@ test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begi
     g.view.setUint32(self + 4, effect.guestState(), true);
     const HOST = Symbol('host');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, pointerBytes: 4 };
     const guestCode = /** @type {any} */ (commitSource);
     for (const index of [0, 1, 2, 0xffffffff])
     {
@@ -2055,6 +2108,91 @@ function copyingEffect(ops = [0x10000001], programs = []){
     return new Uint8Array(new Uint32Array([FX_2_0, start, ...words]).buffer);
 }
 
+/**
+ * A compiled effect of one float `s` (1.5) whose pass sets a ps_2_0 shader
+ * carrying a preshader: c3.x = s * 2, which fxc leaves for D3DX to compute.
+ *
+ * @returns {Uint8Array}
+ */
+function preshaderEffect(){
+    /** @type {number[]} */
+    const words = [0];
+    const put = (/** @type {number[]} */ ...values)=>{
+        const at = words.length * 4;
+        words.push(...values.map(v=>v >>> 0));
+        return at;
+    };
+    /** @param {string} text */
+    const name = text=>{
+        const bytes = [...text, '\0'].map(c=>c.charCodeAt(0));
+        while (bytes.length % 4)
+        {
+            bytes.push(0);
+        }
+        return put(text.length + 1, ...new Uint32Array(Uint8Array.from(bytes).buffer));
+    };
+    const bits = (/** @type {number} */ x)=>new Uint32Array(Float32Array.of(x).buffer)[0];
+    /** @param {number} tag @param {number[]} body  a comment token, its tag and its body */
+    const comment = (tag, body)=>[(body.length + 1) << 16 | 0xfffe, tag, ...body];
+    // The preshader's constant table: `s` in its float register 0, a float scalar.
+    const inputs = [28, 0, 0, 1, 28, 0, 0, 64, 2, 1, 48, 0,
+        PC.SCALAR | PT.FLOAT << 16, 1 | 1 << 16, 1, 0, 's'.charCodeAt(0)];
+    // mul OCONST[12].x (c3.x), CONST[0].x, IMMED[0].x: opcode 517, one component.
+    const code = [1, 0x20500001, 2, 0, 2, 0, 0, 1, 0, 0, 4, 12];
+    const pres = [0x46580201, ...comment(0x54494c43, [1, ...new Uint32Array(
+        Float64Array.of(2).buffer)]), ...comment(0x42415443, inputs),
+    ...comment(0x434c5846, code)];
+    const tokens = [0xffff0200, ...comment(0x42415443, [28, 0, 0, 0, 28, 0, 0]),
+        ...comment(0x53455250, pres), 0x0000ffff];
+
+    const none = name('');
+    const sName = name('s');
+    const technique = name('T');
+    const pass = name('P');
+    const floatType = put(PT.FLOAT, PC.SCALAR, sName, none, 0, 1, 1);
+    const shaderType = put(PT.PIXELSHADER, PC.OBJECT, none, none, 0);
+    const sValue = put(bits(1.5));
+    const shaderValue = put(1);
+    const start = words.length * 4;
+    put(1, 1, 0, 2); // parameters, techniques, shaders, objects
+    put(floatType, sValue, 0, 0);
+    put(technique, 0, 1);
+    put(pass, 0, 1);
+    put(0x93, 0, shaderType, shaderValue); // PixelShader
+    put(0, 1); // strings, resources
+    put(0, 0, 0xffffffff, 0, 0, tokens.length * 4, ...tokens);
+    return new Uint8Array(new Uint32Array([FX_2_0, start, ...words]).buffer);
+}
+
+test('a shader\'s preshader sets the constants it computes, again when a parameter it reads'
+    + ' changes', async()=>{
+    const g = guest();
+    const bytes = preshaderEffect();
+    const effectOut = g.out();
+    // A compiled effect makes its shaders before it awaits anything, as the
+    // bridge lets a handler that still holds the processor; `g.fn` refuses that.
+    assert.equal(await g.fns.D3DXCreateEffect.handler([g.device, g.putInts([...new Uint32Array(
+        bytes.buffer)]), bytes.length, 0, 0, 0, 0, effectOut, 0]), D3D_OK);
+    const fx = g.u32(effectOut);
+    assert.doesNotMatch(g.diverged.join('\n'), /preshader/);
+    /** @returns {number[][]} what c3 was set to */
+    const c3 = ()=>g.calls.splice(0).filter(c=>c.name === 'SetPixelShaderConstantF'
+        && c.args[0] === 3).map(c=>c.values);
+    assert.equal(await g.call(fx, 'Begin', g.out(), 0), D3D_OK);
+    g.calls.length = 0;
+    assert.equal(await g.call(fx, 'BeginPass', 0), D3D_OK);
+    assert.deepEqual(c3(), [[3, 0, 0, 0]], 's * 2, the register\'s other components zero');
+    assert.equal(await g.call(fx, 'CommitChanges'), D3D_OK);
+    assert.deepEqual(c3(), [], 'nothing it reads changed');
+    const s = await g.handle(fx, 's');
+    assert.equal(await g.call(fx, 'SetFloat', s, new Uint32Array(Float32Array.of(-4).buffer)[0]),
+        D3D_OK);
+    assert.equal(await g.call(fx, 'CommitChanges'), D3D_OK);
+    assert.deepEqual(c3(), [[-8, 0, 0, 0]]);
+    assert.equal(await g.call(fx, 'EndPass'), D3D_OK);
+    assert.equal(await g.call(fx, 'End'), D3D_OK);
+});
+
 /** The commit gate's effect: shaders' constants of every shape, samplers and states. */
 const COMMIT_SOURCE = `float4x4 wvp; float4 tint; float3 dir; float4 colors[3]; bool flag;
         texture tex0; texture tex1; int filt = 2; int cull = 1; int ref = 7; bool blend;
@@ -2146,6 +2284,7 @@ async function commitGate(managed, source, names, setOf, least = { commits: 400,
             === g.u32(effectB.guestState() + EFFECT_BLOCK.WALK)
             ? /** @type {any} */ (commitSource).Walk(helpers, ...args) : callNow(fn, args)),
         host: ()=>HOST,
+        pointerBytes: 4,
     };
     /**
      * A method on both effects -- on B through its guest code where it has

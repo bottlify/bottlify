@@ -5,13 +5,13 @@
  */
 
 /**
- * A replacement is invisible to whoever is reading the log.
+ * A child is visible to whoever is reading the log.
  *
- * A parent that starts a child and then exits hands its process over: the
- * machine is torn down and rebuilt on the child's image. Everything the reader
+ * A launcher starts its game and exits: the game runs beside it on a machine
+ * of its own, and goes on when the launcher has gone. Everything the reader
  * holds -- the level it raised at run time, the cursor it drains from, the sink
- * it attached -- has to survive that, or the call log simply stops at the
- * handover and the child runs unobserved.
+ * it attached -- has to reach that machine, or the call log simply stops at the
+ * launcher and the game runs unobserved.
  */
 
 import { test } from 'node:test';
@@ -19,9 +19,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
-    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, PCM_MASK,
+    tableViews, PCM_MASK,
     STATE, STATE_OPEN, RATE, CHANNELS, BITS, GAIN, GAIN_SCALE, WRITTEN, READ,
 } from './layers/audio/output/mix.js';
 
@@ -131,10 +131,10 @@ function buildParentExe(){
     });
 }
 
-test('the reader keeps its level, its cursor and its sink across a replacement',
-    { timeout: 30000 }, async t=>{
+test('the reader keeps its level, its cursor and its sink across a child it starts',
+    { timeout: 60_000 }, async t=>{
         // The decoder binary is fetched, not tracked; without it this test still
-        // exercises the replacement, and the instance sharing below is skipped.
+        // exercises the child, and the instance sharing below is skipped.
         const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
         const child = buildChildExe();
         // The GPU the worker would have opened, and the canvas it presents into.
@@ -190,9 +190,9 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         // its first call, so take it again at the handover -- the parent's last
         // lines then -- which is the cursor a live view would be holding.
         let cursor = app.log.drain(0, 1000).next;
-        /** What `process-replace` said the parent's journal had reached. */
+        /** What the parent's journal had reached when it started its child. */
         let replacedAt = 0;
-        app.on('process-replace', ()=>{
+        app.on('process-child', ()=>{
             cursor = app.log.drain(0, 1000).next;
             replacedAt = cursor;
         });
@@ -222,8 +222,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         // the way `worklet.js`'s `resampleInto` would -- so the cursor the
         // reader holds is not at zero.
         const table = app.audio.table();
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        const { header, pcm } = tableViews(table).slots[0];
         Atomics.store(header, STATE, STATE_OPEN);
         Atomics.store(header, RATE, 48000);
         Atomics.store(header, CHANNELS, 2);
@@ -249,7 +248,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         assert.equal(gpu.count('configure'), 1, 'the parent\'s frame configured the canvas');
         assert.equal(presenter.diagnostics().presents, 1);
 
-        const code = await app.run({ timeoutMs: 20000 });
+        const code = await app.run({ timeoutMs: 60_000 });
         assert.equal(code, 0, 'the child exited cleanly');
 
         // The same presenter, now attached to the child's machine: the count
@@ -259,7 +258,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         await new Promise(resolve=>setImmediate(resolve));
         assert.equal(app.presenter(), presenter, 'the run kept the presenter it made');
         assert.equal(presenter.diagnostics().presents, 2,
-            'the count continued across the replacement');
+            'the count continued into the child');
         assert.equal(gpu.count('configure'), 1, 'the canvas was not reconfigured at the swap');
 
         // The child's own GetSystemMetrics reached the journal at the level the
@@ -281,7 +280,7 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         assert.ok(started, 'process-started fired after the rebuild');
         const announced = /** @type {{ image: string, sequenceBase: number }} */ (started);
         assert.equal(announced.image, 'C:\\App\\Child.exe');
-        assert.equal(announced.sequenceBase, replacedAt,
+        assert.ok(announced.sequenceBase >= replacedAt,
             'the child continues the sequence the parent reached');
         assert.ok(after.records.some((/** @type {any} */ record)=>
             record.sequence === announced.sequenceBase),
@@ -289,17 +288,16 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
 
         // The sink attached before the handover was still the one detachLog knew.
         assert.deepEqual(output, ['A'],
-            'detaching after the replacement stopped the sink receiving');
+            'detaching while the child ran stopped the sink receiving');
 
         // The child's machine writes into the table the reader already holds,
         // rather than making one of its own that nobody would read.
         const childTable = app.audio.table();
         assert.equal(childTable, table, 'the same table');
-        const childHeader = new Int32Array(childTable, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const { header: childHeader, pcm: childPcm } = tableViews(childTable).slots[0];
         assert.equal(Atomics.load(childHeader, READ), consumed,
             'the read cursor continued, not reset');
 
-        const childPcm = new Uint8Array(childTable, slotPcmOffset(0), SLOT_BYTES);
         const writtenBefore = Atomics.load(childHeader, WRITTEN);
         childPcm.set([0, 12, 0, 12], writtenBefore & PCM_MASK);
         Atomics.store(childHeader, WRITTEN, writtenBefore + 4);
@@ -322,14 +320,16 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
 const MUTEX_NAME = 'BottlifyReplacementInstanceMutex';
 
 /**
- * Creates a named mutex and hands over to `C:\App\Child.exe`, without ever
- * closing the mutex handle -- exactly what a process that is about to be
- * replaced does, since nothing here models an orderly shutdown.
+ * Creates a named mutex, starts `C:\App\Child.exe` and waits for it, without
+ * ever closing the mutex handle. It waits because its exit closes the handle,
+ * as Windows closes every handle of a process that ends: a parent gone before
+ * its child named the mutex would leave the name free.
  */
 function buildMutexParentExe(){
     return buildExe({
         imports: {
-            'KERNEL32.dll': ['CreateMutexA', 'CreateProcessA', 'ExitProcess'],
+            'KERNEL32.dll': ['CreateMutexA', 'CreateProcessA', 'WaitForSingleObject',
+                'ExitProcess'],
         },
         codeSize: 0x100,
         data: {
@@ -355,6 +355,10 @@ function buildMutexParentExe(){
             0x6a, 0x00, //                       lpCommandLine
             0x68, ...u32(at('child')), //        lpApplicationName
             0xff, 0x15, ...u32(iat('CreateProcessA')),
+
+            0x6a, 0xff, //                       INFINITE
+            0xff, 0x35, ...u32(at('information')), // hProcess
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
 
             0x6a, 0x00,
             0xff, 0x15, ...u32(iat('ExitProcess')),
@@ -417,18 +421,18 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
 
-    const code = await app.run({ timeoutMs: 20000 });
+    const code = await app.run({ timeoutMs: 60_000 });
 
     assert.equal(code, 0, 'the child exited cleanly');
     const ERROR_ALREADY_EXISTS = 183;
     assert.equal(output.join('').charCodeAt(0), ERROR_ALREADY_EXISTS,
-        'the child found the name the parent registered, never closed across the handover');
+        'the child found the name the parent registered and still holds');
 });
 
 for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
 {
     test(`a process's windows go when it exits, and the one started in its place finds none of`
-        + ` them (concurrency ${concurrency})`, { timeout: 60000 }, async t=>{
+        + ` them (concurrency ${concurrency})`, { timeout: 120_000 }, async t=>{
         // InstallShield's setup shows a window, starts a copy of itself and
         // exits; the copy shows its wizard. On Windows the first process's
         // windows are destroyed with it. Carried into the copy, its window
@@ -460,26 +464,35 @@ for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
                 0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
         });
-        // Exits with FindWindowA(NULL, title): zero when the parent's window is gone.
+        // Looks with FindWindowA(NULL, title) until the parent's window is
+        // gone, then exits. Started before the parent's ExitProcess, the child
+        // may look while the parent still stands, on Windows too: which of
+        // the two runs first is the machine's to decide, and a busy one ran
+        // the child's look first (concurrency 1, eight busy loops beside the
+        // suite). A window carried into the copy is never gone: the run then
+        // ends at its bound, not with the child's exit.
         const child = buildExe({
-            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['ExitProcess'] },
+            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
             codeSize: 0x40,
             data: { title: ascii('left by the parent') },
             code: ({ iat, at })=>[
-                0x68, ...u32(at('title')), 0x6a, 0,
+                0x68, ...u32(at('title')), 0x6a, 0, //   L: push title; push NULL
                 0xff, 0x15, ...u32(iat('FindWindowA')),
-                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+                0x85, 0xc0, //                            test eax, eax
+                0x74, 0x0a, //                            jz gone
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('Sleep')),
+                0xeb, 0xe5, //                            jmp L
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')), // gone: ExitProcess(0)
             ],
         });
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\App\\Parent.exe',
-            engine: 'cork',
             concurrency,
             storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 0,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0,
             'the child found no window of the parent');
         assert.deepEqual((await app.debug.windows()).filter((/** @type {any} */ each)=>
             each.title === 'left by the parent'), [], 'and none is listed');

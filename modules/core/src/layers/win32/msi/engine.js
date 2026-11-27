@@ -36,6 +36,10 @@
  * @property {(commandLine: string, directory: string | null, wait: boolean)
  *     => Promise<number | null>} runExe
  *           Starts a program; its exit code when waited for, null when it could not start.
+ * @property {(commandLine: string, directory: string | null)
+ *     => Promise<{ settle: () => Promise<number> } | null>} [startExe]
+ *           Starts one that runs beside the installation: `settle` waits for it and answers its
+ *           exit code. Null when it could not start.
  * @property {(path: string, helpDir: string | null) => Promise<number | null>} [registerTypeLib]
  *     oleaut32's registration of a type library file, as RegisterTypeLib makes it; its
  *     HRESULT, or null with no oleaut32 to ask.
@@ -76,8 +80,10 @@
  * @property {boolean} executing  In the execute sequence rather than the UI one.
  * @property {{ run: () => Promise<number> }[]} commit  Commit custom actions, after the script.
  * @property {{ name: string, wait: boolean, over: boolean, done: Promise<number | null>,
- *     stop: () => void, finish?: () => Promise<unknown> }[]} async  Library actions that run
- *     beside the installation, until it is over; `finish` gives back what one held.
+ *     stop: () => void, finish?: () => Promise<unknown>,
+ *     settle?: () => Promise<number | null> }[]} async  Library actions and programs that run
+ *     beside the installation, until it is over; `finish` gives back what one held, and a
+ *     program is waited for by its `settle` rather than `done`.
  */
 
 export {};

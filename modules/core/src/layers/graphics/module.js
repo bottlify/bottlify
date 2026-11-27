@@ -7,8 +7,10 @@
 import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
+import { publishFigures } from './figures.js';
 import { ringTrace } from './d3d8/commands.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { createDirect3D10 } from './d3d10/root.js';
 import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
@@ -99,6 +101,99 @@ function windowTree(windows){
     };
     const topLevels = windows.filter(window=>!window.child && shown(window));
     return { byHandle, shown, topLevelOf, topLevels };
+}
+
+/**
+ * Whether a window is listed and shown, it and every window it is inside: a
+ * picture whose window is hidden holds no place on the screen, as under the
+ * desktop window manager, and the desktop is shown instead - the message box
+ * a program puts up before its device's window ever shows.
+ *
+ * @param {ListedWindow[]} windows
+ * @param {number} handle
+ */
+export function windowShown(windows, handle){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    return Boolean(window && tree.shown(window));
+}
+
+/**
+ * Whether a window is shown and no shown top-level window over its own
+ * reaches into its client area on the screen (a minimised one lies off it):
+ * what is seen there is then that window's client area and nothing else, so
+ * a device's frame presented into it is the picture - full screen or a
+ * window smaller than the screen alike.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {number} handle
+ * @param {{ width: number, height: number }} screen
+ */
+export function clientUncovered(windows, handle, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    if (!window || !tree.shown(window))
+    {
+        return false;
+    }
+    const { client } = window;
+    const left = Math.max(client.left, 0);
+    const top = Math.max(client.top, 0);
+    const right = Math.min(client.right, screen.width);
+    const bottom = Math.min(client.bottom, screen.height);
+    const above = tree.topLevels.slice(tree.topLevels.indexOf(tree.topLevelOf(window)) + 1);
+    return !above.some(({ rect })=>rect.right > left && rect.bottom > top && rect.left < right
+        && rect.top < bottom);
+}
+
+/**
+ * What the screen shows for a window a device presents into (a DXGI swap
+ * chain, a Direct3D 8 or 9 device or chain), which is shown in place of what
+ * GDI drew there: `frame`, the device's last frame
+ * as it is, while the window is shown and nothing over it reaches its client
+ * area; `veil`, the frame with the windows over it laid over it, while it has
+ * the screen (full screen, or a window whose client area is the screen); else
+ * `desktop`, composed. The ceiling: the desktop around a smaller window is not
+ * shown, and a window over a smaller one shows its own surface under it.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {{ window: number, fullscreen: boolean }} into
+ * @param {{ width: number, height: number }} screen
+ * @returns {'frame' | 'veil' | 'desktop'}
+ */
+export function swapChainShows(windows, into, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(into.window >>> 0).toString(16)}`);
+    if (!window || !tree.shown(window))
+    {
+        return 'desktop';
+    }
+    if (clientUncovered(windows, into.window, screen))
+    {
+        return 'frame';
+    }
+    const { client } = window;
+    const screenHeld = into.fullscreen || (client.left <= 0 && client.top <= 0
+        && client.right >= screen.width && client.bottom >= screen.height);
+    return screenHeld ? 'veil' : 'desktop';
+}
+
+/**
+ * Where the shown top-level windows over a window lie on the screen, bottom
+ * to top: what a picture that has the screen to itself is to show over it.
+ * None for a window not listed.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {number} handle
+ * @param {import('./gdi/contract.js').Rect} screen
+ * @returns {import('./gdi/contract.js').Rect[]}
+ */
+export function windowsAbove(windows, handle, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    const at = window ? tree.topLevels.indexOf(tree.topLevelOf(window)) : -1;
+    return at < 0 ? [] : tree.topLevels.slice(at + 1)
+        .map(({ rect })=>intersectRect(rect, screen)).filter(rect=>!isEmptyRect(rect));
 }
 
 /**
@@ -216,18 +311,38 @@ const bufferTotals = backend=>{
 const NOT_MEASURED = 'not measured';
 
 /**
+ * Direct3D 10's rings as one line a report prints: how often and how long
+ * each was played on the host's way in, and why buffer maps reached the host.
+ *
+ * @param {any} direct3d10 @returns {string | null}
+ */
+const ringLine = direct3d10=>{
+    if (!direct3d10)
+    {
+        return null;
+    }
+    const rings = (direct3d10.rings ?? []).map((/** @type {any} */ ring)=>`syncs ${ring.syncs}`
+        + ` ${ring.syncMs}ms maps ${Object.entries(ring.maps)
+            .map(([why, count])=>`${why}:${count}`).join(',')}`);
+    const unattached = Object.entries(direct3d10.unattachedMaps ?? {})
+        .map(([usage, count])=>`usage${usage}:${count}`).join(',');
+    return `${rings.join('; ') || 'no ring'}${unattached ? `; unattached ${unattached}` : ''}`;
+};
+
+/**
  * What this layer holds of the tab's memory, by zone (`memory-zones.js`): of
- * the heaps, the pages of guest memory a played OpenGL device keeps (its
- * answer's `mirrored`), and what is not measured yet -- the engine thread's
+ * the heaps, the pages of guest memory the graphics worker keeps for each of
+ * this process's played devices (every root's answer's `mirrored`; none where
+ * nothing is played), and what is not measured yet -- the engine thread's
  * recorded batches and shadows, the worker's other caches; and the device's
  * buffers and textures as its ledger counts them, a zone of their own: a GPU
  * process holds them, not the tab, unless the device is one in JavaScript.
  *
  * @param {any} worker  the graphics worker's figures, or null
- * @param {any} seam  the seam's
  */
-const bytesHeldOf = (worker, seam)=>{
-    const mirrored = seam?.device?.mirrored?.held;
+const bytesHeldOf = worker=>{
+    // No worker, no mirror: a device in this thread reads the guest's memory.
+    const mirrored = worker ? worker.mirrored : 0;
     const ledger = worker?.gpuMemory;
     /** @param {any} kind */
     const bytesOf = kind=>(typeof kind?.bytes === 'number' ? kind.bytes : NOT_MEASURED);
@@ -243,8 +358,93 @@ const bytesHeldOf = (worker, seam)=>{
 
 const DISPLAY_RAMP = 'display';
 
+/**
+ * Who hears that a GPU device went away, by device. The device is the run's
+ * and every machine of the run is built on it, but a reaction on its `lost`
+ * promise can never be taken back: one made in a machine's own scope held
+ * that machine - its memory with it - for as long as the device lived, every
+ * process the run had ever started (an installer's, 560 MB each). So each
+ * device is listened to once, from here, and a machine joins and leaves.
+ *
+ * @type {WeakMap<object, { happened: boolean, hearing: Set<() => void> }>}
+ */
+const deviceLosses = new WeakMap();
+
+/** @param {any} gpu  a GPUDevice @returns {{ happened: boolean, hearing: Set<() => void> }} */
+function lossOf(gpu){
+    let loss = deviceLosses.get(gpu);
+    if (!loss)
+    {
+        const made = { happened: false, hearing: new Set() };
+        loss = made;
+        deviceLosses.set(gpu, made);
+        gpu.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
+            // A device the host destroyed is the run ending, not the GPU failing.
+            if (info?.reason !== 'destroyed')
+            {
+                made.happened = true;
+                for (const one of [...made.hearing])
+                {
+                    one();
+                }
+            }
+        });
+    }
+    return loss;
+}
+
+/**
+ * What a layer offers that graphics can go without, asked as it is built: a
+ * disabled layer's stub refuses every call, and that refusal means the layer
+ * has none to give, as a method it does not have does.
+ *
+ * @template T @param {() => T} ask @returns {T | undefined}
+ */
+const offered = ask=>{
+    try
+    {
+        return ask();
+    }
+    catch (e){
+        if (/** @type {{ code?: string }} */ (e)?.code === 'NOT_IMPLEMENTED')
+        {
+            return undefined;
+        }
+        throw e;
+    }
+};
+
 /** The graphics layer's module for one graph; see `defaultModules`. */
+/**
+ * The drawable OpenGL sees for a device context: a window's is its client
+ * area, whichever of its DCs names it, as one from GetWindowDC spans the frame
+ * too (Wine's opengl32 test_window_dc). Anything else is as gdi32 describes it.
+ *
+ * @template {{ window: number, width: number, height: number }} T
+ * @param {T | null} drawable
+ * @param {ReadonlyArray<{ hwnd: unknown, client?: { left: number, top: number,
+ *     right: number, bottom: number } }>} windows
+ * @returns {T | null}
+ */
+export function clientDrawable(drawable, windows){
+    const client = drawable && drawable.window !== 0
+        ? windows.find(each=>Number(each.hwnd) === drawable.window)?.client ?? null
+        : null;
+    return drawable && client
+        ? { ...drawable, width: client.right - client.left, height: client.bottom - client.top }
+        : drawable;
+}
+
 export function createGraphicsModule(){
+    /**
+     * The desktop's presents at a paint, those kept back (`presentDesktop`),
+     * and the window, client area and screen the last was judged by.
+     *
+     * @type {{ presented: number, keptBack: number, window: number,
+     *     client: import('./gdi/contract.js').Rect | null,
+     *     screen: { width: number, height: number } | null }}
+     */
+    const desktops = { presented: 0, keptBack: 0, window: 0, client: null, screen: null };
     /**
      * The instance this module object made last, for `diagnostics()` and
      * `dispose()`. Every graph is given module objects of its own
@@ -269,7 +469,9 @@ export function createGraphicsModule(){
     return {
         name: 'graphics',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory']),
+        requires: /** @type {readonly string[]} */ ([
+            'win32', 'bridge', 'memory', 'media', 'cache', 'log',
+        ]),
 
         /**
          * @param {any} config
@@ -290,6 +492,11 @@ export function createGraphicsModule(){
             const memory = host.requireApi('memory');
             const win32 = host.requireApi('win32');
             const bridge = host.requireApi('bridge');
+            const log = /** @type {any} */ (host.requireApi('log'));
+            // What the graphics worker keeps of a program's textures while no
+            // draw needs them: the run's cache, which lets idle bodies go to the
+            // disk, rather than the worker's own heap.
+            const cache = /** @type {any} */ (host.requireApi('cache'));
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -302,7 +509,8 @@ export function createGraphicsModule(){
              *
              * @type {{ backend: any, factories: any, created: string[], seam: any,
              *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
-             *     gammaOwners: Set<any>, remote: any, blockCompression: any }}
+             *     gammaOwners: Set<any>, remote: any, blockCompression: any,
+             *     leaveLoss: (() => void) | null }}
              */
             const state = {
                 remote: null,
@@ -316,6 +524,7 @@ export function createGraphicsModule(){
                 shown: null,
                 disposed: false,
                 gammaOwners: new Set(),
+                leaveLoss: null,
             };
 
             /**
@@ -400,12 +609,16 @@ export function createGraphicsModule(){
                 }
                 loss.watchers.clear();
             };
-            device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
-                if (info?.reason !== 'destroyed')
+            if (device?.device)
+            {
+                const runLoss = lossOf(device.device);
+                if (runLoss.happened)
                 {
                     lose();
                 }
-            });
+                runLoss.hearing.add(lose);
+                state.leaveLoss = ()=>runLoss.hearing.delete(lose);
+            }
             /**
              * @param {() => void} watcher
              * @returns {() => void} how to stop watching
@@ -449,12 +662,13 @@ export function createGraphicsModule(){
                     worker: workerEnd,
                     device: device?.device,
                     presentTo: device?.presentTo,
+                    framePlayed: config?.framePlayed,
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                     // Where the memory is shared the worker writes what it reads
                     // back in place, and says only where.
                     sharedMemory: ()=>memory.shared?.() ?? null,
+                    memoryGrown: listener=>memory.onGrow?.(listener),
                     adoptMemory: (address, length)=>memory.adopt?.(address, length),
-                    lendMemory: config?.lendMemory !== false,
                     // The bound the run's presenter holds a device here to, for
                     // the devices that draw there.
                     maxFrameLatency: config?.maxFrameLatency,
@@ -476,13 +690,20 @@ export function createGraphicsModule(){
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services)
                 : factory(services));
+            /**
+             * Direct3D 10's root, drawn here or in the graphics worker.
+             *
+             * @param {import('./d3d10/device.js').DeviceOptions} options
+             */
+            const direct3d10 = options=>(remote
+                ? remote.root('d3d10', createDirect3D10, options)
+                : createDirect3D10(options));
 
             /**
-             * The draw check's switch (`checkDraws`): how many times it was
-             * turned on, 0 while it is off.
+             * The draw check's live switch (`checkDraws` below): how many times
+             * it was turned on, 0 while it is off.
              */
-            const drawCheck = { turn: config?.checkDraws === true ? 1 : 0, turns: 0 };
-            drawCheck.turns = drawCheck.turn;
+            const drawCheck = { turn: 0, turns: 0 };
 
             /** Everything an API needs from outside itself, in one place. */
             const services = {
@@ -498,6 +719,13 @@ export function createGraphicsModule(){
                     ? memory.window(address, length)
                     : memory.readBytes(address, length)),
                 /**
+                 * The RAM over shared memory, byte 0 at address 0, read and
+                 * written in place by any thread; null where it is not shared.
+                 *
+                 * @returns {Uint8Array | null}
+                 */
+                sharedMemory: ()=>memory.shared?.() ?? null,
+                /**
                  * Watches a range for writes: what a draw from a dynamic buffer
                  * compares is the pages written since its last look.
                  *
@@ -512,6 +740,16 @@ export function createGraphicsModule(){
                 checkDraws: ()=>drawCheck.turn,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
+                /**
+                 * A pointer of the process's width (4 or 8 bytes), read and
+                 * written whole by the memory layer: the one place a pointer's
+                 * upper half is made.
+                 *
+                 * @param {number} address @param {4 | 8} bytes
+                 */
+                readPointer: (address, bytes)=>memory.readPointer(address, bytes),
+                /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                writePointer: (address, value, bytes)=>memory.writePointer(address, value, bytes),
                 /**
                  * A dword, written in place: an out-parameter without an array
                  * made to carry its four bytes. Absent where the memory given
@@ -531,6 +769,8 @@ export function createGraphicsModule(){
                 readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /** @param {number} address @param {number} value @param {number} length */
+                fillMemory: (address, value, length)=>memory.fillBytes(address, value, length),
                 /**
                  * A dword swapped only if it holds `expected`, indivisible against
                  * the guest's threads on the process's other executors: a word
@@ -637,8 +877,6 @@ export function createGraphicsModule(){
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
                     ...profileBehaviour(device?.adapter),
-                    keepMemory: config?.keepMemory,
-                    rereadBuffers: config?.rereadBuffers,
                     verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
@@ -695,8 +933,6 @@ export function createGraphicsModule(){
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
                     ...profileBehaviour(device?.adapter),
-                    keepMemory: config?.keepMemory,
-                    rereadBuffers: config?.rereadBuffers,
                     verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     gamma: displayGamma,
@@ -707,8 +943,14 @@ export function createGraphicsModule(){
                 /** @returns {any} */
                 opengl: (/** @type {any} */ options)=>createOpengl({
                     presented: config?.presented,
+                    // A swap waits for the blank its swap interval names, as a
+                    // Present does: on the guest's clock, the thread stopped.
+                    now: config?.guestNow,
+                    waitUntil: config?.waitUntil,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
+                    // A context's command ring read where it lies.
+                    sharedMemory: services.sharedMemory,
                     readF32sInto: services.readF32sInto,
                     writeMemory: services.writeMemory,
                     screen: ()=>services.screen,
@@ -741,16 +983,36 @@ export function createGraphicsModule(){
                     // would be a drawable of its own and a format set on one
                     // would be lost to the next.
                     /** @param {number} hdc */
-                    describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
+                    describeDrawable: hdc=>clientDrawable(win32.gdi().describeDrawable(hdc),
+                        win32.windows?.() ?? []),
+                    // A context on a memory DC draws into the bitmap selected
+                    // there (`wgl-bitmap.js`).
+                    /** @param {number} hdc */
+                    bitmapSurface: hdc=>win32.gdi().bitmapSurface?.(hdc) ?? null,
+                    // A pbuffer's DC is GDI's, so GetPixelFormat and every other
+                    // call naming it finds one (WGL_ARB_pbuffer).
+                    /** @param {number} width @param {number} height */
+                    createPbufferDc: (width, height)=>win32.gdi().createPbufferDc?.(width, height)
+                        ?? 0,
+                    /** @param {number} hdc */
+                    deleteDc: hdc=>win32.gdi().deleteSurfaceDc?.(hdc),
                     // WGL's refusals are read with GetLastError.
                     /** @param {number} code */
                     setLastError: code=>win32.setLastError?.(code),
                     // A context is current on one thread at a time, and another
                     // thread's MakeCurrent or DeleteContext of it is ERROR_BUSY.
                     currentThread: ()=>bridge.callerThread?.()?.id ?? 0,
+                    // The debug callback (4.3) runs on the thread whose call
+                    // made the message.
+                    /** @param {{ entry: number, args: number[] }} guestCall */
+                    callGuest: guestCall=>bridge.callGuest({ ...guestCall,
+                        thread: bridge.callerThread() }),
                     // Where the routines of a context's command ring find its
-                    // block: the calling thread's TEB.
-                    currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
+                    // block: the calling thread's TEB. A 64-bit process has no
+                    // such routines (they are i386 code), and every call traps.
+                    ...config?.pointerSize === 8 ? { pointerSize: 8 } : {
+                        currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
+                    },
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
                     raster: drawing ? config?.raster : false,
@@ -758,19 +1020,22 @@ export function createGraphicsModule(){
                     // draw there, as Direct3D 8 and 9 devices do.
                     remote: remote
                         ? (/** @type {any} */ factory, /** @type {any} */ rootServices)=>
-                            remote.root('opengl', factory, rootServices)
+                            remote.root('opengl', factory, rootServices, cache)
                         : undefined,
                     ...options,
                 }),
-                // Direct3D 10's seam makes the device itself from what a program
-                // passes; this hands it the GPU, reached only when one is made.
-                /** @returns {import('./d3d10/device.js').DeviceOptions} */
-                d3d10: (/** @type {any} */ caps)=>({
-                    backend: device ? api.backend() : undefined,
-                    createSampler: device
+                // Direct3D 10's entry points (`d3d10/root.js`), with the GPU
+                // they draw through: here, or in the graphics worker, where the
+                // root the program gets is a recorded one (`remote/d3d10.js`).
+                // `caps.factoryOptions`: the seam's window and display answers.
+                /** @returns {any} */
+                d3d10: (/** @type {any} */ caps)=>direct3d10({
+                    factoryOptions: caps?.factoryOptions,
+                    backend: device && !remote ? api.backend() : undefined,
+                    createSampler: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                         : undefined,
-                    createTexture: device
+                    createTexture: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
                         : undefined,
                     divergence: config?.divergence,
@@ -782,7 +1047,26 @@ export function createGraphicsModule(){
                     // Only a device made with the feature can leave depth
                     // unclipped, which is what DepthClipEnable = FALSE asks.
                     depthClipControl: device?.device?.features?.has('depth-clip-control') === true,
+                    // What CheckFormatSupport may claim of the formats a GPU
+                    // has or draws into only with a feature; with no GPU, all
+                    // Direct3D has, as nothing is drawn.
+                    formatsTier1: device?.device
+                        ? device.device.features?.has('texture-formats-tier1') === true : undefined,
+                    rg11b10Renderable: device?.device
+                        ? device.device.features?.has('rg11b10ufloat-renderable') === true
+                        : undefined,
                     frameQueued,
+                    // What a program maps lives in its own memory, so a map
+                    // hands out an address and an unmap reads what it wrote
+                    // (the pages written, where the engine watches them).
+                    guest: config?.allocate ? {
+                        allocate: config.allocate,
+                        free: config.free,
+                        readMemory: services.readMemory,
+                        windowMemory: services.windowMemory,
+                        writeMemory: services.writeMemory,
+                        watchWrites: services.watchWrites,
+                    } : undefined,
                 }),
                 /** @returns {any} */
                 vulkan: (/** @type {any} */ options)=>createVulkan({
@@ -849,6 +1133,13 @@ export function createGraphicsModule(){
                  * @returns {Promise<void>}
                  */
                 answered: ()=>state.remote?.answered() ?? Promise.resolve(),
+
+                /**
+                 * The graphics worker's frames, summed so far
+                 * (`remote/channel.js` WorkerFrameTimes); null without a
+                 * worker or before its first present.
+                 */
+                workerFrameTimes: ()=>state.remote?.frameTimes() ?? null,
 
                 /**
                  * The hardware behind the device, as the assembling caller knows
@@ -942,6 +1233,7 @@ export function createGraphicsModule(){
                 backend: ()=>api.backend(),
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
+                ...(typeof config?.processId === 'number' ? { source: config.processId } : {}),
             });
 
             /**
@@ -1006,6 +1298,26 @@ export function createGraphicsModule(){
             };
 
             /**
+             * The windows over a GPU's picture that has the screen, from the
+             * desktop composed, laid over it by the presenter: the picture has
+             * no guest bytes to compose the desktop onto, and the message box a
+             * program put up over its full-screen picture - the one that says
+             * why it ended - was not seen.
+             *
+             * @param {number} holder  The window whose picture has the screen.
+             */
+            const veilOver = holder=>{
+                const screen = services.screen;
+                const rects = windowsAbove(win32.windows?.() ?? [], holder,
+                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
+                // ponytail: the whole desktop is uploaded at each paint while a
+                // window is over the picture; only the windows' rows if a
+                // dialog that paints often over a game shows in a profile.
+                const desktop = rects.length > 0 ? screens.compose() : null;
+                state.shown.overlay(desktop, desktop ? rects : []);
+            };
+
+            /**
              * Shows a DirectDraw primary surface.
              *
              * A primary belongs to a window -- the one the program named when it
@@ -1022,13 +1334,19 @@ export function createGraphicsModule(){
              * @param {number} [window]    The cooperative window, or zero.
              * @param {boolean} [exclusive]
              */
+
             const presentPrimary = (surface, window = 0, exclusive = false)=>{
                 fullScreen = exclusive ? { surface, window } : null;
+                if (!exclusive)
+                {
+                    state.shown.overlay(null, []);
+                }
                 const screen = services.screen;
                 // A picture the GPU owns has nothing worth reading in guest
                 // memory, and a primary of another size than the screen has no
-                // place on it. The ceiling on this: such a primary is shown as
-                // it is, and anything over it is not seen.
+                // place on it. Such a primary is shown as it is: the windows
+                // over a GPU's full-screen picture are laid over it at a paint
+                // (`veilOver`); over a primary of another size they are not seen.
                 const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
                 const usable = !state.shown.isClaimed(surface.buffer)
                     && surface.width === screen.width && surface.height === screen.height;
@@ -1103,7 +1421,23 @@ export function createGraphicsModule(){
                 allocate: config?.allocate,
                 allocateCode: config?.allocateCode,
                 guestCode: config?.guestCode !== false,
+                // A 64-bit process's layouts, and no i386 guest code in it.
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
+                floatResult: config?.floatResult,
+                // DXGI's swap chain hands out a kernel event, and its device sets one.
+                events: offered(()=>win32.events?.()),
+                // A shared resource's NT handle is a kernel object of the process.
+                sharedHandles: offered(()=>win32.sharedHandles?.()),
                 guestTraps: config?.guestTraps,
+                // A full-screen Direct3D 8 or 9 device's windows: user32's own
+                // calls on them, and a window procedure of the device's.
+                user32: (/** @type {string} */ name)=>win32.user32?.(name),
+                cover: (/** @type {number} */ hwnd)=>win32.coverWindow?.(hwnd),
+                procedure: (/** @type {string} */ name,
+                    /** @type {(args: number[]) => unknown} */ handler)=>
+                    bridge.register(`<${name}>`, { argBytes: 16, handler }),
+                answering: (/** @type {unknown} */ thread, /** @type {() => any} */ fn)=>
+                    bridge.answering(thread, fn),
                 free: config?.free,
                 // What a program is handed to free with HeapFree itself.
                 processHeapAllocate: (/** @type {number} */ bytes)=>
@@ -1116,8 +1450,12 @@ export function createGraphicsModule(){
                 // The address of one of OPENGL32's own exports, which only the
                 // assembling caller knows once the module is placed.
                 exportAddress: config?.exportAddress,
+                moduleExportAddress: config?.moduleExportAddress,
                 // Where a program's cursor goes, when the host shows one.
                 cursor: config?.cursor,
+                // SetCursorPosition's: the system's cursor, put and read.
+                placeCursor: config?.placeCursor,
+                cursorAt: config?.cursorAt,
                 // The clock the display's raster -- the vertical blank and the
                 // scan line -- runs on: the guest's, from the assembling caller
                 // that owns it, because a program that spins on the blank times
@@ -1137,6 +1475,14 @@ export function createGraphicsModule(){
                 // asked for as zero by zero takes. Only the layer that owns the
                 // windows can measure one, and only here is it asked for.
                 windowClientSize: config?.windowClientSize,
+                // Whether a window shows what is presented into it. A build
+                // with no windows behind it shows every present.
+                windowShown: win32.windowShown
+                    ? (/** @type {number} */ hwnd)=>Boolean(win32.windowShown(hwnd)) : undefined,
+                // A window's client area on the screen, which a DirectDraw
+                // clipper given the window clips to; null for no such window.
+                windowClient: (/** @type {number} */ hwnd)=>(win32.windows?.() ?? [])
+                    .find((/** @type {any} */ each)=>Number(each.hwnd) === hwnd)?.client ?? null,
                 // Absent in a build with no bridge behind it -- a test, an
                 // inspection -- which then gets tables that refuse rather than
                 // tables that publish into nowhere.
@@ -1158,6 +1504,7 @@ export function createGraphicsModule(){
                     createSurfaceDc: attributes=>win32.gdi().createSurfaceDc(attributes),
                     /** @param {number} handle */
                     deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
+                    displayDc: ()=>Number(win32.user32?.('GetDC')?.handler([0]) ?? 0) >>> 0,
                 },
 
                 present: presentPrimary,
@@ -1219,6 +1566,8 @@ export function createGraphicsModule(){
                 scratch: {
                     /** @param {number} bytes */
                     allocate: bytes=>win32.heap().allocate(bytes),
+                    /** @param {number} address */
+                    free: address=>win32.heap().free(address),
                 },
             });
 
@@ -1353,12 +1702,61 @@ export function createGraphicsModule(){
                         && (win32.windows?.() ?? []).some(
                             (/** @type {ListedWindow} */ listed)=>listed.hwnd === owner))
                     {
+                        if (state.shown.isClaimed(held.surface.buffer))
+                        {
+                            veilOver(held.window);
+                        }
                         presentPrimary(held.surface, held.window, true);
                         return;
                     }
+                    // A full-screen Direct3D device's picture is the screen too,
+                    // and it lives on the GPU, not in guest memory: the desktop
+                    // composed over it put the device window's own surface,
+                    // black, between its frames -- a loading screen flickering
+                    // at every paint. While it holds the screen its last frame
+                    // stays, with the windows over it laid over it. Its window
+                    // hidden, it shows nothing and the desktop is the screen: a
+                    // box put up before that window first showed was laid over a
+                    // frame never drawn, and the screen stayed black.
+                    const covering = state.seam?.screenHeld?.() ?? 0;
+                    if (covering && !win32.applicationDeactivated?.()
+                        && windowShown(win32.windows?.() ?? [], covering))
+                    {
+                        veilOver(covering);
+                        return;
+                    }
                     const screen = screens.screen();
+                    // A windowed device's frames - a DXGI swap chain's, a
+                    // Direct3D 8 or 9 device's or chain's - are its window's
+                    // client area, shown in place of what GDI drew there,
+                    // whether or not its application is active
+                    // (`swapChainShows`). The desktop composed again, the
+                    // window's own surface black or white, would hide every
+                    // frame between two presents: a click that repaints the
+                    // window's border flashed it, a box over the picture stood
+                    // on black, and a Direct3D 9 game's films and menus
+                    // flickered at every paint pass.
+                    const into = state.seam?.presentedWindow?.() ?? null;
+                    desktops.window = into?.window ?? 0;
+                    if (screen && into)
+                    {
+                        const listed = win32.windows?.() ?? [];
+                        const hex = `0x${(into.window >>> 0).toString(16)}`;
+                        desktops.client = listed.find((/** @type {ListedWindow} */ each)=>
+                            each.hwnd === hex)?.client ?? null;
+                        desktops.screen = { width: screen.width, height: screen.height };
+                        const shows = swapChainShows(listed, into, screen);
+                        if (shows !== 'desktop')
+                        {
+                            desktops.keptBack++;
+                            veilOver(into.window);
+                            return;
+                        }
+                    }
+                    state.shown.overlay(null, []);
                     if (screen)
                     {
+                        desktops.presented++;
                         state.shown.present({ ...screen, label: 'desktop',
                             prepare: screens.compose });
                     }
@@ -1380,6 +1778,23 @@ export function createGraphicsModule(){
                 /** Whether a ramp set reaches the picture at all. */
                 appliesGamma: ()=>displayGamma.applies(),
             });
+
+            // The figures a live view follows, into the log's tables once a
+            // frame (`figures.js`). A device in the graphics worker says its own
+            // with every present; one on this thread is asked only where there
+            // is no worker, since asking a recorded device would send the
+            // question to the worker as a call.
+            if (typeof log.metrics?.onFrame === 'function')
+            {
+                log.metrics.onFrame(publishFigures({
+                    metrics: log.metrics,
+                    intern: text=>log.intern(text),
+                    shown: ()=>state.presenter?.shown?.() ?? null,
+                    figures: ()=>(state.remote ? state.remote.figures()
+                        : state.seam?.figures?.() ?? null),
+                    worker: ()=>state.remote?.phases() ?? null,
+                }));
+            }
 
             current = state;
             return {
@@ -1477,11 +1892,16 @@ export function createGraphicsModule(){
                     worker,
                     // Kept flat, where a report drops the structure above.
                     workerAnswers: worker ? worker.answers : null,
+                    // Direct3D 10's and 11's rings, flat for the same reason.
+                    d3d10Rings: ringLine(seam?.direct3d10),
                     // DXT textures kept as BC blocks on the GPU, or decoded first.
                     blockCompression: instance.blockCompression,
                     seam,
                     // What this layer holds of the tab's memory (`memory-zones.js`).
-                    bytesHeld: bytesHeldOf(worker, seam),
+                    bytesHeld: bytesHeldOf(worker),
+                    // The desktop shown at a paint, and kept back under a
+                    // windowed swap chain's window that fills the screen.
+                    desktops: { ...desktops },
                     // GDI's copies by path, and why one went a pixel at a time.
                     blits: { ...blitPaths, why: { ...blitPaths.why } },
                     // State the program set in the guest, and the calls that never
@@ -1529,6 +1949,7 @@ export function createGraphicsModule(){
                 // made itself -- a build assembled without one -- is disposed
                 // here.
                 instance.shown?.detach();
+                instance.leaveLoss?.();
                 if (instance.presenter && !instance.presenterGiven)
                 {
                     instance.presenter.dispose?.();

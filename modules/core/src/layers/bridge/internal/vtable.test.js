@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createVtables } from './vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID = '{00000001-0000-0000-C000-000000000046}';
 
@@ -44,12 +45,12 @@ function vtables({ stubs = Infinity, heap = true }){
     let left = stubs;
     let next = 0x2000;
     return createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name */
         register: name=>{
             if (left-- <= 0)
@@ -104,6 +105,29 @@ test('an interface that fits is published once and answers the same pointer afte
     assert.equal(table.diagnostics().comInterfacesRefused, 0);
 });
 
+test('a method table is laid where the heap keeps tables, apart from objects and code', ()=>{
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: withPointers({
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        }),
+        register: ()=>(next += 0x10),
+        heap: {
+            /** @param {number} size */
+            allocate: size=>(next += size),
+            allocateTable: ()=>0x90000,
+        },
+    });
+    const pointer = table.publish(object, IID);
+    assert.notEqual(pointer, 0);
+    assert.equal(words.get(pointer), 0x90000, 'the object\'s first word names that table');
+});
+
 test('a method that runs in the guest takes its slot, and keeps its trap to fall back to', ()=>{
     // The object's state word sits one word past the vtable pointer, which is
     // where such a method finds the memory it works on.
@@ -113,12 +137,12 @@ test('a method that runs in the guest takes its slot, and keeps its trap to fall
     const memory = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name */
         register: name=>{
             registered.push(name);
@@ -170,12 +194,12 @@ test('objects of one interface share its stubs, and a call still finds its own o
     const memory = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -240,11 +264,11 @@ test('objects whose lists are made afresh share the stubs of their shape, each i
         const handlers = new Map();
         let next = 0x2000;
         const table = createVtables({
-            memory: {
+            memory: withPointers({
                 writeU32: ()=>{},
                 /** @param {number} address @param {number} length */
                 readBytes: (address, length)=>new Uint8Array(length),
-            },
+            }),
             /** @param {string} name @param {any} fn */
             register: (name, fn)=>{
                 handlers.set(`${name}#${handlers.size}`, fn);
@@ -306,11 +330,11 @@ test('a method hands its implementation one argument array, until a call answers
     const handlers = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             writeU32: ()=>{},
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -362,11 +386,11 @@ test('an object still reachable at a count of zero keeps its pointer until it is
     const handlers = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             writeU32: ()=>{},
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -408,7 +432,7 @@ test('an object still reachable at a count of zero keeps its pointer until it is
     // Its owner goes; the next release anywhere finds it unreachable.
     owned = false;
     release([elsewhere]);
-    assert.equal(addRef([pointer]) >>> 0, 0x80004003, 'now it is forgotten');
+    assert.equal(addRef([pointer]), 0, 'now it is forgotten');
     assert.equal(table.diagnostics().comInterfaces, 1);
 });
 
@@ -441,12 +465,12 @@ function interfaces(){
     const freed = [];
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>words.set(address, value),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>guids.get(address) ?? new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -570,7 +594,7 @@ test('an object that does not say it is over loses only the interface released t
     const first = f.table.publish(counted, IID);
     const second = f.query(first, IID_B);
     assert.equal(f.call('Release', second), 0);
-    assert.equal(f.call('AddRef', second), 0x80004003);
+    assert.equal(f.call('AddRef', second), 0);
     assert.equal(f.call('AddRef', first), 1);
 });
 
@@ -603,12 +627,12 @@ test('an object that is over keeps each interface still reachable, and only thos
     assert.equal(f.call('Release', third), 1);
     assert.equal(f.call('Release', first), 0);
 
-    assert.equal(f.call('AddRef', first), 0x80004003, 'nothing keeps the first');
-    assert.equal(f.call('AddRef', third), 0x80004003, 'nor the third');
+    assert.equal(f.call('AddRef', first), 0, 'nothing keeps the first');
+    assert.equal(f.call('AddRef', third), 0, 'nor the third');
     assert.equal(f.call('Release', second), 0, 'the second is kept, and answers');
     kept = false;
     f.call('Release', elsewhere);
-    assert.equal(f.call('Release', second), 0x80004003, 'until nothing keeps it either');
+    assert.equal(f.call('Release', second), 0, 'until nothing keeps it either');
     assert.equal(f.table.diagnostics().comInterfaces, 1);
 });
 
@@ -716,4 +740,151 @@ test('an interface answered with another\'s pointer is that pointer, and counts 
     assert.equal(f.query(pointer, IID_B), pointer);
     assert.deepEqual(references, [IID]);
     assert.equal(f.table.publish(shared, IID_B), pointer, 'and published directly as well');
+});
+
+test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 code, and their'
+    + ' floats declared', ()=>{
+    // Every pointer the table and the interface hold is eight bytes with the
+    // high half zero, and so is a pointer QueryInterface writes; a method that
+    // would run in the guest is its trap, because that code is i386, unless its
+    // builder is built for the process's width (`wide`); the counts are the
+    // x86-64 AddRef and Release (`COUNT_CODE_64`).
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    /** @type {Map<string, any>} */
+    const registered = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: withPointers({
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value >>> 0),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>(address === 0x5000 ? guidBytes(IID)
+                : new Uint8Array(length)),
+            /** @param {number} address @param {Uint8Array} bytes */
+            writeBytes: (address, bytes)=>void [address, bytes],
+        }),
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            registered.set(name, fn);
+            return 0x1000 + registered.size * 0x10;
+        },
+        heap: {
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes;
+                return at;
+            },
+            allocateCode: ()=>0x6000,
+        },
+        long: ()=>true,
+    });
+    const methods = [
+        ...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 8, guest: ()=>0x7000 },
+        { name: 'Scale', argBytes: 8, floats: { 1: /** @type {'f32'} */ ('f32') } },
+        { name: 'Seek', argBytes: 20, quadwords: [1] },
+        { name: 'Register', argBytes: 24, structs: { 1: 4 } },
+        { name: 'Fill', argBytes: 8, guest: Object.assign(()=>0x7100, { wide: true }) },
+    ];
+    const longObject = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+        guestState: ()=>0x9abc,
+    };
+    const pointer = table.publish(longObject, IID);
+    const vtable = /** @type {number} */ (words.get(pointer));
+    assert.equal(words.get(pointer + 4), 0, 'the table\'s pointer is a quadword');
+    assert.equal(words.get(pointer + 8), 0x9abc, 'the state word is the next quadword');
+    const slots = [0, 1, 2, 3, 4].map(index=>[words.get(vtable + index * 8),
+        words.get(vtable + index * 8 + 4)]);
+    assert.ok(slots.every(([, high])=>high === 0), 'each slot eight bytes, its high half zero');
+    assert.deepEqual(slots.map(([low])=>low), [0x1010, 0x6000, 0x6000, 0x1040, 0x1050],
+        'AddRef and Release the x86-64 counts, every other slot a trap: the i386 guest method too');
+    assert.equal(words.get(vtable + 7 * 8), 0x7100, 'a guest method built for the width is code');
+    assert.deepEqual(registered.get(`${IID}::Scale`).floats, { 1: 'f32' },
+        'a float argument is declared to the bridge');
+    assert.deepEqual(registered.get(`${IID}::Seek`).quadwords, [1],
+        'and a quadword: one slot to a 64-bit caller');
+    assert.deepEqual(registered.get(`${IID}::Register`).structs, { 1: 4 },
+        'and a structure by value: a pointer to a copy');
+
+    words.set(0x8000, 0xdead);
+    words.set(0x8004, 0xbeef);
+    assert.equal(registered.get(`${IID}::QueryInterface`).handler([pointer, 0x5000, 0x8000]), 0);
+    assert.deepEqual([words.get(0x8000), words.get(0x8004)], [pointer, 0],
+        'QueryInterface writes the pointer whole');
+});
+
+test('a method with a slot and no implementation answers E_NOTIMPL, and is said', ()=>{
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {string[]} */
+    const said = [];
+    let next = 0x2000;
+    const table = createVtables({
+        memory: withPointers({
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>void [address, value],
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        }),
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+        unimplemented: label=>said.push(label),
+    });
+    const methods = [...METHODS.slice(0, 3), { name: 'SetLOD', argBytes: 8 }];
+    const lodded = { interfaceFor: (/** @type {string} */ id)=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2, release: ()=>0 };
+    const pointer = table.publish(lodded, IID);
+    assert.equal(handlers.get(`${IID}::SetLOD`).handler([pointer, 1]) >>> 0, 0x80004001);
+    assert.deepEqual(said, [`${IID}::SetLOD`]);
+});
+
+test('an object whose layout goes on past the vtable pointer is given its bytes, zeroed', ()=>{
+    /** @type {number[]} */
+    const sizes = [];
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    let next = 0x8000;
+    const table = createVtables({
+        memory: withPointers({
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        }),
+        register: ()=>{
+            next += 0x10;
+            return next;
+        },
+        heap: {
+            /** @param {number} size */
+            allocate: size=>{
+                sizes.push(size);
+                next += size + 0x10;
+                return next - size;
+            },
+        },
+    });
+    // MFASYNCRESULT: the vtable pointer, an OVERLAPPED, then four fields - 40 bytes.
+    const pointer = table.publish({ ...object, bodyBytes: ()=>40 }, IID);
+    assert.notEqual(pointer, 0);
+    assert.equal(sizes.at(-1), 40, 'the block is the layout\'s size, not three words');
+    for (let at = 12; at < 40; at += 4)
+    {
+        assert.equal(words.get(pointer + at), 0, `offset ${at} starts zeroed`);
+    }
+    table.publish({ ...object }, IID);
+    assert.equal(sizes.at(-1), 12, 'an object that asks nothing gets the three words');
 });

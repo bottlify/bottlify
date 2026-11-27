@@ -18,6 +18,13 @@
 
 import { expand, expandedName, readHeader } from './expand.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
+
+/**
+ * How far a name a program hands these is read: whole, as Windows reads it, up to
+ * the 32 767 characters a path may have. A name cut shorter names another file.
+ */
+const WHOLE_NAME = 32767;
 
 /** wStyle bits OpenFile understands and this library acts on. */
 const OF_WRITE = 0x0001;
@@ -36,9 +43,6 @@ const LZERROR_WRITE = -4;
 const OFSTRUCT_SIZE = 136;
 const OFSTRUCT_PATH = 8;
 const OFSTRUCT_PATH_LENGTH = 128;
-
-/** A path is at most this long; longer is a pointer that is not a string. */
-const MAX_PATH = 260;
 
 /**
  * @typedef {Object} LzHost
@@ -165,8 +169,9 @@ export function createLzFunctions(host){
         LZOpenFileA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, reopen, style])=>openFile(host.readCString(name >>> 0, MAX_PATH),
-                reopen, style),
+            handler: ([name, reopen, style])=>openFile(host.readCString(wholeAddress(name),
+                WHOLE_NAME),
+            reopen, style),
         },
 
         /**
@@ -179,7 +184,7 @@ export function createLzFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, reopen, style])=>openFile(
-                host.readWideString?.(name >>> 0, MAX_PATH) ?? '', reopen, style),
+                host.readWideString?.(wholeAddress(name), WHOLE_NAME * 2) ?? '', reopen, style),
         },
 
         /**
@@ -230,14 +235,14 @@ export function createLzFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, buffer])=>{
-                const asked = host.readCString(name >>> 0, MAX_PATH);
+                const asked = host.readCString(wholeAddress(name), WHOLE_NAME);
                 const bytes = load(asked);
                 if (bytes === null)
                 {
                     return LZERROR_BADINHANDLE >>> 0;
                 }
                 const answer = expandedName(asked, readHeader(bytes));
-                host.writeMemory(buffer >>> 0, encodeAnsi(`${answer}\0`));
+                host.writeMemory(wholeAddress(buffer), encodeAnsi(`${answer}\0`));
                 return 1;
             },
         },

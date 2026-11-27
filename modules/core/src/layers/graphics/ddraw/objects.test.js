@@ -13,15 +13,20 @@ import {
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
     DDERR_CLIPPERISUSINGHWND,
+    DDERR_CANTCREATEDC,
     DDERR_DCALREADYCREATED,
     DDERR_INVALIDCAPS,
     DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
+    DDPF_FOURCC,
+    DDPF_LUMINANCE,
     DDERR_NOCLIPPERATTACHED,
     DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
+    DDERR_NOFOCUSWINDOW,
+    DDERR_HWNDALREADYSET,
     DDERR_NOPALETTEATTACHED,
     DDERR_NOTFLIPPABLE,
     DDERR_NOTFOUND,
@@ -29,6 +34,7 @@ import {
     DDERR_SURFACEALREADYATTACHED,
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
+    DDERR_WRONGMODE,
     DDERR_SURFACENOTATTACHED,
     DDERR_NOTONMIPMAPSUBLEVEL,
     DDPCAPS_4BIT,
@@ -48,11 +54,14 @@ import {
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
     DDSCAPS_TEXTURE,
+    DDSCAPS_VIDEOMEMORY,
     DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
+    DDSCL_CREATEDEVICEWINDOW,
     DDSCL_EXCLUSIVE,
     DDSCL_FULLSCREEN,
     DDSCL_NORMAL,
+    DDSCL_SETFOCUSWINDOW,
     DDSD_BACKBUFFERCOUNT,
     DDSD_CAPS,
     DDSD_HEIGHT,
@@ -447,7 +456,8 @@ test('a partial lock points at its own corner and does not change the pitch', ()
     assert.ok(ddraw.destroyed);
 });
 
-test('a malformed lock rectangle is refused, except by a texture with its own copy', ()=>{
+test('a malformed lock rectangle is refused, except by a seventh-generation texture with its'
+    + ' own copy', ()=>{
     const ddraw = withLevel();
     const plain = makeOffscreen(ddraw);
     const managed = makeOffscreen(ddraw, {
@@ -467,6 +477,11 @@ test('a malformed lock rectangle is refused, except by a texture with its own co
     // The lenient answer is the one a program may have been written against.
     assert.equal(managed.lock(inverted).hr, DD_OK);
     assert.equal(managed.unlock(inverted), DD_OK);
+    // Made through an older generation, the same texture refuses it.
+    const older = makeOffscreen(ddraw, { caps: DDSCAPS_TEXTURE, caps2: DDSCAPS2_TEXTUREMANAGE,
+        version: 4 });
+    assert.equal(older.lock(inverted).hr, DDERR_INVALIDPARAMS);
+    assert.equal(older.release(), 0);
 
     // An empty rectangle is well formed: it locks nothing, successfully.
     const empty = { left: 8, top: 8, right: 8, bottom: 16 };
@@ -549,7 +564,7 @@ test('an indexed surface with no palette of its own draws in the primary\'s', ()
     assert.equal(offscreen.getDC().hr, DD_OK);
     assert.equal(made[0].palette?.[0], 0x00800000);
     colours.setEntries(0, [0x00008000]);
-    assert.equal(made[0].palette?.[0], 0x00008000);
+    assert.equal(made[0].palette?.[0], 0x00800000, 'as it was when the DC was made');
 });
 
 test('a device context on one surface says nothing about another', ()=>{
@@ -751,6 +766,108 @@ test('attaching a surface takes a reference and detaching gives it back', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('a chain the program attaches gives its head FRONTBUFFER, the buffer behind BACKBUFFER,'
+    + ' and takes them back when the surfaces leave it (ddraw1 test_surface_attachment)', ()=>{
+    const ddraw = withLevel({ version: 1 });
+    const kind = DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER;
+    /** @param {any} one */
+    const roles = one=>one.caps & kind;
+    const head = makeOffscreen(ddraw, { version: 1 });
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const front = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(roles(back), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER, 'a back buffer heads no front');
+    assert.equal(roles(front), DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER);
+    assert.equal(head.addAttachedSurface(back), DDERR_CANNOTATTACHSURFACE,
+        'a surface in a chain is attached to no other');
+    assert.equal(back.deleteAttachedSurface(front), DD_OK);
+    assert.equal(roles(back), DDSCAPS_BACKBUFFER, 'its own BACKBUFFER stays');
+    assert.equal(roles(front), 0, 'out of a chain no surface is a front buffer');
+
+    assert.equal(head.addAttachedSurface(back), DD_OK);
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(roles(head), DDSCAPS_FLIP | DDSCAPS_FRONTBUFFER);
+    assert.equal(roles(back), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER);
+    assert.equal(roles(front), DDSCAPS_FLIP, 'the third buffer is flippable and nothing else');
+    assert.equal(head.deleteAttachedSurface(back), DD_OK);
+    assert.equal(roles(back), DDSCAPS_BACKBUFFER);
+    assert.equal(roles(front), DDSCAPS_FLIP | DDSCAPS_BACKBUFFER, 'now the one behind the front');
+    assert.equal(head.deleteAttachedSurface(front), DD_OK);
+    assert.equal(roles(front), 0, 'what the chain gave goes with it');
+    assert.equal(roles(head), 0);
+    for (const one of [head, back, front])
+    {
+        assert.equal(one.release(), 0);
+    }
+});
+
+test('a front buffer attached to a lone buffer leads their chain (ddraw1 test_flip)', ()=>{
+    const ddraw = withLevel({ version: 1 });
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const front = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+
+    assert.equal(back.addAttachedSurface(front), DD_OK);
+    assert.equal(front.refCount, 2, 'the surface attached is held, as any attachment');
+    assert.equal(back.refCount, 1);
+    assert.equal(front.flip(null), DD_OK, 'and it is the one that flips');
+    assert.equal(front.deleteAttachedSurface(back), DDERR_CANNOTDETACHSURFACE,
+        'it cannot let go of the buffer from its own end');
+    assert.equal(back.deleteAttachedSurface(front), DD_OK);
+    assert.equal(back.refCount, 1);
+    assert.equal(front.refCount, 1);
+
+    assert.equal(front.caps & DDSCAPS_FRONTBUFFER, 0, 'the chain took its FRONTBUFFER with it');
+    assert.equal(back.release(), 0);
+    assert.equal(front.release(), 0);
+
+    const behind = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER });
+    const leader = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_FRONTBUFFER });
+    assert.equal(behind.addAttachedSurface(leader), DD_OK);
+    assert.equal(behind.release(), 0, 'the buffer behind going lets go of the front it holds');
+    assert.equal(leader.refCount, 1);
+    assert.equal(leader.caps & DDSCAPS_FLIP, 0, 'and the front is out of the chain');
+    assert.equal(leader.release(), 0);
+});
+
+test('a primary in video memory takes a buffer only under exclusive mode', ()=>{
+    const ddraw = withLevel({ version: 1, level: DDSCL_NORMAL });
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE },
+        { version: 1 });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    const back = makeOffscreen(ddraw, { version: 1, caps: DDSCAPS_BACKBUFFER,
+        width: primary.width, height: primary.height });
+
+    assert.equal(primary.addAttachedSurface(back), DDERR_NOEXCLUSIVEMODE);
+    assert.equal(back.refCount, 1);
+    assert.equal(back.release(), 0);
+    assert.equal(primary.release(), 0);
+});
+
+test('the seventh generation attaches only a depth buffer, no generation one of another size, and'
+    + ' an attachment is the generation\'s it was made through (test_surface_attachment)', ()=>{
+    const SEVENTH = 'surface 7';
+    const FIRST = 'surface 1';
+    const seventh = createDirectDraw({ version: 7,
+        surfaceCountOf: key=>(key === SEVENTH ? '7' : key === FIRST ? '1' : key) });
+    seventh.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const a = makeOffscreen(seventh);
+    const b = makeOffscreen(seventh);
+    const z = makeOffscreen(seventh, { caps: DDSCAPS_ZBUFFER });
+    const zSmall = makeOffscreen(seventh, { caps: DDSCAPS_ZBUFFER, width: 32, height: 32 });
+    assert.equal(a.addAttachedSurface(b, SEVENTH), DDERR_CANNOTATTACHSURFACE);
+    assert.equal(a.addAttachedSurface(zSmall, FIRST), DDERR_CANNOTATTACHSURFACE);
+    assert.equal(a.addAttachedSurface(z, SEVENTH), DD_OK);
+    assert.equal(a.addAttachedSurface(z, FIRST), DDERR_CANNOTATTACHSURFACE,
+        'attached through another generation');
+    assert.equal(a.deleteAttachedSurface(z, FIRST), DDERR_SURFACENOTATTACHED);
+    assert.equal(a.deleteAttachedSurface(z, SEVENTH), DD_OK);
+    for (const one of [a, b, z, zSmall])
+    {
+        assert.equal(one.release(), 0);
+    }
+});
+
 test('an attachment refuses the reverse, a mismatched size, and itself', ()=>{
     const ddraw = withLevel();
     const first = makeOffscreen(ddraw);
@@ -775,6 +892,22 @@ test('an attachment refuses the reverse, a mismatched size, and itself', ()=>{
     assert.ok(ddraw.destroyed);
 });
 
+test('a link the runtime made the other way is none of the far surface\'s to detach', ()=>{
+    // ddraw1 test_surface_attachment: a buffer added behind the front goes in
+    // between, and the runtime's link from it onward is no attachment of the
+    // buffer behind it.
+    const { ddraw, front, back1 } = withFlipChain();
+    const added = makeOffscreen(ddraw, { width: front.width, height: front.height });
+    assert.equal(front.addAttachedSurface(added), DD_OK);
+    assert.equal(back1.deleteAttachedSurface(added), DDERR_SURFACENOTATTACHED);
+    assert.equal(added.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE);
+    assert.equal(front.deleteAttachedSurface(added), DD_OK);
+    assert.equal(added.release(), 0);
+    assert.equal(front.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
 test('detaching from the middle of a chain splices rather than truncates', ()=>{
     const ddraw = withLevel();
     const head = makeOffscreen(ddraw);
@@ -785,6 +918,8 @@ test('detaching from the middle of a chain splices rather than truncates', ()=>{
     assert.equal(middle.addAttachedSurface(tail), DD_OK);
     assert.equal(head.addAttachedSurface(tail), DDERR_CANNOTATTACHSURFACE,
         'a chain is a line: nothing takes a second buffer behind it');
+    assert.equal(tail.addAttachedSurface(middle), DDERR_CANNOTATTACHSURFACE,
+        'nor, within a longer chain, the other way round (ddraw1 test_surface_attachment)');
 
     // The loop closes for the walk without a stored link, so the far end is
     // attached to the head and yet cannot be detached from there.
@@ -1001,7 +1136,7 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
         levels.forEach((level, index)=>{
             assert.equal(level.width, Math.max(1, width >> index));
             assert.equal(level.height, Math.max(1, height >> index));
-            assert.equal(level.pitch, level.width * 4);
+            assert.equal(level.pitch, Math.ceil(level.width / 2) * 8);
             assert.equal(level.mipMapCount, expected - index, 'each level counts itself and below');
             assert.equal(level.caps & MIPPED, MIPPED);
             assert.equal(level.caps2 & DDSCAPS2_MIPMAPSUBLEVEL,
@@ -1030,6 +1165,70 @@ test('a complex mip-mapped texture is a chain of halving levels, as long as aske
     assert.equal(ddraw.release('IDirectDraw7'), 0);
 });
 
+test('a DXTn surface off the 4x4 block grid is refused; its lower levels are not', ()=>{
+    // Wine's test_block_formats_creation, every size from 1x1 to 8x8.
+    const ddraw = withLevel();
+    const DXT1 = { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    /** @param {number} width @param {number} height @param {number} [count] */
+    const make = (width, height, count)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | (count === undefined ? 0 : DDSD_MIPMAPCOUNT),
+        caps: count === undefined ? DDSCAPS_TEXTURE : MIPPED,
+        width, height, mipMapCount: count ?? 0, pixelFormat: DXT1,
+    }, { version: 4 });
+    for (const [width, height] of [[1, 1], [2, 4], [4, 6], [8, 3]])
+    {
+        assert.deepEqual(make(width, height), { hr: DDERR_INVALIDPARAMS, surface: null },
+            `${width}x${height}`);
+    }
+    for (const [width, height] of [[4, 4], [8, 4]])
+    {
+        const made = make(width, height);
+        assert.equal(made.hr, DD_OK, `${width}x${height}`);
+        assert.equal(made.surface?.release(), 0);
+    }
+    const chain = make(8, 8, 4);
+    assert.equal(chain.hr, DD_OK, 'levels of 2x2 and 1x1 below a whole top');
+    assert.equal(levelsOf(chain.surface).length, 4);
+    assert.equal(chain.surface?.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0);
+});
+
+test('a cube map is its six faces, the others attached to the first, each with its levels', ()=>{
+    // Wine's ddraw7 test_surface_desc_size and lock tests: the faces of a
+    // DDSCAPS2_CUBEMAP_ALLFACES texture are found from the one handed back by
+    // DDSCAPS2_CUBEMAP and their own face bit, and are let go with it.
+    const CUBEMAP = 0x200;
+    const POSITIVEX = 0x400;
+    const ALLFACES = 0xfc00;
+    const ddraw = withLevel();
+    const made = ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT,
+        caps: MIPPED, caps2: CUBEMAP | ALLFACES,
+        width: 16, height: 16, mipMapCount: 2, pixelFormat: RGB32,
+    }, { version: 7 });
+    assert.equal(made.hr, DD_OK);
+    const root = /** @type {any} */ (made.surface);
+    assert.equal(root.caps2 & (CUBEMAP | ALLFACES), CUBEMAP | POSITIVEX, 'the first face alone');
+    const faces = [root];
+    for (let face = 1; face < 6; face++)
+    {
+        const found = root.getAttachedSurface(0, CUBEMAP | (POSITIVEX << face));
+        assert.equal(found.hr, DD_OK, `face ${face}`);
+        assert.equal(found.surface.caps2 & ALLFACES, POSITIVEX << face);
+        assert.equal(found.surface.width, 16);
+        found.surface.release();
+        faces.push(found.surface);
+    }
+    assert.ok(faces.every(face=>levelsOf(face).length === 2), 'two levels on every face');
+    assert.equal(new Set(faces.map(face=>face.buffer)).size, 6, 'six faces, six buffers');
+    assert.equal(root.enumAttachedSurfaces().length, 6, 'its level, then the five faces');
+    assert.equal(ddraw.surfaceCount, 12);
+    assert.equal(root.release(), 0);
+    assert.equal(ddraw.surfaceCount, 0, 'the faces and their levels go with the first');
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
 test('before IDirectDraw7 a full mip chain ends when the shorter side reaches one', ()=>{
     // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap expect six levels of
     // 128x32 and of 32x64, where ddraw7 expects eight and seven.
@@ -1047,7 +1246,7 @@ test('before IDirectDraw7 a full mip chain ends when the shorter side reaches on
     }
 });
 
-test('before IDirectDraw7 a mip sublevel holds a palette of its own', ()=>{
+test('before IDirectDraw7 a mip sublevel holds a palette and a colour key of its own', ()=>{
     // Wine's ddraw1, ddraw2 and ddraw4 test_mipmap_palette set one on every level.
     for (const version of /** @type {const} */ ([1, 2, 4]))
     {
@@ -1059,6 +1258,10 @@ test('before IDirectDraw7 a mip sublevel holds a palette of its own', ()=>{
             new Array(256).fill(0)).palette);
         assert.equal(level1.getPalette().hr, DDERR_NOPALETTEATTACHED);
         assert.equal(level1.setPalette(palette), DD_OK, `version ${version}`);
+        // And a colour key of its own (test_ck_complex).
+        assert.equal(level1.setColorKey(DDCKEY_SRCBLT, { low: 0xff, high: 0xff }), DD_OK);
+        assert.equal(level1.getColorKey(DDCKEY_SRCBLT).key?.low, 0xff);
+        assert.equal(top.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY, 'the top has none');
         const got = level1.getPalette();
         assert.equal(got.palette, palette);
         got.palette.release();
@@ -1318,7 +1521,7 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.equal(dc.dc, 0x7701, 'the handle is the one the maker chose');
     assert.deepEqual(made, [{
         width: 10, height: 6, pitch: 40, bitCount: 32, bits: surface.buffer, palette: null,
-        format: '555',
+        format: '555', sizeImage: 0,
     }]);
     assert.equal(surface.dc, 0x7701);
     assert.equal(ddraw.surfaceWithDc(0x7701), surface);
@@ -1341,10 +1544,8 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     assert.ok(ddraw.destroyed);
 });
 
-test('a device context over an indexed surface sees the palette change while it is held', ()=>{
-    // A program that animates its palette while drawing text through the DC
-    // expects the new colours: the DC is given the palette's live table, not
-    // a copy made when it was asked for.
+test('a device context over an indexed surface keeps the palette it was made with'
+    + ' (test_palette_gdi)', ()=>{
     /** @type {any[]} */
     const made = [];
     const ddraw = createDirectDraw({
@@ -1367,8 +1568,8 @@ test('a device context over an indexed surface sees the palette change while it 
     assert.equal(table[3], 0, 'an entry never written is black');
     // A PALETTEENTRY is red in its low byte; the pixel is 0x00RRGGBB.
     assert.equal(palette.setEntries(3, [0x00112233]), DD_OK);
-    assert.equal(made[0].palette[3], 0x00332211, 'the held DC reads the new entry');
-    assert.equal(made[0].palette, table, 'through the same table');
+    assert.equal(made[0].palette[3], 0, 'the held DC keeps the entry it was made with');
+    assert.equal(made[0].palette, table);
 });
 
 // --- what the object knows about its primary, and a surface about its changes ---
@@ -1581,4 +1782,343 @@ test('a new palette on the primary, or a new entry in it, is on the screen at on
     assert.equal(palette.release(), 0);
     assert.equal(spare.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a surface of 1, 2 or 4 bits a pixel has the pitch its pixels share bytes by, to eight', ()=>{
+    const ddraw = withLevel();
+    // DDPF_PALETTEINDEXED1, 2, 4 and 8; a row starts on an eight-byte
+    // boundary, as the runtime lays rows out (test_create_surface_pitch).
+    for (const [bits, flag, width, pitch] of [[1, 0x800, 9, 8], [2, 0x1000, 5, 8], [4, 0x8, 5, 8],
+        [8, 0x20, 5, 8], [8, 0x20, 17, 24]])
+    {
+        const made = ddraw.createSurface({
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+            caps: DDSCAPS_OFFSCREENPLAIN, width, height: 2,
+            pixelFormat: { size: 0x20, flags: flag, fourCC: 0,
+                bitCount: bits, redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 },
+        });
+        assert.equal(made.hr, DD_OK);
+        const surface = /** @type {any} */ (made.surface);
+        assert.equal(surface.pitch, pitch, `${bits} bits by ${width}`);
+        surface.release();
+    }
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a surface of a FOURCC the device does not name is refused', ()=>{
+    const ddraw = withLevel();
+    // 'YUY2'.
+    const made = ddraw.createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x32595559, bitCount: 0,
+            redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 },
+    });
+    assert.equal(made.hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(made.surface, null);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+});
+
+test('a surface made over the program\'s memory takes its pitch, and one made by the runtime a row'
+    + ' on eight bytes (test_create_surface_pitch)', ()=>{
+    const ddraw = withLevel();
+    const request = (/** @type {number} */ caps, /** @type {number} */ flags,
+        /** @type {number} */ pitch, /** @type {number} */ pointer)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | flags, caps, width: 63, height: 63,
+        pixelFormat: RGB32, pitch, surfacePointer: pointer });
+    const made = request(DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, 0, 0, 0);
+    assert.equal(made.surface?.pitch, 0x100);
+    const before = ddraw.videoBytes;
+    const video = request(DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN, 0, 0, 0);
+    assert.equal(ddraw.videoBytes, before + 0x100 * 63, 'video memory taken');
+    const LPSURFACE = 0x800;
+    const PITCH = 0x8;
+    const plain = DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN;
+    assert.equal(request(plain, LPSURFACE, 0, 0x9000).hr, DDERR_INVALIDPARAMS, 'no pitch');
+    assert.equal(request(plain, LPSURFACE | PITCH, 0x100, 0).hr, DDERR_INVALIDPARAMS, 'no memory');
+    assert.equal(request(plain, LPSURFACE | PITCH, 0xfe, 0x9000).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(plain, LPSURFACE | PITCH, 0xf8, 0x9000).hr, DDERR_INVALIDPARAMS,
+        'shorter than a row');
+    assert.equal(request(DDSCAPS_VIDEOMEMORY | DDSCAPS_OFFSCREENPLAIN, LPSURFACE | PITCH, 0x100,
+        0x9000).hr, DDERR_INVALIDCAPS);
+    const texture = DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+    const single = request(texture, LPSURFACE | PITCH, 0x100, 0x9000);
+    assert.equal(single.hr, DD_OK, 'a mipmap of one level (test_user_memory)');
+    assert.equal(request(texture | DDSCAPS_COMPLEX, LPSURFACE | PITCH, 0x100, 0x9000).hr,
+        DDERR_INVALIDCAPS, 'but no chain over the program\'s memory');
+    assert.equal(single.surface?.release(), 0);
+    assert.equal(request(plain | 0x04000000, 0, 0, 0).hr, DDERR_INVALIDCAPS,
+        'ALLOCONLOAD is a texture\'s');
+    const own = request(plain, LPSURFACE | PITCH, 0xfc, 0x9000);
+    assert.equal(own.hr, DD_OK);
+    assert.equal(own.surface?.pitch, 0xfc);
+    assert.equal(own.surface?.buffer, 0x9000);
+    for (const one of [made, video, own])
+    {
+        assert.equal(one.surface?.release(), 0);
+    }
+    assert.equal(ddraw.videoBytes, before);
+});
+
+test('a surface\'s DC reports no image size, a 16-bit one its masks, and a luminance surface has'
+    + ' none (test_getdc)', ()=>{
+    /** @type {any[]} */
+    const made = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const make = (/** @type {any} */ pixelFormat)=>{
+        const result = ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT,
+            caps: DDSCAPS_OFFSCREENPLAIN, caps2: 0, width: 8, height: 8, backBufferCount: 0,
+            pixelFormat });
+        assert.equal(result.hr, DD_OK);
+        return /** @type {NonNullable<typeof result.surface>} */ (result.surface);
+    };
+    const r5g6b5 = make({ size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16,
+        redMask: 0xf800, greenMask: 0x07e0, blueMask: 0x001f, alphaMask: 0 });
+    assert.equal(r5g6b5.getDC().hr, DD_OK);
+    assert.equal(made[0].sizeImage, 0);
+    assert.equal(made[0].compression, 3, 'BI_BITFIELDS');
+    assert.deepEqual(made[0].bitfields, [0xf800, 0x07e0, 0x001f]);
+
+    assert.equal(makeOffscreen(ddraw).getDC().hr, DD_OK);
+    assert.equal(made[1].sizeImage, 0);
+    assert.equal(made[1].compression, undefined, 'a 32-bit one is BI_RGB');
+
+    const a8l8 = make({ size: 0x20, flags: DDPF_LUMINANCE | 1, fourCC: 0, bitCount: 16,
+        redMask: 0xff, greenMask: 0, blueMask: 0, alphaMask: 0xff00 });
+    assert.equal(a8l8.getDC().hr, DDERR_CANTCREATEDC);
+    assert.equal(made.length, 2, 'no DC is made for it');
+});
+
+test('a buffer attached to a chain the runtime made goes in behind the surface, and the front'
+    + ' counts it (test_surface_attachment)', ()=>{
+    const { ddraw, front, back1 } = withFlipChain();
+    const added = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN, width: front.width,
+        height: front.height });
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(front.addAttachedSurface(added), DD_OK);
+    assert.equal(front.flipNext, added);
+    assert.equal(added.flipNext, back1, 'what was behind the front is behind it');
+    assert.equal(front.backBufferCount, 4);
+    assert.equal(back1.backBufferCount, 0, 'only the front counts');
+    assert.equal(added.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE,
+        'the link it took over is still the runtime\'s');
+    assert.equal(front.addAttachedSurface(added), DDERR_SURFACEALREADYATTACHED);
+
+    assert.equal(front.deleteAttachedSurface(added), DD_OK);
+    assert.equal(front.flipNext, back1);
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(front.deleteAttachedSurface(back1), DDERR_CANNOTDETACHSURFACE,
+        'and goes back to the front as the runtime\'s');
+
+    assert.equal(back1.addAttachedSurface(added), DD_OK, 'further down the chain as well');
+    assert.equal(front.backBufferCount, 4);
+    assert.ok(added.caps & DDSCAPS_FLIP);
+    assert.equal(back1.deleteAttachedSurface(added), DD_OK);
+    assert.equal(front.backBufferCount, 3);
+    assert.equal(added.caps & DDSCAPS_FLIP, 0);
+});
+
+test('blocks in the program\'s memory are named by their whole size, never a pitch'
+    + ' (test_block_formats_creation)', ()=>{
+    const ddraw = withLevel();
+    const dxt1 = { size: 0x20, flags: DDPF_FOURCC, fourCC: 0x31545844, bitCount: 0,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const request = (/** @type {number} */ flags, /** @type {number} */ size)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | 0x800 | flags,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+        width: 8, height: 8, pixelFormat: dxt1, pitch: size, surfacePointer: 0x7000 });
+    const LINEARSIZE = 0x00080000;
+    const PITCH = 0x8;
+    // Four 8-byte blocks: two rows of two.
+    const whole = request(LINEARSIZE, 32);
+    assert.equal(whole.hr, DD_OK);
+    assert.equal(whole.surface?.programMemory, true);
+    assert.equal(whole.surface?.buffer, 0x7000);
+    assert.equal(request(LINEARSIZE, 33).hr, DD_OK, 'more is room to spare');
+    assert.equal(request(LINEARSIZE, 31).hr, DDERR_INVALIDPARAMS, 'less is not every block');
+    assert.equal(request(LINEARSIZE, 0).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(PITCH, 32).hr, DDERR_INVALIDPARAMS, 'blocks have no pitch');
+    assert.equal(request(PITCH | LINEARSIZE, 32).hr, DDERR_INVALIDPARAMS);
+    assert.equal(request(0, 32).hr, DDERR_INVALIDPARAMS, 'a size has to be named');
+    // Through IDirectDraw4 a pitch names them, whatever it says.
+    const older = (/** @type {number} */ flags, /** @type {number} */ size)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT | 0x800 | flags,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE,
+        width: 8, height: 8, pixelFormat: dxt1, pitch: size, surfacePointer: 0x7000 },
+    { version: 4 }).hr;
+    assert.equal(older(PITCH, 0), DD_OK);
+    assert.equal(older(PITCH | LINEARSIZE, 32), DD_OK);
+    assert.equal(older(LINEARSIZE, 31), DDERR_INVALIDPARAMS);
+    assert.equal(older(0, 32), DDERR_INVALIDPARAMS);
+});
+
+test('a depth buffer asked for by bits alone is depth only, 24 of them in a 32-bit pixel'
+    + ' (test_depth_readback, ddraw2)', ()=>{
+    const ddraw = withLevel();
+    for (const [bits, bytes, mask] of [[16, 2, 0xffff], [24, 4, 0xffffff], [32, 4, 0xffffffff]])
+    {
+        const made = ddraw.createSurface({ flags: SIZED | 0x40, caps: 0x20000, width: 4, height: 4,
+            zBufferBitDepth: bits });
+        assert.equal(made.hr, DD_OK);
+        const surface = /** @type {NonNullable<typeof made.surface>} */ (made.surface);
+        assert.equal(surface.bytesPerPixel, bytes, `${bits} bits`);
+        assert.equal(surface.pixelFormat.greenMask >>> 0, mask, 'the depth mask');
+        assert.equal(surface.pixelFormat.flags, 0x400, 'DDPF_ZBUFFER, no stencil');
+        assert.equal(surface.release(), 0);
+    }
+});
+
+test('a palette of alphas is attached to a texture alone (test_palette_alpha)', ()=>{
+    const ddraw = withLevel();
+    const made = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256 | 0x400,
+        new Array(256).fill(0));
+    const palette = /** @type {any} */ (made.palette);
+    const texture = makeOffscreen(ddraw, { caps: DDSCAPS_TEXTURE });
+    const plain = makeOffscreen(ddraw);
+    assert.equal(plain.setPalette(palette), 0x88760250, 'DDERR_INVALIDSURFACETYPE');
+    assert.equal(texture.setPalette(palette), DD_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(plain.release(), 0);
+    assert.equal(palette.release(), 0);
+});
+
+test('a texture in a format the device does not offer is made in system memory, never in video'
+    + ' memory (test_unsupported_formats)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, textureFormat: format=>format.bitCount === 32 });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const p8 = { size: 0x20, flags: DDPF_PALETTEINDEXED8 | DDPF_RGB, fourCC: 0, bitCount: 8,
+        redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+    const make = (/** @type {number} */ caps, /** @type {any} */ pixelFormat, caps2 = 0)=>
+        ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_TEXTURE | caps,
+            caps2, width: 4, height: 4, pixelFormat });
+    assert.equal(make(DDSCAPS_VIDEOMEMORY, p8).hr >>> 0, 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    const placed = make(0, p8);
+    assert.equal(placed.hr, DD_OK);
+    assert.ok((/** @type {any} */ (placed.surface).caps & DDSCAPS_SYSTEMMEMORY) !== 0);
+    assert.equal(make(0, p8, DDSCAPS2_TEXTUREMANAGE).hr, DD_OK, 'a managed one is placed anyway');
+    const offered = make(0, RGB32);
+    assert.ok((/** @type {any} */ (offered.surface).caps & DDSCAPS_VIDEOMEMORY) !== 0);
+});
+
+test('before IDirectDraw4 a surface is never made over the program\'s memory'
+    + ' (test_create_surface_pitch, ddraw1 and ddraw2)', ()=>{
+    for (const version of /** @type {const} */ ([1, 2]))
+    {
+        const ddraw = withLevel({ version });
+        const made = ddraw.createSurface({ flags: SIZED | DDSD_PIXELFORMAT | 0x800 | 0x8,
+            caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_OFFSCREENPLAIN, width: 63, height: 63,
+            pixelFormat: RGB32, pitch: 0x100, surfacePointer: 0x7000 }, { version });
+        assert.equal(made.hr, DDERR_INVALIDPARAMS, `version ${version}`);
+    }
+});
+
+test('without hardware a depth buffer named by its pixel format is 16 or 32 bits too'
+    + ' (test_caps, ddraw4)', ()=>{
+    const ddraw = createDirectDraw({ version: 4, emulated: true });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const depth = (/** @type {number} */ bits)=>ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT, caps: DDSCAPS_ZBUFFER, width: 8, height: 8,
+        pixelFormat: { size: 0x20, flags: 0x400, fourCC: 0, bitCount: bits, redMask: 0,
+            greenMask: 0xffffffff >>> (32 - bits), blueMask: 0, alphaMask: 0 } },
+    { version: 4 }).hr >>> 0;
+    assert.equal(depth(24), 0x88760091, 'DDERR_INVALIDPIXELFORMAT');
+    assert.equal(depth(16), DD_OK);
+});
+
+test('a mode set elsewhere is the object\'s mode too, and loses its video memory'
+    + ' (test_coop_level_mode_set)', ()=>{
+    const screen = { width: 64, height: 48 };
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48,
+        screenMode: ()=>screen, registryMode: ()=>({ width: 32, height: 24 }) });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(primary.isLost(), DD_OK);
+
+    // Its own mode is the display's before the display is told.
+    assert.equal(ddraw.setDisplayMode(40, 30, 32), DD_OK);
+    assert.equal(ddraw.ownMode.width, 40);
+    assert.equal(ddraw.modeSet, true);
+    Object.assign(screen, { width: 40, height: 30 });
+    assert.equal(ddraw.displayMode.width, 40);
+    assert.equal(primary.isLost(), DDERR_SURFACELOST, 'its own change loses it too');
+    assert.equal(ddraw.restoreDisplayMode(), DD_OK);
+    assert.deepEqual([ddraw.ownMode.width, ddraw.modeSet], [32, false], 'the registry\'s');
+    Object.assign(screen, { width: 32, height: 24 });
+    assert.equal(primary.restore(), DDERR_WRONGMODE);
+
+    // Another sets the display: this object's mode follows and its memory goes.
+    const other = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY });
+    assert.equal(other.isLost(), DD_OK);
+    Object.assign(screen, { width: 64, height: 48 });
+    assert.equal(other.isLost(), DDERR_SURFACELOST);
+    assert.equal(ddraw.displayMode.width, 64);
+    assert.equal(primary.restore(), DD_OK, 'the primary\'s own mode again');
+});
+
+test('the level\'s window losing the activation to another thread\'s window withholds the screen'
+    + ' as the application\'s deactivation does (test_lost_device)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48 });
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    const vidmem = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY });
+    const sysmem = makeOffscreen(ddraw, { caps: DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY });
+
+    ddraw.setWindowInactive(true);
+    assert.deepEqual([vidmem.isLost(), sysmem.isLost()], [DDERR_SURFACELOST, DD_OK]);
+    assert.equal(ddraw.testCooperativeLevel(), DDERR_NOEXCLUSIVEMODE);
+    assert.equal(vidmem.restore(), DDERR_WRONGMODE, 'not while the window is in the background');
+    ddraw.setWindowInactive(false);
+    assert.equal(ddraw.testCooperativeLevel(), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+
+    // Giving the screen back with the mode put back takes the memory too,
+    // unless the level stays full screen.
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL | DDSCL_FULLSCREEN,
+        { putsModeBack: true }), DD_OK);
+    assert.equal(vidmem.isLost(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL), DD_OK);
+    assert.equal(vidmem.isLost(), DD_OK, 'the first generation\'s way: kept');
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN), DD_OK);
+    assert.equal(vidmem.restore(), DD_OK);
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL, { putsModeBack: true }), DD_OK);
+    assert.equal(vidmem.isLost(), DDERR_SURFACELOST);
+});
+
+test('SetCooperativeLevel\'s flags are weighed before anything changes'
+    + ' (test_coop_level_create_device_window)', ()=>{
+    const ddraw = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 48 });
+    const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+    assert.equal(ddraw.planCooperativeLevel(0, 0), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | DDSCL_NORMAL),
+        DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_EXCLUSIVE), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, both), DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW | DDSCL_FULLSCREEN),
+        DDERR_INVALIDPARAMS);
+    assert.equal(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | both),
+        DDERR_NOFOCUSWINDOW);
+    assert.deepEqual(ddraw.planCooperativeLevel(HWND, DDSCL_NORMAL), { deviceWindow: false });
+    assert.deepEqual(ddraw.planCooperativeLevel(HWND, both), { deviceWindow: false });
+    assert.deepEqual(ddraw.planCooperativeLevel(0,
+        DDSCL_SETFOCUSWINDOW | DDSCL_CREATEDEVICEWINDOW | both), { deviceWindow: true });
+
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW), DD_OK);
+    assert.equal(ddraw.focusWindow, HWND);
+    assert.deepEqual(ddraw.planCooperativeLevel(0, DDSCL_CREATEDEVICEWINDOW | both),
+        { deviceWindow: true });
+    ddraw.deviceWindowMade(0x20004);
+    assert.equal(ddraw.setCooperativeLevel(0x20004, DDSCL_CREATEDEVICEWINDOW | both), DD_OK);
+    assert.equal(ddraw.planCooperativeLevel(HWND, DDSCL_SETFOCUSWINDOW), DDERR_HWNDALREADYSET,
+        'not while the screen is held through a window');
+    assert.equal(ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL), DD_OK);
+    assert.deepEqual([ddraw.focusWindow, ddraw.deviceWindow], [0, 0], 'normal mode forgets both');
 });

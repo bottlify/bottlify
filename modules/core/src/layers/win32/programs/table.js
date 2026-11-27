@@ -6,7 +6,8 @@
 
 /**
  * The programs Windows keeps in its system folder and this engine provides
- * itself: msiexec, rundll32, regsvr32.
+ * itself: msiexec, rundll32, regsvr32, reg, regedit, lodctr, unlodctr, notepad
+ * and winver.
  *
  * Installers, bootstrappers and uninstall strings start them by name -- `MsiExec.exe
  * /X{GUID}`, `rundll32 setupapi,InstallHinfSection ...`, `regsvr32 /s x.dll` --
@@ -26,11 +27,16 @@ import { synthesiseProgram } from '../../loader/internal/synth.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { versionStringOf } from '../version/functions.js';
-import { DSETUPERR_SUCCESS } from '../dsetup/functions.js';
 import { runMsiexec } from './msiexec.js';
 import { runRundll32 } from './rundll32.js';
 import { runRegsvr32 } from './regsvr32.js';
+import { runReg } from './reg.js';
+import { runRegedit } from './regedit.js';
 import { runNotepad } from './notepad.js';
+import { runDxsetup } from './dxsetup.js';
+import { runFrameworkSetup } from './netfx.js';
+import { runLodctr } from './lodctr.js';
+import { runWinver } from './winver.js';
 
 /** Where the programs are: GetSystemDirectory's answer. */
 export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -40,6 +46,13 @@ export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * the engine's own, so it is never a file a program brought.
  */
 export const PROGRAMS_LIBRARY = 'bottlify.dll';
+
+/**
+ * A 64-bit machine's folder of 32-bit system programs, and the name a 32-bit
+ * process there reaches the 64-bit system folder by (`wow64-files.js`).
+ */
+export const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
+export const SYSNATIVE_DIRECTORY = 'C:\\WINDOWS\\Sysnative';
 
 /** The Windows directory, where Notepad is too. */
 export const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -56,8 +69,13 @@ export const SYSTEM_PROGRAMS = new Map([
     ['msiexec.exe', { routine: 'msiexec', run: runMsiexec }],
     ['rundll32.exe', { routine: 'rundll32', run: runRundll32 }],
     ['regsvr32.exe', { routine: 'regsvr32', run: runRegsvr32 }],
+    ['reg.exe', { routine: 'reg', run: runReg }],
+    ['regedit.exe', { routine: 'regedit', run: runRegedit, directories: [WINDOWS_DIRECTORY] }],
+    ['lodctr.exe', { routine: 'lodctr', run: runLodctr }],
+    ['unlodctr.exe', { routine: 'unlodctr', run: runLodctr }],
     ['notepad.exe', { routine: 'notepad', run: runNotepad,
         directories: [WINDOWS_DIRECTORY, SYSTEM_DIRECTORY] }],
+    ['winver.exe', { routine: 'winver', run: runWinver }],
 ]);
 
 /**
@@ -68,15 +86,25 @@ export const SYSTEM_PROGRAMS = new Map([
  * the drawing layer answers every DirectX library whatever a setup copies.
  * Run, it found XP's own DirectX files missing from the system folder, copied
  * them in, and answered "succeeded, restart needed" -- which a game's
- * installer stops at. In its place it puts nothing down and succeeds, with no
- * window: the licence it shows is for files it would not install.
+ * installer stops at. In its place it installs only the optional components
+ * beside it - D3DX, the shader compilers, XAudio2 - and succeeds with no
+ * window (`dxsetup.js`).
  *
- * @type {readonly { routine: string, company: string, original: string,
+ * The .NET Framework 4's setup, any of 4.0 to 4.8 and offline or web: the
+ * Framework is a layer the embedder mounts, and the setup asks for it and
+ * succeeds (`netfx.js`, A249).
+ *
+ * Each is known by `is`, asked a field of the version block (`CompanyName`).
+ *
+ * @type {readonly { routine: string, is: (field: (name: string) => string | null) => boolean,
  *     run: (context: import('./msiexec.js').ProgramContext) => Promise<number> }[]}
  */
 export const PROGRAMS_IN_PLACE = [
-    { routine: 'dxsetup', company: 'Microsoft Corporation', original: 'dxsetup.exe',
-        run: async()=>DSETUPERR_SUCCESS },
+    { routine: 'dxsetup', is: field=>field('CompanyName') === 'Microsoft Corporation'
+        && field('OriginalFilename')?.toLowerCase() === 'dxsetup.exe', run: runDxsetup },
+    { routine: 'netfxsetup', is: field=>field('CompanyName') === 'Microsoft Corporation'
+        && /^Microsoft \.NET Framework 4(\.\d+)*( Client Profile)? Setup$/
+            .test(field('FileDescription') ?? ''), run: runFrameworkSetup },
 ];
 
 const RT_VERSION = 16;
@@ -92,7 +120,7 @@ export function programInPlaceOf(executable){
     let block;
     try
     {
-        const image = parsePe(executable);
+        const image = parsePe(executable, { wide: true });
         const found = findResource(executable, image, RT_VERSION, 1);
         const at = found ? rvaToFileOffset(image, found.rva) : -1;
         block = found && at >= 0 ? executable.subarray(at, at + found.size) : null;
@@ -100,10 +128,9 @@ export function programInPlaceOf(executable){
     catch {
         return null;
     }
-    const company = block && versionStringOf(block, 'CompanyName');
-    const original = block && versionStringOf(block, 'OriginalFilename')?.toLowerCase();
-    const program = PROGRAMS_IN_PLACE.find(each=>each.company === company
-        && each.original === original);
+    /** @param {string} name */
+    const field = name=>(block ? versionStringOf(block, name) : null);
+    const program = block ? PROGRAMS_IN_PLACE.find(each=>each.is(field)) : undefined;
     return program ? synthesiseProgram({ library: PROGRAMS_LIBRARY, routine: program.routine })
         .bytes : null;
 }
@@ -117,22 +144,35 @@ export function programInPlaceOf(executable){
  * @returns {string | null}  its routine
  */
 export function systemProgramAt(path){
-    const normal = path.trim().replaceAll('/', '\\').replace(/\\+/g, '\\').toLowerCase();
-    const cut = normal.lastIndexOf('\\');
-    const program = SYSTEM_PROGRAMS.get(normal.slice(cut + 1));
+    const { folder, name } = splitPath(path);
+    const program = SYSTEM_PROGRAMS.get(name);
+    // What stands in the system folder stands in the 32-bit one too.
     const directories = program?.directories ?? [SYSTEM_DIRECTORY];
-    return program && directories.some(each=>each.toLowerCase() === normal.slice(0, cut))
-        ? program.routine : null;
+    const homes = directories.includes(SYSTEM_DIRECTORY)
+        ? [...directories, WOW64_DIRECTORY, SYSNATIVE_DIRECTORY] : directories;
+    return program && homes.some(each=>each.toLowerCase() === folder) ? program.routine : null;
 }
 
+/** @param {string} path */
+const splitPath = path=>{
+    const normal = path.trim().replaceAll('/', '\\').replace(/\\+/g, '\\').toLowerCase();
+    const cut = normal.lastIndexOf('\\');
+    return { folder: normal.slice(0, cut), name: normal.slice(cut + 1) };
+};
+
 /**
- * The image of the program a path names, or null when it names none.
+ * The image of the program a path names, or null when it names none: 32-bit
+ * in SysWOW64 and on a 32-bit machine, 64-bit elsewhere on a 64-bit one, as
+ * Windows keeps its programs.
  *
  * @param {string} path
+ * @param {'x86' | 'amd64'} [machine]
  * @returns {Uint8Array | null}
  */
-export function systemProgramImage(path){
+export function systemProgramImage(path, machine = 'x86'){
     const routine = systemProgramAt(path);
-    return routine === null ? null
-        : synthesiseProgram({ library: PROGRAMS_LIBRARY, routine }).bytes;
+    return routine === null ? null : synthesiseProgram({ library: PROGRAMS_LIBRARY, routine,
+        long: machine === 'amd64' && splitPath(path).folder !== WOW64_DIRECTORY.toLowerCase() })
+        .bytes;
 }
+

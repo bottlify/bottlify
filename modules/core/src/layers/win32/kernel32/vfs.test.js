@@ -13,7 +13,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { createVolume } from './vfs.js';
+import { createSessionSource } from '../../filesystem/internal/session-source.js';
+import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
+import { testCache } from '../../cache/testing.fixture.js';
+import { createVolume, FETCHED_PIECE_BYTES, KEPT_PART_BYTES, KEPT_READ_MIN,
+    MISS_FETCHES } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
@@ -103,6 +107,157 @@ test('a write into a file whose blocks are not resident waits for them, as a rea
     vol.close(node);
 });
 
+test('a file whose blocks are not resident has its end set once they are, as a write', async()=>{
+    // A game sets the end of its own data file (The Sims 2 Legacy Collection,
+    // a lot template): the copy up reads the blocks under it, and absent ones
+    // stopped the process where a write waits for them.
+    const fs = await filesystemModule.create({});
+    const absent = [{ index: 3 }];
+    let resident = false;
+    /** @type {any[]} */
+    const fetched = [];
+    const bundled = Object.create(fs);
+    bundled.setEndOfFile = (/** @type {any} */ node)=>{
+        if (!resident)
+        {
+            throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS', blocks: absent });
+        }
+        return fs.setEndOfFile(node);
+    };
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetched.push(...blocks);
+        resident = true;
+    }));
+    const node = vol.open('C:\\lot.package', { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array([1, 2, 3, 4]));
+
+    assert.throws(()=>vol.truncate(node, 2), /not resident/,
+        'the synchronous cut still reports the miss to a caller that cannot wait');
+    const pending = vol.truncateOrFetch(node, 2);
+    assert.equal(typeof pending?.then, 'function');
+    await pending;
+    assert.deepEqual(fetched, absent, 'the blocks the miss named are the ones fetched');
+    assert.deepEqual([...vol.read(node, 0, 8)], [1, 2], 'the file ends where it was asked to');
+    assert.equal(vol.truncateOrFetch(node, 1), undefined, 'resident: done at once');
+    vol.close(node);
+});
+
+test('a read larger than the blocks kept at once arrives whole, a piece at a time', async()=>{
+    // Where blocks are kept in the heap only a bounded number stay: a program
+    // that maps a 241 MiB archive whole needs more than that, and a read
+    // that fetched every block before copying any found its first ones
+    // evicted by its last.
+    const fs = await filesystemModule.create({});
+    const BLOCK = 1 << 20;
+    const KEPT = 12;
+    const size = 3 * FETCHED_PIECE_BYTES + 12345;
+    const writer = createVolume(fs);
+    const made = writer.open('C:\\archive.ung', { read: true, write: true, create: true });
+    const contents = new Uint8Array(size).map((unused, index)=>(index * 7 + (index >>> 20)) & 0xff);
+    writer.write(made, 0, contents);
+    writer.close(made);
+
+    /** @type {number[]} */
+    const resident = [];
+    let at = 0;
+    const bundled = Object.create(fs);
+    /** @param {any} node @param {number} offset @param {any} from */
+    const seek = (node, offset, from)=>{
+        at = offset;
+        return fs.seek(node, offset, from);
+    };
+    bundled.seek = seek;
+    bundled.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        const end = Math.min(at + length, size);
+        const absent = [];
+        for (let index = Math.floor(at / BLOCK); index * BLOCK < end; index++)
+        {
+            if (!resident.includes(index))
+            {
+                absent.push({ index });
+            }
+        }
+        if (absent.length > 0)
+        {
+            throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS', blocks: absent });
+        }
+        return fs.read(node, length);
+    };
+    let fetches = 0;
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetches++;
+        for (const { index } of blocks)
+        {
+            resident.push(index);
+            if (resident.length > KEPT)
+            {
+                resident.shift();
+            }
+        }
+    }));
+    const node = vol.open('C:\\archive.ung', { read: true });
+    const read = await vol.read(node, 0, size);
+    assert.equal(read.length, size);
+    assert.ok(read.every((/** @type {number} */ byte, /** @type {number} */ index)=>
+        byte === contents[index]), 'every byte is the file\'s');
+    assert.equal(fetches, Math.ceil(size / FETCHED_PIECE_BYTES), 'one fetch a piece');
+    const tail = await vol.read(node, size - 100, 1000);
+    assert.equal(tail.length, 100, 'a read past the end stops at it');
+    vol.close(node);
+});
+
+test('a read whose fetched blocks are gone again before it comes back fetches them again,'
+    + ' and one whose fetch never delivers fails saying so', async()=>{
+    // A cache in the heap is bounded: another thread's reads, landing between
+    // a fetch and the read it was for, push the fetched blocks out, and a read
+    // that waited on another read's request finds nothing when that failed.
+    const fs = await filesystemModule.create({});
+    const writer = createVolume(fs);
+    const made = writer.open('C:\\data.dat', { read: true, write: true, create: true });
+    const contents = new Uint8Array(4096).map((unused, index)=>index * 13 & 0xff);
+    writer.write(made, 0, contents);
+    writer.close(made);
+
+    let resident = false;
+    const bundled = Object.create(fs);
+    bundled.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        if (!resident)
+        {
+            throw Object.assign(new Error('not resident'),
+                { code: 'BLOCK_MISS', blocks: [{ index: 0 }] });
+        }
+        return fs.read(node, length);
+    };
+    /** @param {number} lost  Fetches whose block is gone before the read is back. */
+    const reading = async lost=>{
+        resident = false;
+        let fetches = 0;
+        const vol = /** @type {any} */ (createVolume(bundled, async()=>{
+            fetches++;
+            resident = fetches > lost;
+        }));
+        const node = vol.open('C:\\data.dat', { read: true });
+        try
+        {
+            return { read: await vol.read(node, 100, 1000), fetches };
+        }
+        catch (e){
+            return { error: /** @type {Error} */ (e).message, fetches };
+        }
+        finally
+        {
+            vol.close(node);
+        }
+    };
+
+    const evicted = await reading(1);
+    assert.deepEqual(evicted.read, contents.subarray(100, 1100), 'the read arrives whole');
+    assert.equal(evicted.fetches, 2, 'fetched again once');
+    const never = await reading(Infinity);
+    assert.equal(never.fetches, MISS_FETCHES, 'a bounded number of fetches');
+    assert.match(String(never.error), /still absent after/);
+});
+
 test('an offset is honoured even when it goes backwards', async()=>{
     const { volume: vol } = await volume();
     const node = vol.open('C:\\a.bin', { read: true, write: true, create: true });
@@ -169,6 +324,105 @@ test('a wildcard filters an enumeration and never opens anything', async()=>{
     assert.equal(vol.open('C:\\*.sav', { read: true }), null, 'a pattern is not a file name');
 });
 
+test('a move that copies blocks not resident waits for them, its partial copy gone', async()=>{
+    // A move from the bundle to the overlay copies the file chunk by chunk;
+    // the copy meets an absent block, which the layer throws as a miss after
+    // the destination was made. The move is undone, the blocks fetched, and
+    // it is done again: twice here, a block missing on each of two tries.
+    const fs = await filesystemModule.create({});
+    const node = fs.open('C:\\pkg.zip', { write: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(node, new Uint8Array([1, 2, 3]));
+    fs.close(node);
+    let misses = 2;
+    /** @type {any[]} */
+    const fetched = [];
+    const bundled = Object.create(fs);
+    bundled.rename = (/** @type {string} */ from, /** @type {string} */ to)=>{
+        if (misses > 0)
+        {
+            // As the layer leaves it: the destination made, nothing in it.
+            fs.close(fs.open(to, { write: true, disposition: fs.Disposition.CREATE_NEW }));
+            throw Object.assign(new Error('not resident'),
+                { code: 'BLOCK_MISS', blocks: [{ index: misses }] });
+        }
+        return fs.rename(from, to);
+    };
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetched.push(...blocks);
+        misses--;
+    }));
+    const pending = vol.renameOrFetch('C:\\pkg.zip', 'C:\\moved.zip');
+    assert.equal(typeof pending?.then, 'function', 'the move waits');
+    assert.equal(await pending, true);
+    assert.deepEqual(fetched.map(block=>block.index), [2, 1]);
+    assert.equal(vol.stat('C:\\pkg.zip'), null);
+    const moved = vol.open('C:\\moved.zip', { read: true });
+    assert.deepEqual([...vol.read(moved, 0, 3)], [1, 2, 3]);
+    vol.close(moved);
+    assert.equal(vol.renameOrFetch('C:\\a.dat', 'C:\\b.dat'), false, 'nothing to move');
+});
+
+/**
+ * A volume whose C: stands on a session read a piece at a time
+ * (`session-source.js`), keeping no piece past the next fetch, and a counted
+ * fetch.
+ *
+ * @param {Record<string, Uint8Array>} contents  by path under C:
+ */
+async function onSession(contents){
+    const fs = await filesystemModule.create({});
+    const session = createSessionSource(Object.entries(contents).map(([path, bytes])=>({ path,
+        file: { path: `C:\\${path}`, size: bytes.length,
+            read: async(offset = 0, length = bytes.length - offset)=>
+                bytes.slice(offset, offset + length) } })));
+    fs.mount('C', { source: session });
+    const counted = { fetches: 0 };
+    const vol = /** @type {any} */ (createVolume(fs, async blocks=>{
+        counted.fetches++;
+        await session.fetch(blocks);
+    }));
+    return { vol, counted };
+}
+
+/** @param {number} size @param {number} seed */
+const pattern = (size, seed)=>new Uint8Array(size).map((unused, at)=>(at * 29 + seed) & 0xff);
+
+test('a write into a file of many absent pieces copies it up, fetching each as it comes to it',
+    async()=>{
+        // A copy up stops at each piece it lacks and goes on from there: each
+        // miss names a piece never fetched, which is the write going further,
+        // not a fetch that did not deliver.
+        const big = pattern(6 * PIECE_SIZE + 3, 1);
+        const { vol, counted } = await onSession({ 'Saves\\slot1.sav': big });
+        const node = vol.open('C:\\Saves\\slot1.sav', { read: true, write: true });
+        assert.equal(await vol.writeOrFetch(node, PIECE_SIZE + 2, new Uint8Array([9, 9])), 2);
+        assert.equal(counted.fetches, 7, 'a fetch a piece');
+        const expected = big.slice();
+        expected.set([9, 9], PIECE_SIZE + 2);
+        assert.deepEqual(await vol.readFresh(node, 0, big.length), expected);
+        vol.close(node);
+    });
+
+test('a directory moved while its files\' pieces are absent is moved whole, its folders too',
+    async()=>{
+        const a = pattern(2 * PIECE_SIZE + 1, 2);
+        const b = pattern(PIECE_SIZE + 9, 3);
+        const { vol } = await onSession({
+            'Cache\\a.ni.dll': a, 'Cache\\Sub\\b.ni.dll': b, 'Cache\\Sub\\c.txt': pattern(5, 4),
+        });
+        assert.equal(await vol.renameOrFetch('C:\\Cache', 'C:\\Cache.old'), true);
+        assert.equal(vol.stat('C:\\Cache'), null, 'nothing left at the old name');
+        /** @type {[string, Uint8Array][]} */
+        const moved = [['C:\\Cache.old\\a.ni.dll', a], ['C:\\Cache.old\\Sub\\b.ni.dll', b],
+            ['C:\\Cache.old\\Sub\\c.txt', pattern(5, 4)]];
+        for (const [path, bytes] of moved)
+        {
+            const node = vol.open(path, { read: true });
+            assert.deepEqual(await vol.readFresh(node, 0, bytes.length), bytes, path);
+            vol.close(node);
+        }
+    });
+
 test('renaming moves the bytes and leaves nothing behind', async()=>{
     const { volume: vol } = await volume();
     const node = vol.open('C:\\old.dat', { write: true, create: true });
@@ -230,4 +484,360 @@ test('attributes a program set follow the name through a rename and go with a de
     vol.close(vol.open('C:\\moved\\a.txt', { read: true, write: true, create: true }));
     assert.equal(vol.stat('C:\\moved\\a.txt')?.attributes, undefined);
     assert.equal(vol.setAttributes('C:\\nothing', 1), false, 'no name, nothing to carry them');
+});
+
+test('a watch is told what happened to which name, below the directory it watches', async()=>{
+    const { volume: vol } = await volume();
+    assert.ok(vol.mkdir('C:\\Watched'));
+    /** @type {{ action: number, name: string }[][]} */
+    const told = [];
+    const all = 0x1f;
+    const watch = vol.watch('C:\\watched', true, all, (/** @type {any} */ records)=>{
+        told.push(records);
+    }, ()=>true);
+
+    assert.ok(vol.mkdir('C:\\Watched\\Sub'));
+    const node = vol.open('C:\\Watched\\Sub\\Save.dat', { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array([1]));
+    vol.close(node);
+    assert.ok(vol.rename('C:\\Watched\\Sub\\Save.dat', 'C:\\Watched\\Save.dat'));
+    assert.ok(vol.rename('C:\\Watched\\Save.dat', 'C:\\Elsewhere.dat'));
+    assert.equal(vol.remove('C:\\Watched\\Sub'), true);
+    assert.deepEqual(told, [
+        [{ action: 1, name: 'Sub' }],
+        [{ action: 1, name: 'Sub\\Save.dat' }],
+        [{ action: 3, name: 'Sub\\Save.dat' }],
+        [{ action: 4, name: 'Sub\\Save.dat' }, { action: 5, name: 'Save.dat' }],
+        [{ action: 2, name: 'Save.dat' }],
+        [{ action: 2, name: 'Sub' }],
+    ], 'added, modified, a rename by both names, a rename out of the watch as a removal');
+    watch.close();
+
+    const own = /** @type {any[]} */ ([]);
+    vol.watch('C:\\Watched', false, 0x2, (/** @type {any} */ records)=>own.push(records),
+        ()=>true);
+    assert.ok(vol.rename('C:\\Watched', 'C:\\Moved'));
+    assert.deepEqual(own, [], 'the watched directory moved is not told');
+});
+
+test('a hard link is one file: bytes, attributes, count and identity shared', async()=>{
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\A.DAT', { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.of(1, 2, 3));
+    vol.close(node);
+    assert.equal(vol.link('C:\\B.DAT', 'C:\\A.DAT'), null);
+    const a = vol.stat('C:\\A.DAT');
+    const b = vol.stat('C:\\b.dat');
+    assert.deepEqual([a?.links, b?.links, a?.identity === b?.identity], [2, 2, true]);
+    vol.setAttributes('C:\\B.DAT', 0x21);
+    assert.equal(vol.stat('C:\\A.DAT')?.attributes, 0x21, 'the attributes are the file\'s');
+
+    const other = vol.open('C:\\B.DAT', { read: true, write: true });
+    vol.write(other, 0, Uint8Array.of(9));
+    vol.close(other);
+    const reader = vol.open('C:\\A.DAT', { read: true });
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(reader, 0, 3)))], [9, 2, 3]);
+    vol.close(reader);
+
+    assert.equal(vol.link('C:\\A.DAT', 'C:\\B.DAT'), 'ALREADY_EXISTS');
+    assert.equal(vol.link('C:\\C.DAT', 'C:\\NONE.DAT'), 'NOT_FOUND');
+    vol.mkdir('C:\\DIR');
+    assert.equal(vol.link('C:\\D.DAT', 'C:\\DIR'), 'ACCESS_DENIED');
+    assert.equal(vol.remove('C:\\A.DAT'), true);
+    assert.deepEqual([vol.stat('C:\\B.DAT')?.links, vol.stat('C:\\B.DAT')?.size], [undefined, 3],
+        'one name left: an ordinary file');
+});
+
+test('a file is renamed or deleted only while every open with access shares deletion', async()=>{
+    const { volume: vol, fs } = await volume();
+    const made = vol.open('C:\\F.DAT', { read: true, write: true, create: true });
+    vol.close(made);
+
+    const holding = vol.open('C:\\F.DAT', { read: true, delete: true, shareDelete: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    assert.throws(()=>fs.rename('C:\\F.DAT', 'C:\\G.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.throws(()=>fs.deleteFile('C:\\F.DAT'), { code: 'SHARING_VIOLATION' });
+    assert.equal(vol.isOpen('C:\\F.DAT'), true);
+    vol.close(holding);
+
+    // Sharing deletion, or holding no access at all, keeps nobody out.
+    const sharing = vol.open('C:\\F.DAT', { read: true, shareDelete: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    vol.close(sharing);
+    const layerReader = vol.open('C:\\F.DAT', { read: true });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null,
+        'a reader that says nothing of deletion, a layer\'s own, shares it');
+    vol.close(layerReader);
+    const refusing = vol.open('C:\\F.DAT', { read: true, shareDelete: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), 'SHARING_VIOLATION');
+    vol.close(refusing);
+    const attributesOnly = fs.open('C:\\F.DAT', { read: false, shareRead: false });
+    assert.equal(vol.removalRefused('C:\\F.DAT'), null);
+    const second = fs.open('C:\\F.DAT', { read: true, write: true });
+    assert.notEqual(second, null, 'an open with no access refuses nothing, nor is refused');
+    fs.close(second);
+    fs.close(attributesOnly);
+    assert.equal(vol.rename('C:\\F.DAT', 'C:\\G.DAT'), true);
+    assert.equal(vol.isOpen('C:\\G.DAT'), false);
+});
+
+test('a section holds its file on its own terms once the file\'s handle is closed', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\M.DAT', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(0x4d, 0x5a, 0, 0));
+    vol.close(made);
+    /** @param {'readonly' | 'readwrite' | 'image'} kind */
+    const mapped = kind=>{
+        const file = vol.open('C:\\M.DAT', { read: true, write: true, shareRead: false });
+        const own = vol.section(file, kind);
+        vol.close(file);
+        return own;
+    };
+    /** @param {any} mode */
+    const opens = mode=>{
+        const node = vol.open('C:\\M.DAT', mode);
+        if (node)
+        {
+            vol.close(node);
+        }
+        return node !== null || vol.openRefusal();
+    };
+
+    let section = mapped('readonly');
+    assert.equal(vol.mappedAs('C:\\M.DAT'), 'readonly');
+    assert.equal(opens({ read: true, write: true, shareRead: false }), true,
+        'a read-only section refuses nobody, the handle it came from gone');
+    assert.deepEqual([...(/** @type {Uint8Array} */ (vol.read(section, 0, 2)))], [0x4d, 0x5a]);
+    vol.close(section);
+    assert.equal(vol.mappedAs('C:\\M.DAT'), null);
+
+    section = mapped('readwrite');
+    assert.equal(opens({ read: true }), 'SHARING_VIOLATION', 'it writes: others share writing');
+    assert.equal(opens({ read: true, shareWrite: true }), true);
+    vol.close(section);
+
+    section = mapped('image');
+    assert.equal(opens({ read: true, shareRead: false }), true, 'an image refuses only writers');
+    assert.equal(opens({ read: true, write: true, shareWrite: true }), 'SHARING_VIOLATION');
+    vol.close(section);
+});
+
+test('a name renamed to itself in other letters is respelled, its contents kept', async()=>{
+    const { volume: vol } = await volume();
+    const made = vol.open('C:\\Remove Me', { read: true, write: true, create: true });
+    vol.write(made, 0, Uint8Array.of(7));
+    vol.close(made);
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\Remove Me'), true, 'its own name: nothing to do');
+    assert.equal(vol.rename('C:\\Remove Me', 'C:\\remove me'), true);
+    assert.deepEqual(vol.list('C:\\', '*').map((/** @type {any} */ entry)=>entry.name),
+        ['remove me']);
+    assert.equal(vol.stat('C:\\REMOVE ME')?.size, 1);
+
+    assert.equal(vol.mkdir('C:\\Dir'), true);
+    const inside = vol.open('C:\\Dir\\F', { write: true, create: true });
+    vol.close(inside);
+    assert.equal(vol.rename('C:\\Dir', 'C:\\DIR'), true);
+    assert.deepEqual(vol.list('C:\\', 'd*').map((/** @type {any} */ entry)=>entry.name), ['DIR']);
+    assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
+});
+
+/** The run's cache as a test makes it, and the `reads` space a volume keeps in. */
+async function runCache(){
+    const cache = await testCache();
+    return { ...cache, space: ()=>cache.space('reads') };
+}
+
+/**
+ * A volume whose filesystem reads are counted, on a clock the test moves, and
+ * a file of `size` bytes in it, written long enough ago to be trusted; its
+ * ranges read again kept in `kept`.
+ *
+ * @param {number} size @param {any} [kept] @param {(at: number) => number} [byte]
+ */
+async function countedVolume(size, kept = undefined, byte = ()=>1){
+    const fs = await filesystemModule.create({});
+    const counted = { reads: 0, time: 1e9 };
+    const reading = Object.create(fs);
+    reading.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        counted.reads++;
+        return fs.read(node, length);
+    };
+    const vol = /** @type {any} */ (createVolume(reading, null,
+        { now: ()=>counted.time, ...kept ? { kept } : {} }));
+    const path = 'C:\\game.exe';
+    const node = vol.open(path, { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.from({ length: size }, (_, at)=>byte(at)));
+    const settled = ()=>vol.setModified(path, counted.time - 60000);
+    settled();
+    return { vol, node, counted, settled, fs };
+}
+
+test('a large range read again is kept; a write makes the next one fresh', async()=>{
+    // An engine maps its executable whole hundreds of times while it loads;
+    // each map decoded the file's blocks again. What tells a kept copy is
+    // still the file is its identity, size and last write.
+    const size = KEPT_READ_MIN * 2;
+    const cache = await runCache();
+    const { vol, node, counted, settled } = await countedVolume(size, cache.space());
+
+    vol.read(node, 0, size);
+    assert.equal(cache.keeper.figures().hot, 0, 'read once: nothing kept');
+    const second = vol.read(node, 0, size);
+    assert.equal(cache.keeper.figures().hotBytes, size, 'read again: kept');
+    second[0] = 7;
+    assert.equal(vol.read(node, 0, size)[0], 1,
+        'a caller writing into its copy changes nothing kept');
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
+    vol.read(node, 0, 100);
+    vol.read(node, 0, 100);
+    assert.equal(counted.reads, 4, 'a small read is not kept');
+
+    vol.write(node, 0, new Uint8Array([5]));
+    assert.equal(vol.read(node, 0, size)[0], 5, 'written moments ago: read fresh');
+    assert.equal(vol.read(node, 0, size)[0], 5);
+    assert.equal(counted.reads, 6, 'and not kept while its stamp is that young');
+    counted.time += 1000;
+    settled();
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 8, 'settled again: kept again from its second read');
+    vol.close(node);
+});
+
+test('without a cache a range read again is read again', async()=>{
+    const size = KEPT_READ_MIN * 2;
+    const { vol, node, counted } = await countedVolume(size);
+    for (let i = 0; i < 3; i++)
+    {
+        vol.read(node, 0, size);
+    }
+    assert.equal(counted.reads, 3);
+    vol.close(node);
+});
+
+test('a file read through once in large pieces keeps none of them', async()=>{
+    // A setup extracting a cabinet reads it a mebibyte at a time, each piece
+    // once: keeping them held a quarter of a gibibyte a process.
+    const size = KEPT_READ_MIN * 40;
+    const cache = await runCache();
+    const { vol, node, counted } = await countedVolume(size, cache.space());
+    for (let at = 0; at < size; at += KEPT_READ_MIN)
+    {
+        vol.read(node, at, KEPT_READ_MIN);
+    }
+    assert.equal(counted.reads, 40);
+    assert.equal(cache.keeper.figures().hot, 0);
+    vol.close(node);
+});
+
+test('a range larger than a part is kept in parts and read back whole', async()=>{
+    const size = KEPT_PART_BYTES * 2 + 4097;
+    const cache = await runCache();
+    const byte = (/** @type {number} */ at)=>(at * 31 + (at >>> 13)) & 255;
+    const { vol, node, counted } = await countedVolume(size, cache.space(), byte);
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    assert.equal(cache.keeper.figures().hot, 3, 'three parts');
+    const kept = vol.read(node, 0, size);
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
+    assert.ok(kept.every((/** @type {number} */ value, /** @type {number} */ at)=>value === byte(at)),
+        'whole, every byte where it was');
+    vol.close(node);
+});
+
+test('readInto hands a kept range where the cache holds it, no copy between', async()=>{
+    // ReadFile copies a read into guest memory: a kept range read into bytes
+    // of its own first was a second copy of every body, made and let go.
+    const size = KEPT_PART_BYTES + 4097;
+    const cache = await runCache();
+    const byte = (/** @type {number} */ at)=>(at * 7 + 3) & 255;
+    const { vol, node, counted } = await countedVolume(size, cache.space(), byte);
+    const into = ()=>{
+        const out = new Uint8Array(size);
+        /** @type {boolean[]} */
+        const shared = [];
+        /** @param {Uint8Array} bytes @param {number} at */
+        const put = (bytes, at)=>{
+            shared.push(bytes.buffer instanceof SharedArrayBuffer);
+            out.set(bytes, at);
+        };
+        const count = vol.readInto(node, 0, size, put);
+        return { count, out, shared };
+    };
+    const fresh = into();
+    assert.deepEqual(fresh.shared, [false], 'read fresh: the volume\'s bytes, whole');
+    into();
+    const kept = into();
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
+    assert.equal(kept.count, size);
+    assert.deepEqual(kept.shared, [true, true], 'each part where the cache holds it');
+    assert.ok(kept.out.every((value, at)=>value === byte(at)), 'every byte where it was');
+    vol.close(node);
+});
+
+test('a process of the run reads at once the range another process kept', async()=>{
+    // Each process has a volume of its own; the cache is the run's. An engine's
+    // child mapping the executable its parent mapped twice reads no block.
+    const size = KEPT_READ_MIN * 2;
+    const cache = await runCache();
+    const first = await countedVolume(size, cache.space());
+    first.vol.read(first.node, 0, size);
+    first.vol.read(first.node, 0, size);
+    // Closed, as a process that ended or let go of it: another opens it.
+    first.vol.close(first.node);
+    const other = /** @type {any} */ (createVolume(Object.assign(Object.create(first.fs), {
+        read: ()=>{
+            throw new Error('read past the cache');
+        },
+    }), null, { now: ()=>first.counted.time, kept: cache.space() }));
+    const node = other.open('C:\\game.exe', { read: true });
+    assert.equal(other.read(node, 0, size).length, size, 'from the run\'s cache');
+    other.close(node);
+});
+
+test('a kept range not read again for a while is let go', async()=>{
+    const size = KEPT_READ_MIN * 2;
+    const cache = await runCache();
+    const { vol, node, counted } = await countedVolume(size, cache.space());
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    cache.clock.time += 500;
+    cache.keeper.sweep();
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 2, 'read within the idle time: kept');
+    cache.clock.time += 1001;
+    cache.keeper.sweep();
+    assert.equal(cache.keeper.figures().hot, 0, 'let go after it');
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 3);
+    vol.close(node);
+});
+
+test('readInto of a file the program wrote hands the volume\'s bytes where they lie', async()=>{
+    // ReadFile copies a read into guest memory: the volume's answer in bytes
+    // of its own first was a second copy of every read, made and let go.
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\save.dat', { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.from({ length: 300 }, (_, at)=>at & 255));
+    const into = ()=>{
+        /** @type {ArrayBufferLike[]} */
+        const buffers = [];
+        const out = new Uint8Array(200);
+        /** @param {Uint8Array} bytes @param {number} at */
+        const put = (bytes, at)=>{
+            buffers.push(bytes.buffer);
+            out.set(bytes, at);
+        };
+        const count = vol.readInto(node, 50, 200, put);
+        return { count, out, buffers };
+    };
+    const first = into();
+    const second = into();
+    assert.equal(first.count, 200);
+    assert.ok(first.out.every((value, at)=>value === ((at + 50) & 255)));
+    assert.equal(first.buffers.length, 1);
+    assert.equal(second.buffers[0], first.buffers[0],
+        'both reads handed the file\'s own bytes, not a copy each');
+    vol.close(node);
 });

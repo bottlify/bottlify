@@ -1,7 +1,5 @@
 # Games and programs
 
-[По-русски](games.ru.md)
-
 ## Runs and plays
 
 - 3DMark2001 SE (benchmark)
@@ -19,21 +17,29 @@
 - Call of Duty 4: Modern Warfare (demo) (+shader model 2, +multithreading)
 - Colin McRae Rally 2 (demo)
 - Crysis (demo) (+shader model 3)
+- Dead Space
 - Delta Force: Xtreme (demo)
 - Desperados (demo)
+- Deus Ex: Human Revolution
 - Diablo (demo)
 - Diablo II (demo)
+- Don't Starve
 - Doom 3 (demo)
 - Dungeon Siege (demo)
 - Dwarf Fortress
 - Empire Earth II (demo)
-- Enclave (demo)
+- Enclave
+- Fable: The Lost Chapters
 - Fallout (demo)
 - Far Cry (demo) (+shader model 2)
 - FIFA 08 (demo)
+- Five Nights at Freddy's
 - FlatOut (demo)
 - FlatOut 2 (demo)
-- Half-Life (demo)
+- Grand Theft Auto: San Andreas
+- Grand Theft Auto: Vice City
+- Half-Life
+- Half-Life 2 (demo)
 - Heroes of Might and Magic III (demo)
 - Hitman: Codename 47 (demo)
 - Hitman 2: Silent Assassin (demo)
@@ -48,7 +54,10 @@
 - Need for Speed: Underground 2 (demo)
 - Need for Speed: Most Wanted (demo)
 - Need for Speed: Carbon (demo)
+- Outlast
 - Painkiller (demo)
+- Portal
+- Portal 2
 - Prey (demo)
 - Prince of Persia: Warrior Within (demo)
 - Quake II (demo)
@@ -63,17 +72,20 @@
 - Star Wars: Republic Commando (demo)
 - StarCraft (demo)
 - Stronghold (demo)
+- Super Hexagon
 - Syberia (demo)
 - Syberia II (demo)
 - Titan Quest (demo)
 - Tom Clancy's Splinter Cell: Pandora Tomorrow (demo)
+- Torchlight
 - TRON 2.0 (demo)
 - Unreal Tournament (demo)
 - Warcraft III (demo)
 - Warcraft III: The Frozen Throne
-- World of Warcraft: Classic (relay only)
-- World of Warcraft: The Burning Crusade (relay only)
-- World of Warcraft: Wrath of the Lich King (relay only)
+- World of Goo
+- World of Warcraft: Classic (networking required)
+- World of Warcraft: The Burning Crusade (networking required)
+- World of Warcraft: Wrath of the Lich King (networking required)
 
 ## Starts, with problems
 

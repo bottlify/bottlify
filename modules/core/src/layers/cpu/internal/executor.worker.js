@@ -20,8 +20,11 @@
 
 import { createCorkHost } from './cork-host.js';
 import { startGcNudge } from './gc-nudge.js';
-import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
+import { storeClient } from './store-relay.js';
+import { openSync } from '../../../system/opfs-file.js';
+import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor }
     from './executor-channel.js';
+import { deadlineOf, waitFor, waitForAsync } from '@bottlify/cellar';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**
@@ -34,8 +37,12 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {WebAssembly.Memory} memory
  * @property {SharedArrayBuffer} channel
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
- * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
+ * @property {SharedArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
+ * @property {import('../../cache/module.js').Joined | null} [cache]  the run's cache as
+ *     the process joined this executor to it, where it reads the records put there
+ * @property {SharedArrayBuffer} [emittedHere]  where it writes the milliseconds its
+ *     translator emitted on its own thread, read by a pool that lends it workers
  */
 
 /** How long the executor waits in place for the next slice before its event loop does. */
@@ -63,42 +70,51 @@ const FEED_MS = 1;
 
 /** The executor's host, once started. @type {any} */
 let running = null;
+/** Where the translator's own-thread milliseconds are written for the process. @type {Int32Array | null} */
+let emitted = null;
+/** Workers of the run's pool lent to this executor, by token. @type {Map<number, any>} */
+const lent = new Map();
+/** Lent before the translator was up. @type {any[]} */
+const lentWaiting = [];
+
+/**
+ * The translator's side of a worker the run's pool lent: the port's messages
+ * are the worker's, and giving it back tells the worker it is done here.
+ *
+ * @param {MessagePort} port
+ */
+const portTranslator = port=>({
+    post: (/** @type {any} */ message, /** @type {any[]} */ transfer)=>
+        port.postMessage(message, transfer),
+    onMessage: (/** @type {(data: any) => void} */ handler)=>{
+        if ('on' in port && typeof /** @type {any} */ (port).on === 'function')
+        {
+            /** @type {any} */ (port).on('message', handler);
+        }
+        else
+        {
+            port.onmessage = event=>handler(event.data);
+        }
+        port.start?.();
+    },
+    // A lent worker that dies is the pool's to see; the port says nothing.
+    onLost: ()=>{},
+    terminate: ()=>{
+        port.postMessage({ done: true });
+        port.close();
+    },
+});
 /** Its side of the channel's wakes and sleeps (`channelOf`), once started. @type {any} */
 let waits = null;
 
-/** The store's answers awaited, by the ask's id. @type {Map<number, (bytes: Uint8Array | null) => void>} */
-const storeAnswers = new Map();
-let storeAsks = 0;
-
 /**
- * The run's translation store as this executor reaches it: through the
- * process, which holds it -- a directory store's records file takes one
- * handle, the process's. A lookup is answered on the process's event loop,
- * a turn or a few later, and the runtime interprets meanwhile as it does
- * while any store answers late; a record goes and is not waited on.
+ * The run's translation store as this executor reaches it, through the process
+ * (`store-relay.js`), with the run's cache where the process joined it to that.
+ * Made once the worker is bound to its process.
  *
- * @param {(message: any, transfer?: any[]) => void} send
- * @returns {import('../engine.js').TranslationStore}
+ * @type {ReturnType<typeof storeClient> | null}
  */
-function processStore(send){
-    return {
-        get: key=>new Promise(resolve=>{
-            const id = ++storeAsks;
-            storeAnswers.set(id, resolve);
-            send({ type: 'store', id, method: 'get', key });
-        }),
-        put(key, bytes, options){
-            // The bytes are the store's from the call on (`TranslationStore`):
-            // a record that is the whole of its buffer goes without a copy.
-            const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-                && bytes.buffer instanceof ArrayBuffer;
-            send({ type: 'store', method: 'put', key, bytes, options },
-                whole ? [bytes.buffer] : []);
-            return Promise.resolve();
-        },
-        touch: key=>send({ type: 'store', method: 'touch', key }),
-    };
-}
+let storeRelay = null;
 
 /**
  * Where the executor's time went since it started, in milliseconds: in slices
@@ -108,7 +124,7 @@ function processStore(send){
  * an executor kept running from one kept waiting on the process. `ends` counts
  * why its slices ended. `answerWaits` counts the answers by how long each took,
  * up to each of `ANSWER_BOUNDS_US` and past the last: how long a look before a
- * sleep (`spinMs`) would have caught how many of them.
+ * sleep (`lookFor`) would have caught how many of them.
  */
 const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0, traps: 0,
     faults: 0, yieldMs: 0, feedMs: 0, asyncWaits: 0, inChainYieldMs: 0,
@@ -119,11 +135,23 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
  * @param {ExecutorStart} start
  * @param {(message: any, transfer?: any[]) => void} send
  */
-async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroken, store }, send){
+async function serve(
+    { engineUrl, config, memory, channel: buffer, bell, unbroken, store, emittedHere, cache }, send)
+{
+    storeRelay?.join(cache);
     const engine = await import(engineUrl);
+    // The run's cache the translator keeps its functions in, read here in place.
+    const kept = storeRelay?.kept() ?? null;
     const host = createCorkHost({ ...config, engine, memory,
-        ...(store === true ? { cork: { ...config.cork, store: processStore(send) } } : {}) });
+        cork: { ...config.cork,
+            ...store === true && storeRelay !== null ? { store: storeRelay.store } : {},
+            ...kept === null ? {} : { kept } } });
     running = host;
+    emitted = emittedHere ? new Int32Array(emittedHere) : null;
+    for (const adapter of lentWaiting.splice(0))
+    {
+        host.cork().attachTranslator?.(adapter);
+    }
     // This thread holds the guest's memory too (`gcNudge`, settled by the process).
     if (config.gcNudge)
     {
@@ -131,14 +159,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     }
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
-    // The pacing the config names (`EngineConfig`), these defaults otherwise.
     // How long a wait looks before it sleeps: longer while the host has a core
     // to spare, which the slices out say (`Bell.RUNNING`).
-    const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency,
-        config.cork?.spinMs);
-    const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
-    const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
-    const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
+    const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
     const channel = channelOf(buffer, bellWords, look);
     const { words } = channel;
     waits = channel.counts;
@@ -177,11 +200,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         }
         return retired;
     };
-    /** A wait for the process's answer, in its own account and the channel's (`Word.WAITED`). */
+    /** A wait for the process's answer, in its own account. */
     const noteWaited = (/** @type {number} */ ms)=>{
         spent.answerWaitMs += ms;
         const us = Math.round(ms * 1000);
-        Atomics.add(words, Word.WAITED, us);
         let bucket = 0;
         while (bucket < ANSWER_BOUNDS_US.length && us > ANSWER_BOUNDS_US[bucket])
         {
@@ -252,7 +274,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         {
             // The process mostly asks again soon after a slice's end, and a
             // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, Word.STATE, state, idleMs, look(), Word.SLEEPING);
+            waitFor(words, Word.STATE, state, Word.SLEEPING, deadlineOf(IDLE_MS), look());
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
@@ -260,11 +282,11 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             // `waitAsync`: the event loop goes on meanwhile, and the
             // translations the runtime asked for come back through it.
             spent.asyncWaits++;
-            await sleepAsync(words, Word.STATE, state, Infinity, Word.SLEEPING);
+            await waitForAsync(words, Word.STATE, state, Word.SLEEPING);
             state = Atomics.load(words, 0);
             yieldedAt = performance.now();
         }
-        if (performance.now() - yieldedAt >= yieldMs)
+        if (performance.now() - yieldedAt >= YIELD_MS)
         {
             // Asked again and again without a pause: a turn of the event loop
             // all the same, now and then, or no translation would ever land.
@@ -302,7 +324,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
                 const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'
                     : host.fault() !== null ? 'faulted'
                         : go === 0 ? 'released'
-                            : go === 2 && now - chained >= holdMs ? 'turned'
+                            : go === 2 && now - chained >= HOLD_MS ? 'turned'
                                 : now - chained >= CHAIN_MS ? 'chained' : null;
                 if (end !== null)
                 {
@@ -311,7 +333,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
                         ? runOut() : 0;
                     break;
                 }
-                if (now - yieldedAt >= yieldMs)
+                if (now - yieldedAt >= YIELD_MS)
                 {
                     await yieldTurn();
                     yieldedAt = performance.now();
@@ -345,6 +367,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         const feedFrom = performance.now();
         host.cork().translatePending().catch(()=>{});
         spent.feedMs += performance.now() - feedFrom;
+        if (emitted !== null)
+        {
+            Atomics.store(emitted, 0, Math.round(host.cork().translatedHere?.() ?? 0));
+        }
     }
 }
 
@@ -353,16 +379,55 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
  * @param {(message: any, transfer?: any[]) => void} send
  */
 function bind(listen, send){
+    storeRelay = storeClient(send);
     listen(data=>{
         if (data?.type === 'start')
         {
             serve(data, send).catch(e=>send({ type: 'failed',
                 message: String(e?.stack ?? e) }));
         }
-        else if (data?.type === 'store')
+        else if (storeRelay?.take(data))
         {
-            storeAnswers.get(data.id)?.(data.bytes ?? null);
-            storeAnswers.delete(data.id);
+            // An answer of the store's, or a message of the run's cache.
+        }
+        else if (data?.type === 'records')
+        {
+            openSync(data.file, { shared: true }).then(handle=>{
+                if (handle !== null)
+                {
+                    storeRelay?.holdRecords(handle);
+                }
+            }, ()=>{
+                // One handle a file in this browser: the process reads for it, as before.
+            });
+        }
+        else if (data?.type === 'translator')
+        {
+            const adapter = portTranslator(data.port);
+            lent.set(data.token, adapter);
+            if (running === null)
+            {
+                lentWaiting.push(adapter);
+            }
+            else
+            {
+                running.cork().attachTranslator?.(adapter);
+            }
+        }
+        else if (data?.type === 'recall')
+        {
+            const adapter = lent.get(data.token);
+            lent.delete(data.token);
+            const waiting = lentWaiting.indexOf(adapter);
+            if (waiting >= 0)
+            {
+                lentWaiting.splice(waiting, 1);
+                adapter.terminate();
+            }
+            else if (adapter !== undefined)
+            {
+                running?.cork().detachTranslator?.(adapter);
+            }
         }
         else if (data?.type === 'diagnostics')
         {
@@ -370,7 +435,8 @@ function bind(listen, send){
             send({ type: 'diagnostics', id: data.id,
                 value: running === null ? null : { ...running.cork().diagnostics(),
                     spent: { ...spent, wallMs: performance.now() - spent.startedAt,
-                        waits: { ...waits } } } });
+                        waits: { ...waits } },
+                    storeRecords: { ...storeRelay?.counts } } });
         }
     });
 }

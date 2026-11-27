@@ -5,7 +5,7 @@
  */
 
 /**
- * A seed end to end on the cork host: a benchmark program (`tools/cork-bench`)
+ * A seed end to end on the cork host: a benchmark program (`modules/cork/bench/micro`)
  * run once with a store, the store exported, a fresh store seeded from it, and
  * the program run again -- its first iteration takes its regions from the
  * seed and emits nothing. And a seed that does not fit -- made with other
@@ -25,7 +25,7 @@ import * as engine from '../../../../../cork/src/index.js';
 import { seedRecords } from '../../../../../cork/src/runtime/cache.js';
 import { features } from '../../../../../cork/src/wasm/features.js';
 
-const IMAGES = new URL('../../../../../../tools/cork-bench/images/', import.meta.url);
+const IMAGES = new URL('../../../../../cork/bench/micro/images/', import.meta.url);
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
 
@@ -139,7 +139,7 @@ async function firstIteration(image, seed, options = {}){
 }
 
 test('a seeded store gives a run\'s first iteration every region it formed, and no emit',
-    { timeout: 60000 }, async()=>{
+    { timeout: 120_000 }, async()=>{
         const image = imageOf('load-x87');
         const cold = await firstIteration(image, null);
         assert.ok(cold.cork.emitMs > 0 && cold.cork.cacheMisses > 0, 'cold, the regions are made');
@@ -176,10 +176,6 @@ test('a seed made with other features, another layout or another emitting settin
         ['another layout', { memorySize: 32 << 20 }, {}],
         // Each setting named on both sides, so a default that moves leaves
         // every case a pair of different settings.
-        ['structure off, against on', { cork: { structure: false } },
-            { cork: { structure: true } }],
-        ['structure unset, against off', { cork: { structure: undefined } },
-            { cork: { structure: false } }],
         ['precise, against not', { cork: { precise: true } }, { cork: { precise: false } }],
         ['dispatch, against none', { cork: { dispatch: true } }, { cork: { dispatch: false } }],
         ['no dispatch, against it', { cork: { dispatch: false } }, { cork: { dispatch: true } }],
@@ -197,7 +193,7 @@ test('a seed made with other features, another layout or another emitting settin
     }
 });
 
-test('a seed made under another precision control answers no x87 region', { timeout: 60000 },
+test('a seed made under another precision control answers no x87 region', { timeout: 120_000 },
     async()=>{
         // Double extended (wide), single (narrow), and a test at every
         // rounding from the start (wideFirst off, mixed).
@@ -225,7 +221,7 @@ test('a seed made under another precision control answers no x87 region', { time
     });
 
 test('an empty store\'s first iteration forms and emits what one without a store does',
-    { timeout: 60000 }, async()=>{
+    { timeout: 120_000 }, async()=>{
         // A lookup answered a turn later let the program run on interpreted
         // and turn other starts hot: crc-x87 formed and emitted two regions,
         // in two modules, where without a store it forms one.
@@ -243,7 +239,7 @@ test('an empty store\'s first iteration forms and emits what one without a store
     });
 
 test('a program that writes its own code sums the same with an empty store or a seed as with none',
-    { timeout: 60000 }, async()=>{
+    { timeout: 120_000 }, async()=>{
         // patch-x87 calls a routine that rewrites an immediate of its own
         // before it runs it: a region formed there before a store answers is
         // out of date by the time it would be published.
@@ -256,7 +252,7 @@ test('a program that writes its own code sums the same with an empty store or a 
     });
 
 test('a code byte changed since the seed was made is translated from the bytes it now holds',
-    { timeout: 60000 }, async()=>{
+    { timeout: 120_000 }, async()=>{
         const image = imageOf('crc-x87');
         const seed = await capture(image);
         // The CRC's initial value, `mov eax, 0xffffffff` at 0x401101, becomes

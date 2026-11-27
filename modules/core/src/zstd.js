@@ -6,8 +6,7 @@
 
 /**
  * A decode-only zstd (RFC 8878) implementation, so a bundle block can be
- * decoded synchronously inside a guest file read without the emulator's own
- * wasm carrying the only decoder the product has.
+ * decoded synchronously inside a guest file read, with no wasm of its own.
  *
  * Supported: concatenated and skippable frames; raw, RLE and compressed
  * blocks; literals in all four encodings (raw, RLE, compressed and treeless

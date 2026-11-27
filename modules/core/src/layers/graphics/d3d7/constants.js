@@ -19,8 +19,7 @@
 import { D3DRS as D3DRS8, D3DTS as D3DTS8 } from '../d3d8/constants.js';
 
 export {
-    D3DBLEND, D3DBLENDOP, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT, D3DFOG, D3DLIGHTTYPE,
-    D3DPT, D3DSHADE, D3DSTENCILOP, D3DTA, D3DTOP, D3DZB, D3D_OK, dwordToFloat, floatToDword,
+    D3DFMT, D3DLIGHTTYPE, D3DPT, D3DTA, D3DTOP, D3DZB, D3D_OK,
 } from '../d3d8/constants.js';
 
 /**
@@ -148,6 +147,8 @@ export function transformStateOf(type){
 
 /** The highest texture stage state D3D7 knows: TEXTURETRANSFORMFLAGS. */
 export const D3DTSS_MAX = 24;
+/** D3DTSS_ADDRESS: both ADDRESSU and ADDRESSV at once, a stage state of Direct3D 6 and 7. */
+export const D3DTSS_ADDRESS = 12;
 
 /** D3DDP_* draw flags. Both are hints this layer does not need. */
 export const D3DDP_WAIT = 0x00000001;
@@ -200,14 +201,22 @@ export const D3DPMISCCAPS_CULLCCW = 0x00000040;
 /** D3DPRASTERCAPS. */
 export const D3DPRASTERCAPS_ZTEST = 0x00000010;
 export const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
+export const D3DPRASTERCAPS_FOGVERTEX = 0x00000080;
+export const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
+export const D3DPRASTERCAPS_ZBIAS = 0x00004000;
+export const D3DPRASTERCAPS_WFOG = 0x00100000;
+export const D3DPRASTERCAPS_ZFOG = 0x00200000;
 
 /** D3DPSHADECAPS. */
 export const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
 export const D3DPSHADECAPS_ALPHAGOURAUDBLEND = 0x00004000;
+export const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;
+export const D3DPSHADECAPS_FOGGOURAUD = 0x00080000;
 
 /** D3DPTEXTURECAPS. */
 export const D3DPTEXTURECAPS_PERSPECTIVE = 0x00000001;
 export const D3DPTEXTURECAPS_ALPHA = 0x00000004;
+export const D3DPTEXTURECAPS_TRANSPARENCY = 0x00000008;
 
 /** D3DPTFILTERCAPS. */
 export const D3DPTFILTERCAPS_NEAREST = 0x00000001;
@@ -232,6 +241,9 @@ export const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 export const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 export const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
 export const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
+export const D3DPTADDRESSCAPS_BORDER = 0x00000008;
+/** D3DSTENCILCAPS_KEEP to D3DSTENCILCAPS_DECR: every stencil operation. */
+export const D3DSTENCILCAPS_ALL = 0xff;
 
 /** D3DPBLENDCAPS: one bit per D3DBLEND, bit zero for ZERO. */
 export const D3DPBLENDCAPS_ALL_BUT_BOTH = 0x000007ff;
@@ -345,7 +357,7 @@ export const D3DFILTER = Object.freeze({
 
 /** D3DVERTEXTYPE, and the vertex formats they are. */
 export const D3DVT = Object.freeze({ VERTEX: 1, LVERTEX: 2, TLVERTEX: 3 });
-export const D3DFVF_RESERVED1 = 0x020;
+const D3DFVF_RESERVED1 = 0x020;
 export const D3DFVF_VERTEX = 0x002 | 0x010 | 0x100;
 export const D3DFVF_LVERTEX = 0x002 | D3DFVF_RESERVED1 | 0x040 | 0x080 | 0x100;
 export const D3DFVF_TLVERTEX = 0x004 | 0x040 | 0x080 | 0x100;

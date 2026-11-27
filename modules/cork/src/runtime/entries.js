@@ -12,19 +12,24 @@
  * added under `ANY_TOP` and found whatever the top asked.
  */
 
+import { Tables } from './layout.js';
+
 /** The top a region indifferent to the x87 stack is registered under. */
 export const ANY_TOP = 8;
 
-import { Tables } from './layout.js';
-
-/** @param {number} eip @param {number} top */
-const keyOf = (eip, top)=>eip * 16 + top;
+/** The key of an address at an x87 top (`ANY_TOP` included) the entries and the
+ * runtime's queue, misses, barren addresses and records are kept by. Every "has an entry"
+ * question is for a top, so a region compiled for another top is no answer.
+ * @param {number} eip @param {number} top */
+export const keyOf = (eip, top)=>eip * 16 + top;
 
 /** The slot an address hashes to: the formula translated code probes with. */
 export const slotOf = (/** @type {number} */ eip, shift = 16)=>Math.imul(eip, 0x9e3779b1) >>> shift;
 
 const EMPTY = 0;
 const REMOVED = 0xffffffff;
+/** A removed slot's top byte, with an empty code of 0 (`remove`). */
+const REMOVED_TOP = 0xff;
 
 /**
  * @typedef {Object} Entry
@@ -39,17 +44,22 @@ const REMOVED = 0xffffffff;
  * @property {number} empty    the block a function that does nothing, as `emptyCode` (region.js)
  *     answers it, or 0
  * @property {number} heat     times the host entered it (`run`), until the runtime reads them
- * @property {{ ran: number } | null} owner  the mark of the module its function is in, which
+ * @property {{ ran: number, ranAt: number } | null} owner  the mark of the module its function
+ *     is in, which
  *     an entry stamps, or null
  */
 
 /**
  * @param {{ memory?: WebAssembly.Memory, hashBase?: number, shift?: number,
- *     load?: number }} [hash]  the memory and the offset of the entry hash in it, and the
- *     layout's slot shift; without them the map alone answers. `load`: the share of the
- *     slots live past which entries stay in the map alone (three quarters)
+ *     load?: number, zeroed?: boolean }} [hash]  the memory and the offset of the entry hash
+ *     in it, and the layout's slot shift; without them the map alone answers. `load`: the
+ *     share of the slots live past which entries stay in the map alone (three quarters).
+ *     `zeroed`: the hash is known to be all empty slots already, and is not cleared at the
+ *     start -- the clear wrote every page of it, where a memory just made holds none
  */
-export function createEntries({ memory, hashBase = -1, shift = 16, load: share = 0.75 } = {}){
+export function createEntries({ memory, hashBase = -1, shift = 16, load: share = 0.75,
+    zeroed = false } = {})
+{
     const hashed = memory !== undefined && hashBase >= 0;
     // As many slots as the shift leaves bits for; past `share` of them live,
     // entries stay in the map alone -- an open-addressed probe grows long as
@@ -61,7 +71,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
         .fill(0, hashBase, hashBase + slotCount * Tables.HASH_SLOT);
     let inHash = 0;
     let removed = 0;
-    if (hashed)
+    if (hashed && !zeroed)
     {
         clear();
     }
@@ -79,7 +89,10 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
         }
         const v = view();
         let slot = slotOf(eip, shift);
-        for (;;)
+        // Every slot at most once: the count of live ones says one is free, but
+        // the hash lies in memory a store of the guest's may reach, and a probe
+        // over slots it filled would go round for ever, holding the thread.
+        for (let tried = 0; tried < slotCount; tried++)
         {
             const at = hashBase + slot * Tables.HASH_SLOT;
             const key = v.getUint32(at, true);
@@ -99,6 +112,8 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
             }
             slot = (slot + 1) & (slotCount - 1);
         }
+        throw new Error(`cork: the entry hash at 0x${hashBase.toString(16)} has no slot free`
+            + ` with ${inHash} of ${slotCount} live: written by something else`);
     };
     /** @type {(Entry | null)[]} */
     const slots = [];
@@ -239,7 +254,13 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
             live--;
             if (entry.slot >= 0)
             {
-                view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT, REMOVED, true);
+                const at = hashBase + entry.slot * Tables.HASH_SLOT;
+                view().setUint32(at, REMOVED, true);
+                // No top an entry has, and no empty code: translated calls test
+                // the top and empty code as one halfword for `ANY_TOP`
+                // (`linkedCall`), which a call to address all ones must not
+                // find in a removed slot.
+                view().setUint16(at + 10, REMOVED_TOP, true);
                 inHash--;
                 removed++;
                 if (removed > slotCount / 4)

@@ -30,19 +30,18 @@
  * seeded volume by its files, a watch by the libraries and ordinals it covers.
  * A disc crosses as the `Blob` the person chose, which is cloned by reference
  * rather than copied, and the worker reads it a range at a time.
- * On a page without shared memory, `audio.port` is the engine's end of a
- * channel whose other end the page gave its audio worklet: the worker posts
- * the mix down it, and the worklet says back what it played.
  *
  * @typedef {Omit<import('../app.js').AppOptions,
- *     'executable' | 'v86' | 'device' | 'bundle' | 'storage' | 'watchImport'
+ *     'executable' | 'device' | 'bundle' | 'storage' | 'watchImport'
  *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs' | 'audio'> & {
  *     executable: Uint8Array,
- *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
- *     v86?: { moduleUrl: string, wasmBytes: ArrayBuffer },
+ *     audio?: NonNullable<import('../app.js').AppOptions['audio']>,
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
- *         prefetch?: boolean, indexSha256?: string,
- *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } },
+ *         prefetch?: boolean, preload?: boolean, revision?: number, indexSha256?: string,
+ *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number },
+ *         layers?: { id: string, url?: string, file?: Blob, store?: string | null,
+ *             prefetch?: boolean, preload?: boolean, indexSha256?: string,
+ *             retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } }[] },
  *     storage?: 'opfs' | 'local' | { files: { path: string, bytes: Uint8Array }[] } | null,
  *     device?: { skipTexture?: string | null, probeTexture?: string | null, keepImages?: number[],
  *         fog?: boolean, mips?: boolean, dumpDraws?: boolean, dumpEvery?: number,
@@ -51,9 +50,7 @@
  *     hooks?: HookSpec[],
  *     collectOnExit?: boolean,
  *     signal?: SharedArrayBuffer,
- *     inbound?: import('../system/ring.js').RingMemory,
- *     pacing?: 'page' | 'event',
- *     pendingYieldMs?: number,
+ *     inbound?: import('@bottlify/cellar').RingMemory,
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
  *     discs?: { image: Blob | Uint8Array, letter?: string }[],
@@ -89,19 +86,6 @@
  */
 
 /*
- * `pacing` is how the run loop waits in a worker. `page` -- the default -- is
- * the loop a page's thread runs: a yield every turn and a short look while
- * idle. `event` sleeps until the guest's next deadline, a host answer or a
- * message, and yields only when something is pending. Measured on a real
- * title's menu through the launcher, the same build in the same worker:
- * `page` ran 1.95 G guest instructions and presented 866 frames in thirty
- * seconds, `event` 1.07 G and 469, because a host call answering woke the
- * loop for a turn that retired nothing, seventy thousand times; the page's
- * short look batches those answers. `event` stays for the measurement that
- * changes that, and is not the default until one does.
- */
-
-/*
  * `signal` is one shared word the page adds to before every message it posts,
  * so the worker's loop can see between two turns that something is waiting
  * for it without handing its thread to the event loop to find out.
@@ -125,21 +109,19 @@
  * in the memory the page hands to its audio worklet, the log's memory for a
  * reader on the page, and who made the adapter.
  *
- * `audio.memory` is `{ table }` -- one shared track table, resampled and
+ * `audio.memory` is `{ table }` -- one shared track table (a view of the
+ * memory the run's cache holds for it), resampled and
  * mixed on the audio thread -- on an origin with shared memory, and
  * `{ control, samples }` -- the engine mixer's own float ring, mixed on this
  * thread -- where there is none to hand a worklet at all.
  *
- * `log` is null where the origin has no shared memory: the block would cross
- * as a copy that never moves again, so the page asks the engine for what it
- * wants to read instead. Everything a reader does is on one side or the other,
- * never half on each.
+ * `log` is the log's shared block: the page reads it in place, the engine's
+ * thread never reads for it.
  *
  * @typedef {Object} Started
- * @property {{ memory: { table: ArrayBufferLike }
- *         | { control: ArrayBufferLike, samples: ArrayBufferLike },
+ * @property {{ memory: { table: Uint8Array },
  *     sampleRate: number, channels: number } | null} audio
- * @property {import('../layers/log/internal/reader.js').LogMemory | null} log
+ * @property {import('../layers/log/internal/reader.js').LogMemory} log
  * @property {{ vendor: string, architecture: string, description: string }} adapter
  */
 

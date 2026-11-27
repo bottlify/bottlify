@@ -18,6 +18,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
+import { createLogModule } from '../layers/log/module.js';
+import { BUCKET_CAP, SAMPLE_COLUMNS, createSampleTable, creditSample }
+    from '../layers/cpu/internal/samples.js';
+import { THREAD_COLUMNS } from '../layers/kernel/internal/threads.js';
+import { REGION_COLUMNS } from '../layers/memory/module.js';
+import { publishFigures } from '../layers/graphics/figures.js';
 
 /**
  * The keeper under `worker_threads`, driven the way a page drives it. The
@@ -107,7 +113,7 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
-    const journal = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    const journal = createJournal({ now: ()=>0, capacity: 64 });
     journal.write(Level.INFO, 'boot', 'one');
     journal.write(Level.WARN, 'call.cpu', 'two');
     journal.write(Level.INFO, 'boot', 'three');
@@ -167,7 +173,7 @@ test('a read catches the current block up, so a tail since the last poll is not 
 
     // The block's own ring is larger than the keeper's mirror, as an engine sized
     // for a capture of a call area leaves it.
-    const journal = createJournal({ now: ()=>0, shared: true, capacity: 512 });
+    const journal = createJournal({ now: ()=>0, capacity: 512 });
     journal.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: journal.memory() }, sequenceBase: 0 });
     await keeper.poll();
@@ -201,7 +207,7 @@ test('a second block attached continues the first, and a cursor from it resolves
     const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
-    const first = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    const first = createJournal({ now: ()=>0, capacity: 64 });
     first.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: first.memory() }, sequenceBase: 0 });
     await keeper.poll();
@@ -209,7 +215,7 @@ test('a second block attached continues the first, and a cursor from it resolves
     const cursor = 0;
     const base = first.diagnostics().written;
 
-    const second = createJournal({ now: ()=>0, shared: true, capacity: 64,
+    const second = createJournal({ now: ()=>0, capacity: 64,
         sequenceBase: base });
     second.write(Level.INFO, 'child', 'eight');
     second.write(Level.INFO, 'child', 'nine');
@@ -229,4 +235,82 @@ test('a second block attached continues the first, and a cursor from it resolves
     const onlySecond = await keeper.ask('drain', [base, 100]);
     assert.deepEqual(onlySecond.records.map(/** @param {any} r */ r=>r.text), ['eight', 'nine']);
     assert.equal(onlySecond.lost, 0);
+});
+
+test('a live view is answered by the keeper from what the layers published', async t=>{
+    // What the overlay follows: published by each layer where it keeps the
+    // figure, the frame's samplers run once, and read back on the keeper's
+    // thread -- the engine's side is asked nothing.
+    const keeper = openKeeper({ intervalMs: 0 });
+    t.after(()=>keeper.stop());
+    const logModule = createLogModule();
+    let time = 0;
+    const log = await logModule.create({ now: ()=>time, wallClock: ()=>time });
+    t.after(()=>logModule.dispose());
+    const { metrics } = log;
+
+    const cpu = metrics.counters('cpu', ['running', 'instructions']);
+    cpu[1] = 5_000_000;
+    const samples = createSampleTable(metrics.table('cpu', 'samples',
+        { rows: BUCKET_CAP, columns: SAMPLE_COLUMNS }));
+    creditSample(samples, 0x401000, 300);
+    creditSample(samples, 0x402000, 900);
+    creditSample(samples, 0x401010, 200);
+
+    const threads = metrics.table('kernel', 'threads', { rows: 4, columns: THREAD_COLUMNS });
+    threads.set(0, THREAD_COLUMNS.indexOf('name'), log.intern('main'));
+    threads.set(0, THREAD_COLUMNS.indexOf('instructions'), 4_000_000);
+    threads.set(0, THREAD_COLUMNS.indexOf('state'), 1);
+    threads.used(1);
+    const regions = metrics.table('memory', 'regions', { rows: 4, columns: REGION_COLUMNS });
+    regions.set(0, 0, log.intern('game.exe'));
+    regions.set(0, 1, 0x400000);
+    regions.set(0, 2, 0x10000);
+    regions.used(1);
+    const hooks = metrics.table('bridge', 'hooks', { rows: 4, columns: ['name', 'calls', 'ms'] });
+    hooks.set(0, 0, log.intern('memcpy'));
+    hooks.set(0, 1, 40);
+    hooks.set(0, 2, 1.5);
+    hooks.used(1);
+
+    let device = /** @type {any} */ (null);
+    metrics.onFrame(publishFigures({
+        metrics, intern: log.intern,
+        shown: ()=>({ count: 12, by: { 'd3d9 target': 12 } }),
+        figures: ()=>device,
+        worker: ()=>null,
+    }));
+    log.beginFrame();
+    log.begin('trap');
+    time = 3;
+    log.end('trap');
+    time = 4;
+    log.endFrame();
+    keeper.send({ type: 'attach', memory: log.memory(), sequenceBase: 0 });
+    await keeper.poll();
+
+    const first = await keeper.ask('live');
+    assert.equal(first.instructions, 5_000_000);
+    assert.deepEqual(first.phases.map(/** @param {any} p */ p=>[p.name, p.selfMs]), [['trap', 3]]);
+    assert.deepEqual(first.samples, [{ address: 0x402000, instructions: 900 },
+        { address: 0x401000, instructions: 500 }], 'ranked by the keeper, by bucket');
+    assert.deepEqual(first.threads, [{ id: 0, name: 'main', instructions: 4_000_000,
+        state: 'running' }]);
+    assert.deepEqual(first.regions, [{ name: 'game.exe', base: 0x400000, size: 0x10000 }]);
+    assert.deepEqual(first.hooks, [{ name: 'memcpy', calls: 40, ms: 1.5 }]);
+    assert.equal(first.graphics.shown, 12);
+    assert.deepEqual(first.graphics.shownBy, { 'd3d9 target': 12 });
+    assert.equal(first.graphics.device, null, 'no device said anything: not measured, not zero');
+    assert.equal(first.graphics.lastFrame, null);
+    assert.equal(first.graphics.worker, null);
+
+    device = { draws: 300, gpuFrames: 10, gpuMs: 42, last: { index: 9, draws: 30,
+        offscreenDraws: 2, offscreenTargets: 1, clears: 1, clearColor: 0xff000000,
+        viewportX: 0, viewportY: 0, viewportWidth: 800, viewportHeight: 600,
+        targetWidth: 800, targetHeight: 600 } };
+    log.beginFrame();
+    log.endFrame();
+    const second = await keeper.ask('live');
+    assert.deepEqual(second.graphics.device, { draws: 300, gpuFrames: 10, gpuMs: 42 });
+    assert.deepEqual(second.graphics.lastFrame, device.last);
 });

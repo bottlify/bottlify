@@ -17,10 +17,15 @@
  */
 
 import { guestEntry } from './guest-code.js';
+import { LATER_HEAP } from './heap.js';
+import { IOINFO_EXPORT, IOINFO_LAYOUTS, settle } from './io.js';
+import { INVALID_CRUNTIME_PARAMETER, INVALID_PARAMETERS, createInvalidParameterRuntime,
+    watchedExports } from './invalid-parameter.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -31,6 +36,12 @@ const TRUNCATE = 0xffffffff;
  * @typedef {Object} Msvcr80Host
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
+ * @property {(entry: number, args: number[], thread?: unknown) => any} [callGuest]
+ *           What calls the program's invalid-parameter handler.
+ * @property {() => unknown} [currentThread]
+ * @property {string} [library]  The DLL's name, MSVCR80.dll unless said: the
+ *           2008 runtime, MSVCR90.dll, is the same table under its own name.
  */
 
 /**
@@ -50,23 +61,135 @@ export function createMsvcr80Functions(crt, host){
     const setU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
+
+    const seam = /** @type {any} */ (crt)[INVALID_PARAMETERS];
+    // This runtime's own handler, apart from the universal runtime's: each
+    // DLL keeps the one its own `_set_invalid_parameter_handler` was given.
+    const invalid = createInvalidParameterRuntime({
+        library: host.library ?? 'MSVCR80.dll',
+        callGuest: host.callGuest,
+        currentThread: host.currentThread,
+        exitProcess: seam?.exitProcess,
+        report: seam?.report,
+    });
 
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         setU32(crt._errno.handler([]), code);
+        seam?.watch.note(code);
         return code;
     };
 
-    /**
-     * The secure library's end for a parameter it cannot live with, and a
-     * failed assertion's: the process ends as abort ends it.
-     */
-    const invalidParameter = ()=>crt.abort.handler([]);
+    /** @param {number} address */
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
+        .getUint32(0, true);
+    const pointer = host.pointerSize ?? 4;
+    /** A pointer, every address below 4 GiB. @param {number} address @param {number} value */
+    const setPointer = (address, value)=>{
+        const bytes = new Uint8Array(pointer);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(wholeAddress(address), bytes);
+    };
 
-    return {
+    /**
+     * `strtok_s` and `wcstok_s`: the next token of `text`, or of where the
+     * last call left off when it is none, as strtok finds it, with where to
+     * go on from kept in `*context` rather than in the runtime. No
+     * delimiters, no context, or nowhere to start is EINVAL and null.
+     *
+     * @param {1 | 2} unit  The bytes of a character.
+     */
+    const tokenize = unit=>({
+        convention: 'cdecl',
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([text, delimiters, context])=>{
+            const start = (context >>> 0) === 0 ? 0 : (text >>> 0) || readU32(context);
+            if ((delimiters >>> 0) === 0 || start === 0)
+            {
+                fail(EINVAL);
+                return 0;
+            }
+            /** @param {number} address */
+            const read = address=>{
+                const bytes = host.readMemory(address, unit);
+                return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
+            };
+            const set = new Set();
+            for (let at = wholeAddress(delimiters); read(at) !== 0; at += unit)
+            {
+                set.add(read(at));
+            }
+            let at = start;
+            while (read(at) !== 0 && set.has(read(at)))
+            {
+                at += unit;
+            }
+            if (read(at) === 0)
+            {
+                setPointer(context, at);
+                return 0;
+            }
+            const token = at;
+            while (read(at) !== 0 && !set.has(read(at)))
+            {
+                at += unit;
+            }
+            if (read(at) !== 0)
+            {
+                host.writeMemory(at, new Uint8Array(unit));
+                at += unit;
+            }
+            setPointer(context, at);
+            return token;
+        },
+    });
+
+    /**
+     * `_sopen_s` and `_wsopen_s`: the open `_sopen` makes, the descriptor
+     * into `*fd` (-1 there when it fails) and errno's code the answer.
+     *
+     * @param {string} open  The function that opens: `_sopen` or `_wsopen`.
+     */
+    const openSecure = open=>({
+        convention: 'cdecl',
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([out, path, flags, share, mode])=>{
+            if ((out >>> 0) === 0)
+            {
+                return fail(EINVAL);
+            }
+            setU32(out, -1);
+            if ((path >>> 0) === 0)
+            {
+                return fail(EINVAL);
+            }
+            return settle(crt[open].handler([path, flags, share, mode]), fd=>{
+                if ((fd | 0) < 0)
+                {
+                    return readU32(crt._errno.handler([]));
+                }
+                setU32(out, fd);
+                return 0;
+            });
+        },
+    });
+
+    /** A failed assertion's end: the process ends as abort ends it. */
+    const assertFailed = ()=>crt.abort.handler([]);
+
+    const table = {
         ...crt,
+        // The heap functions this runtime added: _recalloc, the aligned ones'.
+        .../** @type {any} */ (crt)[LATER_HEAP] ?? {},
+        // `__pioinfo` in this runtime's layout, over msvcrt's descriptors:
+        // a program built against it reads `textmode` past the lock.
+        ...(/** @type {any} */ (crt)[IOINFO_EXPORT]
+            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](IOINFO_LAYOUTS.msvcr80) }
+            : {}),
 
         _encode_pointer: encode,
         _decode_pointer: encode,
@@ -104,12 +227,13 @@ export function createMsvcr80Functions(crt, host){
 
         /** _purecall_handler _set_purecall_handler(_purecall_handler): the one before. */
         _set_purecall_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handler])=>{
                 const before = purecallHandler;
-                purecallHandler = handler >>> 0;
+                purecallHandler = wholeAddress(handler);
                 return before;
             },
         },
@@ -123,6 +247,7 @@ export function createMsvcr80Functions(crt, host){
         _vswprintf_c_l: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, count, format, , list])=>
                 crt._vsnwprintf.handler([buffer, count, format, list]),
@@ -151,15 +276,15 @@ export function createMsvcr80Functions(crt, host){
                 const written = crt._vsnprintf.handler([buffer, limit, format, list]) | 0;
                 if (written >= 0)
                 {
-                    host.writeMemory((buffer >>> 0) + written, Uint8Array.of(0));
+                    host.writeMemory(wholeAddress(buffer) + written, Uint8Array.of(0));
                     return written;
                 }
                 if ((count >>> 0) === TRUNCATE || (count >>> 0) <= room)
                 {
-                    host.writeMemory((buffer >>> 0) + limit, Uint8Array.of(0));
+                    host.writeMemory(wholeAddress(buffer) + limit, Uint8Array.of(0));
                     return -1;
                 }
-                host.writeMemory(buffer >>> 0, Uint8Array.of(0));
+                host.writeMemory(wholeAddress(buffer), Uint8Array.of(0));
                 fail(ERANGE);
                 return -1;
             },
@@ -176,7 +301,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, name, mode])=>{
-                if ((file >>> 0) === 0)
+                if (wholeAddress(file) === 0)
                 {
                     return fail(EINVAL);
                 }
@@ -186,7 +311,7 @@ export function createMsvcr80Functions(crt, host){
                 {
                     return 0;
                 }
-                return new DataView(host.readMemory(crt._errno.handler([]), 4).slice().buffer)
+                return new DataView(host.readMemory(crt._errno.handler([]), 4).buffer)
                     .getInt32(0, true);
             },
         },
@@ -199,35 +324,82 @@ export function createMsvcr80Functions(crt, host){
         _wassert: {
             convention: 'cdecl',
             argBytes: 12,
-            handler: ()=>invalidParameter(),
+            handler: ()=>assertFailed(),
+        },
+
+        /**
+         * _invalid_parameter_handler _set_invalid_parameter_handler(
+         *     _invalid_parameter_handler handler)
+         *
+         * The one installed before. This runtime calls it for every argument
+         * one of its functions refuses, and the function then answers its
+         * documented failure (decisions.md A255).
+         */
+        _set_invalid_parameter_handler: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handler])=>invalid.set(handler),
+        },
+
+        /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
+        _get_invalid_parameter_handler: {
+            returns: 'pointer',
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>invalid.get(),
         },
 
         /**
          * void _invalid_parameter_noinfo(void)
          *
          * A secure function's argument it cannot live with, in a release
-         * build: no handler is installed, so the process ends.
+         * build: the handler with nothing known, and the caller goes on; with
+         * none installed, the process ends as `_invoke_watson` ends it.
          */
         _invalid_parameter_noinfo: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>invalidParameter(),
+            handler: ()=>invalid.raise('_invalid_parameter_noinfo', [], 0),
+        },
+
+        /**
+         * void _invalid_parameter(const wchar_t *expression, const wchar_t *function,
+         *     const wchar_t *file, unsigned int line, uintptr_t reserved)
+         *
+         * A debug build's report: the handler hears the details it was given.
+         */
+        _invalid_parameter: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>invalid.raise('_invalid_parameter', args, 0, args.slice(0, 5)),
         },
 
         /**
          * void _invoke_watson(const wchar_t *expression, const wchar_t *function,
          *     const wchar_t *file, unsigned int line, uintptr_t reserved)
          *
-         * The secure library's end: the process goes, as abort takes it.
+         * The secure library's end: the process goes with
+         * STATUS_INVALID_CRUNTIME_PARAMETER, whatever handler is installed.
          */
         _invoke_watson: {
             convention: 'cdecl',
             argBytes: 20,
-            handler: ()=>invalidParameter(),
+            /** @param {number[]} args */
+            handler: args=>{
+                seam?.report?.(host.library ?? 'MSVCR80.dll', `_invoke_watson(${args.map(value=>
+                    `0x${(value >>> 0).toString(16)}`).join(', ')}): the process ends (0xC0000417)`,
+                'loss');
+                return seam?.exitProcess?.(INVALID_CRUNTIME_PARAMETER) ?? 0;
+            },
         },
 
         /** void _crt_debugger_hook(int reserved): a debugger's breakpoint; none is attached. */
         _crt_debugger_hook: { convention: 'cdecl', argBytes: 4, handler: ()=>0 },
+        /** The same under the name Visual C++ 2005's own objects import. */
+        __crt_debugger_hook: { convention: 'cdecl', argBytes: 4, handler: ()=>0 },
 
         /** void *_malloc_crt(size_t size): the runtime's own blocks, from its own heap. */
         _malloc_crt: crt.malloc,
@@ -250,6 +422,7 @@ export function createMsvcr80Functions(crt, host){
 
         /** void type_info::_type_info_dtor_internal_method(void) -- the destructor's body. */
         '?_type_info_dtor_internal_method@type_info@@QAEXXZ': crt['??1type_info@@UAE@XZ'],
+        '?_type_info_dtor_internal_method@type_info@@QEAAXXZ': crt['??1type_info@@UAE@XZ'],
 
         /**
          * int __CppXcptFilter(unsigned long code, struct _EXCEPTION_POINTERS *pointers)
@@ -257,6 +430,59 @@ export function createMsvcr80Functions(crt, host){
          * The filter a DLL's start-up wraps its initialisers in: msvcrt's.
          */
         __CppXcptFilter: crt._XcptFilter,
+
+        /** char *strtok_s(char *text, const char *delimiters, char **context) */
+        strtok_s: { ...tokenize(1), returns: 'pointer' },
+        /** wchar_t *wcstok_s(wchar_t *text, const wchar_t *delimiters, wchar_t **context) */
+        wcstok_s: { ...tokenize(2), returns: 'pointer' },
+
+        /** errno_t _sopen_s(int *fd, const char *path, int flags, int share, int mode) */
+        _sopen_s: openSecure('_sopen'),
+        /** errno_t _wsopen_s(int *fd, const wchar_t *path, int flags, int share, int mode) */
+        _wsopen_s: openSecure('_wsopen'),
+
+        /** int vfprintf_s(FILE *stream, const char *format, va_list args): no format is EINVAL. */
+        vfprintf_s: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([stream, format, list])=>{
+                if (wholeAddress(format) === 0)
+                {
+                    fail(EINVAL);
+                    return -1;
+                }
+                return crt.vfprintf.handler([stream, format, list]);
+            },
+        },
+
+        /**
+         * int vswprintf_s(wchar_t *buffer, size_t size, const wchar_t *format, va_list args)
+         *
+         * The text whole and its length; when it does not fit, the buffer
+         * emptied, -1 and ERANGE. No buffer, size or format is EINVAL.
+         */
+        vswprintf_s: guestEntry(inGuestPrint.vswprintf_s, PRINT_CODE.vswprintf_s, host, {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, size, format, list])=>{
+                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (format >>> 0) === 0)
+                {
+                    fail(EINVAL);
+                    return -1;
+                }
+                const length = crt._vsnwprintf.handler([0, 0, format, list]) | 0;
+                if (length < 0 || length + 1 > (size >>> 0))
+                {
+                    host.writeMemory(wholeAddress(buffer), Uint8Array.of(0, 0));
+                    fail(length < 0 ? EINVAL : ERANGE);
+                    return -1;
+                }
+                crt._vsnwprintf.handler([buffer, size, format, list]);
+                host.writeMemory(wholeAddress(buffer) + length * 2, Uint8Array.of(0, 0));
+                return length;
+            },
+        }),
 
         // std::exception: msvcrt's exception class, which Visual C++ 2005
         // moved into the namespace without changing it.
@@ -267,5 +493,16 @@ export function createMsvcr80Functions(crt, host){
         '??1exception@std@@UAE@XZ': crt['??1exception@@UAE@XZ'],
         '??4exception@std@@QAEAAV01@ABV01@@Z': crt['??4exception@@QAEAAV0@ABV0@@Z'],
         '?what@exception@std@@UBEPBDXZ': crt['?what@exception@@UBEPBDXZ'],
+        // And as a 64-bit compiler names the same members.
+        '??0exception@std@@QEAA@AEBQEBD@Z': crt['??0exception@@QAE@ABQBD@Z'],
+        '??0exception@std@@QEAA@AEBQEBDH@Z': crt['??0exception@@QAE@ABQBDH@Z'],
+        '??0exception@std@@QEAA@AEBV01@@Z': crt['??0exception@@QAE@ABV0@@Z'],
+        '??0exception@std@@QEAA@XZ': crt['??0exception@@QAE@XZ'],
+        '??1exception@std@@UEAA@XZ': crt['??1exception@@UAE@XZ'],
+        '??4exception@std@@QEAAAEAV01@AEBV01@@Z': crt['??4exception@@QAEAAV0@ABV0@@Z'],
+        '?what@exception@std@@UEBAPEBDXZ': crt['?what@exception@@UBEPBDXZ'],
     };
+    // Every export a call of this runtime: what its functions refuse reaches
+    // its handler, where msvcrt.dll's same function answers EINVAL alone.
+    return seam ? watchedExports(table, seam.watch, invalid) : table;
 }

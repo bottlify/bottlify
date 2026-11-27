@@ -19,10 +19,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
     bytesOfHex, call, doubleWords, dumpAndExit, importsWith, setupCode, setupData, storeEax,
-} from '../../../tools/gl-program.mjs';
+} from '../../../tools/fixtures/gl-program.mjs';
 import { guestMemory } from './layers/win32/msvcrt/guest-code.js';
 import * as glu from './layers/graphics/glu/inguest.js';
 

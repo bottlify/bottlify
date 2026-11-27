@@ -28,20 +28,28 @@
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from '../kernel32/console.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
+import { Pipe } from './pipes.js';
 import {
-    O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf, foldUnits, markIn,
-    markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, decodeUnits, encodeUnits, encodingOf,
+    foldUnits, markIn, markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
+import { bytesOfUnits } from '../common/utf16.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
+/** The system error a read or write without the access answers. */
+const ERROR_ACCESS_DENIED = 5;
+
 const O_WRONLY = 0x0001;
 const O_RDWR = 0x0002;
 const O_ACCMODE = 0x0003;
 const O_APPEND = 0x0008;
+const O_SEQUENTIAL = 0x0020;
 const O_TEMPORARY = 0x0040;
 const O_CREAT = 0x0100;
 const O_TRUNC = 0x0200;
 const O_EXCL = 0x0400;
+const O_NOINHERIT = 0x0080;
 const O_TEXT = 0x4000;
 export const O_BINARY = 0x8000;
 
@@ -63,25 +71,56 @@ const STANDARD_HANDLES = [HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR];
 const INVALID_HANDLE_VALUE = -1;
 
 /**
- * `__pioinfo`, msvcrt.dll's table of descriptors as a program reads it in
- * place: a pointer per block of 32, then the first block, each entry 36 bytes
- * -- the handle, `wxflag`, three bytes of lookahead, `exflag` and a critical
- * section.
+ * `__pioinfo`, a runtime's table of descriptors as a program reads it in
+ * place: a pointer per block of 32, then the first block. An entry starts
+ * with the handle, `wxflag`, three bytes of lookahead, a flag word and a
+ * critical section - msvcrt.dll's ends there, 36 bytes, its flag word the
+ * Unicode translation (`exflag`); MSVCR80.dll's goes on to 64 bytes, its flag
+ * word only whether the lock was made, the translation in the byte after the
+ * lock: `textmode` in its low seven bits (0 ANSI, 1 UTF-8, 2 UTF-16) and
+ * `unicode`, opened with `_O_WTEXT`, in its top one (Wine's msvcr80
+ * test_ioinfo_flags).
  */
 const IOINFO = Object.freeze({
-    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4,
+    BLOCK: 32, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4, EXFLAG: 8,
 });
-/** `wxflag`'s bits: open, appending, a character device, text mode. */
+
+/** @typedef {{ size: number, textmode: number | null }} IoinfoLayout */
+
+/** Where a runtime over msvcrt's table finds `__pioinfo` made in its own layout. */
+export const IOINFO_EXPORT = Symbol('ioinfo export');
+
+/** The two layouts of an entry. */
+export const IOINFO_LAYOUTS = Object.freeze({
+    msvcrt: Object.freeze(/** @type {IoinfoLayout} */ ({ size: 36, textmode: null })),
+    msvcr80: Object.freeze(/** @type {IoinfoLayout} */ ({ size: 64, textmode: 36 })),
+});
+const TEXTMODE_UTF8 = 1;
+const TEXTMODE_UTF16 = 2;
+const TM_UNICODE = 0x80;
+/** `wxflag`'s bits: open, a pipe, not inherited, appending, a character device, text mode. */
 const WX_OPEN = 0x01;
+const WX_PIPE = 0x08;
+const WX_DONTINHERIT = 0x10;
 const WX_APPEND = 0x20;
 const WX_TTY = 0x40;
 const WX_TEXT = 0x80;
+/**
+ * `exflag`'s bits: the Unicode translation a descriptor was opened in --
+ * UTF-8, UTF-16, and with `_O_WTEXT` the mark of one still to be told from
+ * the file -- and that its lock was made, which every open does. They stay
+ * when the descriptor closes.
+ */
+const EF_UTF8 = 0x01;
+const EF_UTF16 = 0x02;
+const EF_CRIT_INIT = 0x04;
+const EF_UNK_UNICODE = 0x08;
 
 const SEEK_SET = 0;
 const SEEK_CUR = 1;
 const SEEK_END = 2;
 
-export const CR = 0x0d;
+const CR = 0x0d;
 export const LF = 0x0a;
 const CTRL_Z = 0x1a;
 
@@ -123,6 +162,7 @@ const STAT64I32 = Object.freeze({
 
 /** `st_mode` bits, as sys/stat.h numbers them. */
 const S_IFDIR = 0x4000;
+const S_IFIFO = 0x1000;
 const S_IFCHR = 0x2000;
 const S_IFREG = 0x8000;
 const ALL_READ = 0o444;
@@ -199,6 +239,7 @@ function lineEnd(raw, width){
  * @property {boolean} ended     A ^Z was read: reads answer nothing until a seek.
  * @property {boolean} temporary The file is removed when the descriptor closes.
  * @property {number} [console]  The standard handle a console descriptor stands for.
+ * @property {boolean} [inherit] False for a pipe's end made not to be inherited.
  * @property {{ offset: number, bytes: Uint8Array, whole: boolean } | null} ahead
  *           What a stream read last took from the volume; `whole` when that
  *           read reached the end of the file.
@@ -277,27 +318,46 @@ const onConsole = (handle, settings)=>{
  * @property {boolean} [append]
  * @property {boolean | null} [text]  Null: whatever `_fmode` says.
  * @property {boolean} [temporary]  Remove the file when the descriptor closes.
+ * @property {boolean} [sequential]  Read front to back: the cache hint
+ *           FILE_FLAG_SEQUENTIAL_SCAN gives, which the file's handle reports.
  * @property {number} [unicode]  A Unicode translation to open it in.
  */
 
 /**
  * @typedef {Object} DescriptorHost
- * @property {any} files  The volume: open, read, write, close, stat, remove.
+ * @property {any} files  The volume: open, read, readInto, write, close, stat, remove.
  * @property {(handle: number, text: string) => void} [write]  The console.
  * @property {(code: number) => void} [errno]
  * @property {() => number} [fmode]  The runtime's `_fmode`.
  * @property {FileHandles} [handles]
  *           Where a descriptor's file becomes a handle and a handle a
  *           descriptor. Absent, neither is asked for.
- * @property {() => number} [ioinfo]  Where `__pioinfo` is, 0 before the
- *           runtime's image is placed; each change to a descriptor of the
- *           first block is written there.
+ * @property {() => { at: number, layout: IoinfoLayout }[]} [ioinfo]
+ *           Where each runtime's `__pioinfo` is that has been placed, and its
+ *           layout; each change to a descriptor of the first block is
+ *           written there.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
  * @typedef {ReturnType<typeof createDescriptors>} Descriptors
  */
+
+/**
+ * ioinfo *__pioinfo[]
+ *
+ * Data: the runtime's descriptors as a program reads them in place, its
+ * first pointer to the block that follows it, in the runtime's layout - which
+ * the export carries, so the descriptors are written into each runtime's
+ * table the way that runtime's program reads it.
+ *
+ * @param {Descriptors} descriptors @param {IoinfoLayout} layout
+ */
+export const ioinfoExport = (descriptors, layout)=>({
+    data: ()=>descriptors.ioinfoBytes(layout),
+    pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
+    layout,
+});
 
 /**
  * The descriptor table, shared by the low-level calls and the streams.
@@ -313,35 +373,72 @@ export function createDescriptors(host){
     table.set(2, onConsole(HANDLE_STDERR, { text: true }));
 
     /**
-     * A descriptor's `__pioinfo` entry, its handle and `wxflag`: a number not
-     * open has no handle. A file's handle is made only when one is asked
+     * Each number's `exflag` and MSVCR80's `textmode` byte, kept past its
+     * descriptor's close: a number in the map has been opened.
+     *
+     * @type {Map<number, { exflag: number, textmode: number }>}
+     */
+    const kept = new Map();
+
+    /**
+     * A descriptor's `__pioinfo` entry up to its lock - its handle, `wxflag`
+     * and flag word - and in MSVCR80's layout its `textmode` byte: a number
+     * not open has no handle. A file's handle is made only when one is asked
      * for, so until then the entry holds none, though `wxflag` says it is
      * open.
      *
-     * @param {number} fd
+     * @param {number} fd @param {IoinfoLayout} layout
+     * @returns {{ head: Uint8Array, textmode: number | null }}
      */
-    const entryOf = fd=>{
+    const entryOf = (fd, layout)=>{
         const descriptor = table.get(fd);
-        const bytes = new Uint8Array(IOINFO.WXFLAG + 1);
-        new DataView(bytes.buffer).setInt32(IOINFO.HANDLE,
-            descriptor?.handle || INVALID_HANDLE_VALUE, true);
-        bytes[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
-            | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0);
-        return bytes;
+        const head = new Uint8Array(IOINFO.EXFLAG + 4);
+        const view = new DataView(head.buffer);
+        view.setInt32(IOINFO.HANDLE, descriptor?.handle || INVALID_HANDLE_VALUE, true);
+        if (descriptor)
+        {
+            const unicode = descriptor.unicode ?? 0;
+            kept.set(fd, {
+                exflag: EF_CRIT_INIT | (unicode === O_U8TEXT ? EF_UTF8 : 0)
+                    | (unicode === O_U16TEXT || unicode === O_WTEXT ? EF_UTF16 : 0)
+                    | (unicode === O_WTEXT ? EF_UNK_UNICODE : 0),
+                textmode: (unicode === O_U8TEXT ? TEXTMODE_UTF8 : 0)
+                    | (unicode === O_U16TEXT || unicode === O_WTEXT ? TEXTMODE_UTF16 : 0)
+                    | (unicode === O_WTEXT ? TM_UNICODE : 0),
+            });
+        }
+        const entry = kept.get(fd);
+        view.setInt32(IOINFO.EXFLAG,
+            layout.textmode === null ? entry?.exflag ?? 0 : entry === undefined ? 0 : 1, true);
+        head[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
+            | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0)
+            | (descriptor.node instanceof Pipe ? WX_PIPE : 0)
+            | (descriptor.inherit === false ? WX_DONTINHERIT : 0);
+        return { head, textmode: layout.textmode === null ? null : entry?.textmode ?? 0 };
     };
 
     /**
-     * Writes a descriptor's entry where the program reads it.
-     * ponytail: the first block only, the one msvcrt.dll starts with; the
+     * Writes a descriptor's entry where each runtime's program reads it,
+     * the lock between left as the runtime's.
+     * ponytail: the first block only, the one a runtime starts with; the
      * next are made as descriptors past 31 are opened, when one is read.
      *
      * @param {number} fd
      */
     const mirror = fd=>{
-        const at = host.ioinfo?.() ?? 0;
-        if (at !== 0 && fd >= 0 && fd < IOINFO.BLOCK)
+        if (fd < 0 || fd >= IOINFO.BLOCK)
         {
-            host.writeMemory?.(at + IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE, entryOf(fd));
+            return;
+        }
+        for (const { at, layout } of host.ioinfo?.() ?? [])
+        {
+            const entry = at + IOINFO.BLOCKS * 4 + fd * layout.size;
+            const { head, textmode } = entryOf(fd, layout);
+            host.writeMemory?.(entry, head);
+            if (textmode !== null && layout.textmode !== null)
+            {
+                host.writeMemory?.(entry + layout.textmode, Uint8Array.of(textmode));
+            }
         }
     };
 
@@ -469,6 +566,38 @@ export function createDescriptors(host){
         });
     };
 
+    /**
+     * readAhead, the bytes handed to `put` where they lie rather than
+     * answered: what the stream read last, when it holds the start, and the
+     * rest from the volume into `put` itself (`files.readInto`), a read of a
+     * stretch the window would not hold whole taking no window of its own.
+     * Answers how many bytes there were.
+     *
+     * @param {Descriptor} descriptor @param {number} offset @param {number} length
+     * @param {(bytes: Uint8Array, at: number) => void} put
+     * @returns {number | Promise<number>}
+     */
+    const readAheadInto = (descriptor, offset, length, put)=>{
+        const ahead = descriptor.ahead;
+        const end = ahead ? ahead.offset + ahead.bytes.length : 0;
+        if (ahead && offset >= ahead.offset
+            && (offset + length <= end || (ahead.whole && offset < end)))
+        {
+            const held = ahead.bytes.subarray(offset - ahead.offset,
+                offset - ahead.offset + length);
+            put(held, 0);
+            return held.length;
+        }
+        if (length < READ_AHEAD)
+        {
+            return settle(readAhead(descriptor, offset, length), bytes=>{
+                put(bytes, 0);
+                return bytes.length;
+            });
+        }
+        return host.files.readInto(descriptor.node, offset, length, put);
+    };
+
     return {
         /**
          * The descriptor a number is, or null for one not open -- or whose
@@ -510,7 +639,8 @@ export function createDescriptors(host){
                 fail(!there ? ENOENT : (request.exclusive ? EEXIST : EACCES));
                 return -1;
             }
-            const file = { node, path, position: 0, read: request.read, write: request.write };
+            const file = { node, path, position: 0, read: request.read, write: request.write,
+                ...request.sequential ? { sequential: true } : {} };
             const descriptor = over(file, {
                 append: request.append,
                 text: request.text ?? ((host.fmode?.() ?? 0) & O_BINARY) === 0,
@@ -571,6 +701,42 @@ export function createDescriptors(host){
                 mirror(fd);
             }
             return fd;
+        },
+
+        /**
+         * A pipe's two ends, the reading one first, at the lowest numbers
+         * free; null with EMFILE when there are not two.
+         *
+         * @param {number} flags  `_O_TEXT`, `_O_BINARY` or neither, `_O_NOINHERIT`.
+         * @returns {[number, number] | null}
+         */
+        pipe(flags){
+            const settings = {
+                text: (flags & O_TEXT) !== 0
+                    || ((flags & O_BINARY) === 0 && ((host.fmode?.() ?? 0) & O_BINARY) === 0),
+                inherit: (flags & O_NOINHERIT) === 0,
+            };
+            const pipe = new Pipe();
+            const ends = [true, false].map(reading=>{
+                const fd = lowestFree();
+                if (fd < 0)
+                {
+                    return -1;
+                }
+                const end = over({ node: pipe, path: '', position: 0, read: reading,
+                    write: !reading }, { text: settings.text });
+                end.inherit = settings.inherit;
+                table.set(fd, end);
+                return fd;
+            });
+            if (ends.includes(-1))
+            {
+                ends.filter(fd=>fd >= 0).forEach(fd=>this.close(fd));
+                fail(EMFILE);
+                return null;
+            }
+            ends.forEach(mirror);
+            return /** @type {[number, number]} */ (ends);
         },
 
         /**
@@ -689,11 +855,18 @@ export function createDescriptors(host){
          * `__pioinfo` as the image starts with it: the first block's pointer,
          * filled by the loader, and the block with every descriptor open now.
          */
-        ioinfoBytes(){
-            const bytes = new Uint8Array(IOINFO.BLOCKS * 4 + IOINFO.BLOCK * IOINFO.SIZE);
+        /** @param {IoinfoLayout} layout */
+        ioinfoBytes(layout){
+            const bytes = new Uint8Array(IOINFO.BLOCKS * 4 + IOINFO.BLOCK * layout.size);
             for (let fd = 0; fd < IOINFO.BLOCK; fd++)
             {
-                bytes.set(entryOf(fd), IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE);
+                const entry = IOINFO.BLOCKS * 4 + fd * layout.size;
+                const { head, textmode } = entryOf(fd, layout);
+                bytes.set(head, entry);
+                if (textmode !== null && layout.textmode !== null)
+                {
+                    bytes[entry + layout.textmode] = textmode;
+                }
             }
             return bytes;
         },
@@ -714,6 +887,35 @@ export function createDescriptors(host){
         },
 
         /**
+         * pull of a binary descriptor's bytes (no text, no Unicode
+         * translation, not up to a line), handed to `put` where they lie -- a
+         * stream's window or the volume's own -- rather than answered: what a
+         * caller copies on (into guest memory) is copied once. Answers how
+         * many bytes there were. Anything else is pull's.
+         *
+         * @param {Descriptor} descriptor @param {number} limit
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        pullInto(descriptor, limit, put){
+            if (descriptor.node === null || descriptor.ended || limit <= 0)
+            {
+                return 0;
+            }
+            return settle(readAheadInto(descriptor, descriptor.position, limit, put), count=>{
+                descriptor.position += count;
+                return count;
+            });
+        },
+
+        /**
+         * Whether pullInto reads this descriptor: binary, no Unicode translation.
+         *
+         * @param {Descriptor} descriptor
+         */
+        pullsInto: descriptor=>!descriptor.text && descriptor.unicode === 0,
+
+        /**
          * Up to `limit` bytes as a stream reads them, stopping after a line
          * feed when `line` says so. Only what comes back is consumed, so the
          * position stays the offset of the next byte the program has not
@@ -723,6 +925,9 @@ export function createDescriptors(host){
          * Unicode translation the bytes are the program's UTF-16. `units`
          * says the caller reads a binary file as UTF-16, so a line ends
          * after an LF unit rather than after an LF byte.
+         *
+         * The answer may be the stream's read-ahead itself: read, never
+         * written, and done with before the descriptor is read again.
          *
          * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
          * @param {boolean} [units]
@@ -740,7 +945,7 @@ export function createDescriptors(host){
             if (!descriptor.text)
             {
                 return settle(readAhead(descriptor, descriptor.position, limit), raw=>{
-                    const taken = raw.slice(0, line ? lineEnd(raw, units ? 2 : 1) : raw.length);
+                    const taken = line ? raw.subarray(0, lineEnd(raw, units ? 2 : 1)) : raw;
                     descriptor.position += taken.length;
                     return taken;
                 });
@@ -761,7 +966,7 @@ export function createDescriptors(host){
                         {
                             descriptor.ended = true;
                             descriptor.position = sizeOf(descriptor);
-                            return out.slice(0, filled);
+                            return out.subarray(0, filled);
                         }
                         if (byte === CR && at + 1 === raw.length && raw.length === wanted)
                         {
@@ -773,11 +978,12 @@ export function createDescriptors(host){
                         if (line && out[filled - 1] === LF)
                         {
                             descriptor.position += at;
-                            return out.slice(0, filled);
+                            return out.subarray(0, filled);
                         }
                     }
                     descriptor.position += at;
-                    return filled === limit || raw.length < wanted ? out.slice(0, filled) : round();
+                    return filled === limit || raw.length < wanted
+                        ? out.subarray(0, filled) : round();
                 });
             };
             return round();
@@ -857,10 +1063,13 @@ export function createDescriptors(host){
  * @property {any} files  The volume: stat and currentDirectory, besides what
  *           the descriptors use.
  * @property {(code: number) => void} [errno]
+ * @property {(code: number) => void} [doserrno]  Where the system's reason goes.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call refuses what real Windows would have done.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where the high half of an __int64 answer goes: EDX.
+ * @property {() => number} [systemTimeMs]  The guest's wall clock, for a
+ *           time stamp the caller leaves to "now".
  */
 
 /**
@@ -878,6 +1087,21 @@ export function createIoFunctions(host, descriptors){
      * @param {(args: number[]) => number | Promise<number>} handler
      */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
+
+    /**
+     * A read or a write the descriptor refuses: EBADF, and for one open the
+     * other way the system's own reason in `_doserrno`, ERROR_ACCESS_DENIED,
+     * as ReadFile on a handle without the access answers.
+     *
+     * @param {Descriptor | undefined | null} descriptor
+     */
+    const refuse = descriptor=>{
+        fail(EBADF);
+        if (descriptor)
+        {
+            host.doserrno?.(ERROR_ACCESS_DENIED);
+        }
+    };
 
     /** @param {number} milliseconds */
     const seconds = milliseconds=>Math.floor((milliseconds ?? 0) / 1000) >>> 0;
@@ -905,7 +1129,7 @@ export function createIoFunctions(host, descriptors){
      * @param {boolean} wide  Whether the name is UTF-16.
      */
     const openNamed = (path, oflag, wide)=>{
-        const flags = oflag >>> 0;
+        const flags = wholeAddress(oflag);
         const access = flags & O_ACCMODE;
         if ((path >>> 0) === 0 || access === O_ACCMODE)
         {
@@ -914,7 +1138,7 @@ export function createIoFunctions(host, descriptors){
         }
         return descriptors.open(wide
             ? wideStringAt(host.readMemory, path >>> 0)
-            : host.readCString(path >>> 0, MAX_STRING), {
+            : host.readCString(wholeAddress(path), MAX_STRING), {
             read: access !== O_WRONLY,
             write: access === O_WRONLY || access === O_RDWR,
             create: (flags & O_CREAT) !== 0,
@@ -923,6 +1147,8 @@ export function createIoFunctions(host, descriptors){
             append: (flags & O_APPEND) !== 0,
             text: (flags & O_BINARY) !== 0 ? false : ((flags & O_TEXT) !== 0 ? true : null),
             temporary: (flags & O_TEMPORARY) !== 0,
+            // _O_SEQUENTIAL wins over _O_RANDOM, said together.
+            sequential: (flags & O_SEQUENTIAL) !== 0,
             unicode: (flags & O_BINARY) !== 0 ? 0 : unicodeOf(flags),
         });
     };
@@ -963,7 +1189,7 @@ export function createIoFunctions(host, descriptors){
                 view.setUint32(at, time, true);
             }
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -1028,11 +1254,68 @@ export function createIoFunctions(host, descriptors){
             writeStat(buffer, { device: fd | 0, mode: S_IFCHR, size: 0, modified: 0 }, layout);
             return 0;
         }
+        if (descriptor.node instanceof Pipe)
+        {
+            writeStat(buffer, { device: fd | 0, mode: S_IFIFO,
+                size: descriptor.node.available(descriptor.position), modified: 0 }, layout);
+            return 0;
+        }
         const entry = host.files.stat(descriptor.path);
         writeStat(buffer, {
             device: 0, mode: S_IFREG | ALL_READ | ALL_WRITE,
             size: entry?.size ?? 0, modified: entry?.modified ?? 0,
         }, layout);
+        return 0;
+    };
+
+    /**
+     * The file a path names, as `_stat` reads the name, or null for none.
+     *
+     * @param {number} path @param {boolean} wideName
+     */
+    const namedFile = (path, wideName)=>{
+        if ((path >>> 0) === 0)
+        {
+            return null;
+        }
+        const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
+            : host.readCString(wholeAddress(path), MAX_STRING)).replace(/ +$/, '');
+        return name !== '' && host.files.stat(name) ? name : null;
+    };
+
+    /**
+     * A file's modification time set, from the times given or the clock:
+     * the volume keeps one time per file, the modification time, and the
+     * access time is accepted as the volume has none to keep it in.
+     *
+     * @param {string | null} name @param {number} times
+     * @param {4 | 8} width  bytes of a time in the structure
+     * @param {number} [missing]  errno when there is no such file
+     */
+    const stamp = (name, times, width, missing = ENOENT)=>{
+        if (name === null)
+        {
+            fail(missing);
+            return -1;
+        }
+        let stampSeconds = Math.floor((host.systemTimeMs?.() ?? Date.now()) / 1000);
+        if ((times >>> 0) !== 0)
+        {
+            const view = new DataView(host.readMemory(wholeAddress(times) + width, width)
+                .buffer);
+            stampSeconds = width === 8 ? Number(view.getBigInt64(0, true)) : view.getInt32(0, true);
+            if (stampSeconds < 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+        }
+        if (!host.files.setModified)
+        {
+            host.divergence?.('_utime', 'the volume keeps no time stamps');
+            return 0;
+        }
+        host.files.setModified(name, stampSeconds * 1000);
         return 0;
     };
 
@@ -1044,15 +1327,16 @@ export function createIoFunctions(host, descriptors){
      * program are executable.
      *
      * @param {number} path @param {number} buffer
-     * @param {StatLayout} layout
+     * @param {StatLayout} layout @param {boolean} [wideName]  The path a wide string.
      */
-    const statPath = (path, buffer, layout)=>{
+    const statPath = (path, buffer, layout, wideName = false)=>{
         if ((path >>> 0) === 0 || (buffer >>> 0) === 0)
         {
             fail(EINVAL);
             return -1;
         }
-        const name = host.readCString(path >>> 0, MAX_STRING).replace(/ +$/, '');
+        const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
+            : host.readCString(wholeAddress(path), MAX_STRING)).replace(/ +$/, '');
         const bare = /^[A-Za-z]:$/.test(name);
         const trailing = /[\\/]$/.test(name) && !/^[A-Za-z]:[\\/]$/.test(name);
         const entry = bare || trailing || name === '' ? null : host.files.stat(name);
@@ -1077,10 +1361,11 @@ export function createIoFunctions(host, descriptors){
      * folds to LF and a ^Z ends the data. A CR that is the last byte read is
      * decided by the byte after it -- see `_read`.
      *
-     * @param {Uint8Array} raw
+     * @param {Uint8Array} raw  The volume's answer, the caller's own: folded
+     *        in place, each byte written no further on than it was read.
      */
     const fold = raw=>{
-        const out = new Uint8Array(raw.length);
+        const out = raw;
         let filled = 0;
         for (let at = 0; at < raw.length; at++)
         {
@@ -1146,6 +1431,32 @@ export function createIoFunctions(host, descriptors){
         : {};
 
     const duplicates = {
+        /**
+         * int _pipe(int *pfds, unsigned int psize, int textmode)
+         *
+         * A pipe, its reading end in `pfds[0]` and its writing end in
+         * `pfds[1]`, in the mode asked or `_fmode`'s; the size is a hint
+         * about buffering and bounds nothing. -1 with EINVAL for no array,
+         * EMFILE when two numbers are not free.
+         */
+        _pipe: cdecl(12, ([fds, , mode])=>{
+            if ((fds >>> 0) === 0)
+            {
+                fail(EINVAL);
+                return -1;
+            }
+            const ends = descriptors.pipe(mode >>> 0);
+            if (!ends)
+            {
+                return -1;
+            }
+            const bytes = new Uint8Array(8);
+            new DataView(bytes.buffer).setInt32(0, ends[0], true);
+            new DataView(bytes.buffer).setInt32(4, ends[1], true);
+            host.writeMemory(wholeAddress(fds), bytes);
+            return 0;
+        }),
+
         /** int _dup(int fd) -- a second descriptor on the same file, its position shared. */
         _dup: cdecl(4, ([fd])=>descriptors.duplicate(fd)),
 
@@ -1158,16 +1469,21 @@ export function createIoFunctions(host, descriptors){
         _dup2: cdecl(8, ([fd, onto])=>(descriptors.duplicate(fd, onto) < 0 ? -1 : 0)),
     };
 
-    /**
-     * ioinfo *__pioinfo[]
-     *
-     * Data: the runtime's descriptors as a program reads them in place, its
-     * first pointer to the block that follows it.
-     */
     const ioinfo = {
-        __pioinfo: {
-            data: ()=>descriptors.ioinfoBytes(),
-            pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
+        __pioinfo: ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcrt),
+        /**
+         * ioinfo __badioinfo
+         *
+         * Data: the entry the runtime's own macros read for a descriptor out
+         * of range -- no handle, text mode, not open.
+         */
+        __badioinfo: {
+            data: ()=>{
+                const bytes = new Uint8Array(IOINFO_LAYOUTS.msvcrt.size);
+                new DataView(bytes.buffer).setInt32(IOINFO.HANDLE, -1, true);
+                bytes[IOINFO.WXFLAG] = WX_TEXT;
+                return bytes;
+            },
         },
     };
 
@@ -1183,6 +1499,18 @@ export function createIoFunctions(host, descriptors){
          * and the volume keeps no such bit, so it is read and not used.
          */
         _open: cdecl(12, ([path, oflag])=>openNamed(path, oflag, false)),
+
+        /**
+         * int _creat(const char *filename, int pmode)
+         *
+         * `_open` creating or truncating the file, for reading and writing, in
+         * `_fmode`'s translation. `pmode` would mark a new file read-only, a
+         * bit the volume does not keep.
+         */
+        _creat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, false)),
+
+        /** int _wcreat(const wchar_t *filename, int pmode) -- `_creat`, wide. */
+        _wcreat: cdecl(8, ([path])=>openNamed(path, O_CREAT | O_TRUNC | O_RDWR, true)),
 
         /** int _wopen(const wchar_t *filename, int oflag [, int pmode]) -- `_open`, wide. */
         _wopen: cdecl(12, ([path, oflag])=>openNamed(path, oflag, true)),
@@ -1250,7 +1578,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.read)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;
@@ -1272,7 +1600,7 @@ export function createIoFunctions(host, descriptors){
                 return settle(descriptors.pull(descriptor, wanted, false), bytes=>{
                     if (bytes.length > 0)
                     {
-                        host.writeMemory(buffer >>> 0, bytes);
+                        host.writeMemory(wholeAddress(buffer), bytes);
                     }
                     return bytes.length;
                 });
@@ -1282,16 +1610,24 @@ export function createIoFunctions(host, descriptors){
             const deliver = (bytes, consumed)=>{
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(buffer >>> 0, bytes);
+                    host.writeMemory(wholeAddress(buffer), bytes);
                 }
                 descriptor.position = start + consumed;
                 return bytes.length;
             };
+            if (!descriptor.text)
+            {
+                // Binary: what the volume holds goes to the program's buffer
+                // where it lies, one copy.
+                const to = wholeAddress(buffer);
+                return settle(host.files.readInto(descriptor.node, start, wanted,
+                    (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>
+                        host.writeMemory(to + at, bytes)), read=>{
+                    descriptor.position = start + read;
+                    return read;
+                });
+            }
             return settle(host.files.read(descriptor.node, start, wanted), raw=>{
-                if (!descriptor.text)
-                {
-                    return deliver(raw, raw.length);
-                }
                 const { out, filled, ended, trailingCr } = fold(raw);
                 descriptor.ended = ended;
                 if (!trailingCr)
@@ -1299,11 +1635,18 @@ export function createIoFunctions(host, descriptors){
                     return deliver(out.subarray(0, filled), raw.length);
                 }
                 return settle(host.files.read(descriptor.node, start + raw.length, 1), next=>{
+                    // A CR the read ended on is looked past: before an LF the
+                    // two are the LF. A file's read takes it only when the CR
+                    // was all it read, Windows' own answer; a pipe's always,
+                    // the runtime having kept the byte it looked at aside.
                     if (next.length === 1 && next[0] === LF)
                     {
-                        return filled === 0
-                            ? deliver(Uint8Array.of(LF), raw.length + 1)
-                            : deliver(out.subarray(0, filled), raw.length);
+                        if (filled === 0 || descriptor.node instanceof Pipe)
+                        {
+                            out[filled] = LF;
+                            return deliver(out.subarray(0, filled + 1), raw.length + 1);
+                        }
+                        return deliver(out.subarray(0, filled), raw.length);
                     }
                     out[filled] = CR;
                     return deliver(out.subarray(0, filled + 1), raw.length);
@@ -1321,7 +1664,7 @@ export function createIoFunctions(host, descriptors){
             const descriptor = descriptors.get(fd | 0);
             if (!descriptor || !descriptor.write)
             {
-                fail(EBADF);
+                refuse(descriptor);
                 return -1;
             }
             const wanted = count >>> 0;
@@ -1334,7 +1677,7 @@ export function createIoFunctions(host, descriptors){
                 fail(EINVAL);
                 return -1;
             }
-            const bytes = host.readMemory(buffer >>> 0, wanted).slice();
+            const bytes = host.readMemory(wholeAddress(buffer), wanted);
             if (descriptors.put(descriptor, bytes) < wanted)
             {
                 fail(ENOSPC);
@@ -1433,6 +1776,24 @@ export function createIoFunctions(host, descriptors){
         /** int _fstati64(int fd, struct _stati64 *buffer) -- `_fstat` with the 64-bit size. */
         _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STATI64)),
 
+        // The time stamps: __utimbuf64 is two __time64_t, __utimbuf32 (and
+        // msvcrt's own _utimbuf) two longs; a null one is now.
+        /** int _utime64(const char *filename, struct __utimbuf64 *times) */
+        _utime64: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 8)),
+        /** int _utime32(const char *filename, struct __utimbuf32 *times) */
+        _utime32: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        _utime: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        _wutime64: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 8)),
+        _wutime32: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
+        _wutime: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
+        /** int _futime64(int fd, struct __utimbuf64 *times) */
+        _futime64: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 8,
+            EBADF)),
+        _futime32: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
+            EBADF)),
+        _futime: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
+            EBADF)),
+
         /** int _stat(const char *path, struct _stat *buffer) */
         _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),
 
@@ -1452,6 +1813,16 @@ export function createIoFunctions(host, descriptors){
         /** int _fstat64i32(int fd, struct _stat64i32 *buffer) */
         _fstat64i32: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT64I32)),
 
+        // The same over a wide path, which is read from memory as it lies.
+        /** int _wstat(const wchar_t *path, struct _stat *buffer) */
+        _wstat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT, true)),
+        /** int _wstati64(const wchar_t *path, struct _stati64 *buffer) */
+        _wstati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64, true)),
+        /** int _wstat64(const wchar_t *path, struct _stat64 *buffer) */
+        _wstat64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64, true)),
+        /** int _wstat64i32(const wchar_t *path, struct _stat64i32 *buffer) */
+        _wstat64i32: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64I32, true)),
+
         // An __int64 answer is EDX:EAX, and only a seam onto the registers
         // reaches EDX: without one these would answer a high half that is
         // whatever the register held, so they stay unexported.
@@ -1463,8 +1834,11 @@ export function createIoFunctions(host, descriptors){
                  * `_lseek` with an offset and an answer past 4 GiB: -1 as an
                  * __int64, with the same errno, when it fails.
                  */
-                _lseeki64: cdecl(16, ([fd, low, high, origin])=>
-                    wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+                _lseeki64: {
+                    ...cdecl(16, ([fd, low, high, origin])=>
+                        wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+                    quadwords: [1],
+                },
 
                 /** __int64 _telli64(int fd) */
                 _telli64: cdecl(4, ([fd])=>wide(fileAt(fd)?.position ?? -1)),

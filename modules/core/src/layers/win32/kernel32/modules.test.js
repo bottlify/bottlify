@@ -18,7 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createModuleFunctions, searchesBesideProgram } from './modules.js';
+import { createModuleFunctions, searchesBesideProgram, DLL_SEARCH_PATH } from './modules.js';
 
 /**
  * A module record with the two lookups a load path never reaches here.
@@ -49,7 +49,9 @@ function hostFor({ lookup = {}, load } = {}){
 
     const host = {
         /** @param {number} address */
-        readCString: address=>strings.get(address) ?? '',
+        // Cut at the limit the caller passes, as the layer's reader is.
+        readCString: (/** @type {number} */ address, /** @type {number} */ limit)=>
+            (strings.get(address) ?? '').slice(0, limit),
         /** @param {number} address */
         readWideString: address=>strings.get(address) ?? '',
         writeMemory: ()=>{},
@@ -112,6 +114,32 @@ test('a module already in the table answers when the loader finds no file', ()=>
 
     assert.equal(fns.LoadLibraryA.handler([0x400000]), 0x1000);
 });
+
+test('GetProcAddress answers what the forwarder resolver finds, waiting while it loads',
+    async()=>{
+        const f = hostFor({ lookup: { 'f.dll': 0x1000 } });
+        /** @type {[string, string | null, number | null][]} */
+        const asked = [];
+        const fns = createModuleFunctions({
+            ...f.host,
+            exportOf: (module, name, ordinal)=>{
+                asked.push([module.name, name, ordinal]);
+                return name === 'later' ? Promise.resolve({ address: 0x2004 })
+                    : name === 'loop' ? { error: 193 } : { address: 0x2000 };
+            },
+        });
+        f.say(0x400000, 'func');
+        f.say(0x400010, 'later');
+        f.say(0x400020, 'loop');
+        assert.equal(fns.GetProcAddress.handler([0x1000, 0x400000]), 0x2000);
+        assert.equal(fns.GetProcAddress.handler([0x1000, 2]), 0x2000, 'by ordinal too');
+        assert.equal(await fns.GetProcAddress.handler([0x1000, 0x400010]), 0x2004,
+            'a forwarder\'s target loaded first');
+        assert.equal(fns.GetProcAddress.handler([0x1000, 0x400020]), 0);
+        assert.equal(f.lastError(), 193, 'the resolver\'s error is the one left');
+        assert.deepEqual(asked, [['f.dll', 'func', null], ['f.dll', null, 2],
+            ['f.dll', 'later', null], ['f.dll', 'loop', null]]);
+    });
 
 test('a name nothing provides is zero and sets ERROR_MOD_NOT_FOUND', ()=>{
     const f = hostFor({ lookup: {}, load: ()=>0 });
@@ -275,6 +303,41 @@ test('LoadLibraryEx refuses a file handle, which is reserved and must be NULL', 
     assert.deepEqual(asked, [], 'nothing was loaded');
 });
 
+test('a NULL name loads nothing and reads nothing: ERROR_INVALID_PARAMETER', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const f = hostFor({ load: name=>{ asked.push(name); return 0x1000; } });
+    const fns = createModuleFunctions(f.host);
+    for (const call of [fns.LoadLibraryA, fns.LoadLibraryW])
+    {
+        assert.equal(call.handler([0]), 0);
+        assert.equal(f.lastError(), 87);
+    }
+    for (const call of [fns.LoadLibraryExA, fns.LoadLibraryExW])
+    {
+        assert.equal(call.handler([0, 0, 0]), 0);
+        assert.equal(f.lastError(), 87);
+    }
+    f.say(0x400000, '');
+    assert.equal(fns.LoadLibraryExA.handler([0x400000, 0, 0]), 0, 'nor does an empty one');
+    assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
+    assert.deepEqual(asked, []);
+});
+
+test('a name longer than MAX_PATH reaches the loader whole, never cut to another', ()=>{
+    // Windows reads a library's name to its terminator; one cut at 260
+    // characters names some other file.
+    /** @type {string[]} */
+    const asked = [];
+    const f = hostFor({ load: name=>{ asked.push(name); return 0; } });
+    const fns = createModuleFunctions(f.host);
+    const name = `C:\\${'long\\'.repeat(60)}lib.dll`;
+    f.say(0x400000, name);
+    fns.LoadLibraryA.handler([0x400000]);
+    fns.LoadLibraryExA.handler([0x400000, 0, 0]);
+    assert.deepEqual(asked.map(text=>text.length), [name.length, name.length]);
+});
+
 test('FreeLibrary takes back a data file by the handle LoadLibraryEx gave out', ()=>{
     // A library loaded as data is no module -- GetModuleHandle does not find
     // it -- so its handle, the base with a low bit set, is looked up apart.
@@ -348,6 +411,123 @@ test("K32GetModuleInformation reads a module's base, size and entry from its own
     assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
 });
 
+test('a path cut by a short buffer ends in its terminator, answers nSize and says so', ()=>{
+    const f = hostFor({});
+    const host = /** @type {any} */ (f.host);
+    host.find = (/** @type {string | null} */ name)=>(name === null
+        ? record('app.exe', 0x400000) : null);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    host.writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+        written.push(bytes.slice());
+    };
+    const fns = createModuleFunctions(f.host);
+    // C:\App\speedDemo.exe is 20 characters.
+    assert.equal(fns.GetModuleFileNameW.handler([0, 0x1000, 8]), 8);
+    assert.equal(f.lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(written[0].length, 16, 'seven characters and the terminator');
+    assert.equal(written[0][14] | written[0][15], 0);
+    assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 21]), 20);
+    assert.equal(f.lastError(), 0, 'a whole path clears the error');
+    assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 0]), 0);
+    assert.equal(f.lastError(), 122);
+});
+
+test('AddDllDirectory\'s directories are searched for a bare name until removed', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const loader = (/** @type {string} */ name)=>{
+        asked.push(name);
+        return name === 'E:\\Plugins\\fx.dll' ? 0x30000000 : 0;
+    };
+    const { host, say, lastError } = hostFor({ load: /** @type {any} */ (loader) });
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    say(0x100, 'fx.dll');
+    say(0x200, 'E:\\Plugins');
+    say(0x300, 'relative\\dir');
+    assert.equal(fns.AddDllDirectory.handler([0x300]), 0, 'a relative path is refused');
+    assert.equal(lastError(), 87);
+    const cookie = fns.AddDllDirectory.handler([0x200]);
+    assert.notEqual(cookie, 0);
+    assert.equal(fns.LoadLibraryW.handler([0x100]), 0x30000000);
+    assert.deepEqual(asked, ['fx.dll', 'E:\\Plugins\\fx.dll']);
+    assert.equal(fns.RemoveDllDirectory.handler([cookie]), 1);
+    assert.equal(fns.RemoveDllDirectory.handler([cookie]), 0, 'only once');
+    asked.length = 0;
+    assert.equal(fns.LoadLibraryW.handler([0x100]), 0);
+    assert.deepEqual(asked, ['fx.dll']);
+});
+
+test('LOAD_LIBRARY_SEARCH_* flags are the whole search, the default one too', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    /** @param {string} name @param {number} flags @param {any} search */
+    const loader = (name, flags, search)=>{
+        asked.push([name, flags, search]);
+        return 0;
+    };
+    const { host, say, lastError } = hostFor({ load: /** @type {any} */ (loader) });
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    say(0x100, '1\\x.dll');
+    say(0x200, 'D:\\Mine');
+    say(0x300, 'E:\\Added');
+    fns.SetDllDirectoryA.handler([0x200]);
+    fns.AddDllDirectory.handler([0x300]);
+    // A relative name under LOAD_LIBRARY_SEARCH_SYSTEM32 is looked for in
+    // the system directory alone, and not found is ERROR_MOD_NOT_FOUND.
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800]), 0);
+    assert.equal(lastError(), 126);
+    assert.deepEqual(asked.pop(), ['1\\x.dll', 0,
+        { application: false, user: [], system: true, loadDirectory: false }]);
+    // DEFAULT_DIRS is the program's, the user's and the system directory; AddDllDirectory's
+    // before SetDllDirectory's.
+    fns.LoadLibraryExA.handler([0x100, 0, 0x1000 | 0x2]);
+    assert.deepEqual(asked.pop(), ['1\\x.dll', 0x2,
+        { application: true, user: ['E:\\Added', 'D:\\Mine'], system: true,
+            loadDirectory: false }], 'the other flags handed on');
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800 | 0x8]), 0);
+    assert.equal(lastError(), 87, 'with LOAD_WITH_ALTERED_SEARCH_PATH: ERROR_INVALID_PARAMETER');
+    assert.equal(asked.length, 0, 'and nothing looked for');
+    // The library's own folder is only of a path from the root.
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x100]), 0);
+    assert.equal(lastError(), 87, 'DLL_LOAD_DIR with a relative name: ERROR_INVALID_PARAMETER');
+    assert.equal(asked.length, 0);
+
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x100]), 0,
+        'a flag LoadLibraryEx alone takes is not a default');
+    assert.equal(lastError(), 87);
+    fns.LoadLibraryA.handler([0x100]);
+    assert.equal(asked.pop()[2], undefined, 'the standard search until a default is set');
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x200]), 1);
+    fns.LoadLibraryA.handler([0x100]);
+    assert.deepEqual(asked.pop()[2], { application: true, user: [], system: false,
+        loadDirectory: false }, 'then the default for a load that names no places');
+    fns.LoadLibraryExA.handler([0x100, 0, 0x8]);
+    assert.equal(asked.pop()[2], undefined, 'LOAD_WITH_ALTERED_SEARCH_PATH keeps the standard one');
+});
+
+test('the directories a library is looked for in, as LdrGetDllPath hands them out', ()=>{
+    const { host, say } = hostFor({});
+    const environment = /** @type {any} */ (host);
+    environment.environmentVariable = (/** @type {string} */ name)=>
+        (name === 'PATH' ? 'C:\\Tools;;D:\\Bin' : undefined);
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    const searchPath = /** @type {any} */ (fns)[DLL_SEARCH_PATH];
+    assert.deepEqual(searchPath('', 0), ['C:\\App', 'C:\\WINDOWS\\system32',
+        'C:\\WINDOWS\\system', 'C:\\WINDOWS', '.', 'C:\\Tools', 'D:\\Bin'],
+    'the standard search, the current directory as "."');
+    assert.deepEqual(searchPath('E:\\Lib\\a.dll', 0x8)[0], 'E:\\Lib',
+        'the library\'s own directory first for LOAD_WITH_ALTERED_SEARCH_PATH');
+    say(0x200, 'D:\\Mine');
+    fns.SetDllDirectoryA.handler([0x200]);
+    assert.deepEqual(searchPath('', 0).slice(1, 5), ['D:\\Mine', 'C:\\WINDOWS\\system32',
+        'C:\\WINDOWS\\system', 'C:\\WINDOWS'], 'SetDllDirectory\'s, and no current directory');
+    assert.deepEqual(searchPath('E:\\Lib\\a.dll', 0x100 | 0x800), ['E:\\Lib',
+        'C:\\WINDOWS\\system32'], 'DLL_LOAD_DIR and SYSTEM32');
+    assert.deepEqual(searchPath('', 0x1000), ['C:\\App', 'D:\\Mine', 'C:\\WINDOWS\\system32'],
+        'DEFAULT_DIRS');
+});
+
 test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it away', async()=>{
     /** @type {string[]} */
     const asked = [];
@@ -398,7 +578,14 @@ test('GetDllDirectory answers as the path calls do', ()=>{
     assert.equal(bytes[0x100], 0);
     say(0x10, 'C:\\Libs');
     fns.SetDllDirectoryA.handler([0x10]);
+    bytes.fill(0x41, 0x100, 0x110);
+    assert.equal(fns.GetDllDirectoryA.handler([0, 0x100]), 8, 'no room: the size needed');
+    assert.equal(bytes[0x100], 0x41, 'and nothing written');
     assert.equal(fns.GetDllDirectoryA.handler([4, 0x100]), 8, 'too small: the size needed');
+    assert.equal(bytes[0x100], 0, 'and an empty string');
+    bytes.fill(0x41, 0x200, 0x210);
+    assert.equal(fns.GetDllDirectoryW.handler([7, 0x200]), 8);
+    assert.deepEqual([bytes[0x200], bytes[0x201], bytes[0x202]], [0, 0, 0x41]);
     assert.equal(fns.GetDllDirectoryA.handler([8, 0x100]), 7);
     assert.equal(String.fromCharCode(...bytes.subarray(0x100, 0x108)), 'C:\\Libs\0');
     assert.equal(fns.GetDllDirectoryW.handler([8, 0x200]), 7);
@@ -415,8 +602,8 @@ test('K32EnumProcessModules hands out the image first and the bytes all of them 
     const fns = createModuleFunctions({
         ...host,
         list: ()=>[
-            { base: 0x400000, path: 'C:\\App\\game.exe' },
-            { base: 0x10000000, path: 'C:\\App\\engine.dll' },
+            { base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' },
         ],
         /** @param {number} address @param {Uint8Array} bytes */
         writeMemory: (address, bytes)=>{ written.set(address, bytes); },
@@ -436,6 +623,29 @@ test('K32EnumProcessModules hands out the image first and the bytes all of them 
     assert.deepEqual([u32(0x500), u32(0x500, 4)], [0x400000, 0x10000000]);
     assert.equal(enumerate.handler([0xffffffff, 0x500, 8, 0]), 0);
     assert.equal(lastError(), 998, 'ERROR_NOACCESS');
+});
+
+test('a 64-bit process\'s module handles are quadwords, EnumProcessModulesEx\'s as its own', ()=>{
+    const { host } = hostFor({ lookup: { 'game.exe': 0x400000 } });
+    /** @type {Map<number, Uint8Array>} */
+    const written = new Map();
+    const fns = createModuleFunctions({
+        ...host,
+        pointerSize: 8,
+        list: ()=>[{ base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' }],
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
+    });
+    const u32 = (/** @type {number} */ address, at = 0)=>
+        new DataView(/** @type {Uint8Array} */ (written.get(address)).buffer).getUint32(at, true);
+    for (const name of /** @type {const} */ (['K32EnumProcessModules', 'K32EnumProcessModulesEx']))
+    {
+        written.clear();
+        assert.equal(fns[name].handler([0xffffffff, 0x500, 16, 0x600, 3]), 1);
+        assert.equal(u32(0x600), 16, `${name}: two handles of eight bytes`);
+        assert.deepEqual([0, 4, 8, 12].map(at=>u32(0x500, at)), [0x400000, 0, 0x10000000, 0]);
+    }
 });
 
 test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file name', ()=>{
@@ -467,4 +677,70 @@ test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file
     assert.deepEqual([...wide.subarray(0, 4)], [0x65, 0, 0x6e, 0]);
     assert.equal(fns.K32GetModuleFileNameExA.handler([0xffffffff, 0x20000000, 0x500, 260]), 0);
     assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+});
+
+test('DelayLoadFailureHook offers no stand-in, leaving the delay-load helper to raise', ()=>{
+    const fns = /** @type {any} */ (createModuleFunctions(hostFor().host));
+    assert.equal(fns.DelayLoadFailureHook.argBytes, 8);
+    assert.equal(fns.DelayLoadFailureHook.handler([0x1000, 0x2000]), 0);
+});
+
+test('K32GetMappedFileName names the image an address lies in, as the object manager does', ()=>{
+    // A DRM wrapper resolves psapi's GetMappedFileNameA and checks its own
+    // image with it; without the export it gave up on starting the game.
+    const { host, lastError } = hostFor();
+    const image = new Uint8Array(0x400);
+    const view = new DataView(image.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80 + 24 + 56, 0x9000, true);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    const fns = createModuleFunctions({
+        ...host,
+        list: ()=>[{ base: 0x400000, name: 'gta-vc.exe', path: 'C:\\App\\gta-vc.exe' }],
+        nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>image.slice(address - 0x400000,
+            address - 0x400000 + length),
+        writeMemory: (_, bytes)=>{ written.push(bytes); },
+    });
+    const wanted = '\\Device\\HarddiskVolume1\\App\\gta-vc.exe';
+    assert.equal(fns.K32GetMappedFileNameA.argBytes, 16);
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x500, 260]),
+        wanted.length);
+    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
+    assert.equal(fns.K32GetMappedFileNameW.handler([0xffffffff, 0x408fff, 0x500, 260]),
+        wanted.length, 'the last byte of the image');
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x409000, 0x500, 260]), 0,
+        'past SizeOfImage');
+    assert.equal(lastError(), 59, 'ERROR_UNEXP_NET_ERR: no file is mapped there');
+    assert.equal(fns.K32GetMappedFileNameW.handler([0x44, 0x401234, 0x500, 260]), 0);
+    assert.equal(lastError(), 6, 'another process\'s memory: ERROR_INVALID_HANDLE');
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x500, 0]), 0);
+    assert.equal(lastError(), 122, 'no room at all');
+});
+
+test('K32GetMappedFileName names one of the system\'s libraries by the folder it is in', ()=>{
+    // A library the engine makes has no file of its own: it is where
+    // GetModuleFileName says it is, as ntdll's test reads it.
+    const { host } = hostFor();
+    const image = new Uint8Array(0x400);
+    const view = new DataView(image.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80 + 24 + 56, 0x2000, true);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    const fns = createModuleFunctions({
+        ...host,
+        list: ()=>[{ base: 0x7c900000, name: 'ntdll.dll' }],
+        nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>image.slice(address - 0x7c900000,
+            address - 0x7c900000 + length),
+        writeMemory: (_, bytes)=>{ written.push(bytes); },
+    });
+    const wanted = '\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll';
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x7c9004d2, 0x500, 260]),
+        wanted.length);
+    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
 });

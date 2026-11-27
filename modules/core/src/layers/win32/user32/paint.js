@@ -31,11 +31,12 @@
  * that draws nowhere.
  */
 
-import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
+import { PAINTSTRUCT, RECT, readRect, userLayouts, writeFields, writeRect } from './structs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -148,6 +149,7 @@ const MAX_TAB_STOPS = 1024;
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
+const ERROR_INVALID_HANDLE = 6;
 /** Class styles: each window a context of its own, or the class one for all its windows. */
 const CS_OWNDC = 0x0020;
 const CS_CLASSDC = 0x0040;
@@ -171,9 +173,12 @@ const DCX_INTERSECTRGN = 0x0080;
 
 /**
  * @typedef {Object} PaintHost
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
+ *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(code: number) => void} [setLastError]
  * @property {(region: number) => (Rect & { rects?: Rect[] }) | null} [regionBox]
  *           The rectangle a region object holds, and its rectangles when it is
  *           more than one; null for a handle that is not one: gdi32's, reached
@@ -245,11 +250,11 @@ const MOST_UPDATE_PIECES = 64;
  *
  * @param {Rect[]} area @param {Rect} rect @returns {Rect[]}
  */
-export const addToArea = (area, rect)=>(isEmpty(rect)
+const addToArea = (area, rect)=>(isEmpty(rect)
     ? area : [...area, ...area.reduce(subtractFromArea, [rect])]);
 
 /** @param {Rect[]} area @param {Rect[]} more @returns {Rect[]} */
-export const unionAreas = (area, more)=>more.reduce(addToArea, area);
+const unionAreas = (area, more)=>more.reduce(addToArea, area);
 
 /** @param {Rect[]} area @param {Rect[]} taken @returns {Rect[]} */
 export const subtractAreas = (area, taken)=>taken.reduce(subtractFromArea, area);
@@ -268,7 +273,7 @@ export const offsetArea = (area, dx, dy)=>area.map(piece=>({ left: piece.left + 
  *
  * @param {Rect} rect @returns {Rect}
  */
-export const ordered = rect=>({ left: Math.min(rect.left, rect.right),
+const ordered = rect=>({ left: Math.min(rect.left, rect.right),
     top: Math.min(rect.top, rect.bottom), right: Math.max(rect.left, rect.right),
     bottom: Math.max(rect.top, rect.bottom) });
 
@@ -491,6 +496,8 @@ export function tabbedWidth(text, widthOf, stops, interval){
  */
 export function createPaintFunctions(options){
     const { host, live, WM_PAINT, geometry, send, invalidated, painted, descendants } = options;
+    /** The structures at the process's width (`structs.js`). */
+    const layouts = userLayouts(host.pointerSize);
     const shown = options.shown ?? (()=>true);
     let iconDivergenceSaid = false;
     /** @type {Set<string>} what a drawing call has said it leaves out */
@@ -911,7 +918,7 @@ export function createPaintFunctions(options){
         entry.revision = options.layoutRevision?.() ?? 0;
         if ((flags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN)) !== 0)
         {
-            const given = region >>> 0;
+            const given = wholeAddress(region);
             if (entry.region && entry.region.handle !== given)
             {
                 host.deleteRegion?.(entry.region.handle);
@@ -1242,8 +1249,8 @@ export function createPaintFunctions(options){
      */
     const readCounted = (address, count, wide)=>(wide
         ? String.fromCharCode(...new Uint16Array(
-            host.readMemory(address >>> 0, count * 2).slice().buffer))
-        : decodeAnsi(host.readMemory(address >>> 0, count)));
+            host.readMemory(wholeAddress(address), count * 2).slice().buffer))
+        : decodeAnsi(host.readMemory(wholeAddress(address), count)));
 
     /**
      * DrawState of either kind of text: text, an icon or a bitmap at a
@@ -1266,7 +1273,7 @@ export function createPaintFunctions(options){
         const DSS_UNION = 0x10;
         const DSS_DISABLED = 0x20;
         const draw = host.draw;
-        const h = hdc >>> 0;
+        const h = wholeAddress(hdc);
         const kind = flags & 0xf;
         if (!draw || h === 0)
         {
@@ -1274,6 +1281,11 @@ export function createPaintFunctions(options){
         }
         if (kind === DST_TEXT || kind === DST_PREFIXTEXT)
         {
+            // No text is a failure, not a read of address zero.
+            if ((data >>> 0) === 0)
+            {
+                return 0;
+            }
             // A length of 0 is a terminated string.
             const string = (length | 0) > 0
                 ? readCounted(data, length | 0, wide)
@@ -1345,6 +1357,17 @@ export function createPaintFunctions(options){
      * @param {number[]} args @param {boolean} [wide]  UTF-16 text, as the W calls take.
      */
     const drawText = ([hdc, text, count, rect, format], wide = false)=>{
+        // No context, and the text and the rectangle are not looked at:
+        // Windows answers zero before reading either, the UTF-16 form
+        // without a word in the last error.
+        if (host.draw?.isContext && !host.draw.isContext(hdc >>> 0))
+        {
+            if (!wide)
+            {
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+            }
+            return 0;
+        }
         // A count of -1 means a terminated string; any other count is the
         // string's length, and the text need not be terminated at all -- a
         // caller drawing part of a buffer passes exactly that part.
@@ -1416,7 +1439,7 @@ export function createPaintFunctions(options){
         const cell = cellOf(hdc);
         const widthOf = cell.width ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
         const given = (stops >>> 0) === 0 ? 0 : Math.min(Math.max(positions | 0, 0), MAX_TAB_STOPS);
-        const bytes = host.readMemory(stops >>> 0, given * 4);
+        const bytes = host.readMemory(wholeAddress(stops), given * 4);
         const list = Array.from({ length: given }, (_, index)=>
             bytes[index * 4] | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16
             | bytes[index * 4 + 3] << 24);
@@ -1481,10 +1504,11 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
+                const layout = layouts.PAINTSTRUCT;
                 return after(beginPaint(record), ({ hdc, rect, erase })=>{
-                    writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
-                    writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
-                    writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
+                    writeFields(host, paintStruct, layouts, layout,
+                        { hdc, fErase: erase ? 1 : 0, fRestore: 0, fIncUpdate: 0 });
+                    writeRect(host, paintStruct + layout.rcPaint, rect);
                     return handedOut(record.hwnd, hdc);
                 });
             },
@@ -1496,7 +1520,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, paintStruct])=>{
                 const record = live(hwnd);
-                const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
+                const hdc = host.readMemory(paintStruct + layouts.PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
                 // A kept context is still its window's after the paint.
                 if ((held.get(handle)?.kind ?? 'cache') === 'cache')
@@ -1531,7 +1555,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 invalidate(record,
-                    (rect >>> 0) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
+                    wholeAddress(rect) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
                     (erase >>> 0) !== 0);
                 return 1;
             },
@@ -1578,7 +1602,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const whole = (region >>> 0) === 0 && (rect >>> 0) === 0;
+                const whole = (region >>> 0) === 0 && wholeAddress(rect) === 0;
                 const area = (region >>> 0) !== 0 || whole
                     ? regionArea(record, region) : [ordered(readRect(host, rect))];
                 const children = (flags & RDW_NOCHILDREN) !== 0 ? 'none'
@@ -1677,7 +1701,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const answer = ()=>{
-                    if ((rect >>> 0) !== 0)
+                    if (wholeAddress(rect) !== 0)
                     {
                         writeRect(host, rect,
                             record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 });
@@ -1790,7 +1814,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const handle = brush >>> 0;
+                const handle = wholeAddress(brush);
                 const area = readRect(host, rect);
                 if (handle >= 1 && handle <= SYS_COLOR_BRUSH_LIMIT)
                 {
@@ -1910,7 +1934,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hdc, rect, edge, flags])=>{
                 const draw = host.draw;
-                if (!draw || (rect >>> 0) === 0)
+                if (!draw || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
@@ -1959,11 +1983,11 @@ export function createPaintFunctions(options){
                 const DFCS_ADJUSTRECT = 0x2000;
                 const DFCS_FLAT = 0x4000;
                 const draw = host.draw;
-                if (!draw || (rect >>> 0) === 0 || type < DFC_CAPTION || type > DFC_POPUPMENU)
+                if (!draw || wholeAddress(rect) === 0 || type < DFC_CAPTION || type > DFC_POPUPMENU)
                 {
                     return 0;
                 }
-                const h = hdc >>> 0;
+                const h = wholeAddress(hdc);
                 const area = readRect(host, rect);
                 const pushed = (state & DFCS_PUSHED) !== 0;
                 const flat = (state & DFCS_FLAT) !== 0;
@@ -2127,7 +2151,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const area = readRect(host, rect);
-                const h = hdc >>> 0;
+                const h = wholeAddress(hdc);
                 return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
                     && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
@@ -2153,7 +2177,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                validate(record, (rect >>> 0) === 0 ? null : [ordered(readRect(host, rect))]);
+                validate(record, wholeAddress(rect) === 0 ? null : [ordered(readRect(host, rect))]);
                 return 1;
             },
         },
@@ -2170,7 +2194,7 @@ export function createPaintFunctions(options){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const window = hwnd >>> 0;
+                const window = wholeAddress(hwnd);
                 if (window === 0)
                 {
                     lockedWindow = 0;

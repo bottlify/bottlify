@@ -16,8 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, schedulePresses, presentFrame, recordSample, resetSamples, profile,
-    byModule, guestSamples, seedFiles, bundleStoreOptions,
+    byModule, guestSamples, seedFiles, bundleStoreOptions, drainTable, presentingProcess,
 } from './harness.js';
+import { createMixer } from '../../../src/layers/audio/output/mixer.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
 function fakeApp(){
@@ -189,18 +190,18 @@ test('a held pointer and a scheduled click and key are forwarded per frame', ()=
         '4:pointerButton:false', '5:key:true', '6:key:false']);
 });
 
-test('a process-replace is recorded', ()=>{
+test('a child process is recorded', ()=>{
     const app = fakeApp();
     /** @type {any} */
     const collected = { failures: [], missing: [], output: [], events: [] };
     listen(app, collected);
 
-    app.emit('process-replace', { image: 'C:\\App\\Child.exe', sequenceBase: 42 });
+    app.emit('process-child', { image: 'C:\\App\\Child.exe', commandLine: 'Child.exe' });
 
     assert.ok(collected.events.some(
-        (/** @type {string} */ line)=>line.startsWith('[process-replace]')
+        (/** @type {string} */ line)=>line.startsWith('[process-child]')
             && line.includes('Child.exe')),
-    `a handover is in the report: ${collected.events.join(' | ')}`);
+    `a child is in the report: ${collected.events.join(' | ')}`);
 });
 
 test('the draw-path counters are folded by module', t=>{
@@ -336,3 +337,53 @@ test('timed clicks that come due on the same present go one after the other', ()
         .map(sent=>`${sent.present}:${sent.down ? 'down' : 'up'}`);
     assert.deepEqual(buttons, ['3:down', '4:up', '7:down', '8:up']);
 });
+
+test('the table drain captures each block as mixed, not added onto the one before', t=>{
+    // A worklet zeroes its block before mixing into it; the harness's stand-in
+    // did not, and a steady signal came out of a capture as a ramp to full
+    // scale.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
+    const level = 1000;
+    const steady = new Uint8Array(48000 * 4);
+    new Int16Array(steady.buffer).fill(level);
+    track.write(steady);
+    let now = 0;
+    t.mock.method(performance, 'now', ()=>now);
+    t.mock.timers.enable({ apis: ['setInterval'] });
+    const capture = { fromMs: 0, toMs: Infinity, blocks: /** @type {Int16Array[]} */ ([]) };
+    drainTable(mixer.table, 48000, capture);
+    for (let tick = 0; tick < 5; tick++)
+    {
+        now += 20;
+        t.mock.timers.tick(20);
+    }
+    const samples = capture.blocks.flatMap(block=>[...block]);
+    assert.ok(samples.length >= 4 * 960 * 2, `four blocks or more: ${samples.length} samples`);
+    assert.ok(samples.every(value=>Math.abs(value - level) <= 1),
+        `every sample at the level written: ${Math.min(...samples)}..${Math.max(...samples)}`);
+});
+
+test('a report is of the process that presented the most frames, not of the one started last',
+    ()=>{
+        /** @param {string} image @param {number | undefined} frames @param {boolean} [worker] */
+        const one = (image, frames, worker)=>({ image, worker,
+            diagnostics: [{ name: 'graphics', metrics: { of: image } },
+                ...frames === undefined ? [] : [{ name: 'log', metrics: { frames } }]] });
+        // A benchmark, then the system scanners it started, the facade's the last.
+        const found = [one('3DMark06.exe', 4200), one('FMSISvc.exe', 0, true),
+            one('fmsiscan.exe', undefined, true)];
+        const chosen = presentingProcess(found, 0);
+        assert.equal(chosen.diagnostics, found[0].diagnostics, 'the benchmark\'s tables');
+        assert.deepEqual(chosen.processes.map(each=>[each.image, each.frames, each.worker,
+            each.chosen]), [['3DMark06.exe', 4200, false, true], ['FMSISvc.exe', 0, true, false],
+            ['fmsiscan.exe', null, true, false]]);
+
+        // The facade's own process presenting as much keeps its report.
+        assert.equal(presentingProcess(found, 4200).diagnostics, null);
+        // Of two that presented, the one with more.
+        const three = [one('a.exe', 10), one('b.exe', 30), one('c.exe', 20)];
+        assert.equal(presentingProcess(three, 0).diagnostics, three[1].diagnostics);
+        // Nothing presented anywhere: the facade's.
+        assert.equal(presentingProcess([one('a.exe', 0)], 0).diagnostics, null);
+    });

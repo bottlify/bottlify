@@ -31,6 +31,15 @@ export const MIRROR = Object.freeze({
     CLEAR: 1,
     /** A signalled event: a poll of it takes it, which is the host's. */
     SET: 3,
+    /**
+     * The word of handles 0 to 3, which no object of the table has: a wait
+     * on NULL fails with ERROR_INVALID_HANDLE in the guest (1 to 3 are the
+     * console's streams, the host's to answer). A program that waits on a
+     * handle it never got -- a CreateSemaphore with a maximum below one
+     * answers NULL -- otherwise crossed into the host to be told so, from
+     * another executor a round trip for each.
+     */
+    INVALID: 2,
 });
 
 /**
@@ -46,6 +55,13 @@ export const MUTEX_TAG = 2;
  * sets, resets and takes it there.
  */
 export const EVENT_TAG = 1;
+
+/**
+ * A handle onto a semaphore of this process has the address of the
+ * semaphore's own words (`semaphore-words.js`) with both low bits set: the
+ * guest's WaitForSingleObject and ReleaseSemaphore take and add its counts there.
+ */
+export const SEMAPHORE_TAG = 3;
 
 /** Handles are multiples of four; the two bits below are the program's own. */
 const HANDLE_SHIFT = 2;
@@ -77,27 +93,34 @@ export function createEventMirror(write, own = ()=>true){
          *
          * @param {number} at  the table's address
          * @param {number} count  how many handles it has a word for
-         * @param {{ handle: number, type: string, object: any }[]} open
+         * @param {{ handle: number, type: string, object: any, access?: number | null }[]} open
          */
         attach(at, count, open){
             table = at >>> 0;
             slots = count;
-            for (const { handle, type, object } of open)
+            if (slots > 0)
             {
-                mirror.opened(handle, type, object);
+                write(table, MIRROR.INVALID);
+            }
+            for (const { handle, type, object, access } of open)
+            {
+                mirror.opened(handle, type, object, access);
             }
         },
 
         /**
          * A handle was opened onto an object. Only an event of this process,
-         * and a mutex of it with a word of its own, has a word: one another
-         * process holds changes there, unseen here.
+         * and a mutex or a semaphore of it with a word of its own, has a word: one another
+         * process holds changes there, unseen here. A handle granted fewer
+         * than all rights has none either: what it may do is the host's to
+         * check, on every call.
          *
          * @param {number} handle @param {string} type @param {any} object
+         * @param {number | null} [access]
          */
-        opened(handle, type, object){
+        opened(handle, type, object, access = null){
             const index = handle >>> HANDLE_SHIFT;
-            if (slots === 0 || object.remote || index >= slots || !own(object))
+            if (slots === 0 || object.remote || index >= slots || !own(object) || access !== null)
             {
                 return;
             }
@@ -106,6 +129,12 @@ export function createEventMirror(write, own = ()=>true){
             {
                 byHandle.set(handle, object);
                 write(address, (object.word | MUTEX_TAG) >>> 0);
+                return;
+            }
+            if (type === 'semaphore' && typeof object.word === 'number')
+            {
+                byHandle.set(handle, object);
+                write(address, (object.word | SEMAPHORE_TAG) >>> 0);
                 return;
             }
             if (type !== 'event')
@@ -149,8 +178,8 @@ export function createEventMirror(write, own = ()=>true){
 
         /**
          * Every word says nothing from now on, and none is written until
-         * `reattach`: each wait, SetEvent, ResetEvent and ReleaseMutex the
-         * guest makes crosses, as where there is no table.
+         * `reattach`: each wait, SetEvent, ResetEvent, ReleaseMutex and
+         * ReleaseSemaphore the guest makes crosses, as where there is no table.
          */
         detach(){
             if (slots === 0)
@@ -161,6 +190,7 @@ export function createEventMirror(write, own = ()=>true){
             {
                 write(table + (handle >>> HANDLE_SHIFT) * 4, MIRROR.NONE);
             }
+            write(table, MIRROR.NONE);
             byHandle.clear();
             words = new WeakMap();
             detachedSlots = slots;
@@ -184,6 +214,10 @@ export function createEventMirror(write, own = ()=>true){
 
         /** Whether the guest reads the table now. */
         attached: ()=>slots > 0,
+
+        /** @param {number} handle  @returns {number | null} where the guest reads its word */
+        wordOf: handle=>(slots > 0 && (handle >>> HANDLE_SHIFT) < slots
+            ? table + (handle >>> HANDLE_SHIFT) * 4 : null),
 
         /** @param {any} event  its signalled state just changed */
         changed(event){

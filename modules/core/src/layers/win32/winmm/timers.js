@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { createDeadlines } from '../../../system/deadlines.js';
+
 /** SetThreadPriority's relative value for the highest priority there is. */
 const THREAD_PRIORITY_TIME_CRITICAL = 15;
 
@@ -20,7 +22,11 @@ const THREAD_PRIORITY_TIME_CRITICAL = 15;
  * small number, not a record, so the loop tests what it got and asks again.
  *
  * The event forms (`TIME_CALLBACK_EVENT_SET`/`_PULSE`) signal instead of
- * calling; they are settled on the host and the loop only asks again.
+ * calling, so nothing of theirs needs the thread: the kernel's clock fires
+ * them on the host at their tick (`clockTimer`), as it does a waitable
+ * timer. Left to the thread, a tick waited for it to be given the processor,
+ * behind a main thread's slice; a sound thread woken by them wrote 98 periods
+ * of a hundred a second, and the speaker went short.
  */
 
 /** Guest-side layout of one delivery: the routine, then its five arguments. */
@@ -89,6 +95,49 @@ export function timerLoopCode(stub, at){
 }
 
 /**
+ * The same loop for an x86-64 process: the five arguments in its convention
+ * (RCX, RDX, R8, R9 and the fifth above the callee's home space), the stack a
+ * multiple of 16 at each call, every address below 4 GiB.
+ *
+ *           sub rsp, 0x38
+ *     loop: call stub
+ *           cmp eax, 0x1000
+ *           jb loop
+ *           mov ecx, [rax+4]       ; uTimerID
+ *           mov edx, [rax+8]       ; uMsg
+ *           mov r8d, [rax+12]      ; dwUser
+ *           mov r9d, [rax+16]      ; dw1
+ *           mov r10d, [rax+20]     ; dw2
+ *           mov [rsp+0x20], r10
+ *           mov eax, [rax]
+ *           call rax
+ *           jmp loop
+ *
+ * @param {number} stub
+ * @param {number} at
+ * @returns {Uint8Array}
+ */
+export function longTimerLoopCode(stub, at){
+    const relative = (stub - (at + 9)) | 0;
+    return new Uint8Array([
+        0x48, 0x83, 0xec, 0x38,
+        0xe8, relative & 0xff, relative >>> 8 & 0xff,
+        relative >>> 16 & 0xff, relative >>> 24 & 0xff,
+        ...CMP_LOWEST,
+        0x72, 0xf4,
+        0x8b, 0x48, 0x04,
+        0x8b, 0x50, 0x08,
+        0x44, 0x8b, 0x40, 0x0c,
+        0x44, 0x8b, 0x48, 0x10,
+        0x44, 0x8b, 0x50, 0x14,
+        0x4c, 0x89, 0x54, 0x24, 0x20,
+        0x8b, 0x00,
+        0xff, 0xd0,
+        0xeb, 0xd7,
+    ]);
+}
+
+/**
  * @typedef {Object} TimerDeps
  * @property {(bytes: number) => number} allocate
  *           Guest memory the processor may execute and the host may write.
@@ -104,8 +153,14 @@ export function timerLoopCode(stub, at){
  * @property {(thread: any, result: number) => boolean} wake
  * @property {(thread: any) => any} park
  * @property {() => number} now  Guest milliseconds.
+ * @property {() => any} [clockTimer]  A timer the kernel's clock fires on the
+ *           host (a waitable timer); with the two below, an event timer's.
+ * @property {(timer: any, due: number, period: number,
+ *             fired: (at: number) => void) => void} [armClockTimer]
+ * @property {(timer: any) => void} [cancelClockTimer]
  * @property {(handle: number) => void} setEvent
  * @property {(handle: number) => void} pulseEvent
+ * @property {boolean} [long]  The process is an x86-64 one: the loop in its convention.
  */
 
 /**
@@ -120,10 +175,34 @@ export function createTimerService(deps){
      * @property {number} target  the routine, or the event handle
      * @property {number} user
      * @property {number} flags
-     * @property {boolean} [firing]  A one shot whose routine is running now.
+     * @property {() => boolean} [when]  An event set only while this holds.
+     * @property {number} slot  Its due time's id in `loop`, the loop's timers
+     *     only; -1 for an event timer the kernel's clock fires.
+     * @property {any} [clock]  The kernel's timer firing it, for an event timer.
      */
     /** @type {Map<number, Timer>} */
     const timers = new Map();
+    /**
+     * The due times of the timers the loop fires, by `slot`: a one-shot whose
+     * routine is running is out of it, so the loop does not call it twice.
+     */
+    const loop = createDeadlines();
+    /** @type {(Timer | undefined)[]} */
+    const bySlot = [];
+
+    /** A timer gone, from the table and the loop. @param {Timer} timer */
+    const drop = timer=>{
+        if (timers.get(timer.id) !== timer)
+        {
+            return;
+        }
+        timers.delete(timer.id);
+        if (timer.slot >= 0)
+        {
+            loop.release(timer.slot);
+            bySlot[timer.slot] = undefined;
+        }
+    };
     let nextId = 1;
     /** @type {any} */
     let thread = null;
@@ -143,28 +222,31 @@ export function createTimerService(deps){
      * @type {Timer | null}
      */
     let calling = null;
+    /**
+     * The kernel's timers of event timers gone, armed again by the next: the
+     * kernel keeps every object it made.
+     *
+     * @type {any[]}
+     */
+    const spareClocks = [];
 
     /** @param {number} value */
     const dword = value=>new Uint8Array([
         value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
     ]);
 
-    /** The timer due soonest, or null. */
-    const earliest = ()=>{
-        /** @type {Timer | null} */
-        let found = null;
-        for (const timer of timers.values())
-        {
-            if (timer.firing)
-            {
-                continue;
-            }
-            if (found === null || timer.due < found.due)
-            {
-                found = timer;
-            }
-        }
-        return found;
+    /**
+     * How late each tick was fired past its due time, in guest ms, counted
+     * under each bound and past the last, and the worst: a tick a whole period
+     * late is a refill a sound thread woken by it never makes.
+     */
+    const late = { under1: 0, under2: 0, under5: 0, under10: 0, more: 0, worstMs: 0 };
+    /** @param {number} ms */
+    const noteLate = ms=>{
+        const key = ms < 1 ? 'under1' : ms < 2 ? 'under2' : ms < 5 ? 'under5'
+            : ms < 10 ? 'under10' : 'more';
+        late[key]++;
+        late.worstMs = Math.max(late.worstMs, Math.round(ms * 10) / 10);
     };
 
     /**
@@ -175,6 +257,7 @@ export function createTimerService(deps){
      */
     const advance = timer=>{
         fired++;
+        noteLate(deps.now() - timer.due);
         if (timer.period > 0)
         {
             timer.due += timer.period;
@@ -191,10 +274,11 @@ export function createTimerService(deps){
                 timer.due += missed * timer.period;
                 skipped += missed;
             }
+            loop.move(timer.slot, timer.due);
         }
         else
         {
-            timers.delete(timer.id);
+            drop(timer);
         }
     };
 
@@ -206,12 +290,13 @@ export function createTimerService(deps){
         const me = deps.currentThread();
         if (calling !== null)
         {
-            timers.delete(calling.id);
+            drop(calling);
             calling = null;
         }
         for (;;)
         {
-            const timer = earliest();
+            const slot = loop.first();
+            const timer = slot < 0 ? null : /** @type {Timer} */ (bySlot[slot]);
             if (timer === null)
             {
                 waiting = me;
@@ -228,7 +313,10 @@ export function createTimerService(deps){
             const kind = timer.flags & CALLBACK_MASK;
             if (kind === TIME_CALLBACK_EVENT_SET)
             {
-                deps.setEvent(timer.target);
+                if (!timer.when || timer.when())
+                {
+                    deps.setEvent(timer.target);
+                }
                 advance(timer);
                 continue;
             }
@@ -248,7 +336,7 @@ export function createTimerService(deps){
             else
             {
                 fired++;
-                timer.firing = true;
+                loop.remove(timer.slot);
                 calling = timer;
             }
             return record;
@@ -258,8 +346,8 @@ export function createTimerService(deps){
     const start = ()=>{
         record = deps.allocate(RECORD.SIZE);
         const stub = deps.register('<mm-timers>', { argBytes: 0, handler: fetch });
-        const code = deps.allocate(31);
-        deps.writeMemory(code, timerLoopCode(stub, code));
+        const code = deps.allocate(48);
+        deps.writeMemory(code, (deps.long ? longTimerLoopCode : timerLoopCode)(stub, code));
         thread = deps.createThread({ entry: code, name: 'winmm-timer' });
         // Windows runs the multimedia timer thread time-critical: a callback
         // that refills a sound buffer is due at its tick, not after whatever
@@ -277,18 +365,48 @@ export function createTimerService(deps){
          *
          * @param {number} delay @param {number} target @param {number} user
          * @param {number} flags
+         * @param {() => boolean} [when]  for an event the engine sets, the host's own
+         *     timer (WASAPI's): the event is set at a tick only while this holds
          * @returns {number} the timer's id, or 0
          */
-        set(delay, target, user, flags){
+        set(delay, target, user, flags, when){
             if (delay < 1 || delay > MAX_PERIOD || target === 0 || timers.size >= MAX_TIMERS)
             {
                 return 0;
             }
             const id = nextId++;
-            timers.set(id, {
+            /** @type {Timer} */
+            const timer = {
                 id, due: deps.now() + delay, period: (flags & TIME_PERIODIC) ? delay : 0,
-                target, user, flags,
-            });
+                target, user, flags, when, slot: -1,
+            };
+            timers.set(id, timer);
+            const kind = flags & CALLBACK_MASK;
+            if (kind !== 0 && deps.clockTimer && deps.armClockTimer)
+            {
+                timer.clock = spareClocks.pop() ?? deps.clockTimer();
+                deps.armClockTimer(timer.clock, timer.due, timer.period, at=>{
+                    fired++;
+                    noteLate(deps.now() - at);
+                    if (timer.period === 0)
+                    {
+                        drop(timer);
+                        spareClocks.push(timer.clock);
+                    }
+                    if (kind === TIME_CALLBACK_EVENT_PULSE)
+                    {
+                        deps.pulseEvent(target);
+                    }
+                    else if (!when || when())
+                    {
+                        deps.setEvent(target);
+                    }
+                });
+                return id;
+            }
+            timer.slot = loop.claim();
+            bySlot[timer.slot] = timer;
+            loop.add(timer.due, timer.slot);
             if (thread === null)
             {
                 start();
@@ -306,8 +424,15 @@ export function createTimerService(deps){
 
         /** MMRESULT timeKillEvent(UINT uTimerID) @param {number} id */
         kill(id){
-            if (timers.delete(id))
+            const timer = timers.get(id);
+            if (timer)
             {
+                if (timer.clock)
+                {
+                    deps.cancelClockTimer?.(timer.clock);
+                    spareClocks.push(timer.clock);
+                }
+                drop(timer);
                 return 0;
             }
             return id > 0 && id < nextId ? TIMERR_NOCANDO : MMSYSERR_INVALPARAM;
@@ -319,6 +444,7 @@ export function createTimerService(deps){
             armed: timers.size,
             fired,
             skipped,
+            late: { ...late },
             // Each armed timer's period and how far its next due time lies
             // behind now: a periodic timer whose callbacks take longer than its
             // period falls further behind with every one.

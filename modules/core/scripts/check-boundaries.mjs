@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
@@ -18,11 +18,13 @@ import { findBoundaryIssues } from './lib/boundaries.mjs';
  *  - a layer may import another layer only if it declared it in `requires`;
  *  - nothing imports vendor/: it holds binaries, which the root of src
  *    reaches by URL;
+ *  - a package is imported only by the name of a library in the package's
+ *    `dependencies` (`@bottlify/cellar`);
  *  - no file may import an engine package (`lib/boundaries.mjs`): the cpu layer
  *    loads one by URL when a launch selects it;
  *  - layers must not import core.js (the facade is a consumer, not a dependency);
- *  - no file may import from outside src/, whether by a relative path, a
- *    package name or a module-relative URL, and only the root of src may name
+ *  - no file may import from outside src/, whether by a relative path, any
+ *    other package name or a module-relative URL, and only the root of src may name
  *    a URL outside it; the platform's own `node:` modules are not outside it;
  *  - only the cpu layer and the files at the root of src/ may import a module
  *    by a computed argument -- the one form nothing here can check;
@@ -55,8 +57,12 @@ async function layerRequires(){
     return map;
 }
 
+/** The package's own `dependencies`. */
+const dependencies = new Set(Object.keys(JSON.parse(
+    readFileSync(resolve(SRC, '..', 'package.json'), 'utf8')).dependencies ?? {}));
+
 const { files, issues } = findBoundaryIssues({ src: SRC, vendor: VENDOR,
-    requires: await layerRequires() });
+    requires: await layerRequires(), dependencies });
 
 if (issues.length > 0)
 {

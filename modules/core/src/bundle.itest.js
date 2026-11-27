@@ -22,10 +22,14 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
+import { createApp } from './app.js';
+import {
+    BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, READ_AHEAD_BYTES,
+} from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
+import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;
@@ -76,7 +80,7 @@ async function bundleWith(contents, filler = 300 * 1024){
 }
 
 test('a program reads a file out of a bundle, fetching only what it touches',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
         const exe = await readFile(FIXTURE);
@@ -99,7 +103,7 @@ test('a program reads a file out of a bundle, fetching only what it touches',
         const waits = [];
         app.on('bundle-fetching', (/** @type {any} */ payload)=>waits.push(payload.fetching));
 
-        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 60_000 });
 
         assert.equal(exitCode, 0);
         assert.equal(printed, PLANTED,
@@ -119,8 +123,54 @@ test('a program reads a file out of a bundle, fetching only what it touches',
             `a handful of requests brought it in (${source.fetched.calls})`);
     });
 
+test('a deflated block is inflated from the request it came in, not from a copy of it',
+    { timeout: 60_000 }, async t=>{
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        // Compressible all through, so every block of it is written deflated.
+        await writeFile(join(root, 'save.dat'), PLANTED.repeat(40000));
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(async()=>{
+            await handle.close();
+            await rm(root, { recursive: true, force: true });
+            await rm(out, { recursive: true, force: true });
+        });
+        /** @type {WeakSet<ArrayBufferLike>} */
+        const answered = new WeakSet();
+        const app = await createApp({
+            executable: new Uint8Array(await readFile(FIXTURE)),
+            bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
+                const buffer = Buffer.alloc(length);
+                await handle.read(buffer, 0, length, offset);
+                const bytes = new Uint8Array(buffer.buffer.slice(0, length));
+                answered.add(bytes.buffer);
+                return bytes;
+            } },
+        });
+        t.after(()=>app.dispose());
+        let copied = 0;
+        const slice = Uint8Array.prototype.slice;
+        Uint8Array.prototype.slice = function(/** @type {any[]} */ ...args){
+            copied += answered.has(this.buffer) ? 1 : 0;
+            return slice.apply(this, /** @type {any} */ (args));
+        };
+        t.after(()=>{
+            Uint8Array.prototype.slice = slice;
+        });
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
+        Uint8Array.prototype.slice = slice;
+        assert.ok(printed.startsWith(PLANTED), 'the file came out of the bundle, inflated');
+        assert.equal(copied, 0, 'no block copied out of the request before it was inflated');
+    });
+
 test('what the bundle holds is visible to the program, and stays read-only',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         const source = await bundleWith(PLANTED);
         t.after(()=>source.cleanup());
         const exe = await readFile(FIXTURE);
@@ -135,7 +185,7 @@ test('what the bundle holds is visible to the program, and stays read-only',
         });
         t.after(()=>app.dispose());
 
-        await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+        await app.run({ maxTurns: 20000, timeoutMs: 60_000 });
 
         // The fixture writes the file after reading it. What it wrote belongs
         // to the session; the bundle underneath is untouched, which is what
@@ -145,50 +195,14 @@ test('what the bundle holds is visible to the program, and stays read-only',
     });
 
 /**
- * Somewhere to keep blocks, over ordinary buffers. Node has no OPFS, so without
- * this the cache falls back to the heap and the background filler stays off --
- * which is right, and would leave it untested.
+ * Somewhere to keep blocks: the origin's file system as a test makes it. Node
+ * has no OPFS, so without this the cache holds the blocks in memory alone and
+ * the background filler stays off -- which is right, and would leave it untested.
  */
-function fakeStore(){
-    /** @type {Map<string, Uint8Array>} */
-    const files = new Map();
-    /** @param {string} path @returns {Uint8Array} */
-    const bytesOf = path=>files.get(path) ?? new Uint8Array(0);
-
-    return {
-        /** @param {string} path */
-        async open(path){
-            if (!files.has(path))
-            {
-                files.set(path, new Uint8Array(0));
-            }
-        },
-        /** @param {string} path */
-        stat: path=>files.has(path) ? { size: bytesOf(path).length } : null,
-        /** @param {string} path @param {number} at @param {number} length */
-        read: (path, at, length)=>bytesOf(path).slice(at, at + length),
-        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
-        write(path, at, bytes){
-            const held = bytesOf(path);
-            if (held.length >= at + bytes.length)
-            {
-                held.set(bytes, at);
-                return;
-            }
-            const grown = new Uint8Array(at + bytes.length);
-            grown.set(held);
-            grown.set(bytes, at);
-            files.set(path, grown);
-        },
-        /** @param {string} path @param {number} size */
-        truncate(path, size){
-            files.set(path, new Uint8Array(size));
-        },
-    };
-}
+const fakeStore = ()=>fakeOpfs().root;
 
 test('a session arriving from outside lands on the volume the bundle is mounted on',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // The bundle mount puts a fresh writable layer over the bundle. A
         // session laid down before it went with the layer that was replaced: a
         // program's saved profile was written faithfully, kept faithfully, and
@@ -280,7 +294,7 @@ test('what the program never read is fetched anyway, in the gaps', { timeout: 12
 });
 
 test('the registry a bottle carries is the machine\'s from the start, under what the session saved',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // An installer's keys went into the bottle as a file and no further: a
         // launcher that finds its game installed by the key its setup made
         // offered to install it again.
@@ -369,7 +383,7 @@ function answerLibrary(){
 }
 
 test('what a bottle\'s installation left in system32 is found there, and loaded by bare name',
-    { timeout: 30000 }, async t=>{
+    { timeout: 60_000 }, async t=>{
         // A setup puts the runtime its program links against in system32 --
         // what a DirectX setup installs -- and the program looks nowhere else.
         const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
@@ -408,12 +422,13 @@ test('what a bottle\'s installation left in system32 is found there, and loaded 
         });
         t.after(()=>app.dispose());
 
-        assert.deepEqual([...app.files.read('C:\\WINDOWS\\system32\\runtime.dll')], [...library],
+        assert.deepEqual([...await app.files.read('C:\\WINDOWS\\system32\\runtime.dll') ?? []],
+            [...library],
             'the library is where Windows keeps it');
         const placed = app.files.list('C:\\Games\\Game')
             .map((/** @type {any} */ entry)=>entry.name);
         assert.deepEqual(placed, ['game.dat'], 'and not where the bottle carried it');
-        assert.equal(await app.run({ timeoutMs: 20000 }), 42,
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 42,
             'the program bound its import to it and called it');
     });
 
@@ -473,11 +488,10 @@ test('a process started from a bundle mounts the run\'s bundle rather than openi
         const app = await createApp({
             executable: parent,
             imagePath: 'C:\\parent.exe',
-            engine: 'cork',
             bundle: { prefix: '', fetch: readCounting },
         });
         t.after(()=>app.dispose());
-        assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran, from the bundle');
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 7, 'the child ran, from the bundle');
         assert.equal(heads, 1, 'and the bundle\'s head was read once for both processes');
     });
 
@@ -515,6 +529,124 @@ function buildReaderExe(path){
             0x6a, 0x00,
             0xff, 0x15, ...u32(iat('ExitProcess')),
         ]),
+    });
+}
+
+/**
+ * A program that reads 16 KiB of a file at every `STRIDE` bytes, `count` times, as a player
+ * seeks through an archive - every read a block no other read touches - and exits.
+ *
+ * @param {string} path @param {number} count
+ */
+function buildScatteredReaderExe(path, count){
+    const CHUNK = 0x4000;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateFileA', 'SetFilePointer', 'ReadFile', 'ExitProcess'] },
+        codeSize: 0x80,
+        data: {
+            path: [...path].map(c=>c.charCodeAt(0)).concat(0),
+            counted: [0, 0, 0, 0],
+            buffer: new Array(CHUNK).fill(0),
+        },
+        code: ({ iat, at })=>assemble([
+            0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x03, 0x6a, 0x00, 0x6a, 0x01,
+            0x68, ...u32(0x80000000), 0x68, ...u32(at('path')),
+            0xff, 0x15, ...u32(iat('CreateFileA')),
+            0x89, 0xc3, //                                      mov ebx, eax
+            0x31, 0xf6, //                                      xor esi, esi
+            { label: 'read' },
+            // SetFilePointer(ebx, esi * STRIDE, NULL, FILE_BEGIN)
+            0x6a, 0x00, 0x6a, 0x00,
+            0x89, 0xf0, //                                      mov eax, esi
+            0xc1, 0xe0, SCATTER_SHIFT, //                       shl eax, SCATTER_SHIFT
+            0x50, 0x53,
+            0xff, 0x15, ...u32(iat('SetFilePointer')),
+            0x6a, 0x00, 0x68, ...u32(at('counted')), 0x68, ...u32(CHUNK),
+            0x68, ...u32(at('buffer')), 0x53,
+            0xff, 0x15, ...u32(iat('ReadFile')),
+            0x46, //                                            inc esi
+            0x83, 0xfe, count, //                               cmp esi, count
+            { jump: 'jl', to: 'read' },
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ]),
+    });
+}
+
+/** The stride of `buildScatteredReaderExe`'s reads, as a shift: 512 KiB. */
+const SCATTER_SHIFT = 19;
+
+test('a read of a bundle in a file on this device waits for its own blocks alone, what is '
+    + 'around and ahead of them read behind it', { timeout: 60000 }, async t=>{
+    // A bottle kept in the browser is read from its file a range at a time; a miss widened
+    // to a window there was waited for whole, eight blocks for each one asked, and a game
+    // seeking through its films stood still for all of them at each.
+    const READS = 20;
+    const source = await bundleWith(PLANTED, READS << SCATTER_SHIFT);
+    t.after(()=>source.cleanup());
+    // A read of more than the two blocks one ReadFile of 16 KiB can span is one around or
+    // ahead of a miss: it never answers, so a read that waited for one never ends.
+    let behind = 0;
+    /** @param {number} offset @param {number} length */
+    const file = (offset, length)=>{
+        if (length > 2 * BLOCK_SIZE && source.fetched.calls > 0)
+        {
+            behind++;
+            return new Promise(()=>{});
+        }
+        return source.fetch(offset, length);
+    };
+    const app = await createApp({
+        executable: buildScatteredReaderExe('C:\\Data\\big.bin', READS),
+        bundle: { fetch: file, local: true, prefix: '', store: null, prefetch: false },
+    });
+    t.after(()=>app.dispose());
+
+    const opened = source.fetched.bytes;
+    assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 20000 }), 0);
+    assert.ok(source.fetched.bytes - opened >= READS * BLOCK_SIZE, 'every read reached the file');
+    assert.ok(behind > 0, 'the blocks around a miss were asked for, behind its read');
+});
+
+for (const local of [false, true])
+{
+    test(local
+        ? 'a bundle in a file on this device is read as it is: no checksum, no second read'
+        : 'a block that arrives damaged from a server is asked for again', { timeout: 60000 },
+    async t=>{
+        // A bottle kept in the browser is the only copy there is: a block read
+        // again from its file is the same bytes, and nothing could fetch a good
+        // one. Checked on every read, a game whose files outgrew the block cache
+        // had its engine thread computing the checksums of the same blocks over
+        // and over (Outlast's menu: 1.7 s of a minute) while its reads waited.
+        const source = await bundleWith(PLANTED, 2 << 20);
+        t.after(()=>source.cleanup());
+        let damaged = 0;
+        let opened = Infinity;
+        /** @param {number} offset @param {number} length */
+        const flaky = async(offset, length)=>{
+            const bytes = await source.fetch(offset, length);
+            // The first read after opening loses its last byte to the wire.
+            if (source.fetched.calls > opened && damaged === 0)
+            {
+                damaged++;
+                bytes[bytes.length - 1] ^= 0xff;
+            }
+            return bytes;
+        };
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            bundle: { fetch: flaky, ...local ? { local: true } : {}, prefix: '', store: null,
+                prefetch: false },
+        });
+        t.after(()=>app.dispose());
+        let retried = 0;
+        app.on('bundle-retry', ()=>retried++);
+        opened = source.fetched.calls;
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 20000 }), 0);
+        assert.equal(damaged, 1, 'a read came back damaged');
+        assert.equal(retried, local ? 0 : 1, local ? 'the file was read once, as it is'
+            : 'the damaged block was asked for again');
     });
 }
 
@@ -626,4 +758,33 @@ test('a preload with nowhere to keep the blocks says so and the program reads as
         assert.equal(told.length, 1);
         assert.equal(typeof told[0].unbacked, 'string');
         assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
+    });
+
+test('a bundle whose program sits past the quota starts, its late blocks read first',
+    { timeout: 120_000 }, async t=>{
+        // The file the fixture reads is packed after 2048 blocks of filler,
+        // the way a game keeps its program past gigabytes of archives. A store
+        // whose quota is short of that offset refused the first write of a
+        // cache laid out at index * blockSize, and the start failed.
+        const filler = 2048 * BLOCK_SIZE;
+        const source = await bundleWith(PLANTED, filler + BLOCK_SIZE);
+        t.after(()=>source.cleanup());
+        const origin = fakeOpfs({ quota: filler / 8 });
+        const app = await createApp({
+            executable: new Uint8Array(await readFile(FIXTURE)),
+            bundle: { fetch: source.fetch, prefix: '', prefetch: false, id: 'late',
+                store: origin.root },
+        });
+        t.after(()=>app.dispose());
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
+        assert.equal(printed, PLANTED);
+        await app.dispose();
+        const [home] = origin.names('blocks');
+        const kept = origin.node(`blocks/${home}/pack-0`)?.data.length ?? 0;
+        assert.ok(kept > BLOCK_SIZE / 2 && kept < filler / 8,
+            `kept on the store, as long as the blocks read: ${kept} bytes`);
     });

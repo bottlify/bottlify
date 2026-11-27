@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js';
+import { parsePe, readImports, relocateImage } from './pe.js';
 
 /**
  * Turning a parsed PE into a laid-out image.
@@ -12,7 +12,7 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  * The image is built in a host-side buffer first and written to the guest in one
  * go. That keeps the ordering rules — zero, map, relocate, bind — enforced by
  * the structure of this function rather than by a comment, and it means a caller
- * can inspect the finished image without an emulator running.
+ * can inspect the finished image without an engine running.
  */
 
 /** The section alignment an image that names none is mapped at. */
@@ -40,12 +40,13 @@ const align = (value, to)=>Math.ceil(value / to) * to;
  *   Returns the guest address to write into the IAT, or null if unavailable.
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
  * @param {boolean} [options.wide]  A 64-bit (PE32+) image is taken, not refused.
+ * @param {32 | 64} [options.bits]  The process's machine: only an image of it is taken.
  * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
  *        [options.missing]  Where a call to an import nothing claims should land.
  * @returns {LoadedImage}
  */
-export function buildImage(file, { resolveImport, base, missing, wide = false }){
-    const mapped = mapImage(file, base, { wide });
+export function buildImage(file, { resolveImport, base, missing, wide = false, bits }){
+    const mapped = mapImage(file, base, { wide, bits });
     return { ...mapped, unresolved: bindImports(mapped, resolveImport, missing) };
 }
 
@@ -61,27 +62,85 @@ export function buildImage(file, { resolveImport, base, missing, wide = false })
  *
  * @param {Uint8Array} file
  * @param {number} [base]
- * @param {{ wide?: boolean }} [options]  `wide`: a 64-bit (PE32+) image is taken
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} [options]  `wide`: a 64-bit (PE32+)
+ *     image is taken; `bits`: only an image of the process's machine (`parsePe`).
+ *     A file that is no image it can lay out throws with code BAD_EXE_FORMAT.
  * @returns {{ base: number, entryPoint: number, bytes: Uint8Array, file: Uint8Array,
  *             image: import('./pe.js').PeImage }}
  */
-export function mapImage(file, base, { wide = false } = {}){
-    const image = parsePe(file, { wide });
+export function mapImage(file, base, options = {}){
+    try
+    {
+        return layOut(file, base, options);
+    }
+    catch (e){
+        // Everything here reads the file's bytes and nothing else: what fails
+        // - a section past the image's end, a relocation past it, one of a
+        // kind no loader knows - is the file, which Windows refuses as an
+        // invalid image, not a fault of the machine.
+        const failure = e instanceof Error ? e : new Error(String(e));
+        throw /** @type {any} */ (failure).code ? failure
+            : Object.assign(failure, { code: 'BAD_EXE_FORMAT' });
+    }
+}
+
+/**
+ * Refuses, as Windows' loader refuses with STATUS_INVALID_IMAGE_FORMAT, an
+ * image whose headers cannot describe a mapping: no optional header, no size,
+ * a file alignment coarser than the sections it aligns, or a section that ends
+ * past the image. One check for every image mapped - LoadLibrary's, a
+ * SEC_IMAGE section's, the program's own - so a file one of them refuses no
+ * other maps.
+ *
+ * @param {import('./pe.js').PeImage} image
+ */
+function refuseMalformed(image){
+    const size = image.sizeOfImage;
+    const reason = image.optionalHeaderSize === 0 ? 'it has no optional header'
+        : image.sizeOfImage === 0 ? 'its SizeOfImage is zero'
+            : image.fileAlignment > image.sectionAlignment
+                ? 'its file alignment is coarser than its section alignment'
+                : image.sections.some(section=>section.virtualAddress
+                    + Math.max(section.virtualSize, 0) > size)
+                    ? 'a section ends past its SizeOfImage' : null;
+    if (reason)
+    {
+        throw Object.assign(new Error(`not an image Windows maps: ${reason}`),
+            { code: 'BAD_EXE_FORMAT' });
+    }
+}
+
+/**
+ * `mapImage`'s work, any failure of it thrown as it came.
+ *
+ * @param {Uint8Array} file @param {number | undefined} base
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} options
+ */
+function layOut(file, base, { wide = false, bits } = {}){
+    const image = parsePe(file, { wide, bits });
     const loadBase = base ?? image.imageBase;
 
-    if (loadBase !== image.imageBase && !image.relocatable)
+    // One whose relocations are merely absent is moved as it lies
+    // (`applyRelocations`); only one marked stripped must stay at its base.
+    if (loadBase !== image.imageBase && !image.relocatable && image.relocsStripped !== false)
     {
         throw new Error(
             `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,
         );
     }
 
+    refuseMalformed(image);
+
     // Allocated zeroed: everything not backed by file bytes — BSS tails, gaps
     // between sections, the slack inside the header page — must read as zero,
     // exactly as a fresh mapping would.
     const bytes = new Uint8Array(image.sizeOfImage);
 
-    bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
+    // An image aligned below a page is mapped flat, as Windows maps it: the
+    // file as it is, each section at the offset it is stored at.
+    const flat = image.sectionAlignment < PAGE;
+    bytes.set(file.subarray(0, Math.min(flat ? bytes.length : image.sizeOfHeaders,
+        file.length)), 0);
 
     for (const section of image.sections)
     {
@@ -101,11 +160,11 @@ export function mapImage(file, base, { wide = false } = {}){
         const extent = align(section.virtualSize || section.rawSize,
             image.sectionAlignment || PAGE);
         const span = Math.max(0, Math.min(source.length, extent,
-            image.sizeOfImage - section.virtualAddress));
+            bytes.length - section.virtualAddress));
         bytes.set(source.subarray(0, span), section.virtualAddress);
     }
 
-    applyRelocations(bytes, image, loadBase - image.imageBase);
+    relocateImage(bytes, image, loadBase);
 
     return {
         base: loadBase,
@@ -140,10 +199,12 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
     /** @type {string[]} */
     const unresolved = [];
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    // A PE32+ slot is a pointer eight bytes wide; every address here is below 4 GiB.
+    // A PE32+ slot is a pointer eight bytes wide, the address
+    // whole: an entry past 4 GiB (a wide window's image) keeps its upper half, and
+    // a dword some bitwise operator made negative is the address it names.
     /** @param {number} at @param {number} address */
     const setSlot = (at, address)=>(image.bits === 64
-        ? view.setBigUint64(at, BigInt(address >>> 0), true)
+        ? view.setBigUint64(at, BigInt(address < 0 ? address >>> 0 : address), true)
         : view.setUint32(at, address >>> 0, true));
 
     for (const { dll, entries } of readImports(file, image))
@@ -166,5 +227,3 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
     }
     return unresolved;
 }
-
-export { parsePe, readImports, rvaToFileOffset };

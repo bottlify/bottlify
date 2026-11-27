@@ -5,14 +5,14 @@
  */
 
 /**
- * The debugging interface, for a process no debugger can attach to.
+ * The debugging interface's own calls: the thread's debug object in its
+ * thread block, the breakpoint and the debug print.
  *
- * There is no debug object here and no second process to hold one, so the
- * calls that make, wait on or continue through a debug object answer the
- * way the system answers a handle that is none, attaching is denied, and
- * the system's own debug channel is not implemented. A program asks these
- * to find out whether it is being debugged, or to debug a child; the
- * answers say no, and say it as statuses it tests for.
+ * The debug objects themselves - made, set, attached through, waited on,
+ * continued through, removed, and the state changes DbgUi converts - are
+ * kernel32's (`kernel32/debug-events.js`, published as natives), one with
+ * its debuggers' and debuggees' records. The system's own debug channel is
+ * not implemented.
  *
  * Two calls are real. DbgBreakPoint is the processor's breakpoint -- an
  * `int3` in the library's own code, raised through the same fault path any
@@ -23,21 +23,63 @@
 
 import { STATUS } from './status.js';
 import { createRefusals } from '../common/refusal.js';
+import { TEB } from '../kernel32/teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The processor's breakpoint, as DbgBreakPoint raises it. */
 const STATUS_BREAKPOINT = 0x80000003;
 
-/** A process with no debugger attached, asked to have it removed. */
-const STATUS_PORT_NOT_SET = 0xc0000353;
-
 /** `int3; ret`: DbgBreakPoint as the system's own library has it. */
 const BREAK_CODE = Uint8Array.of(0xcc, 0xc3);
 
+/**
+ * DbgUiRemoteBreakin in i386: when the process block says the process is
+ * debugged, an exception frame is pushed whose handler resumes after the
+ * call with the frame's stack, DbgBreakPoint (its address from a trap) is
+ * called, the frame comes off, and the routine returns 0 to the thread's
+ * start, which ends the thread. The handler declines an unwind and takes
+ * every exception: Eip and Esp of the context it is handed set to the
+ * resume point and the frame, ExceptionContinueExecution.
+ */
+const REMOTE_BREAKIN = Uint8Array.of(
+    0x64, 0xa1, 0x30, 0x00, 0x00, 0x00,         // 0   mov eax, fs:[30h]
+    0x80, 0x78, 0x02, 0x00,                     // 6   cmp byte [eax+2], 0 (BeingDebugged)
+    0x74, 0x2e,                                 // 10  je end
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 12  call here
+    0x58,                                       // 17  here: pop eax
+    0x8d, 0x80, 0x00, 0x00, 0x00, 0x00,         // 18  lea eax, [eax + handler - here]
+    0x50,                                       // 24  push eax
+    0x64, 0xff, 0x35, 0x00, 0x00, 0x00, 0x00,   // 25  push dword fs:[0]
+    0x64, 0x89, 0x25, 0x00, 0x00, 0x00, 0x00,   // 32  mov fs:[0], esp
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 39  call <DbgBreakPoint's address>
+    0xff, 0xd0,                                 // 44  call eax
+    0x8b, 0x04, 0x24,                           // 46  resume: mov eax, [esp]
+    0x64, 0xa3, 0x00, 0x00, 0x00, 0x00,         // 49  mov fs:[0], eax
+    0x83, 0xc4, 0x08,                           // 55  add esp, 8
+    0x31, 0xc0,                                 // 58  end: xor eax, eax
+    0xc2, 0x04, 0x00,                           // 60  ret 4
+    0x8b, 0x44, 0x24, 0x04,                     // 63  handler: mov eax, [esp+4] (record)
+    0xf6, 0x40, 0x04, 0x06,                     // 67  test byte [eax+4], 6 (unwinding)
+    0x75, 0x23,                                 // 71  jnz decline
+    0x8b, 0x44, 0x24, 0x0c,                     // 73  mov eax, [esp+12] (context)
+    0x8b, 0x4c, 0x24, 0x08,                     // 77  mov ecx, [esp+8] (frame)
+    0x89, 0x88, 0xc4, 0x00, 0x00, 0x00,         // 81  mov [eax+Esp], ecx
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 87  call there
+    0x5a,                                       // 92  there: pop edx
+    0x8d, 0x92, 0x00, 0x00, 0x00, 0x00,         // 93  lea edx, [edx + resume - there]
+    0x89, 0x90, 0xb8, 0x00, 0x00, 0x00,         // 99  mov [eax+Eip], edx
+    0x31, 0xc0,                                 // 105 xor eax, eax (ContinueExecution)
+    0xc3,                                       // 107 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00,               // 108 decline: mov eax, 1 (ContinueSearch)
+    0xc3);                                      // 113 ret
+const REMOTE_BREAKIN_HANDLER_AT = 20;
+const REMOTE_BREAKIN_HANDLER_FROM = 63 - 17;
+const REMOTE_BREAKIN_CALL_AT = 40;
+const REMOTE_BREAKIN_RESUME_AT = 95;
+const REMOTE_BREAKIN_RESUME_FROM = 46 - 92;
+
 /** The most DbgPrint formats: the system's own buffer. */
 const DBG_PRINT_LIMIT = 512;
-
-/** Where the thread block keeps the thread's debug object: DbgSsReserved[1]. */
-const TEB_DEBUG_OBJECT = 0xf24;
 
 /** How many argument slots DbgPrint's format is read for. */
 const VARIADIC_SLOTS = 32;
@@ -54,6 +96,8 @@ const VARIADIC_SLOTS = 32;
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => boolean} free
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => number} [breakPoint]  DbgBreakPoint's address, which
+ *           DbgUiRemoteBreakin calls.
  */
 
 /** @param {number} value */
@@ -70,16 +114,30 @@ export function createDebugFunctions(host){
     const refuse = createRefusals({ divergence: host.divergence });
     const why = 'no debugger can attach to this process';
 
-    const refusedCreate = refuse('NtCreateDebugObject',
-        { argBytes: 16, answer: STATUS.NOT_IMPLEMENTED, why: 'no debug object can be made' });
-
     /** The debug object a thread keeps with no thread block to keep it in. */
     let detached = 0;
 
     /** @param {number} pointer @param {number} value */
-    const writeU32 = (pointer, value)=>host.writeMemory(pointer >>> 0, dword(value));
+    const writeU32 = (pointer, value)=>host.writeMemory(wholeAddress(pointer), dword(value));
 
-    return {
+    /**
+     * The argument slots a va_list points at, as many as DbgPrint reads.
+     *
+     * @param {number} list
+     * @returns {number[]}
+     */
+    const slots = list=>{
+        if ((list >>> 0) === 0)
+        {
+            return [];
+        }
+        const view = new DataView(host.readMemory(wholeAddress(list),
+            VARIADIC_SLOTS * 4).buffer);
+        return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>view.getUint32(at * 4, true));
+    };
+
+    /** @type {Record<string, any>} */
+    const functions = {
         /**
          * VOID DbgBreakPoint(void)
          *
@@ -104,7 +162,7 @@ export function createDebugFunctions(host){
             argBytes: 4 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
-                const format = args[0] >>> 0;
+                const format = wholeAddress(args[0]);
                 if (format === 0)
                 {
                     return STATUS.SUCCESS;
@@ -126,6 +184,84 @@ export function createDebugFunctions(host){
         },
 
         /**
+         * ULONG DbgPrintEx(ULONG ComponentId, ULONG Level, PCSTR Format, ...)
+         *
+         * DbgPrint's message, whatever component and level it is filed under:
+         * the log keeps them all, as a debugger asking for all would.
+         */
+        DbgPrintEx: {
+            convention: 'cdecl',
+            argBytes: 12 + VARIADIC_SLOTS * 4,
+            /** @param {number[]} args */
+            handler: args=>functions.DbgPrint.handler(args.slice(2)),
+        },
+
+        /**
+         * ULONG vDbgPrintEx(ULONG ComponentId, ULONG Level, PCCH Format, va_list)
+         *
+         * DbgPrintEx with its arguments where the va_list points.
+         */
+        vDbgPrintEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, , format, list])=>functions.DbgPrint.handler([format, ...slots(list)]),
+        },
+
+        /**
+         * ULONG vDbgPrintExWithPrefix(PCCH Prefix, ULONG ComponentId, ULONG Level,
+         *   PCCH Format, va_list)
+         *
+         * The prefix, then the message, as one line.
+         */
+        vDbgPrintExWithPrefix: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([prefix, , , format, list])=>{
+                const lead =
+                    wholeAddress(prefix) === 0 ? '' : host.readCString(wholeAddress(prefix),
+                        DBG_PRINT_LIMIT);
+                const print = host.crt._snprintf;
+                const say = host.kernel32.OutputDebugStringA;
+                const buffer = host.allocate(DBG_PRINT_LIMIT + 1);
+                if (!print || !say || buffer === 0 || wholeAddress(format) === 0)
+                {
+                    return STATUS.SUCCESS;
+                }
+                const head = Uint8Array.from([...lead].map(ch=>ch.charCodeAt(0) & 0xff))
+                    .subarray(0, DBG_PRINT_LIMIT);
+                host.writeMemory(buffer, head);
+                print.handler([buffer + head.length, DBG_PRINT_LIMIT - head.length, format,
+                    ...slots(list)]);
+                host.writeMemory(buffer + DBG_PRINT_LIMIT, new Uint8Array(1));
+                say.handler([buffer]);
+                host.free(buffer);
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * ULONG DbgPrompt(PCCH Prompt, PCH Response, ULONG MaximumResponseLength)
+         *
+         * The prompt said, and no answer: no debugger is attached to type one,
+         * so the response is empty and its length 0.
+         */
+        DbgPrompt: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([prompt, response, most])=>{
+                if (wholeAddress(prompt) !== 0)
+                {
+                    host.kernel32.OutputDebugStringA?.handler([prompt]);
+                }
+                if (wholeAddress(response) !== 0 && (most >>> 0) !== 0)
+                {
+                    host.writeMemory(wholeAddress(response), new Uint8Array(1));
+                }
+                return 0;
+            },
+        },
+
+        /**
          * HANDLE DbgUiGetThreadDebugObject(void)
          * VOID DbgUiSetThreadDebugObject(HANDLE DebugObject)
          *
@@ -140,7 +276,7 @@ export function createDebugFunctions(host){
                 {
                     return detached;
                 }
-                const bytes = host.readMemory(teb + TEB_DEBUG_OBJECT, 4);
+                const bytes = host.readMemory(teb + TEB.DEBUG_OBJECT, 4);
                 return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
             },
         },
@@ -156,77 +292,39 @@ export function createDebugFunctions(host){
                 }
                 else
                 {
-                    writeU32(teb + TEB_DEBUG_OBJECT, handle);
+                    writeU32(teb + TEB.DEBUG_OBJECT, handle);
                 }
                 return 0;
             },
         },
 
+        /**
+         * VOID DbgUiRemoteBreakin(PVOID Context)
+         *
+         * The routine a debugger's break-in thread runs: DbgBreakPoint when
+         * the process is debugged, inside a frame that takes whatever it
+         * raises - so a debugger that declines the breakpoint
+         * (DBG_EXCEPTION_NOT_HANDLED) sees the thread end, not the process
+         * die of it - then the thread's end (`REMOTE_BREAKIN`). A 64-bit
+         * process runs the breakpoint alone.
+         */
+        DbgUiRemoteBreakin: {
+            argBytes: 4,
+            code: (/** @type {import('../msvcrt/guest-code.js').CodeBuilder} */ builder)=>{
+                const code = REMOTE_BREAKIN.slice();
+                const view = new DataView(code.buffer);
+                view.setInt32(REMOTE_BREAKIN_HANDLER_AT, REMOTE_BREAKIN_HANDLER_FROM, true);
+                view.setInt32(REMOTE_BREAKIN_RESUME_AT, REMOTE_BREAKIN_RESUME_FROM, true);
+                builder?.jump(REMOTE_BREAKIN_CALL_AT, builder.register({ convention: 'stdcall',
+                    argBytes: 0, handler: ()=>host.breakPoint?.() ?? 0 }));
+                return code;
+            },
+            handler: ()=>host.kernel32.RaiseException?.handler([STATUS_BREAKPOINT, 0, 0, 0]) ?? 0,
+        },
+
         /** NTSTATUS DbgUiIssueRemoteBreakin(HANDLE Process) */
         DbgUiIssueRemoteBreakin: refuse('DbgUiIssueRemoteBreakin',
             { argBytes: 4, answer: STATUS.NOT_IMPLEMENTED, why }),
-
-        /**
-         * NTSTATUS DbgUiConvertStateChangeStructure(PDBGUI_WAIT_STATE_CHANGE,
-         *                                           LPDEBUG_EVENT)
-         *
-         * Nothing here ever hands out a state change, so whatever is passed
-         * is not one: the system's answer for a state it does not know.
-         */
-        DbgUiConvertStateChangeStructure: refuse('DbgUiConvertStateChangeStructure',
-            { argBytes: 8, answer: STATUS.UNSUCCESSFUL, why }),
-
-        /**
-         * NTSTATUS NtCreateDebugObject(PHANDLE DebugObjectHandle, ACCESS_MASK,
-         *                              POBJECT_ATTRIBUTES, ULONG Flags)
-         *
-         * No debug object type exists to make one of. The handle is left
-         * NULL, so a caller that closes it closes nothing.
-         */
-        NtCreateDebugObject: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    writeU32(out, 0);
-                }
-                return refusedCreate.handler();
-            },
-        },
-
-        /** NTSTATUS NtDebugActiveProcess(HANDLE Process, HANDLE DebugObject) */
-        NtDebugActiveProcess: refuse('NtDebugActiveProcess',
-            { argBytes: 8, answer: STATUS.ACCESS_DENIED, why }),
-
-        /**
-         * NTSTATUS NtRemoveProcessDebug(HANDLE Process, HANDLE DebugObject)
-         *
-         * No process has a debugger to remove: the status for a process
-         * with no debug port.
-         */
-        NtRemoveProcessDebug: refuse('NtRemoveProcessDebug',
-            { argBytes: 8, answer: STATUS_PORT_NOT_SET, why }),
-
-        // The calls on a debug object: none can exist, so the handle is none.
-
-        /** NTSTATUS NtDebugContinue(HANDLE DebugObject, PCLIENT_ID, NTSTATUS) */
-        NtDebugContinue: refuse('NtDebugContinue',
-            { argBytes: 12, answer: STATUS.INVALID_HANDLE, why }),
-
-        /**
-         * NTSTATUS NtSetInformationDebugObject(HANDLE DebugObject,
-         *   DEBUGOBJECTINFOCLASS, PVOID, ULONG, PULONG)
-         */
-        NtSetInformationDebugObject: refuse('NtSetInformationDebugObject',
-            { argBytes: 20, answer: STATUS.INVALID_HANDLE, why }),
-
-        /**
-         * NTSTATUS NtWaitForDebugEvent(HANDLE DebugObject, BOOLEAN Alertable,
-         *   PLARGE_INTEGER Timeout, PDBGUI_WAIT_STATE_CHANGE StateChange)
-         */
-        NtWaitForDebugEvent: refuse('NtWaitForDebugEvent',
-            { argBytes: 16, answer: STATUS.INVALID_HANDLE, why }),
 
         /**
          * NTSTATUS NtSystemDebugControl(SYSDBG_COMMAND, PVOID, ULONG, PVOID, ULONG,
@@ -237,4 +335,5 @@ export function createDebugFunctions(host){
         NtSystemDebugControl: refuse('NtSystemDebugControl',
             { argBytes: 24, answer: STATUS.NOT_IMPLEMENTED, why: 'there is no kernel debugger' }),
     };
+    return functions;
 }

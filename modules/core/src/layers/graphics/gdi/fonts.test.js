@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { NONANTIALIASED_QUALITY, createFontEngine, familyOf } from './fonts.js';
 import { extTextOut, textExtent } from './text.js';
 import { createGdiDrawing } from './context.js';
@@ -271,4 +272,25 @@ test('a drawing with an engine draws its glyphs for the selected font', ()=>{
     drawing.textOutA(1, 0, 0, 'AB');
     assert.equal(fake.calls.fillText, 2);
     assert.equal(surface.read(1, 5), INK);
+});
+
+test('a glyph or the metrics of a font measured before make nothing: no key a character', async()=>{
+    // Every character a control lays out or draws asks for its glyph: a key
+    // string built from the request each time was garbage per character.
+    const engine = createFontEngine({ canvas: fakeCanvas().canvas });
+    const selected = font({ height: -10 });
+    const first = engine.glyph(0x41, selected);
+    /** @type {any} */
+    let kept = null;
+    assert.ok(await bytesPerCall(()=>{
+        kept = engine.glyph(0x41, selected);
+    }) < 8, 'a glyph of a font seen');
+    assert.equal(kept, first);
+    assert.ok(await bytesPerCall(()=>{
+        kept = engine.metrics(selected);
+    }) < 8, 'its metrics');
+    // The same font asked for by another object of the same fields is the
+    // same face and the same glyphs.
+    assert.equal(engine.glyph(0x41, font({ height: -10 })), first);
+    assert.equal(engine.metrics(font({ height: -10 })), engine.metrics(selected));
 });

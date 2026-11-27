@@ -143,7 +143,9 @@ test('a compiled effect is read into the model the source path builds', ()=>{
     assert.equal(model.shaders[0].profile, 'vs_1_1');
     assert.deepEqual([...model.shaders[0].tokens ?? []], VS);
     assert.deepEqual([...model.shaders[0].constantTable ?? []], [0x1c, 0, 0, 0]);
-    assert.match(messages, /preshader is not run/);
+    // An empty PRES comment: a preshader of no instructions, kept, not refused.
+    assert.equal(model.shaders[0].preshader?.instructions.length, 0);
+    assert.doesNotMatch(messages, /preshader/);
 });
 
 test('what is not a compiled effect, or runs past its end, is refused with a reason', ()=>{

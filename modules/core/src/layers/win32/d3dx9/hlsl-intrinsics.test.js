@@ -108,6 +108,9 @@ test('every intrinsic of the language resolves', ()=>{
         saturate: [f3], sign: [f3], sin: [f3], sincos: [f3, f3, f3], sinh: [f3],
         smoothstep: [f3, f3, f3], sqrt: [f3], step: [f3, f3], tan: [f3], tanh: [f3],
         transpose: [m(2, 3)], trunc: [f3],
+        // Shader Model 4's functions of bits.
+        asfloat: [f3], asint: [f3], asuint: [f3], countbits: [f3], reversebits: [f3],
+        firstbithigh: [f3], firstbitlow: [f3], f32tof16: [f3], f16tof32: [f3],
     };
     for (const [suffix, dim, n] of [['1D', '1d', 1], ['2D', '2d', 2], ['3D', '3d', 3],
         ['CUBE', 'cube', 3]])

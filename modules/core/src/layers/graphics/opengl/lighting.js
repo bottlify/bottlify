@@ -90,12 +90,22 @@ export function createMaterial(){
     };
 }
 
+/** The identity a singular matrix carries normals through. */
+const IDENTITY_3 = Object.freeze([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+/** The upper 3x3 `normalMatrix` was last asked of, and what it answered. */
+const lastUpper = new Float64Array(9).fill(NaN);
+/** @type {readonly number[]} */
+let lastNormal = IDENTITY_3;
+
 /**
  * The transpose of the inverse of a matrix's upper 3x3: what a normal is
- * transformed by.
+ * transformed by. Asked of the modelview by every lit draw, and by the
+ * scene, the uniform block and a shader's state alike, while the matrix
+ * moves far less often: the same nine numbers get back the array answered
+ * before, which nothing writes.
  *
  * @param {ArrayLike<number>} m  column major, 16 elements
- * @returns {number[]} nine elements, column major, or the identity when the
+ * @returns {readonly number[]} nine elements, column major, or the identity when the
  *          matrix is singular and no normal can be carried through it
  */
 export function normalMatrix(m){
@@ -108,19 +118,31 @@ export function normalMatrix(m){
     const g = m[2];
     const h = m[6];
     const i = m[10];
-    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-    if (det === 0)
+    if (a === lastUpper[0] && b === lastUpper[1] && c === lastUpper[2] && d === lastUpper[3]
+        && e === lastUpper[4] && f === lastUpper[5] && g === lastUpper[6]
+        && h === lastUpper[7] && i === lastUpper[8])
     {
-        return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        return lastNormal;
     }
+    lastUpper[0] = a;
+    lastUpper[1] = b;
+    lastUpper[2] = c;
+    lastUpper[3] = d;
+    lastUpper[4] = e;
+    lastUpper[5] = f;
+    lastUpper[6] = g;
+    lastUpper[7] = h;
+    lastUpper[8] = i;
+    const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
     // The inverse is the adjugate over the determinant, and the adjugate is
     // the cofactor matrix transposed -- so the inverse transpose is simply
     // the cofactor matrix over the determinant, laid out column by column.
-    return [
+    lastNormal = det === 0 ? IDENTITY_3 : Object.freeze([
         (e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
         (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
         (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det,
-    ];
+    ]);
+    return lastNormal;
 }
 
 /**

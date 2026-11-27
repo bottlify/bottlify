@@ -10,7 +10,7 @@
  * Nothing here knows about guest memory, argument lists or return codes. It
  * deals in sockets, addresses and bytes, and it answers in outcomes -- a count,
  * or an error number -- which is what lets the surface above be a translation
- * and nothing more, and what lets all of this be tested without an emulator.
+ * and nothing more, and what lets all of this be tested without an engine.
  *
  * Four properties are load-bearing and each one is a defect that has happened:
  *
@@ -28,6 +28,11 @@
  * already parked on that queue is woken to see it. A close that only unbinds an
  * address leaves the other side blocked for the rest of the run.
  *
+ * A connection holds what its two buffers hold, and no more. A sender that
+ * never stops - a loop of non-blocking send() until it fails - fills them and
+ * is told WSAEWOULDBLOCK, as Windows tells it; a queue that took every byte
+ * grew until the process was killed.
+ *
  * Streams and datagrams live in separate address spaces. They really do share
  * port numbers independently, and a discovery datagram arriving in a stream is
  * both wrong and a way for one protocol to corrupt the other.
@@ -42,7 +47,8 @@
 
 import {
     INADDR_ANY, SD_BOTH, SD_RECEIVE, SD_SEND, SOCK_DGRAM, SOCK_STREAM,
-    SO_ERROR, WSAEADDRINUSE, WSAECONNREFUSED, WSAECONNRESET, WSAEINVAL, WSAEISCONN,
+    SO_ERROR, SO_RCVBUF, SO_SNDBUF, WSAEADDRINUSE, WSAECONNREFUSED, WSAECONNRESET, WSAEINVAL,
+    WSAEISCONN,
     WSAENOTCONN, WSAENOTSOCK, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
 } from './constants.js';
 import { addressKey } from './sockaddr.js';
@@ -70,6 +76,13 @@ const failure = (/** @type {number} */ error)=>{
     return outcome;
 };
 
+/**
+ * What SO_SNDBUF and SO_RCVBUF hold until a program sets them (decisions.md
+ * A251): a connection between two sockets here holds the sender's send buffer
+ * and the receiver's receive buffer of bytes not yet read.
+ */
+export const DEFAULT_SOCKET_BUFFER = 65536;
+
 /** An outcome that is a count. */
 const count = (/** @type {number} */ value)=>({ value });
 
@@ -77,9 +90,14 @@ const count = (/** @type {number} */ value)=>({ value });
  * @param {Object} deps
  * @param {import('./loopback.js').Adapter
  *         | import('./transport.js').NetworkTransport} [deps.adapter]
+ * @param {{ open: (socket: any) => number, close: (handle: number) => void }} [deps.numbers]
+ *        Where a socket's number comes from: on Windows a SOCKET is a kernel
+ *        handle, numbered with the files and events, which is how a completion
+ *        port and SetFileCompletionNotificationModes take it. Counted from 1
+ *        when nothing hands one out.
  * @returns {any}
  */
-export function createSocketRegistry({ adapter: supplied } = {}){
+export function createSocketRegistry({ adapter: supplied, numbers } = {}){
     const { adapter, transport } = asNetwork(supplied);
 
     /** @type {Map<number, any>} */
@@ -165,11 +183,12 @@ export function createSocketRegistry({ adapter: supplied } = {}){
         return false;
     };
 
-    /** How many bytes are queued, whatever shape the queue is. */
+    /**
+     * How many bytes are queued, whatever shape the queue is. A stream keeps its
+     * count as bytes arrive and leave: a sender asks it at every send.
+     */
     const queued = (/** @type {any} */ socket)=>isStream(socket)
-        ? socket.rx.reduce(
-            (/** @type {number} */ total, /** @type {Uint8Array} */ chunk)=>
-                total + chunk.length, 0)
+        ? socket.rxBytes
         : socket.rx.reduce(
             (/** @type {number} */ total, /** @type {any} */ datagram)=>
                 total + datagram.bytes.length, 0);
@@ -211,8 +230,39 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             out.set(part, at);
             at += part.length;
         }
+        socket.rxBytes -= taken;
+        // Room was made in the connection: a sender here waiting for it, or
+        // watching for FD_WRITE, looks again.
+        if (taken > 0 && socket.peer)
+        {
+            wake(socket.peer);
+        }
         return out;
     };
+
+    /**
+     * How many more bytes a send on this connected stream can hand over now:
+     * what its send buffer and the peer's receive buffer hold, less what the
+     * peer has not read. A remote stream's bytes go to the transport, whose
+     * frames carry their own flow, and are not counted here.
+     *
+     * @param {any} socket
+     */
+    const room = socket=>(socket.peer
+        ? bufferOf(socket, SO_SNDBUF) + bufferOf(socket.peer, SO_RCVBUF) - socket.peer.rxBytes
+        : Infinity);
+
+    /** @param {any} socket @param {number} option */
+    const bufferOf = (socket, option)=>socket.options.get(option) ?? DEFAULT_SOCKET_BUFFER;
+
+    /**
+     * Whether a send would hand over anything now: a datagram socket always, a
+     * stream once connected and while its connection has room.
+     *
+     * @param {any} socket
+     */
+    const writable = socket=>!socket.closed
+        && (!isStream(socket) || (socket.connected && room(socket) > 0));
 
     /**
      * Tells a stream's peer that this end will send nothing more.
@@ -307,9 +357,8 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             {
                 return failure(WSAEOPNOTSUPP);
             }
-            const handle = nextHandle++;
-            sockets.set(handle, {
-                handle,
+            const socket = {
+                handle: 0,
                 family,
                 type,
                 local: { host: INADDR_ANY, port: 0 },
@@ -329,6 +378,8 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 stream: null,
                 /** @type {any[]} */
                 rx: [],
+                /** A stream's bytes in `rx`, kept as they come and go. */
+                rxBytes: 0,
                 /** @type {any[]} */
                 backlog: [],
                 /** @type {(() => void)[]} */
@@ -338,8 +389,10 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 error: 0,
                 /** Overlapped operations with nowhere to report completion yet. */
                 pending: [],
-            });
-            return count(handle);
+            };
+            socket.handle = numbers ? numbers.open(socket) : nextHandle++;
+            sockets.set(socket.handle, socket);
+            return count(socket.handle);
         },
 
         /** @param {any} socket @param {{ host: number, port: number }} address */
@@ -488,9 +541,18 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 {
                     return failure(WSAECONNRESET);
                 }
-                socket.peer.rx.push(bytes.slice());
+                // As much as the connection holds, and no more: the rest is the
+                // caller's to send again, as Windows answers a stream send.
+                const free = room(socket);
+                if (free <= 0)
+                {
+                    return failure(WSAEWOULDBLOCK);
+                }
+                const taken = Math.min(bytes.length, free);
+                socket.peer.rx.push(bytes.slice(0, taken));
+                socket.peer.rxBytes += taken;
                 wake(socket.peer);
-                return count(bytes.length);
+                return count(taken);
             }
 
             const target = to ?? socket.remote;
@@ -587,6 +649,11 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             if (how === SD_RECEIVE || how === SD_BOTH)
             {
                 socket.rx = [];
+                socket.rxBytes = 0;
+                if (socket.peer)
+                {
+                    wake(socket.peer);
+                }
             }
             return count(0);
         },
@@ -622,6 +689,7 @@ export function createSocketRegistry({ adapter: supplied } = {}){
             finish(socket);
             wake(socket);
             sockets.delete(socket.handle);
+            numbers?.close(socket.handle);
             return count(0);
         },
 
@@ -641,22 +709,28 @@ export function createSocketRegistry({ adapter: supplied } = {}){
         },
 
         /**
-         * The first of these sockets to become readable.
+         * The first moment one of these sockets is ready: readable, for those
+         * in `read`, or able to take a send, for those in `write` - or the
+         * timeout. A wake that leaves none ready (a reader made room for a
+         * socket that is only being read) waits on.
          *
-         * Every waiter is removed once one has fired. Leaving them attached is
+         * Every waiter is removed once it has settled. Leaving them attached is
          * how a later, unrelated wake-up runs a callback belonging to a call
          * that returned long ago -- and in select's case writes an fd_set into
          * a buffer the program has since reused.
          *
-         * @param {any[]} watched
+         * @param {any[]} read
+         * @param {any[]} write
          * @param {number | null} timeoutMs
          * @returns {Promise<void>}
          */
-        anyReadableSoon(watched, timeoutMs){
-            if (watched.some(readable))
+        anyReadySoon(read, write, timeoutMs){
+            const ready = ()=>read.some(readable) || write.some(writable);
+            if (ready())
             {
                 return Promise.resolve();
             }
+            const watched = [...new Set([...read, ...write])];
             return new Promise(resolve=>{
                 let settled = false;
                 /** @type {any} */
@@ -668,7 +742,7 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                             (/** @type {any} */ waiter)=>waiter !== fire);
                     }
                 };
-                const fire = ()=>{
+                const settle = ()=>{
                     if (settled)
                     {
                         return;
@@ -681,35 +755,68 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                     detach();
                     resolve();
                 };
+                const fire = ()=>{
+                    if (settled)
+                    {
+                        return;
+                    }
+                    if (ready())
+                    {
+                        settle();
+                        return;
+                    }
+                    // wake() emptied this socket's list: be on it again.
+                    detach();
+                    for (const socket of watched)
+                    {
+                        socket.waiters.push(fire);
+                    }
+                };
                 for (const socket of watched)
                 {
                     socket.waiters.push(fire);
                 }
                 if (timeoutMs !== null)
                 {
-                    timer = setTimeout(fire, timeoutMs);
+                    timer = setTimeout(settle, timeoutMs);
                 }
             });
         },
 
         /**
-         * Which of these are ready. Writability is unconditional here: a send
-         * always takes the whole buffer, so a stream socket is never blocked on
-         * one, and saying otherwise would park a caller forever.
+         * Which of these are ready: readable, able to take a send - a stream
+         * while its connection has room - or holding an error.
          *
          * @param {any[]} read @param {any[]} write @param {any[]} except
          */
         poll(read, write, except){
             return {
                 read: read.filter(readable),
-                write: write.filter(socket=>!socket.closed
-                    && (socket.connected || !isStream(socket))),
+                write: write.filter(writable),
                 except: except.filter(socket=>socket.error !== 0),
             };
         },
 
         /** @param {any} socket */
         available: socket=>queued(socket),
+
+        writable,
+
+        /**
+         * A promise that settles when a send on this socket would hand over
+         * something, or it is closed or its peer has gone.
+         *
+         * @param {any} socket
+         * @returns {Promise<void>}
+         */
+        writableSoon(socket){
+            if (writable(socket) || socket.closed || socket.finished
+                || (socket.peer && socket.peer.closed))
+            {
+                return Promise.resolve();
+            }
+            return new Promise(resolve=>socket.waiters.push(resolve));
+        },
 
         /**
          * SO_ERROR is documented to clear itself, and frameworks depend on it:
@@ -724,6 +831,10 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 const held = socket.error;
                 socket.error = 0;
                 return held;
+            }
+            if (option === SO_SNDBUF || option === SO_RCVBUF)
+            {
+                return bufferOf(socket, option);
             }
             return socket.options.get(option) ?? 0;
         },
@@ -793,6 +904,7 @@ export function createSocketRegistry({ adapter: supplied } = {}){
                 return;
             }
             socket.rx.push(bytes);
+            socket.rxBytes += bytes.length;
             wake(socket);
         },
 

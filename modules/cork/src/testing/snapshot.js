@@ -21,7 +21,10 @@
  *   never by ST(n): two engines that agree on every value but disagree on
  *   where the top is have a bug, and ST(n) would hide it. Values are
  *   compared as f64 bit patterns, exactly, unless a caller names a tolerance
- *   in ulps.
+ *   in ulps. They are read from the arrays' bytes and copied as bytes,
+ *   never through a number: a signalling NaN stored as a double may come
+ *   back quieted where the engine compiled the store so (V8 14's Maglev
+ *   does).
  * - The control and status words, the latter under a mask a caller may
  *   narrow (the hardware fixtures do not record every bit).
  * - XMM by lane as u32 bit patterns (so a NaN payload counts), and MXCSR.
@@ -102,7 +105,7 @@ export function snapshot(host, spans){
         eflags: host.readReg32('eflags') >>> 0,
         x87: {
             top: x87.top, empty: x87.empty, control: x87.control, status: x87.status,
-            registers: Float64Array.from(x87.registers),
+            registers: x87.registers.slice(),
             raw: Uint8Array.from(x87.raw),
         },
         xmm,
@@ -138,7 +141,12 @@ export function restore(host, state){
 
 const f64Bits = new DataView(new ArrayBuffer(8));
 
-/** @param {number} value @returns {bigint} the value's bit pattern */
+/** @param {Float64Array} values @param {number} index @returns {bigint} its bits */
+function bitsAt(values, index){
+    return new BigUint64Array(values.buffer, values.byteOffset, values.length)[index];
+}
+
+/** @param {number} value @returns {bigint} the bit pattern of a value that is no NaN */
 function bitsOf(value){
     f64Bits.setFloat64(0, value, true);
     return f64Bits.getBigUint64(0, true);
@@ -216,7 +224,7 @@ export function compare(a, b, { flagsMask = ARITH_MASK, statusMask = 0xffff, x87
         const left = a.x87.registers[index];
         const right = b.x87.registers[index];
         const same = x87Ulps === 0
-            ? bitsOf(left) === bitsOf(right)
+            ? bitsAt(a.x87.registers, index) === bitsAt(b.x87.registers, index)
             : ulpsApart(left, right) <= x87Ulps;
         if (!same)
         {

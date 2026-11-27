@@ -8,8 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './functions.js';
 import { createHelperFunctions } from './helpers.js';
-import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
-    TB_SETBUTTONSIZE } from './toolbar.js';
+import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE }
+    from './toolbar.js';
+import { DATA_ORDINALS } from './dpa.js';
 
 /**
  * Guest memory, a bump allocator, and user32 and gdi32 stand-ins that record
@@ -91,8 +92,9 @@ test('CreateToolbarEx makes the toolbar and tells it its sizes, bitmap and butto
     assert.equal(create[3] & 0x40000000, 0x40000000, 'a child');
     assert.deepEqual([create[8], create[9]], [0x100, 7], 'of the window, with the id');
     assert.deepEqual(sent.map(([message, wParam])=>[message, wParam]), [
-        [TB_BUTTONSTRUCTSIZE, 20], [TB_SETBITMAPSIZE, 0], [TB_SETBUTTONSIZE, 0],
-        [TB_ADDBITMAP, 4], [TB_ADDBUTTONSA, 3]]);
+        [TB_BUTTONSTRUCTSIZE, 20], [TB_SETBITMAPSIZE, 0], [TB_SETBITMAPSIZE, 0],
+        [TB_ADDBITMAP, 4], [TB_ADDBUTTONSA, 3]], 'the buttons\' size sizes the images too, '
+        + 'as Windows\' does (Wine\'s test_createtoolbarex)');
     assert.equal(sent[1][2], 15 << 16 | 16);
     assert.equal(sent[2][2], 22 << 16 | 24);
     assert.equal(sent[4][2], 0x8000);
@@ -218,8 +220,10 @@ test('MakeDragList is refused, and the ordinals are the 5.82 library\'s', ()=>{
     assert.equal(m.diverged.length, 1);
     assert.equal(m.fns.MakeDragList.argBytes, 4);
     // Wine's comctl32.spec, from the 5.81 library, and 5.82 alike.
-    assert.deepEqual(COMCTL32_ORDINALS, { 8: 'CreateMappedBitmap', 13: 'MakeDragList',
-        14: 'LBItemFromPt', 17: 'InitCommonControls' });
+    assert.deepEqual(COMCTL32_ORDINALS, { ...DATA_ORDINALS, 8: 'CreateMappedBitmap',
+        13: 'MakeDragList',
+        14: 'LBItemFromPt', 17: 'InitCommonControls', 390: '#390', 410: 'SetWindowSubclass',
+        411: 'GetWindowSubclass', 412: 'RemoveWindowSubclass', 413: 'DefSubclassProc' });
     const all = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (
         createComctlFunctions(/** @type {any} */ ({ ...m.host }))));
     for (const name of Object.values(COMCTL32_ORDINALS))

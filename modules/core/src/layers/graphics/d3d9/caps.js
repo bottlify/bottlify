@@ -22,6 +22,8 @@
  */
 
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
+import { PRESENTATION_INTERVALS } from './validity.js';
+import { SIMULTANEOUS_TARGETS } from './constants.js';
 
 const D3DCAPS_READ_SCANLINE = 0x00020000;
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
@@ -29,9 +31,7 @@ const D3DCAPS2_DYNAMICTEXTURES = 0x20000000;
 const D3DCAPS2_CANAUTOGENMIPMAP = 0x40000000;
 const D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD = 0x00000020;
 const D3DDEVCAPS2_STREAMOFFSET = 0x00000001;
-
-const D3DPRESENT_INTERVAL_ONE = 0x00000001;
-const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+const D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES = 0x00000010;
 
 const D3DCURSORCAPS_COLOR = 0x00000001;
 const D3DCURSORCAPS_LOWRES = 0x00000002;
@@ -57,10 +57,14 @@ const D3DPMISCCAPS_CULLNONE = 0x00000010;
 const D3DPMISCCAPS_CULLCW = 0x00000020;
 const D3DPMISCCAPS_CULLCCW = 0x00000040;
 const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
+const D3DPMISCCAPS_CLIPTLVERTS = 0x00000200;
 const D3DPMISCCAPS_TSSARGTEMP = 0x00000400;
 const D3DPMISCCAPS_BLENDOP = 0x00000800;
 const D3DPMISCCAPS_PERSTAGECONSTANT = 0x00008000;
 const D3DPMISCCAPS_SEPARATEALPHABLEND = 0x00020000;
+const D3DPMISCCAPS_INDEPENDENTWRITEMASKS = 0x00004000;
+const D3DPMISCCAPS_MRTINDEPENDENTBITDEPTHS = 0x00040000;
+const D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING = 0x00080000;
 const D3DDTCAPS_UBYTE4 = 0x0001;
 const D3DDTCAPS_UBYTE4N = 0x0002;
 const D3DDTCAPS_SHORT2N = 0x0004;
@@ -86,8 +90,12 @@ const D3DPRASTERCAPS_DEPTHBIAS = 0x04000000;
 /** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
 const ALL_COMPARE_CAPS = 0x000000ff;
 
-/** Every blend factor up to and including BOTHINVSRCALPHA; not the constant factor. */
-const BLEND_CAPS = 0x00001fff;
+/**
+ * Every blend factor up to BOTHINVSRCALPHA, and D3DPBLENDCAPS_BLENDFACTOR:
+ * D3DRS_BLENDFACTOR is the pass's blend constant. XNA's Reach profile
+ * requires it and refuses a device without it.
+ */
+const BLEND_CAPS = 0x00003fff;
 
 const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
 const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;
@@ -101,7 +109,6 @@ const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
 const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
 const D3DPTEXTURECAPS_VOLUMEMAP = 0x00002000;
 const D3DPTEXTURECAPS_MIPVOLUMEMAP = 0x00008000;
-const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x00000100;
 
 const D3DPTFILTERCAPS_MINFPOINT = 0x00000100;
 const D3DPTFILTERCAPS_MINFLINEAR = 0x00000200;
@@ -185,7 +192,7 @@ export function capabilityWords(caps, identity = {}){
         // Blending is the pipeline's, whatever the swap chain presents with; no copy
         // between video and system memory through StretchRect.
         Caps3: D3DCAPS3_ALPHA_FULLSCREEN_FLIP_OR_DISCARD,
-        PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+        PresentationIntervals: PRESENTATION_INTERVALS,
         CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
         DevCaps: D3DDEVCAPS_EXECUTESYSTEMMEMORY | D3DDEVCAPS_EXECUTEVIDEOMEMORY
             | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY | D3DDEVCAPS_TLVERTEXVIDEOMEMORY
@@ -197,10 +204,15 @@ export function capabilityWords(caps, identity = {}){
             | D3DDEVCAPS_PUREDEVICE,
         // The stages' temporary register and constants are the generated
         // cascade's own.
+        // Pre-transformed vertices are clipped as the rest are, under D3DRS_CLIPPING.
         PrimitiveMiscCaps: D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
             | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP
             | D3DPMISCCAPS_SEPARATEALPHABLEND | D3DPMISCCAPS_TSSARGTEMP
-            | D3DPMISCCAPS_PERSTAGECONSTANT,
+            | D3DPMISCCAPS_PERSTAGECONSTANT | D3DPMISCCAPS_CLIPTLVERTS
+            // Several targets at once: each its own format and write mask,
+            // all blended as the first (a pass's colour attachments).
+            | D3DPMISCCAPS_INDEPENDENTWRITEMASKS | D3DPMISCCAPS_MRTINDEPENDENTBITDEPTHS
+            | D3DPMISCCAPS_MRTPOSTPIXELSHADERBLENDING,
         // Depth bias and anisotropy are the pipeline's and the sampler's; the
         // level bias, which no WebGPU sampler takes, is the shader's.
         RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX
@@ -216,10 +228,11 @@ export function capabilityWords(caps, identity = {}){
             | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
         TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_MIPMAP
             | D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_MIPCUBEMAP
-            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP
-            // Without POW2 a texture of any size is whole; programs test this bit for a
-            // two-dimensional texture of any size at all.
-            | D3DPTEXTURECAPS_NONPOW2CONDITIONAL,
+            // Neither POW2 nor NONPOW2CONDITIONAL: a texture of any size is whole,
+            // wrapped and mipmapped as any other, as a card of Direct3D 10 says it
+            // under Direct3D 9. NONPOW2CONDITIONAL alone is a pair no card gave
+            // (Wine's d3d9 conditional_np2_repeat_test asks for POW2 beside it).
+            | D3DPTEXTURECAPS_VOLUMEMAP | D3DPTEXTURECAPS_MIPVOLUMEMAP,
         TextureFilterCaps: FILTER_CAPS,
         CubeTextureFilterCaps: FILTER_CAPS,
         VolumeTextureFilterCaps: FILTER_CAPS,
@@ -261,7 +274,9 @@ export function capabilityWords(caps, identity = {}){
         PixelShaderVersion: shaderVersion(D3DPS_VERSION_MARK, ps),
         PixelShader1xMaxValue: runsPixelShaders ? 1.0 : 0,
         // A stream reads from the offset SetStreamSource gives it.
-        DevCaps2: D3DDEVCAPS2_STREAMOFFSET,
+        // A render-target texture's level is a StretchRect source as a target surface is,
+        // drawn on the GPU; a program that finds no such stretch refuses to run at all.
+        DevCaps2: D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES,
         MaxNpatchTessellationLevel: 0,
         Reserved5: 0,
         MasterAdapterOrdinal: 0,
@@ -274,7 +289,7 @@ export function capabilityWords(caps, identity = {}){
         DeclTypes: D3DDTCAPS_UBYTE4 | D3DDTCAPS_UBYTE4N | D3DDTCAPS_SHORT2N | D3DDTCAPS_SHORT4N
             | D3DDTCAPS_USHORT2N | D3DDTCAPS_USHORT4N | D3DDTCAPS_FLOAT16_2
             | D3DDTCAPS_FLOAT16_4,
-        NumSimultaneousRTs: 1,
+        NumSimultaneousRTs: SIMULTANEOUS_TARGETS,
         // StretchRect stretches on the GPU, point or linear: D3DPTFILTERCAPS_MINFPOINT,
         // MINFLINEAR, MAGFPOINT and MAGFLINEAR.
         StretchRectFilterCaps: 0x00000100 | 0x00000200 | 0x01000000 | 0x02000000,

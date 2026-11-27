@@ -16,7 +16,7 @@ import { dirname, join, normalize, resolve, sep } from 'node:path';
  * dependency would make an engine loaded by URL a static one, and the
  * boundary checker refuses it.
  */
-export const ENGINE_PACKAGES = Object.freeze(['@bottlify/cork']);
+const ENGINE_PACKAGES = Object.freeze(['@bottlify/cork']);
 
 /**
  * The boundary issue an import specifier raises, or null.
@@ -42,7 +42,7 @@ export function enginePackageIssue(spec){
  * @param {string} code
  * @returns {string}
  */
-export function withoutComments(code){
+function withoutComments(code){
     let out = '';
     let at = 0;
     let previous = '';
@@ -116,7 +116,7 @@ export function withoutComments(code){
  * @param {string} code
  * @returns {{ computed: number, urls: string[] }}
  */
-export function indirectImportsOf(code){
+function indirectImportsOf(code){
     const bare = withoutComments(code);
     let computed = 0;
     for (const match of bare.matchAll(/(?<![\w$.])import\s*\(\s*/g))
@@ -203,9 +203,11 @@ function walk(dir){
  * @param {string} tree.vendor  Its `vendor/`: binaries the root of src reaches by URL, and
  *     that nothing imports.
  * @param {Map<string, Set<string>>} tree.requires  Each layer's declared `requires`.
+ * @param {Set<string>} tree.dependencies  The package's `dependencies`: a library
+ *     among them is imported by its name; an engine among them never is.
  * @returns {{ files: string[], issues: string[] }}
  */
-export function findBoundaryIssues({ src, vendor, requires }){
+export function findBoundaryIssues({ src, vendor, requires, dependencies }){
     /** @param {string} file */
     const classify = file=>{
         const rel = normalize(file).slice(src.length + 1).split(sep);
@@ -254,9 +256,9 @@ export function findBoundaryIssues({ src, vendor, requires }){
         for (const spec of statementSpecifiersOf(code))
         {
             if (!spec.startsWith('.') && !spec.startsWith('node:')
-                && enginePackageIssue(spec) === null)
+                && enginePackageIssue(spec) === null && !dependencies.has(spec))
             {
-                issues.push(`${file} imports a package (${spec}): the core has no dependencies`);
+                issues.push(`${file} imports a package (${spec}): not one the core depends on`);
             }
         }
 

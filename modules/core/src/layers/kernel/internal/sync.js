@@ -51,6 +51,12 @@ export const SyncKind = {
  * @property {(id: number) => void} reset
  * @property {(id: number, count: number) => number} release
  * @property {(id: number, threadId: number) => boolean} releaseMutex
+ * @property {(processId: number) => ({ id: number, threadId: number, imagePath: string,
+ *     exitCode: number | null } | null)} [process]  a process of the run by id: the
+ *     number of the event its exit sets, and its code once it has one
+ * @property {() => number} [token]  the number the next wait is named by, unique on
+ *     the link: the run keeps a link's queued waits by it, and every process on
+ *     that link - a child beside its parent in one worker - hears every wake
  */
 
 /**
@@ -87,16 +93,22 @@ export function signalledNow(object){
  * @param {(event: any) => void} [options.eventChanged]  told each time an
  *     event's signalled state is written, for the words the guest reads it by
  *     (`event-mirror.js`)
- * @param {{ made: (mutex: any) => void, settle: () => void } | null} [options.mutexWords]
+ * @param {{ made: (mutex: any) => void, settle: () => void,
+ *     detach?: () => void } | null} [options.mutexWords]
  *     The words the guest takes and releases mutexes by (`mutex-words.js`): told of
  *     each mutex made, and asked after every call here and every wait run out to
  *     hand back to the guest the words of mutexes nobody waits for
- * @param {{ made: (event: any) => void, settle: () => void } | null} [options.eventWords]
+ * @param {{ made: (event: any) => void, settle: () => void,
+ *     detach?: () => void } | null} [options.eventWords]
  *     The words the guest sets, resets and takes events by (`event-words.js`), as
  *     `mutexWords` for mutexes
+ * @param {{ made: (semaphore: any) => void, settle: () => void,
+ *     detach?: () => void } | null}
+ *     [options.semaphoreWords]  The words the guest releases and takes
+ *     semaphores by (`semaphore-words.js`), the same way
  */
 export function createSyncObjects({ scheduler, remote = null, eventChanged, mutexWords = null,
-    eventWords = null })
+    eventWords = null, semaphoreWords = null })
 {
     /** @type {any[]} */
     const objects = [];
@@ -112,6 +124,40 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
      * event's word -- counted before anyone moves them there.
      */
     const unchanged = { sets: 0, setsOfSet: 0, resets: 0, resetsOfClear: 0 };
+    /**
+     * The waits the host answered, by what was waited on and how each ended:
+     * `taken` at once, `blocked` (the thread queued), `timedOut` (a poll of
+     * one not signalled); a set by its kind and the kinds in it. Which of them
+     * guest code could answer, before anyone moves them there.
+     *
+     * @type {Record<string, { taken: number, blocked: number, timedOut: number }>}
+     */
+    const waits = {};
+    /** @param {string} kind @param {'taken' | 'blocked' | 'timedOut'} how */
+    const countWait = (kind, how)=>{
+        if (quiet === 0)
+        {
+            (waits[kind] ??= { taken: 0, blocked: 0, timedOut: 0 })[how]++;
+        }
+    };
+    /** Above zero while a set's objects are taken one by one, the set counted once. */
+    let quiet = 0;
+    /** One object of a set taken, uncounted. @param {any} object @param {any} thread */
+    const takeOfSet = (object, thread)=>{
+        quiet++;
+        try
+        {
+            return api.wait(object, thread);
+        }
+        finally
+        {
+            quiet--;
+        }
+    };
+    /** @param {string} how @param {any[]} set */
+    const setKind = (how, set)=>`${how}:${[...new Set(set.map(one=>one.kind))].sort().join('+')}`;
+    /** ReleaseSemaphore calls, and those that woke a queued thread. */
+    const releases = { semaphoreReleases: 0, semaphoreWakes: 0 };
 
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
@@ -122,6 +168,9 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     /** Waits on another process's object, queued there, by their token. @type {Map<number, any>} */
     const remoteWaits = new Map();
     let nextToken = 1;
+    /** A new wait's token: the link's own count where it keeps one, shared by
+     * every process that waits across it. */
+    const newToken = ()=>remote?.token?.() ?? nextToken++;
     /**
      * The wait being asked for across the link now, and the word that it
      * ended if that came first: the link answers what it is asked while it
@@ -133,6 +182,16 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     let asking = null;
     /** @param {any} thread */
     const stopWaiting = thread=>{
+        if (thread.remoteSet && remote)
+        {
+            // Every wait across the link taken back; one that was handed its
+            // object already ends the wait with it, as a single wait's does.
+            const granted = withdrawSet(thread, null);
+            if (granted !== null)
+            {
+                thread.waitResult = granted;
+            }
+        }
         if (thread.remoteWait && remote)
         {
             // Taken off the queue there -- unless it was handed the object
@@ -158,6 +217,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         thread.waitSet = null;
         mutexWords?.settle();
         eventWords?.settle();
+        semaphoreWords?.settle();
     };
     scheduler.onTimeout?.(stopWaiting);
 
@@ -226,6 +286,77 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     /** @param {any} object @param {any} thread */
     const owns = (object, thread)=>
         object.kind === SyncKind.MUTEX && object.owner === thread;
+
+    /**
+     * An ending process's threads out of the object's queue, and a mutex one
+     * of them holds abandoned to the next waiter.
+     *
+     * @param {any} object @param {(thread: any) => boolean} ours
+     */
+    const forsake = (object, ours)=>{
+        // A name is not always a sync object's: a section's has no queue.
+        if (!Array.isArray(object?.waiters))
+        {
+            return;
+        }
+        for (let at = object.waiters.length - 1; at >= 0; at--)
+        {
+            if (ours(object.waiters[at]))
+            {
+                object.waiters.splice(at, 1);
+            }
+        }
+        if (object.kind === SyncKind.MUTEX && object.owner && ours(object.owner))
+        {
+            object.owner = null;
+            object.recursion = 0;
+            object.abandoned = true;
+            releaseTo(object);
+        }
+    };
+
+    /**
+     * The object's state as plain values, read once out of whatever kept it
+     * (a word in this process's memory, the mirror of its handles), and
+     * nothing of this process left on it: no word, no clock entry.
+     *
+     * @param {any} object
+     */
+    const settle = object=>{
+        /** @param {string} key */
+        const plain = key=>{
+            const value = object[key];
+            Object.defineProperty(object, key, { value, writable: true, enumerable: true,
+                configurable: true });
+        };
+        switch (object.kind)
+        {
+            case SyncKind.EVENT:
+                plain('signalled');
+                delete object.heldSignalled;
+                break;
+            case SyncKind.MUTEX:
+                plain('owner');
+                plain('recursion');
+                delete object.heldOwner;
+                delete object.heldRecursion;
+                break;
+            case SyncKind.SEMAPHORE:
+                plain('count');
+                delete object.heldCount;
+                break;
+            case SyncKind.TIMER:
+                // Its clock was this process's: it comes due no more.
+                object.fired = null;
+                object.token = null;
+                object.due = null;
+                break;
+            default:
+                break;
+        }
+        delete object.word;
+        delete object.hostKeeps;
+    };
 
     /** @param {any} thread @param {any} object  What woke it, when it waited alone. */
     const leaveQueues = (thread, object)=>{
@@ -297,13 +428,19 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
      */
     const hand = (thread, object)=>{
         const set = thread.waitSet;
+        if (thread.remoteSet && remote)
+        {
+            // An object here ended a wait that also asked other processes:
+            // those waits go back, with anything they were handed.
+            withdrawSet(thread, -1);
+        }
         leaveQueues(thread, object);
         if (set?.all === true)
         {
             let result = WaitResult.OBJECT_0;
             for (const one of set.objects)
             {
-                if (api.wait(one, thread) === WaitResult.ABANDONED)
+                if (takeOfSet(one, thread) === WaitResult.ABANDONED)
                 {
                     result = WaitResult.ABANDONED;
                 }
@@ -329,8 +466,9 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         .map(object=>`${object.kind} "${object.name}"`).join(', ');
 
     /**
-     * A wait on a set holding another process's object is not carried across
-     * a link yet: said, rather than answered as though the object were here.
+     * A wait on all of a set holding another process's object is not carried
+     * across a link yet: said, rather than answered as though the object
+     * were here.
      *
      * @param {any[]} set
      */
@@ -340,6 +478,127 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             throw new Error('a wait on a set of objects one of which is another process\'s,'
                 + ' across a link, is not carried yet');
         }
+    };
+
+    /**
+     * Gives back an object another process holds that a wait on a set was
+     * handed after another of its objects had already ended the wait: an
+     * event is set again, a semaphore's count and a mutex returned. Its
+     * waiters there see it a moment later than they would have, which is all.
+     *
+     * @param {any} object @param {any} thread
+     */
+    const giveBack = (object, thread)=>{
+        const across = /** @type {RemoteObjects} */ (remote);
+        if (object.kind === SyncKind.EVENT)
+        {
+            across.set(object.remote);
+        }
+        else if (object.kind === SyncKind.SEMAPHORE)
+        {
+            across.release(object.remote, 1);
+        }
+        else if (object.kind === SyncKind.MUTEX)
+        {
+            across.releaseMutex(object.remote, thread.id);
+        }
+    };
+
+    /**
+     * Takes back a set wait's waits on other processes' objects, all but
+     * `keep`'s. Each one that was handed its object meanwhile is given back,
+     * except the first in the set's order when nothing has ended the wait
+     * yet (`keep` null): that one ends it, and its answer is returned.
+     *
+     * @param {any} thread @param {number | null} keep
+     * @returns {number | null} the answer, the object's index added, or null
+     */
+    const withdrawSet = (thread, keep)=>{
+        const tokens = /** @type {Map<number, number>} */ (thread.remoteSet);
+        const objects_ = thread.waitSet?.objects ?? thread.remoteObjects ?? [];
+        thread.remoteSet = null;
+        thread.remoteObjects = null;
+        let answer = null;
+        for (const [token, index] of [...tokens].sort((a, b)=>a[1] - b[1]))
+        {
+            remoteWaits.delete(token);
+            if (token === keep)
+            {
+                continue;
+            }
+            const granted = /** @type {RemoteObjects} */ (remote).cancel(token);
+            if (granted === null)
+            {
+                continue;
+            }
+            if (keep === null && answer === null)
+            {
+                answer = (granted + index) >>> 0;
+                continue;
+            }
+            giveBack(objects_[index], thread);
+        }
+        return answer;
+    };
+
+    /**
+     * A wait for any of a set one of whose objects another process holds:
+     * each such object asked for there, the rest queued on here. The first
+     * to come ends the wait; the others are taken back, and an object of
+     * another process handed over meanwhile is given back.
+     *
+     * @param {any[]} objects_ @param {any} thread @param {any} timed
+     * @returns {{ index: number, result: number } | null}
+     */
+    const waitAnyAcross = (objects_, thread, timed)=>{
+        const ready = api.pollAny(objects_, thread);
+        if (ready !== null)
+        {
+            countWait(setKind('any', objects_), 'taken');
+            return ready;
+        }
+        countWait(setKind('any', objects_), 'blocked');
+        const local = objects_.filter(object=>!object.remote);
+        /** @type {Map<number, number>} */
+        const tokens = new Map();
+        thread.remoteSet = tokens;
+        thread.remoteObjects = objects_;
+        for (let index = 0; index < objects_.length; index++)
+        {
+            const object = objects_[index];
+            if (!object.remote)
+            {
+                continue;
+            }
+            const token = newToken();
+            asking = { token, result: null };
+            let now;
+            try
+            {
+                now = /** @type {RemoteObjects} */ (remote).wait(object.remote, thread.id, token)
+                    ?? asking.result;
+            }
+            finally
+            {
+                asking = null;
+            }
+            if (now !== null)
+            {
+                // Handed over at once: the waits already asked for go back.
+                withdrawSet(thread, -1);
+                return { index, result: now };
+            }
+            tokens.set(token, index);
+            remoteWaits.set(token, thread);
+        }
+        thread.waitSet = { objects: objects_, all: false };
+        thread.queuedOn = local;
+        for (const object of local)
+        {
+            object.waiters.push(thread);
+        }
+        scheduler.block(thread, `any of ${describeSet(objects_)}`, timed);
+        return null;
     };
 
     const api = {
@@ -357,6 +616,18 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 {
                     asking.result = result;
                 }
+                return;
+            }
+            if (thread.remoteSet)
+            {
+                // One of a set's objects came: the set's other waits go back,
+                // and the thread leaves the queues of its objects here.
+                const index = /** @type {number} */ (thread.remoteSet.get(token));
+                withdrawSet(thread, token);
+                leaveQueues(thread, null);
+                thread.queuedOn = null;
+                thread.waitResult = (result + index) >>> 0;
+                (thread.scheduler ?? scheduler).wake(thread);
                 return;
             }
             remoteWaits.delete(token);
@@ -441,6 +712,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             objects.push(object);
             made.add(object);
             created[SyncKind.SEMAPHORE]++;
+            semaphoreWords?.made(object);
             return object;
         },
 
@@ -489,9 +761,14 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             object.period = Math.max(0, period);
             object.token = scheduler.addTimer(due, object.period, (/** @type {number} */ next)=>{
                 // A periodic timer moves on to its next boundary; a one-shot
-                // has fired for the last time.
+                // has fired for the last time, and its token is spent: the
+                // scheduler may hand it to the next timer armed.
                 const at = object.due;
                 object.due = object.period > 0 ? next : null;
+                if (object.period === 0)
+                {
+                    object.token = null;
+                }
                 api.setEvent(object);
                 object.fired?.(at);
             });
@@ -586,7 +863,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         wait(object, thread, timed){
             if (object.remote && remote)
             {
-                const token = nextToken++;
+                const token = newToken();
                 asking = { token, result: null };
                 let now;
                 try
@@ -618,9 +895,11 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
 
             if (isSignalled(object))
             {
+                countWait(object.kind, 'taken');
                 return acquire(object, thread);
             }
 
+            countWait(object.kind, 'blocked');
             thread.waitSet = null;
             thread.queuedOn = [object];
             object.waiters.push(thread);
@@ -653,6 +932,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 object.recursion++;
                 return WaitResult.OBJECT_0;
             }
+            countWait(object.kind, isSignalled(object) ? 'taken' : 'timedOut');
             return isSignalled(object) ? acquire(object, thread) : null;
         },
 
@@ -695,6 +975,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             refuseRemoteSet(objects_);
             const ready = objects_.every(object=>
                 isSignalled(object) || (object.kind === SyncKind.MUTEX && object.owner === thread));
+            countWait(setKind('all', objects_), ready ? 'taken' : 'blocked');
             if (!ready)
             {
                 thread.waitSet = { objects: objects_, all: true };
@@ -715,7 +996,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             let result = WaitResult.OBJECT_0;
             for (const object of objects_)
             {
-                const one = api.wait(object, thread);
+                const one = takeOfSet(object, thread);
                 if (one === WaitResult.ABANDONED)
                 {
                     result = WaitResult.ABANDONED;
@@ -733,16 +1014,21 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
          * @returns {{ index: number, result: number } | null}
          */
         waitAny(objects_, thread, timed){
-            refuseRemoteSet(objects_);
+            if (remote && objects_.some(object=>object.remote))
+            {
+                return waitAnyAcross(objects_, thread, timed);
+            }
             for (let i = 0; i < objects_.length; i++)
             {
                 const object = objects_[i];
                 const mine = object.kind === SyncKind.MUTEX && object.owner === thread;
                 if (isSignalled(object) || mine)
                 {
-                    return { index: i, result: /** @type {number} */ (api.wait(object, thread)) };
+                    countWait(setKind('any', objects_), 'taken');
+                    return { index: i, result: /** @type {number} */ (takeOfSet(object, thread)) };
                 }
             }
+            countWait(setKind('any', objects_), 'blocked');
             // Kept on the thread, because the answer to a wait on a set is the
             // index of the object that came -- and by the time one does, the
             // call that named the set has long since returned.
@@ -850,6 +1136,53 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         },
 
         /**
+         * A process is ending and the object outlives it, held by another
+         * process of the run: its threads leave the object's queue, and a
+         * mutex one of them holds is abandoned to the next waiter, as Windows
+         * does with a dead thread's. Whichever process made the object.
+         *
+         * @param {any} object
+         * @param {(thread: any) => boolean} ours  whether a thread is the ending process's
+         */
+        forsake(object, ours){
+            forsake(object, ours);
+        },
+
+        /**
+         * This process is gone: every object it made is left as it stands,
+         * an object of no process. Another process of the run may still hold
+         * one (by name, or a handle duplicated into it), and an object kept
+         * its state in this process's guest memory (`event-words.js` and the
+         * like) and reached its threads and its scheduler: through it a gone
+         * process's whole machine stayed alive, and its memory, handed to the
+         * next process built, would have been written by the object. Its
+         * threads also leave every queue they are in, another process's too.
+         *
+         * @param {(thread: any) => boolean} ours  whether a thread is this process's
+         * @param {Iterable<any>} threads  this process's threads
+         */
+        settleAll(ours, threads){
+            mutexWords?.detach?.();
+            eventWords?.detach?.();
+            semaphoreWords?.detach?.();
+            for (const thread of threads)
+            {
+                for (const object of thread.queuedOn ?? [])
+                {
+                    forsake(object, ours);
+                }
+                thread.queuedOn = null;
+                thread.waitSet = null;
+            }
+            for (const object of objects)
+            {
+                forsake(object, ours);
+                settle(object);
+            }
+            objects.length = 0;
+        },
+
+        /**
          * @param {any} object
          * @param {number} [count]
          * @returns {number} the previous count
@@ -865,16 +1198,20 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             }
             const previous = object.count;
             object.count += count;
+            releases.semaphoreReleases++;
             while (object.count > 0 && releaseTo(object))
             {
                 // Each release takes one count and one waiter, so this ends.
+                releases.semaphoreWakes++;
             }
             return previous;
         },
 
         /** The counts alone: what a snapshot taken often can afford. */
         summary(){
-            return { objects: objects.length, ...created, ...unchanged };
+            return { objects: objects.length, ...created, ...unchanged, ...releases,
+                // A string: a report keeps the flat metrics only.
+                waits: JSON.stringify(waits) };
         },
 
         /**
@@ -907,10 +1244,10 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         },
     };
 
-    // Every call here may have taken a mutex's or an event's word for the host;
-    // each hands back those nobody waits for once it is done (`mutex-words.js`,
-    // `event-words.js`).
-    if (mutexWords !== null || eventWords !== null)
+    // Every call here may have taken a mutex's, an event's or a semaphore's word
+    // for the host; each hands back those nobody waits for once it is done
+    // (`mutex-words.js`, `event-words.js`, `semaphore-words.js`).
+    if (mutexWords !== null || eventWords !== null || semaphoreWords !== null)
     {
         for (const [name, call] of Object.entries(api))
         {
@@ -926,6 +1263,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                     {
                         mutexWords?.settle();
                         eventWords?.settle();
+                        semaphoreWords?.settle();
                     }
                 };
             }

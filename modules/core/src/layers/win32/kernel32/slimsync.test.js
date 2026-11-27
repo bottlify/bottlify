@@ -6,7 +6,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSlimSync, sleepCsCode, sleepSrwCode } from './slimsync.js';
+import { createTestMachine } from '../../../../../cork/src/testing/machine.js';
+import {
+    CODE_64, ENTRY_64, KEPT_64, QUADS, STACK_64, argumentOf, callLong, longMachine,
+} from '../../../../scripts/guest-code/long.mjs';
+import {
+    createSlimSync, executeOnceCode, executeOnceLongCode, sleepCsCode, sleepCsLongCode,
+    sleepSrwCode, sleepSrwLongCode,
+} from './slimsync.js';
 
 /** What the bridge hands back for a call that cannot answer yet. */
 const PARKED = Object.freeze({ parked: true });
@@ -391,3 +398,183 @@ test('argument sizes match what the guest compiled against', ()=>{
         InitOnceExecuteOnce: 16,
     });
 });
+
+/*
+ * The guest code's two widths, run: each routine on cork's test machine as
+ * i386 and on its long-mode machine as x86-64, its traps and the program's
+ * InitFn halts answered here from one seeded scenario. The two must make the
+ * same calls with the same arguments and answer the same; the x86-64 must
+ * also call with RSP a multiple of 16, keep what a callee keeps, and return
+ * past its return address. A trap or InitFn spends every register a callee
+ * may, so a routine that leaned on one would show.
+ */
+const I386 = { code: 0x1000, back: 0x0f00, stack: 0x7fff0, traps: 0x0e00 };
+const X64 = { traps: 0x200000, back: 0x0f00 };
+/** The program's InitFn, a halt like the traps. */
+const INIT_FN = 'InitFn';
+
+/**
+ * @typedef {{ name: string, args: number[] }} Call
+ * @typedef {(call: Call) => number} Answer  EAX for a trap or InitFn.
+ */
+
+/**
+ * @param {Uint8Array} code  At I386.code, its calls reaching the traps.
+ * @param {string[]} names  Each trap's name, by its place.
+ * @param {Record<string, number>} argBytes  Each trap's, and InitFn's.
+ * @param {number[]} args @param {Answer} answer
+ */
+function runI386(code, names, argBytes, args, answer){
+    const m = createTestMachine();
+    m.write(I386.code, code);
+    names.forEach((_, i)=>m.write(I386.traps + i * 8, [0xf4]));
+    m.write(I386.back, [0xf4]);
+    m.writeU32(I386.stack, I386.back);
+    args.forEach((word, i)=>m.writeU32(I386.stack + 4 + i * 4, word));
+    m.setReg('esp', I386.stack);
+    const kept = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x44444444 };
+    Object.entries(kept).forEach(([reg, value])=>m.setReg(reg, value));
+    /** @type {Call[]} */
+    const calls = [];
+    let at = I386.code;
+    for (let step = 0; step < 16; step++)
+    {
+        assert.equal(m.runProgram(at).kind, 3, 'a halt');
+        const stopped = m.eip() - 1;
+        if (stopped === I386.back)
+        {
+            assert.equal(m.reg('esp'), I386.stack + 4 + args.length * 4, 'stdcall: its arguments');
+            assert.deepEqual(Object.keys(kept).map(reg=>m.reg(reg)), Object.values(kept));
+            return { calls, result: m.reg('eax') };
+        }
+        const name = names[(stopped - I386.traps) / 8];
+        const esp = m.reg('esp');
+        const call = { name, args: Array.from({ length: argBytes[name] / 4 },
+            (_, i)=>m.readU32(esp + 4 + i * 4)) };
+        calls.push(call);
+        m.setReg('eax', answer(call));
+        m.setReg('ecx', 0xdeadbeef);
+        m.setReg('edx', 0xdeadbeef);
+        at = m.readU32(esp);
+        m.setReg('esp', esp + 4 + argBytes[name]);
+    }
+    return assert.fail('the routine did not return');
+}
+
+/**
+ * @param {import('./slimsync.js').LongRoutine} routine
+ * @param {Record<string, number>} argBytes  Each trap's, and InitFn's.
+ * @param {number[]} args  The first four; InitFn's place, when it has one, is the second.
+ * @param {Answer} answer
+ */
+function runX64(routine, argBytes, args, answer){
+    const m = longMachine();
+    const names = [...new Set([...routine.jumps.map(jump=>jump.trap), INIT_FN])];
+    const code = routine.code.slice();
+    for (const { at, trap } of routine.jumps)
+    {
+        new DataView(code.buffer).setInt32(at,
+            X64.traps + names.indexOf(trap) * 8 - (CODE_64 + at + 4), true);
+    }
+    m.write(CODE_64, code);
+    names.forEach((_, i)=>m.write(X64.traps + i * 8, [0xf4]));
+    m.write(X64.back, [0xf4]);
+    const once = routine.jumps.some(jump=>jump.trap === 'begin');
+    const given = args.map((word, i)=>(once && i === 1
+        ? BigInt(X64.traps + names.indexOf(INIT_FN) * 8) : argumentOf(word, i)));
+    /** @type {Call[]} */
+    const calls = [];
+    /** @type {{ halted: boolean }} */
+    let ran = callLong(m, CODE_64, { args: given, returnTo: X64.back });
+    for (let step = 0; step < 16; step++)
+    {
+        assert.ok(ran.halted, 'a halt');
+        const stopped = m.rip() - 1;
+        if (stopped === X64.back)
+        {
+            assert.equal(Number(m.reg('rsp')), STACK_64 + 8, 'past its return address');
+            for (const reg of KEPT_64)
+            {
+                assert.equal(m.reg(reg), ENTRY_64[/** @type {keyof typeof ENTRY_64} */ (reg)],
+                    `${reg} kept`);
+            }
+            return { calls, result: Number(m.reg('rax') & 0xffffffffn) };
+        }
+        const name = names[(stopped - X64.traps) / 8];
+        const rsp = Number(m.reg('rsp'));
+        assert.equal(rsp % 16, 8, `RSP a multiple of 16 at the call to ${name}`);
+        const call = { name, args: ['rcx', 'rdx', 'r8', 'r9'].slice(0, argBytes[name] / 4)
+            .map(reg=>Number(m.reg(reg) & 0xffffffffn)) };
+        calls.push(call);
+        // A trap answers its dword sign-extended; InitFn's BOOL leaves RAX's
+        // upper half undefined.
+        const eax = answer(call) >>> 0;
+        const rax = name === INIT_FN ? BigInt(eax) | 0x5a5a5a5a00000000n
+            : BigInt.asUintN(64, BigInt(eax | 0));
+        /** @type {Record<string, bigint>} */
+        const registers = Object.fromEntries(QUADS.map(reg=>[reg, m.reg(reg)]));
+        for (const reg of ['rcx', 'rdx', 'r8', 'r9', 'r10', 'r11'])
+        {
+            registers[reg] = 0xdead0000dead0000n;
+        }
+        ran = m.call(Number(m.quad(rsp)), { ...registers, rax, rsp: BigInt(rsp + 8) });
+    }
+    return assert.fail('the routine did not return');
+}
+
+test('the sleeps and ExecuteOnce make the same calls and answer the same at 64 bits as at 32',
+    ()=>{
+        let state = 0x5eed;
+        const next = ()=>{
+            state = (Math.imul(state ^ state >>> 15, 0x2c1b3c6d) + 0x9e3779b9) >>> 0;
+            return state;
+        };
+        const address = ()=>(next() & 0x7ffffff0) || 0x10;
+        /** @type {Record<string, number>} */
+        const BYTES = { sleep: 16, timedOut: 0, shared: 4, exclusive: 4, enter: 4,
+            begin: 8, end: 12, [INIT_FN]: 12 };
+        const at = I386.code;
+        const trap = (/** @type {number} */ i)=>I386.traps + i * 8;
+        const routines = {
+            srw: {
+                names: ['sleep', 'timedOut', 'shared', 'exclusive'],
+                i386: sleepSrwCode(at, { sleep: trap(0), timedOut: trap(1), shared: trap(2),
+                    exclusive: trap(3) }),
+                x64: sleepSrwLongCode(),
+                bytes: BYTES,
+                args: ()=>[address(), address(), [0, 10, INFINITE, next()][next() & 3],
+                    [0, 1, next()][next() % 3]],
+            },
+            cs: {
+                names: ['sleep', 'timedOut', 'enter'],
+                i386: sleepCsCode(at, { sleep: trap(0), timedOut: trap(1), enter: trap(2) }),
+                x64: sleepCsLongCode(),
+                bytes: { ...BYTES, sleep: 12 },
+                args: ()=>[address(), address(), [0, 10, INFINITE, next()][next() & 3]],
+            },
+            once: {
+                names: ['begin', 'end', INIT_FN],
+                i386: executeOnceCode(at, { begin: trap(0), end: trap(1) }),
+                x64: executeOnceLongCode(),
+                bytes: BYTES,
+                args: ()=>[address(), trap(2), next(), next() & 1 ? address() : 0],
+            },
+        };
+        for (const [which, routine] of Object.entries(routines))
+        {
+            for (let round = 0; round < 40; round++)
+            {
+                const args = routine.args();
+                /** @type {Record<string, number>} */
+                const answers = { sleep: next() & 1, begin: [0, 1, 2][next() % 3],
+                    [INIT_FN]: [0, 1, next()][next() % 3], end: next() & 1,
+                    timedOut: 0, shared: 0, exclusive: 0, enter: 0 };
+                const answer = (/** @type {Call} */ call)=>answers[call.name];
+                const narrow = runI386(routine.i386, routine.names, routine.bytes, args, answer);
+                const wide = runX64(routine.x64, routine.bytes, args, answer);
+                assert.deepEqual(wide, narrow,
+                    `${which}, round ${round}: ${JSON.stringify({ args, answers })}`);
+                assert.ok(narrow.calls.length > 0);
+            }
+        }
+    });

@@ -284,15 +284,16 @@ function setup({ modal = false, guest = false } = {}){
     };
     const memory = fakeMemory();
     const handles = fakeHandles();
-    const queue = createMessageQueue();
+    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
+    const keysDown = new Set();
+    // The queue's thread state starts from the keys as they are, as user32's does.
+    const queue = createMessageQueue({ keyState: key=>(keysDown.has(key) ? 0x8000 : 0) });
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** Every procedure and callback the program has, by address. @type {Map<number, Procedure>} */
     const procedures = new Map();
     let nextProcedure = PROCEDURES;
     let heapNext = HEAP;
     let stringNext = STRINGS;
-    /** The keys held down, as GetKeyState reads them. @type {Set<number>} */
-    const keysDown = new Set();
     /** What the window manager hands the machine, a modal loop among it. @type {any} */
     let windowService = null;
     /** @param {number} bytes */
@@ -387,7 +388,7 @@ function setup({ modal = false, guest = false } = {}){
             {
                 throw new Error(`no callback at 0x${entry.toString(16)}`);
             }
-            return run(procedure, args);
+            return run(procedure, /** @type {number[]} */ (args));
         },
         callerThread: ()=>THREAD,
         procedure: (name, handler)=>register(handler),
@@ -1140,6 +1141,10 @@ async()=>{
         [VK_TAB, [VK_CONTROL], 1], [VK_TAB, [VK_CONTROL, VK_SHIFT], 0]];
     for (const [key, held, page] of steps)
     {
+        // The focus off the page's multi-line edit, which wants every key
+        // itself (DLGC_WANTALLKEYS): with it focused, the sheet leaves the key
+        // to it.
+        context.fns.SetFocus.handler([context.fns.GetDlgItem.handler([hwnd, IDCANCEL])]);
         context.heard.length = 0;
         assert.equal(await context.press(hwnd, key, held, true), 1, `key ${key} taken`);
         assert.equal(active(), page, `key ${key} with ${held}`);

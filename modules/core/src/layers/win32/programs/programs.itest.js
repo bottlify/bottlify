@@ -15,9 +15,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../../../app.js';
-import { buildExe } from '../../../../../../tools/make-pe.mjs';
-import { waitingParent } from '../../../../../../tools/spawn-program.mjs';
-import { HKEY_CURRENT_USER } from '../advapi32/registry.js';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
+import { waitingParent } from '../../../../../../tools/fixtures/spawn-program.mjs';
+import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE } from '../advapi32/registry.js';
+import { encodeAnsi } from '../kernel32/locale.js';
+import { RUN_ONCE_KEY } from './runonce.js';
 import { databaseBytes } from '../msi/database-writer.js';
 import { EXECUTE_SEQUENCE, packageDatabase, registryText } from '../msi/install.fixture.js';
 
@@ -153,7 +155,7 @@ async function startedBy(t, command, options = {}){
 
 for (const [where, options] of /** @type {[string, any][]} */ ([
     ['beside its parent', {}],
-    ['in a worker of its own', { concurrency: 2, engine: 'cork' }],
+    ['in a worker of its own', { concurrency: 2 }],
 ]))
 {
     test(`msiexec ${where} installs a package named relative to its parent's directory, and`
@@ -201,6 +203,52 @@ test('regsvr32 /s registers a library and exits 0; its failures exit 3, 4 and 5'
             '/n without /i');
     });
 
+test('a session\'s first process runs RunOnce before its program, as a logon does',
+    { timeout: 120000 }, async t=>{
+        const app = await createApp({
+            executable: waitingParent('rundll32 C:\\App\\reg.dll,Entry child'),
+            imagePath: 'C:\\App\\setup.exe',
+            files: [{ path: 'C:\\App\\reg.dll', bytes: registeringLibrary() },
+                // A library of the other width than this 32-bit process.
+                { path: 'C:\\App\\wide.dll',
+                    bytes: buildExe({ bits: 64, dll: true, imports: {}, codeSize: 0x10,
+                        code: ()=>[0xc3] }) }],
+            unattended: true,
+        });
+        t.after(()=>app.dispose());
+        const hive = app.registry();
+        const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), RUN_ONCE_KEY);
+        /** @param {string} name @param {string} command */
+        const put = (name, command)=>hive.setValue(key, name, 1, encodeAnsi(command));
+        put('a', 'regsvr32.exe /s "C:\\App\\reg.dll"');
+        // Kept: its name says so until it succeeds, and DllUnregisterServer fails.
+        put('!b', 'regsvr32 /s /u C:\\App\\reg.dll');
+        put('c', 'C:\\App\\elsewhere.exe /x');
+        // Not run here and not lost: kept for a session of its width.
+        put('d', 'regsvr32 /s C:\\App\\wide.dll');
+        /** @type {string[]} */
+        const said = [];
+        app.on('divergence', (/** @type {any} */ event)=>{
+            if (event.api === 'RunOnce')
+            {
+                said.push(event.detail);
+            }
+        });
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, 'the program ran after it');
+        assert.equal(registryText(app.registry(), HKEY_CURRENT_USER,
+            'Software\\Bottlify\\Registered', ''), 'yes', 'DllRegisterServer ran');
+        assert.equal(registryText(app.registry(), HKEY_CURRENT_USER, 'Software\\Bottlify\\Run',
+            ''), 'child', 'and the program itself');
+        const left = hive.open(hive.root(HKEY_LOCAL_MACHINE), RUN_ONCE_KEY);
+        assert.deepEqual(hive.values(left).map((/** @type {any} */ value)=>value.name),
+            ['!b', 'd'], 'each value deleted before it runs, a "!" one only after it succeeds,'
+            + ' one for a library of the other width not run');
+        assert.deepEqual(said.map(line=>line.split(':')[0]), ['regsvr32 /s /u C', 'C',
+            'regsvr32 /s C'], 'the failure, the command no program here runs, the library of'
+            + ' the other width, said');
+        assert.match(said[2], /other width/);
+    });
+
 test('rundll32 calls the entry with the rest of the line, its W spelling first, and exits 0',
     { timeout: 120000 }, async t=>{
         const ansi = await startedBy(t, 'rundll32.exe "C:\\App\\reg.dll",Entry  one two');
@@ -212,3 +260,29 @@ test('rundll32 calls the entry with the rest of the line, its W spelling first, 
         assert.equal(wide.value('Wide'), 'three', 'WideEntryW, handed the line as UTF-16');
         assert.equal(wide.value('Plain'), null, 'and not the ANSI WideEntry');
     });
+
+test('reg adds, overwrites with /f and deletes keys and values through advapi32, exiting 0,'
+    + ' and 1 for a key that is not there', { timeout: 120000 }, async t=>{
+    const added = await startedBy(t, 'reg add HKCU\\Software\\Bottlify\\Reg /v Name /d "two words"'
+        + ' /f');
+    assert.equal(added.code, 0);
+    assert.equal(added.value('Reg', 'Name'), 'two words');
+
+    const number = await startedBy(t, 'REG.EXE ADD "HKEY_CURRENT_USER\\Software\\Bottlify\\Reg"'
+        + ' /v Count /t REG_DWORD /d 0x2a /f');
+    assert.equal(number.code, 0);
+    const hive = number.app.registry();
+    const key = hive.open(hive.root(HKEY_CURRENT_USER), 'Software\\Bottlify\\Reg');
+    const count = hive.getValue(key, 'Count');
+    assert.deepEqual([count.type, [...count.data]], [4, [42, 0, 0, 0]], 'REG_DWORD 42');
+
+    // A key every machine has, as a custom action removes its own.
+    const runOnce = 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce';
+    const removed = await startedBy(t, `REG DELETE "HKLM\\${runOnce}" /f`);
+    assert.equal(removed.code, 0);
+    const machine = removed.app.registry();
+    assert.equal(machine.open(machine.root(0x80000002), runOnce), null, 'gone');
+
+    assert.equal((await startedBy(t, 'reg delete HKLM\\SOFTWARE\\Nobody /f')).code, 1);
+    assert.equal((await startedBy(t, 'reg frobnicate HKLM\\SOFTWARE')).code, 1, 'syntax');
+});

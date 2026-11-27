@@ -27,31 +27,43 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { readGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
-import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
+import { IID_IPICTURE, IID_IPICTUREDISP, createPictureObjects } from './picture.js';
+import { createStdDispatchObjects } from './stddispatch.js';
+import { createRecordInfoObjects } from './recordinfo.js';
+import { TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD } from './typelib.js';
 import { parseTypeLibrary } from './sltg.js';
+import { STDOLE2, isStdole } from './stdole.js';
+import {
+    dayName, formatFixed, formatNamedDate, formatValue, monthName,
+} from './varformat.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { dateOf, fieldsOf, rollYear } from './dates.js';
 import {
-    compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
+    compareExact, decimalBytes, exactOf, fitDecimal, readDecimal, round, roundNumber, toNumber,
 } from './varmath.js';
 import {
-    add, and, currencyFromText, divide, integerDivide, isOperandType, modulo, multiply, nearest,
-    negate, not, or, subtract, variantValue, xor,
+    add, and, divide, integerDivide, isOperandType, modulo, multiply, nearest,
+    coerce, negate, not, or, subtract, variantValue, xor,
 } from './arithmetic.js';
 import {
-    boolOf, dateFromText, numberOf, parseNumber, textOfCurrency, textOfDate,
+    boolOf, dateFromText, exactOfNumber, numberOf, parseNumber, textOfCurrency, textOfDate,
+    textOfExact, textOfReal,
 } from './vartext.js';
 import {
     DISP_E_BADVARTYPE, DISP_E_OVERFLOW, DISP_E_TYPEMISMATCH, VARIANT_FALSE, VARIANT_TRUE,
-    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH, VT_EMPTY,
-    VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
-    VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
+    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_CLSID, VT_CY, VT_DATE, VT_DECIMAL, VT_DISPATCH,
+    VT_EMPTY, VT_ERROR, VT_I1, VT_I2, VT_I4, VT_I8, VT_INT, VT_NULL, VT_R4, VT_R8, VT_RESERVED,
+    VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
+    VT_VECTOR, DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE,
 } from './vartypes.js';
+import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
+import { safeArrayLayout } from '../common/safearray.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -71,11 +83,19 @@ const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
 const VARIANT_BYTES = 16;
 const VARIANT_VALUE = 8;
 
-/**
- * A SAFEARRAY: where its bounds start, and the feature bits that say what
- * its elements own.
- */
-const SAFEARRAY_BOUNDS = 16;
+/** The feature bits of a SAFEARRAY that say what its elements own. */
+const FADF_AUTO = 0x1;
+const FADF_STATIC = 0x2;
+const FADF_EMBEDDED = 0x4;
+const FADF_FIXEDSIZE = 0x10;
+const FADF_RECORD = 0x20;
+const FADF_HAVEIID = 0x40;
+const FADF_CREATEVECTOR = 0x2000;
+/** VT_INT_PTR and VT_UINT_PTR: an array holds them, a variant does not. */
+const VT_INT_PTR = 37;
+const VT_UINT_PTR = 38;
+const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
+const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 const FADF_BSTR = 0x100;
 const FADF_UNKNOWN = 0x200;
 const FADF_DISPATCH = 0x400;
@@ -83,14 +103,15 @@ const FADF_VARIANT = 0x800;
 const DISP_E_ARRAYISLOCKED = 0x8002000d | 0;
 
 /**
- * How many bytes one element of each array type takes.
+ * How many bytes a value of each type takes in a 32-bit process.
  *
  * @type {Readonly<Record<number, number>>}
  */
 const ELEMENT_BYTES = Object.freeze({
     [VT_I2]: 2, [VT_I4]: 4, [VT_R4]: 4, [VT_R8]: 8, [VT_BSTR]: 4, [VT_DISPATCH]: 4,
     [VT_ERROR]: 4, [VT_BOOL]: 2, [VT_VARIANT]: VARIANT_BYTES, [VT_UNKNOWN]: 4, [VT_I1]: 1,
-    [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4,
+    [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4, [VT_CY]: 8, [VT_DATE]: 8,
+    [VT_I8]: 8, [VT_UI8]: 8, [VT_DECIMAL]: 16,
 });
 
 /** VariantChangeType's flags: only the one that changes an answer here. */
@@ -104,12 +125,50 @@ const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
 const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const TYPE_E_REGISTRYACCESS = 0x8002801c | 0;
 const E_INVALIDARG = 0x80070057;
+/** The last system colour index GetSysColor knows (Windows XP's menu bar). */
+const COLOR_MENUBAR = 30;
 const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
+/** INET_E_RESOURCE_NOT_FOUND: what a URL moniker answers for a file that is not there. */
+const INET_E_RESOURCE_NOT_FOUND = 0x800c0005 | 0;
+/** INET_E_UNKNOWN_PROTOCOL: a name read as a URL whose protocol nothing serves. */
+const INET_E_UNKNOWN_PROTOCOL = 0x800c000d | 0;
+/** CTL_E_FILENOTFOUND and CTL_E_PATHFILEACCESSERROR: no file at a picture's path, or no path. */
+const CTL_E_FILENOTFOUND = 0x800a0035 | 0;
+const CTL_E_PATHFILEACCESSERROR = 0x800a004b | 0;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
 const E_UNEXPECTED = 0x8000ffff | 0;
+const DISPID_VALUE = 0;
+/**
+ * The month names a language writes in a date where they differ from the
+ * names on their own, by the primary language: Arabic's transliterations of
+ * the Gregorian months, and the Russian and Polish genitives.
+ */
+const ALTERNATE_MONTHS = new Map([
+    [0x01, ['\u064a\u0646\u0627\u064a\u0631', '\u0641\u0628\u0631\u0627\u064a\u0631',
+        '\u0645\u0627\u0631\u0633', '\u0623\u0628\u0631\u064a\u0644',
+        '\u0645\u0627\u064a\u0648', '\u064a\u0648\u0646\u064a\u0648',
+        '\u064a\u0648\u0644\u064a\u0648', '\u0623\u063a\u0633\u0637\u0633',
+        '\u0633\u0628\u062a\u0645\u0628\u0631', '\u0623\u0643\u062a\u0648\u0628\u0631',
+        '\u0646\u0648\u0641\u0645\u0628\u0631', '\u062f\u064a\u0633\u0645\u0628\u0631']],
+    [0x19, ['\u044f\u043d\u0432\u0430\u0440\u044f', '\u0444\u0435\u0432\u0440\u0430\u043b\u044f',
+        '\u043c\u0430\u0440\u0442\u0430', '\u0430\u043f\u0440\u0435\u043b\u044f',
+        '\u043c\u0430\u044f', '\u0438\u044e\u043d\u044f', '\u0438\u044e\u043b\u044f',
+        '\u0430\u0432\u0433\u0443\u0441\u0442\u0430',
+        '\u0441\u0435\u043d\u0442\u044f\u0431\u0440\u044f',
+        '\u043e\u043a\u0442\u044f\u0431\u0440\u044f', '\u043d\u043e\u044f\u0431\u0440\u044f',
+        '\u0434\u0435\u043a\u0430\u0431\u0440\u044f']],
+    [0x15, ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia',
+        'wrze\u015bnia', 'pa\u017adziernika', 'listopada', 'grudnia']],
+]);
+
+/** IRecordInfo::RecordClear's place in the vtable. */
+const RECORDINFO_RECORDCLEAR = 4;
+/** IRecordInfo::GetSize's place in the vtable. */
+const RECORDINFO_GETSIZE = 8;
+const DISPATCH_PROPERTYGET = 2;
 
 /**
  * NUMPARSE's fields (six 32-bit words) and the NUMPRS_* flags this build
@@ -138,17 +197,12 @@ const NUMPRS_USE_ALL = 0x1000;
 const NUMPRS_NEG = 0x10000;
 const NUMPRS_INEXACT = 0x20000;
 
-/** The forms a string can take that this parser does not pull apart. */
-const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
-    | NUMPRS_PARENS | NUMPRS_CURRENCY;
-
 /** VarCmp's and VarBstrCmp's answers: less, equal, greater -- and null. */
 const VARCMP_LT = 0;
 const VARCMP_EQ = 1;
 const VARCMP_GT = 2;
 const VARCMP_NULL = 3;
 /** VarCmp's flag for a comparison of text without case. */
-const NORM_IGNORECASE = 1;
 
 /**
  * @typedef {Object} AutomationHeap
@@ -182,14 +236,11 @@ const NORM_IGNORECASE = 1;
 
 /**
  * @typedef {Object} AutomationHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, value: number, length: number) => void} fillMemory
- *     Sets a range to one byte value in place, with no host buffer holding
- *     the pattern: the lengths are the program's, and a clear of a megabyte
- *     through writeMemory costs an allocation and two extra passes.
+ * @property {import('../common/guest.js').Guest} guest  The guest's memory, at the
+ *           process's pointer width: its SAFEARRAYs, the strings and interfaces
+ *           they hold and the vtables called through.
  * @property {AutomationHeap} heap  Where a BSTR's block comes from.
- * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ * @property {((api: string, detail: string, kind?: 'loss') => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes. Said once per distinct difference by whoever receives it.
  * @property {AutomationFiles} [files]  Where LoadTypeLib reads from. Without
@@ -203,6 +254,9 @@ const NORM_IGNORECASE = 1;
  * @property {() => unknown} [callerThread]  The thread whose call this is.
  * @property {Map<unknown, number>} [errorSlots]  Each thread's error information,
  *           shared with whoever else sets or takes it for a thread.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [gdi32]
+ *           GDI's export of that name, which a picture draws and is made with.
+ * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  * @property {() => number} [systemTimeMs]  The guest's wall clock, milliseconds
  *           since 1970: the year a date written without one is in. Without it
  *           such a date is refused, and said so.
@@ -230,6 +284,8 @@ const NORM_IGNORECASE = 1;
  * @typedef {Object} Owed
  * @property {number[]} addRef
  * @property {number[]} release
+ * @property {[number, number][]} recordClear  IRecordInfo and the record it empties
+ * @property {[number, number, number][]} recordCopy  IRecordInfo, a record and where it is copied
  */
 
 /**
@@ -241,24 +297,36 @@ const NORM_IGNORECASE = 1;
  */
 export function createAutomationFunctions(host){
     const report = host.divergence ?? (()=>{});
-
-    /** @param {number} address @param {number} length */
-    const peek = (address, length)=>{
-        const bytes = host.readMemory(address, length);
-        return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const { guest } = host;
+    const POINTER = guest.pointerSize;
+    const SAFEARRAY = safeArrayLayout(POINTER);
+    /** A variant in an array: 24 bytes at 64 bits, where a record's two pointers need them. */
+    const VARIANT_ELEMENT = POINTER === 8 ? 24 : VARIANT_BYTES;
+    /**
+     * One element of an array of `type`: a string, an interface or a pointer
+     * as wide as the process's pointers; 0 for a type no array holds.
+     *
+     * @param {number} type
+     */
+    const arrayElementBytes = type=>{
+        if ([VT_BSTR, VT_UNKNOWN, VT_DISPATCH, VT_INT_PTR, VT_UINT_PTR].includes(type))
+        {
+            return POINTER;
+        }
+        return type === VT_VARIANT ? VARIANT_ELEMENT : ELEMENT_BYTES[type] ?? 0;
     };
-
-    /** @param {number} address */
-    const readU16 = address=>peek(address, 2).getUint16(0, true);
-    /** @param {number} address */
-    const readU32 = address=>peek(address, 4).getUint32(0, true);
-
-    /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>{
-        const bytes = new Uint8Array(2);
-        new DataView(bytes.buffer).setUint16(0, value & 0xffff, true);
-        host.writeMemory(address, bytes);
-    };
+    /**
+     * The IRecordInfo a record array keeps in front of its descriptor.
+     *
+     * @param {number} psa
+     */
+    const recordInfoOf = psa=>guest.ptr(wholeAddress(psa) + SAFEARRAY.RECORD_INFO);
+    /**
+     * A method of a guest object: its vtable's `slot`th pointer.
+     *
+     * @param {number} object @param {number} slot
+     */
+    const methodAt = (object, slot)=>guest.ptr(guest.ptr(object) + slot * POINTER);
 
     /**
      * The IErrorInfo each thread last set and has not yet collected, by the
@@ -277,27 +345,6 @@ export function createAutomationFunctions(host){
         view.setUint32(0, low >>> 0, true);
         view.setUint32(4, high >>> 0, true);
         return view.getFloat64(0, true);
-    };
-
-    /** @param {number} address @param {number} value */
-    const writeDouble = (address, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(address, bytes);
-    };
-
-    /** Signed words, as SYSTEMTIME's fields are read. @param {number} address @param {number} count */
-    const readWords = (address, count)=>{
-        const view = peek(address, count * 2);
-        return Array.from({ length: count }, (_, index)=>view.getInt16(index * 2, true));
-    };
-
-    /** @param {number} address @param {number[]} words */
-    const writeWords = (address, words)=>{
-        const bytes = new Uint8Array(words.length * 2);
-        const view = new DataView(bytes.buffer);
-        words.forEach((word, index)=>view.setUint16(index * 2, word & 0xffff, true));
-        host.writeMemory(address, bytes);
     };
 
     /**
@@ -324,14 +371,14 @@ export function createAutomationFunctions(host){
      * @returns {Operand | null}
      */
     const operand = pvar=>{
-        const declared = readU16(pvar);
+        const declared = guest.u16(pvar);
         const type = declared & VT_TYPEMASK;
         if ((declared & ~(VT_TYPEMASK | VT_BYREF | VT_RESERVED)) !== 0)
         {
             return null;
         }
         const byref = (declared & VT_BYREF) !== 0;
-        const at = byref ? readU32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
+        const at = byref ? guest.u32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
         if (at === 0)
         {
             return null;
@@ -343,7 +390,7 @@ export function createAutomationFunctions(host){
             case VT_BSTR:
                 try
                 {
-                    return { ...none, text: readBstr(readU32(at)) };
+                    return { ...none, text: readBstr(guest.u32(at)) };
                 }
                 catch {
                     // A string pointer into nothing: no text to act on.
@@ -353,12 +400,12 @@ export function createAutomationFunctions(host){
             case VT_NULL:
                 return { ...none, number: 0 };
             case VT_DATE:
-                return { ...none, number: peek(at, 8).getFloat64(0, true) };
+                return { ...none, number: guest.f64(at) };
             case VT_CY:
-                return { ...none, exact: { value: peek(at, 8).getBigInt64(0, true), scale: 4 } };
+                return { ...none, exact: { value: guest.i64(at), scale: 4 } };
             case VT_DECIMAL:
                 // A DECIMAL fills the variant, its reserved word over the type.
-                return { ...none, exact: readDecimal(host.readMemory(byref ? at : pvar, 16)) };
+                return { ...none, exact: readDecimal(guest.bytes(byref ? at : pvar, 16)) };
             case VT_DISPATCH:
             case VT_UNKNOWN:
             case VT_ERROR:
@@ -370,27 +417,6 @@ export function createAutomationFunctions(host){
         }
     };
 
-    /** @param {Operand} value @returns {string | null} */
-    const textOf = value=>{
-        if (value.text !== null)
-        {
-            return value.text;
-        }
-        if (value.type === VT_NULL || value.type === VT_EMPTY)
-        {
-            return '';
-        }
-        if (value.type === VT_BOOL)
-        {
-            return value.number !== 0 ? 'True' : 'False';
-        }
-        if (value.exact !== null)
-        {
-            return String(toNumber(value.exact));
-        }
-        return value.number === null ? null : String(value.number);
-    };
-
     /**
      * A variant written whole: its type, and the value's bytes after it.
      *
@@ -400,7 +426,7 @@ export function createAutomationFunctions(host){
         const bytes = new Uint8Array(VARIANT_BYTES);
         new DataView(bytes.buffer).setUint16(0, type, true);
         bytes.set(value.subarray(0, 8), VARIANT_VALUE);
-        host.writeMemory(pvar, bytes);
+        guest.setBytes(pvar, bytes);
         return S_OK;
     };
 
@@ -409,7 +435,7 @@ export function createAutomationFunctions(host){
         const bytes = new Uint8Array(VARIANT_BYTES);
         new DataView(bytes.buffer).setUint16(0, VT_DECIMAL, true);
         bytes.set(decimal, 2);
-        host.writeMemory(pvar, bytes);
+        guest.setBytes(pvar, bytes);
         return S_OK;
     };
 
@@ -422,13 +448,6 @@ export function createAutomationFunctions(host){
 
     /** @param {bigint} value */
     const cyBytes = value=>valueBytes(view=>view.setBigInt64(0, BigInt.asIntN(64, value), true));
-
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
 
     /**
      * Allocates a BSTR over the given bytes of character data.
@@ -451,23 +470,12 @@ export function createAutomationFunctions(host){
         const bytes = new Uint8Array(PREFIX_BYTES + data.length + 2);
         new DataView(bytes.buffer).setUint32(0, data.length, true);
         bytes.set(data, PREFIX_BYTES);
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         return block + PREFIX_BYTES;
     };
 
-    /** @param {string} text @returns {Uint8Array} its UTF-16 code units */
-    const encode = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        const data = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            data.setUint16(index * 2, text.charCodeAt(index), true);
-        }
-        return bytes;
-    };
-
     /** @param {number} bstr @returns {number} the byte count in its prefix */
-    const byteLengthOf = bstr=>bstr === 0 ? 0 : readU32(bstr - PREFIX_BYTES);
+    const byteLengthOf = bstr=>bstr === 0 ? 0 : guest.u32(bstr - PREFIX_BYTES);
 
     /**
      * A BSTR's characters, embedded NULs and all.
@@ -484,7 +492,7 @@ export function createAutomationFunctions(host){
             return '';
         }
         const units = byteLengthOf(bstr) >> 1;
-        const bytes = host.readMemory(bstr, units * 2);
+        const bytes = guest.bytes(bstr, units * 2);
         let text = '';
         for (let index = 0; index < units; index++)
         {
@@ -513,19 +521,12 @@ export function createAutomationFunctions(host){
     const allocateFrom = (source, cch)=>{
         const data = source === 0
             ? new Uint8Array(cch * 2)
-            : host.readMemory(source, cch * 2).slice();
+            : guest.bytes(source, cch * 2);
         return allocateBstr(data);
     };
 
     /** @param {number} address @returns {number} characters before the terminator */
-    const lengthOfWide = address=>{
-        let units = 0;
-        while (readU16(address + units * 2) !== 0)
-        {
-            units++;
-        }
-        return units;
-    };
+    const lengthOfWide = address=>guest.wstr(address, WHOLE).length;
 
     /**
      * The value at an address, read as the given type.
@@ -534,32 +535,31 @@ export function createAutomationFunctions(host){
      * @returns {number | null} null when the type is not a number at all.
      */
     const numberAt = (type, at)=>{
-        const data = peek(at, 8);
         switch (type)
         {
             case VT_EMPTY:
             case VT_NULL:
                 return 0;
             case VT_I1:
-                return data.getInt8(0);
+                return guest.i8(at);
             case VT_UI1:
-                return data.getUint8(0);
+                return guest.u8(at);
             case VT_I2:
             case VT_BOOL:
-                return data.getInt16(0, true);
+                return guest.i16(at);
             case VT_UI2:
-                return data.getUint16(0, true);
+                return guest.u16(at);
             case VT_I4:
             case VT_INT:
             case VT_ERROR:
-                return data.getInt32(0, true);
+                return guest.i32(at);
             case VT_UI4:
             case VT_UINT:
-                return data.getUint32(0, true);
+                return guest.u32(at);
             case VT_R4:
-                return data.getFloat32(0, true);
+                return guest.f32(at);
             case VT_R8:
-                return data.getFloat64(0, true);
+                return guest.f64(at);
             default:
                 return null;
         }
@@ -573,10 +573,10 @@ export function createAutomationFunctions(host){
      * @returns {LoadedVariant | null} null when a reference points nowhere.
      */
     const load = (pvar, indirect)=>{
-        const declared = readU16(pvar);
+        const declared = guest.u16(pvar);
         const type = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
-        const at = byref ? readU32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
+        const at = byref ? guest.u32(pvar + VARIANT_VALUE) : pvar + VARIANT_VALUE;
         if (byref && !indirect)
         {
             return { type, byref, pointer: at, number: null, text: null };
@@ -587,12 +587,12 @@ export function createAutomationFunctions(host){
         }
         if (type === VT_BSTR)
         {
-            const bstr = readU32(at);
+            const bstr = guest.u32(at);
             return { type, byref: false, pointer: bstr, number: null, text: readBstr(bstr) };
         }
         if (type === VT_DISPATCH || type === VT_UNKNOWN)
         {
-            return { type, byref: false, pointer: readU32(at), number: null, text: null };
+            return { type, byref: false, pointer: guest.u32(at), number: null, text: null };
         }
         return { type, byref: false, pointer: 0, number: numberAt(type, at), text: null };
     };
@@ -607,13 +607,13 @@ export function createAutomationFunctions(host){
      * @returns {number} an HRESULT
      */
     const clear = (pvar, owed)=>{
-        const declared = readU16(pvar);
+        const declared = guest.u16(pvar);
         const type = declared & VT_TYPEMASK;
         if ((declared & VT_BYREF) === 0)
         {
             if ((declared & VT_ARRAY) !== 0)
             {
-                const locked = destroyArray(readU32(pvar + VARIANT_VALUE), owed);
+                const locked = destroyArray(guest.u32(pvar + VARIANT_VALUE), owed);
                 if (locked !== S_OK)
                 {
                     return locked;
@@ -621,23 +621,47 @@ export function createAutomationFunctions(host){
             }
             else if (type === VT_BSTR)
             {
-                freeBstr(readU32(pvar + VARIANT_VALUE));
+                freeBstr(guest.u32(pvar + VARIANT_VALUE));
             }
             else if (type === VT_DISPATCH || type === VT_UNKNOWN)
             {
-                const pointer = readU32(pvar + VARIANT_VALUE);
+                const pointer = guest.u32(pvar + VARIANT_VALUE);
                 if (pointer !== 0)
                 {
                     owed.release.push(pointer);
                 }
             }
+            else if (type === VT_RECORD)
+            {
+                // The record is emptied by its own IRecordInfo, whose
+                // reference the variant held, and the variant lets go of it.
+                const record = guest.u32(pvar + VARIANT_VALUE);
+                const info = guest.u32(pvar + VARIANT_VALUE + 4);
+                if (info !== 0)
+                {
+                    owed.recordClear.push([info, record]);
+                    owed.release.push(info);
+                }
+                guest.set32(pvar + VARIANT_VALUE, 0);
+            }
         }
-        host.writeMemory(pvar, new Uint8Array(VARIANT_BYTES));
+        // Only the type changes: what was in the union stays where it was.
+        guest.set16(pvar, VT_EMPTY);
         return S_OK;
     };
 
+    /**
+     * `then` of an answer that may still be on its way, at once when it is not.
+     *
+     * @param {number | Promise<number>} answer
+     * @param {(hr: number) => number | Promise<number>} then
+     * @returns {number | Promise<number>}
+     */
+    const whenAnswered = (answer, then)=>(typeof answer === 'number' ? then(answer)
+        : answer.then(then));
+
     /** @returns {Owed} */
-    const nothingOwed = ()=>({ addRef: [], release: [] });
+    const nothingOwed = ()=>({ addRef: [], release: [], recordClear: [], recordCopy: [] });
 
     /**
      * Takes and gives back the references a call owes, one call into the
@@ -649,8 +673,12 @@ export function createAutomationFunctions(host){
      * @returns {number | Promise<number>}
      */
     const settle = (owed, thread, hr)=>{
-        const calls = [...owed.addRef.map(object=>[object, 1]),
-            ...owed.release.map(object=>[object, 2])];
+        // The object, its vtable slot and the arguments after it.
+        const calls = /** @type {[number, number, number[]][]} */ ([...owed.addRef.map(object=>[object, 1, []]),
+            ...owed.recordCopy.map(([info, from, to])=>[info, RECORDINFO_RECORDCLEAR + 1,
+                [from, to]]),
+            ...owed.recordClear.map(([info, record])=>[info, RECORDINFO_RECORDCLEAR, [record]]),
+            ...owed.release.map(object=>[object, 2, []])]);
         if (calls.length === 0)
         {
             return hr;
@@ -661,8 +689,8 @@ export function createAutomationFunctions(host){
             report('OLE Automation', 'an interface a variant takes or gives up is not counted');
             return hr;
         }
-        return calls.reduce((before, [object, slot])=>before.then(()=>
-            call(readU32(readU32(object) + slot * 4), [object], thread)),
+        return calls.reduce((before, [object, slot, rest])=>before.then(()=>
+            call(methodAt(object, slot), [object, ...rest], thread)),
         Promise.resolve(0)).then(()=>hr);
     };
 
@@ -680,7 +708,7 @@ export function createAutomationFunctions(host){
         const at = pvar + VARIANT_VALUE;
         if (type === VT_EMPTY || type === VT_NULL)
         {
-            writeU16(pvar, type);
+            guest.set16(pvar, type);
             return S_OK;
         }
         if (type === VT_DISPATCH || type === VT_UNKNOWN)
@@ -698,24 +726,24 @@ export function createAutomationFunctions(host){
             {
                 owed.addRef.push(value.pointer);
             }
-            writeU16(pvar, type);
-            writeU32(at, value.pointer);
+            guest.set16(pvar, type);
+            guest.set32(at, value.pointer);
             return S_OK;
         }
         if (type === VT_BSTR)
         {
-            const text = value.text ?? formatNumber(value, flags);
+            const text = value.text;
             if (text === null)
             {
                 return DISP_E_TYPEMISMATCH;
             }
-            const bstr = allocateBstr(encode(text));
+            const bstr = allocateBstr(utf16(text));
             if (bstr === 0)
             {
                 return E_OUTOFMEMORY;
             }
-            writeU16(pvar, VT_BSTR);
-            writeU32(at, bstr);
+            guest.set16(pvar, VT_BSTR);
+            guest.set32(at, bstr);
             return S_OK;
         }
 
@@ -757,8 +785,8 @@ export function createAutomationFunctions(host){
         {
             return DISP_E_OVERFLOW;
         }
-        writeU16(pvar, type);
-        host.writeMemory(at, bytes);
+        guest.set16(pvar, type);
+        guest.setBytes(at, bytes);
         return S_OK;
     };
 
@@ -777,29 +805,40 @@ export function createAutomationFunctions(host){
     };
 
     /**
-     * A number as a program expects to read it back.
+     * A value as VariantChangeType and the VarBstrFrom* functions spell it in
+     * English: a boolean as its number -- 1 when it holds 1 -- unless
+     * VARIANT_ALPHABOOL asks for words, a float to seven digits and a double to fifteen, a CY and a
+     * DECIMAL exactly, a date as VarBstrFromDate spells it, EMPTY as nothing.
      *
-     * @param {LoadedVariant} value @param {number} flags
-     * @returns {string | null}
+     * @param {import('./arithmetic.js').Value} value @param {number} flags
+     * @param {number} dateFlags  VAR_TIMEVALUEONLY or VAR_DATEVALUEONLY
+     * @returns {string | number} the text, or the HRESULT
      */
-    const formatNumber = (value, flags)=>{
-        if (value.number === null)
+    const spelled = (value, flags, dateFlags = 0)=>{
+        switch (value.type)
         {
-            return null;
+            case VT_EMPTY:
+                return '';
+            case VT_BOOL:
+                if ((flags & VARIANT_ALPHABOOL) !== 0)
+                {
+                    return value.integer !== 0n ? 'True' : 'False';
+                }
+                return String(value.integer);
+            case VT_R4:
+                return textOfReal(Number(value.real), 7);
+            case VT_R8:
+                return textOfReal(Number(value.real), 15);
+            case VT_DATE:
+                return textOfDate(Number(value.real), dateFlags) ?? E_INVALIDARG;
+            case VT_CY:
+            case VT_DECIMAL:
+                return textOfExact(/** @type {import('./varmath.js').Exact} */ (value.exact));
+            case VT_BSTR:
+                return String(value.text);
+            default:
+                return value.integer === null ? DISP_E_TYPEMISMATCH : String(value.integer);
         }
-        if (value.type === VT_BOOL)
-        {
-            // Windows spells a boolean as its number unless asked for words,
-            // which is what VARIANT_ALPHABOOL asks for.
-            const alpha = (flags & VARIANT_ALPHABOOL) !== 0;
-            const truth = value.number !== 0;
-            return alpha ? (truth ? 'True' : 'False') : (truth ? '-1' : '0');
-        }
-        if (value.type === VT_EMPTY || value.type === VT_NULL)
-        {
-            return '';
-        }
-        return String(value.number);
     };
 
     /**
@@ -815,33 +854,466 @@ export function createAutomationFunctions(host){
 
     /**
      * VariantChangeType and VariantChangeTypeEx, which differ only in taking a
-     * locale this build has nothing to do with.
+     * locale this build has nothing to do with. A number, a boolean, a date, a
+     * CY or a DECIMAL is made by the conversion the Var<to>From<from>
+     * functions make, an object's default value read first; the destination
+     * is touched only once the conversion has succeeded, so a failure leaves
+     * it as it was. An object is converted to its default value only when it
+     * cannot answer by itself, which is answered after the program's Invoke.
      *
      * @param {number} dest @param {number} src @param {number} flags @param {number} vt
-     * @param {Owed} owed
+     * @param {Owed} owed @param {number} [lcid] @param {unknown} [thread]
+     * @returns {number | Promise<number>}
      */
-    const changeType = (dest, src, flags, vt, owed)=>{
+    const changeType = (dest, src, flags, vt, owed, lcid = 0, thread = undefined)=>{
         if (dest === 0 || src === 0)
         {
             return E_INVALIDARG;
         }
         const type = vt & VT_TYPEMASK;
-        if ((vt & VT_BYREF) !== 0)
+        if (!isOperandType(type) || (vt & ~(VT_TYPEMASK | VT_BYREF | VT_ARRAY)) !== 0)
         {
             return DISP_E_BADVARTYPE;
         }
+        const bytes = bytesConversion(dest, src, vt, owed);
+        if (bytes !== null)
+        {
+            return bytes;
+        }
+        // An array converts to nothing but an array of its own type, which
+        // is a copy; a source no variant holds is a bad type.
+        const declared = guest.u16(src);
+        if (!isVariantType(declared))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if ((declared & VT_ARRAY) !== 0 || (vt & VT_ARRAY) !== 0)
+        {
+            return declared === vt ? copyVariant(dest, src, owed) : DISP_E_TYPEMISMATCH;
+        }
+        // A reference to nothing is refused before a reference is as a target.
         const value = load(src, true);
         if (value === null)
         {
             return DISP_E_TYPEMISMATCH;
         }
+        if ((vt & VT_BYREF) !== 0)
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        // An error code and a null convert to nothing but their own type.
+        if (type === VT_VARIANT || type === VT_RECORD
+            || (type === VT_ERROR || value.type === VT_ERROR || value.type === VT_NULL)
+                && value.type !== type)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (!CONVERTED.has(type) && (type !== VT_BSTR || value.type === VT_BSTR
+            || value.type === VT_NULL))
+        {
+            if (!isVariantType(guest.u16(dest)))
+            {
+                return DISP_E_BADVARTYPE;
+            }
+            clear(dest, owed);
+            return store(dest, type, value, flags, owed);
+        }
+        /** @param {import('./arithmetic.js').Value} from */
+        const convert = from=>{
+            const outcome = type === VT_BSTR ? bstrOutcome(spelled(from, flags))
+                : from.type === VT_BSTR && type === VT_DATE ? dateOutcome(String(from.text))
+                    : coerce(SAME_WIDTH.get(from.type)?.has(type) ? reinterpreted(from, type)
+                        : from, type);
+            if (typeof outcome === 'number')
+            {
+                return outcome;
+            }
+            if (!isVariantType(guest.u16(dest)))
+            {
+                return DISP_E_BADVARTYPE;
+            }
+            clear(dest, owed);
+            return writeOutcome(dest, outcome);
+        };
+        if (value.type === VT_DISPATCH)
+        {
+            return defaultValue(value.pointer, lcid, thread, convert);
+        }
+        const read = readOperand(src);
+        return typeof read === 'number' ? read : convert(read);
+    };
+
+    /**
+     * The integral types VariantChangeType moves a value between by its bits
+     * rather than its number: a signed type and the unsigned one of its width,
+     * so VT_I1 -1 becomes VT_UI1 255 and VT_UI4 0xffffffff becomes VT_I4 -1,
+     * where VarUI1FromI1 and VarI4FromUI4 refuse with an overflow.
+     */
+    const SAME_WIDTH = new Map([[VT_I1, new Set([VT_UI1])], [VT_UI1, new Set([VT_I1])],
+        [VT_I2, new Set([VT_UI2])], [VT_UI2, new Set([VT_I2])],
+        [VT_I4, new Set([VT_UI4, VT_UINT])], [VT_INT, new Set([VT_UI4, VT_UINT])],
+        [VT_UI4, new Set([VT_I4, VT_INT])], [VT_UINT, new Set([VT_I4, VT_INT])]]);
+
+    /**
+     * @param {import('./arithmetic.js').Value} value @param {number} type
+     * @returns {import('./arithmetic.js').Value}
+     */
+    const reinterpreted = (value, type)=>{
+        const bits = value.type === VT_I1 || value.type === VT_UI1 ? 8
+            : value.type === VT_I2 || value.type === VT_UI2 ? 16 : 32;
+        const integer = /** @type {bigint} */ (value.integer);
+        const signed = type === VT_I1 || type === VT_I2 || type === VT_I4 || type === VT_INT;
+        return variantValue(type, { integer: signed ? BigInt.asIntN(bits, integer)
+            : BigInt.asUintN(bits, integer) });
+    };
+
+    /**
+     * The types VarCmp will not compare, whatever is beside them: Windows
+     * refuses these even where every other call converts them, and an INT
+     * only on the right.
+     */
+    const UNCOMPARED = new Set([VT_I1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_DISPATCH, VT_UNKNOWN,
+        VT_VARIANT, VT_RECORD, VT_CLSID]);
+
+    /**
+     * VarCmp of two values read: VARCMP_LT, VARCMP_EQ, VARCMP_GT or
+     * VARCMP_NULL, or the HRESULT refusing them.
+     *
+     * Text beside a number is greater whatever it says, unless VT_RESERVED is
+     * on exactly one side: on the text, the number is spelled and the two
+     * compared as text; on the number, the text is read as a number -- and
+     * is greater still when it holds none. On both sides, text that reads as
+     * a negative number is less, any other greater: Wine's vartest records
+     * Windows so for every string it tries. EMPTY beside text is "". Two
+     * numbers compare exactly where either is a CY or a DECIMAL, a double
+     * as a float beside a float.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     * @param {boolean[]} reserved  whether each side carried VT_RESERVED
+     * @param {number} lcid @param {number} flags
+     * @returns {number}
+     */
+    const compareValues = (left, right, reserved, lcid, flags)=>{
+        if (left.flags !== 0 || right.flags !== 0)
+        {
+            return (left.flags | right.flags) & ~VT_ARRAY & ~VT_BYREF ? DISP_E_BADVARTYPE
+                : DISP_E_TYPEMISMATCH;
+        }
+        if (!isVariantType(left.type) || !isVariantType(right.type))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if (UNCOMPARED.has(left.type) || UNCOMPARED.has(right.type) || right.type === VT_INT)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (left.type === VT_ERROR || right.type === VT_ERROR)
+        {
+            return left.type === right.type
+                ? orderOf(Number(left.integer), Number(right.integer)) : DISP_E_TYPEMISMATCH;
+        }
+        if (left.type === VT_NULL || right.type === VT_NULL)
+        {
+            return VARCMP_NULL;
+        }
+        const text = [left, right].map(side=>side.type === VT_BSTR);
+        if (text[0] || text[1])
+        {
+            /** @param {import('./arithmetic.js').Value} side */
+            const spell = side=>(side.type === VT_EMPTY ? '' : spelled(side, 0));
+            if (text[0] && text[1] || left.type === VT_EMPTY || right.type === VT_EMPTY
+                || reserved[text[0] ? 0 : 1] && !reserved[text[0] ? 1 : 0])
+            {
+                const a = spell(left);
+                const b = spell(right);
+                return typeof a === 'number' || typeof b === 'number' ? DISP_E_TYPEMISMATCH
+                    : compareTexts(a, b, lcid, flags);
+            }
+            const string = String((text[0] ? left : right).text);
+            if (reserved[0] && reserved[1])
+            {
+                // With the flag on both sides the text is greater still --
+                // unless it is a negative number, which is less.
+                const negative = (parseText(string) ?? 0) < 0;
+                return text[0] === negative ? VARCMP_LT : VARCMP_GT;
+            }
+            const number = reserved[text[0] ? 1 : 0] ? parseText(string) : null;
+            if (number === null)
+            {
+                return text[0] ? VARCMP_GT : VARCMP_LT;
+            }
+            const parsed = parseNumber(string);
+            const exact = parsed && exactOfNumber(parsed);
+            const read = exact ? variantValue(VT_DECIMAL, { exact })
+                : variantValue(VT_R8, { real: number });
+            return compareNumbers(text[0] ? read : left, text[0] ? right : read);
+        }
+        return compareNumbers(left, right);
+    };
+
+    /** @param {number | bigint | string} a @param {number | bigint | string} b */
+    const orderOf = (a, b)=>(a < b ? VARCMP_LT : a > b ? VARCMP_GT : VARCMP_EQ);
+
+    /**
+     * Two numbers' order: exactly when either is a CY or a DECIMAL and both
+     * can be had exactly, as whole numbers when both are, and otherwise as
+     * doubles -- a double rounded to a float beside a float first, so a float
+     * 1 equals a double 1+1e-8.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     */
+    const compareNumbers = (left, right)=>{
+        /** @param {import('./arithmetic.js').Value} side */
+        const real = side=>(side.real ?? (side.exact
+            ? Number(side.exact.value) / 10 ** side.exact.scale : Number(side.integer ?? 0n)));
+        if (left.exact !== null || right.exact !== null)
+        {
+            /** @param {import('./arithmetic.js').Value} side */
+            const exact = side=>side.exact ?? (side.real !== null ? exactOf(side.real)
+                : { value: side.integer ?? 0n, scale: 0 });
+            const a = exact(left);
+            const b = exact(right);
+            if (a && b)
+            {
+                return compareExact(a, b) + 1;
+            }
+        }
+        else if (left.real === null && right.real === null)
+        {
+            return orderOf(left.integer ?? 0n, right.integer ?? 0n);
+        }
+        const float = left.type === VT_R4 || right.type === VT_R4;
+        const [a, b] = [left, right].map(side=>(float && side.real !== null
+            ? Math.fround(side.real) : real(side)));
+        return orderOf(a, b);
+    };
+
+    /**
+     * Two strings' order as VarBstrCmp gives it: none and empty alike and
+     * below anything else, then by the locale's collation, or by code units
+     * where there is no locale.
+     *
+     * @param {string} a @param {string} b @param {number} lcid @param {number} flags
+     */
+    const compareTexts = (a, b, lcid, flags)=>{
+        if (a === '' || b === '')
+        {
+            return orderOf(a.length, b.length);
+        }
+        if (lcid !== 0)
+        {
+            return compareStrings(a, b, flags) - 1;
+        }
+        return orderOf(a, b);
+    };
+
+    /**
+     * VariantCopy of a record: a new record of the size its IRecordInfo
+     * gives, filled by its RecordCopy, and the IRecordInfo shared with a
+     * reference of the copy's own.
+     *
+     * @param {number} dest @param {number} src @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const copyRecord = (dest, src, thread)=>{
+        const record = guest.u32(src + VARIANT_VALUE);
+        const info = guest.u32(src + VARIANT_VALUE + 4);
+        const call = host.call;
+        if (!call)
+        {
+            return E_INVALIDARG;
+        }
+        const owed = nothingOwed();
         clear(dest, owed);
-        return store(dest, type, value, flags, owed);
+        return Promise.resolve(settle(owed, thread, S_OK))
+            .then(()=>recordSize(info))
+            .then(size=>{
+                const copy = host.heap.allocate(Math.max(size ?? 0, 1));
+                if (copy === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                guest.fill(copy, 0, Math.max(size ?? 0, 1));
+                guest.set16(dest, VT_RECORD);
+                guest.set32(dest + VARIANT_VALUE, copy);
+                guest.set32(dest + VARIANT_VALUE + 4, info);
+                return call(methodAt(info, RECORDINFO_RECORDCLEAR + 1),
+                    [info, record, copy], thread)
+                    .then(hr=>addRefOf(info).then(()=>hr));
+            });
+    };
+
+    /**
+     * The interface a VT_DISPATCH variant holds, by value or by reference.
+     *
+     * @param {number} pvar
+     */
+    const objectIn = pvar=>{
+        const at = guest.u32(pvar + VARIANT_VALUE);
+        return (guest.u16(pvar) & VT_BYREF) !== 0 ? guest.u32(at) : at;
+    };
+
+    /**
+     * VarCat of two values read: both spelled, null and empty as nothing,
+     * a boolean as True or False; null only when both are.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const concatenation = (left, right)=>{
+        const refusal = catRefusal(left, right);
+        if (refusal !== S_OK)
+        {
+            return refusal;
+        }
+        if (left.type === VT_NULL && right.type === VT_NULL)
+        {
+            return variantValue(VT_NULL);
+        }
+        /** @param {import('./arithmetic.js').Value} value */
+        const text = value=>(value.type === VT_NULL ? '' : spelled(value, VARIANT_ALPHABOOL));
+        const a = text(left);
+        const b = text(right);
+        return typeof a === 'number' ? a : typeof b === 'number' ? b
+            : variantValue(VT_BSTR, { text: a + b });
+    };
+
+    /** The types VarCat spells and joins. */
+    const CATENATED = new Set([VT_EMPTY, VT_NULL, VT_I2, VT_I4, VT_R4, VT_R8, VT_CY, VT_DATE,
+        VT_BSTR, VT_BOOL, VT_DECIMAL, VT_I1, VT_UI1, VT_UI2, VT_UI4, VT_I8, VT_UI8, VT_INT,
+        VT_UINT]);
+
+    /**
+     * Why VarCat refuses two values, or S_OK: by Windows' table, as Wine's
+     * vartest records it type pair by type pair -- an error code, a variant
+     * and an interface are mismatches beside what VarCat spells, a type no
+     * variant holds a bad type, and which of the two is answered depends on
+     * the side.
+     *
+     * @param {import('./arithmetic.js').Value} left
+     * @param {import('./arithmetic.js').Value} right
+     */
+    const catRefusal = (left, right)=>{
+        const l = left.type;
+        const r = right.type;
+        const odd = new Set([VT_ERROR, VT_DATE, VT_DECIMAL]);
+        if (left.flags !== 0 || right.flags !== 0)
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        if (CATENATED.has(l) && CATENATED.has(r))
+        {
+            return S_OK;
+        }
+        if ([VT_DISPATCH, VT_UNKNOWN, VT_RECORD].some(type=>type === l || type === r))
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (l === VT_VARIANT && odd.has(r) || r === VT_ERROR && l < 24
+            || l === VT_ERROR && odd.has(r))
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        if (odd.has(r))
+        {
+            return DISP_E_BADVARTYPE;
+        }
+        return l === VT_ERROR || r === VT_ERROR || l === VT_VARIANT
+            || r === VT_VARIANT && CATENATED.has(l) ? DISP_E_TYPEMISMATCH : DISP_E_BADVARTYPE;
+    };
+
+    /**
+     * A one-dimensional array of bytes and a string of the same bytes, in
+     * either direction, as VariantChangeType converts them; null for any
+     * other pair.
+     *
+     * @param {number} dest @param {number} src @param {number} vt @param {Owed} owed
+     * @returns {number | null}
+     */
+    const bytesConversion = (dest, src, vt, owed)=>{
+        const declared = guest.u16(src);
+        if (declared === (VT_ARRAY | VT_UI1) && vt === VT_BSTR)
+        {
+            const array = safeArrayAt(guest.u32(src + VARIANT_VALUE));
+            if (!array || array.dims !== 1)
+            {
+                return DISP_E_TYPEMISMATCH;
+            }
+            const data = array.data === 0 ? new Uint8Array(0)
+                : guest.bytes(array.data, array.bounds[0].elements);
+            const bstr = allocateBstr(data);
+            if (bstr === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            clear(dest, owed);
+            guest.set16(dest, VT_BSTR);
+            guest.set32(dest + VARIANT_VALUE, bstr);
+            return S_OK;
+        }
+        if (declared === VT_BSTR && vt === (VT_ARRAY | VT_UI1))
+        {
+            const bstr = guest.u32(src + VARIANT_VALUE);
+            const data = bstr === 0 ? new Uint8Array(0)
+                : guest.bytes(bstr, byteLengthOf(bstr));
+            const psa = /** @type {number} */ (createArray(VT_UI1, 1, 0, 0,
+                { lower: 0, elements: data.length }));
+            if (psa === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            guest.setBytes(guest.ptr(psa + SAFEARRAY.DATA), data);
+            clear(dest, owed);
+            guest.set16(dest, VT_ARRAY | VT_UI1);
+            guest.set32(dest + VARIANT_VALUE, psa);
+            return S_OK;
+        }
+        return null;
+    };
+
+    /**
+     * Whether a VARTYPE is one a variant can hold, so that whatever it holds
+     * can be cleared out of it: a base type of VT_EMPTY to VT_UINT but 15,
+     * VT_RECORD or VT_CLSID, by value, by reference or as an array -- but
+     * not a reference to or an array of nothing. A variant that is not is
+     * left alone by everything that would clear it.
+     *
+     * @param {number} declared
+     */
+    const isVariantType = declared=>{
+        const type = declared & VT_TYPEMASK;
+        const flags = declared & ~VT_TYPEMASK;
+        return (isOperandType(type) || type === VT_CLSID)
+            && (flags & ~(VT_BYREF | VT_ARRAY)) === 0 && (flags === 0 || type > VT_NULL);
+    };
+
+    /** The types VariantChangeType makes by the shared conversion. */
+    const CONVERTED = new Set([VT_I1, VT_UI1, VT_I2, VT_UI2, VT_I4, VT_UI4, VT_INT, VT_UINT,
+        VT_I8, VT_UI8, VT_R4, VT_R8, VT_DATE, VT_CY, VT_DECIMAL, VT_BOOL]);
+
+    /**
+     * @param {string | number} text
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const bstrOutcome = text=>(typeof text === 'number' ? text : variantValue(VT_BSTR, { text }));
+
+    /**
+     * A string read as a date, as VarDateFromStr reads it.
+     *
+     * @param {string} text
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const dateOutcome = text=>{
+        const date = dateFromText(text, 0, thisYear);
+        return date === null ? DISP_E_TYPEMISMATCH : variantValue(VT_DATE, { real: date });
     };
 
     const typeLibraries = host.vtables ? createTypeLibraryObjects({
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+        readMemory: guest.bytes,
+        writeMemory: guest.setBytes,
         // The task allocator's heap and the BSTR heap are one heap here, so
         // a descriptor is freed by the Release that matches it either way.
         heap: host.heap,
@@ -859,17 +1331,67 @@ export function createAutomationFunctions(host){
             }
         },
         readBstr,
-        allocateBstr: text=>allocateBstr(encode(text)),
+        allocateBstr: text=>allocateBstr(utf16(text)),
         freeBstr,
         divergence: report,
     }) : null;
 
-    const errorInfos = host.vtables ? createErrorInfoObjects({
-        readMemory: host.readMemory,
-        writeMemory: host.writeMemory,
+    const stdDispatches = host.vtables && host.call ? createStdDispatchObjects({
+        readMemory: guest.bytes,
+        writeMemory: guest.setBytes,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
-        allocateBstr: text=>allocateBstr(encode(text)),
+        call: (entry, args)=>(host.call
+            ? host.call(entry, args, host.callerThread?.())
+            : Promise.reject(new Error('no way to call guest code'))),
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+    }) : null;
+
+    const recordInfos = host.vtables && host.call ? createRecordInfoObjects({
+        readMemory: guest.bytes,
+        writeMemory: guest.setBytes,
+        heap: host.heap,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        call: (entry, args, thread)=>(host.call
+            ? host.call(entry, args, thread)
+            : Promise.reject(new Error('no way to call guest code'))),
+        thread: ()=>host.callerThread?.(),
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+        clearVariant: (pvar, thread)=>{
+            const owed = nothingOwed();
+            return settle(owed, thread, clear(pvar, owed));
+        },
+        copyVariant: (dest, src, thread)=>{
+            const owed = nothingOwed();
+            return settle(owed, thread, copyVariant(dest, src, owed));
+        },
+        copyBstr: bstr=>(bstr === 0 ? 0
+            : allocateBstr(guest.bytes(bstr, byteLengthOf(bstr)))),
+        freeBstr,
+        allocateBstr: text=>allocateBstr(utf16(text)),
+        divergence: report,
+    }) : null;
+
+    const errorInfos = host.vtables ? createErrorInfoObjects({
+        readMemory: guest.bytes,
+        writeMemory: guest.setBytes,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        allocateBstr: text=>allocateBstr(utf16(text)),
         adapt: (state, interfaces)=>createAdapter(state, interfaces),
+    }) : null;
+
+    // The standard picture (`picture.js`), over GDI and user32.
+    const pictures = host.vtables && host.call ? createPictureObjects({
+        readMemory: guest.bytes,
+        writeMemory: guest.setBytes,
+        allocate: bytes=>host.heap.allocate(bytes),
+        free: address=>host.heap.free(address),
+        gdi32: (name, args)=>host.gdi32?.(name)?.handler(args) ?? 0,
+        user32: (name, args)=>host.user32?.(name)?.handler(args) ?? 0,
+        publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
+        adapt: (state, interfaces, destroy)=>createAdapter(state, interfaces, destroy),
+        call: /** @type {NonNullable<AutomationHost['call']>} */ (host.call),
+        callerThread: ()=>host.callerThread?.(),
+        divergence: (api, detail, kind)=>host.divergence?.(api, detail, kind),
     }) : null;
 
     /**
@@ -904,20 +1426,38 @@ export function createAutomationFunctions(host){
         return bytes;
     };
 
-    /** @param {number} address @returns {string} the OLESTR there, or '' for NULL */
-    const wideAt = address=>{
-        if (address === 0)
+    /**
+     * The picture in the file a name gives - a path, or a file: URL - read as
+     * a URL moniker reads it: a file that is not there is
+     * INET_E_RESOURCE_NOT_FOUND, a name that is neither a path from a drive
+     * or a share nor a URL of a protocol served here INET_E_UNKNOWN_PROTOCOL.
+     *
+     * @param {string} named @param {string} iid @param {number} out
+     * @returns {number | Promise<number>} the HRESULT
+     */
+    const pictureAtPath = (named, iid, out)=>{
+        if (!pictures)
         {
-            return '';
+            report('OLE Automation', 'a picture from a file: no COM to publish with', 'loss');
+            return E_NOTIMPL;
         }
-        const units = lengthOfWide(address);
-        const bytes = host.readMemory(address, units * 2);
-        let text = '';
-        for (let index = 0; index < units; index++)
+        const url = /^file:(\/\/\/?)?/i.exec(named);
+        const file = url ? decodeURIComponent(named.slice(url[0].length)).replace(/\//g, '\\')
+            : named;
+        if (!/^([a-z]:\\|\\\\)/i.test(file))
         {
-            text += String.fromCharCode(bytes[index * 2] | (bytes[index * 2 + 1] << 8));
+            if (/^[a-z][a-z0-9+.-]+:\/\//i.test(named) && !url)
+            {
+                host.divergence?.('OleLoadPicturePath', `${named}: no network to read a URL from`);
+                return INET_E_RESOURCE_NOT_FOUND;
+            }
+            return INET_E_UNKNOWN_PROTOCOL;
         }
-        return text;
+        const answer = (/** @type {Uint8Array | null} */ bytes)=>(bytes
+            ? pictures.fromFile(bytes, iid, out) : INET_E_RESOURCE_NOT_FOUND);
+        const bytes = fileBytes(file);
+        return bytes instanceof Promise ? bytes.then(answer, ()=>INET_E_RESOURCE_NOT_FOUND)
+            : answer(bytes);
     };
 
     /**
@@ -928,7 +1468,7 @@ export function createAutomationFunctions(host){
      * @returns {Uint8Array}
      */
     const typeLibResource = (file, index)=>{
-        const image = parsePe(file);
+        const image = parsePe(file, { wide: true });
         const found = findResource(file, image, 'TYPELIB', index);
         if (!found)
         {
@@ -950,14 +1490,21 @@ export function createAutomationFunctions(host){
         {
             return E_INVALIDARG;
         }
-        writeU32(out, 0);
-        const named = wideAt(pathAddress);
+        guest.set32(out, 0);
+        const named = guest.wstr(pathAddress, WHOLE);
         // A library inside an image is named by the image's path, and one past
         // the first by the image's path and \N, its TYPELIB resource number.
         const indexed = /^(.*)\\(\d+)$/.exec(named);
         const path = indexed && fileBytes(named) === null ? indexed[1] : named;
         const index = indexed && path !== named ? Number(indexed[2]) : 1;
         const bytes = fileBytes(path);
+        // The system's own stdole2.tlb is there whether or not its file is.
+        if (bytes === null && typeLibraries && isStdole(path))
+        {
+            const pointer = typeLibraries.open(STDOLE2, path);
+            guest.set32(out, pointer);
+            return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+        }
         if (bytes === null || !typeLibraries)
         {
             report('LoadTypeLib', typeLibraries
@@ -978,7 +1525,7 @@ export function createAutomationFunctions(host){
                 return TYPE_E_CANTLOADLIBRARY;
             }
             const pointer = typeLibraries.open(library, path);
-            writeU32(out, pointer);
+            guest.set32(out, pointer);
             return pointer === 0 ? E_OUTOFMEMORY : S_OK;
         };
         return bytes instanceof Promise
@@ -1010,8 +1557,8 @@ export function createAutomationFunctions(host){
         return create ? hive.create(root, path).key : hive.open(root, path);
     };
 
-    /** @param {string} text @returns {Uint8Array} ANSI bytes, terminated */
-    const ansi = text=>encodeAnsi(`${text}\0`);
+    /** @param {string} text @returns {Uint8Array} a REG_SZ value's ANSI bytes, terminated */
+    const regSz = text=>encodeAnsi(`${text}\0`);
 
     /** The registered string type. */
     const REG_SZ = 1;
@@ -1029,11 +1576,22 @@ export function createAutomationFunctions(host){
         {
             return E_INVALIDARG;
         }
+        const declared = guest.u16(src);
+        // A source that is no variant type, or a CLSID -- which a variant may
+        // be cleared of but never copied -- is refused, and so is a target
+        // that could not be cleared.
+        if (!isVariantType(declared) || (declared & VT_TYPEMASK) === VT_CLSID)
+        {
+            return DISP_E_BADVARTYPE;
+        }
         if (dest === src)
         {
             return S_OK;
         }
-        const declared = readU16(src);
+        if (!isVariantType(guest.u16(dest)))
+        {
+            return DISP_E_BADVARTYPE;
+        }
         const type = declared & VT_TYPEMASK;
         const byref = (declared & VT_BYREF) !== 0;
         clear(dest, owed);
@@ -1042,39 +1600,39 @@ export function createAutomationFunctions(host){
             // Two variants holding one array would each destroy it: what a
             // program that is told it has its own copy changes or frees must
             // not reach the other.
-            const source = readU32(src + VARIANT_VALUE);
+            const source = guest.u32(src + VARIANT_VALUE);
             const copy = source === 0 ? { hr: S_OK, descriptor: 0 } : copyArray(source, owed);
             if (copy.hr !== S_OK)
             {
                 return copy.hr;
             }
-            writeU16(dest, declared);
-            writeU32(dest + VARIANT_VALUE, copy.descriptor);
+            guest.set16(dest, declared);
+            guest.set32(dest + VARIANT_VALUE, copy.descriptor);
             return S_OK;
         }
         if (!byref && type === VT_BSTR)
         {
-            const source = readU32(src + VARIANT_VALUE);
-            const copy = source === 0
-                ? 0
-                : allocateBstr(host.readMemory(source, byteLengthOf(source)).slice());
-            if (source !== 0 && copy === 0)
+            // No string at all is copied as an empty one.
+            const source = guest.u32(src + VARIANT_VALUE);
+            const copy = allocateBstr(source === 0 ? new Uint8Array(0)
+                : guest.bytes(source, byteLengthOf(source)));
+            if (copy === 0)
             {
                 return E_OUTOFMEMORY;
             }
-            writeU16(dest, VT_BSTR);
-            writeU32(dest + VARIANT_VALUE, copy);
+            guest.set16(dest, VT_BSTR);
+            guest.set32(dest + VARIANT_VALUE, copy);
             return S_OK;
         }
         if (!byref && (type === VT_DISPATCH || type === VT_UNKNOWN))
         {
-            const pointer = readU32(src + VARIANT_VALUE);
+            const pointer = guest.u32(src + VARIANT_VALUE);
             if (pointer !== 0)
             {
                 owed.addRef.push(pointer);
             }
         }
-        host.writeMemory(dest, host.readMemory(src, VARIANT_BYTES).slice());
+        guest.copy(dest, src, VARIANT_BYTES);
         return S_OK;
     };
 
@@ -1090,19 +1648,20 @@ export function createAutomationFunctions(host){
         {
             return null;
         }
-        const dims = readU16(psa);
+        const dims = guest.u16(psa);
+        // One read for every bound: a descriptor may have 65535 of them.
         const bounds = [];
         for (let index = 0; index < dims; index++)
         {
-            const at = psa + SAFEARRAY_BOUNDS + index * 8;
-            bounds.push({ elements: readU32(at), lower: readU32(at + 4) | 0 });
+            const at = psa + SAFEARRAY.BOUNDS + index * 8;
+            bounds.push({ elements: guest.u32(at), lower: guest.i32(at + 4) });
         }
         return {
             dims,
-            features: readU16(psa + 2),
-            elementBytes: readU32(psa + 4),
-            locks: readU32(psa + 8),
-            data: readU32(psa + 12),
+            features: guest.u16(psa + 2),
+            elementBytes: guest.u32(psa + 4),
+            locks: guest.u32(psa + SAFEARRAY.LOCKS),
+            data: guest.ptr(psa + SAFEARRAY.DATA),
             bounds,
         };
     };
@@ -1126,7 +1685,7 @@ export function createAutomationFunctions(host){
         for (let dim = 0; dim < array.dims; dim++)
         {
             const bound = array.bounds[array.dims - 1 - dim];
-            const index = readU32(rgIndices + dim * 4) | 0;
+            const index = guest.u32(rgIndices + dim * 4) | 0;
             if (index < bound.lower || index >= bound.lower + bound.elements)
             {
                 return { error: DISP_E_BADINDEX };
@@ -1147,46 +1706,192 @@ export function createAutomationFunctions(host){
     const releaseElement = (features, address, owed)=>{
         if ((features & FADF_BSTR) !== 0)
         {
-            freeBstr(readU32(address));
+            freeBstr(guest.ptr(address));
         }
         else if ((features & FADF_VARIANT) !== 0)
         {
             clear(address, owed);
         }
-        else if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(address) !== 0)
+        else if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && guest.ptr(address) !== 0)
         {
-            owed.release.push(readU32(address));
+            owed.release.push(guest.ptr(address));
         }
     };
 
     /**
-     * Gives an array back, as SafeArrayDestroy does: what its elements own
-     * first, then its data and its descriptor. A locked array is its locker's
-     * still.
+     * An array's elements emptied as SafeArrayDestroyData empties them, and
+     * its data freed unless the array does not own it -- FADF_AUTO,
+     * FADF_STATIC or FADF_EMBEDDED, or a vector whose data shares its
+     * descriptor's block. A locked array is its locker's still.
      *
      * @param {number} psa @param {Owed} owed
      * @returns {number} an HRESULT
      */
-    const destroyArray = (psa, owed)=>{
+    const destroyData = (psa, owed)=>{
         const array = safeArrayAt(psa);
         if (!array)
         {
-            return S_OK;
+            return E_INVALIDARG;
         }
         if (array.locks !== 0)
         {
             return DISP_E_ARRAYISLOCKED;
         }
-        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
-        if (array.data !== 0)
+        if (array.data === 0)
         {
-            for (let index = 0; index < elements; index++)
-            {
-                releaseElement(array.features, array.data + index * array.elementBytes, owed);
-            }
-            host.heap.free(array.data);
+            return S_OK;
         }
-        host.heap.free(psa);
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        const record = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
+        for (let index = 0; index < elements; index++)
+        {
+            const address = array.data + index * array.elementBytes;
+            if (record !== 0)
+            {
+                owed.recordClear.push([record, address]);
+            }
+            else
+            {
+                releaseElement(array.features, address, owed);
+            }
+        }
+        if ((array.features & FADF_CREATEVECTOR) !== 0)
+        {
+            // A vector's data is its descriptor's block: the array lets go
+            // of it and is an ordinary array from then on.
+            guest.set16(psa + 2, array.features & ~FADF_CREATEVECTOR);
+            guest.setPtr(psa + SAFEARRAY.DATA, 0);
+        }
+        else if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
+        {
+            host.heap.free(array.data);
+            guest.setPtr(psa + SAFEARRAY.DATA, 0);
+        }
+        else
+        {
+            // Memory the array does not own stays, emptied.
+            guest.fill(array.data, 0, elements * array.elementBytes);
+        }
+        return S_OK;
+    };
+
+    /**
+     * A descriptor given back as SafeArrayDestroyDescriptor gives it: the
+     * record information it held let go of, then the block it heads.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {number} an HRESULT
+     */
+    const destroyDescriptor = (psa, owed)=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return E_INVALIDARG;
+        }
+        if (array.locks !== 0)
+        {
+            return DISP_E_ARRAYISLOCKED;
+        }
+        // Only a record array has its IRecordInfo in front: one a program laid
+        // out itself may have nothing there.
+        const info = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
+        if (info !== 0)
+        {
+            owed.release.push(info);
+        }
+        if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
+        {
+            host.heap.free(psa - DESCRIPTOR_PREFIX);
+        }
+        return S_OK;
+    };
+
+    /**
+     * Gives an array back, as SafeArrayDestroy does: what its elements own
+     * first, then its data and its descriptor. No array is nothing to do.
+     *
+     * @param {number} psa @param {Owed} owed
+     * @returns {number} an HRESULT
+     */
+    const destroyArray = (psa, owed)=>{
+        if (psa === 0)
+        {
+            return S_OK;
+        }
+        const data = destroyData(psa, owed);
+        return data !== S_OK ? data : destroyDescriptor(psa, owed);
+    };
+
+    /**
+     * A zeroed descriptor of `dims` dimensions with Windows' prefix in front
+     * of it; 0 when nothing fits.
+     *
+     * @param {number} dims @param {number} [extra]  bytes after the bounds, for a vector's data
+     */
+    const allocateDescriptor = (dims, extra = 0)=>{
+        const bytes = DESCRIPTOR_PREFIX + SAFEARRAY.BOUNDS + dims * 8 + extra;
+        const block = host.heap.allocate(bytes);
+        if (block === 0)
+        {
+            return 0;
+        }
+        guest.fill(block, 0, bytes);
+        guest.set16(block + DESCRIPTOR_PREFIX, dims);
+        return block + DESCRIPTOR_PREFIX;
+    };
+
+    /**
+     * What SafeArrayAllocDescriptorEx records of a type: FADF_HAVEIID with
+     * the interface's IID, FADF_RECORD, or FADF_HAVEVARTYPE with the type,
+     * in the prefix, and its element size -- 0 for a type no array holds, a
+     * record's left for its IRecordInfo to say. What the elements own is
+     * SafeArrayCreate's to flag.
+     *
+     * @param {number} psa @param {number} vt
+     */
+    const describeElements = (psa, vt)=>{
+        const type = vt & 0xffff;
+        let features = FADF_HAVEVARTYPE;
+        if (type === VT_UNKNOWN || type === VT_DISPATCH)
+        {
+            features = FADF_HAVEIID;
+            guest.setGuid(psa - DESCRIPTOR_PREFIX,
+                type === VT_UNKNOWN ? IID_IUNKNOWN : IID_IDISPATCH);
+        }
+        else if (type === VT_RECORD)
+        {
+            features = FADF_RECORD;
+        }
+        if ((features & FADF_HAVEVARTYPE) !== 0)
+        {
+            guest.set32(psa - 4, type);
+        }
+        guest.set16(psa + 2, features);
+        guest.set32(psa + 4, arrayElementBytes(type));
+    };
+
+    /**
+     * The data for a described array, zeroed: every dimension's elements
+     * times the element size.
+     *
+     * @param {number} psa
+     * @returns {number} an HRESULT
+     */
+    const allocateData = psa=>{
+        const array = safeArrayAt(psa);
+        if (!array)
+        {
+            return E_INVALIDARG;
+        }
+        const bytes = array.bounds.reduce((total, bound)=>total * bound.elements, 1)
+            * array.elementBytes;
+        const data = host.heap.allocate(Math.max(bytes, 1));
+        if (data === 0)
+        {
+            return E_UNEXPECTED;
+        }
+        guest.fill(data, 0, Math.max(bytes, 1));
+        guest.setPtr(psa + SAFEARRAY.DATA, data);
         return S_OK;
     };
 
@@ -1205,59 +1910,102 @@ export function createAutomationFunctions(host){
         {
             return { hr: E_INVALIDARG, descriptor: 0 };
         }
-        const descriptorBytes = SAFEARRAY_BOUNDS + array.dims * 8;
+        const descriptorBytes = SAFEARRAY.BOUNDS + array.dims * 8;
         const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
         const dataBytes = elements * array.elementBytes;
-        const descriptor = host.heap.allocate(descriptorBytes);
-        const data = dataBytes === 0 ? 0 : host.heap.allocate(dataBytes);
-        if (descriptor === 0 || (dataBytes !== 0 && data === 0))
+        const descriptor = allocateDescriptor(array.dims);
+        const data = dataBytes === 0 || array.data === 0 ? 0 : host.heap.allocate(dataBytes);
+        if (descriptor === 0 || (dataBytes !== 0 && array.data !== 0 && data === 0))
         {
-            host.heap.free(descriptor);
+            host.heap.free(descriptor - DESCRIPTOR_PREFIX);
             host.heap.free(data);
             return { hr: E_OUTOFMEMORY, descriptor: 0 };
         }
-        const header = host.readMemory(psa, descriptorBytes).slice();
-        host.writeMemory(descriptor, header);
-        writeU32(descriptor + 8, 0);
-        writeU32(descriptor + 12, data);
-        if (dataBytes !== 0)
+        // The copy is the copier's own: whatever storage flags the original
+        // had for its own memory do not come with it, and its IID, VARTYPE
+        // or record information does.
+        const header = guest.bytes(psa, descriptorBytes);
+        guest.setBytes(descriptor, header);
+        guest.set16(descriptor + 2, array.features
+            & ~(FADF_AUTO | FADF_STATIC | FADF_EMBEDDED | FADF_FIXEDSIZE | FADF_CREATEVECTOR));
+        if ((array.features & (FADF_HAVEIID | FADF_HAVEVARTYPE | FADF_RECORD)) !== 0)
         {
-            if ((array.features & FADF_VARIANT) !== 0)
+            guest.copy(descriptor - DESCRIPTOR_PREFIX, psa - DESCRIPTOR_PREFIX, DESCRIPTOR_PREFIX);
+        }
+        const info = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
+        if (info !== 0)
+        {
+            owed.addRef.push(info);
+        }
+        guest.set32(descriptor + SAFEARRAY.LOCKS, 0);
+        guest.setPtr(descriptor + SAFEARRAY.DATA, data);
+        if (data === 0)
+        {
+            return { hr: S_OK, descriptor };
+        }
+        const copied = copyElements(array, data, owed, psa);
+        return { hr: copied, descriptor };
+    };
+
+    /**
+     * An array's elements copied into `data`, which holds as many: each the
+     * way its type is copied -- a string duplicated, a variant through
+     * VariantCopy, an interface with a reference of its own and a record by
+     * its IRecordInfo::RecordCopy, put in `owed`.
+     *
+     * @param {NonNullable<ReturnType<typeof safeArrayAt>>} array
+     * @param {number} data @param {Owed} owed @param {number} psa
+     * @returns {number} an HRESULT
+     */
+    const copyElements = (array, data, owed, psa)=>{
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        const dataBytes = elements * array.elementBytes;
+        if ((array.features & FADF_RECORD) !== 0)
+        {
+            const info = recordInfoOf(psa);
+            guest.fill(data, 0, dataBytes);
+            for (let index = 0; index < elements; index++)
             {
-                host.fillMemory(data, 0, dataBytes);
+                const offset = index * array.elementBytes;
+                owed.recordCopy.push([info, array.data + offset, data + offset]);
+            }
+            return S_OK;
+        }
+        if ((array.features & FADF_VARIANT) !== 0)
+        {
+            guest.fill(data, 0, dataBytes);
+            for (let index = 0; index < elements; index++)
+            {
+                const offset = index * array.elementBytes;
+                copyVariant(data + offset, array.data + offset, owed);
+            }
+        }
+        else
+        {
+            guest.copy(data, array.data, dataBytes);
+            if ((array.features & FADF_BSTR) !== 0)
+            {
                 for (let index = 0; index < elements; index++)
                 {
-                    copyVariant(data + index * VARIANT_BYTES, array.data + index * VARIANT_BYTES,
-                        owed);
+                    const source = guest.ptr(array.data + index * POINTER);
+                    const copy = source === 0 ? 0 : allocateBstr(
+                        guest.bytes(source, byteLengthOf(source)));
+                    guest.setPtr(data + index * POINTER, copy);
                 }
             }
-            else
+            else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
             {
-                host.writeMemory(data, host.readMemory(array.data, dataBytes).slice());
-                if ((array.features & FADF_BSTR) !== 0)
+                for (let index = 0; index < elements; index++)
                 {
-                    for (let index = 0; index < elements; index++)
+                    const pointer = guest.ptr(array.data + index * POINTER);
+                    if (pointer !== 0)
                     {
-                        const source = readU32(array.data + index * 4);
-                        const copy = source === 0 ? 0 : allocateBstr(
-                            host.readMemory(source, byteLengthOf(source)).slice());
-                        writeU32(data + index * 4, copy);
-                    }
-                }
-                else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
-                {
-                    for (let index = 0; index < elements; index++)
-                    {
-                        const pointer = readU32(array.data + index * 4);
-                        if (pointer !== 0)
-                        {
-                            owed.addRef.push(pointer);
-                        }
+                        owed.addRef.push(pointer);
                     }
                 }
             }
         }
-        return { hr: S_OK, descriptor };
+        return S_OK;
     };
 
     const registerTypeLib = {
@@ -1278,12 +2026,14 @@ export function createAutomationFunctions(host){
             {
                 return TYPE_E_REGISTRYACCESS;
             }
-            hive.setValue(key, '', REG_SZ, ansi(library.helpString ?? library.name));
-            const path = wideAt(fullPath >>> 0) || loaded.path;
-            hive.setValue(hive.create(key, '0\\win32').key, '', REG_SZ, ansi(path));
-            hive.setValue(hive.create(key, 'FLAGS').key, '', REG_SZ, ansi(String(library.flags)));
-            const help = wideAt(helpDir >>> 0) || path.slice(0, path.lastIndexOf('\\'));
-            hive.setValue(hive.create(key, 'HELPDIR').key, '', REG_SZ, ansi(help));
+            hive.setValue(key, '', REG_SZ, regSz(library.helpString ?? library.name));
+            const path = (wholeAddress(fullPath) !== 0 && guest.wstr(wholeAddress(fullPath), WHOLE))
+                || loaded.path;
+            hive.setValue(hive.create(key, '0\\win32').key, '', REG_SZ, regSz(path));
+            hive.setValue(hive.create(key, 'FLAGS').key, '', REG_SZ, regSz(String(library.flags)));
+            const help = (wholeAddress(helpDir) !== 0 && guest.wstr(wholeAddress(helpDir), WHOLE))
+                || path.slice(0, path.lastIndexOf('\\'));
+            hive.setValue(hive.create(key, 'HELPDIR').key, '', REG_SZ, regSz(help));
             // Every interface the universal marshaler can carry is registered
             // to it, with the library that describes it: that is how a proxy
             // for one is found when it crosses into another process.
@@ -1298,15 +2048,15 @@ export function createAutomationFunctions(host){
                     continue;
                 }
                 const entry = hive.create(root, `Interface\\${type.guid}`).key;
-                hive.setValue(entry, '', REG_SZ, ansi(type.name));
-                const proxy = ansi(type.kind === TKIND_DISPATCH && !dual
+                hive.setValue(entry, '', REG_SZ, regSz(type.name));
+                const proxy = regSz(type.kind === TKIND_DISPATCH && !dual
                     ? PSDISPATCH : PSOAINTERFACE);
                 hive.setValue(hive.create(entry, 'ProxyStubClsid').key, '', REG_SZ, proxy);
                 hive.setValue(hive.create(entry, 'ProxyStubClsid32').key, '', REG_SZ, proxy);
                 const reference = hive.create(entry, 'TypeLib').key;
-                hive.setValue(reference, '', REG_SZ, ansi(library.guid ?? ''));
+                hive.setValue(reference, '', REG_SZ, regSz(library.guid ?? ''));
                 hive.setValue(reference, 'Version', REG_SZ,
-                    ansi(versionKey(library.majorVersion, library.minorVersion)));
+                    regSz(versionKey(library.majorVersion, library.minorVersion)));
             }
             return S_OK;
         },
@@ -1348,35 +2098,14 @@ export function createAutomationFunctions(host){
                 return E_INVALIDARG;
             }
             english(api, lcid);
-            const answer = convert(wideAt(strIn >>> 0), flags >>> 0);
+            const answer = convert(guest.wstr(wholeAddress(strIn), WHOLE), flags >>> 0);
             if (typeof answer === 'number')
             {
                 return answer;
             }
-            host.writeMemory(out >>> 0, answer);
+            guest.setBytes(wholeAddress(out), answer);
             return S_OK;
         },
-    });
-
-    /**
-     * Var*FromStr for an integral type: the text read as VarR8FromStr reads
-     * it, rounded as every conversion to an integral type here rounds, and an
-     * overflow outside the type's range rather than a wrap.
-     *
-     * @param {string} api @param {number} type @param {number} size  the bytes written
-     */
-    const integerFromString = (api, type, size)=>fromString(api, text=>{
-        const number = parseText(text);
-        if (number === null)
-        {
-            return DISP_E_TYPEMISMATCH;
-        }
-        const whole = nearest(number);
-        if (!fits(type, whole))
-        {
-            return DISP_E_OVERFLOW;
-        }
-        return valueBytes(view=>view.setInt32(0, whole | 0, true)).subarray(0, size);
     });
 
     /**
@@ -1385,9 +2114,12 @@ export function createAutomationFunctions(host){
      * required, E_POINTER without it.
      *
      * @param {number} argBytes @param {(args: number[]) => string | number} spell
+     * @param {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }} [marshal]
+     *     How a 64-bit caller passes the value (`wideOf`).
      */
-    const toBstr = (argBytes, spell)=>({
+    const toBstr = (argBytes, spell, marshal = {})=>({
         argBytes,
+        ...marshal,
         /** @param {number[]} args */
         handler: args=>{
             const out = args[argBytes / 4 - 1] >>> 0;
@@ -1400,8 +2132,8 @@ export function createAutomationFunctions(host){
             {
                 return text;
             }
-            const bstr = allocateBstr(encode(text));
-            writeU32(out, bstr);
+            const bstr = allocateBstr(utf16(text));
+            guest.set32(out, bstr);
             return bstr === 0 ? E_OUTOFMEMORY : S_OK;
         },
     });
@@ -1429,10 +2161,11 @@ export function createAutomationFunctions(host){
      * only a NUL inside a string VarAdd joins to another is lost by it.
      *
      * @param {number} pvar
+     * @param {number} [ignored]  flag bits read past, as VarCmp reads VT_RESERVED
      * @returns {import('./arithmetic.js').Value | number} the value, or an HRESULT
      */
-    const readOperand = pvar=>{
-        const declared = readU16(pvar);
+    const readOperand = (pvar, ignored = 0)=>{
+        const declared = guest.u16(pvar) & ~ignored;
         let type = declared & VT_TYPEMASK;
         let flags = declared & ~VT_TYPEMASK;
         // A reference to an empty or a null is no reference a variant holds.
@@ -1442,7 +2175,7 @@ export function createAutomationFunctions(host){
         let at = pvar + VARIANT_VALUE;
         try
         {
-            const target = reference ? readU32(pvar + VARIANT_VALUE) : 0;
+            const target = reference ? guest.u32(pvar + VARIANT_VALUE) : 0;
             if (target !== 0)
             {
                 flags = 0;
@@ -1450,7 +2183,7 @@ export function createAutomationFunctions(host){
                 at = target;
                 if (type === VT_VARIANT)
                 {
-                    const inner = readU16(target);
+                    const inner = guest.u16(target);
                     type = inner & VT_TYPEMASK;
                     flags = inner & ~VT_TYPEMASK;
                     at = target + VARIANT_VALUE;
@@ -1482,22 +2215,25 @@ export function createAutomationFunctions(host){
         switch (type)
         {
             case VT_BSTR:
-                return { text: wideAt(readU32(at)) };
+            {
+                const bstr = guest.u32(at);
+                return { text: bstr === 0 ? '' : guest.wstr(bstr, WHOLE) };
+            }
             case VT_R4:
-                return { real: peek(at, 4).getFloat32(0, true) };
+                return { real: guest.f32(at) };
             case VT_R8:
             case VT_DATE:
-                return { real: peek(at, 8).getFloat64(0, true) };
+                return { real: guest.f64(at) };
             case VT_CY:
-                return { exact: { value: peek(at, 8).getBigInt64(0, true), scale: 4 } };
+                return { exact: { value: guest.i64(at), scale: 4 } };
             case VT_DECIMAL: {
-                const exact = readDecimal(host.readMemory(base, 16));
+                const exact = readDecimal(guest.bytes(base, 16));
                 return exact.scale > 28 ? null : { exact };
             }
             case VT_I8:
-                return { integer: peek(at, 8).getBigInt64(0, true) };
+                return { integer: guest.i64(at) };
             case VT_UI8:
-                return { integer: peek(at, 8).getBigUint64(0, true) };
+                return { integer: guest.u64(at) };
             default: {
                 const number = numberAt(type, at);
                 return { integer: number === null ? null : BigInt(number) };
@@ -1520,7 +2256,7 @@ export function createAutomationFunctions(host){
     const writeOutcome = (pvar, outcome)=>{
         if (typeof outcome === 'number')
         {
-            writeU16(pvar, VT_EMPTY);
+            guest.set16(pvar, VT_EMPTY);
             return outcome;
         }
         const { type, integer, real, exact, text } = outcome;
@@ -1530,7 +2266,7 @@ export function createAutomationFunctions(host){
             case VT_NULL:
                 return writeVariant(pvar, type, new Uint8Array(0));
             case VT_BSTR: {
-                const bstr = allocateBstr(encode(String(text)));
+                const bstr = allocateBstr(utf16(String(text)));
                 return bstr === 0 ? writeOutcome(pvar, E_OUTOFMEMORY)
                     : writeVariant(pvar, type, valueBytes(view=>view.setUint32(0, bstr, true)));
             }
@@ -1616,13 +2352,1168 @@ export function createAutomationFunctions(host){
         },
     });
 
+    /**
+     * How each type a Var<to>From<from> takes arrives on the stack -- its
+     * VARTYPE and the bytes it takes there -- and how many bytes each type
+     * the answer can be is written as. A DECIMAL arrives by pointer and a
+     * string as an OLECHAR pointer, a locale and flags.
+     */
+    const CONVERSION_SOURCES = Object.freeze({
+        I1: [VT_I1, 4], UI1: [VT_UI1, 4], I2: [VT_I2, 4], UI2: [VT_UI2, 4], I4: [VT_I4, 4],
+        UI4: [VT_UI4, 4], I8: [VT_I8, 8], UI8: [VT_UI8, 8], R4: [VT_R4, 4], R8: [VT_R8, 8],
+        Date: [VT_DATE, 8], Cy: [VT_CY, 8], Bool: [VT_BOOL, 4], Dec: [VT_DECIMAL, 4],
+        Str: [VT_BSTR, 12],
+    });
+    const CONVERSION_TARGETS = Object.freeze({
+        I1: [VT_I1, 1], UI1: [VT_UI1, 1], I2: [VT_I2, 2], UI2: [VT_UI2, 2], I4: [VT_I4, 4],
+        UI4: [VT_UI4, 4], I8: [VT_I8, 8], UI8: [VT_UI8, 8], R4: [VT_R4, 4], R8: [VT_R8, 8],
+        Date: [VT_DATE, 8], Cy: [VT_CY, 8], Bool: [VT_BOOL, 2], Dec: [VT_DECIMAL, 14],
+    });
+
+    /**
+     * How a 64-bit caller passes arguments of these types and stack widths, in
+     * order from the first dword: an eight-byte integer (CY, I8, UI8) in one
+     * slot, a double (R8, DATE) and a float (R4) in an XMM register among the
+     * first four -- the bridge's `quadwords` and `floats`.
+     *
+     * @param {[number, number][]} widths  each argument's VARTYPE and stack bytes
+     * @returns {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }}
+     */
+    const wideOf = widths=>{
+        /** @type {number[]} */
+        const quadwords = [];
+        /** @type {Record<number, 'f32' | 'f64'>} */
+        const floats = {};
+        let word = 0;
+        for (const [type, bytes] of widths)
+        {
+            if (type === VT_R8 || type === VT_DATE)
+            {
+                floats[word] = 'f64';
+            }
+            else if (type === VT_R4)
+            {
+                floats[word] = 'f32';
+            }
+            else if (bytes === 8)
+            {
+                quadwords.push(word);
+            }
+            word += bytes / 4;
+        }
+        return { ...quadwords.length > 0 ? { quadwords } : {},
+            ...Object.keys(floats).length > 0 ? { floats } : {} };
+    };
+
+    /**
+     * A Var<to>From<from>'s argument as a value, read by its type's width
+     * and sign; a DECIMAL whose scale or sign byte no DECIMAL has is an
+     * invalid argument, and a missing string holds no number.
+     *
+     * @param {number} type @param {number[]} args
+     * @returns {import('./arithmetic.js').Value | number}
+     */
+    const argumentValue = (type, args)=>{
+        const words = valueBytes(view=>{
+            view.setUint32(0, args[0] >>> 0, true);
+            view.setUint32(4, (args[1] ?? 0) >>> 0, true);
+        });
+        const view = new DataView(words.buffer);
+        switch (type)
+        {
+            case VT_I1: return variantValue(type, { integer: BigInt(view.getInt8(0)) });
+            case VT_UI1: return variantValue(type, { integer: BigInt(view.getUint8(0)) });
+            case VT_I2:
+            case VT_BOOL: return variantValue(type, { integer: BigInt(view.getInt16(0, true)) });
+            case VT_UI2: return variantValue(type, { integer: BigInt(view.getUint16(0, true)) });
+            case VT_I4: return variantValue(type, { integer: BigInt(args[0] | 0) });
+            case VT_UI4: return variantValue(type, { integer: BigInt(args[0] >>> 0) });
+            case VT_I8: return variantValue(type, { integer: view.getBigInt64(0, true) });
+            case VT_UI8: return variantValue(type, { integer: view.getBigUint64(0, true) });
+            case VT_R4: return variantValue(type, { real: view.getFloat32(0, true) });
+            case VT_CY:
+                return variantValue(type,
+                    { exact: { value: view.getBigInt64(0, true), scale: 4 } });
+            case VT_DECIMAL: {
+                const bytes = guest.bytes(args[0] >>> 0, 16);
+                return bytes[2] > 28 || (bytes[3] & 0x7f) !== 0 ? E_INVALIDARG
+                    : variantValue(type, { exact: readDecimal(bytes) });
+            }
+            case VT_BSTR:
+                return (args[0] >>> 0) === 0 ? DISP_E_TYPEMISMATCH
+                    : variantValue(type, { text: guest.wstr(args[0] >>> 0, WHOLE) });
+            default: return variantValue(type, { real: view.getFloat64(0, true) });
+        }
+    };
+
+    /**
+     * A converted value's bytes as its type is stored: a DECIMAL as the
+     * fourteen past its reserved word.
+     *
+     * @param {import('./arithmetic.js').Value} value
+     * @returns {Uint8Array}
+     */
+    const valueBytesOf = value=>{
+        switch (value.type)
+        {
+            case VT_DECIMAL: return /** @type {Uint8Array} */ (
+                decimalBytes(/** @type {import('./varmath.js').Exact} */ (value.exact)));
+            case VT_CY: return cyBytes(value.exact?.value ?? 0n);
+            case VT_R4: return valueBytes(view=>view.setFloat32(0, Number(value.real), true));
+            case VT_R8:
+            case VT_DATE: return valueBytes(view=>view.setFloat64(0, Number(value.real), true));
+            default: return valueBytes(view=>view.setBigUint64(0,
+                BigInt.asUintN(64, value.integer ?? 0n), true));
+        }
+    };
+
+    /**
+     * Every Var<to>From<from> between the numeric types, the boolean, DATE,
+     * CY, DECIMAL and a string read as a number, by one conversion: the
+     * one VariantChangeType makes. A date from a string is read as a date,
+     * by VarDateFromStr below.
+     *
+     * @type {Record<string, { argBytes: number,
+     *     handler: (args: number[]) => number | Promise<number> }>}
+     */
+    const conversions = {};
+    for (const [to, [target, size]] of Object.entries(CONVERSION_TARGETS))
+    {
+        for (const [from, [source, width]] of Object.entries(CONVERSION_SOURCES))
+        {
+            if (to === from)
+            {
+                continue;
+            }
+            const api = `Var${to}From${from}`;
+            conversions[api] = {
+                argBytes: width + 4,
+                ...wideOf([[source, width]]),
+                handler: args=>{
+                    const out = args[width / 4] >>> 0;
+                    const value = argumentValue(source, args);
+                    if (typeof value === 'number')
+                    {
+                        return value;
+                    }
+                    if (out === 0)
+                    {
+                        return E_INVALIDARG;
+                    }
+                    if (source === VT_BSTR)
+                    {
+                        english(api, args[1]);
+                    }
+                    // VarDecFromBool makes any true -1, where VariantChangeType
+                    // keeps a boolean's 1 as 1.
+                    if (source === VT_BOOL && target === VT_DECIMAL)
+                    {
+                        value.integer = value.integer === 0n ? 0n : -1n;
+                    }
+                    const outcome = coerce(value, target);
+                    if (typeof outcome === 'number')
+                    {
+                        return outcome;
+                    }
+                    guest.setBytes(out + (target === VT_DECIMAL ? 2 : 0),
+                        valueBytesOf(outcome).subarray(0, size));
+                    return S_OK;
+                },
+            };
+        }
+    }
+
+    /**
+     * An object's value, as every conversion from VT_DISPATCH reads it: its
+     * default property, got by IDispatch::Invoke(DISPID_VALUE,
+     * DISPATCH_PROPERTYGET) with no arguments, and then converted as `then`
+     * converts it. An object that will not answer is a mismatch, whatever it
+     * failed with.
+     *
+     * @param {number} dispatch @param {number} lcid @param {unknown} thread
+     * @param {(value: import('./arithmetic.js').Value) => number} then
+     * @returns {number | Promise<number>}
+     */
+    const defaultValue = (dispatch, lcid, thread, then)=>{
+        const fetched = fetchDefault(dispatch, lcid, thread);
+        return typeof fetched === 'number' ? DISP_E_TYPEMISMATCH
+            : fetched.then(value=>(typeof value === 'number' ? DISP_E_TYPEMISMATCH
+                : then(value)));
+    };
+
+    /**
+     * An object's default property, read out of the variant Invoke filled
+     * and that variant emptied again; the HRESULT Invoke failed with, or a
+     * mismatch for no object at all.
+     *
+     * @param {number} dispatch @param {number} lcid @param {unknown} thread
+     * @returns {number | Promise<import('./arithmetic.js').Value | number>}
+     */
+    const fetchDefault = (dispatch, lcid, thread)=>{
+        const call = host.call;
+        if (dispatch === 0 || !call)
+        {
+            return DISP_E_TYPEMISMATCH;
+        }
+        // The result variant, the empty DISPPARAMS and IID_NULL, zeroed.
+        const block = host.heap.allocate(48);
+        if (block === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        guest.fill(block, 0, 48);
+        const invoke = methodAt(dispatch, 6);
+        return call(invoke, [dispatch, DISPID_VALUE, block + 32, lcid >>> 0,
+            DISPATCH_PROPERTYGET, block + 16, block, 0, 0], thread).then(hr=>{
+            const value = (hr | 0) < 0 ? hr | 0 : readOperand(block);
+            const owed = nothingOwed();
+            clear(block, owed);
+            return Promise.resolve(settle(owed, thread, S_OK)).then(()=>value);
+        }).finally(()=>host.heap.free(block));
+    };
+
+    for (const [to, [target, size]] of Object.entries(CONVERSION_TARGETS))
+    {
+        /** HRESULT Var<to>FromDisp(IDispatch *pdispIn, LCID lcid, <to> *pOut) */
+        conversions[`Var${to}FromDisp`] = {
+            argBytes: 12,
+            handler: ([dispatch, lcid, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                return defaultValue(dispatch >>> 0, lcid, host.callerThread?.(), value=>{
+                    const outcome = coerce(value, target);
+                    if (typeof outcome === 'number')
+                    {
+                        return outcome;
+                    }
+                    guest.setBytes(wholeAddress(out) + (target === VT_DECIMAL ? 2 : 0),
+                        valueBytesOf(outcome).subarray(0, size));
+                    return S_OK;
+                });
+            },
+        };
+    }
+
+    /**
+     * VarCy* and VarDec*: the operators over two CYs or two DECIMALs, an
+     * answer of the same type, each argument arriving as Var<to>From<from>'s
+     * do. An answer is written only when there is one.
+     *
+     * @param {number} type  VT_CY or VT_DECIMAL
+     * @param {[number, number][]} widths  each operand's VARTYPE and stack bytes, in order
+     * @param {(...operands: import('./arithmetic.js').Value[]) =>
+     *     import('./arithmetic.js').Outcome} operation
+     */
+    const exactOperation = (type, widths, operation)=>{
+        const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 4);
+        return {
+            argBytes,
+            ...wideOf(widths),
+            /** @param {number[]} args */
+            handler: args=>{
+                const out = args[argBytes / 4 - 1] >>> 0;
+                /** @type {import('./arithmetic.js').Value[]} */
+                const operands = [];
+                let at = 0;
+                for (const [operandType, bytes] of widths)
+                {
+                    const value = operandType === VT_I4
+                        ? variantValue(VT_I4, { integer: BigInt(args[at] | 0) })
+                        : argumentValue(operandType, args.slice(at, at + bytes / 4));
+                    if (typeof value === 'number')
+                    {
+                        return value;
+                    }
+                    operands.push(value);
+                    at += bytes / 4;
+                }
+                if (out === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const answer = operation(...operands);
+                const outcome = typeof answer === 'number' ? answer : coerce(answer, type);
+                if (typeof outcome === 'number')
+                {
+                    return outcome;
+                }
+                guest.setBytes(out + (type === VT_DECIMAL ? 2 : 0),
+                    valueBytesOf(outcome).subarray(0, type === VT_DECIMAL ? 14 : 8));
+                return S_OK;
+            },
+        };
+    };
+
+    /**
+     * A CY or a DECIMAL cut to a whole number: towards zero for Fix, down
+     * for Int.
+     *
+     * @param {boolean} down
+     * @returns {(value: import('./arithmetic.js').Value) => import('./arithmetic.js').Value}
+     */
+    const whole = down=>value=>{
+        const { value: units, scale } = /** @type {import('./varmath.js').Exact} */ (value.exact);
+        const unit = 10n ** BigInt(scale);
+        const cut = units / unit - (down && units < 0n && units % unit !== 0n ? 1n : 0n);
+        return variantValue(value.type, { exact: { value: cut, scale: 0 } });
+    };
+
+    /**
+     * A CY or a DECIMAL rounded to `places`, a half to the even neighbour;
+     * fewer than none is an invalid argument.
+     *
+     * @param {import('./arithmetic.js').Value} value @param {import('./arithmetic.js').Value} places
+     * @returns {import('./arithmetic.js').Outcome}
+     */
+    const roundExact = (value, places)=>(Number(places.integer) < 0 ? E_INVALIDARG
+        : variantValue(value.type, { exact: round(
+            /** @type {import('./varmath.js').Exact} */ (value.exact), Number(places.integer)) }));
+
+    /**
+     * VarCyCmp, VarCyCmpR8, VarDecCmp and VarDecCmpR8: VARCMP_LT, VARCMP_EQ
+     * or VARCMP_GT, a double first made the left side's type.
+     *
+     * @param {number} type @param {[number, number][]} widths
+     */
+    const exactComparison = (type, widths)=>{
+        const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 0);
+        return {
+            argBytes,
+            ...wideOf(widths),
+            /** @param {number[]} args */
+            handler: args=>{
+                const left = argumentValue(type, args.slice(0, widths[0][1] / 4));
+                const read = argumentValue(widths[1][0], args.slice(widths[0][1] / 4));
+                if (typeof left === 'number' || typeof read === 'number')
+                {
+                    return typeof left === 'number' ? left : read;
+                }
+                const right = coerce(read, type);
+                if (typeof right === 'number')
+                {
+                    return right;
+                }
+                const order = compareExact(/** @type {import('./varmath.js').Exact} */ (left.exact),
+                    /** @type {import('./varmath.js').Exact} */ (right.exact));
+                return order < 0 ? VARCMP_LT : order > 0 ? VARCMP_GT : VARCMP_EQ;
+            },
+        };
+    };
+
+    /**
+     * VarDecAbs and VarDecNeg: the DECIMAL copied with its sign byte changed,
+     * nothing else checked -- a sign of 0x7f negates to 0xff, a scale of 29
+     * stays -- and zero negated is a negative zero.
+     *
+     * @param {(sign: number) => number} change
+     */
+    const decimalSign = change=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([pin, pout])=>{
+            if ((pin >>> 0) === 0 || (pout >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const bytes = guest.bytes(wholeAddress(pin), 16);
+            bytes[3] = change(bytes[3]);
+            guest.setBytes(wholeAddress(pout) + 2, bytes.subarray(2));
+            return S_OK;
+        },
+    });
+
+    /**
+     * VarDecFix, VarDecInt and VarDecRound: worked on the magnitude, the sign
+     * kept as it was even where the answer is zero -- -0.1 rounds to -0.
+     *
+     * @param {number} argCount
+     * @param {(magnitude: bigint, scale: number, negative: boolean, places: number) =>
+     *     import('./varmath.js').Exact | number} operation
+     */
+    const decimalMagnitude = (argCount, operation)=>({
+        argBytes: argCount * 4,
+        /** @param {number[]} args */
+        handler: args=>{
+            const out = args[argCount - 1] >>> 0;
+            const value = argumentValue(VT_DECIMAL, args);
+            if (typeof value === 'number')
+            {
+                return value;
+            }
+            if (out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const sign = guest.bytes(args[0] >>> 0, 4)[3];
+            const exact = /** @type {import('./varmath.js').Exact} */ (value.exact);
+            const magnitude = exact.value < 0n ? -exact.value : exact.value;
+            const answer = operation(magnitude, exact.scale, sign !== 0, args[1] | 0);
+            if (typeof answer === 'number')
+            {
+                return answer;
+            }
+            const bytes = decimalBytes(answer);
+            if (!bytes)
+            {
+                return DISP_E_OVERFLOW;
+            }
+            bytes[1] = sign;
+            guest.setBytes(out + 2, bytes);
+            return S_OK;
+        },
+    });
+
+    /** @type {[number, number]} */
+    const CY = [VT_CY, 8];
+    /** @type {[number, number]} */
+    const DEC = [VT_DECIMAL, 4];
+    /** @type {[number, number]} */
+    const PLACES = [VT_I4, 4];
+    /** @type {[number, number]} */
+    const I8 = [VT_I8, 8];
+    /** @type {[number, number]} */
+    const R8 = [VT_R8, 8];
+    Object.assign(conversions, {
+        VarCyAdd: exactOperation(VT_CY, [CY, CY], add),
+        VarCySub: exactOperation(VT_CY, [CY, CY], subtract),
+        VarCyMul: exactOperation(VT_CY, [CY, CY], multiply),
+        VarCyMulI4: exactOperation(VT_CY, [CY, PLACES], multiply),
+        VarCyMulI8: exactOperation(VT_CY, [CY, I8], multiply),
+        VarCyAbs: exactOperation(VT_CY, [CY], value=>(/** @type {import('./varmath.js').Exact} */
+            (value.exact).value < 0n ? negate(value) : value)),
+        VarCyNeg: exactOperation(VT_CY, [CY], negate),
+        VarCyFix: exactOperation(VT_CY, [CY], whole(false)),
+        VarCyInt: exactOperation(VT_CY, [CY], whole(true)),
+        VarCyRound: exactOperation(VT_CY, [CY, PLACES], roundExact),
+        VarCyCmp: exactComparison(VT_CY, [CY, CY]),
+        VarCyCmpR8: exactComparison(VT_CY, [CY, R8]),
+        VarDecAdd: exactOperation(VT_DECIMAL, [DEC, DEC], add),
+        VarDecSub: exactOperation(VT_DECIMAL, [DEC, DEC], subtract),
+        VarDecMul: exactOperation(VT_DECIMAL, [DEC, DEC], multiply),
+        VarDecDiv: exactOperation(VT_DECIMAL, [DEC, DEC], divide),
+        VarDecAbs: decimalSign(sign=>sign & 0x7f),
+        VarDecNeg: decimalSign(sign=>sign ^ 0x80),
+        VarDecFix: decimalMagnitude(2, (magnitude, scale)=>({
+            value: magnitude / 10n ** BigInt(scale), scale: 0 })),
+        VarDecInt: decimalMagnitude(2, (magnitude, scale, negative)=>{
+            const unit = 10n ** BigInt(scale);
+            return { value: magnitude / unit + (negative && magnitude % unit !== 0n ? 1n : 0n),
+                scale: 0 };
+        }),
+        VarDecRound: decimalMagnitude(3, (magnitude, scale, negative, places)=>(
+            places < 0 ? E_INVALIDARG : round({ value: magnitude, scale }, places))),
+        VarDecCmp: exactComparison(VT_DECIMAL, [DEC, DEC]),
+        VarDecCmpR8: exactComparison(VT_DECIMAL, [DEC, R8]),
+
+        /** HRESULT VarR8Round(double dblIn, int nDig, double *pDblOut) */
+        VarR8Round: {
+            argBytes: 16,
+            floats: { 0: 'f64' },
+            /** @param {number[]} args */
+            handler: ([low, high, places, out])=>{
+                if ((places | 0) < 0 || wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.setF64(wholeAddress(out), roundNumber(doubleOf(low, high), places | 0));
+                return S_OK;
+            },
+        },
+    });
+
+    /**
+     * VarBstrFrom<from> for the types without a spelling of their own below:
+     * the text VariantChangeType makes of the value.
+     */
+    for (const [from, [source, width]] of Object.entries(CONVERSION_SOURCES))
+    {
+        if (source !== VT_BSTR)
+        {
+            /** HRESULT VarBstrFrom<from>(<from> in, LCID lcid, ULONG dwFlags, BSTR *pbstrOut) */
+            conversions[`VarBstrFrom${from}`] = toBstr(width + 12, args=>{
+                english(`VarBstrFrom${from}`, args[width / 4]);
+                const value = argumentValue(source, args);
+                return typeof value === 'number' ? value : spelled(value, args[width / 4 + 1]);
+            }, wideOf([[source, width]]));
+        }
+    }
+
+    /**
+     * SafeArrayCreate, SafeArrayCreateEx and the vectors: a descriptor with
+     * Windows' prefix, the bounds given rightmost first as the descriptor
+     * keeps them, and zeroed data -- in the descriptor's own block for a
+     * vector. `extra` is an IID for an array of interfaces, or the
+     * IRecordInfo whose GetSize sets a record array's element size and to
+     * which the array holds a reference. 0 for a type no array holds.
+     *
+     * @param {number} type @param {number} dims @param {number} rgsabound
+     * @param {number} extra @param {{ lower: number, elements: number }} [vector]
+     * @returns {number | Promise<number>}
+     */
+    const createArray = (type, dims, rgsabound, extra, vector = undefined)=>{
+        const size = arrayElementBytes(type);
+        if (dims === 0 || dims > 0xffff || (!vector && rgsabound === 0)
+            || (size === 0 && type !== VT_RECORD)
+            || (type === VT_RECORD && extra === 0))
+        {
+            return 0;
+        }
+        const psa = allocateDescriptor(dims, vector ? size * vector.elements : 0);
+        if (psa === 0)
+        {
+            return 0;
+        }
+        describeElements(psa, type);
+        const owning = type === VT_BSTR ? FADF_BSTR : type === VT_VARIANT ? FADF_VARIANT
+            : type === VT_UNKNOWN ? FADF_UNKNOWN : type === VT_DISPATCH ? FADF_DISPATCH : 0;
+        guest.set16(psa + 2, guest.u16(psa + 2) | owning);
+        if (vector)
+        {
+            guest.set16(psa + 2, guest.u16(psa + 2) | FADF_CREATEVECTOR);
+            guest.set32(psa + SAFEARRAY.BOUNDS, vector.elements);
+            guest.set32(psa + SAFEARRAY.BOUNDS + 4, vector.lower);
+        }
+        else
+        {
+            for (let index = 0; index < dims; index++)
+            {
+                guest.copy(psa + SAFEARRAY.BOUNDS + (dims - 1 - index) * 8,
+                    rgsabound + index * 8, 8);
+            }
+        }
+        if ((type === VT_UNKNOWN || type === VT_DISPATCH) && extra !== 0)
+        {
+            guest.copy(psa - DESCRIPTOR_PREFIX, extra, 16);
+        }
+        /** @returns {number} */
+        const finish = ()=>{
+            if (vector)
+            {
+                guest.setPtr(psa + SAFEARRAY.DATA, psa + SAFEARRAY.BOUNDS + 8);
+                return psa;
+            }
+            if (allocateData(psa) !== S_OK)
+            {
+                host.heap.free(psa - DESCRIPTOR_PREFIX);
+                return 0;
+            }
+            return psa;
+        };
+        if (type !== VT_RECORD)
+        {
+            return finish();
+        }
+        return recordSize(extra).then(bytes=>{
+            if (bytes === null)
+            {
+                host.heap.free(psa - DESCRIPTOR_PREFIX);
+                return 0;
+            }
+            guest.setPtr(psa + SAFEARRAY.RECORD_INFO, extra);
+            guest.set32(psa + 4, bytes);
+            if (vector)
+            {
+                // A vector of records keeps its data apart: its size was not
+                // known when the descriptor's block was made.
+                guest.set16(psa + 2, guest.u16(psa + 2) & ~FADF_CREATEVECTOR);
+                if (allocateData(psa) !== S_OK)
+                {
+                    host.heap.free(psa - DESCRIPTOR_PREFIX);
+                    return 0;
+                }
+                return addRefOf(extra).then(()=>psa);
+            }
+            const made = finish();
+            return made === 0 ? 0 : addRefOf(extra).then(()=>made);
+        });
+    };
+
+    /**
+     * What IRecordInfo::GetSize puts in its out parameter -- whatever it
+     * answers, as Windows takes it -- or null when it cannot be asked.
+     *
+     * @param {number} info
+     * @returns {Promise<number | null>}
+     */
+    const recordSize = info=>{
+        const call = host.call;
+        const slot = host.heap.allocate(4);
+        if (!call || slot === 0)
+        {
+            return Promise.resolve(null);
+        }
+        guest.set32(slot, 0);
+        return call(methodAt(info, RECORDINFO_GETSIZE), [info, slot],
+            host.callerThread?.()).then(()=>guest.u32(slot))
+            .finally(()=>host.heap.free(slot));
+    };
+
+    /** @param {number} object @returns {Promise<unknown>} */
+    const addRefOf = object=>(host.call
+        ? host.call(methodAt(object, 1), [object], host.callerThread?.())
+        : Promise.resolve(0));
+
+    /**
+     * An array's elements emptied where they are, as SafeArrayCopyData
+     * empties its target before it copies -- all but records, which
+     * IRecordInfo::RecordCopy copies over without a clear first.
+     *
+     * @param {number} psa @param {Owed} owed
+     */
+    const clearElements = (psa, owed)=>{
+        const array = /** @type {NonNullable<ReturnType<typeof safeArrayAt>>} */ (safeArrayAt(psa));
+        const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+        for (let index = 0; index < elements; index++)
+        {
+            releaseElement(array.features, array.data + index * array.elementBytes, owed);
+        }
+    };
+
+    Object.assign(conversions, {
+        /** HRESULT SafeArrayAllocDescriptor(UINT cDims, SAFEARRAY **ppsaOut) */
+        SafeArrayAllocDescriptor: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([cDims, out])=>{
+                const dims = wholeAddress(cDims);
+                if (dims === 0 || dims > 0xffff)
+                {
+                    return E_INVALIDARG;
+                }
+                if (wholeAddress(out) === 0)
+                {
+                    return E_POINTER;
+                }
+                const psa = allocateDescriptor(dims);
+                guest.setPtr(wholeAddress(out), psa);
+                return psa === 0 ? E_UNEXPECTED : S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayAllocDescriptorEx(VARTYPE vt, UINT cDims, SAFEARRAY **ppsaOut)
+         *
+         * As SafeArrayAllocDescriptor, with the type's features and element
+         * size recorded; a type no array holds is described with no size.
+         */
+        SafeArrayAllocDescriptorEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([vt, cDims, out])=>{
+                const dims = wholeAddress(cDims);
+                if (dims === 0 || dims > 0xffff)
+                {
+                    return E_INVALIDARG;
+                }
+                if (wholeAddress(out) === 0)
+                {
+                    return E_POINTER;
+                }
+                const psa = allocateDescriptor(dims);
+                guest.setPtr(wholeAddress(out), psa);
+                if (psa === 0)
+                {
+                    return E_UNEXPECTED;
+                }
+                describeElements(psa, vt & 0xffff);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArrayAllocData(SAFEARRAY *psa) */
+        SafeArrayAllocData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>allocateData(wholeAddress(psa)),
+        },
+
+        /** HRESULT SafeArrayDestroyData(SAFEARRAY *psa) */
+        SafeArrayDestroyData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                const hr = destroyData(wholeAddress(psa), owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
+            },
+        },
+
+        /** HRESULT SafeArrayDestroyDescriptor(SAFEARRAY *psa) */
+        SafeArrayDestroyDescriptor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                if (wholeAddress(psa) === 0)
+                {
+                    return S_OK;
+                }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                const hr = destroyDescriptor(wholeAddress(psa), owed);
+                return hr !== S_OK ? hr : settle(owed, thread, S_OK);
+            },
+        },
+
+        /**
+         * SAFEARRAY *SafeArrayCreateEx(VARTYPE vt, UINT cDims, SAFEARRAYBOUND *rgsabound,
+         *                              void *pvExtra)
+         */
+        SafeArrayCreateEx: {
+            returns: 'pointer',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([vt, cDims, rgsabound, extra])=>createArray(vt & 0xffff, cDims >>> 0,
+                wholeAddress(rgsabound), wholeAddress(extra)),
+        },
+
+        /** SAFEARRAY *SafeArrayCreateVector(VARTYPE vt, LONG lLbound, ULONG cElements) */
+        SafeArrayCreateVector: {
+            returns: 'pointer',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([vt, lower, elements])=>createArray(vt & 0xffff, 1, 0, 0,
+                { lower: lower | 0, elements: elements >>> 0 }),
+        },
+
+        /**
+         * SAFEARRAY *SafeArrayCreateVectorEx(VARTYPE vt, LONG lLbound, ULONG cElements,
+         *                                    void *pvExtra)
+         */
+        SafeArrayCreateVectorEx: {
+            returns: 'pointer',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([vt, lower, elements, extra])=>createArray(vt & 0xffff, 1, 0,
+                wholeAddress(extra), { lower: lower | 0, elements: elements >>> 0 }),
+        },
+
+        /**
+         * HRESULT SafeArrayCopyData(SAFEARRAY *psaSource, SAFEARRAY *psaTarget)
+         *
+         * Into an array of the same shape: what the target held is emptied,
+         * then each element copied as SafeArrayCopy copies it.
+         */
+        SafeArrayCopyData: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psaSource, psaTarget])=>{
+                const source = safeArrayAt(wholeAddress(psaSource));
+                const target = safeArrayAt(wholeAddress(psaTarget));
+                if (!source || !target || source.dims !== target.dims
+                    || source.elementBytes !== target.elementBytes || target.data === 0
+                    || source.bounds.some((bound, index)=>
+                        bound.elements !== target.bounds[index].elements))
+                {
+                    return E_INVALIDARG;
+                }
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                clearElements(wholeAddress(psaTarget), owed);
+                const hr = source.data === 0 ? S_OK
+                    : copyElements(source, target.data, owed, wholeAddress(psaSource));
+                return settle(owed, thread, hr);
+            },
+        },
+
+        /** HRESULT SafeArrayGetIID(SAFEARRAY *psa, GUID *pguid) */
+        SafeArrayGetIID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, guid])=>{
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || wholeAddress(guid) === 0 || (array.features & FADF_HAVEIID) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.copy(wholeAddress(guid), wholeAddress(psa) - DESCRIPTOR_PREFIX, 16);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArraySetIID(SAFEARRAY *psa, REFGUID guid) */
+        SafeArraySetIID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, guid])=>{
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || (guid >>> 0) === 0 || (array.features & FADF_HAVEIID) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.copy(wholeAddress(psa) - DESCRIPTOR_PREFIX, wholeAddress(guid), 16);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayGetVartype(SAFEARRAY *psa, VARTYPE *pvt)
+         *
+         * The VARTYPE the prefix keeps, VT_RECORD for a record array, or the
+         * one its features name; E_INVALIDARG when none says.
+         */
+        SafeArrayGetVartype: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, pvt])=>{
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || wholeAddress(pvt) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const features = array.features;
+                // A descriptor with an IID but no FADF_DISPATCH -- one
+                // SafeArrayAllocDescriptorEx made for IDispatch -- answers
+                // VT_UNKNOWN, as Windows answers.
+                const type = (features & FADF_RECORD) !== 0 ? VT_RECORD
+                    : (features & FADF_HAVEVARTYPE) !== 0 ? guest.u16(wholeAddress(psa) - 4)
+                        : (features & FADF_DISPATCH) !== 0 ? VT_DISPATCH
+                            : (features & (FADF_HAVEIID | FADF_UNKNOWN)) !== 0 ? VT_UNKNOWN
+                                : (features & FADF_BSTR) !== 0 ? VT_BSTR
+                                    : (features & FADF_VARIANT) !== 0 ? VT_VARIANT : -1;
+                if (type < 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.set16(wholeAddress(pvt), type);
+                return S_OK;
+            },
+        },
+
+        /** HRESULT SafeArraySetRecordInfo(SAFEARRAY *psa, IRecordInfo *prinfo) */
+        SafeArraySetRecordInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, info])=>{
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || (array.features & FADF_RECORD) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const held = recordInfoOf(psa);
+                guest.setPtr(wholeAddress(psa) + SAFEARRAY.RECORD_INFO, wholeAddress(info));
+                return settle({ addRef: wholeAddress(info) !== 0 ? [wholeAddress(info)] : [],
+                    release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] },
+                host.callerThread?.(), S_OK);
+            },
+        },
+
+        /** HRESULT SafeArrayGetRecordInfo(SAFEARRAY *psa, IRecordInfo **prinfo) */
+        SafeArrayGetRecordInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, out])=>{
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || wholeAddress(out) === 0 || (array.features & FADF_RECORD) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const info = recordInfoOf(psa);
+                guest.setPtr(wholeAddress(out), info);
+                return settle({ addRef: info !== 0 ? [info] : [], release: [], recordClear: [],
+                    recordCopy: [] }, host.callerThread?.(), S_OK);
+            },
+        },
+    });
+
+
+    /**
+     * A variant as VarFormat reads it: a reference followed, a string as
+     * text, a date as a date, and every other number as a double.
+     *
+     * @param {number} pvar
+     * @returns {import('./varformat.js').Formattable | number} or the HRESULT
+     */
+    const formattable = pvar=>{
+        const value = readOperand(pvar);
+        if (typeof value === 'number')
+        {
+            return value;
+        }
+        switch (value.type)
+        {
+            case VT_EMPTY: return { kind: 'empty' };
+            case VT_NULL: return { kind: 'null' };
+            case VT_BSTR: return { kind: 'string', value: String(value.text) };
+            case VT_DATE: return { kind: 'date', value: Number(value.real) };
+            default: {
+                const real = coerce(value, VT_R8);
+                return typeof real === 'number' ? real
+                    : { kind: 'number', value: Number(real.real) };
+            }
+        }
+    };
+
+    /**
+     * A variant as a double for VarFormatNumber and its kin, a string read
+     * as a number.
+     *
+     * @param {number} pvar
+     * @returns {number | { real: number }} the HRESULT, or the number
+     */
+    const formatNumberOf = pvar=>{
+        const value = readOperand(pvar);
+        if (typeof value === 'number')
+        {
+            return value;
+        }
+        const real = coerce(value, VT_R8);
+        return typeof real === 'number' ? real : { real: Number(real.real) };
+    };
+
+    /** @param {number} out @param {string | null} text */
+    const answerText = (out, text)=>{
+        if (text === null)
+        {
+            guest.set32(out, 0);
+            return S_OK;
+        }
+        const bstr = allocateBstr(utf16(text));
+        guest.set32(out, bstr);
+        return bstr === 0 ? E_OUTOFMEMORY : S_OK;
+    };
+
+    /**
+     * VarFormatNumber, VarFormatPercent and VarFormatCurrency.
+     *
+     * @param {string} api @param {(real: number, args: number[]) => string} spell
+     */
+    const fixedFormat = (api, spell)=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ args)=>{
+            const out = args[6] >>> 0;
+            if ((args[0] >>> 0) === 0 || out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const number = formatNumberOf(args[0] >>> 0);
+            if (typeof number === 'number')
+            {
+                return number;
+            }
+            english(api, 0);
+            return answerText(out, spell(number.real, args));
+        },
+    });
+
+    /** @type {Map<number, number>} the month-name table handed out for each language */
+    const alternateTables = new Map();
+
+    /** The bytes VarTokenizeFormatString writes before the format it keeps. */
+    const TOKEN_HEADER = 4;
+
+    Object.assign(conversions, {
+        /**
+         * HRESULT VarFormat(LPVARIANT pVarIn, LPOLESTR lpszFormat, int nFirstDay,
+         *                   int nFirstWeek, ULONG dwFlags, BSTR *pbstrOut)
+         */
+        VarFormat: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([pin, format, firstDay, firstWeek, , out])=>{
+                if (wholeAddress(pin) === 0 || wholeAddress(out) === 0 || (firstDay | 0) < 0
+                    || (firstDay | 0) > 7 || (firstWeek | 0) < 0 || (firstWeek | 0) > 3)
+                {
+                    return E_INVALIDARG;
+                }
+                const value = formattable(wholeAddress(pin));
+                if (typeof value === 'number')
+                {
+                    return value;
+                }
+                const text = wholeAddress(format) === 0 ? ''
+                    : guest.wstr(wholeAddress(format), WHOLE);
+                return answerText(wholeAddress(out), formatValue(value, text, firstDay | 0,
+                    real=>textOfReal(real, 15)));
+            },
+        },
+        VarFormatNumber: fixedFormat('VarFormatNumber', (real, args)=>formatFixed(real,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0)),
+        VarFormatPercent: fixedFormat('VarFormatPercent', (real, args)=>formatFixed(real * 100,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0, { suffix: '%' })),
+        VarFormatCurrency: fixedFormat('VarFormatCurrency', (real, args)=>formatFixed(real,
+            args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0,
+            { prefix: '$', parensByDefault: true })),
+
+        /**
+         * HRESULT VarFormatDateTime(LPVARIANT pVarIn, int iNamedFormat, ULONG dwFlags,
+         *                           BSTR *pbstrOut)
+         */
+        VarFormatDateTime: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([pin, named, , out])=>{
+                if (wholeAddress(pin) === 0 || wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const value = readOperand(wholeAddress(pin));
+                if (typeof value === 'number')
+                {
+                    return value;
+                }
+                // Null formats as no string at all.
+                if (value.type === VT_NULL)
+                {
+                    return answerText(wholeAddress(out), null);
+                }
+                const date = value.type === VT_BSTR ? dateOutcome(String(value.text))
+                    : coerce(value, VT_DATE);
+                if (typeof date === 'number')
+                {
+                    return date;
+                }
+                const text = formatNamedDate(Number(date.real), named | 0);
+                return text === null ? E_INVALIDARG : answerText(wholeAddress(out), text);
+            },
+        },
+
+        /**
+         * HRESULT VarWeekdayName(int iWeekday, int fAbbrev, int iFirstDay,
+         *                        ULONG dwFlags, BSTR *pbstrOut)
+         *
+         * The day iWeekday counts to from iFirstDay, 1 for Sunday, 0 for the
+         * locale's first day -- Sunday in English.
+         */
+        VarWeekdayName: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([weekday, abbreviated, firstDay, , out])=>{
+                if (wholeAddress(out) === 0 || (weekday | 0) < 1 || (weekday | 0) > 7
+                    || (firstDay | 0) < 0 || (firstDay | 0) > 7)
+                {
+                    return E_INVALIDARG;
+                }
+                const first = (firstDay | 0) === 0 ? 1 : firstDay | 0;
+                return answerText(wholeAddress(out),
+                    dayName(((weekday | 0) - 1 + first - 1) % 7, (abbreviated | 0) !== 0));
+            },
+        },
+
+        /** HRESULT VarMonthName(int iMonth, int fAbbrev, ULONG dwFlags, BSTR *pbstrOut) */
+        VarMonthName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([month, abbreviated, , out])=>(wholeAddress(out) === 0 || (month | 0) < 1
+                || (month | 0) > 12 ? E_INVALIDARG
+                : answerText(wholeAddress(out), monthName((month | 0) - 1,
+                    (abbreviated | 0) !== 0))),
+        },
+
+        /**
+         * HRESULT GetAltMonthNames(LCID lcid, LPOLESTR **str)
+         *
+         * The genitive month names a language writes a date with, where it
+         * has them -- Russian and Polish -- and Arabic's transliterated
+         * ones; English has none, and gets NULL, as Windows answers for it.
+         */
+        GetAltMonthNames: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([lcid, out])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const names = ALTERNATE_MONTHS.get(lcid & 0x3ff);
+                if (!names)
+                {
+                    guest.set32(wholeAddress(out), 0);
+                    return S_OK;
+                }
+                // One table per language for the life of the process, as
+                // Windows hands out the same pointer every time.
+                let table = alternateTables.get(lcid & 0x3ff);
+                if (table === undefined)
+                {
+                    const strings = [...names, ''].map(name=>{
+                        const at = host.heap.allocate(name.length * 2 + 2);
+                        guest.setBytes(at, utf16z(name));
+                        return at;
+                    });
+                    table = host.heap.allocate(strings.length * 4);
+                    strings.forEach((at, index)=>guest.set32(/** @type {number} */ (table)
+                        + index * 4, at));
+                    alternateTables.set(lcid & 0x3ff, table);
+                }
+                guest.set32(wholeAddress(out), table);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarTokenizeFormatString(LPOLESTR lpszFormat, LPBYTE rgbTok, int cbTok,
+         *     int iFirstDay, int iFirstWeek, LCID lcid, int *pcbActual)
+         *
+         * The tokens are VarFormatFromTokens' own to read: the format kept
+         * whole, behind its length and the first day it was given.
+         */
+        VarTokenizeFormatString: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([format, tokens, room, firstDay, , , actual])=>{
+                if (wholeAddress(tokens) === 0 || (room | 0) < TOKEN_HEADER)
+                {
+                    return E_INVALIDARG;
+                }
+                const text = wholeAddress(format) === 0 ? ''
+                    : guest.wstr(wholeAddress(format), WHOLE);
+                const bytes = new Uint8Array(TOKEN_HEADER + text.length * 2);
+                const view = new DataView(bytes.buffer);
+                view.setUint16(0, text.length, true);
+                view.setUint16(2, firstDay & 0xffff, true);
+                bytes.set(utf16(text), TOKEN_HEADER);
+                if (bytes.length > (room | 0))
+                {
+                    return 0x80020013 | 0;
+                }
+                guest.setBytes(wholeAddress(tokens), bytes);
+                if (wholeAddress(actual) !== 0)
+                {
+                    guest.set32(wholeAddress(actual), bytes.length);
+                }
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarFormatFromTokens(LPVARIANT pVarIn, LPOLESTR lpszFormat,
+         *     LPBYTE pbTokCur, ULONG dwFlags, BSTR *pbstrOut, LCID lcid)
+         */
+        VarFormatFromTokens: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([pin, , tokens, , out, lcid])=>{
+                if (wholeAddress(pin) === 0 || wholeAddress(tokens) === 0
+                    || wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                english('VarFormatFromTokens', lcid);
+                const length = guest.u16(wholeAddress(tokens));
+                const firstDay = guest.i16(wholeAddress(tokens) + 2);
+                const text = String.fromCharCode(...Array.from({ length },
+                    (_, index)=>guest.u16(wholeAddress(tokens) + TOKEN_HEADER + index * 2)));
+                const value = formattable(wholeAddress(pin));
+                return typeof value === 'number' ? value : answerText(wholeAddress(out),
+                    formatValue(value, text, firstDay, real=>textOfReal(real, 15)));
+            },
+        },
+    });
+
     const table = {
+        ...conversions,
+
         /** BSTR SysAllocString(const OLECHAR *psz) */
         SysAllocString: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psz])=>{
-                const source = psz >>> 0;
+                const source = wholeAddress(psz);
                 // Documented, and relied on: a NULL string allocates nothing
                 // and answers NULL rather than an empty string.
                 if (source === 0)
@@ -1635,9 +3526,10 @@ export function createAutomationFunctions(host){
 
         /** BSTR SysAllocStringLen(const OLECHAR *strIn, UINT ui) */
         SysAllocStringLen: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([strIn, ui])=>allocateFrom(strIn >>> 0, ui >>> 0),
+            handler: ([strIn, ui])=>allocateFrom(wholeAddress(strIn), ui >>> 0),
         },
 
         /**
@@ -1648,14 +3540,21 @@ export function createAutomationFunctions(host){
          * here interprets what it copies.
          */
         SysAllocStringByteLen: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psz, len])=>{
-                const source = psz >>> 0;
-                const bytes = len >>> 0;
+                const source = wholeAddress(psz);
+                const bytes = wholeAddress(len);
+                // A length with the top bit set is no string on a 32-bit
+                // system, refused before anything is read.
+                if (bytes >= 0x80000000)
+                {
+                    return 0;
+                }
                 const data = source === 0
                     ? new Uint8Array(bytes)
-                    : host.readMemory(source, bytes).slice();
+                    : guest.bytes(source, bytes);
                 return allocateBstr(data);
             },
         },
@@ -1665,12 +3564,12 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pbstr, psz])=>{
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 if (slot === 0)
                 {
                     return 0;
                 }
-                const source = psz >>> 0;
+                const source = wholeAddress(psz);
                 const replacement = source === 0
                     ? 0
                     : allocateFrom(source, lengthOfWide(source));
@@ -1678,8 +3577,8 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                freeBstr(readU32(slot));
-                writeU32(slot, replacement);
+                freeBstr(guest.u32(slot));
+                guest.set32(slot, replacement);
                 return 1;
             },
         },
@@ -1689,18 +3588,41 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pbstr, psz, len])=>{
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 if (slot === 0)
                 {
                     return 0;
                 }
-                const replacement = allocateFrom(psz >>> 0, len >>> 0);
+                // A reallocation: without a source the characters already
+                // there stay, and a string that is not growing keeps its
+                // block, as the heap's realloc keeps one it can shrink in.
+                const old = guest.u32(slot);
+                const oldBytes = old === 0 ? 0 : guest.u32(old - PREFIX_BYTES);
+                const bytes = (len >>> 0) * 2;
+                const data = new Uint8Array(bytes);
+                if (wholeAddress(psz) !== 0)
+                {
+                    data.set(guest.bytes(wholeAddress(psz), bytes));
+                }
+                else if (old !== 0)
+                {
+                    data.set(guest.bytes(old, Math.min(oldBytes, bytes)));
+                }
+                if (old !== 0 && bytes <= oldBytes)
+                {
+                    const block = new Uint8Array(PREFIX_BYTES + bytes + 2);
+                    new DataView(block.buffer).setUint32(0, bytes, true);
+                    block.set(data, PREFIX_BYTES);
+                    guest.setBytes(old - PREFIX_BYTES, block);
+                    return 1;
+                }
+                const replacement = allocateBstr(data);
                 if (replacement === 0)
                 {
                     return 0;
                 }
-                freeBstr(readU32(slot));
-                writeU32(slot, replacement);
+                freeBstr(old);
+                guest.set32(slot, replacement);
                 return 1;
             },
         },
@@ -1711,7 +3633,7 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([bstr])=>{
                 // Documented as a no-op for NULL, so wrappers pass it on.
-                freeBstr(bstr >>> 0);
+                freeBstr(wholeAddress(bstr));
                 return 0;
             },
         },
@@ -1720,14 +3642,14 @@ export function createAutomationFunctions(host){
         SysStringLen: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([bstr])=>byteLengthOf(bstr >>> 0) >>> 1,
+            handler: ([bstr])=>byteLengthOf(wholeAddress(bstr)) >>> 1,
         },
 
         /** UINT SysStringByteLen(BSTR bstr) — in bytes */
         SysStringByteLen: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([bstr])=>byteLengthOf(bstr >>> 0),
+            handler: ([bstr])=>byteLengthOf(wholeAddress(bstr)),
         },
 
         /**
@@ -1740,27 +3662,27 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([left, right, result])=>{
-                if ((result >>> 0) === 0)
+                if (wholeAddress(result) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const leftBytes = byteLengthOf(left >>> 0);
-                const rightBytes = byteLengthOf(right >>> 0);
+                const leftBytes = byteLengthOf(wholeAddress(left));
+                const rightBytes = byteLengthOf(wholeAddress(right));
                 const data = new Uint8Array(leftBytes + rightBytes);
                 if (leftBytes)
                 {
-                    data.set(host.readMemory(left >>> 0, leftBytes));
+                    data.set(guest.bytes(wholeAddress(left), leftBytes));
                 }
                 if (rightBytes)
                 {
-                    data.set(host.readMemory(right >>> 0, rightBytes), leftBytes);
+                    data.set(guest.bytes(wholeAddress(right), rightBytes), leftBytes);
                 }
                 const bstr = allocateBstr(data);
                 if (bstr === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(result >>> 0, bstr);
+                guest.set32(wholeAddress(result), bstr);
                 return S_OK;
             },
         },
@@ -1777,17 +3699,19 @@ export function createAutomationFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([left, right, lcid, flags])=>{
-                const leftBytes = byteLengthOf(left >>> 0);
-                const rightBytes = byteLengthOf(right >>> 0);
-                const leftEmpty = leftBytes < 2 || readU16(left >>> 0) === 0;
-                const rightEmpty = rightBytes < 2 || readU16(right >>> 0) === 0;
+                const leftBytes = byteLengthOf(wholeAddress(left));
+                const rightBytes = byteLengthOf(wholeAddress(right));
+                // Empty is no string or no characters: a lone NUL is a
+                // character, greater than nothing.
+                const leftEmpty = leftBytes === 0;
+                const rightEmpty = rightBytes === 0;
                 if (leftEmpty || rightEmpty)
                 {
                     return leftEmpty === rightEmpty ? VARCMP_EQ
                         : leftEmpty ? VARCMP_LT : VARCMP_GT;
                 }
-                const a = host.readMemory(left >>> 0, leftBytes);
-                const b = host.readMemory(right >>> 0, rightBytes);
+                const a = guest.bytes(wholeAddress(left), leftBytes);
+                const b = guest.bytes(wholeAddress(right), rightBytes);
                 if ((lcid >>> 0) !== 0)
                 {
                     /** @param {Uint8Array} bytes */
@@ -1819,7 +3743,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, start, pbstr])=>{
-                const units = (byteLengthOf(readU32(pbstr >>> 0)) + 1) >>> 1;
+                const units = (byteLengthOf(guest.u32(wholeAddress(pbstr))) + 1) >>> 1;
                 return ((((start >>> 0) + 3) & ~3) + WIRE_BSTR_HEADER + units * 2) >>> 0;
             },
         },
@@ -1832,12 +3756,13 @@ export function createAutomationFunctions(host){
          * is how the other side tells it from an empty one.
          */
         BSTR_UserMarshal: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
-                const from = buffer >>> 0;
+                const from = wholeAddress(buffer);
                 const pad = (4 - (from & 3)) & 3;
-                const bstr = readU32(pbstr >>> 0);
+                const bstr = guest.u32(wholeAddress(pbstr));
                 const bytes = byteLengthOf(bstr);
                 const units = (bytes + 1) >>> 1;
                 const wire = new Uint8Array(pad + WIRE_BSTR_HEADER + units * 2);
@@ -1847,10 +3772,10 @@ export function createAutomationFunctions(host){
                 view.setUint32(pad + 8, units, true);
                 if (units > 0)
                 {
-                    wire.set(host.readMemory(bstr, units * 2), pad + WIRE_BSTR_HEADER);
+                    wire.set(guest.bytes(bstr, units * 2), pad + WIRE_BSTR_HEADER);
                 }
-                host.writeMemory(from, wire);
-                return (from + wire.length) >>> 0;
+                guest.setBytes(from, wire);
+                return wholeAddress(from + wire.length);
             },
         },
 
@@ -1861,17 +3786,18 @@ export function createAutomationFunctions(host){
          * The string the slot held is freed and a new one made from the wire.
          */
         BSTR_UserUnmarshal: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
-                const at = (((buffer >>> 0) + 3) & ~3) >>> 0;
-                const bytes = readU32(at + 4);
-                const units = readU32(at + 8);
-                const slot = pbstr >>> 0;
-                freeBstr(readU32(slot));
-                writeU32(slot, bytes === 0xffffffff ? 0 : allocateBstr(host.readMemory(
-                    at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2)).slice()));
-                return (at + WIRE_BSTR_HEADER + units * 2) >>> 0;
+                const at = ((wholeAddress(buffer) + 3) & ~3) >>> 0;
+                const bytes = guest.u32(at + 4);
+                const units = guest.u32(at + 8);
+                const slot = wholeAddress(pbstr);
+                freeBstr(guest.u32(slot));
+                guest.set32(slot, bytes === 0xffffffff ? 0 : allocateBstr(guest.bytes(
+                    at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2))));
+                return wholeAddress(at + WIRE_BSTR_HEADER + units * 2);
             },
         },
 
@@ -1880,9 +3806,9 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, pbstr])=>{
-                const slot = pbstr >>> 0;
-                freeBstr(readU32(slot));
-                writeU32(slot, 0);
+                const slot = wholeAddress(pbstr);
+                freeBstr(guest.u32(slot));
+                guest.set32(slot, 0);
                 return 0;
             },
         },
@@ -1891,14 +3817,16 @@ export function createAutomationFunctions(host){
         VARIANT_UserSize: noWireForm('VARIANT_UserSize', ([, start])=>start >>> 0),
 
         /** unsigned char *VARIANT_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
-        VARIANT_UserMarshal: noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0),
+        VARIANT_UserMarshal: {
+            ...noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0), returns: 'pointer',
+        },
 
         /** unsigned char *VARIANT_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
-        VARIANT_UserUnmarshal: noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
+        VARIANT_UserUnmarshal: { ...noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
             const owed = nothingOwed();
             clear(pvar >>> 0, owed);
             return settle(owed, host.callerThread?.(), buffer >>> 0);
-        }),
+        }), returns: 'pointer' },
 
         /** void VARIANT_UserFree(ULONG *pFlags, VARIANT *pVar) -- its contents, as VariantClear */
         VARIANT_UserFree: {
@@ -1906,7 +3834,7 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([, pvar])=>{
                 const owed = nothingOwed();
-                clear(pvar >>> 0, owed);
+                clear(wholeAddress(pvar), owed);
                 return settle(owed, host.callerThread?.(), 0);
             },
         },
@@ -1915,13 +3843,19 @@ export function createAutomationFunctions(host){
         LPSAFEARRAY_UserSize: noWireForm('LPSAFEARRAY_UserSize', ([, start])=>start >>> 0),
 
         /** unsigned char *LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
-        LPSAFEARRAY_UserMarshal: noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+        LPSAFEARRAY_UserMarshal: {
+            ...noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+            returns: 'pointer',
+        },
 
         /** unsigned char *LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
-        LPSAFEARRAY_UserUnmarshal: noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
-            writeU32(ppsa >>> 0, 0);
-            return buffer >>> 0;
-        }),
+        LPSAFEARRAY_UserUnmarshal: {
+            ...noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
+                guest.set32(wholeAddress(ppsa), 0);
+                return wholeAddress(buffer);
+            }),
+            returns: 'pointer',
+        },
 
         /** void LPSAFEARRAY_UserFree(ULONG *pFlags, LPSAFEARRAY *ppsa) -- the array, as SafeArrayDestroy */
         LPSAFEARRAY_UserFree: {
@@ -1930,7 +3864,7 @@ export function createAutomationFunctions(host){
              * @param {number[]} args
              * @returns {number | Promise<number>}
              */
-            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([readU32(ppsa >>> 0)]),
+            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([guest.u32(wholeAddress(ppsa))]),
         },
 
         /** void VariantInit(VARIANTARG *pvarg) */
@@ -1938,14 +3872,14 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvarg])=>{
-                const variant = pvarg >>> 0;
+                const variant = wholeAddress(pvarg);
                 if (variant !== 0)
                 {
                     // Documented as setting only the type. The union is zeroed
                     // too, because nothing may legitimately read the value of a
                     // VT_EMPTY variant and leaving the stack's leftovers there
                     // makes a wrong read look like a plausible one.
-                    host.writeMemory(variant, new Uint8Array(VARIANT_BYTES));
+                    guest.fill(variant, 0, VARIANT_BYTES);
                 }
                 return 0;
             },
@@ -1956,10 +3890,14 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvarg])=>{
-                const variant = pvarg >>> 0;
+                const variant = wholeAddress(pvarg);
                 if (variant === 0)
                 {
                     return E_INVALIDARG;
+                }
+                if (!isVariantType(guest.u16(variant)))
+                {
+                    return DISP_E_BADVARTYPE;
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
@@ -1979,7 +3917,15 @@ export function createAutomationFunctions(host){
             handler: ([pvargDest, pvargSrc])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, copyVariant(pvargDest >>> 0, pvargSrc >>> 0, owed));
+                const dest = wholeAddress(pvargDest);
+                const src = wholeAddress(pvargSrc);
+                // A record with no IRecordInfo to copy it by is copied as it is.
+                if (dest !== 0 && src !== 0 && dest !== src && guest.u16(src) === VT_RECORD
+                    && guest.u32(src + VARIANT_VALUE + 4) !== 0 && isVariantType(guest.u16(dest)))
+                {
+                    return copyRecord(dest, src, thread);
+                }
+                return settle(owed, thread, copyVariant(dest, src, owed));
             },
         },
 
@@ -1988,8 +3934,8 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pvarDest, pvargSrc])=>{
-                const dest = pvarDest >>> 0;
-                const src = pvargSrc >>> 0;
+                const dest = wholeAddress(pvarDest);
+                const src = wholeAddress(pvargSrc);
                 if (dest === 0 || src === 0)
                 {
                     return E_INVALIDARG;
@@ -1998,24 +3944,73 @@ export function createAutomationFunctions(host){
                 const owed = nothingOwed();
                 // What is not a reference is copied as VariantCopy copies it,
                 // which leaves a variant copied onto itself as it was.
-                if ((readU16(src) & VT_BYREF) === 0)
+                if ((guest.u16(src) & VT_BYREF) === 0)
                 {
                     return settle(owed, thread, copyVariant(dest, src, owed));
                 }
-                const value = load(src, true);
-                if (value === null)
+                // A reference is followed to a value of a type a variant holds
+                // by value -- an array included -- and that value copied as
+                // VariantCopy copies it; a reference to anything else, or to
+                // nothing, is an invalid argument.
+                const declared = guest.u16(src);
+                const type = declared & VT_TYPEMASK;
+                const target = guest.u32(src + VARIANT_VALUE);
+                if (type <= VT_NULL || type === 15 || type >= 24
+                    || (declared & (VT_VECTOR | VT_RESERVED)) !== 0 || target === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if (dest !== src)
+                if (dest !== src && !isVariantType(guest.u16(dest)))
                 {
-                    clear(dest, owed);
+                    return DISP_E_BADVARTYPE;
+                }
+                /** @param {number} reference @param {number} at */
+                const valueOf = (reference, at)=>{
+                    const bytes = new Uint8Array(VARIANT_BYTES);
+                    const size = (reference & VT_ARRAY) !== 0 ? 4
+                        : ELEMENT_BYTES[reference & VT_TYPEMASK];
+                    bytes.set(guest.bytes(at, size),
+                        (reference & VT_TYPEMASK) === VT_DECIMAL && size === 16 ? 0
+                            : VARIANT_VALUE);
+                    new DataView(bytes.buffer).setUint16(0, reference & ~VT_BYREF, true);
+                    return bytes;
+                };
+                let bytes;
+                if (type === VT_VARIANT && (declared & VT_ARRAY) === 0)
+                {
+                    // A variant referred to is copied, and a reference it
+                    // holds followed in turn -- unless that is to yet
+                    // another variant.
+                    bytes = guest.bytes(target, VARIANT_BYTES);
+                    const inner = guest.u16(target);
+                    if ((inner & VT_BYREF) !== 0)
+                    {
+                        const at = guest.u32(target + VARIANT_VALUE);
+                        if ((inner & VT_TYPEMASK) === VT_VARIANT || at === 0
+                            || ELEMENT_BYTES[inner & VT_TYPEMASK] === undefined)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        bytes = valueOf(inner, at);
+                    }
                 }
                 else
                 {
-                    host.writeMemory(dest, new Uint8Array(VARIANT_BYTES));
+                    bytes = valueOf(declared, target);
                 }
-                return settle(owed, thread, store(dest, value.type, value, 0, owed));
+                const scratch = host.heap.allocate(VARIANT_BYTES);
+                if (scratch === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                guest.setBytes(scratch, bytes);
+                if (dest === src)
+                {
+                    guest.fill(dest, 0, VARIANT_BYTES);
+                }
+                const hr = copyVariant(dest, scratch, owed);
+                host.heap.free(scratch);
+                return settle(owed, thread, hr);
             },
         },
 
@@ -2029,8 +4024,8 @@ export function createAutomationFunctions(host){
             handler: ([pvargDest, pvarSrc, wFlags, vt])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
-                    wFlags & 0xffff, vt & 0xffff, owed));
+                return whenAnswered(changeType(wholeAddress(pvargDest), wholeAddress(pvarSrc),
+                    wFlags & 0xffff, vt & 0xffff, owed, 0, thread), hr=>settle(owed, thread, hr));
             },
         },
 
@@ -2052,8 +4047,9 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                return settle(owed, thread, changeType(pvargDest >>> 0, pvarSrc >>> 0,
-                    wFlags & 0xffff, vt & 0xffff, owed));
+                return whenAnswered(changeType(wholeAddress(pvargDest), wholeAddress(pvarSrc),
+                    wFlags & 0xffff, vt & 0xffff, owed, lcid, thread),
+                hr=>settle(owed, thread, hr));
             },
         },
 
@@ -2077,7 +4073,7 @@ export function createAutomationFunctions(host){
         VarBstrFromCy: toBstr(20, ([low, high, lcid])=>{
             english('VarBstrFromCy', lcid);
             return textOfCurrency(BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0)));
-        }),
+        }, { quadwords: [0] }),
 
         /**
          * HRESULT VarBstrFromDate(DATE dateIn, LCID lcid, ULONG dwFlags, BSTR *pbstrOut)
@@ -2090,29 +4086,33 @@ export function createAutomationFunctions(host){
         VarBstrFromDate: toBstr(20, ([low, high, lcid, flags])=>{
             english('VarBstrFromDate', lcid);
             return textOfDate(doubleOf(low, high), flags >>> 0) ?? E_INVALIDARG;
-        }),
+        }, { floats: { 0: 'f64' } }),
         /** HRESULT VarRound(LPVARIANT pvarIn, int cDecimals, LPVARIANT pvarResult) */
         VarRound: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pin, places, pout])=>{
-                if ((places | 0) < 0 || (pin >>> 0) === 0 || (pout >>> 0) === 0)
+                if ((places | 0) < 0 || wholeAddress(pin) === 0 || wholeAddress(pout) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const value = operand(pin >>> 0);
+                const value = operand(wholeAddress(pin));
                 if (value === null)
                 {
                     return DISP_E_BADVARTYPE;
                 }
-                const out = pout >>> 0;
+                const out = wholeAddress(pout);
                 const number = Number(value.number);
                 switch (value.type)
                 {
                     case VT_NULL:
                         return writeVariant(out, VT_NULL, new Uint8Array(0));
                     case VT_BSTR: {
-                        const parsed = parseText(String(value.text));
+                        // Read to its terminator, as a Var*FromStr reads one:
+                        // a plain OLECHAR string passed as a BSTR is read too.
+                        const read = readOperand(wholeAddress(pin));
+                        const parsed = typeof read === 'number' ? null
+                            : parseText(String(read.text));
                         return parsed === null ? DISP_E_TYPEMISMATCH
                             : writeVariant(out, VT_R8, valueBytes(view=>
                                 view.setFloat64(0, roundNumber(parsed, places), true)));
@@ -2146,7 +4146,7 @@ export function createAutomationFunctions(host){
                     case VT_INT:
                     case VT_UINT:
                         return writeVariant(out, value.type,
-                            host.readMemory((pin >>> 0) + VARIANT_VALUE, 8).slice());
+                            guest.bytes(wholeAddress(pin) + VARIANT_VALUE, 8));
                     default:
                         return DISP_E_BADVARTYPE;
                 }
@@ -2162,67 +4162,29 @@ export function createAutomationFunctions(host){
         VarCmp: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pleft, pright, , flags])=>{
-                const types = [pleft, pright].map(pvar=>readU16(pvar >>> 0));
-                // Refused as Windows refuses them, even the ones it would
-                // convert anywhere else -- and an int only on the right.
-                const refused = [VT_I1, VT_UI2, VT_UI4, VT_UI8, VT_UINT];
-                if (types.some(type=>refused.includes(type & VT_TYPEMASK))
-                    || (types[1] & VT_TYPEMASK) === VT_INT)
+            handler: ([pleft, pright, lcid, flags])=>{
+                if (wholeAddress(pleft) === 0 || wholeAddress(pright) === 0)
                 {
-                    return DISP_E_TYPEMISMATCH;
+                    return E_INVALIDARG;
                 }
-                // Text beside a number is above it whatever it says, and is
-                // not read.
-                const isText = types.map(type=>(type & VT_TYPEMASK) === VT_BSTR);
-                const blank = types.map(type=>[VT_EMPTY, VT_NULL, VT_BSTR]
-                    .includes(type & VT_TYPEMASK));
-                if (isText[0] !== isText[1] && !blank[0] !== !blank[1])
+                const reserved = [pleft, pright]
+                    .map(pvar=>(guest.u16(wholeAddress(pvar)) & VT_RESERVED) !== 0);
+                // A string beside a number is not read unless the flags ask
+                // for it, so one that points nowhere is still text.
+                /** @param {number} pvar */
+                const read = pvar=>{
+                    const value = readOperand(pvar, VT_RESERVED);
+                    return typeof value !== 'number' && value.type === VT_BSTR
+                        && value.flags === VT_BYREF && (guest.u16(pvar) & VT_BYREF) === 0
+                        ? variantValue(VT_BSTR, { text: '' }) : value;
+                };
+                const left = read(wholeAddress(pleft));
+                const right = read(wholeAddress(pright));
+                if (typeof left === 'number' || typeof right === 'number')
                 {
-                    const other = operand((isText[0] ? pright : pleft) >>> 0);
-                    if (other === null || (other.number === null && other.exact === null))
-                    {
-                        return DISP_E_TYPEMISMATCH;
-                    }
-                    return isText[0] ? 2 : 0;
+                    return typeof left === 'number' ? left : /** @type {number} */ (right);
                 }
-                const left = operand(pleft >>> 0);
-                const right = operand(pright >>> 0);
-                if (left === null || right === null)
-                {
-                    return DISP_E_BADVARTYPE;
-                }
-                if (left.type === VT_NULL || right.type === VT_NULL)
-                {
-                    return VARCMP_NULL;
-                }
-                if (left.text !== null || right.text !== null)
-                {
-                    const texts = [left, right].map(side=>(side.text !== null ? side.text
-                        : side.type === VT_EMPTY ? '' : null));
-                    if (texts[0] === null || texts[1] === null)
-                    {
-                        return texts[0] === null ? 0 : 2;
-                    }
-                    const [a, b] = texts.map(text=>((flags & NORM_IGNORECASE) !== 0
-                        ? String(text).toLowerCase() : String(text)));
-                    return a < b ? 0 : a > b ? 2 : 1;
-                }
-                if ((left.number === null && left.exact === null)
-                    || (right.number === null && right.exact === null))
-                {
-                    return DISP_E_TYPEMISMATCH;
-                }
-                if (left.exact === null && right.exact === null)
-                {
-                    const a = Number(left.number);
-                    const b = Number(right.number);
-                    return a < b ? 0 : a > b ? 2 : 1;
-                }
-                /** @param {Operand} side */
-                const exact = side=>side.exact
-                    ?? exactOf(Number(side.number)) ?? { value: 0n, scale: 0 };
-                return compareExact(exact(left), exact(right)) + 1;
+                return compareValues(left, right, reserved, lcid >>> 0, flags >>> 0);
             },
         },
 
@@ -2236,29 +4198,28 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pleft, pright, pout])=>{
-                const left = operand(pleft >>> 0);
-                const right = operand(pright >>> 0);
-                if (left === null || right === null)
+                const left = readOperand(wholeAddress(pleft));
+                const right = readOperand(wholeAddress(pright));
+                if (typeof left === 'number' || typeof right === 'number')
                 {
-                    return DISP_E_BADVARTYPE;
+                    return writeOutcome(wholeAddress(pout), typeof left === 'number' ? left
+                        : /** @type {number} */ (right));
                 }
-                if (left.type === VT_NULL && right.type === VT_NULL)
+                if (left.type !== VT_DISPATCH && right.type !== VT_DISPATCH)
                 {
-                    return writeVariant(pout >>> 0, VT_NULL, new Uint8Array(0));
+                    return writeOutcome(wholeAddress(pout), concatenation(left, right));
                 }
-                const a = textOf(left);
-                const b = textOf(right);
-                if (a === null || b === null)
-                {
-                    return DISP_E_TYPEMISMATCH;
-                }
-                const bstr = allocateBstr(encode(a + b));
-                if (bstr === 0)
-                {
-                    return E_OUTOFMEMORY;
-                }
-                return writeVariant(pout >>> 0, VT_BSTR,
-                    valueBytes(view=>view.setUint32(0, bstr, true)));
+                // An object joins as its default value; Invoke's failure is
+                // the call's.
+                const thread = host.callerThread?.();
+                const sides = [[left, pleft], [right, pright]].map(([side, pvar])=>{
+                    const value = /** @type {import('./arithmetic.js').Value} */ (side);
+                    return value.type === VT_DISPATCH && value.flags === 0
+                        ? fetchDefault(objectIn(/** @type {number} */ (pvar) >>> 0), 0, thread)
+                        : value;
+                });
+                return Promise.all(sides).then(([a, b])=>writeOutcome(wholeAddress(pout),
+                    typeof a === 'number' ? a : typeof b === 'number' ? b : concatenation(a, b)));
             },
         },
 
@@ -2284,122 +4245,6 @@ export function createAutomationFunctions(host){
         VarNeg: unary(negate),
         VarNot: unary(not),
 
-        /** HRESULT VarCyFromI4(LONG lIn, CY *pCyOut) */
-        VarCyFromI4: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([number, out])=>{
-                host.writeMemory(out >>> 0, cyBytes(BigInt(number | 0) * 10000n));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromCy(CY cyIn, double *pDblOut) */
-        VarR8FromCy: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([low, high, out])=>{
-                const cy = BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0));
-                writeDouble(out >>> 0, toNumber({ value: cy, scale: 4 }));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarDecFromI4(LONG lIn, DECIMAL *pDecOut) */
-        VarDecFromI4: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([number, out])=>{
-                host.writeMemory((out >>> 0) + 2, /** @type {Uint8Array} */ (
-                    decimalBytes({ value: BigInt(number | 0), scale: 0 })));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarDecFromR8(double dblIn, DECIMAL *pDecOut) */
-        VarDecFromR8: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([low, high, out])=>{
-                const exact = exactOf(doubleOf(low, high));
-                const bytes = exact && decimalBytes(exact);
-                if (!bytes)
-                {
-                    return DISP_E_OVERFLOW;
-                }
-                host.writeMemory((out >>> 0) + 2, bytes);
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromDec(const DECIMAL *pDecIn, double *pDblOut) */
-        VarR8FromDec: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([decimal, out])=>{
-                const bytes = host.readMemory(decimal >>> 0, 16);
-                if (bytes[2] > 28)
-                {
-                    return E_INVALIDARG;
-                }
-                writeDouble(out >>> 0, toNumber(readDecimal(bytes)));
-                return S_OK;
-            },
-        },
-
-        /** HRESULT VarR8FromStr(LPCOLESTR strIn, LCID lcid, ULONG dwFlags, double *pDblOut) */
-        VarR8FromStr: fromString('VarR8FromStr', text=>{
-            const number = parseText(text);
-            if (number === null)
-            {
-                return DISP_E_TYPEMISMATCH;
-            }
-            return Number.isFinite(number)
-                ? valueBytes(view=>view.setFloat64(0, number, true)) : DISP_E_OVERFLOW;
-        }),
-
-        /**
-         * HRESULT VarR4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, FLOAT *pFltOut)
-         *
-         * The double VarR8FromStr reads, as the float nearest it; past the
-         * floats' range an overflow rather than an infinity.
-         */
-        VarR4FromStr: fromString('VarR4FromStr', text=>{
-            const number = parseText(text);
-            if (number === null)
-            {
-                return DISP_E_TYPEMISMATCH;
-            }
-            return Math.abs(number) <= 3.4028234663852886e38
-                ? valueBytes(view=>view.setFloat32(0, number, true)).subarray(0, 4)
-                : DISP_E_OVERFLOW;
-        }),
-
-        /**
-         * HRESULT VarCyFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, CY *pCyOut)
-         *
-         * Read exactly, not through a double, and rounded to the fourth place
-         * a half to the even neighbour; past a CY's range an overflow.
-         */
-        VarCyFromStr: fromString('VarCyFromStr', text=>{
-            const units = currencyFromText(text);
-            return typeof units === 'number' ? units : cyBytes(units);
-        }),
-
-        /**
-         * HRESULT VarBoolFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags,
-         *                        VARIANT_BOOL *pBoolOut)
-         *
-         * #TRUE# and #FALSE# as spelled, True and False in any case, or a
-         * number, non-zero for VARIANT_TRUE. Yes, No, On and Off are not
-         * booleans, and a localised word is not read: this build speaks English.
-         */
-        VarBoolFromStr: fromString('VarBoolFromStr', text=>{
-            const truth = boolOf(text);
-            return truth === null ? DISP_E_TYPEMISMATCH
-                : valueBytes(view=>view.setInt16(0, truth, true)).subarray(0, 2);
-        }),
-
         /**
          * HRESULT VarDateFromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, DATE *pdateOut)
          *
@@ -2415,20 +4260,10 @@ export function createAutomationFunctions(host){
                 : valueBytes(view=>view.setFloat64(0, date, true));
         }),
 
-        /**
-         * HRESULT VarI4FromStr(OLECHAR *strIn, LCID lcid, ULONG dwFlags, LONG *plOut),
-         * and the same for the other integral types
-         */
-        VarI1FromStr: integerFromString('VarI1FromStr', VT_I1, 1),
-        VarUI1FromStr: integerFromString('VarUI1FromStr', VT_UI1, 1),
-        VarI2FromStr: integerFromString('VarI2FromStr', VT_I2, 2),
-        VarUI2FromStr: integerFromString('VarUI2FromStr', VT_UI2, 2),
-        VarI4FromStr: integerFromString('VarI4FromStr', VT_I4, 4),
-        VarUI4FromStr: integerFromString('VarUI4FromStr', VT_UI4, 4),
-
         /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
         VarUdateFromDate: {
             argBytes: 16,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, , out])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -2436,7 +4271,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeWords(out >>> 0, udateWords(fields));
+                udateWords(fields).forEach((value, index)=>
+                    guest.set16(wholeAddress(out) + index * 2, value));
                 return S_OK;
             },
         },
@@ -2446,13 +4282,14 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([udate, flags, out])=>{
-                const words = readWords(udate >>> 0, 8);
+                const words = Array.from({ length: 8 },
+                    (_, index)=>guest.i16(wholeAddress(udate) + index * 2));
                 if (words[0] > 9999 || words[0] < -9999)
                 {
                     return E_INVALIDARG;
                 }
                 const { year, month } = rollYear(words[0], words[1]);
-                writeDouble(out >>> 0, dateOf({ year, month, day: words[3], hour: words[4],
+                guest.setF64(wholeAddress(out), dateOf({ year, month, day: words[3], hour: words[4],
                     minute: words[5], second: words[6] }, flags >>> 0));
                 return S_OK;
             },
@@ -2469,13 +4306,14 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([time, out])=>{
-                const [year, month, , day, hour, minute, second] = readWords(time >>> 0, 8);
+                const [year, month, , day, hour, minute, second] = Array.from({ length: 8 },
+                    (_, index)=>guest.i16(wholeAddress(time) + index * 2));
                 if (year < 0 || year > 9999 || month < 1 || month > 12 || day > 31
                     || hour > 23 || minute > 59 || second > 59)
                 {
                     return 0;
                 }
-                writeDouble(out >>> 0, dateOf({
+                guest.setF64(wholeAddress(out), dateOf({
                     year: year < 50 ? 2000 + year : year < 100 ? 1900 + year : year,
                     month, day, hour, minute, second }));
                 return 1;
@@ -2485,6 +4323,7 @@ export function createAutomationFunctions(host){
         /** INT VariantTimeToSystemTime(double vtime, LPSYSTEMTIME lpSystemTime) */
         VariantTimeToSystemTime: {
             argBytes: 12,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, out])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -2492,7 +4331,8 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                writeWords(out >>> 0, udateWords(fields).slice(0, 8));
+                udateWords(fields).slice(0, 8).forEach((value, index)=>
+                    guest.set16(wholeAddress(out) + index * 2, value));
                 return 1;
             },
         },
@@ -2516,7 +4356,7 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                writeDouble(out >>> 0,
+                guest.setF64(wholeAddress(out),
                     dateOf({ year, month, day: date & 0x1f, hour, minute, second }));
                 return 1;
             },
@@ -2525,6 +4365,7 @@ export function createAutomationFunctions(host){
         /** INT VariantTimeToDosDateTime(double vtime, USHORT *pwDosDate, USHORT *pwDosTime) */
         VariantTimeToDosDateTime: {
             argBytes: 16,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, dateOut, timeOut])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -2532,10 +4373,10 @@ export function createAutomationFunctions(host){
                 {
                     return 0;
                 }
-                writeWords(dateOut >>> 0, [fields.day | fields.month << 5
-                    | (fields.year - 1980) << 9]);
-                writeWords(timeOut >>> 0, [fields.second >>> 1 | fields.minute << 5
-                    | fields.hour << 11]);
+                guest.set16(wholeAddress(dateOut), fields.day | fields.month << 5
+                    | (fields.year - 1980) << 9);
+                guest.set16(wholeAddress(timeOut), fields.second >>> 1 | fields.minute << 5
+                    | fields.hour << 11);
                 return 1;
             },
         },
@@ -2552,37 +4393,34 @@ export function createAutomationFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([strIn, lcid, , pnumprs, rgbDig])=>{
-                const numprs = pnumprs >>> 0;
-                if ((strIn >>> 0) === 0 || numprs === 0 || (rgbDig >>> 0) === 0)
+                const numprs = wholeAddress(pnumprs);
+                if (wholeAddress(strIn) === 0 || numprs === 0 || wholeAddress(rgbDig) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 english('VarParseNumFromStr', lcid);
-                const fields = peek(numprs, 24);
-                const capacity = fields.getInt32(NUMPARSE_C_DIG, true);
-                const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
-                const text = wideAt(strIn >>> 0);
+                const capacity = guest.i32(numprs + NUMPARSE_C_DIG);
+                const allowed = guest.u32(numprs + NUMPARSE_IN_FLAGS);
+                const text = guest.wstr(wholeAddress(strIn), WHOLE);
                 const parsed = parseNumberText(text, allowed, capacity);
-                const rest = parsed === null ? text : text.slice(parsed.used);
-                if ((allowed & NUMPRS_UNPARSED) !== 0 && /^\s*[&()$+-]/.test(rest))
-                {
-                    report('VarParseNumFromStr',
-                        'hex/octal, currency, parenthesised and trailing-sign forms are not read');
-                }
-                if (parsed === null
-                    || ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length))
+                if (parsed === null)
                 {
                     return DISP_E_TYPEMISMATCH;
                 }
-                const out = new DataView(new ArrayBuffer(24));
-                out.setInt32(NUMPARSE_C_DIG, parsed.digits.length, true);
-                out.setUint32(NUMPARSE_IN_FLAGS, allowed, true);
-                out.setUint32(NUMPARSE_OUT_FLAGS, parsed.flags, true);
-                out.setInt32(NUMPARSE_CCH_USED, parsed.used, true);
-                out.setInt32(NUMPARSE_BASE_SHIFT, 0, true);
-                out.setInt32(NUMPARSE_PWR10, parsed.pwr10, true);
-                host.writeMemory(numprs, new Uint8Array(out.buffer));
-                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.digits));
+                // What was read is in the caller's buffer even when the rest
+                // of the string makes USE_ALL refuse it.
+                if ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length)
+                {
+                    guest.setBytes(wholeAddress(rgbDig), Uint8Array.from(parsed.written));
+                    return DISP_E_TYPEMISMATCH;
+                }
+                guest.set32(numprs + NUMPARSE_C_DIG, parsed.count);
+                guest.set32(numprs + NUMPARSE_IN_FLAGS, allowed);
+                guest.set32(numprs + NUMPARSE_OUT_FLAGS, parsed.flags);
+                guest.set32(numprs + NUMPARSE_CCH_USED, parsed.used);
+                guest.set32(numprs + NUMPARSE_BASE_SHIFT, parsed.baseShift);
+                guest.set32(numprs + NUMPARSE_PWR10, parsed.pwr10);
+                guest.setBytes(wholeAddress(rgbDig), Uint8Array.from(parsed.written));
                 return S_OK;
             },
         },
@@ -2598,29 +4436,25 @@ export function createAutomationFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([pnumprs, rgbDig, vtBits, pvar])=>{
-                const numprs = pnumprs >>> 0;
-                if (numprs === 0 || (rgbDig >>> 0) === 0 || (pvar >>> 0) === 0)
+                const numprs = wholeAddress(pnumprs);
+                if (numprs === 0 || wholeAddress(rgbDig) === 0 || wholeAddress(pvar) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const fields = peek(numprs, 24);
-                const count = Math.max(fields.getInt32(NUMPARSE_C_DIG, true), 0);
-                const digits = [...host.readMemory(rgbDig >>> 0, count)];
-                const negative = (fields.getUint32(NUMPARSE_OUT_FLAGS, true) & NUMPRS_NEG) !== 0;
-                const made = numberVariant(digits, fields.getInt32(NUMPARSE_PWR10, true),
-                    fields.getInt32(NUMPARSE_BASE_SHIFT, true), negative, vtBits >>> 0);
+                const count = Math.max(guest.i32(numprs + NUMPARSE_C_DIG), 0);
+                const digits = [...guest.bytes(wholeAddress(rgbDig), count)];
+                const negative = (guest.u32(numprs + NUMPARSE_OUT_FLAGS) & NUMPRS_NEG) !== 0;
+                const made = numberVariant(digits, guest.i32(numprs + NUMPARSE_PWR10),
+                    guest.i32(numprs + NUMPARSE_BASE_SHIFT), negative, vtBits >>> 0);
                 if (made === null)
                 {
-                    if ((vtBits & (1 << VT_DECIMAL)) !== 0)
-                    {
-                        report('VarNumFromParseNum', 'VT_DECIMAL is never produced');
-                    }
                     return DISP_E_OVERFLOW;
                 }
                 const variant = new Uint8Array(VARIANT_BYTES);
+                // A DECIMAL fills the variant from its third byte on.
+                variant.set(made.bytes, made.type === VT_DECIMAL ? 0 : VARIANT_VALUE);
                 variant[0] = made.type;
-                variant.set(made.bytes, VARIANT_VALUE);
-                host.writeMemory(pvar >>> 0, variant);
+                guest.setBytes(wholeAddress(pvar), variant);
                 return S_OK;
             },
         },
@@ -2652,7 +4486,7 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.() ?? null;
                 const held = heldErrorInfo.get(thread) ?? 0;
-                const given = errorInfo >>> 0;
+                const given = wholeAddress(errorInfo);
                 if (given === 0)
                 {
                     heldErrorInfo.delete(thread);
@@ -2662,7 +4496,8 @@ export function createAutomationFunctions(host){
                     heldErrorInfo.set(thread, given);
                 }
                 return settle({ addRef: given !== 0 ? [given] : [],
-                    release: held !== 0 ? [held] : [] }, thread, S_OK);
+                    release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] }, thread,
+                S_OK);
             },
         },
 
@@ -2677,9 +4512,9 @@ export function createAutomationFunctions(host){
                 const thread = host.callerThread?.() ?? null;
                 const held = heldErrorInfo.get(thread) ?? 0;
                 heldErrorInfo.delete(thread);
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out >>> 0, held);
+                    guest.set32(wholeAddress(out), held);
                 }
                 return held === 0 ? S_FALSE : S_OK;
             },
@@ -2699,11 +4534,11 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([, , out])=>{
                 const MK_E_UNAVAILABLE = 0x800401e3;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                guest.set32(wholeAddress(out), 0);
                 return MK_E_UNAVAILABLE;
             },
         },
@@ -2720,21 +4555,21 @@ export function createAutomationFunctions(host){
         LoadTypeLib: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([file, out])=>loadTypeLib(file >>> 0, out >>> 0),
+            handler: ([file, out])=>loadTypeLib(wholeAddress(file), wholeAddress(out)),
         },
         LoadTypeLibEx: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, regKind, out])=>{
                 const REGKIND_REGISTER = 1;
-                const loaded = loadTypeLib(file >>> 0, out >>> 0);
+                const loaded = loadTypeLib(wholeAddress(file), wholeAddress(out));
                 if ((regKind >>> 0) !== REGKIND_REGISTER)
                 {
                     return loaded;
                 }
                 /** @param {number} result */
                 const register = result=>(result === S_OK
-                    ? registerTypeLib.handler([readU32(out >>> 0), file, 0])
+                    ? registerTypeLib.handler([guest.u32(wholeAddress(out)), file, 0])
                     : result);
                 return loaded instanceof Promise ? loaded.then(register) : register(loaded);
             },
@@ -2752,13 +4587,13 @@ export function createAutomationFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([guid, major, minor, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                guest.set32(wholeAddress(out), 0);
                 const key = registrationKey(
-                    readGuid(host, guid >>> 0), major & 0xffff, minor & 0xffff, false);
+                    guest.guid(guid >>> 0), major & 0xffff, minor & 0xffff, false);
                 const win32 = key && host.hive ? host.hive.open(key, '0\\win32') : null;
                 const value = win32 && host.hive ? host.hive.getValue(win32, '') : null;
                 if (!value)
@@ -2767,12 +4602,12 @@ export function createAutomationFunctions(host){
                 }
                 const end = value.data.indexOf(0);
                 const path = decodeAnsi(value.data.subarray(0, end < 0 ? value.data.length : end));
-                const bstr = allocateBstr(encode(path));
+                const bstr = allocateBstr(utf16(path));
                 if (bstr === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                const loaded = loadTypeLib(bstr, out >>> 0);
+                const loaded = loadTypeLib(bstr, wholeAddress(out));
                 /** @param {number} result */
                 const done = result=>{
                     freeBstr(bstr);
@@ -2808,7 +4643,7 @@ export function createAutomationFunctions(host){
                 {
                     return TYPE_E_REGISTRYACCESS;
                 }
-                const id = readGuid(host, guid >>> 0);
+                const id = guest.guid(guid >>> 0);
                 const version = `TypeLib\\${id}\\${versionKey(major & 0xffff, minor & 0xffff)}`;
                 if (!hive.open(root, version))
                 {
@@ -2833,47 +4668,11 @@ export function createAutomationFunctions(host){
          * bound readers below count from.
          */
         SafeArrayCreate: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([vt, cDims, rgsabound])=>{
-                const type = vt & 0xffff;
-                const dims = cDims >>> 0;
-                const elementBytes = ELEMENT_BYTES[type];
-                if (elementBytes === undefined || dims === 0 || (rgsabound >>> 0) === 0)
-                {
-                    return 0;
-                }
-                let elements = 1;
-                for (let index = 0; index < dims; index++)
-                {
-                    elements *= readU32((rgsabound >>> 0) + index * 8);
-                }
-                const dataBytes = Math.max(1, elements * elementBytes);
-                const descriptor = host.heap.allocate(SAFEARRAY_BOUNDS + dims * 8);
-                const data = host.heap.allocate(dataBytes);
-                if (descriptor === 0 || data === 0)
-                {
-                    host.heap.free(descriptor);
-                    host.heap.free(data);
-                    return 0;
-                }
-                const features = type === VT_BSTR ? FADF_BSTR
-                    : type === VT_UNKNOWN ? FADF_UNKNOWN
-                        : type === VT_DISPATCH ? FADF_DISPATCH
-                            : type === VT_VARIANT ? FADF_VARIANT : 0;
-                writeU16(descriptor, dims);
-                writeU16(descriptor + 2, features);
-                writeU32(descriptor + 4, elementBytes);
-                writeU32(descriptor + 8, 0);
-                writeU32(descriptor + 12, data);
-                for (let index = 0; index < dims; index++)
-                {
-                    host.writeMemory(descriptor + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
-                        host.readMemory((rgsabound >>> 0) + index * 8, 8).slice());
-                }
-                host.fillMemory(data, 0, dataBytes);
-                return descriptor;
-            },
+            handler: ([vt, cDims, rgsabound])=>createArray(vt & 0xffff, cDims >>> 0,
+                wholeAddress(rgsabound), 0),
         },
 
         /**
@@ -2888,7 +4687,7 @@ export function createAutomationFunctions(host){
             handler: ([psa])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const hr = destroyArray(psa >>> 0, owed);
+                const hr = destroyArray(wholeAddress(psa), owed);
                 return hr !== S_OK ? hr : settle(owed, thread, S_OK);
             },
         },
@@ -2905,19 +4704,20 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psa, psaboundNew])=>{
-                const array = safeArrayAt(psa >>> 0);
-                if (!array || (psaboundNew >>> 0) === 0)
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || array.dims === 0 || wholeAddress(psaboundNew) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if (array.locks !== 0)
+                // A fixed-size array is refused as a locked one is.
+                if (array.locks !== 0 || (array.features & FADF_FIXEDSIZE) !== 0)
                 {
                     return DISP_E_ARRAYISLOCKED;
                 }
                 const inner = array.bounds.slice(1)
                     .reduce((total, bound)=>total * bound.elements, 1);
                 const before = array.bounds[0].elements * inner;
-                const elements = readU32(psaboundNew >>> 0);
+                const elements = guest.u32(wholeAddress(psaboundNew));
                 const after = elements * inner;
                 const stride = array.elementBytes;
                 const thread = host.callerThread?.();
@@ -2933,17 +4733,15 @@ export function createAutomationFunctions(host){
                     {
                         return settle(owed, thread, E_OUTOFMEMORY);
                     }
-                    host.fillMemory(data, 0, after * stride);
+                    guest.fill(data, 0, after * stride);
                     if (array.data !== 0)
                     {
-                        host.writeMemory(data,
-                            host.readMemory(array.data, before * stride).slice());
+                        guest.copy(data, array.data, before * stride);
                         host.heap.free(array.data);
                     }
-                    writeU32((psa >>> 0) + 12, data);
+                    guest.setPtr(wholeAddress(psa) + SAFEARRAY.DATA, data);
                 }
-                host.writeMemory((psa >>> 0) + SAFEARRAY_BOUNDS,
-                    host.readMemory(psaboundNew >>> 0, 8).slice());
+                guest.copy(wholeAddress(psa) + SAFEARRAY.BOUNDS, wholeAddress(psaboundNew), 8);
                 return settle(owed, thread, S_OK);
             },
         },
@@ -2961,40 +4759,47 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([psa, rgIndices, pv])=>{
-                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                const at = elementAt(wholeAddress(psa), wholeAddress(rgIndices));
                 if ('error' in at)
                 {
                     return at.error;
                 }
-                if ((pv >>> 0) === 0)
+                if (wholeAddress(pv) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const { features, elementBytes } = at.array;
                 if ((features & FADF_BSTR) !== 0)
                 {
-                    const source = readU32(at.address);
+                    const source = guest.ptr(at.address);
                     const copy = source === 0 ? 0 : allocateBstr(
-                        host.readMemory(source, byteLengthOf(source)).slice());
+                        guest.bytes(source, byteLengthOf(source)));
                     if (source !== 0 && copy === 0)
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writeU32(pv >>> 0, copy);
+                    guest.setPtr(wholeAddress(pv), copy);
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
+                if ((features & FADF_RECORD) !== 0)
+                {
+                    // A record is copied by its own IRecordInfo.
+                    owed.recordCopy.push([recordInfoOf(psa), at.address, wholeAddress(pv)]);
+                    return settle(owed, thread, S_OK);
+                }
                 if ((features & FADF_VARIANT) !== 0)
                 {
-                    host.writeMemory(pv >>> 0, new Uint8Array(VARIANT_BYTES));
-                    return settle(owed, thread, copyVariant(pv >>> 0, at.address, owed));
+                    guest.fill(wholeAddress(pv), 0, VARIANT_ELEMENT);
+                    return settle(owed, thread, copyVariant(wholeAddress(pv), at.address, owed));
                 }
-                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(at.address) !== 0)
+                const held = guest.ptr(at.address);
+                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && held !== 0)
                 {
-                    owed.addRef.push(readU32(at.address));
+                    owed.addRef.push(held);
                 }
-                host.writeMemory(pv >>> 0, host.readMemory(at.address, elementBytes).slice());
+                guest.copy(wholeAddress(pv), at.address, elementBytes);
                 return settle(owed, thread, S_OK);
             },
         },
@@ -3002,7 +4807,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([psa, rgIndices, pv])=>{
-                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                const at = elementAt(wholeAddress(psa), wholeAddress(rgIndices));
                 if ('error' in at)
                 {
                     return at.error;
@@ -3012,15 +4817,15 @@ export function createAutomationFunctions(host){
                 {
                     // The argument is the BSTR itself, not a pointer to one;
                     // NULL is the empty string, as SysStringByteLen reads it.
-                    const source = pv >>> 0;
+                    const source = wholeAddress(pv);
                     const copy = allocateBstr(source === 0 ? new Uint8Array(0)
-                        : host.readMemory(source, byteLengthOf(source)).slice());
+                        : guest.bytes(source, byteLengthOf(source)));
                     if (copy === 0)
                     {
                         return E_OUTOFMEMORY;
                     }
-                    freeBstr(readU32(at.address));
-                    writeU32(at.address, copy);
+                    freeBstr(guest.ptr(at.address));
+                    guest.setPtr(at.address, copy);
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
@@ -3029,23 +4834,28 @@ export function createAutomationFunctions(host){
                 {
                     // Like the other types, the argument is the value itself;
                     // NULL empties the slot.
-                    if ((pv >>> 0) !== 0)
+                    if (wholeAddress(pv) !== 0)
                     {
-                        owed.addRef.push(pv >>> 0);
+                        owed.addRef.push(wholeAddress(pv));
                     }
                     releaseElement(features, at.address, owed);
-                    writeU32(at.address, pv >>> 0);
+                    guest.setPtr(at.address, wholeAddress(pv));
                     return settle(owed, thread, S_OK);
                 }
-                if ((pv >>> 0) === 0)
+                if (wholeAddress(pv) === 0)
                 {
                     return E_INVALIDARG;
                 }
+                if ((features & FADF_RECORD) !== 0)
+                {
+                    owed.recordCopy.push([recordInfoOf(psa), wholeAddress(pv), at.address]);
+                    return settle(owed, thread, S_OK);
+                }
                 if ((features & FADF_VARIANT) !== 0)
                 {
-                    return settle(owed, thread, copyVariant(at.address, pv >>> 0, owed));
+                    return settle(owed, thread, copyVariant(at.address, wholeAddress(pv), owed));
                 }
-                host.writeMemory(at.address, host.readMemory(pv >>> 0, elementBytes).slice());
+                guest.copy(at.address, wholeAddress(pv), elementBytes);
                 return S_OK;
             },
         },
@@ -3060,16 +4870,16 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([psa, rgIndices, ppvData])=>{
-                if ((ppvData >>> 0) === 0)
+                if (wholeAddress(ppvData) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                const at = elementAt(wholeAddress(psa), wholeAddress(rgIndices));
                 if ('error' in at)
                 {
                     return at.error;
                 }
-                writeU32(ppvData >>> 0, at.address);
+                guest.setPtr(wholeAddress(ppvData), at.address);
                 return S_OK;
             },
         },
@@ -3085,13 +4895,17 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psa, out])=>{
-                const array = safeArrayAt(psa >>> 0);
-                if (!array || (out >>> 0) === 0)
+                const array = safeArrayAt(wholeAddress(psa));
+                if (!array || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32((psa >>> 0) + 8, array.locks + 1);
-                writeU32(out >>> 0, array.data);
+                if (array.locks >= 0xffff)
+                {
+                    return E_UNEXPECTED;
+                }
+                guest.set32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks + 1);
+                guest.setPtr(wholeAddress(out), array.data);
                 return S_OK;
             },
         },
@@ -3099,7 +4913,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psa])=>{
-                const array = safeArrayAt(psa >>> 0);
+                const array = safeArrayAt(wholeAddress(psa));
                 if (!array)
                 {
                     return E_INVALIDARG;
@@ -3108,7 +4922,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks - 1);
+                guest.set32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks - 1);
                 return S_OK;
             },
         },
@@ -3126,20 +4940,20 @@ export function createAutomationFunctions(host){
         SafeArrayGetDim: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([psa])=>safeArrayAt(psa >>> 0)?.dims ?? 0,
+            handler: ([psa])=>safeArrayAt(wholeAddress(psa))?.dims ?? 0,
         },
         SafeArrayGetElemsize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([psa])=>safeArrayAt(psa >>> 0)?.elementBytes ?? 0,
+            handler: ([psa])=>safeArrayAt(wholeAddress(psa))?.elementBytes ?? 0,
         },
         SafeArrayGetUBound: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([psa, nDim, out])=>{
-                const array = safeArrayAt(psa >>> 0);
+                const array = safeArrayAt(wholeAddress(psa));
                 const bound = array?.bounds[array.dims - (nDim >>> 0)];
-                if (!array || (out >>> 0) === 0)
+                if (!array || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -3147,7 +4961,7 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(out >>> 0, bound.lower + bound.elements - 1);
+                guest.set32(wholeAddress(out), bound.lower + bound.elements - 1);
                 return S_OK;
             },
         },
@@ -3155,9 +4969,9 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([psa, nDim, out])=>{
-                const array = safeArrayAt(psa >>> 0);
+                const array = safeArrayAt(wholeAddress(psa));
                 const bound = array?.bounds[array.dims - (nDim >>> 0)];
-                if (!array || (out >>> 0) === 0)
+                if (!array || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -3165,7 +4979,7 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(out >>> 0, bound.lower);
+                guest.set32(wholeAddress(out), bound.lower);
                 return S_OK;
             },
         },
@@ -3182,12 +4996,17 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psa])=>{
-                const array = safeArrayAt(psa >>> 0);
+                const array = safeArrayAt(wholeAddress(psa));
                 if (!array)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32((psa >>> 0) + 8, array.locks + 1);
+                // The count stops at 65535 locks, refused past it.
+                if (array.locks >= 0xffff)
+                {
+                    return E_UNEXPECTED;
+                }
+                guest.set32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks + 1);
                 return S_OK;
             },
         },
@@ -3195,7 +5014,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psa])=>{
-                const array = safeArrayAt(psa >>> 0);
+                const array = safeArrayAt(wholeAddress(psa));
                 if (!array)
                 {
                     return E_INVALIDARG;
@@ -3204,7 +5023,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks - 1);
+                guest.set32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks - 1);
                 return S_OK;
             },
         },
@@ -3221,19 +5040,29 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psa, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                guest.setPtr(wholeAddress(out), 0);
+                // No array copies as none; one with no element size, as
+                // nothing to copy.
+                if (wholeAddress(psa) === 0)
+                {
+                    return S_OK;
+                }
+                if (guest.u32(wholeAddress(psa) + 4) === 0)
+                {
+                    return E_INVALIDARG;
+                }
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const copy = copyArray(psa >>> 0, owed);
+                const copy = copyArray(wholeAddress(psa), owed);
                 if (copy.hr !== S_OK)
                 {
                     return copy.hr;
                 }
-                writeU32(out >>> 0, copy.descriptor);
+                guest.setPtr(wholeAddress(out), copy.descriptor);
                 return settle(owed, thread, S_OK);
             },
         },
@@ -3250,28 +5079,41 @@ export function createAutomationFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([pdispparams, position, vtTarg, pvarResult, puArgErr])=>{
-                const params = pdispparams >>> 0;
-                if (params === 0 || (pvarResult >>> 0) === 0)
+                const params = wholeAddress(pdispparams);
+                if (params === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const args = readU32(params);
-                const count = readU32(params + 8);
-                const named = readU32(params + 12);
+                const args = guest.u32(params);
+                const count = guest.u32(params + 8);
+                const named = guest.u32(params + 12);
                 const positional = count - named;
                 if ((position >>> 0) >= positional)
                 {
                     return DISP_E_PARAMNOTFOUND;
                 }
-                const source = args + (count - 1 - (position >>> 0)) * VARIANT_BYTES;
+                // What a failure names is the argument's place in rgvarg,
+                // where the positional ones sit last and in reverse.
+                const slot = count - 1 - (position >>> 0);
+                if (wholeAddress(pvarResult) === 0)
+                {
+                    if (wholeAddress(puArgErr) !== 0)
+                    {
+                        guest.set32(wholeAddress(puArgErr), slot);
+                    }
+                    return E_INVALIDARG;
+                }
+                const source = args + slot * VARIANT_BYTES;
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const result = changeType(pvarResult >>> 0, source, 0, vtTarg & 0xffff, owed);
-                if (result !== S_OK && (puArgErr >>> 0) !== 0)
-                {
-                    writeU32(puArgErr >>> 0, position >>> 0);
-                }
-                return settle(owed, thread, result);
+                return whenAnswered(changeType(wholeAddress(pvarResult), source, 0, vtTarg & 0xffff,
+                    owed, 0, thread), result=>{
+                    if (result !== S_OK && wholeAddress(puArgErr) !== 0)
+                    {
+                        guest.set32(wholeAddress(puArgErr), slot);
+                    }
+                    return settle(owed, thread, result);
+                });
             },
         },
 
@@ -3286,12 +5128,13 @@ export function createAutomationFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([ptinfo, rgszNames, cNames, rgdispid])=>{
-                const typeInfo = typeLibraries?.typeInfoAt(ptinfo >>> 0) ?? null;
+                const typeInfo = typeLibraries?.typeInfoAt(wholeAddress(ptinfo)) ?? null;
                 if (!typeInfo)
                 {
                     return E_INVALIDARG;
                 }
-                return typeInfo.getIDsOfNames(rgszNames >>> 0, cNames >>> 0, rgdispid >>> 0);
+                return typeInfo.getIDsOfNames(wholeAddress(rgszNames), cNames >>> 0,
+                    wholeAddress(rgdispid));
             },
         },
 
@@ -3347,30 +5190,205 @@ export function createAutomationFunctions(host){
                     return DISP_E_BADVARTYPE;
                 }
                 /** @type {number[]} */
-                const pushed = (instance >>> 0) === 0 ? [] : [instance >>> 0];
+                const pushed = wholeAddress(instance) === 0 ? [] : [wholeAddress(instance)];
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    const type = readU16((types >>> 0) + index * 2);
-                    const variant = readU32((values >>> 0) + index * 4);
+                    const type = guest.u16(wholeAddress(types) + index * 2);
+                    const variant = guest.u32(wholeAddress(values) + index * 4);
                     const dwords = type === VT_VARIANT ? 4 : wide64.has(type) ? 2 : 1;
                     const from = type === VT_VARIANT ? variant : variant + VARIANT_VALUE;
                     for (let word = 0; word < dwords; word++)
                     {
-                        pushed.push(readU32(from + word * 4));
+                        pushed.push(guest.u32(from + word * 4));
                     }
                 }
-                const entry = (instance >>> 0) === 0
+                const entry = wholeAddress(instance) === 0
                     ? offset >>> 0
-                    : readU32(readU32(instance >>> 0) + (offset >>> 0));
+                    : guest.u32(guest.u32(wholeAddress(instance)) + (offset >>> 0));
                 return host.call(entry, pushed, host.callerThread?.()).then(answer=>{
-                    if ((result >>> 0) !== 0)
+                    if (wholeAddress(result) !== 0)
                     {
-                        host.fillMemory(result >>> 0, 0, 16);
-                        writeU16(result >>> 0, returned);
-                        writeU32((result >>> 0) + VARIANT_VALUE, answer >>> 0);
+                        guest.fill(wholeAddress(result), 0, 16);
+                        guest.set16(wholeAddress(result), returned);
+                        guest.set32(wholeAddress(result) + VARIANT_VALUE, answer >>> 0);
                     }
                     return S_OK;
                 });
+            },
+        },
+
+        /**
+         * HRESULT OleCreatePictureIndirect(LPPICTDESC lpPictDesc, REFIID riid,
+         *   BOOL fOwn, LPVOID *lplpvObj)
+         *
+         * A picture over a bitmap, an icon or a metafile the program has, or
+         * an uninitialised one for NULL (`picture.js`).
+         */
+        OleCreatePictureIndirect: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([desc, riid, own, out])=>{
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleCreatePictureIndirect: no COM to publish with',
+                        'loss');
+                    return E_NOTIMPL;
+                }
+                if ((riid >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                return pictures.create(wholeAddress(desc), guest.guid(riid >>> 0),
+                    (own >>> 0) !== 0,
+                    wholeAddress(out));
+            },
+        },
+
+        /**
+         * HRESULT OleLoadPicture(LPSTREAM lpstream, LONG lSize, BOOL fRunmode,
+         *   REFIID riid, LPVOID *lplpvObj)
+         *
+         * The picture an image in a stream makes, read through the stream's
+         * own Read from where it stands: lSize bytes, or all it has for 0.
+         */
+        OleLoadPicture: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([stream, size, , riid, out])=>{
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleLoadPicture: no COM to publish with', 'loss');
+                    return E_NOTIMPL;
+                }
+                if ((riid >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                return pictures.load(wholeAddress(stream), size | 0, guest.guid(riid >>> 0),
+                    wholeAddress(out));
+            },
+        },
+
+        /**
+         * HRESULT OleLoadPicturePath(LPOLESTR szURLorPath, LPUNKNOWN punkCaller,
+         *   DWORD dwReserved, OLE_COLOR clrReserved, REFIID riid, LPVOID *ppvRet)
+         *
+         * The picture in a file, named by its path or a file: URL. A file that
+         * is not there is INET_E_RESOURCE_NOT_FOUND, as URL monikers answer;
+         * a URL of another scheme has no network to come from here.
+         */
+        OleLoadPicturePath: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([path, , , , riid, out])=>{
+                // A call missing its name or its out pointer is refused whole,
+                // the out pointer left as it was.
+                if (wholeAddress(out) === 0 || wholeAddress(path) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.fill(wholeAddress(out), 0, 4);
+                return pictureAtPath(guest.wstr(wholeAddress(path), WHOLE),
+                    (riid >>> 0) === 0 ? IID_IPICTURE : guest.guid(riid >>> 0), wholeAddress(out));
+            },
+        },
+
+        /**
+         * HRESULT OleLoadPictureFile(VARIANT varFileName, LPDISPATCH *lplpdispPicture)
+         *
+         * OleLoadPicturePath's picture, as its IPictureDisp, for a name in a
+         * BSTR. The VARIANT comes by value, sixteen bytes of the stack.
+         */
+        OleLoadPictureFile: {
+            argBytes: 20,
+            structs: { 0: 4 },
+            /** @param {number[]} args */
+            handler: ([type, , name, , out])=>{
+                if (wholeAddress(out) === 0)
+                {
+                    return E_POINTER;
+                }
+                guest.fill(wholeAddress(out), 0, 4);
+                if ((type & 0xffff) !== VT_BSTR)
+                {
+                    return CTL_E_FILENOTFOUND;
+                }
+                // A file's path, never a URL: a name with a scheme is no path.
+                const file = wholeAddress(name) === 0 ? '' : guest.wstr(wholeAddress(name), WHOLE);
+                if (/^[a-z][a-z0-9+.-]+:\/\//i.test(file))
+                {
+                    return CTL_E_PATHFILEACCESSERROR;
+                }
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleLoadPictureFile: no COM to publish with', 'loss');
+                    return E_NOTIMPL;
+                }
+                const answer = (/** @type {Uint8Array | null} */ bytes)=>(bytes
+                    ? pictures.fromFile(bytes, IID_IPICTUREDISP,
+                        wholeAddress(out)) : CTL_E_FILENOTFOUND);
+                const bytes = file === '' ? null : fileBytes(file);
+                return bytes instanceof Promise ? bytes.then(answer, ()=>CTL_E_FILENOTFOUND)
+                    : answer(bytes);
+            },
+        },
+
+        /**
+         * HRESULT OleTranslateColor(OLE_COLOR clr, HPALETTE hpal, COLORREF *pcolorref)
+         *
+         * An OLE_COLOR made the COLORREF GDI draws with, by its high byte: an
+         * RGB value as it is (palette-relative with a palette), a palette
+         * index checked against the palette given, a palette-relative RGB as
+         * it is, and 0x80 a system colour index read through GetSysColor.
+         * Anything else, or an index the palette or the system colours do
+         * not have, is E_INVALIDARG. The result pointer may be NULL.
+         */
+        OleTranslateColor: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([color, palette, out])=>{
+                const clr = wholeAddress(color);
+                let answer = clr;
+                switch (clr >>> 24)
+                {
+                    case 0x00:
+                        answer = (palette >>> 0) !== 0 ? (0x02000000 | clr) >>> 0 : clr;
+                        break;
+                    case 0x01: {
+                        if ((palette >>> 0) !== 0)
+                        {
+                            const entry = host.heap.allocate(4);
+                            const found = entry === 0 ? 1 : Number(host.gdi32?.('GetPaletteEntries')
+                                ?.handler([palette, clr & 0xffff, 1, entry]) ?? 1);
+                            if (entry !== 0)
+                            {
+                                host.heap.free(entry);
+                            }
+                            if (found === 0)
+                            {
+                                return E_INVALIDARG;
+                            }
+                        }
+                        break;
+                    }
+                    case 0x02:
+                        break;
+                    case 0x80:
+                        if ((clr & 0xffff) > COLOR_MENUBAR)
+                        {
+                            return E_INVALIDARG;
+                        }
+                        answer = Number(host.user32?.('GetSysColor')?.handler([clr & 0xff]) ?? 0)
+                            >>> 0;
+                        break;
+                    default:
+                        return E_INVALIDARG;
+                }
+                if (wholeAddress(out) !== 0)
+                {
+                    guest.set32(wholeAddress(out), answer);
+                }
+                return S_OK;
             },
         },
 
@@ -3386,9 +5404,9 @@ export function createAutomationFunctions(host){
             /** @param {number[]} args */
             handler: ([, , out])=>{
                 report('OLE Automation', 'OleCreateFontIndirect: no IFont object is implemented');
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    guest.set32(wholeAddress(out), 0);
                 }
                 return E_NOTIMPL;
             },
@@ -3399,16 +5417,116 @@ export function createAutomationFunctions(host){
          *
          * A fresh, empty error object with one reference, the caller's.
          */
+        /**
+         * HRESULT CreateStdDispatch(IUnknown *punkOuter, void *pvThis,
+         *     ITypeInfo *ptinfo, IUnknown **ppunkStdDisp)
+         *
+         * The object, its type information and the out pointer are required.
+         */
+        CreateStdDispatch: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([outer, self, typeInfo, out])=>{
+                if (wholeAddress(out) === 0 || wholeAddress(self) === 0
+                    || wholeAddress(typeInfo) === 0)
+                {
+                    if (wholeAddress(out) !== 0)
+                    {
+                        guest.set32(wholeAddress(out), 0);
+                    }
+                    return E_INVALIDARG;
+                }
+                if (!stdDispatches)
+                {
+                    report('CreateStdDispatch', 'no guest calls to make, so no object');
+                    return E_NOTIMPL;
+                }
+                return stdDispatches.create(wholeAddress(outer), wholeAddress(self),
+                    wholeAddress(typeInfo))
+                    .then(pointer=>{
+                        guest.set32(wholeAddress(out), pointer);
+                        return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+                    });
+            },
+        },
+
+        /**
+         * HRESULT GetRecordInfoFromTypeInfo(ITypeInfo *pTypeInfo, IRecordInfo **ppRecInfo)
+         *
+         * An IRecordInfo for a record type this library described; anything
+         * but a record is an invalid argument.
+         */
+        GetRecordInfoFromTypeInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([typeInfo, out])=>{
+                if (wholeAddress(typeInfo) === 0 || wholeAddress(out) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                guest.set32(wholeAddress(out), 0);
+                const loaded = typeLibraries?.typeInfoAt(wholeAddress(typeInfo)) ?? null;
+                if (!loaded || !recordInfos)
+                {
+                    report('GetRecordInfoFromTypeInfo', 'only a type this library loaded is'
+                        + ' described as a record');
+                    return E_NOTIMPL;
+                }
+                if (loaded.description.kind !== TKIND_RECORD)
+                {
+                    return E_INVALIDARG;
+                }
+                return recordInfos.create(loaded.library, loaded.description,
+                    wholeAddress(typeInfo))
+                    .then(pointer=>{
+                        guest.set32(wholeAddress(out), pointer);
+                        return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+                    });
+            },
+        },
+
+        /**
+         * void ClearCustData(CUSTDATA *pCustData)
+         *
+         * Each item's variant cleared, the items' block given back to the
+         * task allocator it came from, and both fields zeroed.
+         */
+        ClearCustData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pcust])=>{
+                const custom = wholeAddress(pcust);
+                if (custom === 0)
+                {
+                    return 0;
+                }
+                const count = guest.u32(custom);
+                const items = guest.u32(custom + 4);
+                const thread = host.callerThread?.();
+                const owed = nothingOwed();
+                if (items !== 0)
+                {
+                    for (let index = 0; index < count; index++)
+                    {
+                        clear(items + index * 32 + 16, owed);
+                    }
+                    host.heap.free(items);
+                }
+                guest.fill(custom, 0, 8);
+                return settle(owed, thread, 0);
+            },
+        },
+
         CreateErrorInfo: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const pointer = errorInfos?.create() ?? 0;
-                writeU32(out >>> 0, pointer);
+                guest.set32(wholeAddress(out), pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -3418,198 +5536,314 @@ export function createAutomationFunctions(host){
 
 /** @param {string} char */
 const isWhite = char=>char === ' ' || char === '\t' || char === '\n' || char === '\r'
-    || char === '\v' || char === '\f';
+    || char === '\v' || char === '\f' || char === ' ';
 
 /**
  * A number string pulled apart the way VarParseNumFromStr does, in the
- * invariant spelling: sign, digits, thousands commas, a '.' and an exponent,
- * each only where `allowed` lets it in. The digits come back without leading
- * or trailing zeros (those move into the power of ten), at most `capacity` of
- * them, INEXACT set when a dropped one was not zero.
+ * English spelling, each part only where `allowed` lets it in: white space,
+ * a sign, '$' and an opening parenthesis in front in any order; then &H or
+ * &O and digits of that base, or decimal digits with ',' after the first
+ * as thousands, a '.' and an exponent; then white space, a sign, '$' and the
+ * closing parenthesis behind.
+ *
+ * Leading zeros are dropped and trailing ones moved into the power of ten;
+ * `count` is what is left, at most `capacity` of it, INEXACT set when a
+ * dropped digit was not zero. What `written` holds is the digits as read,
+ * trailing zeros of the whole part included -- Windows writes those into
+ * the caller's buffer though it does not count them -- but not a fraction
+ * of zeros alone. A hexadecimal or octal number keeps all its digits.
  *
  * @param {string} text @param {number} allowed @param {number} capacity
- * @returns {{ digits: number[], flags: number, used: number, pwr10: number } | null}
- *   null when the string holds no number at all.
+ * @returns {{ written: number[], count: number, flags: number, used: number, pwr10: number,
+ *     baseShift: number } | null}  null when the string holds no number.
  */
-export function parseNumberText(text, allowed, capacity){
+function parseNumberText(text, allowed, capacity){
     let at = 0;
     let flags = 0;
-    if ((allowed & NUMPRS_LEADING_WHITE) !== 0)
-    {
-        while (at < text.length && isWhite(text[at]))
-        {
-            at++;
-            flags |= NUMPRS_LEADING_WHITE;
-        }
-    }
-    if (text[at] === '+' && (allowed & NUMPRS_LEADING_PLUS) !== 0)
-    {
-        at++;
-        flags |= NUMPRS_LEADING_PLUS;
-    }
-    else if (text[at] === '-' && (allowed & NUMPRS_LEADING_MINUS) !== 0)
-    {
-        at++;
-        flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
-    }
-    let whole = '';
-    let fraction = '';
-    let inFraction = false;
-    for (; at < text.length; at++)
+    const has = (/** @type {number} */ flag)=>(allowed & flag) !== 0;
+    for (;;)
     {
         const char = text[at];
-        if (char >= '0' && char <= '9')
+        if (has(NUMPRS_LEADING_WHITE) && isWhite(char))
         {
-            if (inFraction)
-            {
-                fraction += char;
-            }
-            else
-            {
-                whole += char;
-            }
+            flags |= NUMPRS_LEADING_WHITE;
+            at++;
         }
-        else if (char === '.' && !inFraction && (allowed & NUMPRS_DECIMAL) !== 0)
+        else if (char === '+' && has(NUMPRS_LEADING_PLUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS)) === 0)
         {
-            inFraction = true;
-            flags |= NUMPRS_DECIMAL;
+            flags |= NUMPRS_LEADING_PLUS;
+            at++;
         }
-        else if (char === ',' && !inFraction && (allowed & NUMPRS_THOUSANDS) !== 0)
+        else if (char === '-' && has(NUMPRS_LEADING_MINUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS)) === 0)
         {
-            flags |= NUMPRS_THOUSANDS;
+            flags |= NUMPRS_LEADING_MINUS | NUMPRS_NEG;
+            at++;
+        }
+        else if (char === '$' && has(NUMPRS_CURRENCY) && (flags & NUMPRS_CURRENCY) === 0)
+        {
+            flags |= NUMPRS_CURRENCY;
+            at++;
+        }
+        else if (char === '(' && has(NUMPRS_PARENS) && (flags & NUMPRS_PARENS) === 0)
+        {
+            flags |= NUMPRS_PARENS | NUMPRS_NEG;
+            at++;
         }
         else
         {
             break;
         }
     }
-    if (whole === '' && fraction === '')
-    {
-        return null;
-    }
-    let exponent = 0;
-    if ((text[at] === 'e' || text[at] === 'E') && (allowed & NUMPRS_EXPONENT) !== 0)
-    {
-        // An 'e' with no digits after it is not an exponent, and is left unread.
-        const match = /^[eE]([+-]?)(\d+)/.exec(text.slice(at));
-        if (match)
-        {
-            exponent = Number(match[2]) * (match[1] === '-' ? -1 : 1);
-            at += match[0].length;
-            flags |= NUMPRS_EXPONENT;
-        }
-    }
-    if ((allowed & NUMPRS_TRAILING_WHITE) !== 0)
-    {
-        while (at < text.length && isWhite(text[at]))
-        {
-            at++;
-            flags |= NUMPRS_TRAILING_WHITE;
-        }
-    }
 
-    let all = (whole + fraction).replace(/^0+/, '');
-    let pwr10 = exponent - fraction.length;
-    const significant = all.replace(/0+$/, '');
-    pwr10 += all.length - significant.length;
-    all = significant;
-    if (all === '')
+    /** @type {number[]} */
+    let written;
+    let count;
+    let pwr10 = 0;
+    let baseShift = 0;
+    const prefix = /^&([hHoO])/.exec(text.slice(at));
+    // A currency amount is never hexadecimal or octal.
+    if (prefix && has(NUMPRS_HEX_OCT) && (flags & NUMPRS_CURRENCY) === 0)
     {
-        return { digits: [0], flags, used: at, pwr10: 0 };
-    }
-    const kept = Math.max(capacity, 0);
-    if (all.length > kept)
-    {
-        if (/[1-9]/.test(all.slice(kept)))
+        const hex = prefix[1].toLowerCase() === 'h';
+        baseShift = hex ? 4 : 3;
+        at += 2;
+        /** @type {number[]} */
+        const digits = [];
+        let seen = false;
+        for (; at < text.length; at++)
+        {
+            const value = parseInt(text[at], hex ? 16 : 8);
+            if (Number.isNaN(value) || (!hex && value > 7))
+            {
+                break;
+            }
+            seen = true;
+            if (value !== 0 || digits.length > 0)
+            {
+                digits.push(value);
+            }
+        }
+        if (!seen)
+        {
+            return null;
+        }
+        flags |= NUMPRS_HEX_OCT;
+        written = digits.length === 0 ? [0] : digits.slice(0, Math.max(capacity, 0));
+        count = written.length;
+        if (digits.length > count && digits.slice(count).some(digit=>digit !== 0))
         {
             flags |= NUMPRS_INEXACT;
         }
-        pwr10 += all.length - kept;
-        all = all.slice(0, kept);
     }
-    return { digits: [...all].map(Number), flags, used: at, pwr10 };
+    else
+    {
+        let whole = '';
+        let fraction = '';
+        for (; at < text.length; at++)
+        {
+            const char = text[at];
+            if (char >= '0' && char <= '9')
+            {
+                whole += char;
+            }
+            else if (char === ',' && has(NUMPRS_THOUSANDS) && whole !== '')
+            {
+                flags |= NUMPRS_THOUSANDS;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (text[at] === '.' && has(NUMPRS_DECIMAL))
+        {
+            let end = at + 1;
+            while (end < text.length && text[end] >= '0' && text[end] <= '9')
+            {
+                end++;
+            }
+            if (whole !== '' || end > at + 1)
+            {
+                fraction = text.slice(at + 1, end);
+                flags |= NUMPRS_DECIMAL;
+                at = end;
+            }
+        }
+        if (whole === '' && fraction === '')
+        {
+            return null;
+        }
+        let exponent = 0;
+        const power = has(NUMPRS_EXPONENT) ? /^[eE]([+-]?)(\d+)/.exec(text.slice(at)) : null;
+        if (power)
+        {
+            exponent = Number(power[2]) * (power[1] === '-' ? -1 : 1);
+            at += power[0].length;
+            flags |= NUMPRS_EXPONENT;
+        }
+        const all = whole + fraction;
+        const significant = all.replace(/^0+/, '');
+        pwr10 = exponent - fraction.length;
+        if (significant === '')
+        {
+            written = [0];
+            count = 1;
+        }
+        else
+        {
+            const trimmed = significant.replace(/0+$/, '');
+            const kept = Math.max(capacity, 0);
+            const shown = /^0*$/.test(fraction) ? significant.slice(0,
+                significant.length - fraction.length) || trimmed : significant;
+            written = [...shown.slice(0, kept)].map(Number);
+            count = Math.min(trimmed.length, kept);
+            pwr10 += significant.length - count;
+            if (/[1-9]/.test(trimmed.slice(kept)))
+            {
+                flags |= NUMPRS_INEXACT;
+            }
+        }
+    }
+
+    let closed = false;
+    for (;;)
+    {
+        const char = text[at];
+        if (has(NUMPRS_TRAILING_WHITE) && isWhite(char))
+        {
+            flags |= NUMPRS_TRAILING_WHITE;
+            at++;
+        }
+        else if (char === '+' && has(NUMPRS_TRAILING_PLUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS | NUMPRS_TRAILING_PLUS
+                | NUMPRS_TRAILING_MINUS)) === 0)
+        {
+            flags |= NUMPRS_TRAILING_PLUS;
+            at++;
+        }
+        else if (char === '-' && has(NUMPRS_TRAILING_MINUS)
+            && (flags & (NUMPRS_LEADING_PLUS | NUMPRS_LEADING_MINUS | NUMPRS_TRAILING_PLUS
+                | NUMPRS_TRAILING_MINUS)) === 0)
+        {
+            flags |= NUMPRS_TRAILING_MINUS | NUMPRS_NEG;
+            at++;
+        }
+        else if (char === '$' && has(NUMPRS_CURRENCY) && baseShift === 0)
+        {
+            flags |= NUMPRS_CURRENCY;
+            at++;
+        }
+        else if (char === ')' && (flags & NUMPRS_PARENS) !== 0 && !closed)
+        {
+            closed = true;
+            at++;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if ((flags & NUMPRS_PARENS) !== 0 && !closed)
+    {
+        return null;
+    }
+    return { written, count, flags, used: at, pwr10, baseShift };
 }
 
 /**
  * The VARIANT VarNumFromParseNum makes of parsed digits: the first type in
  * `vtBits` (a mask of 1 << VT_*) that holds the value, integers smallest
- * first, then R4 for at most seven significant digits, R8, CY. A fraction
- * given only integer types is rounded to one. null when nothing holds it;
- * VT_DECIMAL is never chosen, since this build does not carry it.
+ * first, then R4 for at most seven significant digits, R8, CY, DECIMAL. A
+ * fraction given only integer types is rounded to one, a half to the even
+ * neighbour. null when nothing holds it.
  *
  * @param {number[]} digits @param {number} pwr10 @param {number} baseShift
  * @param {boolean} negative @param {number} vtBits
- * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes
+ * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes, or
+ *     a DECIMAL's sixteen
  */
-export function numberVariant(digits, pwr10, baseShift, negative, vtBits){
-    let magnitude;
+function numberVariant(digits, pwr10, baseShift, negative, vtBits){
+    const bytes = new Uint8Array(16);
+    const data = new DataView(bytes.buffer);
+    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
+    /** @type {[number, number, boolean][]} each integral type, its bits, whether signed */
+    const integers = [[VT_I1, 8, true], [VT_UI1, 8, false], [VT_I2, 16, true],
+        [VT_UI2, 16, false], [VT_I4, 32, true], [VT_UI4, 32, false], [VT_I8, 64, true],
+        [VT_UI8, 64, false]];
+    /** @param {number} type @param {number} width @param {boolean} signed @param {bigint} value */
+    const integer = (type, width, signed, value)=>{
+        if (signed)
+        {
+            data.setBigInt64(0, BigInt.asIntN(width, value), true);
+        }
+        else
+        {
+            data.setBigUint64(0, BigInt.asUintN(width, value), true);
+        }
+        return { type, bytes: bytes.subarray(0, 8) };
+    };
+    /** @type {import('./varmath.js').Exact} */
+    let exact;
     if (baseShift !== 0)
     {
-        magnitude = digits.reduce((sum, digit)=>sum * (1 << baseShift) + digit, 0);
+        // Hex and octal digits are bits: the first type wide enough holds
+        // them as they are, so &H82 is the I1 -126 and &H7F the I1 127.
+        const bits = digits.reduce((sum, digit)=>(sum << BigInt(baseShift)) + BigInt(digit), 0n);
+        const fitting = integers.find(([type, width])=>allows(type) && bits < 1n << BigInt(width));
+        if (fitting)
+        {
+            return integer(fitting[0], fitting[1], fitting[2], bits);
+        }
+        exact = { value: bits, scale: 0 };
     }
     else
     {
-        magnitude = Number(`${digits.join('') || '0'}e${pwr10}`);
+        const magnitude = BigInt(digits.join('') || '0');
+        const signed = negative ? -magnitude : magnitude;
+        exact = pwr10 >= 0 ? { value: signed * 10n ** BigInt(pwr10), scale: 0 }
+            : { value: signed, scale: -pwr10 };
     }
-    const value = negative ? -magnitude : magnitude;
-    const bytes = new Uint8Array(8);
-    const data = new DataView(bytes.buffer);
-    const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;
-    const integral = Number.isInteger(value);
-    const floats = allows(VT_R4) || allows(VT_R8) || allows(VT_CY);
-    // Rounding to an integer happens only when no type could keep the fraction.
-    const whole = integral || floats ? value : Math.sign(value) * Math.round(Math.abs(value));
-    if (Number.isInteger(whole))
+    const fractional = exact.scale > 0 && round(exact, 0).value * 10n ** BigInt(exact.scale)
+        !== exact.value;
+    const keepsFraction = allows(VT_R4) || allows(VT_R8) || allows(VT_CY) || allows(VT_DECIMAL);
+    // Rounding to a whole number happens only when no type could keep the fraction.
+    if (!fractional || !keepsFraction)
     {
-        /** @type {[number, number, number, (n: number) => void][]} */
-        const integers = [
-            [VT_I1, -128, 127, n=>data.setInt8(0, n)],
-            [VT_UI1, 0, 255, n=>data.setUint8(0, n)],
-            [VT_I2, -32768, 32767, n=>data.setInt16(0, n, true)],
-            [VT_UI2, 0, 65535, n=>data.setUint16(0, n, true)],
-            [VT_I4, -2147483648, 2147483647, n=>data.setInt32(0, n, true)],
-            [VT_UI4, 0, 4294967295, n=>data.setUint32(0, n, true)],
-        ];
-        for (const [type, low, high, write] of integers)
+        const whole = round(exact, 0).value;
+        const fitting = integers.find(([type, width, signed])=>allows(type)
+            && (signed ? whole >= -(1n << BigInt(width - 1)) && whole < 1n << BigInt(width - 1)
+                : whole >= 0n && whole < 1n << BigInt(width)));
+        if (fitting)
         {
-            if (allows(type) && whole >= low && whole <= high)
-            {
-                write(whole);
-                return { type, bytes };
-            }
-        }
-        const big = Number.isSafeInteger(whole)
-            ? BigInt(whole)
-            : (baseShift === 0 && pwr10 >= 0
-                ? BigInt(digits.join('')) * 10n ** BigInt(pwr10) * (negative ? -1n : 1n)
-                : null);
-        if (big !== null && allows(VT_I8) && big >= -(2n ** 63n) && big < 2n ** 63n)
-        {
-            data.setBigInt64(0, big, true);
-            return { type: VT_I8, bytes };
-        }
-        if (big !== null && allows(VT_UI8) && big >= 0n && big < 2n ** 64n)
-        {
-            data.setBigUint64(0, big, true);
-            return { type: VT_UI8, bytes };
+            return integer(fitting[0], fitting[1], fitting[2], whole);
         }
     }
-    const significant = digits.length;
-    if (allows(VT_R4) && significant <= 7 && Math.abs(value) <= 3.4028234663852886e38)
+    const value = toNumber(exact);
+    if (allows(VT_R4) && digits.length <= 7 && Math.abs(value) <= 3.4028234663852886e38)
     {
         data.setFloat32(0, value, true);
-        return { type: VT_R4, bytes };
+        return { type: VT_R4, bytes: bytes.subarray(0, 8) };
     }
     if (allows(VT_R8) && Number.isFinite(value))
     {
         data.setFloat64(0, value, true);
-        return { type: VT_R8, bytes };
+        return { type: VT_R8, bytes: bytes.subarray(0, 8) };
     }
-    const units = Math.round(value * 10000);
-    if (allows(VT_CY) && Number.isSafeInteger(units))
+    const units = round(exact, 4);
+    const cy = units.value * 10n ** BigInt(4 - units.scale);
+    if (allows(VT_CY) && cy >= -(1n << 63n) && cy < 1n << 63n)
     {
-        data.setBigInt64(0, BigInt(units), true);
-        return { type: VT_CY, bytes };
+        data.setBigInt64(0, cy, true);
+        return { type: VT_CY, bytes: bytes.subarray(0, 8) };
+    }
+    const decimal = allows(VT_DECIMAL) ? fitDecimal(exact) : null;
+    const fourteen = decimal && decimalBytes(decimal);
+    if (fourteen)
+    {
+        bytes.set(fourteen, 2);
+        return { type: VT_DECIMAL, bytes };
     }
     return null;
 }
@@ -3643,11 +5877,6 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     12: 'VariantChangeType',
     13: 'VariantTimeToDosDateTime',
     14: 'DosDateTimeToVariantTime',
-    35: 'GetActiveObject',
-    146: 'DispCallFunc',
-    147: 'VariantChangeTypeEx',
-    149: 'SysStringByteLen',
-    150: 'SysAllocStringByteLen',
     15: 'SafeArrayCreate',
     16: 'SafeArrayDestroy',
     17: 'SafeArrayGetDim',
@@ -3663,26 +5892,120 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     27: 'SafeArrayCopy',
     28: 'DispGetParam',
     29: 'DispGetIDsOfNames',
+    32: 'CreateStdDispatch',
+    35: 'GetActiveObject',
+    36: 'SafeArrayAllocDescriptor',
+    37: 'SafeArrayAllocData',
+    38: 'SafeArrayDestroyDescriptor',
+    39: 'SafeArrayDestroyData',
     40: 'SafeArrayRedim',
+    41: 'SafeArrayAllocDescriptorEx',
+    42: 'SafeArrayCreateEx',
+    43: 'SafeArrayCreateVectorEx',
+    44: 'SafeArraySetRecordInfo',
+    45: 'SafeArrayGetRecordInfo',
     46: 'VarParseNumFromStr',
     47: 'VarNumFromParseNum',
+    48: 'VarI2FromUI1',
+    49: 'VarI2FromI4',
+    50: 'VarI2FromR4',
+    51: 'VarI2FromR8',
+    52: 'VarI2FromCy',
+    53: 'VarI2FromDate',
     54: 'VarI2FromStr',
+    55: 'VarI2FromDisp',
+    56: 'VarI2FromBool',
+    57: 'SafeArraySetIID',
+    58: 'VarI4FromUI1',
+    59: 'VarI4FromI2',
+    60: 'VarI4FromR4',
+    61: 'VarI4FromR8',
+    62: 'VarI4FromCy',
+    63: 'VarI4FromDate',
     64: 'VarI4FromStr',
+    65: 'VarI4FromDisp',
+    66: 'VarI4FromBool',
+    67: 'SafeArrayGetIID',
+    68: 'VarR4FromUI1',
+    69: 'VarR4FromI2',
+    70: 'VarR4FromI4',
+    71: 'VarR4FromR8',
+    72: 'VarR4FromCy',
+    73: 'VarR4FromDate',
     74: 'VarR4FromStr',
+    75: 'VarR4FromDisp',
+    76: 'VarR4FromBool',
+    77: 'SafeArrayGetVartype',
+    78: 'VarR8FromUI1',
+    79: 'VarR8FromI2',
+    80: 'VarR8FromI4',
+    81: 'VarR8FromR4',
     82: 'VarR8FromCy',
+    83: 'VarR8FromDate',
     84: 'VarR8FromStr',
+    85: 'VarR8FromDisp',
+    86: 'VarR8FromBool',
+    87: 'VarFormat',
+    88: 'VarDateFromUI1',
+    89: 'VarDateFromI2',
+    90: 'VarDateFromI4',
+    91: 'VarDateFromR4',
+    92: 'VarDateFromR8',
+    93: 'VarDateFromCy',
     94: 'VarDateFromStr',
+    95: 'VarDateFromDisp',
+    96: 'VarDateFromBool',
+    97: 'VarFormatDateTime',
+    98: 'VarCyFromUI1',
+    99: 'VarCyFromI2',
     100: 'VarCyFromI4',
+    101: 'VarCyFromR4',
+    102: 'VarCyFromR8',
+    103: 'VarCyFromDate',
     104: 'VarCyFromStr',
+    105: 'VarCyFromDisp',
+    106: 'VarCyFromBool',
+    107: 'VarFormatNumber',
+    108: 'VarBstrFromUI1',
+    109: 'VarBstrFromI2',
+    110: 'VarBstrFromI4',
+    111: 'VarBstrFromR4',
+    112: 'VarBstrFromR8',
     113: 'VarBstrFromCy',
     114: 'VarBstrFromDate',
     116: 'VarBstrFromBool',
+    117: 'VarFormatPercent',
+    118: 'VarBoolFromUI1',
+    119: 'VarBoolFromI2',
+    120: 'VarBoolFromI4',
+    121: 'VarBoolFromR4',
+    122: 'VarBoolFromR8',
+    123: 'VarBoolFromDate',
+    124: 'VarBoolFromCy',
     125: 'VarBoolFromStr',
+    126: 'VarBoolFromDisp',
+    127: 'VarFormatCurrency',
+    128: 'VarWeekdayName',
+    129: 'VarMonthName',
+    130: 'VarUI1FromI2',
+    131: 'VarUI1FromI4',
+    132: 'VarUI1FromR4',
+    133: 'VarUI1FromR8',
+    134: 'VarUI1FromCy',
+    135: 'VarUI1FromDate',
     136: 'VarUI1FromStr',
+    137: 'VarUI1FromDisp',
+    138: 'VarUI1FromBool',
+    139: 'VarFormatFromTokens',
+    140: 'VarTokenizeFormatString',
     141: 'VarAdd',
     142: 'VarAnd',
     143: 'VarDiv',
+    146: 'DispCallFunc',
+    147: 'VariantChangeTypeEx',
     148: 'SafeArrayPtrOfIndex',
+    149: 'SysStringByteLen',
+    150: 'SysAllocStringByteLen',
     153: 'VarIdiv',
     155: 'VarMod',
     156: 'VarMul',
@@ -3692,23 +6015,116 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',
     167: 'VarXor',
+    171: 'ClearCustData',
     173: 'VarNeg',
     174: 'VarNot',
     175: 'VarRound',
     176: 'VarCmp',
+    177: 'VarDecAdd',
+    178: 'VarDecDiv',
+    179: 'VarDecMul',
+    181: 'VarDecSub',
+    182: 'VarDecAbs',
     183: 'LoadTypeLibEx',
     184: 'SystemTimeToVariantTime',
     185: 'VariantTimeToSystemTime',
     186: 'UnRegisterTypeLib',
+    187: 'VarDecFix',
+    188: 'VarDecInt',
+    189: 'VarDecNeg',
+    190: 'VarDecFromUI1',
+    191: 'VarDecFromI2',
     192: 'VarDecFromI4',
+    193: 'VarDecFromR4',
     194: 'VarDecFromR8',
+    195: 'VarDecFromDate',
+    196: 'VarDecFromCy',
+    197: 'VarDecFromStr',
+    198: 'VarDecFromDisp',
+    199: 'VarDecFromBool',
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
+    203: 'VarDecRound',
+    204: 'VarDecCmp',
+    205: 'VarI2FromI1',
+    206: 'VarI2FromUI2',
+    207: 'VarI2FromUI4',
+    208: 'VarI2FromDec',
+    209: 'VarI4FromI1',
+    210: 'VarI4FromUI2',
+    211: 'VarI4FromUI4',
+    212: 'VarI4FromDec',
+    213: 'VarR4FromI1',
+    214: 'VarR4FromUI2',
+    215: 'VarR4FromUI4',
+    216: 'VarR4FromDec',
+    217: 'VarR8FromI1',
+    218: 'VarR8FromUI2',
+    219: 'VarR8FromUI4',
     220: 'VarR8FromDec',
+    221: 'VarDateFromI1',
+    222: 'VarDateFromUI2',
+    223: 'VarDateFromUI4',
+    224: 'VarDateFromDec',
+    225: 'VarCyFromI1',
+    226: 'VarCyFromUI2',
+    227: 'VarCyFromUI4',
+    228: 'VarCyFromDec',
+    229: 'VarBstrFromI1',
+    230: 'VarBstrFromUI2',
+    231: 'VarBstrFromUI4',
+    232: 'VarBstrFromDec',
+    233: 'VarBoolFromI1',
+    234: 'VarBoolFromUI2',
+    235: 'VarBoolFromUI4',
+    236: 'VarBoolFromDec',
+    237: 'VarUI1FromI1',
+    238: 'VarUI1FromUI2',
+    239: 'VarUI1FromUI4',
+    240: 'VarUI1FromDec',
+    241: 'VarDecFromI1',
+    242: 'VarDecFromUI2',
+    243: 'VarDecFromUI4',
+    244: 'VarI1FromUI1',
+    245: 'VarI1FromI2',
+    246: 'VarI1FromI4',
+    247: 'VarI1FromR4',
+    248: 'VarI1FromR8',
+    249: 'VarI1FromDate',
+    250: 'VarI1FromCy',
     251: 'VarI1FromStr',
+    252: 'VarI1FromDisp',
+    253: 'VarI1FromBool',
+    254: 'VarI1FromUI2',
+    255: 'VarI1FromUI4',
+    256: 'VarI1FromDec',
+    257: 'VarUI2FromUI1',
+    258: 'VarUI2FromI2',
+    259: 'VarUI2FromI4',
+    260: 'VarUI2FromR4',
+    261: 'VarUI2FromR8',
+    262: 'VarUI2FromDate',
+    263: 'VarUI2FromCy',
     264: 'VarUI2FromStr',
+    265: 'VarUI2FromDisp',
+    266: 'VarUI2FromBool',
+    267: 'VarUI2FromI1',
+    268: 'VarUI2FromUI4',
+    269: 'VarUI2FromDec',
+    270: 'VarUI4FromUI1',
+    271: 'VarUI4FromI2',
+    272: 'VarUI4FromI4',
+    273: 'VarUI4FromR4',
+    274: 'VarUI4FromR8',
+    275: 'VarUI4FromDate',
+    276: 'VarUI4FromCy',
     277: 'VarUI4FromStr',
+    278: 'VarUI4FromDisp',
+    279: 'VarUI4FromBool',
+    280: 'VarUI4FromI1',
+    281: 'VarUI4FromUI2',
+    282: 'VarUI4FromDec',
     283: 'BSTR_UserSize',
     284: 'BSTR_UserMarshal',
     285: 'BSTR_UserUnmarshal',
@@ -3721,11 +6137,106 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     292: 'LPSAFEARRAY_UserMarshal',
     293: 'LPSAFEARRAY_UserUnmarshal',
     294: 'LPSAFEARRAY_UserFree',
+    298: 'VarDecCmpR8',
+    299: 'VarCyAdd',
+    303: 'VarCyMul',
+    304: 'VarCyMulI4',
+    305: 'VarCySub',
+    306: 'VarCyAbs',
+    307: 'VarCyFix',
+    308: 'VarCyInt',
+    309: 'VarCyNeg',
+    310: 'VarCyRound',
+    311: 'VarCyCmp',
+    312: 'VarCyCmpR8',
     313: 'VarBstrCat',
     314: 'VarBstrCmp',
+    317: 'VarR8Round',
     318: 'VarCat',
+    323: 'GetRecordInfoFromTypeInfo',
+    329: 'VarCyMulI8',
     330: 'VarDateFromUdate',
     331: 'VarUdateFromDate',
+    332: 'GetAltMonthNames',
+    333: 'VarI8FromUI1',
+    334: 'VarI8FromI2',
+    335: 'VarI8FromR4',
+    336: 'VarI8FromR8',
+    337: 'VarI8FromCy',
+    338: 'VarI8FromDate',
+    339: 'VarI8FromStr',
+    340: 'VarI8FromDisp',
+    341: 'VarI8FromBool',
+    342: 'VarI8FromI1',
+    343: 'VarI8FromUI2',
+    344: 'VarI8FromUI4',
+    345: 'VarI8FromDec',
+    346: 'VarI2FromI8',
+    347: 'VarI2FromUI8',
+    348: 'VarI4FromI8',
+    349: 'VarI4FromUI8',
+    360: 'VarR4FromI8',
+    361: 'VarR4FromUI8',
+    362: 'VarR8FromI8',
+    363: 'VarR8FromUI8',
+    364: 'VarDateFromI8',
+    365: 'VarDateFromUI8',
+    366: 'VarCyFromI8',
+    367: 'VarCyFromUI8',
+    368: 'VarBstrFromI8',
+    369: 'VarBstrFromUI8',
+    370: 'VarBoolFromI8',
+    371: 'VarBoolFromUI8',
+    372: 'VarUI1FromI8',
+    373: 'VarUI1FromUI8',
+    374: 'VarDecFromI8',
+    375: 'VarDecFromUI8',
+    376: 'VarI1FromI8',
+    377: 'VarI1FromUI8',
+    378: 'VarUI2FromI8',
+    379: 'VarUI2FromUI8',
+    411: 'SafeArrayCreateVector',
+    412: 'SafeArrayCopyData',
     417: 'OleCreatePropertyFrame',
+    418: 'OleLoadPicture',
+    419: 'OleCreatePictureIndirect',
     420: 'OleCreateFontIndirect',
+    421: 'OleTranslateColor',
+    422: 'OleLoadPictureFile',
+    424: 'OleLoadPicturePath',
+    425: 'VarUI4FromI8',
+    426: 'VarUI4FromUI8',
+    427: 'VarI8FromUI8',
+    428: 'VarUI8FromI8',
+    429: 'VarUI8FromUI1',
+    430: 'VarUI8FromI2',
+    431: 'VarUI8FromR4',
+    432: 'VarUI8FromR8',
+    433: 'VarUI8FromCy',
+    434: 'VarUI8FromDate',
+    435: 'VarUI8FromStr',
+    436: 'VarUI8FromDisp',
+    437: 'VarUI8FromBool',
+    438: 'VarUI8FromI1',
+    439: 'VarUI8FromUI2',
+    440: 'VarUI8FromUI4',
+    441: 'VarUI8FromDec',
+});
+
+/**
+ * olepro32.dll's exports, by the numbers it has them under: a forwarder to
+ * oleaut32 and nothing else (Wine's olepro32.spec), which an MFC application
+ * links its pictures, fonts, colours and property pages through, by number.
+ * 248 (OleIconToCursor) and 249 (OleCreatePropertyFrameIndirect) are left out
+ * while oleaut32 has neither: an ordinal pointing at nothing binds and jumps
+ * into nowhere.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const OLEPRO32_ORDINALS = Object.freeze({
+    250: 'OleCreatePropertyFrame',
+    251: 'OleLoadPicture',
+    252: 'OleCreatePictureIndirect',
+    253: 'OleCreateFontIndirect',
+    254: 'OleTranslateColor',
 });

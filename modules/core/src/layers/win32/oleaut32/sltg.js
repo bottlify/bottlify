@@ -22,12 +22,12 @@
  * this format become the description's hreftypes.
  */
 
-import { GUID_SIZE, formatGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { parseTypeLib } from './typelib.js';
 
 /** 'SLTG', as the first four bytes read as a little-endian word. */
-export const SLTG_MAGIC = 0x47544c53;
+const SLTG_MAGIC = 0x47544c53;
 
 /**
  * A type library in either format: SLTG when it says so, MSFT otherwise.
@@ -113,7 +113,7 @@ export const STDOLE_TYPES = Object.freeze([
  * @returns {import('./typelib.js').TypeLibrary}
  * @throws {Error} when the bytes are not an SLTG library, or do not hang together.
  */
-export function parseSltg(bytes){
+function parseSltg(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (bytes.length < HEADER_BYTES || view.getUint32(0, true) !== SLTG_MAGIC)
     {

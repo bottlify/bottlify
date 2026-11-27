@@ -423,13 +423,55 @@ export function textOfDate(date, flags){
 }
 
 /**
- * A currency value as VarBstrFromCy spells it in English: as many places as
+ * An exact number as VarBstrFromDec spells it in English: as many places as
  * it needs and no more, no thousands separators, '.' before the fraction.
+ *
+ * @param {import('./varmath.js').Exact} exact
+ */
+export function textOfExact({ value, scale }){
+    const magnitude = value < 0n ? -value : value;
+    const unit = 10n ** BigInt(scale);
+    const fraction = scale === 0 ? ''
+        : String(magnitude % unit).padStart(scale, '0').replace(/0+$/, '');
+    return `${value < 0n ? '-' : ''}${magnitude / unit}${fraction === '' ? '' : `.${fraction}`}`;
+}
+
+/**
+ * A currency value as VarBstrFromCy spells it in English.
  *
  * @param {bigint} units  ten-thousandths
  */
-export function textOfCurrency(units){
-    const magnitude = units < 0n ? -units : units;
-    const fraction = String(magnitude % 10000n).padStart(4, '0').replace(/0+$/, '');
-    return `${units < 0n ? '-' : ''}${magnitude / 10000n}${fraction === '' ? '' : `.${fraction}`}`;
+export const textOfCurrency = units=>textOfExact({ value: units, scale: 4 });
+
+/**
+ * A float or a double as VarBstrFromR4 and VarBstrFromR8 spell it in
+ * English: rounded to `digits` significant digits (7 for a float, 15 for a
+ * double) with no trailing zeros, written out in full while its exponent is
+ * below that count and no smaller than -11, and as 1.234E+16 or 5.6789E-12
+ * past those.
+ *
+ * @param {number} number @param {number} digits
+ */
+export function textOfReal(number, digits){
+    if (number === 0 || !Number.isFinite(number))
+    {
+        return number === 0 ? '0' : String(number);
+    }
+    const [mantissa, power] = Math.abs(number).toExponential(digits - 1).split('e');
+    const exponent = Number(power);
+    const figures = mantissa.replace('.', '').replace(/0+$/, '');
+    const sign = number < 0 ? '-' : '';
+    if (exponent >= digits || exponent < -11)
+    {
+        const tail = figures.length > 1 ? `.${figures.slice(1)}` : '';
+        return `${sign}${figures[0]}${tail}E${exponent < 0 ? '-' : '+'}`
+            + String(Math.abs(exponent)).padStart(2, '0');
+    }
+    if (exponent < 0)
+    {
+        return `${sign}0.${'0'.repeat(-exponent - 1)}${figures}`;
+    }
+    const whole = figures.slice(0, exponent + 1).padEnd(exponent + 1, '0');
+    const fraction = figures.slice(exponent + 1);
+    return `${sign}${whole}${fraction === '' ? '' : `.${fraction}`}`;
 }

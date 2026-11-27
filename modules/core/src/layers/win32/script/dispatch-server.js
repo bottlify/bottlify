@@ -28,6 +28,7 @@ import {
     DISPID_VALUE, IID_IDISPATCH, IID_IDISPATCHEX,
 } from './guest-dispatch.js';
 import { VARIANT_SIZE } from './variant.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {import('./values.js').Value} Value
@@ -98,7 +99,7 @@ export function createDispatchServer(host){
         {
             return false;
         }
-        memory.writeU32(out >>> 0, value);
+        memory.writeU32(wholeAddress(out), value);
         return true;
     };
 
@@ -223,7 +224,7 @@ export function createDispatchServer(host){
                             MAX_NAME);
                         const id = i === 0
                             ? targetOf(object).dispId(name, false, false) : DISPID_UNKNOWN;
-                        memory.writeU32((out >>> 0) + i * 4, id >>> 0);
+                        memory.writeU32(wholeAddress(out) + i * 4, id >>> 0);
                         if (id === DISPID_UNKNOWN)
                         {
                             hr = DISP_E_UNKNOWNNAME;
@@ -256,7 +257,7 @@ export function createDispatchServer(host){
                     const id = targetOf(object).dispId(codec.readBstr(name >>> 0),
                         (grfdex & FDEX_NAME_CASE_INSENSITIVE) !== 0,
                         (grfdex & FDEX_NAME_ENSURE) !== 0);
-                    memory.writeU32(out >>> 0, id >>> 0);
+                    memory.writeU32(wholeAddress(out), id >>> 0);
                     return id === DISPID_UNKNOWN ? DISP_E_UNKNOWNNAME : S_OK;
                 } },
             /**
@@ -291,7 +292,8 @@ export function createDispatchServer(host){
                         return E_POINTER;
                     }
                     const name = targetOf(object).nameOf(id | 0);
-                    memory.writeU32(out >>> 0, name === null ? 0 : await codec.allocateBstr(name));
+                    memory.writeU32(wholeAddress(out),
+                        name === null ? 0 : await codec.allocateBstr(name));
                     return name === null ? DISP_E_UNKNOWNNAME : S_OK;
                 } },
             /** HRESULT GetNextDispID(DWORD grfdex, DISPID id, DISPID *pid) */
@@ -302,7 +304,7 @@ export function createDispatchServer(host){
                         return E_POINTER;
                     }
                     const next = targetOf(object).next(id | 0);
-                    memory.writeU32(out >>> 0, next >>> 0);
+                    memory.writeU32(wholeAddress(out), next >>> 0);
                     return next === DISPID_UNKNOWN ? S_FALSE : S_OK;
                 } },
             /** HRESULT GetNameSpaceParent(IUnknown **) */

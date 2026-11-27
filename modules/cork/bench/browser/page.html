@@ -12,7 +12,9 @@ window.job = (bundle, exeUrl, options)=>{
     };
     worker.onerror = event=>{
         worker.terminate();
-        window.report(JSON.stringify({ error: `worker error: ${event.message}` }));
+        // A module that failed to load has no message: the URL says which.
+        window.report(JSON.stringify({
+            error: `worker error: ${event.message ?? `/b/${bundle}/worker.js did not load`}` }));
     };
     worker.postMessage({ exeUrl, options });
     return true;

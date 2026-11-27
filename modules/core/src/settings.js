@@ -15,8 +15,9 @@ import raw from '../config.json' with { type: 'json' };
  * before anything is built on it.
  *
  * @typedef {Object} Settings
- * @property {{ name?: string, version?: string }} processor
- *     The name and release the registry's processor key shows, as `name v<version>`.
+ * @property {{ name?: string }} processor
+ *     The name the registry's processor key shows, as `name v<version>`: the
+ *     version is the translator's own (`processorName`).
  * @property {{ frequency?: number }} qpc
  *     Ticks a second of QueryPerformanceCounter, a whole number up to 4294967295.
  * @property {{ maxFps?: number }} frame
@@ -66,7 +67,6 @@ export function readSettings(source){
     };
     const whole = (/** @type {number} */ n)=>Number.isInteger(n) && n >= 0;
     check(settings.processor.name, 'processor.name', 'string', name=>name.length > 0);
-    check(settings.processor.version, 'processor.version', 'string');
     check(settings.qpc.frequency, 'qpc.frequency', 'number',
         n=>whole(n) && n >= 1 && n <= 0xffffffff);
     check(settings.frame.maxFps, 'frame.maxFps', 'number', whole);
@@ -78,17 +78,18 @@ export function readSettings(source){
 export const SETTINGS = readSettings(raw);
 
 /**
- * The name the registry shows for the processor: the file's name and
- * version, or nothing where it names no processor.
+ * The name the registry shows for the processor: the file's name and the
+ * translator's version, which its entry module says (`version`), or nothing
+ * where the file names no processor.
  *
  * @param {Readonly<Settings>} settings
+ * @param {string} [version]
  * @returns {string | undefined}
  */
-export function processorName({ processor }){
+export function processorName({ processor }, version){
     if (processor.name === undefined)
     {
         return undefined;
     }
-    return processor.version === undefined ? processor.name
-        : `${processor.name} v${processor.version}`;
+    return version === undefined ? processor.name : `${processor.name} v${version}`;
 }

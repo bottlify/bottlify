@@ -80,7 +80,7 @@ const NUMERIC = new Set([VT_I1, VT_I2, VT_I4, VT_INT, VT_R4, VT_R8, VT_CY, VT_DE
  *
  * @param {Value} value @returns {value is ForeignValue}
  */
-export const isTypedNumber = value=>value instanceof ForeignValue && NUMERIC.has(value.vt);
+const isTypedNumber = value=>value instanceof ForeignValue && NUMERIC.has(value.vt);
 
 /**
  * A value as a host reads it: a number held with its subtype as the plain

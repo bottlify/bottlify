@@ -30,12 +30,19 @@
  */
 
 import { createComPublisher, IID_IUNKNOWN } from '../../bridge/com-seam.js';
-import { readGuid } from '../../win32/ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 import {
     createSpatial, IDIRECTSOUND3DLISTENER_SLOTS, IDIRECTSOUND3DBUFFER_SLOTS,
 } from './spatial.js';
-import { SOUND_ADAPTER_NAME } from '../../win32/devices.js';
+import {
+    SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID, SOUND_DEVICE_INTERFACE,
+} from '../../win32/devices.js';
+import { parseGuid } from '../../../system/guid.js';
+import {
+    FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_IEEE_FLOAT,
+    MEDIASUBTYPE_PCM, MEDIATYPE_Audio,
+} from './effects.js';
 
 export const DS_OK = 0;
 const DS_UNCERTIFIED = 1;
@@ -59,11 +66,13 @@ const CLSID_DirectSound8 = '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}';
 const CLSID_DirectSoundCapture = '{B0210780-89CD-11D0-AF08-00A0C925CD16}';
 const CLSID_DirectSoundCapture8 = '{E4BCAC13-7F99-4908-9A8E-74E3BF24B6E1}';
 const CLSID_DirectSoundFullDuplex = '{FEA4300C-7959-4147-B26A-2377B9E7A91D}';
+/** dsconf.h's private property set, which a program reaches only through DllGetClassObject. */
+const CLSID_DirectSoundPrivate = '{11AB3EC0-25EC-11D1-A4D8-00C04FC28ACA}';
 /** Each class this library makes, and the kind of object its factory makes. */
 const CLASS_KINDS = new Map([
     [CLSID_DirectSound, 'sound'], [CLSID_DirectSound8, 'sound8'],
     [CLSID_DirectSoundCapture, 'capture'], [CLSID_DirectSoundCapture8, 'capture'],
-    [CLSID_DirectSoundFullDuplex, 'duplex'],
+    [CLSID_DirectSoundFullDuplex, 'duplex'], [CLSID_DirectSoundPrivate, 'private'],
 ]);
 /** IDirectSoundCapture, which IDirectSoundCapture8 is by another name. */
 const IID_IDirectSoundCapture = '{B0210781-89CD-11D0-AF08-00A0C925CD16}';
@@ -130,6 +139,8 @@ export const WAVEFORMATEX = Object.freeze({
 });
 /** WAVE_FORMAT_EXTENSIBLE, and where its extension's fields sit after WAVEFORMATEX. */
 const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+/** WAVE_FORMAT_IEEE_FLOAT; also the first dword of KSDATAFORMAT_SUBTYPE_IEEE_FLOAT. */
+const WAVE_FORMAT_IEEE_FLOAT = 3;
 const EXTENSIBLE = Object.freeze({ wValidBitsPerSample: 18, SubFormat: 24, EXTRA: 22 });
 
 /**
@@ -149,6 +160,19 @@ export const DSBUFFERDESC = Object.freeze({
     guid3DAlgorithm: 0x14,
     SIZE: 0x14,
     SIZE_DX8: 0x24,
+});
+
+/**
+ * DSBUFFERDESC in a 64-bit process: lpwfxFormat is eight bytes and stays at
+ * 0x10, which is already aligned for it, so only the sizes and the GUID
+ * behind it move. A 64-bit caller declares 24 or 40, and a check against the
+ * 32-bit sizes refuses every buffer it asks for.
+ */
+export const DSBUFFERDESC_64 = Object.freeze({
+    ...DSBUFFERDESC,
+    guid3DAlgorithm: 0x18,
+    SIZE: 0x18,
+    SIZE_DX8: 0x28,
 });
 
 /** DSBCAPS, which a program reads back to learn what it actually got. */
@@ -245,7 +269,7 @@ const ZEROED_CAPS = Object.freeze([
  *
  * @type {Readonly<Record<number, string>>}
  */
-export const DSOUND_ORDINALS = Object.freeze({
+const DSOUND_ORDINALS = Object.freeze({
     1: 'DirectSoundCreate',
     2: 'DirectSoundEnumerateA',
     3: 'DirectSoundEnumerateW',
@@ -263,10 +287,7 @@ export const DSOUND_ORDINALS = Object.freeze({
  * and GetDeviceID answers. Every GUID opens the same output here, so its value
  * only has to be stable and not null.
  */
-const DEVICE_GUID = Object.freeze([
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-]);
+const DEVICE_GUID = Object.freeze([.../** @type {Uint8Array} */ (parseGuid(SOUND_DEVICE_GUID))]);
 
 /**
  * dsound.h's DSDEVID_Default* aliases, {DEF0000n-9C6D-47ED-AAF1-4DDA8F2B5C03},
@@ -287,6 +308,12 @@ export const DSBPOSITIONNOTIFY = Object.freeze({
     dwOffset: 0x00,
     hEventNotify: 0x04,
     SIZE: 0x08,
+});
+/** DSBPOSITIONNOTIFY in a 64-bit process: the HANDLE is eight bytes, aligned to eight. */
+export const DSBPOSITIONNOTIFY_64 = Object.freeze({
+    dwOffset: 0x00,
+    hEventNotify: 0x08,
+    SIZE: 0x10,
 });
 
 /** IDirectSound, after IUnknown's three. */
@@ -344,7 +371,7 @@ export const IDIRECTSOUNDBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IKsPropertySet, after IUnknown's three. */
-export const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
+const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
     ['Get', 7],
     ['Set', 6],
     ['QuerySupport', 3],
@@ -353,28 +380,101 @@ export const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
 /** HRESULT_FROM_WIN32(ERROR_NOT_FOUND): a property set this device does not have. */
 const E_PROP_ID_UNSUPPORTED = 0x80070490;
 
+/** An effect's place in a buffer's chain (DSFXR_*), as SetFX reports it. */
+const DSFXR_PRESENT = 0;
+const DSFXR_LOCSOFTWARE = 2;
+const DSFXR_UNKNOWN = 5;
+const DSERR_OBJECTNOTFOUND = 0x88781161 | 0;
+/** GetObjectInPath's "any object on the path". */
+const GUID_All_Objects = '{AA114DE5-C262-4169-A1C8-23D698CC73B5}';
+const CLSCTX_INPROC_SERVER = 1;
+/** The vtable slots an effect is driven through. */
+const SLOT_QUERY_INTERFACE = 0;
+const SLOT_RELEASE = 2;
+const SLOT_SET_INPUT_TYPE = 8;
+const SLOT_SET_OUTPUT_TYPE = 9;
+const SLOT_DISCONTINUITY = 17;
+const SLOT_PROCESS = 3;
+
+/** dsconf.h's DSPROPSETID_DirectSoundDevice, the private object's one property set. */
+const DSPROPSETID_DirectSoundDevice = '{84624F82-25EC-11D1-A4D8-00C04FC28ACA}';
+/** KSPROPERTY_SUPPORT_GET: every property of that set is read, none written. */
+const KSPROPERTY_SUPPORT_GET = 1;
+/**
+ * DSPROPERTY_DIRECTSOUNDDEVICE, by id: what each asks and the form of its data
+ * - A or W for the character width its strings are in, 1 for the structure
+ * that carries both inline.
+ *
+ * @type {ReadonlyMap<number, { property: 'mapping' | 'description' | 'enumerate',
+ *     form: 'A' | 'W' | '1' }>}
+ */
+const DEVICE_PROPERTIES = new Map([
+    [1, { property: 'mapping', form: 'A' }],
+    [2, { property: 'description', form: '1' }],
+    [3, { property: 'enumerate', form: '1' }],
+    [4, { property: 'mapping', form: 'W' }],
+    [5, { property: 'description', form: 'A' }],
+    [6, { property: 'description', form: 'W' }],
+    [7, { property: 'enumerate', form: 'A' }],
+    [8, { property: 'enumerate', form: 'W' }],
+]);
+/** DIRECTSOUNDDEVICE_DATAFLOW. */
+const DATAFLOW_RENDER = 0;
+const DATAFLOW_CAPTURE = 1;
+/** DIRECTSOUNDDEVICE_TYPE_WDM: Windows NT has no VxD, so every device it lists is WDM. */
+const DEVICE_TYPE_WDM = 2;
+/** ..._WAVEDEVICEMAPPING_A/W_DATA: the wave device's name and flow in, its GUID out. */
+const WAVEDEVICEMAPPING = Object.freeze({
+    DeviceName: 0, DataFlow: 4, DeviceId: 8, SIZE: 24,
+});
+const WAVEDEVICEMAPPING_64 = Object.freeze({
+    DeviceName: 0, DataFlow: 8, DeviceId: 12, SIZE: 32,
+});
+/** ..._DESCRIPTION_1_DATA: no pointer in it, one layout in either width. */
+const DESCRIPTION_1 = Object.freeze({
+    DeviceId: 0, DescriptionA: 16, DescriptionW: 272, ModuleA: 784, ModuleW: 1044,
+    Type: 1564, DataFlow: 1568, WaveDeviceId: 1572, Devnode: 1576, SIZE: 1580,
+});
+/** ..._DESCRIPTION_A/W_DATA: the strings are pointers to text the library keeps. */
+const DESCRIPTION = Object.freeze({
+    Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 28, Interface: 32,
+    WaveDeviceId: 36, SIZE: 40,
+});
+const DESCRIPTION_64 = Object.freeze({
+    Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 32, Interface: 40,
+    WaveDeviceId: 48, SIZE: 56,
+});
+/** ..._ENUMERATE_1/A/W_DATA: the program's callback and its context. */
+const ENUMERATE = Object.freeze({ Callback: 0, Context: 4, SIZE: 8 });
+const ENUMERATE_64 = Object.freeze({ Callback: 0, Context: 8, SIZE: 16 });
+
 /** IDirectSoundNotify, after IUnknown's three. */
-export const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
+const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
     ['SetNotificationPositions', 2],
 ]);
 
 /**
- * Builds an interface descriptor from `[name, argumentCount]` pairs.
+ * Builds an interface descriptor from `[name, argumentCount, floats?]` slots.
  *
  * The count excludes `this`, because that is how a header reads and
- * transcribing a header is what these lists are.
+ * transcribing a header is what these lists are. `floats` names the
+ * arguments that are a D3DVALUE, counting `this` as 0: a 64-bit caller passes
+ * those among its first four in XMM registers, where the bridge reads them
+ * from only when it is told.
  *
  * @param {string} id
- * @param {[string, number][]} slots
- * @param {Record<string, (target: any, args: number[]) => number>} [implemented]
+ * @param {[string, number, number[]?][]} slots
+ * @param {Record<string, (target: any, args: number[]) => number | Promise<number>>} [implemented]
+ *        A method that calls back into the guest answers with a promise.
  */
 export function describe(id, slots, implemented = {}){
     return {
         id,
-        methods: slots.map(([name, args])=>({
+        methods: slots.map(([name, args, floats])=>({
             name,
             argBytes: 4 + args * 4,
             invoke: implemented[name],
+            ...floats ? { floats: Object.fromEntries(floats.map(at=>[at, 'f32'])) } : {},
         })),
     };
 }
@@ -469,7 +569,8 @@ export function createPublisher({ publishInterface }){
  * The DirectSound library and everything behind it.
  *
  * @param {Object} deps
- * @param {any} deps.memory   readMemory/writeMemory over guest memory.
+ * @param {any} deps.memory   readMemory/writeMemory over guest memory, and writePointer
+ *     (the memory layer's, a pointer of 4 or 8 bytes whole).
  * @param {(bytes: number) => number} deps.allocate  Guest memory for a buffer's samples.
  * @param {() => number} deps.now   The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
@@ -489,12 +590,27 @@ export function createPublisher({ publishInterface }){
  *        ole32's hold on the multithreaded apartment. An initialized device
  *        keeps it open while it lives, as Windows' worker threads do, so a
  *        thread that entered no apartment is in it implicitly.
+ * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process: its descriptors
+ *        and notification arrays in their 64-bit layouts, and every pointer an
+ *        out parameter takes written whole.
+ * @param {(clsid: number, outer: number, context: number, iid: number, out: number)
+ *     => number | Promise<number>} [deps.createInstance]
+ *        CoCreateInstance as a program calls it, guest pointers in: how a
+ *        buffer's SetFX makes the effects it names, the program's own
+ *        registered class included.
+ * @param {(buffer: any) => void} [deps.played]  Told at each Play, after the
+ *        buffer is playing: where the sound device gives it its voice, so the
+ *        voice starts where the cursor was put.
  */
 export function createDirectSound({
     memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence, mtaUsage,
+    pointerSize = 4, createInstance, played,
 })
 {
     const publisher = createPublisher({ publishInterface });
+    const long = pointerSize === 8;
+    const descriptorLayout = long ? DSBUFFERDESC_64 : DSBUFFERDESC;
+    const notifyLayout = long ? DSBPOSITIONNOTIFY_64 : DSBPOSITIONNOTIFY;
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -515,6 +631,19 @@ export function createDirectSound({
         memory.writeMemory(address >>> 0, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
+    };
+    /**
+     * An interface or a sample address into a pointer-sized out parameter,
+     * whole, by the memory layer's writer: a 64-bit caller's slot holds
+     * whatever its stack held, so the upper half is written too.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointer = (address, value)=>{
+        if ((address >>> 0) !== 0)
+        {
+            memory.writePointer(address, value, long ? 8 : 4);
+        }
     };
 
     /** @type {any[]} */
@@ -619,7 +748,15 @@ export function createDirectSound({
         {
             return null;
         }
-        return normaliseFormat({ channels, sampleRate, bitsPerSample, averageBytes });
+        // Floats are said by WAVE_FORMAT_IEEE_FLOAT, or by an extensible
+        // format's KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, whose first dword is that
+        // tag -- SDL2's thirty-two-bit stream, which read as integers is noise.
+        const tag = readU16(address + WAVEFORMATEX.wFormatTag);
+        const float = bitsPerSample === 32 && (tag === WAVE_FORMAT_IEEE_FLOAT
+            || (tag === WAVE_FORMAT_EXTENSIBLE
+                && readU32(address + EXTENSIBLE.SubFormat) === WAVE_FORMAT_IEEE_FLOAT));
+        return normaliseFormat({ channels, sampleRate, bitsPerSample, averageBytes,
+            ...float ? { float } : {} });
     };
 
     /**
@@ -735,10 +872,10 @@ export function createDirectSound({
             const positions = [];
             for (let at = 0; at < wanted; at++)
             {
-                const entry = (array >>> 0) + at * DSBPOSITIONNOTIFY.SIZE;
+                const entry = (array >>> 0) + at * notifyLayout.SIZE;
                 positions.push({
-                    offset: readU32(entry + DSBPOSITIONNOTIFY.dwOffset),
-                    event: readU32(entry + DSBPOSITIONNOTIFY.hEventNotify),
+                    offset: readU32(entry + notifyLayout.dwOffset),
+                    event: readU32(entry + notifyLayout.hEventNotify),
                 });
             }
             buffer.setNotifications(positions);
@@ -756,7 +893,257 @@ export function createDirectSound({
     const hasControl = (buffer, flag)=>(buffer.capabilities & flag) !== 0
         && !(buffer.primary && flag === DSBCAPS_CTRLFREQUENCY);
 
-    /** @type {Record<string, (target: any, args: number[]) => number>} */
+    /**
+     * A value now or a promise of one, the next step run on it either way:
+     * a buffer with no effects answers in the call, as it always has.
+     *
+     * @template T, U
+     * @param {T | Promise<T>} value @param {(value: T) => U | Promise<U>} next
+     * @returns {U | Promise<U>}
+     */
+    const andThen = (value, next)=>(value instanceof Promise ? value.then(next) : next(value));
+
+    /** A pointer whole, by the memory layer's reader. @param {number} address */
+    const readPointer = address=>memory.readPointer(address, long ? 8 : 4);
+
+    /**
+     * Calls a method of a guest object - an effect the program or the engine
+     * made - through its vtable.
+     *
+     * @param {number} object @param {number} slot @param {number[]} args
+     * @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const callMethod = async(object, slot, args, thread)=>{
+        const entry = readPointer(readPointer(object) + slot * pointerSize);
+        return (await /** @type {NonNullable<typeof callGuest>} */ (callGuest)(entry,
+            [object, ...args], thread)) | 0;
+    };
+
+    /**
+     * Each buffer's effects, in the chain's order: the class it was made by,
+     * its IMediaObject and its IMediaObjectInPlace (0 where it has none).
+     *
+     * @type {WeakMap<any, { clsid: string, object: number, inPlace: number }[]>}
+     */
+    const effectsOf = new WeakMap();
+    /**
+     * Guest memory a buffer's effects are driven with, made once: a class
+     * and interface id and an out pointer, a DMO_MEDIA_TYPE and its
+     * WAVEFORMATEX, then room for the whole buffer, which an effect runs
+     * over in place.
+     *
+     * @type {WeakMap<any, number>}
+     */
+    const scratchOf = new WeakMap();
+    const SCRATCH_CLSID = 0;
+    const SCRATCH_IID = 16;
+    const SCRATCH_OUT = 32;
+    const SCRATCH_TYPE = 48;
+    const SCRATCH_FORMAT = 144;
+    const SCRATCH_DATA = 176;
+    /** Effects that could not run over a span, said once each. @type {Set<string>} */
+    const effectSaid = new Set();
+
+    /** @param {any} buffer */
+    const scratchFor = buffer=>{
+        let at = scratchOf.get(buffer);
+        if (at === undefined)
+        {
+            at = allocate(SCRATCH_DATA + buffer.bytes);
+            scratchOf.set(buffer, at);
+        }
+        return at;
+    };
+
+    /**
+     * The buffer's format as a DMO_MEDIA_TYPE: PCM (or float) audio, its
+     * WAVEFORMATEX, a sample the size of a frame going in and of a byte
+     * coming out, as DirectSound hands it to an effect.
+     *
+     * @param {any} buffer @param {number} at  the scratch block @param {number} sampleSize
+     */
+    const writeMediaType = (buffer, at, sampleSize)=>{
+        const format = buffer.format;
+        const wave = new DataView(new ArrayBuffer(18));
+        wave.setUint16(0, format.float ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM, true);
+        wave.setUint16(2, format.channels, true);
+        wave.setUint32(4, format.sampleRate, true);
+        wave.setUint32(8, format.sampleRate * format.blockAlign, true);
+        wave.setUint16(12, format.blockAlign, true);
+        wave.setUint16(14, format.bitsPerSample, true);
+        memory.writeMemory(at + SCRATCH_FORMAT, new Uint8Array(wave.buffer));
+        const type = new Uint8Array(long ? 88 : 72);
+        type.set(/** @type {Uint8Array} */ (parseGuid(MEDIATYPE_Audio)), 0);
+        type.set(/** @type {Uint8Array} */ (parseGuid(format.float
+            ? MEDIASUBTYPE_IEEE_FLOAT : MEDIASUBTYPE_PCM)), 16);
+        const view = new DataView(type.buffer);
+        view.setUint32(32, 1, true);
+        view.setUint32(40, sampleSize, true);
+        type.set(/** @type {Uint8Array} */ (parseGuid(FORMAT_WaveFormatEx)), 44);
+        view.setUint32(long ? 72 : 64, 18, true);
+        view.setUint32(long ? 80 : 68, at + SCRATCH_FORMAT, true);
+        memory.writeMemory(at + SCRATCH_TYPE, type);
+    };
+
+    /**
+     * Lets a chain go: each effect's interfaces released, as the buffer
+     * holds them.
+     *
+     * @param {{ object: number, inPlace: number }[]} chain @param {unknown} thread
+     */
+    const releaseEffects = async(chain, thread)=>{
+        for (const effect of chain)
+        {
+            if (effect.inPlace !== 0)
+            {
+                await callMethod(effect.inPlace, SLOT_RELEASE, [], thread);
+            }
+            await callMethod(effect.object, SLOT_RELEASE, [], thread);
+        }
+    };
+
+    /**
+     * SetFX's work once its arguments are checked.
+     *
+     * @param {any} buffer @param {number} count @param {number} descriptions
+     * @param {number} results
+     */
+    const setEffects = async(buffer, count, descriptions, results)=>{
+        const thread = callerThread?.();
+        await releaseEffects(effectsOf.get(buffer) ?? [], thread);
+        effectsOf.delete(buffer);
+        buffer.clearEffected?.();
+        if (count === 0)
+        {
+            return DS_OK;
+        }
+        const at = scratchFor(buffer);
+        const descriptionSize = long ? 40 : 32;
+        /** @type {{ clsid: string, object: number, inPlace: number }[]} */
+        const made = [];
+        let failure = DS_OK;
+        for (let index = 0; index < count; index++)
+        {
+            const clsid = memory.readMemory(descriptions + index * descriptionSize + 8, 16);
+            memory.writeMemory(at + SCRATCH_CLSID, clsid);
+            memory.writeMemory(at + SCRATCH_IID,
+                /** @type {Uint8Array} */ (parseGuid(IID_IMediaObject)));
+            memory.writeMemory(at + SCRATCH_OUT, new Uint8Array(8));
+            const created = await /** @type {NonNullable<typeof createInstance>} */ (
+                createInstance)(at + SCRATCH_CLSID, 0, CLSCTX_INPROC_SERVER, at + SCRATCH_IID,
+                at + SCRATCH_OUT) | 0;
+            if (created < 0)
+            {
+                failure = created;
+                break;
+            }
+            const object = readPointer(at + SCRATCH_OUT);
+            writeMediaType(buffer, at, buffer.format.blockAlign);
+            let answer = await callMethod(object, SLOT_SET_INPUT_TYPE, [0, at + SCRATCH_TYPE, 0],
+                thread);
+            if (answer >= 0)
+            {
+                writeMediaType(buffer, at, 1);
+                answer = await callMethod(object, SLOT_SET_OUTPUT_TYPE,
+                    [0, at + SCRATCH_TYPE, 0], thread);
+            }
+            if (answer < 0)
+            {
+                await callMethod(object, SLOT_RELEASE, [], thread);
+                failure = answer;
+                break;
+            }
+            memory.writeMemory(at + SCRATCH_IID,
+                /** @type {Uint8Array} */ (parseGuid(IID_IMediaObjectInPlace)));
+            memory.writeMemory(at + SCRATCH_OUT, new Uint8Array(8));
+            const asked = await callMethod(object, SLOT_QUERY_INTERFACE,
+                [at + SCRATCH_IID, at + SCRATCH_OUT], thread);
+            const inPlace = asked >= 0 ? readPointer(at + SCRATCH_OUT) : 0;
+            const name = readGuid(memory, at + SCRATCH_CLSID);
+            if (inPlace === 0)
+            {
+                divergence?.('IDirectSoundBuffer8::SetFX',
+                    `effect ${name} has no IMediaObjectInPlace and is not run`);
+            }
+            made.push({ clsid: name, object, inPlace });
+        }
+        if (failure < 0)
+        {
+            await releaseEffects(made, thread);
+            if (results !== 0)
+            {
+                for (let index = 0; index < count; index++)
+                {
+                    writeU32(results + index * 4,
+                        index < made.length ? DSFXR_PRESENT : DSFXR_UNKNOWN);
+                }
+            }
+            return failure;
+        }
+        effectsOf.set(buffer, made);
+        if (results !== 0)
+        {
+            for (let index = 0; index < count; index++)
+            {
+                writeU32(results + index * 4, DSFXR_LOCSOFTWARE);
+            }
+        }
+        return DS_OK;
+    };
+
+    /**
+     * Runs a buffer's effects over spans of it, in the chain's order, each
+     * in place on a copy: what is heard of those spans is what they make of
+     * the program's samples, which stay as the program wrote them.
+     *
+     * @param {any} buffer @param {{ from: number, length: number }[]} spans
+     * @param {unknown} thread
+     */
+    const runEffects = async(buffer, spans, thread)=>{
+        const chain = effectsOf.get(buffer) ?? [];
+        const data = scratchFor(buffer) + SCRATCH_DATA;
+        for (const { from, length } of spans)
+        {
+            if (length <= 0)
+            {
+                continue;
+            }
+            memory.writeMemory(data, memory.readMemory(buffer.address + from, length));
+            for (const effect of chain)
+            {
+                if (effect.inPlace === 0)
+                {
+                    continue;
+                }
+                const answer = await callMethod(effect.inPlace, SLOT_PROCESS,
+                    long ? [length, data, 0, 0] : [length, data, 0, 0, 0], thread);
+                if (answer < 0 && !effectSaid.has(effect.clsid))
+                {
+                    effectSaid.add(effect.clsid);
+                    divergence?.('IMediaObjectInPlace::Process', `effect ${effect.clsid} refused`
+                        + ` a span (0x${(answer >>> 0).toString(16)}); it is heard as written`);
+                }
+            }
+            buffer.setEffected?.(from, memory.readMemory(data, length));
+        }
+    };
+
+    /**
+     * What Play owes a buffer's effects: each told the stream starts again,
+     * then run over the whole buffer.
+     *
+     * @param {any} buffer @param {unknown} thread
+     */
+    const startEffects = async(buffer, thread)=>{
+        for (const effect of effectsOf.get(buffer) ?? [])
+        {
+            await callMethod(effect.object, SLOT_DISCONTINUITY, [0], thread);
+        }
+        await runEffects(buffer, [{ from: 0, length: buffer.bytes }], thread);
+    };
+
+    /** @type {Record<string, (target: any, args: number[]) => number | Promise<number>>} */
     const bufferMethods = {
         /** HRESULT GetCurrentPosition(LPDWORD play, LPDWORD write) */
         GetCurrentPosition(buffer, [play, write]){
@@ -799,9 +1186,16 @@ export function createDirectSound({
         Play(buffer, [, , flags]){
             calls.Play = (calls.Play || 0) + 1;
             record(`b${buffers.indexOf(buffer)} Play loop=${(flags >>> 0) & 1} n=${buffer.bytes}`);
-            buffer.play(flags >>> 0);
-            bufferMethods.AcquireResources(buffer, []);
-            return DS_OK;
+            const start = ()=>{
+                buffer.play(flags >>> 0);
+                played?.(buffer);
+                bufferMethods.AcquireResources(buffer, []);
+                return DS_OK;
+            };
+            // Each effect is told the stream starts again, and runs over what
+            // the buffer holds before it is heard.
+            return (effectsOf.get(buffer)?.length ?? 0) > 0
+                ? andThen(startEffects(buffer, callerThread?.()), start) : start();
         },
 
         /** HRESULT Stop(void) */
@@ -839,30 +1233,42 @@ export function createDirectSound({
             }
             if ((n1 >>> 0) === 0)
             {
-                writeU32(p1, 0);
+                writePointer(p1, 0);
                 return DSERR_INVALIDPARAM;
             }
             deliver(buffer);
             const ranges = buffer.lockRange(offset, bytes, flags >>> 0);
             const none = { address: 0, bytes: 0 };
             const { first, second } = ranges ?? { first: none, second: none };
-            writeU32(p1, first.address);
+            writePointer(p1, first.address);
             writeU32(n1, first.bytes);
             // The second range is written wherever the caller offered somewhere
             // to put it, zero included: a caller that passed pointers and reads
             // a stale value there splices audio from a previous lock. Either of
             // the two may be missing, even when the lock wraps.
-            writeU32(p2, second.address);
+            writePointer(p2, second.address);
             writeU32(n2, second.bytes);
             return ranges ? DS_OK : DSERR_INVALIDPARAM;
         },
 
         /** HRESULT Unlock(LPVOID p1, DWORD n1, LPVOID p2, DWORD n2) */
-        Unlock(buffer, [p1, , p2]){
+        Unlock(buffer, [p1, n1, p2, n2]){
             record(`b${buffers.indexOf(buffer)} Unlock`);
-            // A range is named by its pointer; the sizes are not looked at.
-            return buffer.unlock([p1 >>> 0, p2 >>> 0].filter(at=>at !== 0))
-                ? DS_OK : DSERR_INVALIDPARAM;
+            // A range is named by its pointer; the sizes are not looked at,
+            // save by the effects, which run over what was written.
+            if (!buffer.unlock([p1 >>> 0, p2 >>> 0].filter(at=>at !== 0)))
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            if ((effectsOf.get(buffer)?.length ?? 0) === 0)
+            {
+                return DS_OK;
+            }
+            const spans = [[p1 >>> 0, n1 >>> 0], [p2 >>> 0, n2 >>> 0]]
+                .filter(([at, length])=>at !== 0 && length > 0)
+                .map(([at, length])=>({ from: at - buffer.address,
+                    length: Math.min(length, buffer.bytes - (at - buffer.address)) }));
+            return andThen(runEffects(buffer, spans, callerThread?.()), ()=>DS_OK);
         },
 
         /** HRESULT GetCaps(LPDSBCAPS caps) */
@@ -1014,9 +1420,13 @@ export function createDirectSound({
          * HRESULT SetFX(DWORD count, LPDSEFFECTDESC effects, LPDWORD results)
          *
          * Effects are a control like volume and pan, and a buffer created
-         * without it refuses them as it would refuse either. With it, the
-         * arguments are checked and clearing a chain that was never set is
-         * done; setting one answers E_NOTIMPL, because no effect is hosted.
+         * without it refuses them as it would refuse either; a locked or
+         * playing buffer keeps the chain it has. The chain given replaces the
+         * one there: each effect made through COM as a DMO and given the
+         * buffer's format in and out. One that cannot be made or refuses the
+         * format fails the whole call with its answer, and the buffer is left
+         * with no effects, as on Windows; the results say which were made
+         * (DSFXR_PRESENT) and which not (DSFXR_UNKNOWN).
          */
         SetFX(buffer, [count, effects, results]){
             if ((buffer.capabilities & DSBCAPS_CTRLFX) === 0)
@@ -1035,7 +1445,41 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDCALL;
             }
-            return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
+            if (!createInstance || !callGuest)
+            {
+                return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
+            }
+            return setEffects(buffer, count >>> 0, effects >>> 0, results >>> 0);
+        },
+
+        /**
+         * HRESULT GetObjectInPath(REFGUID object, DWORD index, REFGUID iid,
+         *     LPVOID *out)
+         *
+         * An effect on the buffer's chain, by its class (or any, with
+         * GUID_All_Objects) and its place among those that match, asked for
+         * one of its interfaces.
+         */
+        GetObjectInPath(buffer, [object, index, iid, out]){
+            if ((out >>> 0) === 0 || (object >>> 0) === 0 || (iid >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            const wanted = readGuid(memory, object >>> 0);
+            const found = (effectsOf.get(buffer) ?? []).filter((/** @type {any} */ effect)=>
+                wanted === GUID_All_Objects || effect.clsid === wanted)[index >>> 0];
+            if (!found)
+            {
+                return DSERR_OBJECTNOTFOUND;
+            }
+            return andThen(callMethod(found.object, SLOT_QUERY_INTERFACE,
+                [iid >>> 0, out >>> 0], callerThread?.()), hr=>{
+                if (hr < 0)
+                {
+                    writePointer(out, 0);
+                }
+                return hr;
+            });
         },
 
         /**
@@ -1065,16 +1509,16 @@ export function createDirectSound({
             }
             // One of the two layouts, or a caller that disagrees with us about
             // where every later field is.
-            const size = readU32(descriptor + DSBUFFERDESC.dwSize);
-            if (size !== DSBUFFERDESC.SIZE && size !== DSBUFFERDESC.SIZE_DX8)
+            const size = readU32(descriptor + descriptorLayout.dwSize);
+            if (size !== descriptorLayout.SIZE && size !== descriptorLayout.SIZE_DX8)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
-            const flags = readU32(descriptor + DSBUFFERDESC.dwFlags);
+            const flags = readU32(descriptor + descriptorLayout.dwFlags);
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
-            const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
-            const formatAt = readU32(descriptor + DSBUFFERDESC.lpwfxFormat);
+            const wanted = readU32(descriptor + descriptorLayout.dwBufferBytes);
+            const formatAt = readU32(descriptor + descriptorLayout.lpwfxFormat);
             const format = readFormat(formatAt);
             const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
                 + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
@@ -1086,7 +1530,7 @@ export function createDirectSound({
             // is one asking for effects, which only a secondary buffer takes.
             if (primary && (formatAt !== 0 || (flags & DSBCAPS_CTRLFX) !== 0))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
 
@@ -1096,7 +1540,7 @@ export function createDirectSound({
             if (primary && root.primary)
             {
                 root.primary.addRef();
-                writeU32(out, publishBuffer(root.primary));
+                writePointer(out, publishBuffer(root.primary));
                 return DS_OK;
             }
 
@@ -1106,7 +1550,7 @@ export function createDirectSound({
             // mistake.
             if (!primary && (wanted === 0 || !format))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
             // DirectSound 8's rule, not the older interface's, which makes
@@ -1115,7 +1559,7 @@ export function createDirectSound({
             if (root.eight && !primary && (flags & DSBCAPS_CTRL3D) !== 0
                 && ((flags & DSBCAPS_CTRLPAN) !== 0 || format?.channels !== 1))
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_INVALIDPARAM;
             }
 
@@ -1133,7 +1577,7 @@ export function createDirectSound({
             const address = allocate(bytes);
             if (address === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DSERR_OUTOFMEMORY;
             }
             // A new buffer holds silence, as DirectSound's does. A program may
@@ -1168,7 +1612,7 @@ export function createDirectSound({
             {
                 root.primary = buffer;
             }
-            writeU32(out, publishBuffer(buffer));
+            writePointer(out, publishBuffer(buffer));
             return DS_OK;
         },
 
@@ -1198,7 +1642,7 @@ export function createDirectSound({
             });
             buffers.push(copy);
             awake.add(copy);
-            writeU32(out, publishBuffer(copy));
+            writePointer(out, publishBuffer(copy));
             return DS_OK;
         },
 
@@ -1279,7 +1723,11 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(out, 0x00000002); // DSSPEAKER_STEREO
+            // DSSPEAKER_COMBINED(DSSPEAKER_STEREO (4), DSSPEAKER_GEOMETRY_WIDE
+            // (20 degrees)), what Windows answers for two speakers and Wine's
+            // dsound answers by default. 2 is DSSPEAKER_MONO: told so, FMOD
+            // mixed every title down to one channel.
+            writeU32(out, 0x00140004);
             return DS_OK;
         },
         /** HRESULT SetSpeakerConfig(DWORD) */
@@ -1390,7 +1838,7 @@ export function createDirectSound({
              */
             primary: null,
         };
-        writeU32(out, eight
+        writePointer(out, eight
             ? publisher.publish(device, sound8Interfaces, IID_IDirectSound8,
                 DEVICE_COUNTED_ON_ITS_OWN)
             : publisher.publish(device, soundInterfaces, IID_IDirectSound,
@@ -1405,15 +1853,15 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(out, 0);
+            writePointer(out, 0);
             if ((outer >>> 0) !== 0)
             {
                 return DSERR_NOAGGREGATION;
             }
             const wanted = (iid >>> 0) === 0 ? '' : readGuid(memory, iid >>> 0);
-            if (factory.kind === 'capture' || factory.kind === 'duplex')
+            if (Object.hasOwn(plainInterfaces, factory.kind))
             {
-                return createDriverless(factory.kind, wanted, out);
+                return createPlain(factory.kind, wanted, out);
             }
             const interfaces = factory.eight ? sound8Interfaces : soundInterfaces;
             if (!interfaces.some(entry=>entry.id === wanted) && wanted !== IID_IUNKNOWN)
@@ -1428,7 +1876,7 @@ export function createDirectSound({
             // Asked for another of its interfaces: that one is handed back,
             // holding the one reference the object was made with.
             const object = publisher.objectAt(readU32(out >>> 0));
-            writeU32(out, publisher.publish(object, interfaces, wanted));
+            writePointer(out, publisher.publish(object, interfaces, wanted));
             if (wanted === IID_IUNKNOWN)
             {
                 publisher.hand(object, factory.eight ? IID_IDirectSound8 : IID_IDirectSound,
@@ -1482,16 +1930,18 @@ export function createDirectSound({
         {
             return DSERR_INVALIDPARAM;
         }
-        writeU32(out, 0);
+        writePointer(out, 0);
         return DSERR_NODRIVER;
     };
 
     /**
+     * The objects a class factory makes that are not a playback device.
      * Capture and full duplex, over a machine with no capture device: the
      * object is made, and initializing it is DSERR_NODRIVER, as Windows
-     * answers without a microphone (Wine's capture.c and duplex.c).
+     * answers without a microphone (Wine's capture.c and duplex.c). The
+     * private property set: IKsPropertySet over DSPROPSETID_DirectSoundDevice.
      */
-    const driverlessInterfaces = {
+    const plainInterfaces = {
         capture: [describe(IID_IDirectSoundCapture, IDIRECTSOUNDCAPTURE_SLOTS, {
             CreateCaptureBuffer: ()=>DSERR_UNINITIALIZED,
             GetCaps: ()=>DSERR_UNINITIALIZED,
@@ -1504,18 +1954,28 @@ export function createDirectSound({
                 {
                     return DSERR_INVALIDPARAM;
                 }
-                writeU32(captureOut, 0);
-                writeU32(renderOut, 0);
+                writePointer(captureOut, 0);
+                writePointer(renderOut, 0);
                 return DSERR_NODRIVER;
+            },
+        })],
+        private: [describe(IID_IKsPropertySet, IKSPROPERTYSET_SLOTS, {
+            Get: (_object, args)=>getDeviceProperty(args),
+            Set: ()=>E_PROP_ID_UNSUPPORTED,
+            /** HRESULT QuerySupport(REFGUID, ULONG id, PULONG pTypeSupport) */
+            QuerySupport(_object, [set, id, support]){
+                const known = namesDeviceSet(set) && DEVICE_PROPERTIES.has(id >>> 0);
+                writeU32(support, known ? KSPROPERTY_SUPPORT_GET : 0);
+                return known ? DS_OK : E_PROP_ID_UNSUPPORTED;
             },
         })],
     };
 
     /**
-     * @param {'capture' | 'duplex'} kind @param {string} wanted @param {number} out
+     * @param {'capture' | 'duplex' | 'private'} kind @param {string} wanted @param {number} out
      */
-    const createDriverless = (kind, wanted, out)=>{
-        const interfaces = driverlessInterfaces[kind];
+    const createPlain = (kind, wanted, out)=>{
+        const interfaces = plainInterfaces[kind];
         const own = interfaces[0].id;
         if (wanted !== own && wanted !== IID_IUNKNOWN)
         {
@@ -1535,11 +1995,11 @@ export function createDirectSound({
         publisher.publish(object, interfaces, own, DEVICE_COUNTED_ON_ITS_OWN);
         if (wanted === IID_IUNKNOWN)
         {
-            writeU32(out, publisher.publish(object, interfaces, IID_IUNKNOWN));
+            writePointer(out, publisher.publish(object, interfaces, IID_IUNKNOWN));
             publisher.hand(object, own, IID_IUNKNOWN);
             return DS_OK;
         }
-        writeU32(out, publisher.publish(object, interfaces, own));
+        writePointer(out, publisher.publish(object, interfaces, own));
         return DS_OK;
     };
 
@@ -1557,14 +2017,34 @@ export function createDirectSound({
         };
     };
 
+    /** @type {Map<string, number>} */
+    const placedAt = new Map();
     /**
-     * Puts a string where guest code can read it, in the width the caller of
-     * the A or W entry point expects, and answers with its address.
+     * Bytes put where guest code can read them, at one address per key for
+     * the session: what an enumeration hands a program is written afresh each
+     * time and never allocated twice, so a program that asks every frame does
+     * not grow the heap.
+     *
+     * @param {string} key @param {Uint8Array} bytes
+     */
+    const place = (key, bytes)=>{
+        let address = placedAt.get(key);
+        if (address === undefined)
+        {
+            address = allocate(bytes.length);
+            placedAt.set(key, address);
+        }
+        memory.writeMemory(address, bytes);
+        return address;
+    };
+
+    /**
+     * A string as guest code reads it, terminated, in the width the caller of
+     * an A or W entry point expects.
      *
      * @param {string} text @param {boolean} wide
-     * @returns {number}
      */
-    const stringForGuest = (text, wide)=>{
+    const encodeText = (text, wide)=>{
         const units = wide ? 2 : 1;
         const bytes = new Uint8Array((text.length + 1) * units);
         for (let index = 0; index < text.length; index++)
@@ -1576,13 +2056,49 @@ export function createDirectSound({
                 bytes[index * units + 1] = code >>> 8 & 0xff;
             }
         }
-        const address = allocate(bytes.length);
-        memory.writeMemory(address, bytes);
-        return address;
+        return bytes;
     };
+
+    /** @param {string} text @param {boolean} wide @returns {number} its address */
+    const stringForGuest = (text, wide)=>
+        place(`${wide ? 'W' : 'A'}:${text}`, encodeText(text, wide));
 
     /** How many times a program has asked what sound devices there are. */
     let enumerations = 0;
+
+    /**
+     * Hands each entry to a program's callback in turn, as Windows does, until
+     * it answers FALSE: TRUE asks for the next one, and a program that has
+     * seen enough is obeyed rather than handed a list it did not want.
+     *
+     * The callback is guest code, so answering means running the guest from
+     * inside a host call; the bridge parks the caller while that happens, and
+     * this returns a promise it hands back rather than a value.
+     *
+     * @param {number} callback @param {number[][]} entries  each call's arguments
+     */
+    const callEach = (callback, entries)=>{
+        enumerations++;
+        if (!callGuest)
+        {
+            // No route to guest code - a test harness, or an engine assembled
+            // without a bridge. Saying so is better than reporting no devices,
+            // which a program reads as a machine that cannot play sound.
+            return DS_OK;
+        }
+        // Named once, before the loop's first await - see the parameter doc.
+        const thread = callerThread?.();
+        return (async()=>{
+            for (const args of entries)
+            {
+                if ((await callGuest(callback >>> 0, args, thread) | 0) === 0)
+                {
+                    break;
+                }
+            }
+            return DS_OK;
+        })();
+    };
 
     /**
      * Describes the devices to a program's own callback, as Windows does.
@@ -1593,10 +2109,6 @@ export function createDirectSound({
      * here because that is what this engine has: a single output that whoever
      * assembles it opened.
      *
-     * The callback is guest code, so answering means running the guest from
-     * inside a host call; the bridge parks the caller while that happens, and
-     * this returns a promise it hands back rather than a value.
-     *
      * @param {number} callback @param {number} context @param {boolean} wide
      */
     const enumerate = (callback, context, wide)=>{
@@ -1604,35 +2116,139 @@ export function createDirectSound({
         {
             return DSERR_INVALIDPARAM;
         }
-        enumerations++;
-        if (!callGuest)
-        {
-            // No route to guest code -- a test harness, or an engine assembled
-            // without a bridge. Saying so is better than reporting no devices,
-            // which a program reads as a machine that cannot play sound.
-            return DS_OK;
-        }
-        const primary = stringForGuest('Primary Sound Driver', wide);
         const blank = stringForGuest('', wide);
-        const device = stringForGuest(SOUND_ADAPTER_NAME, wide);
         // A GUID is sixteen bytes and a program keeps it to open that device by
         // name later.
-        const guid = allocate(16);
-        memory.writeMemory(guid, new Uint8Array(DEVICE_GUID));
-        // Named once, before the loop's first await -- see the parameter doc.
-        const thread = callerThread?.();
-        return (async()=>{
-            // TRUE asks for the next one, and a program that has seen enough
-            // says FALSE -- so a caller that stops early is obeyed rather than
-            // handed a list it did not want.
-            const more = await callGuest(
-                callback >>> 0, [0, primary, blank, context >>> 0], thread);
-            if ((more | 0) !== 0)
+        const guid = place('device guid', Uint8Array.from(DEVICE_GUID));
+        return callEach(callback, [
+            [0, stringForGuest('Primary Sound Driver', wide), blank, context >>> 0],
+            [guid, stringForGuest(SOUND_ADAPTER_NAME, wide), blank, context >>> 0],
+        ]);
+    };
+
+    /** @param {number} set  a property set's GUID, as the program passed it */
+    const namesDeviceSet = set=>(set >>> 0) !== 0
+        && readGuid(memory, set >>> 0) === DSPROPSETID_DirectSoundDevice;
+
+    /**
+     * The one device, as DSPROPERTY_DIRECTSOUNDDEVICE_DESCRIPTION describes it
+     * in the given form: what DirectSoundEnumerate says of it - its GUID, its
+     * name, no module - and the interface name winmm gives the same device.
+     *
+     * @param {'A' | 'W' | '1'} form
+     */
+    const deviceDescription = form=>{
+        if (form === '1')
+        {
+            const bytes = new Uint8Array(DESCRIPTION_1.SIZE);
+            const view = new DataView(bytes.buffer);
+            bytes.set(DEVICE_GUID, DESCRIPTION_1.DeviceId);
+            bytes.set(encodeText(SOUND_ADAPTER_NAME, false), DESCRIPTION_1.DescriptionA);
+            bytes.set(encodeText(SOUND_ADAPTER_NAME, true), DESCRIPTION_1.DescriptionW);
+            view.setUint32(DESCRIPTION_1.Type, DEVICE_TYPE_WDM, true);
+            view.setUint32(DESCRIPTION_1.DataFlow, DATAFLOW_RENDER, true);
+            return bytes;
+        }
+        const layout = long ? DESCRIPTION_64 : DESCRIPTION;
+        const wide = form === 'W';
+        const bytes = new Uint8Array(layout.SIZE);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(layout.Type, DEVICE_TYPE_WDM, true);
+        view.setUint32(layout.DataFlow, DATAFLOW_RENDER, true);
+        bytes.set(DEVICE_GUID, layout.DeviceId);
+        // Below 4 GiB in either width, so a 64-bit pointer's high half stays zero.
+        view.setUint32(layout.Description, stringForGuest(SOUND_ADAPTER_NAME, wide), true);
+        view.setUint32(layout.Module, stringForGuest('', wide), true);
+        view.setUint32(layout.Interface, stringForGuest(SOUND_DEVICE_INTERFACE, wide), true);
+        return bytes;
+    };
+
+    /**
+     * IKsPropertySet::Get over DSPROPSETID_DirectSoundDevice.
+     *
+     * Every property answers in the shape Wine's propset test sees Windows
+     * answer: a structure shorter than its form is E_INVALIDARG with the size
+     * it needs in *pcbReturned, a description asked for with no structure is
+     * that size alone, and a GUID_NULL device is the default of the flow named.
+     *
+     * HRESULT Get(REFGUID set, ULONG id, LPVOID instance, ULONG instanceLength,
+     *     LPVOID data, ULONG dataLength, PULONG returned)
+     *
+     * @param {number[]} args
+     */
+    const getDeviceProperty = ([set, id, , , data, size, returned])=>{
+        const known = namesDeviceSet(set) ? DEVICE_PROPERTIES.get(id >>> 0) : undefined;
+        if (!known)
+        {
+            writeU32(returned, 0);
+            return E_PROP_ID_UNSUPPORTED;
+        }
+        const { property, form } = known;
+        const at = data >>> 0;
+        if (property === 'mapping')
+        {
+            const layout = long ? WAVEDEVICEMAPPING_64 : WAVEDEVICEMAPPING;
+            writeU32(returned, layout.SIZE);
+            if (at === 0 || (size >>> 0) < layout.SIZE || readU32(at + layout.DeviceName) === 0)
             {
-                await callGuest(callback >>> 0, [guid, device, blank, context >>> 0], thread);
+                return DSERR_INVALIDPARAM;
             }
+            // The wave device's name, as waveOutGetDevCaps gives it: there is
+            // one, and it is the render device; a capture name finds nothing.
+            const wanted = encodeText(SOUND_ADAPTER_NAME, form === 'W');
+            const asked = memory.readMemory(readU32(at + layout.DeviceName), wanted.length);
+            if (readU32(at + layout.DataFlow) !== DATAFLOW_RENDER
+                || !wanted.every((byte, index)=>asked[index] === byte))
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            memory.writeMemory(at + layout.DeviceId, Uint8Array.from(DEVICE_GUID));
             return DS_OK;
-        })();
+        }
+        if (property === 'description')
+        {
+            const layout = form === '1' ? DESCRIPTION_1 : long ? DESCRIPTION_64 : DESCRIPTION;
+            writeU32(returned, layout.SIZE);
+            if (at === 0)
+            {
+                return DS_OK;
+            }
+            if ((size >>> 0) < layout.SIZE)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            const flow = readU32(at + layout.DataFlow);
+            const device = at + layout.DeviceId;
+            const unnamed = memory.readMemory(device, 16).every((/** @type {number} */ byte)=>
+                byte === 0);
+            if (unnamed && flow > DATAFLOW_CAPTURE)
+            {
+                return E_PROP_ID_UNSUPPORTED;
+            }
+            // GUID_NULL is the flow's default device; there is no capture one.
+            if (unnamed ? flow !== DATAFLOW_RENDER : !namesPlayback(device))
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            memory.writeMemory(at, deviceDescription(form));
+            return DS_OK;
+        }
+        const layout = long ? ENUMERATE_64 : ENUMERATE;
+        writeU32(returned, layout.SIZE);
+        if (at === 0 || (size >>> 0) < layout.SIZE)
+        {
+            return DSERR_INVALIDPARAM;
+        }
+        const callback = readU32(at + layout.Callback);
+        if (callback === 0)
+        {
+            return E_PROP_ID_UNSUPPORTED;
+        }
+        // The devices DirectSoundEnumerate lists, without its primary driver
+        // entry: this set names devices, and that entry is none.
+        return callEach(callback, [
+            [place(`description ${form}`, deviceDescription(form)), readU32(at + layout.Context)],
+        ]);
     };
 
     return {
@@ -1776,7 +2392,7 @@ export function createDirectSound({
                         }
                         for (const at of [out, captureOut, renderOut])
                         {
-                            writeU32(at, 0);
+                            writePointer(at, 0);
                         }
                         return DSERR_NODRIVER;
                     },
@@ -1787,11 +2403,12 @@ export function createDirectSound({
                 /**
                  * HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv)
                  *
-                 * The class object for DirectSound and DirectSound8, which
+                 * The class objects for DirectSound and DirectSound8, which
                  * CoCreateInstance reaches through the class's InprocServer32
-                 * key; its objects wait for Initialize. Any other class -- the
-                 * private property set a program asks for directly among
-                 * them -- is not one this library hands out.
+                 * key and whose objects wait for Initialize; for capture and
+                 * full duplex; and for the private property set, which a
+                 * program asks this entry point for directly. Any other class
+                 * is not one this library hands out.
                  */
                 DllGetClassObject: {
                     argBytes: 12,
@@ -1801,7 +2418,7 @@ export function createDirectSound({
                         {
                             return DSERR_INVALIDPARAM;
                         }
-                        writeU32(out, 0);
+                        writePointer(out, 0);
                         const asked = (clsid >>> 0) === 0 ? '' : readGuid(memory, clsid >>> 0);
                         const kind = CLASS_KINDS.get(asked);
                         if (!kind)
@@ -1813,7 +2430,7 @@ export function createDirectSound({
                         {
                             return E_NOINTERFACE;
                         }
-                        writeU32(out,
+                        writePointer(out,
                             publisher.publish(classFactory(kind), factoryInterfaces, wanted));
                         return DS_OK;
                     },
@@ -1857,10 +2474,14 @@ export function createDirectSound({
             // between for the mixer to play.
             skippedBytes: buffers.reduce((sum, buffer)=>sum + buffer.skipped.bytes, 0),
             skips: buffers.reduce((sum, buffer)=>sum + buffer.skipped.count, 0),
-            // What each live buffer holds now: whether a stream the program
-            // writes is sound or silence, which nothing else here can say.
+            // What each playing buffer holds now: whether a stream the program
+            // writes is sound or silence, which nothing else here can say. Only
+            // the playing ones: every byte of every loaded sound, copied and
+            // scanned, was 99 ms of the engine's thread for four hundred
+            // buffers of 64 KB, and a sound nobody plays is not heard either way.
             contents: buffers
-                .filter(buffer=>!buffer.destroyed && !buffer.primary && buffer.bytes > 0)
+                .filter(buffer=>!buffer.destroyed && !buffer.primary && buffer.bytes > 0
+                    && (buffer.status() & 1) !== 0)
                 .map(buffer=>{
                     const held = memory.readMemory(buffer.address >>> 0, buffer.bytes);
                     const sixteen = buffer.format?.bitsPerSample === 16;

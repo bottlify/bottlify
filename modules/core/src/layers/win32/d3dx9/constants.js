@@ -15,6 +15,10 @@
  * guest's heap, so the names and defaults it hands out by pointer stay valid
  * for as long as the table does.
  *
+ * A handle is a record in the guest's heap that says what the table answers
+ * for it (`constants-setters.js`), so that the setters and getters a program
+ * calls for every draw run in the guest with no host call.
+ *
  * The layout is the one the shader model documents: a comment token (0xFFFE,
  * its length in DWORDs in bits 16-30) whose first DWORD is 'CTAB', followed by
  * a D3DXSHADER_CONSTANTTABLE -- size, creator, version, the constants' count
@@ -23,8 +27,14 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
+import { BLOCK_BYTES, BLOCK_DEFAULTS, BLOCK_PIXEL, DEFAULT_BYTES,
+    DEFAULT_TWIN, HANDLE_BYTES, HANDLE_DESC, HANDLE_ELEMENTS, HANDLE_TAG,
+    HANDLE_TWIN } from './constants-setters.js';
+import { COMPILED } from './constants-setters.x86.js';
+import { COMPILED as COMPILED_LONG } from './constants-setters.x64.js';
+import { wholeAddress } from '../common/pointers.js';
 
-export const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
+const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -224,11 +234,15 @@ export function registerValues(constant, values){
  * @typedef {Object} ConstantTableHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process.
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any })
  *     => Promise<number>} [callGuest]
  * @property {() => any} [currentThread]
+ * @property {(steps: Generator<{ entry: number, args: number[] }, number, number>) => any} [drive]
+ *     Steps run by the bridge in the slice the call came in: a setter's call
+ *     of the device's own setter, made with no turn of the run loop for it.
  */
 
 /**
@@ -239,11 +253,35 @@ export function registerValues(constant, values){
  */
 export function createConstantTableObjects(host){
     const u32 = (/** @type {number} */ address)=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     const dword = (/** @type {number} */ value)=>Uint8Array.of(value & 0xff, value >> 8 & 0xff,
         value >> 16 & 0xff, value >>> 24);
+    // A program asks for a constant's description and sets its values every
+    // frame, for every constant: an answer put together from arrays made per
+    // field was most of what the engine thread collected. The bytes go out
+    // through these, which writeMemory copies at once.
+    /** A pointer's bytes in the calling process. */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    const descBytes = new Uint8Array(64);
+    const descWords = new DataView(descBytes.buffer);
+    /** @param {number[]} values @returns {Uint8Array} */
+    const words = values=>{
+        values.forEach((value, i)=>descWords.setUint32(i * 4, value >>> 0, true));
+        return descBytes.subarray(0, values.length * 4);
+    };
+    let scratch = new DataView(new ArrayBuffer(256));
+    /** A scratch of at least this many bytes. @param {number} length */
+    const scratchOf = length=>{
+        if (scratch.byteLength < length)
+        {
+            scratch = new DataView(new ArrayBuffer(Math.max(length, scratch.byteLength * 2)));
+        }
+        return scratch;
+    };
+    /** Each constant's twins in its table, found once. @type {WeakMap<Constant, Constant[]>} */
+    const twinsOf = new WeakMap();
     const f32Word = new Uint32Array(1);
     const f32View = new Float32Array(f32Word.buffer);
     const f32 = (/** @type {number} */ address)=>{
@@ -252,7 +290,7 @@ export function createConstantTableObjects(host){
     };
     const readString = (/** @type {number} */ address)=>{
         let text = '';
-        for (let at = address >>> 0; text.length < 256; at++)
+        for (let at = wholeAddress(address); text.length < 256; at++)
         {
             const byte = host.readMemory(at, 1)[0];
             if (byte === 0)
@@ -275,6 +313,7 @@ export function createConstantTableObjects(host){
      * @property {Map<number, Constant>} handles
      * @property {Map<Constant, number>} handleOf
      * @property {number[]} owned  Blocks that go back to the heap with the table.
+     * @property {number} block  The interface's state word (`BLOCK_*`).
      */
 
     /**
@@ -289,7 +328,7 @@ export function createConstantTableObjects(host){
         {
             return known;
         }
-        const handle = host.heap?.allocate(4) ?? 0;
+        const handle = host.heap?.allocate(HANDLE_BYTES) ?? 0;
         if (handle === 0)
         {
             return 0;
@@ -297,6 +336,67 @@ export function createConstantTableObjects(host){
         table.owned.push(handle);
         table.handles.set(handle, constant);
         table.handleOf.set(constant, handle);
+        let elements = 0;
+        if (constant.elements > 1)
+        {
+            elements = host.heap?.allocate(constant.elements * 4) ?? 0;
+            if (elements !== 0)
+            {
+                table.owned.push(elements);
+                host.writeMemory(elements, new Uint8Array(constant.elements * 4));
+            }
+        }
+        host.writeMemory(handle + HANDLE_DESC, words(descOf(constant)));
+        host.writeMemory(handle + HANDLE_TAG, words([table.block, ~table.block >>> 0]));
+        host.writeMemory(handle + HANDLE_TWIN, words([twinsFor(table, constant).length > 0 ? 1 : 0,
+            elements]));
+        return handle;
+    };
+
+    /**
+     * What GetConstantDesc answers for a constant: D3DXCONSTANT_DESC's words.
+     *
+     * @param {Constant} constant @returns {number[]}
+     */
+    const descOf = constant=>[constant.nameAt, constant.set, constant.index, constant.count,
+        constant.cls, constant.type, constant.rows, constant.columns, constant.elements,
+        constant.members.length, constant.set === SET.SAMPLER || constant.cls === CLASS.OBJECT
+            ? 4 * constant.elements
+            : 4 * Math.max(constant.rows, 1) * Math.max(constant.columns, 1) * constant.elements,
+        constant.defaultAt];
+
+    /**
+     * D3DXCONSTANT_DESC as the caller lays it out: in a 64-bit process the name
+     * and the default value are quadword pointers, the ten counts between them
+     * where they were.
+     *
+     * @param {Constant} constant @returns {number[]}
+     */
+    const descOut = constant=>{
+        const desc = descOf(constant);
+        return POINTER === 8 ? [desc[0], 0, ...desc.slice(1, 11), desc[11], 0] : desc;
+    };
+    /** A pointer's words in the calling process. @param {number} value */
+    const pointerWords = value=>(POINTER === 8 ? [value, 0] : [value]);
+
+    /**
+     * An element's handle, kept in its array's record as well, where the
+     * guest's GetConstantElement finds it the next time.
+     *
+     * @param {TableState} table @param {Constant} constant @param {number} index
+     */
+    const elementHandle = (table, constant, index)=>{
+        const element = elementOf(constant, index);
+        const handle = element ? handleFor(table, element) : 0;
+        const record = table.handleOf.get(constant);
+        if (handle !== 0 && record !== undefined)
+        {
+            const list = u32(record + HANDLE_ELEMENTS);
+            if (list !== 0)
+            {
+                host.writeMemory(list + index * 4, dword(handle));
+            }
+        }
         return handle;
     };
 
@@ -337,15 +437,29 @@ export function createConstantTableObjects(host){
         return found;
     };
 
-    /** One element of an array constant. @param {Constant} constant @param {number} index */
+    /** @type {WeakMap<Constant, Constant[]>} */
+    const elementsOf = new WeakMap();
+    /**
+     * One element of an array constant, made once: its handle is found by
+     * the element, and a program asks for the same elements every frame.
+     *
+     * @param {Constant} constant @param {number} index @returns {Constant | null}
+     */
     const elementOf = (constant, index)=>{
         if (index >= constant.elements)
         {
             return null;
         }
+        let made = elementsOf.get(constant);
+        if (!made)
+        {
+            made = [];
+            elementsOf.set(constant, made);
+        }
         const per = Math.max(1, Math.floor(constant.count / constant.elements));
-        return { ...constant, elements: 1, index: constant.index + index * per, count: per,
-            defaultAt: 0 };
+        made[index] ??= { ...constant, elements: 1, index: constant.index + index * per,
+            count: per, defaultAt: 0 };
+        return made[index];
     };
 
     /**
@@ -358,11 +472,14 @@ export function createConstantTableObjects(host){
      * @param {any} [thread]  Whose call it is, when it comes after an await.
      */
     const store = (table, device, constant, values, thread)=>{
-        // fxc gives a model 3 loop's int count a second entry of the same name in the integer
-        // registers, which rep reads, beside the float one arithmetic reads: both are set.
-        const twins = constant && table.constants.includes(constant)
-            ? table.constants.filter(one=>one !== constant && one.name === constant.name
-                && one.set !== constant.set) : [];
+        // A program sets constants for every draw, thousands a frame: through
+        // the bridge's steps the device's setter is called in the slice the
+        // call came in, where a promise parked the thread for a turn each.
+        if (host.drive)
+        {
+            return host.drive(storeSteps(table, device, constant, values));
+        }
+        const twins = twinsFor(table, constant);
         if (twins.length === 0)
         {
             return storeSet(table, device, constant, values, thread);
@@ -372,6 +489,176 @@ export function createConstantTableObjects(host){
             ? answer : storeSet(table, device, twin, values, who))),
         storeSet(table, device, constant, values, thread));
     };
+
+    /**
+     * fxc gives a model 3 loop's int count a second entry of the same name in
+     * the integer registers, which rep reads, beside the float one arithmetic
+     * reads: both are set. Found once a constant.
+     *
+     * @param {TableState} table @param {Constant | null} constant @returns {Constant[]}
+     */
+    const twinsFor = (table, constant)=>{
+        if (!constant)
+        {
+            return [];
+        }
+        let twins = twinsOf.get(constant);
+        if (!twins)
+        {
+            twins = table.constants.includes(constant)
+                ? table.constants.filter(one=>one !== constant && one.name === constant.name
+                    && one.set !== constant.set) : [];
+            twinsOf.set(constant, twins);
+        }
+        return twins;
+    };
+
+    /**
+     * The device's setter call that puts a constant's values, ready to make,
+     * with the block of values it reads; or the answer where there is no call
+     * to make.
+     *
+     * @param {TableState} table @param {number} device @param {Constant | null} constant
+     * @param {number[]} values
+     * @returns {number | { call: { entry: number, args: number[] }, data: number }}
+     */
+    const prepareSet = (table, device, constant, values)=>{
+        if (!constant || (device >>> 0) === 0 || !host.heap)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        if (constant.set === SET.SAMPLER || constant.cls === CLASS.STRUCT)
+        {
+            return D3D_OK;
+        }
+        const count = registerBytes(constant, values);
+        if (count === 0)
+        {
+            return D3D_OK;
+        }
+        const data = host.heap.allocate(count * 16);
+        if (data === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(data, new Uint8Array(scratch.buffer, 0, count * 16));
+        const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
+        return { call: { entry: u32(u32(device) + slot * POINTER),
+            args: [device >>> 0, constant.index, data, count] }, data };
+    };
+
+    /**
+     * A constant's registers as its setter takes them, into the scratch:
+     * floats for the float registers, integers four to a register for the
+     * integer ones, one BOOL a register for the boolean ones.
+     *
+     * @param {Constant} constant @param {number[]} values
+     * @returns {number}  How many registers.
+     */
+    const registerBytes = (constant, values)=>{
+        const { registers, count } = registerValues(constant, values);
+        const bytes = scratchOf(count * 16);
+        const units = constant.set === SET.BOOL ? count : count * 4;
+        for (let i = 0; i < units; i++)
+        {
+            const value = registers[constant.set === SET.BOOL ? i * 4 : i];
+            if (constant.set === SET.FLOAT4)
+            {
+                bytes.setFloat32(i * 4, value, true);
+            }
+            else
+            {
+                bytes.setInt32(i * 4, constant.set === SET.BOOL ? (value !== 0 ? 1 : 0)
+                    : Math.trunc(value), true);
+            }
+        }
+        return count;
+    };
+
+    /** The constants SetDefaults sets. @param {TableState} table */
+    const defaultsOf = table=>table.constants.filter(one=>one.defaultAt !== 0
+        && one.set === SET.FLOAT4);
+    /** A default's values. @param {Constant} constant */
+    const defaultValues = constant=>floats(constant.defaultAt, constant.count * 4)
+        .filter((_, i)=>i % 4 < Math.max(constant.columns, 1));
+
+    /**
+     * SetDefaults' list for the guest (`DEFAULT_*`), made once: a program
+     * sets a table's defaults before every draw, and they are the table's.
+     *
+     * @param {TableState} table @returns {boolean}  False when the heap had no room.
+     */
+    const writeDefaults = table=>{
+        const heap = /** @type {NonNullable<ConstantTableHost['heap']>} */ (host.heap);
+        /** @type {number[]} */
+        const entries = [];
+        let room = true;
+        for (const constant of defaultsOf(table))
+        {
+            [constant, ...twinsFor(table, constant)].forEach((one, i)=>{
+                const plain = one.set === SET.SAMPLER || one.cls === CLASS.STRUCT;
+                const count = plain ? 0 : registerBytes(one, defaultValues(constant));
+                let data = 0;
+                if (count !== 0)
+                {
+                    data = heap.allocate(count * 16);
+                    room &&= data !== 0;
+                    if (data !== 0)
+                    {
+                        table.owned.push(data);
+                        host.writeMemory(data, new Uint8Array(scratch.buffer, 0, count * 16));
+                    }
+                }
+                entries.push(plain ? 0 : SETTERS[one.set][table.pixel ? 1 : 0]
+                    | (i > 0 ? DEFAULT_TWIN : 0), one.index, data, count);
+            });
+        }
+        const list = entries.length === 0 ? 0 : heap.allocate(entries.length * 4);
+        if (list !== 0)
+        {
+            table.owned.push(list);
+            host.writeMemory(list, Uint8Array.from(new Uint8Array(Uint32Array.from(entries
+                .map(value=>value >>> 0)).buffer)));
+        }
+        host.writeMemory(table.block + BLOCK_DEFAULTS, words([list,
+            list === 0 ? 0 : entries.length * 4 / DEFAULT_BYTES]));
+        return room && (entries.length === 0 || list !== 0);
+    };
+
+    /**
+     * A constant's values, and its twins', set through the bridge's steps.
+     *
+     * @param {TableState} table @param {number} device @param {Constant | null} constant
+     * @param {number[]} values
+     * @returns {Generator<{ entry: number, args: number[] }, number, number>}
+     */
+    function* storeSteps(table, device, constant, values){
+        let answer = D3D_OK;
+        for (const one of constant ? [constant, ...twinsFor(table, constant)] : [constant])
+        {
+            const made = prepareSet(table, device, one, values);
+            if (typeof made === 'number')
+            {
+                answer = made;
+            }
+            else
+            {
+                try
+                {
+                    answer = (yield made.call) >>> 0;
+                }
+                finally
+                {
+                    host.heap?.free(made.data);
+                }
+            }
+            if (answer !== D3D_OK)
+            {
+                return answer;
+            }
+        }
+        return answer;
+    }
 
     /**
      * @param {TableState} table @param {number} device @param {Constant | null} constant
@@ -393,7 +680,7 @@ export function createConstantTableObjects(host){
         }
         // Floats for the float registers; integers four to a register for the
         // integer ones; one BOOL a register for the boolean ones.
-        const bytes = new DataView(new ArrayBuffer(count * 16));
+        const bytes = scratchOf(count * 16);
         const units = constant.set === SET.BOOL ? count : count * 4;
         for (let i = 0; i < units; i++)
         {
@@ -408,14 +695,14 @@ export function createConstantTableObjects(host){
                     : Math.trunc(value), true);
             }
         }
-        const data = host.heap.allocate(bytes.byteLength);
+        const data = host.heap.allocate(count * 16);
         if (data === 0)
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(data, new Uint8Array(bytes.buffer));
+        host.writeMemory(data, new Uint8Array(bytes.buffer, 0, count * 16));
         const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
-        const entry = u32(u32(device) + slot * 4);
+        const entry = u32(u32(device) + slot * POINTER);
         const free = ()=>host.heap?.free(data);
         return host.callGuest({ entry, args: [device >>> 0, constant.index, data, count],
             ...(thread === undefined ? {} : { thread }) })
@@ -467,10 +754,12 @@ export function createConstantTableObjects(host){
      *
      * @param {string} name @param {number} argBytes
      * @param {(table: TableState, constant: Constant, args: number[]) => number[]} read
+     * @param {{ floats?: Record<number, 'f32'> }} [marshal]  A FLOAT by value, by dword
+     *     counting `this`: the bridge's `floats`.
      * @returns {import('../ole32/objects.js').ComMethod}
      */
-    const setter = (name, argBytes, read)=>({
-        name, argBytes,
+    const setter = (name, argBytes, read, marshal = {})=>({
+        name, argBytes, ...marshal,
         invoke: (object, [device, handle, ...rest])=>{
             const table = tableOf(object);
             const constant = resolve(table, handle);
@@ -479,12 +768,61 @@ export function createConstantTableObjects(host){
         },
     });
 
+    /** @type {Map<string, Map<number, number>>} Where each method's code is, by its trap. */
+    const placed = new Map();
+    /**
+     * The methods `constants-setters.js` has guest code for take it through
+     * their `guest` slot: placed once for each trap, its `return host()`
+     * going to that trap. A 64-bit process places the x86-64 the build made
+     * from the same source (`wide`), and a method it made none for is a trap
+     * there (`REFUSED`).
+     *
+     * @param {import('../ole32/objects.js').ComMethod[]} methods
+     * @returns {import('../ole32/objects.js').ComMethod[]}
+     */
+    function inGuest(methods){
+        const records = /** @type {Record<string, any>} */ (POINTER === 8 ? COMPILED_LONG
+            : COMPILED);
+        return methods.map(method=>{
+            const compiled = records[method.name];
+            if (!compiled)
+            {
+                return method;
+            }
+            return /** @type {any} */ ({ ...method, guest: Object.assign((
+                /** @type {{ trap: number }} */ { trap })=>{
+                const known = placed.get(method.name)?.get(trap);
+                if (known !== undefined)
+                {
+                    return known;
+                }
+                const heap = /** @type {any} */ (host.heap);
+                const code = /** @type {Uint8Array} */ (compiled.code);
+                const at = heap ? (heap.allocateCode ?? heap.allocate)(code.length) : 0;
+                if (at === 0)
+                {
+                    return trap;
+                }
+                const bytes = code.slice();
+                // `return host()` jumps to the trap: an address after `mov eax`,
+                // else a displacement from the end of the jump.
+                new DataView(bytes.buffer).setUint32(compiled.host,
+                    bytes[compiled.host - 1] === 0xb8 ? trap >>> 0
+                        : (trap - (at + compiled.host + 4)) >>> 0, true);
+                host.writeMemory(at, bytes);
+                placed.set(method.name, (placed.get(method.name) ?? new Map()).set(trap, at));
+                return at;
+            }, { wide: true }) });
+        });
+    }
+
     /** @type {import('../ole32/objects.js').ComInterfaceDescriptor} */
     const constantTable = {
         id: IID_ID3DXCONSTANTTABLE,
-        methods: [
+        methods: inGuest([
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>tableOf(object).base },
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
+                invoke: object=>tableOf(object).base },
             /** DWORD GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4, invoke: object=>tableOf(object).size },
             /** HRESULT GetDesc(D3DXCONSTANTTABLE_DESC *pDesc) */
@@ -494,8 +832,8 @@ export function createConstantTableObjects(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const table = tableOf(object);
-                host.writeMemory(out >>> 0, Uint8Array.of(...dword(table.creatorAt),
-                    ...dword(table.version), ...dword(table.constants.length)));
+                host.writeMemory(wholeAddress(out), words([...pointerWords(table.creatorAt),
+                    table.version, table.constants.length]));
                 return D3D_OK;
             } },
             /** HRESULT GetConstantDesc(D3DXHANDLE, D3DXCONSTANT_DESC *pDesc, UINT *pCount) */
@@ -507,19 +845,11 @@ export function createConstantTableObjects(host){
                 }
                 if ((out >>> 0) !== 0)
                 {
-                    const numbers = constant.set === SET.SAMPLER || constant.cls === CLASS.OBJECT
-                        ? 4 * constant.elements
-                        : 4 * Math.max(constant.rows, 1) * Math.max(constant.columns, 1)
-                            * constant.elements;
-                    host.writeMemory(out >>> 0, Uint8Array.of(...[constant.nameAt, constant.set,
-                        constant.index, constant.count, constant.cls, constant.type,
-                        constant.rows, constant.columns, constant.elements,
-                        constant.members.length, numbers, constant.defaultAt]
-                        .flatMap(value=>[...dword(value)])));
+                    host.writeMemory(wholeAddress(out), words(descOut(constant)));
                 }
                 if ((countAt >>> 0) !== 0)
                 {
-                    host.writeMemory(countAt >>> 0, dword(1));
+                    host.writeMemory(wholeAddress(countAt), dword(1));
                 }
                 return D3D_OK;
             } },
@@ -554,21 +884,32 @@ export function createConstantTableObjects(host){
             { name: 'GetConstantElement', argBytes: 12, invoke: (object, [parent, index])=>{
                 const table = tableOf(object);
                 const constant = resolve(table, parent);
-                const element = constant ? elementOf(constant, index >>> 0) : null;
-                return element ? handleFor(table, element) : 0;
+                return constant ? elementHandle(table, constant, index >>> 0) : 0;
             } },
             /** HRESULT SetDefaults(LPDIRECT3DDEVICE9) */
             { name: 'SetDefaults', argBytes: 8, invoke: (object, [device])=>{
                 const table = tableOf(object);
+                const defaults = defaultsOf(table);
+                const valuesOf = defaultValues;
+                if (host.drive)
+                {
+                    // Each set in turn, the answer the last one's, as below.
+                    return host.drive((function* (){
+                        let answer = D3D_OK;
+                        for (const constant of defaults)
+                        {
+                            answer = yield* storeSteps(table, device, constant, valuesOf(constant));
+                        }
+                        return answer;
+                    })());
+                }
                 // Every store after the first comes after an await.
                 const thread = host.currentThread?.();
                 let chain = Promise.resolve(D3D_OK);
-                for (const constant of table.constants.filter(one=>one.defaultAt !== 0
-                    && one.set === SET.FLOAT4))
+                for (const constant of defaults)
                 {
-                    chain = chain.then(()=>store(table, device, constant,
-                        floats(constant.defaultAt, constant.count * 4)
-                            .filter((_, i)=>i % 4 < Math.max(constant.columns, 1)), thread));
+                    chain = chain.then(()=>store(table, device, constant, valuesOf(constant),
+                        thread));
                 }
                 return chain;
             } },
@@ -585,7 +926,8 @@ export function createConstantTableObjects(host){
             /** HRESULT SetIntArray(device, handle, const INT *pn, UINT Count) */
             setter('SetIntArray', 20, (_, __, [at, count])=>ints(at, count >>> 0)),
             /** HRESULT SetFloat(device, handle, FLOAT f) */
-            setter('SetFloat', 16, (_, __, [value])=>[asFloat(value)]),
+            // SetFloat(device, handle, FLOAT): the value in the fourth slot, XMM3 at 64 bits.
+            setter('SetFloat', 16, (_, __, [value])=>[asFloat(value)], { floats: { 3: 'f32' } }),
             /** HRESULT SetFloatArray(device, handle, const FLOAT *pf, UINT Count) */
             setter('SetFloatArray', 20, (_, __, [at, count])=>floats(at, count >>> 0)),
             /** HRESULT SetVector(device, handle, const D3DXVECTOR4 *pVector) */
@@ -600,7 +942,8 @@ export function createConstantTableObjects(host){
                 { length: count >>> 0 }, (__, i)=>matrix(constant, at + i * 64, false)).flat()),
             /** HRESULT SetMatrixPointerArray(device, handle, const D3DXMATRIX **, UINT Count) */
             setter('SetMatrixPointerArray', 20, (_, constant, [at, count])=>Array.from(
-                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * 4), false)).flat()),
+                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * POINTER),
+                    false)).flat()),
             /** HRESULT SetMatrixTranspose(device, handle, const D3DXMATRIX *pMatrix) */
             setter('SetMatrixTranspose', 16, (_, constant, [at])=>matrix(constant, at, true)),
             /** HRESULT SetMatrixTransposeArray(device, handle, const D3DXMATRIX *, UINT Count) */
@@ -608,8 +951,9 @@ export function createConstantTableObjects(host){
                 { length: count >>> 0 }, (__, i)=>matrix(constant, at + i * 64, true)).flat()),
             /** HRESULT SetMatrixTransposePointerArray(device, handle, const D3DXMATRIX **, UINT Count) */
             setter('SetMatrixTransposePointerArray', 20, (_, constant, [at, count])=>Array.from(
-                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * 4), true)).flat()),
-        ],
+                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * POINTER),
+                    true)).flat()),
+        ]),
     };
 
     /**
@@ -635,28 +979,47 @@ export function createConstantTableObjects(host){
         host.writeMemory(base, block);
         const parsed = parseConstantTable(new DataView(block.buffer, block.byteOffset, size),
             base);
+        const pixel = ((version & 0xffff0000) >>> 0) === 0xffff0000;
+        const state = heap.allocate(BLOCK_BYTES);
+        if (state === 0)
+        {
+            heap.free(base);
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(state + BLOCK_PIXEL, dword(pixel ? 1 : 0));
         /** @type {TableState} */
-        const table = { base, size, creatorAt: parsed.creatorAt, version: parsed.version,
-            pixel: ((version & 0xffff0000) >>> 0) === 0xffff0000,
+        const table = { base, size, creatorAt: parsed.creatorAt, version: parsed.version, pixel,
             constants: parsed.constants, handles: new Map(), handleOf: new Map(),
-            owned: [base] };
-        // A constant the table lists is named by its record's address.
-        const infos = new DataView(block.buffer, block.byteOffset, size).getUint32(16, true);
-        parsed.constants.forEach((constant, c)=>{
-            table.handles.set(base + infos + c * 20, constant);
-            table.handleOf.set(constant, base + infos + c * 20);
-        });
+            owned: [base, state], block: state };
+        // The constants the table lists have their handles from the start.
+        parsed.constants.forEach(constant=>handleFor(table, constant));
+        if (!writeDefaults(table))
+        {
+            table.owned.forEach(address=>heap.free(address));
+            return E_OUTOFMEMORY;
+        }
+        // Its count in a word of the guest's: a program takes and gives back a
+        // reference to the table around every constant it sets, and the
+        // guest's AddRef and Release count there with no host call.
+        const cellAt = heap.allocate(4);
+        if (cellAt !== 0)
+        {
+            table.owned.push(cellAt);
+        }
         const object = createComObject(IID_ID3DXCONSTANTTABLE, {
             interfaces: [constantTable], state: table,
             destroy: ()=>table.owned.forEach(address=>heap.free(address)),
+            ...cellAt === 0 ? {} : { count: { address: cellAt, read: ()=>u32(cellAt),
+                write: (/** @type {number} */ value)=>host.writeMemory(cellAt, dword(value)) } },
         });
+        /** @type {any} */ (object).guestState = ()=>table.block;
         const pointer = vtables.publish(object, IID_ID3DXCONSTANTTABLE) >>> 0;
         if (pointer === 0)
         {
             object.release();
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(out >>> 0, dword(pointer));
+        host.writeMemory(wholeAddress(out), words(pointerWords(pointer)));
         return D3D_OK;
     };
 
@@ -673,16 +1036,16 @@ export function createConstantTableObjects(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([code, out])=>{
-                if ((code >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(code) === 0 || wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(POINTER));
                 if (!host.heap || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                const found = findConstantTable(u32, code >>> 0);
+                const found = findConstantTable(u32, wholeAddress(code));
                 if (!found)
                 {
                     return D3DERR_INVALIDCALL;

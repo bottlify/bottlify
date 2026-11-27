@@ -25,7 +25,8 @@
  */
 
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
+    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
+    D3D11_BIND_UNORDERED_ACCESS, D3D11_LIMITS, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL,
     DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, S_OK,
 } from './constants.js';
 
@@ -177,7 +178,7 @@ export const RESOURCE_ACCESS = Object.freeze([
  * @param {number} bindFlags
  * @returns {ResourceAccessRow | null}
  */
-export function resourceAccessRow(usage, bindFlags){
+function resourceAccessRow(usage, bindFlags){
     return RESOURCE_ACCESS.find(row=>row.usage === usage && row.bindFlags === bindFlags) ?? null;
 }
 
@@ -204,9 +205,21 @@ export function usageRequiresCpuAccess(usage){
  * @param {number} usage
  * @param {number} bindFlags
  * @param {number} cpuAccessFlags
+ * @param {CreateRules} [rules]
  * @returns {number} S_OK or E_INVALIDARG
  */
-export function resourceAccessResult(usage, bindFlags, cpuAccessFlags){
+export function resourceAccessResult(usage, bindFlags, cpuAccessFlags, rules = NO_RULES){
+    // Direct3D 11's unordered access: written by a shader, so of the default
+    // usage, out of the processor's reach, and of a level that has compute.
+    if ((bindFlags & D3D11_BIND_UNORDERED_ACCESS) !== 0)
+    {
+        if (!rules.d3d11 || rules.featureLevel < D3D_FEATURE_LEVEL.LEVEL_11_0
+            || usage !== D3D10_USAGE.DEFAULT || cpuAccessFlags !== 0)
+        {
+            return E_INVALIDARG;
+        }
+        bindFlags &= ~D3D11_BIND_UNORDERED_ACCESS;
+    }
     let allowed = D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE;
     if (bindFlags === 0)
     {
@@ -244,8 +257,26 @@ export function resourceAccessResult(usage, bindFlags, cpuAccessFlags){
     return (cpuAccessFlags & ~allowed) === 0 ? S_OK : E_INVALIDARG;
 }
 
+/**
+ * What a create is judged by past Direct3D 10's own rules: whether Direct3D
+ * 11 made the device, and at what level.
+ *
+ * @typedef {Object} CreateRules
+ * @property {boolean} d3d11
+ * @property {number} featureLevel
+ */
+
+/** @type {CreateRules} */
+const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
+
+/**
+ * D3D11_CENTER_MULTISAMPLE_PATTERN; D3D11_STANDARD_MULTISAMPLE_PATTERN is the
+ * one above it, 0xffffffff.
+ */
+const MULTISAMPLE_PATTERN_CENTER = 0xfffffffe;
+
 /** The bind flags that only a buffer may carry. */
-export const BUFFER_ONLY_BIND_FLAGS =
+const BUFFER_ONLY_BIND_FLAGS =
     D3D10_BIND.VERTEX_BUFFER | D3D10_BIND.INDEX_BUFFER | D3D10_BIND.CONSTANT_BUFFER;
 
 /**
@@ -255,9 +286,17 @@ export const BUFFER_ONLY_BIND_FLAGS =
  *
  * @type {ReadonlySet<number>}
  */
-export const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.DEPTH)
     .map(([, info])=>info.family));
+
+/**
+ * The typeless families with a depth member that carries stencil.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const STENCIL_FAMILIES = new Set([DXGI_FORMAT.D24_UNORM_S8_UINT,
+    DXGI_FORMAT.D32_FLOAT_S8X24_UINT].map(format=>FORMAT_INFO[format].family));
 
 /**
  * The typeless families with a member a render target may be made of, derived
@@ -265,7 +304,7 @@ export const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
  *
  * @type {ReadonlySet<number>}
  */
-export const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.COLOUR && info.renderable)
     .map(([, info])=>info.family));
 
@@ -304,6 +343,13 @@ export function formatAllowsBind(format, bindFlag){
     if (bindFlag === D3D10_BIND.SHADER_RESOURCE)
     {
         return info.kind !== FORMAT_KIND.DEPTH;
+    }
+    // A view a shader writes texel by texel: no depth, no blocks, and no
+    // family whose depth carries stencil (test_create_texture2d).
+    if (bindFlag === D3D11_BIND_UNORDERED_ACCESS)
+    {
+        return info.kind !== FORMAT_KIND.DEPTH && info.blockEdge === 1
+            && !STENCIL_FAMILIES.has(info.family);
     }
     return false;
 }
@@ -344,12 +390,42 @@ export function levelExtent(size, level){
  */
 
 /**
- * @param {BufferDesc} desc
+ * @param {BufferDesc & { MiscFlags11?: number, StructureByteStride?: number }} desc
  * @param {boolean} hasInitialData
+ * @param {CreateRules} [rules]
  * @returns {number} S_OK or E_INVALIDARG
  */
-export function bufferCreateResult(desc, hasInitialData){
-    if (desc.ByteWidth === 0)
+export function bufferCreateResult(desc, hasInitialData, rules = NO_RULES){
+    // A buffer has no levels to generate (test_generate_mips), no faces and
+    // nothing GDI draws into: Direct3D 10's GDI_COMPATIBLE is the bit
+    // Direct3D 11's BUFFER_ALLOW_RAW_VIEWS is, which a Direct3D 10 device
+    // refuses (d3d10core.c test_create_buffer).
+    if (desc.ByteWidth === 0 || ((desc.MiscFlags ?? 0) & (D3D10_RESOURCE_MISC.GENERATE_MIPS
+        | D3D10_RESOURCE_MISC.TEXTURECUBE | D3D10_RESOURCE_MISC.GDI_COMPATIBLE)) !== 0)
+    {
+        return E_INVALIDARG;
+    }
+    const eleven = desc.MiscFlags11 ?? 0;
+    if ((eleven & ~(D3D11_RESOURCE_MISC.DRAWINDIRECT_ARGS
+        | D3D11_RESOURCE_MISC.BUFFER_ALLOW_RAW_VIEWS | D3D11_RESOURCE_MISC.BUFFER_STRUCTURED
+        | D3D11_RESOURCE_MISC.RESOURCE_CLAMP)) !== 0)
+    {
+        return E_INVALIDARG;
+    }
+    const viewsOnly = D3D10_BIND.SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    // A raw buffer is read and written by views alone, four bytes at a time.
+    if ((eleven & D3D11_RESOURCE_MISC.BUFFER_ALLOW_RAW_VIEWS) !== 0
+        && ((desc.BindFlags & viewsOnly) === 0 || (desc.BindFlags & ~viewsOnly) !== 0
+            || (eleven & D3D11_RESOURCE_MISC.BUFFER_STRUCTURED) !== 0))
+    {
+        return E_INVALIDARG;
+    }
+    // A structured buffer is whole structures of four-byte members, at most
+    // 2048 bytes each, read and written by views.
+    const stride = desc.StructureByteStride ?? 0;
+    if ((eleven & D3D11_RESOURCE_MISC.BUFFER_STRUCTURED) !== 0
+        && (stride < 4 || stride > 2048 || stride % 4 !== 0 || desc.ByteWidth % stride !== 0
+            || (desc.BindFlags & ~viewsOnly) !== 0))
     {
         return E_INVALIDARG;
     }
@@ -364,7 +440,7 @@ export function bufferCreateResult(desc, hasInitialData){
     {
         return E_INVALIDARG;
     }
-    return resourceAccessResult(desc.Usage, desc.BindFlags, desc.CPUAccessFlags);
+    return resourceAccessResult(desc.Usage, desc.BindFlags, desc.CPUAccessFlags, rules);
 }
 
 /**
@@ -390,16 +466,31 @@ export function bufferCreateResult(desc, hasInitialData){
 
 /**
  * @param {number} dimension  A D3D10_RESOURCE_DIMENSION for a texture.
+ * @param {CreateRules} rules
  * @returns {number} the largest extent that dimension allows
  */
-function maxExtentFor(dimension){
+function maxExtentFor(dimension, rules){
+    const limits = rules.d3d11 && rules.featureLevel >= D3D_FEATURE_LEVEL.LEVEL_11_0
+        ? D3D11_LIMITS : D3D10_LIMITS;
     if (dimension === 2)
     {
-        return D3D10_LIMITS.MAX_TEXTURE1D_DIMENSION;
+        return limits.MAX_TEXTURE1D_DIMENSION;
     }
     return dimension === 4
-        ? D3D10_LIMITS.MAX_TEXTURE3D_DIMENSION
-        : D3D10_LIMITS.MAX_TEXTURE2D_DIMENSION;
+        ? limits.MAX_TEXTURE3D_DIMENSION
+        : limits.MAX_TEXTURE2D_DIMENSION;
+}
+
+/**
+ * Whether a device of a feature level knows a format: BC6H and BC7 only from
+ * level 11 (a level 10 device has neither, as Direct3D 10's runtime did not).
+ *
+ * @param {number} format @param {number | undefined} featureLevel
+ */
+export function levelHasFormat(format, featureLevel){
+    const family = FORMAT_INFO[format]?.family;
+    return (family !== DXGI_FORMAT.BC6H_TYPELESS && family !== DXGI_FORMAT.BC7_TYPELESS)
+        || (featureLevel ?? 0) >= 0xb000;
 }
 
 /**
@@ -407,17 +498,30 @@ function maxExtentFor(dimension){
  * @param {number} dimension  A D3D10_RESOURCE_DIMENSION.
  * @param {DeviceCaps} caps
  * @param {boolean} hasInitialData
+ * @param {CreateRules} [rules]
  * @returns {number} S_OK or E_INVALIDARG
  */
-export function textureCreateResult(desc, dimension, caps, hasInitialData){
+export function textureCreateResult(desc, dimension, caps, hasInitialData, rules = NO_RULES){
     const arraySize = desc.ArraySize ?? 1;
     const height = desc.Height ?? 1;
     const depth = desc.Depth ?? 1;
     const sample = desc.SampleDesc ?? { Count: 1, Quality: 0 };
-    const limit = maxExtentFor(dimension);
+    const limit = maxExtentFor(dimension, rules);
+    // Of Direct3D 11's own flags a texture may only be clamped, or shared by
+    // an NT handle.
+    if (((/** @type {any} */ (desc).MiscFlags11 ?? 0)
+        & ~(D3D11_RESOURCE_MISC.RESOURCE_CLAMP | D3D11_RESOURCE_MISC.SHARED_NTHANDLE)) !== 0)
+    {
+        return E_INVALIDARG;
+    }
 
     if (desc.Width < 1 || height < 1 || depth < 1
         || desc.Width > limit || height > limit || depth > limit)
+    {
+        return E_INVALIDARG;
+    }
+    // BC6H and BC7 are feature level 11's (test_texture skips them below it).
+    if (!levelHasFormat(desc.Format, rules.featureLevel))
     {
         return E_INVALIDARG;
     }
@@ -439,8 +543,15 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
     {
         return E_INVALIDARG;
     }
+    // Nor depth and a shader's writes.
+    const depthAndWrites = D3D10_BIND.DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS;
+    if ((desc.BindFlags & depthAndWrites) === depthAndWrites)
+    {
+        return E_INVALIDARG;
+    }
     for (const bindFlag of [
         D3D10_BIND.SHADER_RESOURCE, D3D10_BIND.RENDER_TARGET, D3D10_BIND.DEPTH_STENCIL,
+        D3D11_BIND_UNORDERED_ACCESS,
     ])
     {
         if ((desc.BindFlags & bindFlag) !== 0 && !formatAllowsBind(desc.Format, bindFlag))
@@ -461,16 +572,34 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
     {
         return E_INVALIDARG;
     }
+    // A texture GDI draws into is a default render target of BGRA's eight bits
+    // with alpha (test_getdc).
+    if ((desc.MiscFlags & D3D10_RESOURCE_MISC.GDI_COMPATIBLE) !== 0
+        && ((desc.Usage ?? D3D10_USAGE.DEFAULT) !== D3D10_USAGE.DEFAULT
+            || (desc.BindFlags & D3D10_BIND.RENDER_TARGET) === 0
+            || !(/** @type {number[]} */ ([DXGI_FORMAT.B8G8R8A8_UNORM,
+                DXGI_FORMAT.B8G8R8A8_TYPELESS, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB]))
+                .includes(desc.Format)))
+    {
+        return E_INVALIDARG;
+    }
     const shared = D3D10_RESOURCE_MISC.SHARED | D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX;
-    if ((desc.MiscFlags & shared) === shared)
+    // A texture is shared one way: a plain share or a keyed mutex, and an NT
+    // handle only names one of those (test_shared_resource).
+    if ((desc.MiscFlags & shared) === shared
+        || (((/** @type {any} */ (desc).MiscFlags11 ?? 0) & D3D11_RESOURCE_MISC.SHARED_NTHANDLE)
+            !== 0 && (desc.MiscFlags & shared) === 0))
     {
         return E_INVALIDARG;
     }
     if ((desc.MiscFlags & D3D10_RESOURCE_MISC.TEXTURECUBE) !== 0)
     {
-        // A cube is six faces and, in this version of the API, exactly one cube:
-        // arrays of cubes arrived with the next feature level.
-        if (dimension !== 3 || arraySize !== 6)
+        // A cube is six faces. From feature level 10.1, which Direct3D 10's
+        // device is not, a texture made as cubes may have more slices than
+        // six; a view of it as cubes takes them six at a time
+        // (test_create_texture2d).
+        const cubeArrays = rules.d3d11 && rules.featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1;
+        if (dimension !== 3 || (cubeArrays ? arraySize < 6 : arraySize !== 6))
         {
             return E_INVALIDARG;
         }
@@ -483,7 +612,12 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
     if (sample.Count > 1 || sample.Quality > 0)
     {
         const levels = caps.multisampleQualityLevels(desc.Format, sample.Count);
-        if (levels === 0 || sample.Quality >= levels)
+        // From feature level 10.1 a quality may name a fixed pattern instead,
+        // D3D11_STANDARD_MULTISAMPLE_PATTERN or _CENTER_, at any count the
+        // format multisamples at (Wine's test_standard_pattern).
+        const pattern = (sample.Quality >>> 0) >= MULTISAMPLE_PATTERN_CENTER
+            && rules.featureLevel >= D3D_FEATURE_LEVEL.LEVEL_10_1;
+        if (levels === 0 || (sample.Quality >= levels && !pattern))
         {
             return E_INVALIDARG;
         }
@@ -506,7 +640,7 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
     {
         return E_INVALIDARG;
     }
-    return resourceAccessResult(desc.Usage, desc.BindFlags, desc.CPUAccessFlags);
+    return resourceAccessResult(desc.Usage, desc.BindFlags, desc.CPUAccessFlags, rules);
 }
 
 /**
@@ -519,9 +653,10 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
  *
  * @param {number} resourceFormat
  * @param {number} viewFormat
+ * @param {boolean} [swapChainBuffer]  whether the resource is a swap chain's buffer
  * @returns {number | null} the format the view ends up with, or null if refused
  */
-export function resolveViewFormat(resourceFormat, viewFormat){
+export function resolveViewFormat(resourceFormat, viewFormat, swapChainBuffer = false){
     const resource = FORMAT_INFO[resourceFormat];
     if (!resource)
     {
@@ -536,17 +671,24 @@ export function resolveViewFormat(resourceFormat, viewFormat){
     {
         return null;
     }
+    // A typed resource is viewed as its own type (test_create_shader_resource_view):
+    // a swap chain's buffer as its sRGB twin too, as DXGI lets a program draw
+    // into one without converting.
+    if (resource.kind !== FORMAT_KIND.TYPELESS && viewFormat !== resourceFormat
+        && !(swapChainBuffer && SRGB_TWINS.get(resourceFormat) === viewFormat))
+    {
+        return null;
+    }
     return viewFormat;
 }
 
-/**
- * @param {number} requested
- * @param {number} available
- * @returns {number} how many slices a view covers, resolving "all remaining"
- */
-export function resolveSliceCount(requested, available){
-    return requested === ALL_REMAINING ? available : requested;
-}
+/** Each format with an sRGB twin, both ways. */
+/** @type {Map<number, number>} */
+const SRGB_TWINS = new Map([
+    [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB],
+    [DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB],
+    [DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB],
+].flatMap(([plain, srgb])=>[[plain, srgb], [srgb, plain]]));
 
 // --- swap chains ---
 
@@ -568,7 +710,7 @@ export function resolveSliceCount(requested, available){
  *
  * @type {Readonly<Record<number, SwapEffectRule>>}
  */
-export const SWAP_EFFECT_RULES = Object.freeze({
+const SWAP_EFFECT_RULES = Object.freeze({
     [DXGI_SWAP_EFFECT.DISCARD]: Object.freeze({
         minBuffers: 1, maxBuffers: D3D10_LIMITS.MAX_SWAP_CHAIN_BUFFERS,
         sequentialAccess: false, allowsMultisample: true,
@@ -616,15 +758,16 @@ export function swapChainDescResult(desc){
 /**
  * The formats a swap chain's buffers can be shown from, which are also the
  * ones CheckFormatSupport says DISPLAY for and an output lists modes in: the
- * four Direct3D 10 requires (d3d10core.c display_format_support) and the
- * BGRA pair it allows.
+ * four Direct3D 10 requires (d3d10core.c display_format_support), the
+ * BGRA pair it allows, and the extended-range format level 11 requires
+ * (kept without its bias: decisions.md A83).
  *
  * @type {ReadonlySet<number>}
  */
 export const DISPLAY_FORMATS = new Set([
     DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
     DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, DXGI_FORMAT.R16G16B16A16_FLOAT,
-    DXGI_FORMAT.R10G10B10A2_UNORM,
+    DXGI_FORMAT.R10G10B10A2_UNORM, DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM,
 ]);
 
 /**
@@ -673,6 +816,10 @@ export function bindFlagsForUsage(usage){
     if ((usage & DXGI_USAGE.SHADER_INPUT) !== 0)
     {
         bindFlags |= D3D10_BIND.SHADER_RESOURCE;
+    }
+    if ((usage & DXGI_USAGE.UNORDERED_ACCESS) !== 0)
+    {
+        bindFlags |= D3D11_BIND_UNORDERED_ACCESS;
     }
     return bindFlags;
 }

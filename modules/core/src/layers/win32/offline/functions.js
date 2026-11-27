@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * netapi32's NetBIOS, tapi32 and SensApi -- the libraries a program links to
  * ask about network adapters, modems and connectivity, on a machine that has
@@ -61,7 +63,7 @@ export function createNetbiosFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([ncb])=>{
-                const at = ncb >>> 0;
+                const at = wholeAddress(ncb);
                 if (at === 0)
                 {
                     return NRC_BRIDGE;
@@ -113,15 +115,15 @@ export function createTelephonyFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, , , , count])=>{
-                if ((out >>> 0) === 0 || (count >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(count) === 0)
                 {
                     return LINEERR_INVALPOINTER;
                 }
                 const app = nextApp;
                 nextApp += 4;
                 apps.add(app);
-                host.writeMemory(out >>> 0, u32(app));
-                host.writeMemory(count >>> 0, u32(0));
+                host.writeMemory(wholeAddress(out), u32(app));
+                host.writeMemory(wholeAddress(count), u32(0));
                 return 0;
             },
         },

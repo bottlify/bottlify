@@ -19,6 +19,7 @@
 import { infText, parseInf } from '../setupapi/inf.js';
 import { standardDirids } from '../setupapi/dirids.js';
 import { installRegistry } from '../setupapi/registry.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -82,11 +83,11 @@ export function createAdvpackFunctions(host){
         {
             return [];
         }
-        const head = new DataView(host.readMemory(table >>> 0, 8).slice().buffer);
+        const head = new DataView(host.readMemory(wholeAddress(table), 8).slice().buffer);
         const count = head.getUint32(0, true);
         const entries = head.getUint32(4, true);
         const read = (/** @type {number} */ pointer)=>((pointer >>> 0) === 0 ? ''
-            : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY) ?? ''
+            : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY * 2) ?? ''
                 : host.readCString?.(pointer >>> 0, MAX_ENTRY) ?? '');
         /** @type {[string, string][]} */
         const found = [];
@@ -152,7 +153,7 @@ export function createAdvpackFunctions(host){
 
     /** @param {number} pointer @param {boolean} wide */
     const sectionAt = (pointer, wide)=>((pointer >>> 0) === 0 ? ''
-        : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY) ?? ''
+        : wide ? host.readWideString?.(pointer >>> 0, MAX_ENTRY * 2) ?? ''
             : host.readCString?.(pointer >>> 0, MAX_ENTRY) ?? '');
 
     /** @type {{ argBytes: number, handler: (args: number[]) => number }} */

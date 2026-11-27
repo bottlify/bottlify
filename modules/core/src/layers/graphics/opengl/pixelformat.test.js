@@ -6,11 +6,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PFD } from './constants.js';
+import { PFD, WGL } from './constants.js';
 import {
     PIXELFORMATDESCRIPTOR,
     PIXEL_FORMATS,
     choosePixelFormat,
+    choosePixelFormatsARB,
+    formatAttribute,
     readPixelFormatDescriptor,
     writePixelFormatDescriptor,
 } from './pixelformat.js';
@@ -215,4 +217,58 @@ test('every advertised format is a bitmap format only alongside GDI support', ()
                 'a bitmap has no second buffer to swap with');
         }
     }
+});
+
+test('wglChoosePixelFormatARB answers every format that meets the attributes', ()=>{
+    // Wine's opengl32 test_wglChoosePixelFormatARB.
+    /** @type {Array<[number, number]>} */
+    const window = [[WGL.DRAW_TO_WINDOW_ARB, 1], [WGL.SUPPORT_OPENGL_ARB, 1]];
+    const all = choosePixelFormatsARB(window).formats;
+    assert.ok(all.length > 1, 'a list, not the one best');
+    assert.ok(all.every(index=>PIXEL_FORMATS[index - 1].dwFlags & PFD.DRAW_TO_WINDOW));
+    const bitmapOnly = PIXEL_FORMATS.findIndex(format=>!(format.dwFlags & PFD.DRAW_TO_WINDOW)) + 1;
+    assert.ok(!all.includes(bitmapOnly), 'a bitmap-only format is not a window format');
+    assert.deepEqual([...all].sort((a, b)=>a - b), all, 'the list\'s own order');
+
+    // Among formats that differ only in depth and stencil, depth never falls.
+    /** @type {Map<string, number>} */
+    const lastDepth = new Map();
+    for (const index of all)
+    {
+        const { cDepthBits, cStencilBits, ...shape } = PIXEL_FORMATS[index - 1];
+        const key = JSON.stringify(shape);
+        assert.ok((lastDepth.get(key) ?? 0) <= cDepthBits,
+            `depth ${cDepthBits} after ${lastDepth.get(key)}`);
+        lastDepth.set(key, cDepthBits);
+        assert.ok(cStencilBits >= 0);
+    }
+
+    const gdi = choosePixelFormatsARB([...window, [WGL.SUPPORT_GDI_ARB, 1]]).formats;
+    assert.ok(gdi.length > 0);
+    assert.ok(gdi.every(index=>PIXEL_FORMATS[index - 1].dwFlags & PFD.SUPPORT_GDI),
+        'a boolean is matched exactly');
+    const noGdi = choosePixelFormatsARB([...window, [WGL.SUPPORT_GDI_ARB, 0]]).formats;
+    assert.ok(noGdi.length > 0);
+    assert.ok(noGdi.every(index=>!(PIXEL_FORMATS[index - 1].dwFlags & PFD.SUPPORT_GDI)),
+        'asking for none excludes the ones that have it');
+
+    for (const method of [WGL.SWAP_COPY_ARB, WGL.SWAP_EXCHANGE_ARB, WGL.SWAP_UNDEFINED_ARB])
+    {
+        const swapping = choosePixelFormatsARB([[WGL.SWAP_METHOD_ARB, method], ...window]).formats;
+        assert.ok(swapping.every(index=>formatAttribute(PIXEL_FORMATS[index - 1],
+            WGL.SWAP_METHOD_ARB) === method), `swap method ${method.toString(16)} exactly`);
+        if (method !== WGL.SWAP_COPY_ARB)
+        {
+            assert.ok(swapping.length > 0, `some format swaps by ${method.toString(16)}`);
+        }
+    }
+
+    const deep = choosePixelFormatsARB([...window, [WGL.DEPTH_BITS_ARB, 24]]).formats;
+    assert.ok(deep.length > 0 && deep.every(index=>PIXEL_FORMATS[index - 1].cDepthBits >= 24),
+        'a size is a floor');
+    assert.ok(deep.some(index=>PIXEL_FORMATS[index - 1].cDepthBits > 24), 'and more meets it');
+
+    const strange = choosePixelFormatsARB([...window, [0x20a9, 1]]);
+    assert.deepEqual(strange.unknown, [0x20a9], 'an attribute not known here is said');
+    assert.deepEqual(strange.formats, all, 'and matches every format');
 });

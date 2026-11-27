@@ -12,9 +12,10 @@ import {
     IID, S_OK,
 } from './constants.js';
 import {
-    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc, outputModes,
+    CreateDXGIFactory, CreateDXGIFactory1, CreateDXGIFactory2, createFactory,
+    defaultSwapChainDesc, outputModes,
 } from './dxgi.js';
-import { D3D10CreateDevice } from './device.js';
+import { D3D10CreateDevice, D3D11CreateDevice } from './device.js';
 
 /** @param {object} [options] */
 function createDevice(options = {}){
@@ -38,6 +39,58 @@ function swapChainDesc(overrides = {}){
 }
 
 // --- the factory ---
+
+test('a later factory is asked of any entry point, the first one\'s too, and DXGI 1.3\'s takes'
+    + ' flags (test_create_factory)', ()=>{
+    /** @type {{ object?: any }} */
+    const out = {};
+    assert.equal(CreateDXGIFactory(IID.IDXGIFactory2, out), S_OK);
+    assert.ok(out.object.supports(IID.IDXGIFactory7));
+    out.object.release();
+    assert.equal(CreateDXGIFactory(IID.IDXGIFactory, out), S_OK);
+    assert.ok(!out.object.supports(IID.IDXGIFactory2), 'a first-version factory stays one');
+    out.object.release();
+    assert.equal(CreateDXGIFactory1(IID.IDXGIFactory5, out), S_OK);
+    out.object.release();
+    assert.equal(CreateDXGIFactory2(1, IID.IDXGIFactory3, out), S_OK);
+    assert.equal(out.object.GetCreationFlags(), 1);
+    out.object.release();
+    assert.equal(CreateDXGIFactory2(2, IID.IDXGIFactory3, out), E_INVALIDARG);
+    assert.equal(CreateDXGIFactory2(0, IID.IDXGIDevice, out), E_NOINTERFACE);
+});
+
+test('a swap chain answers DXGI 1.2 to 1.5: its frame latency only with the flag that asks for'
+    + ' one, a rotation only on a flip chain', ()=>{
+    /** @type {number[]} */
+    const events = [];
+    const device = createDevice({ factoryOptions: { createEvent: ()=>{
+        events.push(1);
+        return 0x88;
+    } } });
+    /** @type {{ swapChain?: any }} */
+    const plain = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), plain), S_OK);
+    assert.ok(plain.swapChain.supports(IID.IDXGISwapChain4));
+    assert.equal(plain.swapChain.GetFrameLatencyWaitableObject(), 0);
+    assert.equal(plain.swapChain.SetMaximumFrameLatency(2), DXGI_ERROR_INVALID_CALL);
+    assert.equal(plain.swapChain.SetRotation(1), DXGI_ERROR_INVALID_CALL);
+    plain.swapChain.release();
+    /** @type {{ swapChain?: any }} */
+    const waitable = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({ bufferCount: 2,
+        swapEffect: DXGI_SWAP_EFFECT.FLIP_DISCARD, flags: 0x40 }), waitable), S_OK);
+    assert.equal(waitable.swapChain.GetFrameLatencyWaitableObject(), 0x88);
+    assert.equal(events.length, 1);
+    assert.equal(waitable.swapChain.SetMaximumFrameLatency(3), S_OK);
+    /** @type {{ frames?: number }} */
+    const latency = {};
+    assert.equal(waitable.swapChain.GetMaximumFrameLatency(latency), S_OK);
+    assert.equal(latency.frames, 3);
+    assert.equal(waitable.swapChain.SetRotation(1), S_OK);
+    assert.equal(waitable.swapChain.GetCurrentBackBufferIndex(), 0);
+    waitable.swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
 
 /**
  * `CreateDXGIFactory` is the first version of the entry point, and refusing
@@ -417,6 +470,51 @@ test('a buffer obtained after a resize is not the one from before it', ()=>{
     assertFullyReleased(device, 'the device');
 });
 
+test('a present moves a sequential chain\'s buffers down one, the shown one to the end; only'
+    + ' the first is drawn into (test_swapchain_flip)', async()=>{
+    const device = createDevice();
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({
+        bufferCount: 3, swapEffect: DXGI_SWAP_EFFECT.SEQUENTIAL,
+        bufferDesc: { ...defaultSwapChainDesc().bufferDesc, width: 4, height: 4 },
+        bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT | DXGI_USAGE.SHADER_INPUT,
+    }), created), S_OK);
+    const swapChain = created.swapChain;
+    const buffers = [0, 1, 2].map(index=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(swapChain.GetBuffer(index, IID.ID3D10Texture2D, out), S_OK);
+        device.UpdateSubresource(out.buffer, 0, null, new Uint8Array(64).fill(index + 1), 16, 0);
+        return out.buffer;
+    });
+    /** @type {{ view?: any }} */
+    const view = {};
+    assert.equal(device.CreateRenderTargetView(buffers[1], null, view), E_INVALIDARG);
+    assert.equal(view.view, null);
+    assert.equal(swapChain.Present(0, 0), S_OK);
+    /** @type {{ resource?: any }} */
+    const staging = {};
+    assert.equal(device.CreateTexture2D({ Width: 4, Height: 4, MipLevels: 1, ArraySize: 1,
+        Format: DXGI_FORMAT.R8G8B8A8_UNORM, SampleDesc: { Count: 1, Quality: 0 }, Usage: 3,
+        BindFlags: 0, CPUAccessFlags: 0x20000, MiscFlags: 0 }, null, staging), S_OK);
+    const firstBytes = [];
+    for (const buffer of buffers)
+    {
+        device.CopyResource(staging.resource, buffer);
+        /** @type {{ data?: Uint8Array }} */
+        const mapped = {};
+        assert.equal(await staging.resource.Map(0, 1, 0, mapped), S_OK);
+        firstBytes.push(mapped.data?.[0]);
+        staging.resource.Unmap(0);
+    }
+    assert.deepEqual(firstBytes, [2, 3, 1], 'buffer 1 is the new 0, buffer 0 the last');
+    staging.resource.release();
+    buffers.forEach(buffer=>buffer.release());
+    swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
 test('presenting advances the buffer and is counted', ()=>{
     const device = createDevice();
     /** @type {{ swapChain?: any }} */
@@ -630,6 +728,33 @@ test('a present that only tests shows, counts and rotates nothing'
     assert.equal(shown.length, 1, 'one frame went to the device');
     swapChain.release();
     assertFullyReleased(device, 'the device');
+});
+
+test('the extended-range format is a swap chain format, kept without its bias'
+    + ' (test_swapchain_formats, decisions.md A83)', ()=>{
+    /** @param {number} level */
+    const made = level=>{
+        /** @type {any} */
+        const out = { wantDevice: true };
+        /** @type {string[]} */
+        const said = [];
+        /** @param {string} api @param {string} detail */
+        const divergence = (api, detail)=>said.push(detail);
+        assert.equal(D3D11CreateDevice(null, 1, null, 0, [level], out, { divergence }), S_OK);
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc();
+        desc.bufferDesc.format = DXGI_FORMAT.R10G10B10_XR_BIAS_A2_UNORM;
+        const hr = out.device.factory().CreateSwapChain(out.device, desc, created);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        created.swapChain?.GetBuffer(0, IID.ID3D11Texture2D, buffer);
+        buffer.buffer?.release();
+        created.swapChain?.release();
+        return { hr, said: said.some(detail=>/XR_BIAS/.test(detail)) };
+    };
+    assert.deepEqual(made(0xb000), { hr: S_OK, said: true });
+    assert.deepEqual(made(0xa000), { hr: S_OK, said: true }, 'optional at level 10, taken');
 });
 
 test('a swap chain is made only in a format it can be shown in (test_create_swapchain,'

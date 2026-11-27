@@ -27,6 +27,7 @@
  */
 
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -103,7 +104,7 @@ const helperCode = (refusal, make)=>({
  *
  * @param {number[]} report
  */
-export const smapls = report=>{
+const smapls = report=>{
     const head = [
         0x31, 0xd2,                                          // xor edx, edx
         0xa9, ...dword(SELECTOR_MASK),                       // test eax, 0xffff0000
@@ -121,7 +122,7 @@ export const smapls = report=>{
  *
  * @param {number} offset @returns {(report: number[]) => { bytes: number[], reportAt: number }}
  */
-export const smaplsFrame = offset=>report=>{
+const smaplsFrame = offset=>report=>{
     const head = [
         0x8b, 0x45, offset,                                  // mov eax, [ebp + n]
         0x31, 0xd2,                                          // xor edx, edx
@@ -144,7 +145,7 @@ export const smaplsFrame = offset=>report=>{
  *
  * @param {number[]} report
  */
-export const ftThunk = report=>({
+const ftThunk = report=>({
     bytes: [...report,
         0x31, 0xc0,                                          // xor eax, eax
         0x31, 0xd2,                                          // xor edx, edx
@@ -161,7 +162,7 @@ export const ftThunk = report=>({
  *
  * @param {number} pop
  */
-export const ftExitCode = pop=>new Uint8Array([
+const ftExitCode = pop=>new Uint8Array([
     0x89, 0xd8,                                              // mov eax, ebx
     0x8b, 0x5d, 0xfc,                                        // mov ebx, [ebp - 4]
     0x8b, 0x75, 0xf8,                                        // mov esi, [ebp - 8]
@@ -177,7 +178,7 @@ export const ftExitCode = pop=>new Uint8Array([
  *
  * @param {number} offset
  */
-export const sunmaplsFrameCode = offset=>new Uint8Array([
+const sunmaplsFrameCode = offset=>new Uint8Array([
     0xc7, 0x45, offset, 0, 0, 0, 0,                          // mov dword [ebp + n], 0
     0xc3,                                                    // ret
 ]);
@@ -223,8 +224,8 @@ export function createWin9xFunctions(host){
         MapLS: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>(((pointer >>> 0) & SELECTOR_MASK) === 0
-                ? pointer >>> 0 : mapLS.handler()),
+            handler: ([pointer])=>((wholeAddress(pointer) & SELECTOR_MASK) === 0
+                ? wholeAddress(pointer) : mapLS.handler()),
         },
         MapSL: {
             argBytes: 4,
@@ -233,6 +234,7 @@ export function createWin9xFunctions(host){
                 ? pointer >>> 0 : mapSL.handler()),
         },
         MapSLFix: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>(((pointer >>> 0) & SELECTOR_MASK) === 0
@@ -297,7 +299,7 @@ export function createWin9xFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return handle >>> 0;
+                return wholeAddress(handle);
             },
         },
 

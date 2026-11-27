@@ -11,6 +11,7 @@ import { IID_ITYPEINFO, IID_ITYPELIB, createAdapter, createTypeLibraryObjects } 
 import { parseTypeLib } from './typelib.js';
 import { IID_IUNKNOWN, IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const library = parseTypeLib(
     new Uint8Array(readFileSync(new URL('./msft-typelib.bin', import.meta.url))));
@@ -409,8 +410,8 @@ test('an adapter\'s last reference ends every interface it was published as', ()
     const handlers = new Map();
     let next = 0x2000;
     const vtables = createVtables({
-        memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
-            /** @type {number} */ length)=>new Uint8Array(length) },
+        memory: withPointers({ writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+            /** @type {number} */ length)=>new Uint8Array(length) }),
         register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
             handlers.set(name, fn);
             return 0x1000 + handlers.size * 0x10;
@@ -431,5 +432,5 @@ test('an adapter\'s last reference ends every interface it was published as', ()
     assert.equal(adapter.destroyed, false);
     assert.equal(call(IID_IUNKNOWN, 'Release', unknown), 0);
     assert.equal(adapter.destroyed, true);
-    assert.equal(call(IID_ITYPELIB, 'AddRef', typeLib), 0x80004003, 'E_POINTER');
+    assert.equal(call(IID_ITYPELIB, 'AddRef', typeLib), 0, 'no references: it is forgotten');
 });

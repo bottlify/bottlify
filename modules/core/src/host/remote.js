@@ -29,8 +29,9 @@
  */
 
 import { createDomInput } from '../layers/input/dom.js';
-import { serveKeeper, MIRROR_MS, MIRROR_LIMIT, MIRROR_CAPACITY } from './keeper.js';
-import { createRingMemory } from '../system/ring.js';
+import { serveKeeper, MIRROR_CAPACITY } from './keeper.js';
+import { createRingMemory } from '@bottlify/cellar';
+import { frameDrops } from '../frame-drops.js';
 import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 
 /**
@@ -42,7 +43,7 @@ import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
  * @param {{ path: string, size: number, pieces: (Uint8Array | null)[] }} file
  * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[], bytes: Uint8Array }}
  */
-export function wholeOnDemand(file){
+function wholeOnDemand(file){
     /** @type {Uint8Array | null} */
     let whole = null;
     const unit = file.pieces.find(piece=>piece)?.length || file.size || 1;
@@ -112,7 +113,7 @@ function openKeeper(given){
  *     the same worker and no canvas at all.
  * @property {any[]} [transfer]
  *     Buffers in `options` to hand over rather than copy: the image, the
- *     emulator's binary, the decoder's.
+ *     decoder's binary.
  * @property {any} [keeper]
  *     The log keeper's port, when a test supplies one. Absent, a worker is
  *     created the way the engine's is.
@@ -132,18 +133,15 @@ export async function createRemoteApp(wiring){
     /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
     const pending = new Map();
     // One shared word, added to before every post, so the worker can tell a
-    // message is waiting without yielding to find out. Only where the origin
-    // has shared memory; elsewhere the worker looks on a clock instead.
-    const signal = typeof SharedArrayBuffer === 'function'
-        && /** @type {any} */ (globalThis).crossOriginIsolated !== false
-        ? new Int32Array(new SharedArrayBuffer(4))
-        : null;
+    // message is waiting without yielding to find out; the word after it
+    // counts the waits asleep on it, as a doorbell's does.
+    const signal = new Int32Array(new SharedArrayBuffer(8));
     /** What crossed the port, by kind: the cost of the page's own tooling, counted. */
     const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0, 'log-memory': 0 };
     // With concurrency, the channel processes side by side are fed through:
     // input and visibility written into a ring rung on the signal word, which
     // the engine reads between turns.
-    const inbound = signal && (options.concurrency ?? 1) > 1 && options.mode !== 'compatible'
+    const inbound = (options.concurrency ?? 1) > 1
         ? createRingMemory(INBOUND_BYTES, { buffer: /** @type {SharedArrayBuffer} */ (
             signal.buffer), index: 0 })
         : null;
@@ -152,10 +150,7 @@ export async function createRemoteApp(wiring){
     const send = (message, handOver)=>{
         traffic[/** @type {keyof typeof traffic} */ (message.type)]++;
         const post = ()=>{
-            if (signal)
-            {
-                Atomics.add(signal, 0, 1);
-            }
+            Atomics.add(signal, 0, 1);
             worker.postMessage(message, handOver);
         };
         if (inboundWriter)
@@ -345,58 +340,25 @@ export async function createRemoteApp(wiring){
     const offscreen = canvas?.transferControlToOffscreen?.() ?? canvas ?? null;
     /** @type {import('./messages.js').Started} */
     const started = await request('start',
-        [{ ...options, signal: signal ? signal.buffer : undefined, inbound: inbound ?? undefined },
+        [{ ...options, signal: signal.buffer, inbound: inbound ?? undefined },
             offscreen],
-        [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : []),
-            ...(options.audio?.port && !transfer.includes(options.audio.port)
-                ? [options.audio.port] : [])]);
+        [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : [])]);
 
-    // The first block, handed to the keeper. On an origin without shared
-    // memory there is nothing to hand over, and the keeper is fed below by
-    // relaying the engine's own answers.
+    // The engine subscribed for what was asked before the start: an event it
+    // told while the program was loaded (`layer-needed`) is kept for its first
+    // subscriber, and is heard now.
+    for (const name of handlers.keys())
+    {
+        if (name !== 'frame')
+        {
+            request('on', [name]).catch(()=>{});
+        }
+    }
+
+    // The first block, handed to the keeper.
     latestLog = started.log;
-    if (started.log)
-    {
-        keeper.port.postMessage({ type: 'attach', memory: started.log, sequenceBase: 0 });
-    }
+    keeper.port.postMessage({ type: 'attach', memory: started.log, sequenceBase: 0 });
     const capacity = options.log?.capacity || MIRROR_CAPACITY;
-
-    // Without a block to read, the engine's own reader still holds the ring.
-    // One `log.drain` per cadence is relayed to the keeper, which keeps the
-    // history; this thread holds none of it.
-    let feedNext = 0;
-    let feeding = false;
-    const feed = async()=>{
-        if (feeding || gone)
-        {
-            return;
-        }
-        feeding = true;
-        try
-        {
-            const answer = await request('log.drain', [feedNext, MIRROR_LIMIT]);
-            feedNext = answer.next;
-            if (answer.records.length > 0 || answer.lost > 0)
-            {
-                keeper.port.postMessage({ type: 'feed', records: answer.records,
-                    next: answer.next, lost: answer.lost });
-            }
-        }
-        catch {
-            // The worker is gone or going: the keeper keeps what it has.
-        }
-        finally
-        {
-            feeding = false;
-        }
-    };
-    const feeder = started.log ? null : setInterval(feed, MIRROR_MS);
-    if (!started.log)
-    {
-        // One look now, so a read made before the first cadence has something
-        // to answer with.
-        await feed();
-    }
 
     /** What an exit left behind, once there has been one. @type {any} */
     let left = null;
@@ -417,10 +379,6 @@ export async function createRemoteApp(wiring){
          */
         async run(runOptions){
             left = await request('run', [runOptions]);
-            if (feeder)
-            {
-                await feed();
-            }
             return left.code;
         },
         pause: ()=>request('pause'),
@@ -490,11 +448,13 @@ export async function createRemoteApp(wiring){
         }),
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
+        frameClock: ()=>request('frameClock'),
 
         /**
-         * The emulator's account of where the guest ran, by address, weighted by
-         * the instructions retired there. The same surface the local controller
-         * offers, because the run worth profiling is the one a page drives.
+         * An engine's account of where the guest ran, by address, weighted by
+         * the instructions retired there, where it keeps one. The same surface
+         * the local controller offers, because the run worth profiling is the
+         * one a page drives.
          *
          * Costs a call per compiled block while it is kept, so it is started for
          * a measurement and stopped after.
@@ -559,19 +519,10 @@ export async function createRemoteApp(wiring){
 
         log: {
             /**
-             * Which of the two ways the log is being read: from the memory the
-             * engine writes into, or by asking the engine. A panel shows it
-             * because the difference is visible in everything else -- without
-             * shared memory every figure below costs the running program.
-             *
-             * @returns {'shared' | 'requests'}
-             */
-            reading: ()=>started.log ? 'shared' : 'requests',
-            /**
              * The block of the current process, for a consumer that wants a
              * reader of its own. It follows a replacement: the page is handed
              * the next block and forwards it to the keeper, and this is the
-             * latest one. Null where nothing could be shared.
+             * latest one.
              *
              * A consumer that wants to follow the log rather than build a
              * reader over one block asks the keeper instead.
@@ -602,33 +553,41 @@ export async function createRemoteApp(wiring){
             ],
 
             /** @param {number} [worst] */
-            profile: worst=>started.log ? ask('profile', [worst])
-                : request('log.profile', [worst]),
+            profile: worst=>ask('profile', [worst]),
             /** @param {number} [count] */
-            frames: count=>started.log ? ask('frames', [count])
-                : request('log.frames', [count]),
-            /** @param {string} layer */
-            counters: layer=>started.log ? ask('counters', [layer])
-                : request('log.counters', [layer]),
+            frames: count=>ask('frames', [count]),
             /**
-             * One published table, as the keeper read it. Shared memory only:
-             * a table is its buffer, and what crosses here is a snapshot of
-             * the rows at the moment asked, not a view that keeps moving.
+             * The last `count` frames' drops, each told why, and the rates of
+             * the slowest frames (`frame-drops.js`), read on this thread.
+             *
+             * @param {number} [count]
+             */
+            drops: async count=>frameDrops(await ask('frames', [count ?? 1000])),
+            /** @param {string} layer */
+            counters: layer=>ask('counters', [layer]),
+            /**
+             * One published table, as the keeper read it: a snapshot of the
+             * rows at the moment asked, not a view that keeps moving.
              *
              * @param {string} layer @param {string} name
              */
-            table: (layer, name)=>started.log ? ask('table', [layer, name])
-                : Promise.resolve(null),
+            table: (layer, name)=>ask('table', [layer, name]),
             /**
-             * What a word id in a table means. Shared memory only, for the
-             * same reason as `table`.
+             * What a word id in a table means.
              *
              * @param {number} id
              */
-            word: id=>started.log ? ask('word', [id]) : Promise.resolve(`#${id}`),
-            threads: ()=>started.log ? ask('threads') : request('log.threads'),
-            guestByModule: ()=>started.log ? ask('guestByModule')
-                : request('log.guestByModule'),
+            word: id=>ask('word', [id]),
+            threads: ()=>ask('threads'),
+            guestByModule: ()=>ask('guestByModule'),
+            /**
+             * What a view that follows the run reads once a second -- the
+             * guest's instructions, every phase, the threads, the regions, the
+             * hottest code, the hooks and the graphics figures -- cumulative
+             * since the start, answered by the keeper from the published
+             * tables (`docs/core/api.md`). Never a request to the engine.
+             */
+            live: ()=>ask('live'),
             /**
              * The journal itself: how much has been written, how much it
              * holds, how much was lapped before the keeper saw it, and how
@@ -641,7 +600,7 @@ export async function createRemoteApp(wiring){
                 const [tail, lost, own] = await Promise.all([
                     ask('recent', [1]),
                     ask('lost'),
-                    started.log ? ask('counters', ['log']) : request('log.counters', ['log']),
+                    ask('counters', ['log']),
                 ]);
                 return {
                     written: tail.length > 0 ? tail[0].sequence + 1 : 0,
@@ -749,10 +708,6 @@ export async function createRemoteApp(wiring){
         },
 
         async dispose(){
-            if (feeder)
-            {
-                clearInterval(feeder);
-            }
             stopWatching?.();
             dom?.detach();
             dom = null;

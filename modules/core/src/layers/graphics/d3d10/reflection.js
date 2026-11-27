@@ -120,6 +120,8 @@ export const SHADER_TYPE_DESC_FIELDS = Object.freeze([
  * @property {number} flags        D3D10_SHADER_VARIABLE_FLAGS.
  * @property {number} defaultAt    From the start of the container, or -1 for none.
  * @property {ReflectedType} type
+ * @property {number[]} [bindings]   A model 5 entry's StartTexture, TextureSize,
+ *     StartSampler and SamplerSize; absent from a model 4 one.
  */
 
 /**
@@ -130,6 +132,8 @@ export const SHADER_TYPE_DESC_FIELDS = Object.freeze([
  * @property {number} columns
  * @property {number} elements
  * @property {ReflectedMember[]} members
+ * @property {number} [nameAt]     A model 5 entry's name of the type, from the start of the
+ *     container.
  */
 
 /**
@@ -148,8 +152,10 @@ export const SHADER_TYPE_DESC_FIELDS = Object.freeze([
  * @typedef {Object} ShaderReflection
  * @property {Record<string, number>} desc  D3D10_SHADER_DESC by field name, with
  *     `Creator` an offset from the start of the container, or -1 for none.
+ * @property {boolean} hasDefinitions  Whether the container keeps its RDEF chunk.
  * @property {ReflectedConstantBuffer[]} constantBuffers
  * @property {ReflectedBinding[]} bindings
+ * @property {number[]} [statistics]   The STAT chunk's dwords, as written.
  * @property {ReflectedParameter[]} inputs
  * @property {ReflectedParameter[]} outputs
  */
@@ -272,6 +278,8 @@ function readVariables(chunk, base, at, count){
         const type = {
             class: u16(chunk, typeAt), type: u16(chunk, typeAt + 2), rows: u16(chunk, typeAt + 4),
             columns: u16(chunk, typeAt + 6), elements: u16(chunk, typeAt + 8), members: [],
+            ...(sizes.type >= 36 && u32(chunk, typeAt + 32) > 0
+                ? { nameAt: base + u32(chunk, typeAt + 32) } : {}),
         };
         known.set(typeAt, type);
         const membersAt = u32(chunk, typeAt + 12);
@@ -303,6 +311,8 @@ function readVariables(chunk, base, at, count){
             flags: u32(chunk, entry + 12),
             defaultAt: defaultAt > 0 && defaultAt < chunk.length ? base + defaultAt : -1,
             type: readType(u32(chunk, entry + 16)),
+            ...(sizes.variable >= 40 ? { bindings: [24, 28, 32, 36].map(field=>u32(chunk,
+                entry + field)) } : {}),
         });
     }
     return variables;
@@ -423,8 +433,11 @@ export function reflectShader(bytes){
     });
     return {
         desc,
+        hasDefinitions: container.chunks.has('RDEF'),
         constantBuffers: definitions.constantBuffers,
         bindings: definitions.bindings,
+        statistics: Array.from({ length: statistics.length >> 2 }, (_, i)=>u32(statistics,
+            i * 4)),
         inputs: located(bytes, container.chunks.get('ISGN'), container.inputs),
         outputs: located(bytes, container.chunks.get('OSGN'), container.outputs),
     };
@@ -518,6 +531,7 @@ export function createBlob(address, size, onLastRef){
  * @typedef {Object} ReflectionType
  * @property {any} owner
  * @property {Describe} GetDesc
+ * @property {ReflectedType} [entry]
  * @property {(index: number) => ReflectionType} GetMemberTypeByIndex
  * @property {(name: string | null) => ReflectionType} GetMemberTypeByName
  * @property {(index: number) => ReflectionName | null} GetMemberTypeName
@@ -530,6 +544,9 @@ export function createBlob(address, size, onLastRef){
  * @property {any} owner
  * @property {Describe} GetDesc
  * @property {() => ReflectionType} GetType
+ * @property {() => ReflectionConstantBuffer} [GetBuffer]   The buffer it is in (Direct3D 11's
+ *     method).
+ * @property {ReflectedVariable} [entry]
  */
 
 /**
@@ -632,10 +649,17 @@ const describing = desc=>out=>{
  * do not count references: the runtime frees them with the reflection, and
  * `children()` names them for whoever published them to give back then.
  *
+ * The same object answers Direct3D 11's ID3D11ShaderReflection (D3DReflect) when made with
+ * that interface's identifier: its additions - a variable's buffer, lookups by name across
+ * the buffers - are here, the wider structures are written by the seam.
+ *
  * @param {ShaderReflection} reflection
  * @param {() => void} [onLastRef]
+ * @param {string[]} [interfaces]
  */
-export function createShaderReflection(reflection, onLastRef){
+export function createShaderReflection(reflection, onLastRef,
+    interfaces = [IID.ID3D10ShaderReflection])
+{
     /** @type {object[]} */
     const made = [];
     /**
@@ -660,6 +684,7 @@ export function createShaderReflection(reflection, onLastRef){
             INVALID_TYPE);
         return kept({
             owner: self,
+            entry: type,
             GetDesc: describing({
                 Class: type.class, Type: type.type, Rows: type.rows, Columns: type.columns,
                 Elements: type.elements, Members: type.members.length, Offset: offset,
@@ -672,12 +697,17 @@ export function createShaderReflection(reflection, onLastRef){
         });
     };
 
-    /** @param {ReflectedVariable} variable @returns {ReflectionVariable} */
-    const variableObject = variable=>{
+    /**
+     * @param {ReflectedVariable} variable @param {() => ReflectionConstantBuffer} buffer
+     * @returns {ReflectionVariable}
+     */
+    const variableObject = (variable, buffer)=>{
         /** @type {ReflectionType | null} */
         let type = null;
         return kept({
             owner: self,
+            entry: variable,
+            GetBuffer: buffer,
             GetDesc: describing({
                 Name: variable.nameAt, StartOffset: variable.startOffset, Size: variable.size,
                 uFlags: variable.flags, DefaultValue: variable.defaultAt,
@@ -688,8 +718,12 @@ export function createShaderReflection(reflection, onLastRef){
 
     /** @param {ReflectedConstantBuffer} buffer @returns {ReflectionConstantBuffer} */
     const bufferObject = buffer=>{
-        const variableAt = objectsOf(buffer.variableList, variableObject, INVALID_VARIABLE);
-        return kept({
+        /** @type {ReflectionConstantBuffer} */
+        let madeBuffer = INVALID_CONSTANT_BUFFER;
+        /** @type {(index: number) => ReflectionVariable} */
+        const variableAt = objectsOf(buffer.variableList, variable=>variableObject(variable,
+            ()=>madeBuffer), INVALID_VARIABLE);
+        madeBuffer = kept({
             owner: self,
             GetDesc: describing({
                 Name: buffer.nameAt, Type: buffer.type, Variables: buffer.variables,
@@ -698,6 +732,7 @@ export function createShaderReflection(reflection, onLastRef){
             GetVariableByIndex: variableAt,
             GetVariableByName: name=>variableAt(indexByName(buffer.variableList, name)),
         });
+        return madeBuffer;
     };
 
     const bufferAt = objectsOf(reflection.constantBuffers, bufferObject,
@@ -740,6 +775,27 @@ export function createShaderReflection(reflection, onLastRef){
         GetInputParameterDesc: (index, out)=>entryOf(reflection.inputs, index, out ?? null),
         /** @param {number} index @param {{ entry?: ReflectedParameter } | null} out */
         GetOutputParameterDesc: (index, out)=>entryOf(reflection.outputs, index, out ?? null),
-    }, { interfaces: [IID.ID3D10ShaderReflection], onLastRef });
+        /**
+         * The first variable of the name in any buffer, or the invalid one.
+         * @param {string | null} name @returns {ReflectionVariable}
+         */
+        GetVariableByName: name=>{
+            for (let i = 0; i < reflection.constantBuffers.length; i++)
+            {
+                const at = indexByName(reflection.constantBuffers[i].variableList, name);
+                if (at >= 0)
+                {
+                    return bufferAt(i).GetVariableByIndex(at);
+                }
+            }
+            return INVALID_VARIABLE;
+        },
+        /** @param {string | null} name @param {{ entry?: ReflectedBinding } | null} out */
+        GetResourceBindingDescByName: (name, out)=>entryOf(reflection.bindings,
+            name === null ? reflection.bindings.length : (()=>{
+                const at = indexByName(reflection.bindings, name);
+                return at < 0 ? reflection.bindings.length : at;
+            })(), out ?? null),
+    }, { interfaces, onLastRef });
     return self;
 }

@@ -17,7 +17,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
-import { createRing } from './output/ring.js';
 import {
     slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, RATE as SLOT_RATE,
     createSeam, resampleInto, mixBlock, KIND, KIND_DMA, BASE, LENGTH, PLAYING, LOOPING, POSITION,
@@ -26,6 +25,19 @@ import {
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
+import { withPointers } from '../memory/pointers.fixture.js';
+import { testCache } from '../cache/testing.fixture.js';
+
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
 
 /** DSBCAPS_CTRLFREQUENCY, CTRLPAN and CTRLVOLUME together. */
 const DSBCAPS_CTRLDEFAULT = 0x000000e0;
@@ -58,14 +70,14 @@ function fixture(){
     const byPointer = new Map();
     let nextPointer = 0x10000;
 
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {number} length */
         window: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
 
     return {
         bytes,
@@ -122,18 +134,19 @@ function fixture(){
 /**
  * A module with one playing sound buffer full of something to hear.
  *
- * @param {{ silent?: boolean, drained?: boolean, shared?: boolean,
- *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike } }} [options]
+ * @param {{ silent?: boolean, drained?: boolean, memory?: any, cache?: any,
+ *     divergence?: (api: string, detail: string) => void }} [options]
+ *     `cache`: the run's cache the module is given (none: a machine built alone)
  */
-async function playing({ silent = false, drained = true, shared = false, memory } = {}){
+async function playing({ silent = false, drained = true, memory, cache, divergence } = {}){
     const f = fixture();
     /** @type {number[]} */
     const signalled = [];
     const api = await audioModule.create({
         ...f.config,
         drained,
-        shared,
         memory,
+        ...(divergence ? { divergence } : {}),
         /** @param {number} handle */
         signal: handle=>signalled.push(handle),
     }, {
@@ -147,6 +160,10 @@ async function playing({ silent = false, drained = true, shared = false, memory 
             if (name === 'win32')
             {
                 return {};
+            }
+            if (name === 'cache')
+            {
+                return cache ?? { space: ()=>({ hold: ()=>null }) };
             }
             assert.equal(name, 'memory');
             return f.memory;
@@ -184,36 +201,101 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     return { ...f, api, root, buffer, held, signalled };
 }
 
-test('a playing sound buffer reaches the ring', async()=>{
-    const f = await playing();
+/**
+ * The lengths of the voices the device plays now, from the table it reads.
+ *
+ * @param {{ api: any }} f
+ */
+function playingVoices(f){
+    const table = f.api.output().table;
+    /** @type {number[]} */
+    const lengths = [];
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        const header = tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32);
+        if (Atomics.load(header, KIND) === KIND_DMA && Atomics.load(header, PLAYING) !== 0)
+        {
+            lengths.push(Atomics.load(header, LENGTH));
+        }
+    }
+    return lengths;
+}
+
+/**
+ * The device reading the table for `ms` milliseconds, as the worklet does on
+ * the audio thread: the cursors move where it reads.
+ *
+ * @param {{ api: any }} f @param {number} ms
+ */
+function deviceReads(f, ms){
+    const table = f.api.output().table;
+    const outputRate = f.api.output().sampleRate;
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
+    const slots = Array.from({ length: SLOTS }, (_, slot)=>({
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
+    }));
+    const seams = slots.map(()=>createSeam());
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
+    const block = new Float32Array(128 * 2);
+    for (let at = 0; at < Math.ceil(outputRate * ms / 1000 / 128); at++)
+    {
+        mixBlock({ global, slots, seams, block, blockFrames: 128, outputRate, arena });
+    }
+}
+
+test('the sound output is memory held in the run\'s cache: counted there, written in place, '
+    + 'given back when the output closes', async()=>{
+    const run = await testCache({ budget: 64 << 20, segmentBytes: 16 << 20 });
+    const f = await playing({ cache: { space: (/** @type {string} */ name)=>run.space(name) } });
+    const output = f.api.output();
+    const { table } = output.memory;
+    assert.deepEqual(Object.keys(output.memory), ['table'],
+        'what crosses to a worker: the table alone');
+    assert.ok(table instanceof Uint8Array, 'a view of memory, not a buffer of its own');
+    assert.ok(run.keeper.segmentBuffers().includes(/** @type {any} */ (table.buffer)),
+        'in one of the run cache\'s segments');
+    assert.equal(run.keeper.under('sound/').hotBytes, table.byteLength, 'counted under sound/');
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    assert.deepEqual(playingVoices(f), [BUFFER_BYTES], 'a voice in it, read where it lies');
+    // Many sweeps past every idle and abandon time: still the output's.
+    for (let i = 0; i < 20; i++)
+    {
+        run.clock.time += 600_000;
+        run.keeper.sweep();
+    }
+    assert.equal(run.keeper.under('sound/').hotBytes, table.byteLength, 'never taken back');
+    output.release();
+    assert.equal(run.keeper.under('sound/').bodies, 0, 'and given back once released');
+});
 
-    assert.equal(f.api.output().diagnostics().produced, 0, 'nothing yet');
-    f.advance(50);
-    assert.ok(f.api.pump() > 0, 'the pump wrote frames');
-
-    const mixed = f.api.output().diagnostics();
-    assert.equal(mixed.tracks, 1, 'the buffer opened a track of its own');
-    assert.ok(mixed.produced > 0, 'and its samples reached the ring');
+test('with no cache the output is a buffer of its own, and that is said once', async()=>{
+    /** @type {string[]} */
+    const said = [];
+    const f = await playing({ divergence: (api, detail)=>said.push(`${api}: ${detail}`) });
+    assert.ok(f.api.output().memory.table instanceof Uint8Array);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    assert.deepEqual(playingVoices(f), [BUFFER_BYTES], 'and it plays');
+    assert.equal(said.filter(line=>/run's cache/.test(line)).length, 1, said.join('\n'));
 });
 
 test('a process that replaces another mixes into the same sound output', async()=>{
-    // The ring is the machine's, not the program's: the page was handed it
+    // The table is the machine's, not the program's: the page was handed it
     // before the program changed and its worklet holds it across the change.
     // A child that made its own left that reader on a dead buffer -- audible
     // as a menu with no sound at all.
-    const inherited = createRing({ channels: 2, capacityFrames: 32 });
-    const f = await playing({ memory: inherited.memory });
-    assert.equal(f.api.output().ring.memory, inherited.memory,
-        'the output the reader already holds');
+    const first = await playing();
+    const inherited = { table: first.api.output().table };
+    const f = await playing({ memory: inherited });
+    assert.equal(f.api.output().table, inherited.table, 'the output the reader already holds');
 
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
-    assert.ok(f.api.pump() > 0, 'the child mixed frames');
-    assert.ok(inherited.read(new Float32Array(16)) > 0,
-        'and the reader that held it hears them');
+    f.api.pump();
+    assert.deepEqual(playingVoices(f), [BUFFER_BYTES],
+        'and the child\'s buffer is a voice in it, which the reader that held it hears');
 });
-
 test('a build with nothing draining the ring does not read a buffer out', async()=>{
     // Every sample read out here would be mixed and then thrown away, and this
     // runs on every mix of every turn. The cursors still move -- that is
@@ -235,78 +317,53 @@ test('a buffer nobody played contributes nothing', async()=>{
     assert.equal(f.api.output().diagnostics().tracks, 0, 'and opens no track');
 });
 
-test('what reaches the ring is the buffer\'s own bytes, not silence', async()=>{
-    // Reading the wrong address gives a block of zeroes, which is exactly what
-    // a correct block sounds like when nobody is listening for it.
-    const loud = await playing();
-    loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    loud.advance(50);
-    loud.api.pump();
-
-    const frames = loud.api.output().ring.read(new Float32Array(64 * 2));
-    assert.ok(frames > 0, 'the ring had something in it');
-});
-
 test('with shared memory, a playing buffer is a sound card\'s voice over the buffer\'s own bytes',
     async()=>{
         // Not converted, not silence, not pushed a turn at a time: the whole
         // buffer mirrored for the device to read on its own clock.
-        const loud = await playing({ shared: true });
+        const loud = await playing();
         loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
         loud.api.pump();
 
         const table = loud.api.output().table;
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
         assert.equal(Atomics.load(header, KIND), KIND_DMA, 'a voice, not a queue');
         assert.equal(Atomics.load(header, LENGTH), BUFFER_BYTES, 'the whole buffer');
         assert.equal(Atomics.load(header, PLAYING), 1);
         assert.equal(Atomics.load(header, LOOPING), 1);
-        const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+        const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
         const base = Atomics.load(header, BASE);
         assert.ok(arena.subarray(base, base + BUFFER_BYTES).every(byte=>byte === 0x40),
             'byte-equal to what the guest wrote');
     });
 
-test('a silenced buffer is mixed at its own gain, not at full', async()=>{
-    const f = await playing();
-    f.call(f.buffer, 'SetVolume', [-10000]);
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
-    f.api.pump();
-
-    const block = new Float32Array(64 * 2);
-    f.api.output().ring.read(block);
-    assert.ok(block.every(sample=>sample === 0),
-        'DSBVOLUME_MIN is silence, and the volume is decibels rather than a fraction');
-});
-
-test('a buffer panned hard left is heard on the left alone', async()=>{
-    const f = await playing();
-    f.call(f.buffer, 'SetPan', [-10000]);
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
-    f.api.pump();
-
-    const block = new Float32Array(64 * 2);
-    const frames = f.api.output().ring.read(block);
-    assert.ok(frames > 0);
-    for (let frame = 0; frame < frames; frame++)
-    {
-        assert.ok(block[frame * 2] > 0, 'the left side plays');
-        assert.equal(block[frame * 2 + 1], 0, 'DSBPAN_LEFT leaves the right silent');
-    }
+test('with shared memory, a buffer\'s voice plays from where Play found the cursor, not from where'
+    + ' it stood at the next pump', async()=>{
+    // The voice was opened at the next pump while the cursor ran on by the
+    // clock from Play, and was put where it had got to: the first few
+    // milliseconds of every sound were never heard (a streamed tone came out
+    // 4-6 ms short).
+    const loud = await playing();
+    loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    const header = tableView(Int32Array, loud.api.output().table,
+        slotHeaderOffset(0), SLOT_HEADER_INT32);
+    assert.equal(Atomics.load(header, KIND), KIND_DMA, 'the voice is there at Play');
+    assert.equal(Atomics.load(header, PLAYING) !== 0, true);
+    loud.advance(5);
+    loud.api.pump();
+    assert.equal(Atomics.load(header, POSITION), 0, 'from the start of the buffer');
 });
 
 test('with shared memory, a buffer\'s pan reaches its voice', async()=>{
-    const f = await playing({ shared: true });
+    const f = await playing();
     f.call(f.buffer, 'SetPan', [10000]);
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.api.pump();
 
     const table = f.api.output().table;
-    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(2 * 2);
     resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
         seam: createSeam() });
@@ -316,13 +373,13 @@ test('with shared memory, a buffer\'s pan reaches its voice', async()=>{
 
 test('with shared memory, a volume or a pan changed while the buffer plays reaches its voice at'
     + ' the next turn, and only what changed is given again', async()=>{
-    const f = await playing({ shared: true });
+    const f = await playing();
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.api.pump();
     const table = f.api.output().table;
-    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const heard = ()=>{
         const block = new Float32Array(2 * 2);
         resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
@@ -344,45 +401,8 @@ test('with shared memory, a volume or a pan changed while the buffer plays reach
     assert.equal(silent, 0, 'DSBPAN_LEFT leaves the right silent');
 });
 
-test('a buffer retuned while it plays is heard at the rate its cursor moves', async()=>{
-    // The cursor drains bytes at the new frequency from the moment it is set; a
-    // track still reading them at the first one plays them at the wrong pitch
-    // and makes twice (or half) the sound the guest's clock allows for.
-    const f = await playing();
-    const mixer = f.api.output();
-    /** @type {any[]} */
-    const opened = [];
-    const open = mixer.open.bind(mixer);
-    mixer.open = (/** @type {any} */ format)=>{
-        const track = open(format);
-        opened.push(track);
-        return track;
-    };
-    const scratch = new Float32Array(mixer.capacityFrames * 2);
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
-    f.api.pump();
-    mixer.ring.read(scratch);
-    assert.equal(opened.length, 1);
-    assert.equal(opened[0].format.sampleRate, RATE);
-
-    f.call(f.buffer, 'SetFrequency', [RATE * 2]);
-    let frames = 0;
-    for (let turn = 0; turn < 10; turn++)
-    {
-        f.advance(20);
-        f.api.pump();
-        frames += mixer.ring.read(scratch);
-    }
-    assert.equal(opened.length, 1, 'the same track, retuned');
-    assert.equal(opened[0].format.sampleRate, RATE * 2);
-    // Two hundred milliseconds of guest time is 9600 frames at 48 kHz.
-    assert.ok(Math.abs(frames - 9600) < 9600 / 10,
-        `the output keeps pace with the guest's clock: ${frames} frames in 200 ms`);
-});
-
 test('with shared memory, a retuned buffer\'s slot reads at its new rate', async()=>{
-    const f = await playing({ shared: true });
+    const f = await playing();
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.advance(50);
     f.api.pump();
@@ -390,103 +410,9 @@ test('with shared memory, a retuned buffer\'s slot reads at its new rate', async
     f.advance(20);
     f.api.pump();
 
-    const header = new Int32Array(f.api.output().table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, f.api.output().table,
+        slotHeaderOffset(0), SLOT_HEADER_INT32);
     assert.equal(Atomics.load(header, SLOT_RATE), 44100);
-});
-
-test('the mixer asks for sound itself, so whoever pumps it need not know how', async()=>{
-    // Whoever drives the machine reaches the mixer directly rather than through
-    // this module, so a feed hung anywhere else here is never called at all --
-    // which is exactly how a correctly wired buffer stayed silent.
-    const f = await playing();
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    f.advance(50);
-
-    assert.ok(f.api.output().pump() > 0,
-        'pumping the mixer alone is enough to pull the buffer');
-});
-
-test('a stall costs the machine time, not the sound it had not read yet', ()=>{
-    // The old expectation here was that a backlog is dropped, and it was wrong
-    // in the way that matters: reading a span moves the point the next read
-    // starts from, so draining one and then refusing it does not postpone that
-    // sound, it destroys it. Every machine stalls -- fetching a block takes as
-    // long as it takes -- and a stall left the queue over its depth, after
-    // which each turn discarded exactly the span that would have let it drain
-    // back under. The sound stopped and never came back.
-    //
-    // What has to be bounded is the backlog, and leaving the bytes where they
-    // are bounds it just as well: the read point lags and catches up.
-    return playing().then(f=>{
-        f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-
-        // A stall of the length a block fetch takes. Long enough that what it
-        // leaves queued is past the depth the output can hold even after the
-        // ring has taken its fill, and short enough that the cursor has not
-        // lapped the buffer -- a lap really is gone, and `drainPlayed` says so.
-        f.advance(800);
-        f.api.pump();
-
-        // The device, doing what a device does: it takes the sound the time
-        // that has passed is worth, and not a frame more. Reading the ring dry
-        // every turn is what hid this -- the queue drained faster than the
-        // stall could refill it, and nothing was ever refused twice running.
-        const block = new Float32Array(1024 * 2);
-        let produced = 0;
-        for (let turn = 0; turn < 200; turn++)
-        {
-            f.advance(10);
-            f.api.pump();
-            for (let owed = 10 * 48; owed > 0;)
-            {
-                const read = f.api.output().ring.read(block.subarray(0, Math.min(owed, 1024) * 2));
-                if (read === 0)
-                {
-                    break;
-                }
-                produced += read;
-                owed -= read;
-            }
-        }
-
-        const mixed = f.api.output().diagnostics();
-        assert.ok(f.api.behind() > 0, 'the machine says it fell behind its own sound');
-
-        // The whole point. Throwing away the span just read leaves the stale
-        // one queued in front of it, and the machine then plays a fixed
-        // lateness for ever -- a backlog that sat at better than twice the
-        // output's depth and never came down. What a program is playing now is
-        // what it meant to be heard.
-        assert.ok(mixed.queuedFrames <= f.api.output().capacityFrames,
-            `the machine caught up, and was ${mixed.queuedFrames} frames behind`);
-
-        // And it is still playing: a recovery that goes quiet is not one.
-        assert.ok(produced > 90000, `heard ${produced} frames after the stall`);
-    });
-});
-
-test('the span read on the turn the machine falls behind is the one it plays', ()=>{
-    // Reading a span moves the point the next read starts from, so a turn that
-    // reads one and then refuses it has destroyed it -- and what stays queued
-    // in front is the older sound. Whichever way the policy goes, the span just
-    // read is the one a program meant to be heard now, so it is the backlog
-    // that goes and the fresh span that plays.
-    return playing().then(f=>{
-        f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-        f.advance(800);
-        f.api.pump();
-        assert.equal(f.api.behind(), 0, 'nothing refused yet');
-
-        const before = f.api.output().diagnostics().queuedFrames;
-        f.advance(10);
-        f.api.pump();
-
-        assert.ok(f.api.behind() > 0, 'this is the turn it fell behind');
-        const after = f.api.output().diagnostics().queuedFrames;
-        assert.ok(after < before,
-            `the backlog went, and did not grow: ${before} -> ${after}`);
-        assert.ok(after > 0, 'and the span just read stayed, rather than being the one dropped');
-    });
 });
 
 test('with shared memory, a stalled engine thread is not heard: the device plays on', async()=>{
@@ -495,19 +421,19 @@ test('with shared memory, a stalled engine thread is not heard: the device plays
     // tens of milliseconds emptied the device while the program's own buffer
     // held most of a second. Now the device reads the buffer itself, the way
     // a sound card's DMA does, and the program's cursor is where it reads.
-    const f = await playing({ shared: true });
+    const f = await playing();
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.api.pump();
 
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     // Three hundred milliseconds of device blocks, and not one pump.
     const blocks = Math.ceil(outputRate * 0.3 / 128);
@@ -533,18 +459,18 @@ test('with shared memory, a stalled engine thread is not heard: the device plays
 test('with shared memory, what the device plays and nobody wrote is counted stale', async()=>{
     // The device reads the buffer on its own clock, so a refill that comes
     // late is heard as the last lap again -- and counted, on this path too.
-    const f = await playing({ shared: true });
+    const f = await playing();
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.api.pump();
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     for (let at = 0; at < Math.ceil(outputRate * 0.3 / 128); at++)
     {
@@ -565,7 +491,7 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
     // buffers played, ever, in the session": the ordinary DirectSound idiom of
     // creating and releasing a buffer per sound effect exhausted every slot
     // permanently the first time 32 had ever been played.
-    const f = await playing({ shared: true });
+    const f = await playing();
     for (let i = 0; i < 40; i++)
     {
         assert.equal(f.call(f.root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
@@ -587,8 +513,8 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
         // the slot back to STATE_FREE; every track in this test lands on
         // slot 0, the sole free slot each time.
         const table = f.api.output().table;
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
         resampleInto({
             block: new Float32Array(2), blockFrames: 1, header, pcm,
             outputRate: f.api.output().sampleRate, seam: createSeam(),
@@ -662,15 +588,16 @@ test('a position a program asked to be woken at wakes it', async()=>{
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
 
     f.advance(1);
+    deviceReads(f, 1);
     f.api.pump();
     assert.deepEqual(f.signalled, [], 'not before playback reaches it');
 
-    // Past the half-second mark the position sits at.
+    // Past the half-second mark the position sits at, as far as the device read.
     f.advance(600);
+    deviceReads(f, 600);
     f.api.pump();
     assert.deepEqual(f.signalled, [EVENT], 'and exactly once when it does');
 });
-
 test('a program is woken even when nothing is listening to the sound', async()=>{
     // The wake is owed whether or not anything drains the ring. A build with no
     // sound device must not hang the program that asked for one.
@@ -753,17 +680,17 @@ test('the decoder behind the provider follows the configuration', async()=>{
  * @param {number} stallMs
  */
 async function refillAcrossAStall(stallMs){
-    const f = await playing({ shared: true });
+    const f = await playing();
     const [held] = f.api.buffers();
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     const bytesPerMs = RATE * CHANNELS * (BITS / 8) / 1000;
     const LOCK_AT = 0x380;
@@ -846,7 +773,7 @@ test('a sound device made again after the last one was let go of is heard', asyn
     // TRON 2.0 makes its device again for each level: the stream buffer and
     // the device are released, the primary buffer it played is not, and a new
     // device's primary and stream buffer are made and played. The new stream
-    // has to reach the ring as the first did.
+    // has to be a voice the device plays, as the first was.
     const f = await playing();
     const PRIMARY_DESC = 0x500;
     f.view.setUint32(PRIMARY_DESC + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE, true);
@@ -857,7 +784,8 @@ test('a sound device made again after the last one was let go of is heard', asyn
     assert.equal(f.call(primary, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.advance(50);
-    assert.ok(f.api.pump() > 0, 'the first device is heard');
+    f.api.pump();
+    assert.ok(playingVoices(f).includes(BUFFER_BYTES), 'the first device is heard');
 
     f.call(f.buffer, 'Stop', []);
     // The bridge's IUnknown, which this fixture does not have: the objects'
@@ -877,10 +805,9 @@ test('a sound device made again after the last one was let go of is heard', asyn
     const held = f.api.buffers().at(-1);
     f.bytes.fill(0x40, held.address, held.address + BUFFER_BYTES);
     assert.equal(f.call(stream, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
-    const before = f.api.output().diagnostics().produced;
     f.advance(50);
     f.api.pump();
-    assert.ok(f.api.output().diagnostics().produced > before, 'the second device is heard too');
+    assert.ok(playingVoices(f).includes(BUFFER_BYTES), 'the second device is heard too');
 });
 
 test('a program that writes the primary buffer itself is heard from it', async()=>{
@@ -899,9 +826,8 @@ test('a program that writes the primary buffer itself is heard from it', async()
         const held = f.api.buffers().find((/** @type {any} */ b)=>b.primary);
         f.bytes.fill(0x40, held.address, held.address + held.bytes);
         assert.equal(f.call(primary, 'Play', [0, 0, DSBPLAY_LOOPING]), DS_OK);
-        const before = f.api.output().diagnostics().produced;
         f.advance(50);
         f.api.pump();
-        assert.equal(f.api.output().diagnostics().produced > before, heard, `level ${level}`);
+        assert.equal(playingVoices(f).includes(held.bytes), heard, `level ${level}`);
     }
 });

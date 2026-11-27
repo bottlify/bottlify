@@ -6,7 +6,8 @@
 
 import { ErrorCode, fsError } from './internal/errors.js';
 import { Disposition, SeekFrom, createFileTable, createSharing } from './internal/handles.js';
-import { bytesOf, createMemoryStore } from './internal/memory-store.js';
+import { bytesOf, createMemoryStore, piecesOf } from './internal/memory-store.js';
+import { createPageFileStore } from './internal/page-file.js';
 import { createOverlay } from './internal/tree.js';
 import {
     createDirectoryState,
@@ -54,7 +55,45 @@ const handedOut = (tree, components, path)=>{
     // Not enumerable: a copy of the entry, or one posted to another thread,
     // carries the bytes and not the store's pieces.
     Object.defineProperty(entry, 'contents', { value: contents });
+    // The bytes as the store keeps them, for a writer that takes them in parts.
+    // Named apart from an installation's `pieces` (`@bottlify/installer`), an
+    // array a reader takes this entry's for when it has one.
+    Object.defineProperty(entry, 'parts', { value: ()=>(whole ? [whole] : piecesOf(contents)) });
     return entry;
+};
+
+/**
+ * What the drives' writable layers hold of the tab's memory: each store's
+ * own pieces, and the pieces being written of the page file they stand on,
+ * once however many drives share it. The rest of the page file's pieces are
+ * the run's cache's bodies, which it counts (`runCache().spaces.pages`).
+ *
+ * @param {Iterable<any>} writables
+ * @returns {{ heaps: { writable: number }, pageFile?: Record<string, any> }}
+ */
+const writableHeld = writables=>{
+    let memory = 0;
+    /** @type {Set<any>} */
+    const pageFiles = new Set();
+    for (const store of writables)
+    {
+        if (store?.pageFile)
+        {
+            pageFiles.add(store.pageFile);
+        }
+        else
+        {
+            memory += store?.heldBytes?.() ?? 0;
+        }
+    }
+    /** @type {Record<string, any> | undefined} */
+    let described;
+    for (const pageFile of pageFiles)
+    {
+        described = pageFile.diagnostics();
+        memory += described?.workingBytes ?? 0;
+    }
+    return { heaps: { writable: memory }, ...described ? { pageFile: described } : {} };
 };
 
 /**
@@ -68,8 +107,9 @@ const handedOut = (tree, components, path)=>{
  * agreeing on numbering first.
  *
  * The backing stores are injected. A build with persistence supplies its own;
- * a build without one gets the in-memory store here, and behaves identically
- * until it is closed.
+ * a build without one gets a writable layer here: on the run's page file
+ * (`page-file.js`) where it was handed one, in memory otherwise, and either
+ * behaves identically until it is closed.
  */
 
 /** The filesystem layer's module for one graph; see `defaultModules`. */
@@ -100,9 +140,69 @@ export function createFilesystemModule(){
 
         /**
          * @param {any} config
+         * @param {any} [host]  the module host, whose log is told what an export left out
          * @returns {Promise<any>}
          */
-        async create(config){
+        async create(config, host){
+            /** The run's log, where it was given one. @type {any} */
+            const log = host?.requireApi?.('log') ?? null;
+            /** Names `export` could not read, each said once. @type {Set<string>} */
+            const unreadable = new Set();
+            /**
+             * One file as `export` hands it on, or null where the tree lists a
+             * name its store has nothing at: left out of the session, and said.
+             *
+             * @param {any} tree @param {string[]} components @param {string} path
+             */
+            const exported = (tree, components, path)=>{
+                try
+                {
+                    return handedOut(tree, components, path);
+                }
+                catch (e){
+                    if (/** @type {any} */ (e)?.code !== ErrorCode.NOT_FOUND)
+                    {
+                        throw e;
+                    }
+                    if (!unreadable.has(path))
+                    {
+                        unreadable.add(path);
+                        log?.warn?.('filesystem', `"${path}" is listed and has nothing to`
+                            + ' read: left out of what was exported');
+                    }
+                    return null;
+                }
+            };
+            /**
+             * Every file under a directory, as `export` hands each on, into
+             * `out`: what a junction shows, taken as files of its own. A chain
+             * of junctions deeper than any a program makes is a loop, and stops.
+             *
+             * @param {any} tree @param {string} key @param {string[]} components
+             * @param {({ path: string, bytes: Uint8Array }
+             *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]} out
+             * @param {number} depth
+             */
+            const filesUnder = (tree, key, components, out, depth)=>{
+                if (depth > 64)
+                {
+                    return;
+                }
+                for (const entry of tree.list(components))
+                {
+                    const child = [...components, entry.name];
+                    if (entry.directory)
+                    {
+                        filesUnder(tree, key, child, out, depth + 1);
+                        continue;
+                    }
+                    const file = exported(tree, child, formatPath(key, child));
+                    if (file)
+                    {
+                        out.push(file);
+                    }
+                }
+            };
             /**
              * The drives every process of a run shares, where this one was
              * handed them: one volume, as one Windows has. What each drive
@@ -113,9 +213,20 @@ export function createFilesystemModule(){
              *     writables: Map<string, any>,
              *     watchers: Set<(key: string, change: any) => void>,
              *     sharing?: import('./internal/handles.js').Sharing,
-             *     revisions?: Int32Array } | null}
+             *     revisions?: Int32Array,
+             *     pageFile?: import('./internal/page-file.js').PageFile | null } | null}
              */
             const shared = config?.volume ?? null;
+            /**
+             * Where a writable layer made here keeps its pieces: the run's page
+             * file, in the run's cache, or this thread's memory where there is
+             * none (a machine built alone).
+             *
+             * @type {import('./internal/page-file.js').PageFile | null}
+             */
+            const pageFile = shared?.pageFile ?? config?.pageFile ?? null;
+            const newWritable = ()=>(pageFile
+                ? createPageFileStore(pageFile) : createMemoryStore());
             // Every process's open files, which sharing is settled against:
             // a file one process holds on terms that share nothing is refused
             // to every other, as CreateFile's terms are the system's.
@@ -135,7 +246,9 @@ export function createFilesystemModule(){
              *
              * @type {{ drives: Map<string, any>, writables: Map<string, any>,
              *     volumes: Map<string, any>, directories: any, files: any, disposed: boolean,
-             *     unwatch: () => void }}
+             *     unwatch: () => void,
+             *     view: ((drive: string, components: string[]) => string[] | null) | null,
+             *     bypass: number }}
              */
             const state = {
                 drives: shared?.drives ?? new Map(),
@@ -149,10 +262,31 @@ export function createFilesystemModule(){
                 // was mounted -- rather than giving the drive a blank disk.
                 writables: shared?.writables ?? new Map(),
                 directories: null,
-                files: createFileTable({ limit: config?.openFileLimit,
-                    sharing: shared?.sharing }),
+                files: createFileTable({ sharing: shared?.sharing }),
                 disposed: false,
                 unwatch: ()=>{},
+                /**
+                 * The process's view of the volume where it is not the volume's
+                 * own (`redirect`): a path's components as the process reaches
+                 * them, or null for the path as named.
+                 *
+                 * @type {((drive: string, components: string[]) => string[] | null) | null}
+                 */
+                view: /** @type {((drive: string, components: string[]) => string[] | null) | null} */ (null),
+                // Calls made as the system rather than the process, through no view.
+                bypass: 0,
+            };
+            /**
+             * A path resolved against the current directories, then through
+             * the process's view.
+             *
+             * @param {string} path
+             */
+            const resolveInView = path=>{
+                const resolved = state.directories.resolve(path);
+                const seen = state.bypass > 0 ? null
+                    : state.view?.(resolved.drive, resolved.components) ?? null;
+                return seen === null ? resolved : { ...resolved, components: seen };
             };
 
             // What has changed since anyone last asked. Kept as a set of paths
@@ -169,6 +303,9 @@ export function createFilesystemModule(){
             const touched = new Map();
             let generation = 0;
             let quiet = false;
+            // A batch `apply` puts in as what the session already holds:
+            // nothing about it is announced.
+            let saved = false;
             /** @type {((changes: any[]) => void) | null} */
             let listener = config?.onChanged ?? null;
             let notifying = false;
@@ -209,7 +346,7 @@ export function createFilesystemModule(){
                 // the one a later writable mount of the letter finds.
                 const writable = readOnly
                     ? createMemoryStore()
-                    : stores?.writable ?? state.writables.get(key) ?? createMemoryStore();
+                    : stores?.writable ?? state.writables.get(key) ?? newWritable();
                 if (!readOnly)
                 {
                     state.writables.set(key, writable);
@@ -247,10 +384,15 @@ export function createFilesystemModule(){
              * @param {string} key @param {any} change
              */
             const changed = (key, change)=>{
-                if (!quiet)
+                // A record of the file changed, not its bytes: nothing to hand out.
+                if (!quiet && change.kind !== 'named')
                 {
                     touched.set(`${key}:${change.path}`,
                         { key, path: change.path, generation: ++generation });
+                }
+                if (saved)
+                {
+                    return;
                 }
                 changes.set(`${key}:${change.path}`, {
                     path: formatPath(key, splitComponents(change.path)),
@@ -279,7 +421,7 @@ export function createFilesystemModule(){
              * @param {boolean} [allowWildcard]
              */
             const locate = (path, allowWildcard = false)=>{
-                const resolved = state.directories.resolve(path);
+                const resolved = resolveInView(path);
                 if (resolved.device)
                 {
                     throw Object.assign(
@@ -306,6 +448,26 @@ export function createFilesystemModule(){
                     components: resolved.components,
                     key: `${foldName(resolved.drive)}:${foldName(resolved.components.join('\\'))}`,
                 };
+            };
+
+            /**
+             * Refuses to remove or rename the process's current directory. A
+             * Win32 process holds it open, without sharing deletion, from the
+             * moment it becomes current until another one does, so Windows
+             * answers its RemoveDirectory or MoveFile with a sharing violation.
+             * Only the current drive's: another drive's is remembered, not held.
+             *
+             * @param {{ drive: string, key: string }} where @param {string} path
+             */
+            const mustNotBeCurrent = (where, path)=>{
+                const drive = state.directories.drive();
+                const held = state.directories.directoryOf(drive).join('\\');
+                if (where.drive === drive
+                    && where.key === `${foldName(drive)}:${foldName(held)}`)
+                {
+                    throw fsError(ErrorCode.SHARING_VIOLATION,
+                        `"${path}" is the current directory, held open`);
+                }
             };
 
             /**
@@ -370,8 +532,11 @@ export function createFilesystemModule(){
                  *
                  * @param {{ path: string, bytes?: Uint8Array, delete?: boolean,
                  *     contents?: import('./internal/memory-store.js').FileContents }[]} batch
-                 * @param {{ quiet?: boolean }} [options]  `quiet`: what arrives is
-                 *        another copy's, and `changesSince` does not report it back.
+                 * @param {{ quiet?: boolean, saved?: boolean }} [options]  `quiet`:
+                 *        what arrives is another copy's, and `changesSince` does not
+                 *        report it back. `saved`: it is what the session already
+                 *        holds, restored - quiet, and not announced to `onChanged`,
+                 *        so nothing saves it again.
                  * @returns {number} how many entries were applied
                  */
                 apply(batch, options){
@@ -379,7 +544,11 @@ export function createFilesystemModule(){
                     {
                         return 0;
                     }
-                    quiet = options?.quiet === true;
+                    saved = options?.saved === true;
+                    quiet = saved || options?.quiet === true;
+                    // Changes from outside name the volume's own paths, through no
+                    // process's view of it.
+                    state.bypass++;
                     try
                     {
                         for (const entry of batch)
@@ -432,7 +601,9 @@ export function createFilesystemModule(){
                     }
                     finally
                     {
+                        state.bypass--;
                         quiet = false;
+                        saved = false;
                     }
                 },
 
@@ -475,17 +646,29 @@ export function createFilesystemModule(){
                  *
                  * The source is not in it. A bundle is named by its own digest and
                  * fetched, never uploaded, so what travels is only what the program
-                 * itself produced.
+                 * itself produced. A session laid under the writable layer is
+                 * (`session-source.js`): a file of it the program has not written
+                 * is in it as the session handed it - `{ path, size, read }`,
+                 * its bytes read when `read` is called.
+                 *
+                 * A file with more than one name is in it once, under the path
+                 * its bytes are kept at, and `exportLinks` gives its other
+                 * names -- unless `everyName` asks for each name as a file of
+                 * its own: what a reader that keeps no links takes, a bottle's
+                 * read-only files among them.
                  *
                  * @param {string} [letter]
-                 * @returns {{ path: string, bytes: Uint8Array }[]}
+                 * @param {{ everyName?: boolean }} [options]
+                 * @returns {({ path: string, bytes: Uint8Array }
+                 *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]}
                  */
-                export(letter){
+                export(letter, options){
                     if (!live())
                     {
                         return [];
                     }
-                    /** @type {{ path: string, bytes: Uint8Array }[]} */
+                    /** @type {({ path: string, bytes: Uint8Array }
+                     *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]} */
                     const out = [];
                     for (const [key, tree] of state.drives)
                     {
@@ -496,7 +679,42 @@ export function createFilesystemModule(){
                         for (const entry of tree.writableFiles())
                         {
                             const components = splitComponents(entry.path);
-                            out.push(handedOut(tree, components, formatPath(key, components)));
+                            const file = exported(tree, components, formatPath(key, components));
+                            if (file)
+                            {
+                                out.push(file);
+                            }
+                        }
+                        // The session under the writable layer, the files the
+                        // program has not touched, as the session handed them.
+                        out.push(.../** @type {any[]} */ (tree.keptFiles?.() ?? []));
+                        for (const record of options?.everyName ? tree.links() : [])
+                        {
+                            // A reparse point's file is its own owner, already out.
+                            if (record.reparse && !record.junction)
+                            {
+                                continue;
+                            }
+                            // A junction's files go under its name as well:
+                            // a reader that keeps no links keeps no junction.
+                            if (record.junction)
+                            {
+                                for (const name of record.names)
+                                {
+                                    filesUnder(tree, key, splitComponents(name), out, 0);
+                                }
+                                continue;
+                            }
+                            for (const name of record.names)
+                            {
+                                const components = splitComponents(name);
+                                const file = exported(tree, components,
+                                    formatPath(key, components));
+                                if (file)
+                                {
+                                    out.push(file);
+                                }
+                            }
                         }
                     }
                     return out;
@@ -563,8 +781,41 @@ export function createFilesystemModule(){
                         return { drive: '', components: [], device: null, wildcard: false,
                             path: '' };
                     }
-                    const resolved = state.directories.resolve(path);
+                    const resolved = resolveInView(path);
                     return { ...resolved, path: formatPath(resolved.drive, resolved.components) };
+                },
+
+                /**
+                 * Sets the process's view of the volume: every path it names -
+                 * an open, a search, a resolve - goes through `view` after it is
+                 * made absolute, and reaches the components it answers, or the
+                 * path as named for null. What a 32-bit process on a 64-bit
+                 * Windows reaches of the system folder is win32's to say
+                 * (file system redirection); the volume knows nothing of it.
+                 *
+                 * @param {((drive: string, components: string[]) => string[] | null) | null} view
+                 */
+                redirect(view){
+                    state.view = view;
+                },
+
+                /**
+                 * Runs `fn` with the volume as the system sees it, through no
+                 * view: what the embedder reads, the machine's own folders, a
+                 * 64-bit service's files.
+                 *
+                 * @template T @param {() => T} fn @returns {T}
+                 */
+                unredirected(fn){
+                    state.bypass++;
+                    try
+                    {
+                        return fn();
+                    }
+                    finally
+                    {
+                        state.bypass--;
+                    }
                 },
 
                 /** @returns {string} the current directory, as a full path. */
@@ -610,7 +861,70 @@ export function createFilesystemModule(){
                     }
                     const { tree, drive, components } = locate(path);
                     const entry = tree.stat(components);
-                    return entry ? { ...entry, path: formatPath(drive, components) } : null;
+                    return entry ? { ...entry, path: formatPath(drive, components),
+                        identity: formatPath(drive, splitComponents(entry.identity)) } : null;
+                },
+
+                /**
+                 * The number of the file at `path` on its volume, the same
+                 * under every name and across renames (the tree's `fileId`).
+                 *
+                 * @param {string} path @returns {number}
+                 */
+                fileId(path){
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const { tree, components } = locate(path);
+                    return tree.fileId(components);
+                },
+
+                /**
+                 * The full path `path` reaches, as the volume spells it, every
+                 * junction on the way taken; the last name is not followed.
+                 *
+                 * @param {string} path @returns {string}
+                 */
+                finalPath(path){
+                    if (!live())
+                    {
+                        return path;
+                    }
+                    const { tree, drive, components } = locate(path);
+                    return formatPath(drive, tree.finalPath(components));
+                },
+
+                /**
+                 * Where the file numbered `id` is on the volume `path` is on,
+                 * as a full path: null for a number no file there has.
+                 *
+                 * @param {string} path @param {number} id @returns {string | null}
+                 */
+                pathOfFileId(path, id){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    const { tree, drive } = locate(path);
+                    const components = tree.pathOfId(id);
+                    return components ? formatPath(drive, components) : null;
+                },
+
+                /**
+                 * Every name the file at `path` has, as full paths: its own
+                 * alone unless it is linked.
+                 *
+                 * @param {string} path @returns {string[]}
+                 */
+                namesOf(path){
+                    if (!live())
+                    {
+                        return [];
+                    }
+                    const { tree, drive } = locate(path);
+                    return tree.namesOf(locate(path).components).map(
+                        (/** @type {string} */ name)=>formatPath(drive, splitComponents(name)));
                 },
 
                 /**
@@ -647,6 +961,7 @@ export function createFilesystemModule(){
                         (/** @type {any} */ entry)=>({
                             ...entry,
                             path: formatPath(drive, [...components, entry.name]),
+                            identity: formatPath(drive, splitComponents(entry.identity)),
                         }));
                 },
 
@@ -666,8 +981,9 @@ export function createFilesystemModule(){
                     {
                         return;
                     }
-                    const { tree, components } = locate(path);
-                    tree.removeDirectory(components);
+                    const where = locate(path);
+                    mustNotBeCurrent(where, path);
+                    where.tree.removeDirectory(where.components);
                 },
 
                 /** @param {string} path */
@@ -676,8 +992,258 @@ export function createFilesystemModule(){
                     {
                         return;
                     }
-                    const { tree, components } = locate(path);
+                    const { tree, components, key } = locate(path);
+                    if (tree.stat(components))
+                    {
+                        state.files.mayRemove(key, path);
+                    }
                     tree.removeFile(components);
+                },
+
+                /**
+                 * Whether the file at `path` may be renamed or deleted as its
+                 * opens stand: SHARING_VIOLATION thrown when one that holds
+                 * access does not share deletion.
+                 *
+                 * @param {string} path
+                 */
+                mayRemove(path){
+                    if (live())
+                    {
+                        const where = locate(path);
+                        mustNotBeCurrent(where, path);
+                        state.files.mayRemove(where.key, path);
+                    }
+                },
+
+                /**
+                 * Holds the directory at `path` open on `access` and `share`,
+                 * as CreateFile with FILE_FLAG_BACKUP_SEMANTICS opens one:
+                 * its number, or SHARING_VIOLATION thrown when the opens
+                 * already there do not allow it (NOT_FOUND for no directory).
+                 *
+                 * @param {string} path
+                 * @param {import('./internal/handles.js').AccessFlags} access
+                 * @param {import('./internal/handles.js').AccessFlags} share
+                 * @returns {number}
+                 */
+                holdDirectory(path, access, share){
+                    const where = locate(path);
+                    const entry = where.tree.stat(where.components);
+                    if (!entry?.directory)
+                    {
+                        throw fsError(ErrorCode.NOT_FOUND, `No directory at "${path}"`);
+                    }
+                    return state.files.holdDirectory({ key: where.key, path: entry.path,
+                        access: { read: !!access.read, write: !!access.write,
+                            delete: !!access.delete },
+                        share: { read: !!share.read, write: !!share.write,
+                            delete: !!share.delete } });
+                },
+
+                /** @param {number} token */
+                releaseDirectory(token){
+                    if (live())
+                    {
+                        state.files.releaseDirectory(token);
+                    }
+                },
+
+                /** @param {string} path @returns {boolean} whether any process holds it open */
+                isOpen: path=>live() && state.files.isOpen(locate(path).key),
+
+                /**
+                 * How a section of this process maps the file, or null.
+                 *
+                 * @param {string} path
+                 * @returns {'readonly' | 'readwrite' | 'image' | null}
+                 */
+                mappedAs: path=>(live() ? state.files.mappedAs(locate(path).key) : null),
+
+                /**
+                 * A section's own hold on the file an open handle has: the same
+                 * file, read (and written, for a read-write section) through
+                 * it, held on the section's terms once the handle is closed.
+                 *
+                 * @param {any} handle @param {'readonly' | 'readwrite' | 'image'} kind
+                 */
+                reopenSection(handle, kind){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    return state.files.open({ tree: handle.tree, key: handle.key,
+                        components: handle.components,
+                        access: { read: true, write: kind === 'readwrite' },
+                        disposition: Disposition.OPEN_EXISTING, section: kind });
+                },
+
+                /**
+                 * Gives the file at `existing` the further name `name`, a hard
+                 * link: one file under both, a write through either seen
+                 * through the other, its bytes gone with its last name. Both
+                 * have to be on one drive.
+                 *
+                 * @param {string} name @param {string} existing
+                 */
+                link(name, existing){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const from = locate(existing);
+                    const to = locate(name);
+                    if (from.tree !== to.tree)
+                    {
+                        throw fsError(ErrorCode.NOT_SAME_DEVICE,
+                            `"${existing}" and "${name}" are on different drives`);
+                    }
+                    from.tree.link(from.components, to.components);
+                },
+
+                /**
+                 * Sets a reparse point on the file or directory at `path`, what
+                 * FSCTL_SET_REPARSE_POINT does; null takes it off. `target`,
+                 * the place a mount point or a symbolic link names, makes it
+                 * stand for that place when it is on the same drive - a
+                 * directory's contents reached and listed through it; one on
+                 * another drive is kept and stands for nothing here. Taking
+                 * it off leaves the target as it was.
+                 *
+                 * @param {string} path
+                 * @param {{ tag: number, data: Uint8Array | null, target: string | null }
+                 *     | null} point
+                 * @returns {boolean | undefined}  whether the target was on the same drive
+                 */
+                setReparse(path, point){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const at = locate(path);
+                    if (point === null)
+                    {
+                        at.tree.setReparse(at.components, null);
+                        return true;
+                    }
+                    const to = point.target === null ? null : locate(point.target);
+                    const here = to !== null && to.tree === at.tree;
+                    at.tree.setReparse(at.components, { tag: point.tag, data: point.data,
+                        target: here ? to.components : null });
+                    return to === null || here;
+                },
+
+                /**
+                 * Sets the attribute bits of the file or directory at `path`,
+                 * or forgets them with null: kept on the volume for every name
+                 * of the file, and in the session.
+                 *
+                 * @param {string} path @param {number | null} attributes
+                 */
+                setAttributes(path, attributes){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const at = locate(path);
+                    at.tree.setAttributes(at.components, attributes);
+                },
+
+                /**
+                 * The reparse point at `path` as it was set, null for none.
+                 *
+                 * @param {string} path
+                 * @returns {{ tag: number, data: Uint8Array | null } | null}
+                 */
+                reparseOf(path){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    const at = locate(path);
+                    return at.tree.reparseOf(at.components);
+                },
+
+                /**
+                 * The files with more than one name, as full paths: the path
+                 * each one's bytes travel under in `export`, and its other
+                 * names - the part of a session `export` cannot carry. A
+                 * junction is one too: the directory it stands for as the
+                 * owner, the junction as its name, `junction` set.
+                 *
+                 * @param {string} [letter]
+                 * @returns {import('./internal/tree.js').LinkRecord[]}
+                 */
+                exportLinks(letter){
+                    if (!live())
+                    {
+                        return [];
+                    }
+                    /** @type {import('./internal/tree.js').LinkRecord[]} */
+                    const out = [];
+                    for (const [key, tree] of state.drives)
+                    {
+                        if (letter && key !== String(letter).toUpperCase())
+                        {
+                            continue;
+                        }
+                        for (const record of tree.links())
+                        {
+                            out.push({ owner: formatPath(key, splitComponents(record.owner)),
+                                names: record.names.map((/** @type {string} */ path)=>
+                                    formatPath(key, splitComponents(path))),
+                                ...record.junction ? { junction: true } : {},
+                                ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
+                                ...record.target
+                                    ? { target: formatPath(key, splitComponents(record.target)) }
+                                    : {} });
+                        }
+                    }
+                    return out;
+                },
+
+                /**
+                 * Gives files the further names `exportLinks` recorded, once
+                 * `apply` has put the files themselves in. A record whose names
+                 * span drives, or whose file is not there, is passed over.
+                 *
+                 * @param {import('./internal/tree.js').LinkRecord[]} records
+                 * @param {{ saved?: boolean }} [options]  as `apply` takes it
+                 */
+                applyLinks(records, options){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    saved = options?.saved === true;
+                    quiet = saved;
+                    try
+                    {
+                        for (const record of records)
+                        {
+                            const owner = locate(record.owner);
+                            const names = record.names.map(path=>locate(path))
+                                .filter(at=>at.tree === owner.tree);
+                            const target = record.target ? locate(record.target) : null;
+                            owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
+                                names: names.map(at=>at.components.join('\\')),
+                                ...record.junction ? { junction: true } : {},
+                                ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
+                                ...target && target.tree === owner.tree
+                                    ? { target: target.components.join('\\') } : {} }]);
+                        }
+                    }
+                    finally
+                    {
+                        quiet = false;
+                        saved = false;
+                    }
                 },
 
                 /**
@@ -689,6 +1255,8 @@ export function createFilesystemModule(){
                  * @param {boolean} [options.write]
                  * @param {boolean} [options.shareRead]
                  * @param {boolean} [options.shareWrite]
+                 * @param {boolean} [options.delete]  DELETE access.
+                 * @param {boolean} [options.shareDelete]  FILE_SHARE_DELETE.
                  * @param {string} [options.disposition]  One of Disposition.
                  * @param {boolean} [options.inherited]  A handle another process
                  *     opened and handed on: the same open file, its terms agreed.
@@ -703,10 +1271,12 @@ export function createFilesystemModule(){
                         tree,
                         key,
                         components,
-                        access: { read: options.read !== false, write: options.write === true },
+                        access: { read: options.read !== false, write: options.write === true,
+                            delete: options.delete === true },
                         share: {
                             read: options.shareRead !== false,
                             write: options.shareWrite === true,
+                            delete: options.shareDelete === true,
                         },
                         disposition: options.disposition ?? Disposition.OPEN_EXISTING,
                         inherited: options.inherited === true,
@@ -717,6 +1287,14 @@ export function createFilesystemModule(){
                 read: (handle, length)=>live()
                     ? state.files.read(handle, length)
                     : new Uint8Array(0),
+                /**
+                 * @param {any} handle @param {number} length
+                 * @param {(bytes: Uint8Array, at: number) => void} put
+                 * @returns {number}
+                 */
+                readInto: (handle, length, put)=>live()
+                    ? state.files.readInto(handle, length, put)
+                    : 0,
                 /** @param {any} handle @param {Uint8Array} bytes @returns {number} */
                 write: (handle, bytes)=>live() ? state.files.write(handle, bytes) : 0,
                 /** @param {any} handle @param {number} offset @param {string} [from] */
@@ -749,19 +1327,24 @@ export function createFilesystemModule(){
                 /**
                  * Moves a name to another name.
                  *
-                 * A file only the writable layer holds, moved within its drive,
-                 * is given the new name and keeps its bytes: an installer writes
-                 * every file it unpacks under a temporary name and renames it, a
-                 * gigabyte at a time. Anything else may live in the read-only
-                 * source, where nothing can be renamed, so it is a copy followed
-                 * by a delete, which is what the overlay would have to do anyway
-                 * -- and the delete leaves the tombstone that keeps the old name
-                 * from coming back from the source.
+                 * A file moved within its drive is given the new name and keeps
+                 * its bytes: an installer writes every file it unpacks under a
+                 * temporary name and renames it, a gigabyte at a time. One the
+                 * read-only source holds, where nothing can be renamed, is copied
+                 * up first (`tree.js`), and its old name left the tombstone that
+                 * keeps it from coming back from the source. A file moved to
+                 * another drive is a copy followed by a delete.
+                 *
+                 * A file renamed through a handle that holds it for deletion
+                 * (`held`) is not asked again whether its opens let it go:
+                 * every other open was admitted against that handle's right to
+                 * delete it, as Windows renames through a file object.
                  *
                  * @param {string} from
                  * @param {string} to
+                 * @param {{ held?: boolean }} [options]
                  */
-                rename(from, to){
+                rename(from, to, { held = false } = {}){
                     if (!live())
                     {
                         return;
@@ -771,14 +1354,53 @@ export function createFilesystemModule(){
                     {
                         throw fsError(ErrorCode.NOT_FOUND, `${from} does not exist`);
                     }
+                    const leavingName = locate(from);
+                    const arrivingName = locate(to);
+                    if (leavingName.key === arrivingName.key
+                        && leavingName.tree === arrivingName.tree)
+                    {
+                        // The same name: nothing to do, or only its spelling
+                        // to change, which goes by way of another name.
+                        if (entry.name === arrivingName.components.at(-1))
+                        {
+                            return;
+                        }
+                        let step = 0;
+                        while (this.stat(`${to}.~${step}`))
+                        {
+                            step++;
+                        }
+                        this.rename(from, `${to}.~${step}`, { held });
+                        this.rename(`${to}.~${step}`, to, { held });
+                        return;
+                    }
                     if (this.stat(to))
                     {
                         throw fsError(ErrorCode.ALREADY_EXISTS, `${to} already exists`);
                     }
+                    if (!entry.directory && !held)
+                    {
+                        state.files.mayRemove(locate(from).key, from);
+                    }
 
                     if (entry.directory)
                     {
+                        // Refused before a child moves, not by the last step.
+                        mustNotBeCurrent(locate(from), from);
+                        // Into its own subtree it would never finish: each
+                        // name moved makes another under the one being moved.
+                        // Windows refuses it.
+                        if (locate(to).key.startsWith(`${locate(from).key}\\`))
+                        {
+                            throw fsError(ErrorCode.SHARING_VIOLATION,
+                                `${from} cannot be moved into itself, to ${to}`);
+                        }
                         this.createDirectory(to);
+                        if (locate(from).tree === locate(to).tree)
+                        {
+                            locate(from).tree.carryFile(locate(from).components,
+                                locate(to).components);
+                        }
                         for (const child of this.list(from))
                         {
                             this.rename(`${from}\\${child.name}`, `${to}\\${child.name}`);
@@ -792,6 +1414,12 @@ export function createFilesystemModule(){
                     if (leaving.tree === arriving.tree
                         && leaving.tree.moveFile(leaving.components, arriving.components))
                     {
+                        // A file renamed while open stays the file its
+                        // handles have: an NGen worker renames the native
+                        // image it wrote and goes on asking its size.
+                        state.files.moved({ tree: leaving.tree, from: leaving.key,
+                            to: arriving.key, components: arriving.components,
+                            path: leaving.tree.stat(arriving.components)?.path ?? to });
                         return;
                     }
 
@@ -843,11 +1471,16 @@ export function createFilesystemModule(){
                     ...described?.kind ? { kind: described.kind, label: described.label } : {},
                 };
             }
+            const { pageFile, ...bytesHeld } = writableHeld(instance.writables.values());
             return {
                 name: 'filesystem',
                 version: '0.1.0',
                 status: 'ready',
                 metrics: {
+                    // The writable layers' pieces in memory of their own
+                    // (`memory-zones.js`); the page file's, beside them.
+                    bytesHeld,
+                    ...pageFile ? { pageFile } : {},
                     volumes,
                     handles: instance.files.diagnostics(),
                     // A relative path that resolves somewhere unexpected is one

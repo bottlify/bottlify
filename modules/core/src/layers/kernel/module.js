@@ -4,9 +4,11 @@
  * See LICENSE for details
  */
 
-import { EVENT_TAG, MIRROR, MUTEX_TAG, createEventMirror } from './internal/event-mirror.js';
+import { EVENT_TAG, MIRROR, MUTEX_TAG, SEMAPHORE_TAG, createEventMirror }
+    from './internal/event-mirror.js';
 import { createEventWords } from './internal/event-words.js';
 import { createMutexWords } from './internal/mutex-words.js';
+import { createSemaphoreWords } from './internal/semaphore-words.js';
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
 import {
@@ -20,6 +22,73 @@ import { createStackPool } from './internal/stacks.js';
 
 /** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
 const TURN_MS = 0.25;
+
+/** How long a flush looks on the engine's thread before it goes on through its event loop, ms. */
+const FLUSH_LOOK_MS = 20;
+
+/**
+ * The word a flush's own sequentially consistent operation is made on. A page
+ * without SharedArrayBuffer (not cross-origin isolated) runs one executor and
+ * has no other to order against: a plain buffer serves it, and the module
+ * still loads there.
+ */
+const FENCE = new Int32Array(typeof SharedArrayBuffer === 'function'
+    ? new SharedArrayBuffer(4) : new ArrayBuffer(4));
+
+/**
+ * FlushProcessWriteBuffers: done once every other executor that was running
+ * guest code has passed a sequentially consistent operation since - the end
+ * of a slice or a crossing into the host, each of which moves its count of
+ * runs of guest code (`cpu.executorEpochs`). Translated code's loads and
+ * stores are plain ones in the shared memory, ordered among threads by
+ * nothing: a store of one executor's thread could be unseen by another, or
+ * a load return what was there before a store another made, as long as
+ * neither passed such an operation - and on a host that orders memory less
+ * than x86 does, longer. The caller's own stores are released by its
+ * operation here, made before the counts are read. A runtime hands a flag
+ * between threads this way: a collector sets one, flushes, and reads whether
+ * each thread has left native code, while the thread stores that it has and
+ * then reads the collector's flag - with neither store seen by the other,
+ * both go on.
+ *
+ * @param {any} cpu
+ * @param {{ now?: () => number, later?: (look: () => void) => void }} [clock]
+ * @returns {true | Promise<true>}
+ */
+export function flushWrites(cpu, { now = ()=>performance.now(),
+    later = look=>{ setTimeout(look, 0); } } = {})
+{
+    if (typeof cpu.executorEpochs !== 'function')
+    {
+        return true;
+    }
+    Atomics.add(FENCE, 0, 1);
+    const then = cpu.executorEpochs();
+    const passed = ()=>{
+        const counts = cpu.executorEpochs();
+        return then.every((/** @type {number} */ count, /** @type {number} */ at)=>
+            (count & 1) === 0 || counts[at] !== count);
+    };
+    const from = now();
+    while (!passed())
+    {
+        if (now() - from > FLUSH_LOOK_MS)
+        {
+            return new Promise(resolve=>{
+                const look = ()=>{
+                    if (passed())
+                    {
+                        resolve(true);
+                        return;
+                    }
+                    later(look);
+                };
+                later(look);
+            });
+        }
+    }
+    return true;
+}
 
 /**
  * kernel — the execution core: threads, the scheduler, synchronisation, handles
@@ -58,6 +127,30 @@ function published(cpu, log){
             { rows: 8, columns: SLOW_SLICE_COLUMNS }),
         intern: (/** @type {string} */ text)=>log.intern(text),
     };
+}
+
+/**
+ * Every event of the process as the guest and the host see it, one line each:
+ * the word the handle's table entry holds, the event's own word, whether the
+ * host keeps it, the state it holds, and who is queued on it.
+ *
+ * @param {any} instance
+ * @returns {string}
+ */
+function describeEvents(instance){
+    const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16);
+    /** @param {number | null | undefined} address */
+    const read = address=>(typeof address === 'number' ? hex(instance.readWord(address)) : 'none');
+    return instance.handles.list()
+        .filter((/** @type {{ type: string }} */ { type })=>type === 'event')
+        .map((/** @type {{ handle: number, object: any }} */ { handle, object })=>{
+            const word = typeof object.word === 'number'
+                ? `${hex(object.word)}=${read(object.word)}` : 'none';
+            const waiters = (object.waiters ?? []).map((/** @type {any} */ one)=>one.name).join(',');
+            return `#${hex(handle)} table ${read(instance.mirror?.wordOf(handle))} word ${word}`
+                + ` host ${object.hostKeeps ? 'keeps' : 'gave'} held ${object.heldSignalled ?? '-'}`
+                + ` manual ${object.manualReset === true} waiters ${waiters}`;
+        }).join('; ');
 }
 
 /** The kernel layer's module for one graph; see `defaultModules`. */
@@ -104,6 +197,9 @@ export function createKernelModule(){
                 // than by failing -- which is the hardest kind of fault to read
                 // back to its cause.
                 limit: config?.stacks?.limit ?? Infinity,
+                // In a memory a gone process handed on: where its stacks' bytes end.
+                ...(config?.stacks?.dirtyTo === undefined ? {}
+                    : { dirtyTo: config.stacks.dirtyTo }),
             });
 
             /**
@@ -118,8 +214,11 @@ export function createKernelModule(){
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
+             *          othersRunning: (() => boolean) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
-             *          mutexWords: any, eventWords: any }}
+             *          mutexWords: any, eventWords: any, semaphoreWords: any, mirror: any,
+             *          readWord: ((address: number) => number) | null,
+             *          unwake: (() => void) | null }}
              */
             const state = {
                 stacks,
@@ -130,7 +229,10 @@ export function createKernelModule(){
                 switcher: null,
                 processes: null,
                 disposed: false,
+                // Stops this machine hearing the link's wakes (`onWake`).
+                unwake: null,
                 refreshClock: undefined,
+                othersRunning: undefined,
                 hostAnswering: undefined,
                 // The guest word the scheduler keeps its ready count in (`mirrorReady`).
                 readyWord: 0,
@@ -138,6 +240,10 @@ export function createKernelModule(){
                 mutexWords: null,
                 // The words of the process's events (`event-words.js`).
                 eventWords: null,
+                mirror: null,
+                readWord: null,
+                // The words of the process's semaphores (`semaphore-words.js`).
+                semaphoreWords: null,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -148,6 +254,21 @@ export function createKernelModule(){
                 if (state.resumeLog.length > 16)
                 {
                     state.resumeLog.shift();
+                }
+            };
+            // A stub's return address, a quadword in a 64-bit process: whole,
+            // where the caller is an image past 4 GiB, and the park loop's put
+            // over it whole, not over its low dword alone.
+            /** @param {number} esp */
+            const readReturn = esp=>(cpu.bits?.() === 64
+                ? (memory.readU32(esp) >>> 0) + (memory.readU32(esp + 4) >>> 0) * 2 ** 32
+                : memory.readU32(esp));
+            /** @param {number} esp @param {number} address */
+            const writeReturn = (esp, address)=>{
+                memory.writeU32(esp, address >>> 0);
+                if (cpu.bits?.() === 64)
+                {
+                    memory.writeU32(esp + 4, Math.floor(address / 2 ** 32));
                 }
             };
             /**
@@ -178,8 +299,13 @@ export function createKernelModule(){
                 // Moved *to* the deadline rather than *by* an interval, because
                 // the clock is the one that knows the host's, and a wait nobody has
                 // to sit through must never carry the guest past real time.
+                // Nor while another process of the run is running: what a
+                // thread here waits on may be its to set before the deadline,
+                // and a clock behind the host's by every slow turn would jump
+                // past that time in one step - a parent's timed wait on a child
+                // ending before the child had the wall time to start.
                 /** @param {number} deadline */
-                skipTo: deadline=>state.clock.skipTo(deadline),
+                skipTo: deadline=>(state.othersRunning?.() ? 0 : state.clock.skipTo(deadline)),
                 // A slice that calls the host in a loop moves the clock as it
                 // goes, as between slices (`refreshClockWith`).
                 refreshClock: ()=>state.refreshClock?.(),
@@ -189,20 +315,13 @@ export function createKernelModule(){
                 /** @param {any} thread @param {string | null} reason @param {number} value */
                 onResume: (thread, reason, value)=>log.debug('kernel',
                     '{0} resumed from {1} with {2:x}', thread.name, reason ?? 'a park', value),
-                // Below a page the emulator cannot honour a smaller quantum anyway,
-                // so asking for one would only be a lie in the configuration.
+                // A turn's length in instructions where the run names none.
                 quantum: config?.quantum ?? 100_000,
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
-                soloQuantum: config?.soloQuantum,
-                // Where a process of several executors runs its ready threads: the
-                // way the caller names, else spread beside a free host (`freeHost`),
-                // or each thread moved on its gains without one (`placement.js`).
-                placement: ['spread', 'concentrate', 'auto'].includes(config?.placement)
-                    ? config.placement : null,
-                placementTiming: config?.placementTiming,
-                playPinned: config?.playPinned,
-                freeHost: config?.freeHost,
+                // Where a process of several executors runs its ready threads:
+                // spread, unless a debugging run concentrates them.
+                placement: config?.placement === 'concentrate' ? 'concentrate' : null,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)
@@ -211,24 +330,15 @@ export function createKernelModule(){
                     }
                 },
                 ids: config?.ids,
+                // Where a stack pointer that left its stack lies: an overflow
+                // stops the process before it reaches the engine's tables.
+                regionAt: (/** @type {number} */ address)=>memory.find?.(address),
                 hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
             });
             if (typeof log.metrics?.onFrame === 'function')
             {
                 log.metrics.onFrame(()=>state.scheduler.publish());
-            }
-            // With `preemption` on, a slice ends between chunks of translated
-            // code once a thread of higher priority comes due, as Windows
-            // preempts for one (`preemptionDue`). Off by default: measured on
-            // the Warcraft III demo it ended ~8 000 slices early for Miles'
-            // TIME_CRITICAL mixer and changed nothing heard in a browser, where
-            // the mixer's lateness is collection pauses outside any slice; and
-            // the chunked budget it needs has not been measured for speed.
-            if (config?.preemption === true)
-            {
-                cpu.setYieldCheck?.(()=>!state.disposed
-                    && state.scheduler.preemptionDue(state.refreshClock));
             }
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
@@ -244,15 +354,74 @@ export function createKernelModule(){
             // places them (`mirrorEvents`).
             const eventWords = createEventWords(/** @type {any} */ (memory));
             state.eventWords = eventWords;
+            // The words the guest releases and takes semaphores by, the same way.
+            const semaphoreWords = createSemaphoreWords(/** @type {any} */ (memory));
+            state.semaphoreWords = semaphoreWords;
             state.sync = createSyncObjects({ scheduler: state.scheduler,
                 remote: config?.remoteObjects ?? null,
-                eventChanged: event=>mirror.changed(event), mutexWords, eventWords });
+                eventChanged: event=>mirror.changed(event), mutexWords, eventWords,
+                semaphoreWords });
             // A wait of this process on another's object, across a link,
-            // ends there; the word comes back here.
-            config?.remoteObjects?.onWake?.((/** @type {number} */ token,
-                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
+            // ends there; the word comes back here. Every machine of a
+            // worker hears every word on the link and takes its own: a child
+            // started beside its parent there shares the link.
+            state.unwake = config?.remoteObjects?.onWake?.((/** @type {number} */ token,
+                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result)) ?? null;
             state.handles = createHandleTable({ watch: mirror });
+            state.mirror = mirror;
+            state.readWord = (/** @type {number} */ address)=>memory.readU32(address);
             state.processes = createProcessTable(config?.ids);
+            /**
+             * The processes of the run this one opened by id across its link,
+             * one record each: in a worker of its own the run's directory is
+             * not here, and a helper opens the process that started it (the
+             * .NET runtime's shim in an ngen worker opens ngen to watch it).
+             *
+             * @type {Map<number, any>}
+             */
+            const acrossProcesses = new Map();
+            /**
+             * A process of the run that runs elsewhere, by id, or null: its
+             * exit a stand-in for the event the run sets when it ends, so a
+             * wait on its handle is asked there, and its code asked there
+             * until it has one.
+             *
+             * @param {number} id
+             */
+            const acrossProcess = id=>{
+                const remote = config?.remoteObjects;
+                if (typeof remote?.process !== 'function' || !state.sync)
+                {
+                    return null;
+                }
+                const known = acrossProcesses.get(id);
+                if (known)
+                {
+                    return known;
+                }
+                const found = remote.process(id);
+                if (!found)
+                {
+                    return null;
+                }
+                /** The code it exited with, once it has. @type {number | null} */
+                let code = found.exitCode;
+                const ended = ()=>(code ??= remote.process(id)?.exitCode ?? null);
+                const exited = state.sync.createEvent({ manualReset: true,
+                    signalled: code !== null, name: `process ${id}` });
+                exited.remote = found.id;
+                const record = { kind: 'process', id, threadId: found.threadId,
+                    imagePath: found.imagePath, commandLine: '', suspended: false, started: true,
+                    exited,
+                    get completed(){
+                        return ended() !== null;
+                    },
+                    get exitCode(){
+                        return ended() ?? STILL_ACTIVE;
+                    } };
+                acrossProcesses.set(id, record);
+                return record;
+            };
 
             /**
              * Whether this instance is still open. A call still in flight when the
@@ -281,6 +450,7 @@ export function createKernelModule(){
                 EventMirror: MIRROR,
                 MUTEX_TAG,
                 EVENT_TAG,
+                SEMAPHORE_TAG,
 
                 /**
                  * Creates a thread, giving it a stack of its own.
@@ -319,6 +489,9 @@ export function createKernelModule(){
                  *   the thread -- and then enters it: placed in the word above the
                  *   parameter for that routine to find, so the start routine is
                  *   entered with the stack it would have had as `entry`.
+                 * @param {{ entry: number, block: number }} [options.first]
+                 *   A process's first thread: its image's entry point and its
+                 *   process block, which its context names before it runs.
                  * @returns {any} null once this instance is disposed -- there is
                  *     no scheduler left to give a thread to -- or when the pool has
                  *     no room for its stack, which is a thread that cannot be made
@@ -326,7 +499,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo, id, start,
+                    tebAddress, name, returnTo, id, start, first,
                 })
                 {
                     if (!live())
@@ -359,6 +532,9 @@ export function createKernelModule(){
                     // reserve a thread gets by default.
                     const base = low ?? Math.max(0, top - 0x100000);
                     cpu.noteStack?.(base, top - base);
+                    // The stack's own top, which the thread block names as its
+                    // base: the frame below starts a little under it.
+                    const region = top;
                     // Sixteen rather than the eight the frame needs: a thread that
                     // returns pops its return address and then the stub it returns
                     // into pops again, and a stack pointer that lands exactly on
@@ -398,7 +574,27 @@ export function createKernelModule(){
                     {
                         thread.context.reg32[1] = parameter | 0;
                         thread.context.reg32[2] = (start ?? 0) | 0;
+                        const routine = start ?? 0;
+                        if (parameter >= 2 ** 32 || routine >= 2 ** 32)
+                        {
+                            // Whole: a parameter or a start routine a 64-bit
+                            // program keeps past 4 GiB is not its low dword.
+                            const gpr = /** @type {bigint[]} */ ([]);
+                            gpr[1] = BigInt(parameter >= 2 ** 32 ? parameter : parameter >>> 0);
+                            gpr[2] = BigInt(routine >= 2 ** 32 ? routine : routine >>> 0);
+                            cpu.setContextLong?.(thread.context, { gpr });
+                        }
                     }
+                    else if (thread.context?.reg32)
+                    {
+                        // Where a new thread's context says it will go, as
+                        // Windows' i386 start leaves it: EAX the start routine,
+                        // EBX its parameter (a first thread's: the image's entry
+                        // point and its process block).
+                        thread.context.reg32[0] = (first?.entry ?? start ?? entry) | 0;
+                        thread.context.reg32[3] = (first?.block ?? parameter) | 0;
+                    }
+                    thread.stackBase = region;
                     thread.handle = state.handles.open('thread', thread);
                     if (start !== undefined)
                     {
@@ -413,6 +609,11 @@ export function createKernelModule(){
                     return thread;
                 },
 
+                /**
+                 * Where what any process wrote in the thread stacks' pool ends:
+                 * what a process taking this memory next has to zero there.
+                 */
+                stacksReached: ()=>stacks.reached(),
                 /**
                  * A stack from the threads' pool for something that runs on a
                  * thread without being one -- a fiber -- made known to the
@@ -440,6 +641,16 @@ export function createKernelModule(){
                 },
 
                 /**
+                 * Where a thread's stack comes from once the pool is full: the
+                 * process's free address space, which win32 owns (`StackLender`).
+                 *
+                 * @param {import('./internal/stacks.js').StackLender} lender
+                 */
+                lendStacks(lender){
+                    stacks.lend(lender);
+                },
+
+                /**
                  * Stops the running thread where it stands, and says where its stub
                  * would have returned to.
                  *
@@ -452,8 +663,8 @@ export function createKernelModule(){
                  */
                 holdThread(){
                     const esp = cpu.readReg32('esp');
-                    const returnAddress = memory.readU32(esp);
-                    memory.writeU32(esp, cpu.parkAddress());
+                    const returnAddress = readReturn(esp);
+                    writeReturn(esp, cpu.parkAddress());
                     noteResume(`hold ${state.scheduler.current()?.name}`
                         + `@0x${(returnAddress >>> 0).toString(16)}`);
                     endTurnAtCall();
@@ -473,11 +684,12 @@ export function createKernelModule(){
                  */
                 parkThread(thread, restingStack){
                     const esp = cpu.readReg32('esp');
-                    thread.parkedReturn = memory.readU32(esp);
-                    noteResume(`park ${thread.name}@0x${(thread.parkedReturn >>> 0).toString(16)}`);
+                    thread.parkedReturn = readReturn(esp);
+                    noteResume(`park ${thread.name}@0x${(thread.parkedReturn >= 2 ** 32
+                        ? thread.parkedReturn : thread.parkedReturn >>> 0).toString(16)}`);
                     thread.resumeStack = restingStack;
                     thread.parkedInStub = true;
-                    memory.writeU32(esp, cpu.parkAddress());
+                    writeReturn(esp, cpu.parkAddress());
                     endTurnAtCall();
                 },
 
@@ -507,6 +719,15 @@ export function createKernelModule(){
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
                 /**
+                 * Runs `fn` between turns with no thread on the CPU (the
+                 * scheduler's `outside`).
+                 *
+                 * @template T
+                 * @param {() => T} fn
+                 * @returns {T}
+                 */
+                outside: fn=>state.scheduler.outside(fn),
+                /**
                  * Guest code no slice ends inside (see the scheduler's
                  * `atomicCode`): a routine of the host's that writes what other
                  * threads read, and never waits.
@@ -519,16 +740,24 @@ export function createKernelModule(){
                         state.scheduler.atomicCode(address, length);
                     }
                 },
-                /** Whether a thread of higher priority is due the processor now (see the scheduler). */
-                preemptionDue: ()=>live() && state.scheduler.preemptionDue(state.refreshClock),
                 /**
                  * How the guest's clock is brought up to the host's between turns,
-                 * so a wait can come due inside a slice (see `preemptionDue`).
+                 * so a wait can come due inside a slice of many crossings.
                  *
                  * @param {() => void} refresh
                  */
                 refreshClockWith(refresh){
                     state.refreshClock = refresh;
+                },
+                /**
+                 * Whether another process of the run is running beside this
+                 * one: while it answers true the clock is not moved to a
+                 * deadline, and a timed wait is sat through in real time.
+                 *
+                 * @param {() => boolean} running
+                 */
+                othersRunningWith(running){
+                    state.othersRunning = running;
                 },
                 /**
                  * How the scheduler tells a host call still to answer through
@@ -567,6 +796,18 @@ export function createKernelModule(){
                  * caller can tell progress from an idle system from a finished one.
                  * Once this instance is disposed there is nothing to run.
                  */
+                /**
+                 * The calling thread's host call is answered by another process
+                 * (`kernel32/cross-process.js`): its answer is a wait's end.
+                 *
+                 * @param {any} thread
+                 */
+                answeredElsewhere: (/** @type {any} */ thread)=>{
+                    if (live())
+                    {
+                        state.scheduler.answeredElsewhere(thread);
+                    }
+                },
                 /** @param {number} ticks @param {boolean} answered */
                 noteHostAnswer: (ticks, answered)=>{
                     if (live())
@@ -603,6 +844,9 @@ export function createKernelModule(){
                  * will, and nothing can run until a moment that is coming.
                  */
                 nextDeadline: ()=>live() ? state.scheduler.nextDeadline() : null,
+
+                /** What the soonest deadline is a wait on, or null. */
+                nextDeadlineOn: ()=>live() ? state.scheduler.nextDeadlineOn() : null,
 
                 /**
                  * @param {any} thread @param {number} exitCode
@@ -650,6 +894,22 @@ export function createKernelModule(){
                 threadGone: thread=>!live() || threadGone(thread),
 
                 /**
+                 * Runs `work` when `thread`, about to park in a host call, is
+                 * resumed, before it runs again: what the call writes only once
+                 * its wait has ended (GetOverlappedResult's count), and what
+                 * the call answers then: `work` is given the wait's answer and
+                 * returns the call's. One at a time; a thread that parks again
+                 * sets its own.
+                 *
+                 * @param {any} thread @param {(answer: number | bigint) => number | bigint} work
+                 */
+                whenResumed: (/** @type {any} */ thread,
+                    /** @type {(answer: number | bigint) => number | bigint} */ work)=>
+                {
+                    thread.whenResumed = work;
+                },
+
+                /**
                  * Suspends a thread: it keeps its state -- a wait stays a wait,
                  * deadline and all -- and gets no turn, and no object it waits on
                  * is handed to it, until it has been resumed as often.
@@ -661,6 +921,51 @@ export function createKernelModule(){
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
 
                 /**
+                 * Runs `work` once, before the first slice any of the process's
+                 * threads gets, on the scheduler's turn that gives it: what a
+                 * process's loader leaves in it is there from its first
+                 * instruction and not before. At once when a thread already ran.
+                 *
+                 * @param {() => void} work
+                 */
+                beforeFirstSlice: work=>{
+                    if (live())
+                    {
+                        state.scheduler.beforeFirstSlice(work);
+                    }
+                },
+
+                /**
+                 * Stops a thread as a suspension does without counting in its
+                 * suspend count (`scheduler.freeze`): a debuggee's freeze.
+                 *
+                 * @param {any} thread
+                 */
+                freezeThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.freeze(thread);
+                    }
+                },
+
+                /**
+                 * Undoes one `freezeThread`; a thread free again is handed what
+                 * it waits on, as a resumed one is.
+                 *
+                 * @param {any} thread
+                 */
+                thawThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.thaw(thread);
+                        if (!(thread.suspendCount > 0))
+                        {
+                            state.sync.retry(thread);
+                        }
+                    }
+                },
+
+                /**
                  * Brings a thread running on another of the process's executors
                  * back to it, its registers saved (`scheduler.settle`).
                  *
@@ -668,6 +973,48 @@ export function createKernelModule(){
                  * @returns {boolean} whether it runs nowhere now
                  */
                 settleThread: thread=>!live() || state.scheduler.settle(thread),
+
+                /**
+                 * Answers the traps the other executors are waiting on, between
+                 * turns (`scheduler.answerOthers`).
+                 */
+                answerExecutors: ()=>{
+                    if (live())
+                    {
+                        state.scheduler.answerOthers();
+                    }
+                },
+
+                /**
+                 * Returns once every other executor running guest code has
+                 * passed a barrier (`flushWrites`).
+                 *
+                 * @returns {true | Promise<true>}
+                 */
+                flushProcessWrites: ()=>flushWrites(cpu),
+
+                /**
+                 * Settles once the thread runs nowhere: what a caller that
+                 * could not bring it back at once (`settleThread` false - it
+                 * is answering another executor's call, which cannot wait for
+                 * the others, or the thread's slice outlasted the wait) waits
+                 * for, its own thread parked meanwhile. Asked again at each
+                 * turn of the event loop, where nothing is being answered.
+                 *
+                 * @param {any} thread
+                 * @returns {Promise<void>}
+                 */
+                settledThread: (/** @type {any} */ thread)=>new Promise(resolve=>{
+                    const look = ()=>{
+                        if (!live() || state.scheduler.settle(thread))
+                        {
+                            resolve(undefined);
+                            return;
+                        }
+                        setTimeout(look, 0);
+                    };
+                    setTimeout(look, 0);
+                }),
 
                 /**
                  * @param {any} thread
@@ -729,6 +1076,21 @@ export function createKernelModule(){
                     if (live())
                     {
                         state.scheduler.onTimeout(handler);
+                    }
+                },
+
+                /**
+                 * This process ends while another of the run still holds the
+                 * object (a name both opened): its threads leave the object's
+                 * queue and a mutex one of them holds is abandoned to the next
+                 * waiter, as Windows does at a process's exit.
+                 *
+                 * @param {any} object
+                 */
+                forsake: (/** @type {any} */ object)=>{
+                    if (live())
+                    {
+                        state.sync.forsake(object, ourThread(state));
                     }
                 },
 
@@ -866,20 +1228,26 @@ export function createKernelModule(){
                  * with room for them, each mutex's own word, `mutexCount` of
                  * them at `mutexTable`, its handles' words pointing there
                  * (`mutex-words.js`), and each event's, `eventCount` of them at
-                 * `eventTable` (`event-words.js`).
+                 * `eventTable` (`event-words.js`), and each semaphore's two,
+                 * `semaphoreCount` of them at `semaphoreTable` (`semaphore-words.js`).
                  *
                  * @param {number} table @param {number} count
                  * @param {number} [mutexTable] @param {number} [mutexCount]
                  * @param {number} [eventTable] @param {number} [eventCount]
+                 * @param {number} [semaphoreTable] @param {number} [semaphoreCount]
                  */
                 mirrorEvents: (table, count, mutexTable = 0, mutexCount = 0, eventTable = 0,
-                    eventCount = 0)=>
+                    eventCount = 0, semaphoreTable = 0, semaphoreCount = 0)=>
                 {
                     if (live())
                     {
                         if (mutexTable !== 0 && mutexCount > 0)
                         {
                             state.mutexWords.attach(mutexTable, mutexCount);
+                        }
+                        if (semaphoreTable !== 0 && semaphoreCount > 0)
+                        {
+                            state.semaphoreWords.attach(semaphoreTable, semaphoreCount);
                         }
                         // Before the handles' words: an event open already
                         // gets its word, and its handles point there.
@@ -892,11 +1260,11 @@ export function createKernelModule(){
                 },
 
                 /**
-                 * Whether the guest answers its events and mutexes by itself
-                 * (`mirrorEvents`), switched as the program runs: off, every
-                 * word of the table says nothing and the host keeps every
-                 * mutex's word, so each wait, SetEvent, ResetEvent and
-                 * ReleaseMutex crosses into the host, as with
+                 * Whether the guest answers its events, mutexes and semaphores
+                 * by itself (`mirrorEvents`), switched as the program runs: off,
+                 * every word of the table says nothing and the host keeps every
+                 * object's word, so each wait, SetEvent, ResetEvent, ReleaseMutex
+                 * and ReleaseSemaphore crosses into the host, as with
                  * `win32.handleWords: false`; on again, the words are written
                  * afresh from the handles open. A diagnostic: a fault that
                  * goes with the guest's own answers goes while they are off.
@@ -913,6 +1281,7 @@ export function createKernelModule(){
                     {
                         mutexWords.reattach();
                         eventWords.reattach();
+                        semaphoreWords.reattach();
                         mirror.reattach(state.handles.list());
                     }
                     else
@@ -920,6 +1289,7 @@ export function createKernelModule(){
                         mirror.detach();
                         mutexWords.detach();
                         eventWords.detach();
+                        semaphoreWords.detach();
                     }
                     return mirror.attached();
                 },
@@ -941,8 +1311,27 @@ export function createKernelModule(){
                 },
 
                 handles: {
-                    /** @param {string} type @param {any} object */
-                    open: (type, object)=>live() ? state.handles.open(type, object) : 0,
+                    /**
+                     * @param {string} type @param {any} object
+                     * @param {number | null} [access]  fewer rights than all
+                     */
+                    open: (type, object, access)=>live()
+                        ? state.handles.open(type, object, access) : 0,
+                    /**
+                     * An object under a number chosen elsewhere: an inherited
+                     * handle keeps its parent's number and rights.
+                     *
+                     * @param {number} handle @param {string} type @param {any} object
+                     * @param {number | null} [access]
+                     */
+                    adopt: (handle, type, object, access)=>live()
+                        ? state.handles.adopt(handle, type, object, access) : false,
+                    /**
+                     * The rights a handle was granted, null for all of them.
+                     *
+                     * @param {number} handle
+                     */
+                    access: handle=>live() ? state.handles.access(handle) : null,
                     /** @param {number} handle @param {string} [type] */
                     resolve: (handle, type)=>live() ? state.handles.resolve(handle, type) : null,
                     /** @param {number} handle */
@@ -964,21 +1353,65 @@ export function createKernelModule(){
                      * @param {any} object
                      */
                     holds: object=>live() ? state.handles.holds(object) : false,
+                    /** Every handle open, with its kind and object. */
+                    list: ()=>(live() ? state.handles.list() : []),
                 },
 
                 /**
                  * Child processes, as records. Nothing here runs one: a request is
-                 * recorded, and whoever drives the machine decides when the parent
-                 * has nothing left to do and the child takes its place.
+                 * recorded, and whoever drives the machine starts it beside this
+                 * process and says when it has ended.
                  */
                 processes: {
                     /** The exit code a process still running reports. */
                     STILL_ACTIVE,
                     /**
+                     * A record with the event its exit sets, which a wait on the
+                     * process's handle waits on as on any object: signalled
+                     * already for one that is over before it starts.
+                     *
                      * @param {{ imagePath: string, commandLine: string,
                      *           suspended?: boolean, completed?: boolean }} options
                      */
-                    create: options=>live() ? state.processes.create(options) : null,
+                    create: options=>{
+                        if (!live())
+                        {
+                            return null;
+                        }
+                        const record = state.processes.create(options);
+                        record.exited = state.sync.createEvent({ manualReset: true,
+                            signalled: record.completed, name: `process ${record.id}` });
+                        // In the run's directory too, where a process that
+                        // is not its parent opens it by id.
+                        config?.processDirectory?.set(record.id, record);
+                        return record;
+                    },
+                    /**
+                     * A process of the run by id: this one's child, or one any
+                     * other process on this thread started. Null for none.
+                     *
+                     * @param {number} id
+                     */
+                    find: (/** @type {number} */ id)=>{
+                        if (!live())
+                        {
+                            return null;
+                        }
+                        return state.processes.all().find(
+                            (/** @type {any} */ record)=>record.id === id)
+                            ?? config?.processDirectory?.get(id) ?? acrossProcess(id);
+                    },
+                    /**
+                     * Every process of the run this thread's directory holds,
+                     * whoever started it: a grandchild a child made is listed
+                     * where a snapshot of the run is taken, as on Windows,
+                     * where every process sees every other. Empty without a
+                     * directory.
+                     *
+                     * @returns {any[]}
+                     */
+                    run: ()=>live() && config?.processDirectory
+                        ? [...config.processDirectory.values()] : [],
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
@@ -990,8 +1423,28 @@ export function createKernelModule(){
                      * @param {any} record
                      */
                     started: record=>live() ? state.processes.started(record) : undefined,
-                    /** @param {boolean} on */
-                    runBeside: on=>(live() ? state.processes.runBeside(on) : undefined),
+                    /**
+                     * The child has exited with this code: what GetExitCodeProcess
+                     * reads, and its event set, which wakes every wait on it.
+                     *
+                     * @param {any} record @param {number} code
+                     */
+                    finish: (record, code)=>{
+                        record.exitCode = code >>> 0;
+                        record.completed = true;
+                        if (!record.exited)
+                        {
+                            return;
+                        }
+                        // A child that outlived the process that made it (a
+                        // grandchild its parent left suspended and the root
+                        // resumed) ends after this machine is gone: its exit
+                        // event, settled where it stood when the machine went
+                        // (`settleAll`), is set there, and whoever waits on it
+                        // is woken by its own scheduler.
+                        (live() && state.sync.owns(record.exited) ? state.sync : SETTLED_EVENTS)
+                            .setEvent(record.exited);
+                    },
                 },
 
                 clock: state.clock,
@@ -1022,6 +1475,11 @@ export function createKernelModule(){
                     // words given out, kept by the host now, and the hand-overs.
                     // A string: a report keeps the flat metrics only.
                     eventWords: JSON.stringify(instance.eventWords?.diagnostics() ?? {}),
+                    semaphoreWords: JSON.stringify(instance.semaphoreWords?.diagnostics() ?? {}),
+                    // Each event as the guest and the host see it: the handle's word in
+                    // the table, the event's own word, and the state the host holds -
+                    // where a change the guest made and the host's state part, they show it.
+                    events: describeEvents(instance),
                     processes: instance.processes.diagnostics(),
                     time: instance.clock.diagnostics(),
                 },
@@ -1032,10 +1490,43 @@ export function createKernelModule(){
             if (current)
             {
                 current.disposed = true;
+                // What another process of the run still holds of this one's
+                // objects keeps their state and nothing of this machine. A
+                // record in the run's directory keeps its exit event so: the
+                // same object, settled where it stands, so a thread of another
+                // process already queued on it is still queued on what the
+                // child's end sets.
+                current.sync?.settleAll(ourThread(current), current.scheduler?.all() ?? []);
+                current.unwake?.();
             }
             current = null;
         },
     };
+}
+
+/**
+ * Where an exit event a gone process made is set: no machine's, and nothing
+ * waits on this table itself - every thread waiting on such an event is woken
+ * by its own scheduler (`sync.js`).
+ */
+const SETTLED_EVENTS = createSyncObjects({ scheduler: {
+    block(){
+        throw new Error('settled events: a wait here is a thread\'s own, never a block');
+    },
+    wake(){},
+    onTimeout(){},
+} });
+
+/**
+ * Whether a thread is this process's: a thread of another process on this
+ * thread of the page carries its own scheduler (`threads.js`).
+ *
+ * @param {any} state
+ * @returns {(thread: any) => boolean}
+ */
+function ourThread(state){
+    const scheduler = state.scheduler;
+    return thread=>Boolean(thread) && thread.scheduler === scheduler;
 }
 
 /** One graph's worth, for the boundary check and for a test that builds this layer alone. */

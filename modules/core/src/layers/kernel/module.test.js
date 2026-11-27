@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { kernelModule } from './module.js';
+import { flushWrites, kernelModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
 
@@ -27,7 +27,7 @@ function fakeCpu(esp = 0){
     return {
         parkAddress: ()=>PARK,
         /** @param {any} state */
-        newContext: state=>({ ...state }),
+        newContext: state=>({ ...state, reg32: new Int32Array(8) }),
         /** @param {string} name */
         readReg32: name=>(name === 'esp' ? esp : 0),
     };
@@ -62,7 +62,29 @@ function fakeMemory(){
     };
 }
 
-/** @param {number} [esp] */
+/**
+ * Whether what `ref` points at is let go of: collected after the tasks a
+ * disposed machine had already queued have run. A timer or a turn queued
+ * before `dispose` may hold it for a moment and lets go when it runs; under
+ * a loaded machine that moment outlasts a few turns of the event loop. Held
+ * still after a second of timers and collections is held for good - a leak.
+ *
+ * @param {WeakRef<object>} ref @param {() => void} gc
+ */
+async function letGo(ref, gc){
+    for (const until = Date.now() + 1000; Date.now() < until;)
+    {
+        await new Promise(done=>setTimeout(done, 10));
+        gc();
+        if (ref.deref() === undefined)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** @param {number} [esp]  What the stack pointer reads while a call is in flight. */
 async function makeKernel(esp){
     const memory = fakeMemory();
     const kernel = await kernelModule.create(
@@ -102,6 +124,24 @@ test('a thread begun in a routine of the loader finds its start routine above it
         undefined, 'nothing written there for a thread without one');
 });
 
+test('a new thread\'s context names its start routine and parameter, a first thread its entry'
+    + ' point and process block', async()=>{
+    // What GetThreadContext reads of a thread not yet run, as on Windows'
+    // i386: EAX the start routine, EBX its parameter. A debugger or a
+    // launcher that hollows its suspended child reads the entry point there.
+    const { kernel } = await makeKernel();
+    const loaderStarted = kernel.createThread({ entry: 0x00403000, parameter: 7,
+        start: 0x00402000 });
+    assert.equal(loaderStarted.context.reg32[0], 0x00402000, 'the start routine, not the loader');
+    assert.equal(loaderStarted.context.reg32[3], 7);
+    const plain = kernel.createThread({ entry: 0x00402000, parameter: 9 });
+    assert.deepEqual([plain.context.reg32[0], plain.context.reg32[3]], [0x00402000, 9]);
+    const first = kernel.createThread({ entry: 0x00405000, first: { entry: 0x00401000,
+        block: 0x7ffdf000 } });
+    assert.equal(first.context.reg32[0], 0x00401000, 'the image\'s entry point');
+    assert.equal(first.context.reg32[3] >>> 0, 0x7ffdf000, 'the process block');
+});
+
 test('a caller with nowhere better sends the thread to the park loop', async()=>{
     // The default is a thread that stops rather than one that returns into
     // whatever the stack happened to hold.
@@ -125,6 +165,9 @@ test('the stack pointer leaves room for the pops a returning thread makes', asyn
     const top = region.base + region.size;
     assert.ok(thread.stackTop <= top - 16, 'at least two frames of headroom');
     assert.ok(thread.stackTop > region.base, 'and still inside the stack');
+    // The thread block's StackBase is the stack's top, a page boundary, as
+    // a program finding its stack from the address of a local reads it.
+    assert.equal(thread.stackBase, top, 'its base is the region\'s top, not the first frame');
 });
 
 test('each thread gets a stack of its own, registered like any other memory', async()=>{
@@ -148,6 +191,7 @@ test('the first thread may bring its own stack', async()=>{
 
     assert.equal(memory.regions.length, 0, 'nothing was allocated for it');
     assert.equal(thread.stackTop, 0x00280000 - 16);
+    assert.equal(thread.stackBase, 0x00280000);
 });
 
 /**
@@ -301,7 +345,7 @@ function fakeLog(){
     const words = [];
     return {
         words,
-        metrics: createMetrics({ shared: false }),
+        metrics: createMetrics(),
         /** @param {string} text */
         intern: text=>{
             const at = words.indexOf(text);
@@ -342,7 +386,7 @@ test('the kernel publishes its figures as tables and keeps the object tables col
     const metrics = /** @type {any} */ (kernelModule.diagnostics().metrics);
     assert.deepEqual(metrics.sync,
         { objects: 2, event: 1, mutex: 1, semaphore: 0, timer: 0, sets: 0, setsOfSet: 0,
-            resets: 0, resetsOfClear: 0 },
+            resets: 0, resetsOfClear: 0, semaphoreReleases: 0, semaphoreWakes: 0, waits: '{}' },
         'counts in the snapshot; the rows only by name');
     assert.equal(kernel.syncObjects().length, 2);
     await kernelModule.dispose();
@@ -423,7 +467,7 @@ test('diagnostics answers for the live instance', async()=>{
     assert.equal(diag.status, 'ready');
     assert.deepEqual(diag.metrics.sync,
         { objects: 3, event: 2, mutex: 1, semaphore: 0, timer: 0, sets: 0, setsOfSet: 0,
-            resets: 0, resetsOfClear: 0 },
+            resets: 0, resetsOfClear: 0, semaphoreReleases: 0, semaphoreWakes: 0, waits: '{}' },
         'diagnostics reports the second (most recent) instance');
 
     await kernelModule.dispose();
@@ -431,7 +475,7 @@ test('diagnostics answers for the live instance', async()=>{
 
 test('parking a thread keeps where its stub leaves the stack, for the resume', async()=>{
     // Whether the stub's `ret` runs before or after the thread is switched
-    // away is the emulator's business; the resume must not depend on it.
+    // away is the engine's business; the resume must not depend on it.
     const { kernel, memory } = await makeKernel(0x2ffed0);
     const thread = kernel.createThread({ entry: 0x00402000, name: 'main' });
     memory.words.set(0x2ffed0, 0x007e8166);
@@ -603,6 +647,45 @@ test('a thread carries at most MAXIMUM_SUSPEND_COUNT suspensions', async()=>{
     assert.equal(kernel.resumeThread(thread), 127, 'and did not add to the count');
 });
 
+test('the clock is not moved to a deadline while another process of the run may answer the wait'
+    + ' first', async()=>{
+    // A parent that starts a child and waits for it with a timeout - ngen
+    // giving its compile worker thirty seconds to say it is up - has a clock
+    // behind the host's by every slow turn it ran. Moved to the deadline as
+    // soon as nothing of its own was ready, it timed out within the lag, in a
+    // fraction of the wall time the child had to start in, and killed it.
+    // While another process runs, the wait is sat through in real time.
+    const memory = fakeMemory();
+    const cpu = { ...fakeCpu(), captureContext: ()=>({}), restoreContext: ()=>{},
+        runSlice: (/** @type {number} */ max)=>max };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : memory),
+            provide: ()=>{},
+        }),
+    );
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'parent' });
+    const child = kernel.createEvent({});
+    assert.equal(kernel.wait(child, thread, { deadline: kernel.clock.virtualTime() + 20,
+        result: 0x102 }), null, 'the wait blocks');
+    // The host runs ahead of the guest's clock, as a slow machine's does.
+    await new Promise(done=>setTimeout(done, 60));
+
+    let others = true;
+    kernel.othersRunningWith(()=>others);
+    kernel.runOnce();
+    assert.equal(kernel.clock.virtualTime(), 0, 'the clock stays where it was');
+    assert.equal(thread.state, 'blocked', 'and the wait goes on');
+
+    others = false;
+    kernel.runOnce();
+    assert.equal(kernel.clock.virtualTime(), 20, 'alone, the machine moves it to the deadline');
+    assert.equal(thread.waitResult, 0x102, 'and the wait times out');
+    await kernelModule.dispose();
+});
+
 test('the cpu layer is given the guest\'s clock, for the time-stamp counter', async()=>{
     /** @type {(() => number) | null} */
     let given = null;
@@ -636,4 +719,302 @@ test('a thread ended while it waits leaves the queue, and a live waiter gets the
     assert.deepEqual(event.waiters, [living], 'the ended thread is no longer queued');
     kernel.setEvent(event);
     assert.equal(living.state, 'ready', 'an auto-reset signal reaches the live one');
+});
+
+test('a process is found by id in the run\'s directory, whichever process started it', async()=>{
+    const directory = new Map();
+    /** @param {any} config */
+    const kernelWith = async config=>/** @type {any} */ (await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, ...config },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const ids = { thread: 1, process: 0x2000 };
+    const parent = await kernelWith({ processDirectory: directory, ids });
+    const other = await kernelWith({ processDirectory: directory, ids });
+    const child = parent.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    assert.equal(parent.processes.find(child.id), child, 'its parent finds it');
+    assert.equal(other.processes.find(child.id), child, 'and so does a process beside it');
+    assert.equal(other.processes.find(0x9998), null);
+});
+
+test('a child that outlives the process that made it sets its exit when it ends, and the run lists'
+    + ' it', async()=>{
+    // A launcher starts a child suspended and exits; another process of the
+    // run finds the child, resumes it and waits for it to end.
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x5000 };
+    /** @param {any} module */
+    const machine = async module=>/** @type {any} */ (await module.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const launcherModule = createKernelModule();
+    const launcher = await machine(launcherModule);
+    const root = await machine(createKernelModule());
+    const child = launcher.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    assert.deepEqual(root.processes.run(), [child], 'the run lists it, whoever made it');
+    await launcherModule.dispose();
+    assert.equal(root.processes.find(child.id).exited.signalled, false);
+    launcher.processes.finish(child, 0);
+    assert.equal(child.exitCode, 0);
+    assert.equal(root.processes.find(child.id).exited.signalled, true,
+        'its exit is set though its maker is gone');
+});
+
+test('a thread of another process that waits on a child\'s exit before its maker ends is woken'
+    + ' when the child ends', async()=>{
+    // The root waits on the child the launcher made, then the launcher exits
+    // before the child does: the root's wait is in the exit event's queue, and
+    // the event the gone launcher leaves must still be the one it waits on.
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x6000 };
+    /** @param {any} module */
+    const machine = async module=>/** @type {any} */ (await module.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const launcherModule = createKernelModule();
+    const launcher = await machine(launcherModule);
+    const root = await machine(createKernelModule());
+    const child = launcher.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    const waiter = root.createThread({ entry: 0x00402000, name: 'waiter' });
+    assert.equal(root.wait(root.processes.find(child.id).exited, waiter), null, 'it waits');
+    await launcherModule.dispose();
+    launcher.processes.finish(child, 3);
+    assert.equal(waiter.state, 'ready', 'the child\'s end wakes the wait made before');
+});
+
+test('a gone process\'s record in the run\'s directory keeps its exit, not its memory', async()=>{
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x3000 };
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    await (async()=>{
+        const module = createKernelModule();
+        const memory = fakeMemory();
+        memoryOfGone = new WeakRef(memory);
+        const kernel = /** @type {any} */ (await module.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                provide: ()=>{},
+            })));
+        // As a COM server enters itself: its own record, its own exit event.
+        const self = { kind: 'process', id: 0x3004, completed: false,
+            exited: kernel.createEvent({ manualReset: true, signalled: false,
+                name: 'process 0x3004' }) };
+        directory.set(self.id, self);
+        kernel.setEvent(self.exited);
+        self.completed = true;
+        await module.dispose();
+    })();
+    await new Promise(done=>setImmediate(done));
+    gc();
+    const record = directory.get(0x3004);
+    assert.equal(record.exited.signalled, true, 'a wait on its exit still returns at once');
+    assert.equal(record.exited.manualReset, true);
+    assert.ok(await letGo(memoryOfGone, gc), 'and its memory is nobody\'s');
+});
+
+test('a gone process on this thread gives its names back, and a name another process still holds'
+    + ' keeps its object\'s state, not the gone machine', async()=>{
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const { createKernelModule } = await import('./module.js');
+    const { createNamedObjects } = await import('../win32/kernel32/named-objects.js');
+    // The run's one namespace, and the process that stays.
+    const table = new Map();
+    const ids = { thread: 1, process: 0x3000 };
+    /** @param {any} memory */
+    const machine = async memory=>{
+        const module = createKernelModule();
+        const kernel = /** @type {any} */ (await module.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE }, ids },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                provide: ()=>{},
+            })));
+        const named = createNamedObjects({ table });
+        return { module, kernel, named,
+            ended: ()=>named.ended(object=>kernel.forsake(object)) };
+    };
+    const staying = await machine(fakeMemory());
+    const waiter = staying.kernel.createThread({ entry: 0x00402000, name: 'waiter' });
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    /** @type {any} */
+    let ready = null;
+    await (async()=>{
+        const memory = fakeMemory();
+        memoryOfGone = new WeakRef(memory);
+        const gone = await machine(memory);
+        const owner = gone.kernel.createThread({ entry: 0x00402000, name: 'owner' });
+        ready = gone.kernel.createEvent({ manualReset: true, name: 'Local\\Ready' });
+        gone.named.remember('Local\\Ready', 'event', ready, false, ()=>{});
+        const lock = gone.kernel.createMutex({ name: 'Local\\Lock' });
+        gone.named.remember('Local\\Lock', 'mutex', lock, false, ()=>{});
+        const alone = gone.kernel.createEvent({ name: 'Local\\Alone' });
+        gone.named.remember('Local\\Alone', 'event', alone, false, ()=>{});
+        assert.equal(gone.kernel.poll(lock, owner), 0, 'its thread holds the lock');
+        // The process that stays opens two of the names, and waits on the lock.
+        staying.named.reference(staying.named.existing('Local\\Ready', 'event'));
+        staying.named.reference(staying.named.existing('Local\\Lock', 'mutex'));
+        assert.equal(staying.kernel.wait(lock, waiter), null);
+        gone.kernel.setEvent(ready);
+        gone.ended();
+        await gone.module.dispose();
+    })();
+    // The object namespace's own directories and links are the run's, not a process's.
+    const names = ()=>[...table]
+        .filter(([, held])=>held.kind !== 'objdir' && held.kind !== 'symlink')
+        .map(([name])=>name);
+    // Local\X is kept under the key X, as a native call names it.
+    assert.deepEqual(names().sort(), ['Lock', 'Ready'],
+        'a name only the gone process held is free again');
+    assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
+    assert.ok(await letGo(memoryOfGone, gc), 'the gone machine\'s memory is nobody\'s');
+    assert.equal(staying.kernel.poll(ready, waiter), 0, 'the event it set stays set');
+    staying.kernel.resetEvent(ready);
+    assert.equal(staying.kernel.poll(ready, waiter), null, 'and works on as an object of the run');
+    staying.ended();
+    assert.deepEqual(names(), [], 'the last process gone, every name is free');
+});
+
+test('a process in a worker of its own finds a process of the run by id across the link: its'
+    + ' exit is a stand-in for the run\'s event, and its code is asked there', async()=>{
+    const { objectHandlers } = await import('../../system-objects.js');
+    const { createSyncObjects } = await import('./internal/sync.js');
+    const run = createSyncObjects({ scheduler: { block(){}, wake(){}, onTimeout(){} } });
+    const record = { kind: 'process', id: 0x1fb8, threadId: 0x1fb9, imagePath: 'C:\\ngen.exe',
+        completed: false, exitCode: 259,
+        exited: run.createEvent({ manualReset: true, signalled: false, name: 'process 8120' }) };
+    const { objects } = objectHandlers({ table: new Map(),
+        processes: new Map([[record.id, record]]), wake: ()=>Promise.resolve() });
+    const kernel = /** @type {any} */ (await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE },
+            remoteObjects: { ...objects, onWake(){} } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const found = kernel.processes.find(0x1fb8);
+    assert.equal(found.kind, 'process');
+    assert.equal(found.imagePath, 'C:\\ngen.exe');
+    assert.equal(typeof found.exited.remote, 'number', 'its exit is the run\'s object');
+    assert.equal(found.exitCode, 259, 'still active');
+    assert.equal(found.completed, false);
+    assert.equal(kernel.processes.find(0x1fb8), found, 'one record however often it is opened');
+    record.completed = true;
+    record.exitCode = 5;
+    run.setEvent(record.exited);
+    assert.equal(found.exitCode, 5, 'its code once it has exited');
+    assert.equal(found.completed, true);
+    assert.equal(kernel.processes.find(0x2222), null, 'an id no process of the run has');
+});
+
+test('a flush of write buffers waits until each executor running guest code has passed a barrier',
+    async()=>{
+        // Executor 1 runs guest code (odd), 2 waits between slices (even).
+        const epochs = [7, 4];
+        const cpu = { executorEpochs: ()=>epochs.slice() };
+        /** @type {(() => void)[]} */
+        const looks = [];
+        let time = 0;
+        const flushed = flushWrites(cpu, { now: ()=>(time += 5), later: look=>looks.push(look) });
+        assert.ok(flushed instanceof Promise, 'a run still on is waited for');
+        let done = false;
+        flushed.then(()=>{ done = true; });
+        looks.shift()?.();
+        await Promise.resolve();
+        assert.equal(done, false, 'not done while executor 1 is still in that run');
+        epochs[0] = 8;
+        epochs[1] = 5;
+        looks.shift()?.();
+        await flushed;
+        assert.equal(done, true,
+            'done once it ended the run; a run begun after the call is not waited for');
+        assert.equal(flushWrites({ executorEpochs: ()=>[2, 6] }), true,
+            'no executor in guest code: done at once');
+        assert.equal(flushWrites({}), true, 'one executor: nothing to wait for');
+    });
+
+test('a 64-bit thread parked or held keeps a return past 4 GiB whole, and the park loop\'s',
+    async()=>{
+        // A 64-bit program's image at its own base past 4 GiB: the return address
+        // its stub would pop is that whole quadword, and the park loop written over
+        // it leaves no high dword of the caller's beside it.
+        const memory = fakeMemory();
+        const kernel = await kernelModule.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu'
+                    ? { ...fakeCpu(0x2ffed0), bits: ()=>64 } : memory),
+                provide: ()=>{},
+            }),
+        );
+        /** @type {any} */
+        const thread = { name: 'main' };
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        kernel.parkThread(thread, 0x2ffed8);
+        assert.equal(thread.parkedReturn, 0x140001202);
+        assert.equal(memory.words.get(0x2ffed0), PARK);
+        assert.equal(memory.words.get(0x2ffed4), 0, 'the park loop whole');
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        assert.equal(kernel.holdThread(), 0x140001202);
+        assert.equal(memory.words.get(0x2ffed4), 0);
+    });
+
+test('a 64-bit thread starts with a parameter and a routine past 4 GiB whole', async()=>{
+    // RCX and RDX of the new thread: the dword view of its context carries
+    // their low halves, so the whole values are set through the context's own
+    // quadwords - and only where there is a high half to set.
+    const memory = { ...fakeMemory(), writeBytes: ()=>{} };
+    /** @type {{ gpr: bigint[] }[]} */
+    const set = [];
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? {
+                ...fakeCpu(), bits: ()=>64,
+                /** @param {any} state */
+                newContext: state=>({ ...state, reg32: new Array(8).fill(0) }),
+                /** @param {any} context @param {{ gpr: bigint[] }} long */
+                setContextLong: (context, long)=>set.push(long),
+            } : memory),
+            provide: ()=>{},
+        }),
+    );
+    const high = kernel.createThread({ entry: 0x402000, start: 0x140001740,
+        parameter: 0x140003010 });
+    assert.deepEqual([high.context.reg32[1], high.context.reg32[2]], [0x40003010, 0x40001740]);
+    assert.equal(set.length, 1);
+    assert.deepEqual([set[0].gpr[1], set[0].gpr[2]], [0x140003010n, 0x140001740n]);
+    assert.equal(0 in set[0].gpr, false, 'no other register is touched');
+    kernel.createThread({ entry: 0x402000, start: 0x401000, parameter: 0x90000000 });
+    assert.equal(set.length, 1, 'a thread below 4 GiB starts as it always did');
 });

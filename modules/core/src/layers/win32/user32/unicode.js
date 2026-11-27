@@ -25,6 +25,8 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -61,11 +63,17 @@ const ITEM_STRING_IN = new Set([LB_ADDSTRING, LB_INSERTSTRING, LB_SELECTSTRING, 
 /** An edit's replacement text, and the line it copies out. */
 const EM_REPLACESEL = 0x00c2;
 const EM_GETLINE = 0x00c4;
+const LB_ADDFILE = 0x0196;
+/** The section or device a broadcast names (lParam). */
+const WM_WININICHANGE = 0x001a;
+const WM_DEVMODECHANGE = 0x001b;
 /**
  * The messages whose lParam is a string whatever the window keeps: a path,
- * an edit's replacement text.
+ * a file to add, an edit's replacement text, the section or device a
+ * broadcast names.
  */
-const PATH_IN = new Set([LB_DIR, CB_DIR, EM_REPLACESEL]);
+const PATH_IN = new Set([LB_DIR, CB_DIR, LB_ADDFILE, EM_REPLACESEL, WM_WININICHANGE,
+    WM_DEVMODECHANGE]);
 /** The messages that fill a buffer with an item's string, and the length each is asked. */
 const ITEM_STRING_OUT = new Map([[LB_GETTEXT, LB_GETTEXTLEN], [CB_GETLBTEXT, CB_GETLBTEXTLEN]]);
 const LBS_OWNERDRAW = 0x0030;
@@ -91,12 +99,12 @@ const keepsStrings = (message, style)=>{
         : (style & LBS_OWNERDRAW) === 0 || (style & LBS_HASSTRINGS) !== 0;
 };
 
-/** CREATESTRUCT: the two string pointers in it, and its size. */
-const CREATESTRUCT_NAME = 36;
-const CREATESTRUCT_CLASS = 40;
-const CREATESTRUCT_SIZE = 48;
-const CREATESTRUCT_PARAMS = 0;
-const CREATESTRUCT_EXSTYLE = 44;
+/**
+ * CREATESTRUCT: the two string pointers in it, its creation parameter, its
+ * extended style and its size, at either width.
+ */
+const CREATESTRUCT32 = Object.freeze({ NAME: 36, CLASS: 40, SIZE: 48, PARAMS: 0, EXSTYLE: 44 });
+const CREATESTRUCT64 = Object.freeze({ NAME: 56, CLASS: 64, SIZE: 80, PARAMS: 0, EXSTYLE: 72 });
 const WS_EX_MDICHILD = 0x00000040;
 /** MDICREATESTRUCT: the class and title first, nine dwords in all. */
 const MDICREATESTRUCT_SIZE = 36;
@@ -114,6 +122,8 @@ const MAX_TEXT = 0x8000;
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose CREATESTRUCT
+ *     has its pointers eight bytes wide.
  */
 
 /**
@@ -141,14 +151,7 @@ export function textBytes(text, unicode){
         bytes.set(encoded);
         return bytes.subarray(0, encoded.length + 1);
     }
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const code = text.charCodeAt(index);
-        bytes[index * 2] = code & 0xff;
-        bytes[index * 2 + 1] = code >>> 8;
-    }
-    return bytes;
+    return utf16z(text);
 }
 
 /**
@@ -176,7 +179,7 @@ export function writeText(memory, address, text, room, unicode){
         return 0;
     }
     const clipped = text.slice(0, room - 1);
-    memory.writeMemory(address >>> 0, textBytes(clipped, unicode));
+    memory.writeMemory(wholeAddress(address), textBytes(clipped, unicode));
     return clipped.length;
 }
 
@@ -269,13 +272,19 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                 return 0;
             }
             // Room for the characters in the procedure's encoding; a character
-            // of the ANSI page is never more than two bytes. What it wrote is
-            // read back up to its terminator, and the answer is the count of
+            // of the ANSI page is never more than two bytes. As many
+            // characters as the procedure answers it wrote are read back, up
+            // to a terminator - a procedure that answers 0 has written
+            // nothing, whatever the buffer holds (dialog.c
+            // test_aw_conversion_dlgproc) - and the answer is the count of
             // characters the caller's buffer took.
             const size = room * 2 + 2;
             return lending(memory, size, ()=>new Uint8Array(size),
-                into=>andThen(call({ ...converted, lParam: into }), ()=>writeText(memory,
-                    message.lParam, readText(memory, into, toUnicode, room), room, fromUnicode)));
+                into=>andThen(call({ ...converted, lParam: into }), answer=>{
+                    const count = Math.max(0, Math.min(answer | 0, toUnicode ? room : room * 2));
+                    const text = count === 0 ? '' : readText(memory, into, toUnicode, count);
+                    return writeText(memory, message.lParam, text, room, fromUnicode);
+                }));
         }
         case EM_GETLINE:
         {
@@ -288,7 +297,7 @@ export function translated(memory, message, toUnicode, call, style = undefined){
             // many of its characters, and copied over unterminated, as
             // EM_GETLINE leaves it; the answer counts what the caller's
             // buffer took.
-            const head = memory.readMemory(message.lParam >>> 0, 2);
+            const head = memory.readMemory(wholeAddress(message.lParam), 2);
             const room = head[0] | head[1] << 8;
             const size = room * 2 + 2;
             return lending(memory, size, ()=>{
@@ -305,7 +314,7 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                     : decodeAnsi(raw);
                 const bytes = textBytes(text.slice(0, room), fromUnicode);
                 const written = bytes.subarray(0, bytes.length - (fromUnicode ? 2 : 1));
-                memory.writeMemory(message.lParam >>> 0, written);
+                memory.writeMemory(wholeAddress(message.lParam), written);
                 return fromUnicode ? written.length / 2 : written.length;
             }));
         }
@@ -378,7 +387,11 @@ export function translated(memory, message, toUnicode, call, style = undefined){
  * @returns {{ size: number, build: (base: number) => Uint8Array }}
  */
 function createStruct(memory, address, fromUnicode, toUnicode){
-    const header = memory.readMemory(address >>> 0, CREATESTRUCT_SIZE);
+    const wide = memory.pointerSize === 8;
+    const { NAME: CREATESTRUCT_NAME, CLASS: CREATESTRUCT_CLASS, SIZE: CREATESTRUCT_SIZE,
+        PARAMS: CREATESTRUCT_PARAMS, EXSTYLE: CREATESTRUCT_EXSTYLE }
+        = wide ? CREATESTRUCT64 : CREATESTRUCT32;
+    const header = memory.readMemory(wholeAddress(address), CREATESTRUCT_SIZE);
     const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
     const name = view.getUint32(CREATESTRUCT_NAME, true);
     const cls = view.getUint32(CREATESTRUCT_CLASS, true);
@@ -386,8 +399,10 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     const classBytes = cls <= LAST_ATOM
         ? null : textBytes(readText(memory, cls, fromUnicode), toUnicode);
     const params = view.getUint32(CREATESTRUCT_PARAMS, true);
-    const mdi = (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0 && params !== 0
-        ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
+    // An MDI child's MDICREATESTRUCT is copied at 32 bits only; at 64 its
+    // names reach the procedure as they were given.
+    const mdi = !wide && (view.getUint32(CREATESTRUCT_EXSTYLE, true) & WS_EX_MDICHILD) !== 0
+        && params !== 0 ? memory.readMemory(params, MDICREATESTRUCT_SIZE) : null;
     const mdiView = mdi ? new DataView(mdi.buffer, mdi.byteOffset, mdi.byteLength) : null;
     const mdiClass = mdiView ? mdiView.getUint32(0, true) : 0;
     const mdiTitle = mdiView ? mdiView.getUint32(4, true) : 0;

@@ -20,11 +20,16 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR,
-    SAMPLER_STATE_MIRROR, SHADOW,
-    SURFACE, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode,
-    getSamplerStateCode, getSurfaceDescCode, getViewportCode, lockCode,
-} from './shadow.js';
+    BUFFER, COMMAND, DRAW as DRAWN, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, SURFACE,
+} from './block.js';
+import {
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR,
+    commandCode,
+} from './routines/command.js';
+import {
+    getRenderStateCode, getSamplerStateCode, getSurfaceDescCode, getViewportCode,
+} from './routines/getters.js';
+import { lockCode } from './routines/locks.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
 const PROGRAM = 0x8000;
@@ -78,7 +83,7 @@ const shape = (name, more = {})=>({ ...COMMANDS[name], slot: commandSlot(name), 
 test('a command routine writes the call into the ring and leaves the rest to the trap', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     /** @type {[number, Uint8Array][]} */
     const routines = [
@@ -187,10 +192,13 @@ test('a command routine writes the call into the ring and leaves the rest to the
         [commandSlot('DrawIndexedPrimitive'), 32, 4, 0, 0, 4, 0, 2]);
     assert.equal(run(LOCK, [0, 16, OUT, 0], VBUF), 'trap', 'a plain lock waits for the host');
     assert.equal(run(LOCK, [0, 16, OUT, 0x2000], VBUF), 'trap', 'and so does DISCARD');
-    assert.equal(run(LOCK, [16, 16, OUT, 0x3000], VBUF), 'trap',
-        'and so does DISCARD with NOOVERWRITE, which promises nothing of what the draw reads');
-    assert.equal(run(LOCK, [16, 16, OUT, 0x1000], VBUF), 'ok', 'NOOVERWRITE alone does not');
-    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2, 'each lock taken in the guest counted');
+    assert.equal(run(LOCK, [16, 16, OUT, 0x1000], VBUF), 'ok', 'NOOVERWRITE does not');
+    host.writePhysical(VBLOCK + BUFFER.LOCKED, new Uint8Array(4));
+    // With DISCARD too a lock is a NOOVERWRITE (Wine's d3d9 test_map_synchronisation
+    // finds it unsynchronised), and is remembered as one.
+    assert.equal(run(LOCK, [16, 16, OUT, 0x3000], VBUF), 'ok', 'nor does it with DISCARD');
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS) & 0x2000, 0, 'its DISCARD dropped');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 3, 'each lock taken in the guest counted');
 
     // What the host makes of them: the calls, in order, with what was copied.
     /** @type {any[]} */
@@ -242,7 +250,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
 test('a draw from the program\'s memory copies the vertices its primitives span', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawPrimitiveUP')));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -325,11 +333,135 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
     assert.equal(head(), at);
 });
 
+test('an indexed draw from the program\'s memory copies its indices and the vertices they reach',
+    ()=>{
+        const host = createCorkHost({
+            memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
+        });
+        // With the seam's mirror: the draw leaves stream zero and the indices unset.
+        host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawIndexedPrimitiveUP',
+            { mirror: [...DRAWABLE_MIRRORS.DrawIndexedPrimitiveUP] })));
+        host.writePhysical(TRAP, new Uint8Array([0xf4]));
+        host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+        host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+        host.writePhysical(BLOCK + SHADOW.COMMANDS,
+            new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+        host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+        host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+        const INDICES = DATA;
+        const VERTICES = DATA + 0x400;
+        const indices = new Uint8Array(0x100).map((unused, i)=>i * 5 + 1);
+        const vertices = new Uint8Array(0x400).map((unused, i)=>i * 7);
+        host.writePhysical(INDICES, indices);
+        host.writePhysical(VERTICES, vertices);
+
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readPhysical(at, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        };
+        const head = ()=>read(BLOCK + SHADOW.COMMAND_HEAD);
+        const drawable = ()=>read(BLOCK + SHADOW.DRAWABLE);
+        /** @param {number[]} args @returns {'ok' | 'trap'} */
+        const run = args=>{
+            const code = call(PROGRAM, DRAW, OBJECT, args);
+            host.writePhysical(PROGRAM, new Uint8Array(code));
+            host.writeReg32('eip', PROGRAM);
+            host.writeReg32('esp', STACK);
+            runToHalt(host, 1000);
+            if (host.readReg32('eip') === TRAP + 1)
+            {
+                assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
+                return 'trap';
+            }
+            assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+            assert.equal(host.readReg32('esp'), STACK);
+            assert.equal(host.readReg32('eax'), 0);
+            return 'ok';
+        };
+
+        // Each type with three primitives, both widths of index, from vertex two on six
+        // vertices of twelve bytes: the indices spanned are 3, 6, 4, 9, 5 and 5, and the
+        // vertices copied are the first eight, which the indices may reach.
+        const spans = [3, 6, 4, 9, 5, 5];
+        const header = COMMAND.ARGS + 4 * 8;
+        /** @type {any[]} */
+        const expected = [];
+        let at = 0;
+        for (const [format, width] of [[101, 2], [102, 4]])
+        {
+            for (let type = 1; type <= 6; type++)
+            {
+                host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+                assert.equal(run([type, 2, 6, 3, INDICES, format, VERTICES, 12]), 'ok',
+                    `type ${type}, ${width * 8}-bit indices`);
+                const indexBytes = spans[type - 1] * width;
+                const past = (indexBytes + 3) & ~3;
+                const vertexBytes = 8 * 12;
+                const record = RING + at;
+                assert.equal(read(record + COMMAND.BYTES), header + past + vertexBytes);
+                assert.equal(read(record + COMMAND.ARGS + 16), record + header,
+                    'the indices\' pointer names their copy');
+                assert.equal(read(record + COMMAND.ARGS + 24), record + header + past,
+                    'the vertices\' pointer names theirs, at a whole dword');
+                assert.deepEqual([...host.readPhysical(record + header, indexBytes)],
+                    [...indices.subarray(0, indexBytes)]);
+                assert.deepEqual([...host.readPhysical(record + header + past, vertexBytes)],
+                    [...vertices.subarray(0, vertexBytes)]);
+                assert.equal(drawable() & (DRAWN.STREAM | DRAWN.INDEXED), 0,
+                    'stream zero and the indices unset');
+                expected.push([type, 2, 6, 3, [...indices.subarray(0, indexBytes)], format,
+                    [...vertices.subarray(0, vertexBytes)], 12]);
+                at += header + past + vertexBytes;
+            }
+        }
+        assert.equal(head(), at);
+        assert.equal(read(BLOCK + SHADOW.DRAWS_PENDING), 1, 'a draw is waiting');
+
+        /** @type {any[]} */
+        const made = [];
+        const device = {
+            /**
+             * @param {number} type @param {number} min @param {number} count
+             * @param {number} primitives @param {Uint8Array} indexed @param {number} format
+             * @param {Uint8Array} data @param {number} stride
+             */
+            DrawIndexedPrimitiveUP: (type, min, count, primitives, indexed, format, data, stride)=>
+                made.push([type, min, count, primitives, [...indexed], format, [...data], stride])
+                && 0,
+        };
+        assert.equal(runCommands(device, host.readPhysical(RING, head()).slice(), [], ()=>{
+            assert.fail('nothing refused');
+        }), expected.length);
+        assert.deepEqual(made, expected, 'the device is given the program\'s bytes');
+
+        // The draws the routine leaves to the host, the ring as it was.
+        host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+        const good = [4, 0, 8, 12, INDICES, 101, VERTICES, 12];
+        /** @param {number} index @param {number} value */
+        const with_ = (index, value)=>good.map((arg, i)=>(i === index ? value : arg));
+        assert.equal(run(with_(0, 7)), 'trap', 'a type there is not');
+        assert.equal(run(with_(0, 0)), 'trap', 'nor type zero');
+        assert.equal(run(with_(3, 0)), 'trap', 'no primitives');
+        assert.equal(run(with_(4, 0)), 'trap', 'no indices');
+        assert.equal(run(with_(6, 0)), 'trap', 'no vertices');
+        assert.equal(run(with_(5, 21)), 'trap', 'an index format that is no index format');
+        assert.equal(run(with_(7, 10)), 'trap', 'a stride that is not whole dwords');
+        assert.equal(run(with_(7, 0)), 'trap', 'no stride');
+        assert.equal(run([4, 0, 0, 12, INDICES, 101, VERTICES, 12]), 'trap', 'no vertex reached');
+        assert.equal(run(with_(2, 2000)), 'trap', 'more vertices than a record copies');
+        assert.equal(run(with_(3, 3000)), 'trap', 'more indices than a record copies');
+        assert.equal(run([4, 0xffffffff, 2, 12, INDICES, 101, VERTICES, 12]), 'trap',
+            'a reach past any');
+        assert.equal(head(), at);
+    });
+
 test('the viewport and the sampler states a program sets in the guest are what its getters read',
     ()=>{
         const host = createCorkHost({
             memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-            initialStack: STACK, engine: cork, cork: {},
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
         });
         const SET_VIEWPORT = VIEWPORT;
         const GET_VIEWPORT = VIEWPORT + BESIDE;
@@ -403,10 +535,64 @@ test('the viewport and the sampler states a program sets in the guest are what i
         assert.equal(run(GET_SAMPLER, [2, 5, OUT]), 'trap');
     });
 
+test('a state set to what the block holds writes no record, unless a state block may have moved it',
+    ()=>{
+        const host = createCorkHost({
+            memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
+        });
+        const SET_SAMPLER = VIEWPORT;
+        const SET_RENDER = CONSTANTS;
+        host.writePhysical(SET_SAMPLER, commandCode(SET_SAMPLER, TRAP,
+            shape('SetSamplerState', { mirror: SAMPLER_STATE_MIRROR })));
+        host.writePhysical(SET_RENDER, commandCode(SET_RENDER, TRAP,
+            shape('SetRenderState', { mirror: RENDER_STATE_MIRROR })));
+        host.writePhysical(TRAP, new Uint8Array([0xf4]));
+        host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+        host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+        host.writePhysical(BLOCK + SHADOW.COMMANDS,
+            new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+        host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array([0xff]));
+        host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readPhysical(at, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        };
+        /** The ring's head after the call, which answered D3D_OK in the guest. */
+        const run = (/** @type {number} */ target, /** @type {number[]} */ args)=>{
+            const code = call(PROGRAM, target, OBJECT, args);
+            host.writePhysical(PROGRAM, new Uint8Array(code));
+            host.writeReg32('eip', PROGRAM);
+            host.writeReg32('esp', STACK);
+            runToHalt(host, 1000);
+            assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+            assert.equal(host.readReg32('esp'), STACK);
+            assert.equal(host.readReg32('eax'), 0);
+            assert.equal(read(BLOCK + SHADOW.HELD), 0, 'the device\'s lock let go');
+            return read(BLOCK + SHADOW.COMMAND_HEAD);
+        };
+
+        const first = run(SET_SAMPLER, [2, 5, 3]);
+        assert.ok(first > 0, 'a new value is a record');
+        assert.equal(run(SET_SAMPLER, [2, 5, 3]), first, 'the same again is none');
+        const other = run(SET_SAMPLER, [2, 5, 4]);
+        assert.ok(other > first, 'another value is one');
+        // Zero is what the block holds of a state nothing set: the device's, mirrored.
+        assert.equal(run(SET_RENDER, [3, 0]), other, 'a render state as the block holds it');
+        const render = run(SET_RENDER, [3, 7]);
+        assert.ok(render > other);
+        host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_STALE)));
+        const stale = run(SET_SAMPLER, [2, 5, 4]);
+        assert.ok(stale > render,
+            'after a state block applied in the ring the block may be behind: a record');
+        assert.ok(run(SET_RENDER, [3, 7]) > stale);
+    });
+
 test('a state block\'s Apply in the ring names the block and sends the getters to the host', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     const APPLY = VIEWPORT;
     const CAPTURE = VIEWPORT + BESIDE;
@@ -471,7 +657,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
 test('a clear copies its rectangles, or none for the whole target', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     const CLEAR = VIEWPORT;
     host.writePhysical(CLEAR, commandCode(CLEAR, TRAP, shape('Clear')));
@@ -538,7 +724,7 @@ test('a clear copies its rectangles, or none for the whole target', ()=>{
 test('a surface\'s GetDesc copies the description out of its block', ()=>{
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
-        initialStack: STACK, engine: cork, cork: {},
+        initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
     });
     host.writePhysical(VIEWPORT, getSurfaceDescCode(VIEWPORT, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));

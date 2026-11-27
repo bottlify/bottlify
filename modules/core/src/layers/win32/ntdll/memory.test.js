@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryFunctions } from './memory.js';
+import { RELEASE_PART } from '../kernel32/heap.js';
+import { VIRTUAL_MEMORY } from '../kernel32/process-memory.js';
 
 const SELF = 0xffffffff;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
@@ -22,8 +24,9 @@ const STATUS_PARTIAL_COPY = 0x8000000d;
  *
  * @param {Record<string, any>} [answers]  what each call answers, by name
  * @param {number} [lastError]
+ * @param {Record<string, any>} [more]  further host members
  */
-function setup(answers = {}, lastError = 0){
+function setup(answers = {}, lastError = 0, more = {}){
     const memory = new Uint8Array(0x2000);
     const view = new DataView(memory.buffer);
     /** @type {{ name: string, args: number[] }[]} */
@@ -46,12 +49,19 @@ function setup(answers = {}, lastError = 0){
             VirtualFreeEx: recorder('VirtualFreeEx', 1),
             VirtualProtectEx: recorder('VirtualProtectEx', 1),
             VirtualQueryEx: recorder('VirtualQueryEx', 28),
-            ReadProcessMemory: recorder('ReadProcessMemory', 1),
-            WriteProcessMemory: recorder('WriteProcessMemory', 1),
+            [VIRTUAL_MEMORY]: { read: recorder('read', 0).handler,
+                write: recorder('write', 0).handler },
+            FlushInstructionCache: recorder('FlushInstructionCache', 1),
+            GetWriteWatch: recorder('GetWriteWatch', 0),
+            ResetWriteWatch: recorder('ResetWriteWatch', 0),
+            ...answers.K32GetMappedFileNameW
+                ? { K32GetMappedFileNameW: recorder('K32GetMappedFileNameW', 0) } : {},
             GetLastError: { argBytes: 0, handler: ()=>lastError },
+            ...answers.releasePart ? { [RELEASE_PART]: answers.releasePart } : {},
         },
+        ...more,
     });
-    return { fns, view, calls };
+    return { fns, view, calls, memory };
 }
 
 test('NtAllocateVirtualMemory reads the base and size through pointers and writes back pages',
@@ -100,17 +110,58 @@ test('NtProtectVirtualMemory with no old protection is an access violation', ()=
     assert.equal(view.getUint32(0x104, true), 0x1000);
 });
 
-test('NtFreeVirtualMemory of size zero reports the region it released', ()=>{
-    const { fns, view } = setup({
-        VirtualQueryEx: (/** @type {number[]} */ [, , buffer])=>{
-            view.setUint32(buffer + 12, 0x3000, true);
-            return 28;
-        },
-    });
+/**
+ * VirtualQueryEx over one allocation of two regions, free memory round it.
+ *
+ * @param {() => DataView} view @param {number} base @param {number} span
+ */
+const oneAllocation = (view, base, span)=>(/** @type {number[]} */ [, where, buffer])=>{
+    const inside = where >= base && where < base + span;
+    const half = base + span / 2;
+    view().setUint32(buffer + 4, inside ? base : 0, true);
+    view().setUint32(buffer + 12, inside ? (where < half ? half : base + span) - where : 0x10000,
+        true);
+    view().setUint32(buffer + 16, inside ? 0x1000 : 0x10000, true);
+    return 28;
+};
+
+test('NtFreeVirtualMemory releases a whole allocation, named by a page of its base', ()=>{
+    /** @type {DataView} */
+    let dataView;
+    /** @type {number[][]} */
+    const parts = [];
+    const { fns, view, calls } = setup({ VirtualQueryEx: oneAllocation(()=>dataView,
+        0x10000, 0x4000), releasePart: (/** @type {number} */ at, /** @type {number} */ size)=>
+        parts.push([at, size]) && 1 });
+    dataView = view;
+    /** @param {number} base @param {number} size @param {number} type */
+    const free = (base, size, type)=>{
+        view.setUint32(0x100, base, true);
+        view.setUint32(0x104, size, true);
+        return fns.NtFreeVirtualMemory.handler([SELF, 0x100, 0x104, type]);
+    };
+    assert.equal(free(0x10fff, 0, 0x8000), 0, 'the page the address is in');
+    assert.deepEqual(calls.at(-1), { name: 'VirtualFreeEx', args: [SELF, 0x10000, 0, 0x8000] });
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x10000, 0x4000], 'both of its regions, from its base');
+    assert.equal(free(0x11001, 0, 0x8000), 0xc000009f, 'STATUS_FREE_VM_NOT_AT_BASE');
+    assert.equal(view.getUint32(0x104, true), 0, 'nothing reported');
+    assert.equal(free(0x10000, 0x4000, 0x8000), 0, 'its size is all of it');
+    assert.equal(free(0x10000, 0x5000, 0x8000), 0xc000001a,
+        'STATUS_UNABLE_TO_FREE_VM: past the allocation\'s end');
+    assert.equal(free(0x11001, 0xfff, 0x8000), 0, 'a part: the pages it reaches');
+    assert.deepEqual(parts, [[0x11000, 0x1000]], 'split where it lies');
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x11000, 0x1000]);
+    assert.equal(free(0x10000, 0x5000, 0x4000), 0xc000001a, 'a decommit past it too');
+    assert.equal(free(0x10ffe, 0, 0x4000), 0, 'a decommit of no size, from its base too');
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x10000, 0x4000]);
+    assert.equal(free(0x30000, 0, 0x8000), 0xc00000a0, 'nothing there');
     view.setUint32(0x100, 0x10000, true);
     view.setUint32(0x104, 0, true);
-    assert.equal(fns.NtFreeVirtualMemory.handler([SELF, 0x100, 0x104, 0x8000]), 0);
-    assert.equal(view.getUint32(0x104, true), 0x3000);
+    assert.equal(fns.NtFreeVirtualMemory.handler([0, 0x100, 0x104, 0x8000]), 0xc0000008,
+        'STATUS_INVALID_HANDLE: no handle is none, not memory missing');
 });
 
 test('NtQueryVirtualMemory answers basic information and nothing else', ()=>{
@@ -123,12 +174,107 @@ test('NtQueryVirtualMemory answers basic information and nothing else', ()=>{
         STATUS_INFO_LENGTH_MISMATCH);
 });
 
-test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s, answered as statuses', ()=>{
+test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s native copy and its status',
+    ()=>{
+        const { fns, calls } = setup();
+        assert.equal(fns.NtWriteVirtualMemory.handler([SELF, 0x10000, 0x300, 16, 0x100]), 0);
+        assert.deepEqual(calls.at(-1), { name: 'write', args: [SELF, 0x10000, 0x300, 16, 0x100] });
+        const partial = setup({ read: STATUS_PARTIAL_COPY });
+        assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
+            STATUS_PARTIAL_COPY);
+    });
+
+test('the instruction cache and write watches are kernel32\'s, answered as statuses', ()=>{
     const { fns, calls } = setup();
-    assert.equal(fns.NtWriteVirtualMemory.handler([SELF, 0x10000, 0x300, 16, 0x100]), 0);
-    assert.deepEqual(calls.at(-1), { name: 'WriteProcessMemory',
-        args: [SELF, 0x10000, 0x300, 16, 0x100] });
-    const partial = setup({ ReadProcessMemory: 0 }, 299);
-    assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
-        STATUS_PARTIAL_COPY);
+    const { NtFlushInstructionCache, NtGetWriteWatch, NtResetWriteWatch } =
+        /** @type {Record<string, { handler: Function }>} */ (fns);
+    assert.equal(NtFlushInstructionCache.handler([SELF, 0x10000, 0x100]), 0);
+    assert.deepEqual(calls.at(-1), { name: 'FlushInstructionCache', args: [SELF, 0x10000, 0x100] });
+    assert.equal(NtGetWriteWatch.handler([SELF, 1, 0x10000, 0x2000, 0x300, 0x304, 0x308]), 0);
+    assert.deepEqual(calls.at(-1), { name: 'GetWriteWatch',
+        args: [1, 0x10000, 0x2000, 0x300, 0x304, 0x308] }, 'the process handle off');
+    assert.equal(NtResetWriteWatch.handler([SELF, 0x10000, 0x2000]), 0);
+    assert.equal(NtGetWriteWatch.handler([0x44, 0, 0x10000, 0x2000, 0x300, 0x304, 0x308]),
+        0xc0000008, 'another process\'s watches are not kept');
+    const refused = setup({ GetWriteWatch: 0xffffffff }, 87);
+    assert.equal(/** @type {any} */ (refused.fns).NtGetWriteWatch.handler([SELF, 0, 0x1, 0x10, 0x300, 0x304, 0x308]),
+        0xc000000d, 'STATUS_INVALID_PARAMETER');
+});
+
+test('a call answered later by another process answers its status then, from its caller\'s error',
+    async()=>{
+        // A handle to a child is answered where the child runs, after the
+        // caller's thread has stopped: the status is the promise's, and the
+        // error it stands for is the caller's, not the thread running then.
+        const caller = { id: 1 };
+        const errors = new Map([[caller, 487]]);
+        let running = /** @type {any} */ (caller);
+        const later = (/** @type {number} */ value)=>(()=>Promise.resolve(value).then(got=>{
+            running = { id: 2 };
+            return got;
+        }));
+        const more = { currentThread: ()=>running,
+            lastErrorOf: (/** @type {any} */ thread)=>errors.get(thread) ?? 0 };
+        const refused = setup({ VirtualAllocEx: later(0) }, 0, more);
+        assert.equal(await refused.fns.NtAllocateVirtualMemory.handler(
+            [0x44, 0x100, 0, 0x104, 0x3000, 4]), STATUS_CONFLICTING_ADDRESSES);
+
+        running = caller;
+        const made = setup({ VirtualAllocEx: later(0x30000) }, 0, more);
+        made.view.setUint32(0x104, 0x1800, true);
+        assert.equal(await made.fns.NtAllocateVirtualMemory.handler(
+            [0x44, 0x100, 0, 0x104, 0x3000, 4]), 0);
+        assert.equal(made.view.getUint32(0x100, true), 0x30000);
+        assert.equal(made.view.getUint32(0x104, true), 0x2000);
+
+        // A release of size zero asks the child how far its region runs first.
+        running = caller;
+        /** @type {DataView} */
+        let freedView;
+        const answer = oneAllocation(()=>freedView, 0x30000, 0x5000);
+        const freed = setup({ VirtualQueryEx: (/** @type {number[]} */ args)=>
+            later(answer(args))(), VirtualFreeEx: later(1) }, 0, more);
+        freedView = freed.view;
+        freed.view.setUint32(0x100, 0x30000, true);
+        freed.view.setUint32(0x104, 0, true);
+        assert.equal(await freed.fns.NtFreeVirtualMemory.handler([0x44, 0x100, 0x104, 0x8000]), 0);
+        assert.equal(freed.view.getUint32(0x104, true), 0x5000);
+
+        running = caller;
+        const partial = setup({ read: later(STATUS_PARTIAL_COPY) }, 0, more);
+        assert.equal(await partial.fns.NtReadVirtualMemory.handler([0x44, 0, 0, 0, 0]),
+            STATUS_PARTIAL_COPY);
+    });
+
+test('MemoryMappedFilenameInformation is the mapped file\'s name after its UNICODE_STRING', ()=>{
+    const name = '\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll';
+    const { fns, view, memory } = setup({ K32GetMappedFileNameW: (/** @type {number[]} */ [
+        , , buffer])=>{
+        for (let i = 0; i < name.length; i++)
+        {
+            view.setUint16(buffer + i * 2, name.charCodeAt(i), true);
+        }
+        return name.length;
+    } });
+    const needed = 8 + name.length * 2 + 2;
+    view.setUint32(0x200, 0xcccccccc, true);
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x18, 0x1f0]),
+        0x80000005, 'STATUS_BUFFER_OVERFLOW');
+    assert.equal(view.getUint32(0x1f0, true), needed, 'the length it needs');
+    assert.equal(view.getUint32(0x200, true), 0xcccccccc, 'nothing written');
+
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x400, 0x1f0]), 0);
+    assert.equal(view.getUint16(0x200, true), name.length * 2, 'Length');
+    assert.equal(view.getUint16(0x202, true), name.length * 2 + 2, 'MaximumLength');
+    assert.equal(view.getUint32(0x204, true), 0x208, 'Buffer, right after it');
+    assert.equal(new TextDecoder('utf-16le').decode(memory.subarray(0x208,
+        0x208 + name.length * 2)), name);
+    assert.equal(view.getUint16(0x208 + name.length * 2, true), 0, 'terminated');
+    assert.equal(view.getUint32(0x1f0, true), needed);
+});
+
+test('MemoryMappedFilenameInformation of memory no file backs is STATUS_INVALID_ADDRESS', ()=>{
+    const { fns } = setup({ K32GetMappedFileNameW: ()=>0 }, 1240);
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x400, 0]),
+        0xc0000141);
 });

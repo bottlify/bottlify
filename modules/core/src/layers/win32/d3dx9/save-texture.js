@@ -4,10 +4,11 @@
  * See LICENSE for details
  */
 
-import { SURFACE, TEXTURE, createDeviceCalls } from './device.js';
+import { LOCKED_RECT_BYTES, SURFACE, TEXTURE, createDeviceCalls } from './device.js';
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DXSaveTextureToFile, D3DXSaveSurfaceToFile and their InMemory forms: a
@@ -195,7 +196,7 @@ export function writeBmp(bgra, width, height, alpha, dib = false){
  * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} buffers
  */
 export function createTextureSaver(host, buffers){
-    const { u32, method } = createDeviceCalls(host);
+    const { u32, lockedRect, method } = createDeviceCalls(host);
 
     /**
      * A level's or a surface's area as an image file can keep it: its rows'
@@ -223,8 +224,7 @@ export function createTextureSaver(host, buffers){
      * @param {{ rowBytes: number, rows: number }} layout
      */
     const rowsAt = (locked, layout)=>{
-        const pitch = u32(locked);
-        const bits = u32(locked + 4);
+        const { pitch, bits } = lockedRect(locked);
         const bytes = new Uint8Array(layout.rowBytes * layout.rows);
         for (let row = 0; row < layout.rows; row++)
         {
@@ -253,7 +253,7 @@ export function createTextureSaver(host, buffers){
             return E_NOTIMPL;
         }
         const heap = /** @type {NonNullable<SaveHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
+        const scratch = heap.allocate(SURFACE_DESC_BYTES + LOCKED_RECT_BYTES);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -272,7 +272,7 @@ export function createTextureSaver(host, buffers){
             }
             const [{ width, height, bytes }] = levels;
             const colours = (palette >>> 0) === 0 ? undefined
-                : host.readMemory(palette >>> 0, 1024).slice();
+                : host.readMemory(wholeAddress(palette), 1024).slice();
             if (format === FMT.P8 && !colours)
             {
                 return D3DERR_INVALIDCALL;
@@ -353,7 +353,7 @@ export function createTextureSaver(host, buffers){
         const format = u32(scratch);
         const [full, tall] = [u32(scratch + 24), u32(scratch + 28)];
         const [left, top, right, bottom] = (rect >>> 0) === 0 ? [0, 0, full, tall]
-            : [0, 4, 8, 12].map(at=>u32((rect >>> 0) + at) | 0);
+            : [0, 4, 8, 12].map(at=>u32(wholeAddress(rect) + at) | 0);
         if (left < 0 || top < 0 || right > full || bottom > tall || right <= left
             || bottom <= top)
         {
@@ -431,7 +431,7 @@ export function createTextureSaver(host, buffers){
         handler: ([out, fileFormat, source, palette, rect])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
             }
             if ((out >>> 0) === 0 || (source >>> 0) === 0 || !host.callGuest || !host.heap)
             {

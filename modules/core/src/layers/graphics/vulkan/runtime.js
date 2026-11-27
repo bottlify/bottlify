@@ -35,7 +35,7 @@ import { createDeviceCommands } from './device.js';
  *           The GPU, reached when a program first needs one.
  * @property {() => { width: number, height: number }} screen
  * @property {(width: number, height: number) => void} [resolution]
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {boolean} [compressedTextures]
  * @property {() => { vendor?: string, description?: string } | null} [adapter]
  */

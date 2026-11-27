@@ -14,8 +14,9 @@
  * wasm's min); a float-to-integer conversion answers the "integer
  * indefinite" 0x80000000 for a NaN or a value out of range (a saturating
  * conversion and a fix-up); `rsqrtps` and `rcpps` are computed exactly, as
- * the emulator does, so results stay bit-identical to what the library's
- * programs already run against. MXCSR is read by the conversions that round
+ * the interpreter computes them (`ir-simd.js`), within the processor's own
+ * estimate's error, and the two tiers agree bit for bit. MXCSR is read by the
+ * conversions that round
  * alone: the arithmetic rounds to nearest, keeps denormals (no FTZ, no DAZ)
  * and raises no flag, as the host's f32 and f64 lanes do. MMX operations run
  * in the low lane of a `v128` and come back as an `i64`; an MMX instruction
@@ -23,13 +24,14 @@
  * register held), which the region's exit writes out when one ran.
  */
 
+import { LONG_WIDE, registerLocal } from './width.js';
 import { CF, OF, PF, SF, ZF, AF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { SIMD } from '../wasm/simd.js';
-import { I32 } from './flags.js';
-import { Local, MMX_HELD, MMX_TOP } from './region.js';
-import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
-import { checkAccess, noteStore } from './memory.js';
+import { I32, I64 } from './flags.js';
+import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
+import { accessAddress, prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
+import { checkAccess, noteStore, ram, ramAt, RARE } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
 
@@ -89,6 +91,13 @@ const wordShuffle = words=>words.flatMap(w=>[w * 2, w * 2 + 1]);
  * @returns {boolean}
  */
 export function emitSimd(e, instruction, flagsLive){
+    if (e.pendingLows.size > 0 && !owes(instruction))
+    {
+        // A form that reads or writes its registers whole: their owed lanes
+        // put back before it, on the block's straight line.
+        e.settleLows(instruction.operands.filter(operand=>operand.kind === 'xmm')
+            .map(operand=>/** @type {number} */ (operand.reg)), true);
+    }
     const done = emitForm(e, instruction, flagsLive);
     if (done && instruction.operands.some(operand=>operand.kind === 'mm'))
     {
@@ -147,11 +156,59 @@ function emitForm(e, instruction, flagsLive){
         // --- moves ---
         case 'movaps': case 'movups': case 'movapd': case 'movupd': case 'movdqa': case 'movdqu':
         case 'lddqu': case 'movntps': case 'movntpd': case 'movntdq':
+            if (dst.kind === 'xmm' && src.kind === 'xmm' && MOVES.has(op)
+                && e.lows.has(/** @type {number} */ (src.reg))
+                && e.controls.length === e.blockDepth)
+            {
+                copyHeld(e, /** @type {number} */ (dst.reg), /** @type {number} */ (src.reg));
+                return true;
+            }
             writeV(e, dst, ()=>readV(e, src, 16));
             return true;
         case 'movss': case 'movsd':
         {
             const width = op === 'movss' ? 4 : 8;
+            const double = width === 8;
+            if (e.controls.length === e.blockDepth)
+            {
+                // The low lane in a local, the vector's owed (`pendingLows`).
+                if (dst.kind === 'xmm')
+                {
+                    const reg = /** @type {number} */ (dst.reg);
+                    if (src.kind === 'xmm')
+                    {
+                        oweOtherWidth(e, reg, double);
+                        pushLow(e, src, double);
+                        const low = e.lowLocal(reg, double);
+                        b.localSet(low);
+                        oweLow(e, reg, low, double, 'replace');
+                        return true;
+                    }
+                    // A load: the other lanes zero, whatever was owed.
+                    e.pendingLows.delete(reg);
+                    e.lows.delete(reg);
+                    if (!owesLoads(e))
+                    {
+                        writeV(e, dst, ()=>readV(e, src, width));
+                        return true;
+                    }
+                    prepareAddress(e, src);
+                    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, src)));
+                    const low = e.lowLocal(reg, double);
+                    b.localSet(low);
+                    oweLow(e, reg, low, double, 'zero');
+                    return true;
+                }
+                const held = e.lows.get(/** @type {number} */ (src.reg));
+                if (held !== undefined && held.double === double)
+                {
+                    prepareAddress(e, dst, true);
+                    noteStore(e, width);
+                    const offset = accessAddress(e, dst);
+                    b.localGet(held.local).store(double ? 'f64' : 'f32', ramAt(offset));
+                    return true;
+                }
+            }
             if (dst.kind === 'xmm' && src.kind === 'xmm')
             {
                 // The low lane from the source, the rest kept.
@@ -180,7 +237,7 @@ function emitForm(e, instruction, flagsLive){
                 b.localGet(Local.addr);
                 readV(e, src, 16);
                 b.simdMem(SIMD.store64Lane,
-                    { align: 3, offset: e.layout.ramBase, lane: high ? 1 : 0 });
+                    { ...ram(e), align: 3, lane: high ? 1 : 0 });
                 return true;
             }
             if (src.kind === 'mem')
@@ -189,7 +246,7 @@ function emitForm(e, instruction, flagsLive){
                 b.localGet(Local.addr);
                 readV(e, dst, 16);
                 b.simdMem(SIMD.load64Lane,
-                    { align: 3, offset: e.layout.ramBase, lane: high ? 1 : 0 });
+                    { ...ram(e), align: 3, lane: high ? 1 : 0 });
                 writeV(e, dst, null);
                 return true;
             }
@@ -205,6 +262,12 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         case 'movd':
+            if (dst.size === 8 && dst.kind !== 'mm' || src.size === 8 && src.kind !== 'mm')
+            {
+                // Long mode's movq to or from a general register or a quadword of memory.
+                moveQuad(e, dst, src);
+                return true;
+            }
             prepareAddress(e, src);
             if (dst.kind === 'xmm')
             {
@@ -327,12 +390,12 @@ function emitForm(e, instruction, flagsLive){
             noteStore(e, 4);
             b.localGet(Local.addr);
             atState(e.context, b).load('i32', { offset: e.layout.mxcsr });
-            b.store('i32', { offset: e.layout.ramBase });
+            b.store('i32', ram(e));
             return true;
         case 'ldmxcsr':
             prepareAddress(e, dst);
             atState(e.context, b);
-            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
+            b.localGet(Local.addr).load('i32', ram(e));
             b.store('i32', { offset: e.layout.mxcsr });
             return true;
         case 'movq':
@@ -383,7 +446,7 @@ function emitForm(e, instruction, flagsLive){
                 return false;
             }
             const whole = op === 'maskmovdqu';
-            b.localGet(Local.reg + 7).localSet(Local.addr);
+            b.localGet(registerLocal(e, 7)).localSet(Local.addr);
             checkAccess(e, whole ? 16 : 8);
             noteStore(e, whole ? 16 : 8);
             b.localGet(Local.addr);
@@ -391,11 +454,11 @@ function emitForm(e, instruction, flagsLive){
             b.localGet(Local.addr);
             if (whole)
             {
-                b.simdMem(SIMD.load, { align: 4, offset: e.layout.ramBase });
+                b.simdMem(SIMD.load, { ...ram(e), align: 4 });
             }
             else
             {
-                b.simdMem(SIMD.load64Zero, { align: 3, offset: e.layout.ramBase });
+                b.simdMem(SIMD.load64Zero, { ...ram(e), align: 3 });
             }
             readV(e, src, 16);
             b.i32const(7);
@@ -403,11 +466,11 @@ function emitForm(e, instruction, flagsLive){
             simd(SIMD.bitselect);
             if (whole)
             {
-                b.simdMem(SIMD.store, { align: 4, offset: e.layout.ramBase });
+                b.simdMem(SIMD.store, { ...ram(e), align: 4 });
             }
             else
             {
-                b.simdMem(SIMD.store64Lane, { align: 3, offset: e.layout.ramBase, lane: 0 });
+                b.simdMem(SIMD.store64Lane, { ...ram(e), align: 3, lane: 0 });
             }
             return true;
         }
@@ -417,18 +480,25 @@ function emitForm(e, instruction, flagsLive){
             // exit writes that mask back over anything written straight into
             // the state block, and into the state block otherwise. The
             // run's hold is released too, or the exit would hold every
-            // register right after. The top is left alone: an MMX instruction
-            // of this run put it at zero and leaving the MMX state does not
-            // put it back, and a run with none leaves the machine's own.
+            // register right after. The top goes to zero, as the SDM's table
+            // of the MMX instructions' effects on the x87 state has it.
             if (e.x87.active)
             {
                 x87Forget(e);
                 b.i32const(0xff).localSet(Local.x87Empty);
+                b.i32const(0).localSet(Local.x87Top);
+                // The x87 after it is compiled for that top (the tracker's, `step`).
+                if (e.x87.current !== null)
+                {
+                    e.x87.current = { top: 0, slot: [...e.x87.current.slot] };
+                }
             }
             else
             {
                 atState(e.context, b).i32const(0xff).store('i32_8',
                     { offset: e.layout.x87Empty });
+                atState(e.context, b).i32const(0).store('i32_8',
+                    { offset: e.layout.x87Top });
             }
             b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
                 .localSet(e.mmxTouchedLocal());
@@ -443,7 +513,7 @@ function emitForm(e, instruction, flagsLive){
             const base = /** @type {'add' | 'sub' | 'mul' | 'div'} */ (op.slice(0, 3));
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarFloat(e, dst, src, double ? F64[base] : F32[base], double);
                 return true;
@@ -460,7 +530,7 @@ function emitForm(e, instruction, flagsLive){
         {
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarFloat(e, dst, src, double ? F64.sqrt : F32.sqrt, double, true);
                 return true;
@@ -491,7 +561,7 @@ function emitForm(e, instruction, flagsLive){
             const min = op.startsWith('min');
             // (a < b) ? a : b for min, (a > b) ? a : b for max: the second
             // operand whenever the compare is false, NaN and zeros included.
-            if (scalar && scalarsApart(e))
+            if (scalar)
             {
                 scalarSelect(e, dst, src, double, min);
                 return true;
@@ -598,10 +668,28 @@ function emitForm(e, instruction, flagsLive){
         case 'cvtsi2ss': case 'cvtsi2sd':
         {
             const double = op === 'cvtsi2sd';
+            if (src.size === 8)
+            {
+                // A quadword rounds by MXCSR's rounding control, which wasm's
+                // conversion does not read: nearest here, any other mode the
+                // interpreter's.
+                atState(e.context, b).load('i32', { offset: e.layout.mxcsr }).i32const(0x6000)
+                    .op(I32.and);
+                e.openGuard('rounded', EMPTY);
+                e.exitBefore(e.current.eip, Exit.UNTRANSLATED, RARE);
+                e.close();
+            }
             prepareAddress(e, src);
             readV(e, dst, 16);
             readOp(e, src);
-            b.op(double ? F64.convertI32S : F32.convertI32S);
+            if (src.size === 8)
+            {
+                b.op(double ? 0xb9 : 0xb4); // f64/f32.convert_i64_s
+            }
+            else
+            {
+                b.op(double ? F64.convertI32S : F32.convertI32S);
+            }
             b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
             writeV(e, dst, null);
             return true;
@@ -611,13 +699,18 @@ function emitForm(e, instruction, flagsLive){
             const double = op.endsWith('sd2si');
             const truncate = op.startsWith('cvtt');
             prepareAddress(e, src);
-            readV(e, src, double ? 8 : 4);
-            b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+            pushLow(e, src, double, true);
             b.localSet(double ? Local.d0 : Local.f0);
             if (!truncate)
             {
                 roundByMxcsr(e, double ? Local.d0 : Local.f0, double ? F64_ROUND : F32_ROUND,
                     false);
+            }
+            if (dst.size === 8)
+            {
+                scalarToQuad(e, double);
+                writeReg(e, /** @type {number} */ (dst.reg), 8, false);
+                return true;
             }
             scalarToInt(e, double);
             writeReg(e, /** @type {number} */ (dst.reg), 4, false);
@@ -643,22 +736,37 @@ function emitForm(e, instruction, flagsLive){
         case 'cvtpd2ps':
             unary(e, dst, src, ()=>simd(SIMD.f32x4DemoteF64x2Zero), 0);
             return true;
-        case 'cvtss2sd':
+        case 'cvtss2sd': case 'cvtsd2ss':
+            if (e.controls.length === e.blockDepth)
+            {
+                // The low lane converted into the destination's local, its vector's owed.
+                const wide = op === 'cvtss2sd';
+                const reg = /** @type {number} */ (dst.reg);
+                pushLow(e, src, !wide);
+                b.op(wide ? F64.promoteF32 : F32.demoteF64);
+                oweOtherWidth(e, reg, wide);
+                const low = e.lowLocal(reg, wide);
+                b.localSet(low);
+                oweLow(e, reg, low, wide, 'replace');
+                return true;
+            }
+            if (op === 'cvtsd2ss')
+            {
+                readV(e, dst, 16);
+                prepareAddress(e, src);
+                readV(e, src, 8);
+                b.op(0xfd, [SIMD.f64x2ExtractLane, 0]);
+                b.op(F32.demoteF64);
+                b.op(0xfd, [SIMD.f32x4ReplaceLane, 0]);
+                writeV(e, dst, null);
+                return true;
+            }
             readV(e, dst, 16);
             prepareAddress(e, src);
             readV(e, src, 4);
             b.op(0xfd, [SIMD.f32x4ExtractLane, 0]);
             b.op(F64.promoteF32);
             b.op(0xfd, [SIMD.f64x2ReplaceLane, 0]);
-            writeV(e, dst, null);
-            return true;
-        case 'cvtsd2ss':
-            readV(e, dst, 16);
-            prepareAddress(e, src);
-            readV(e, src, 8);
-            b.op(0xfd, [SIMD.f64x2ExtractLane, 0]);
-            b.op(F32.demoteF64);
-            b.op(0xfd, [SIMD.f32x4ReplaceLane, 0]);
             writeV(e, dst, null);
             return true;
         case 'cvtdq2pd':
@@ -874,6 +982,11 @@ function emitForm(e, instruction, flagsLive){
             return true;
         case 'pextrw':
         {
+            if (dst.kind === 'mem')
+            {
+                // SSE4.1's form into memory (0F 3A 15).
+                return emitExtension(e, instruction, flagsLive);
+            }
             const lane = /** @type {number} */ (imm.value) & (isMm ? 3 : 7);
             if (isMm)
             {
@@ -947,25 +1060,711 @@ function emitForm(e, instruction, flagsLive){
             return true;
         }
         default:
+            return emitExtension(e, instruction, flagsLive);
+    }
+}
+
+/** The byte shuffle that moves lanes of `size` bytes: lane i from `pick(i)` (0.. first, n.. second). */
+const laneShuffle = (/** @type {number} */ size, /** @type {(i: number) => number} */ pick)=>
+    Array.from({ length: 16 }, (_, at)=>pick(Math.floor(at / size)) * size + at % size);
+
+/**
+ * SSSE3, SSE4.1 and SSE4.2 (the three-byte maps): each the wasm SIMD the SDM's
+ * operation comes to, as `ir-simd.js` models it. MMX's SSSE3 forms run in the
+ * low lane, as every MMX form here does (`packedBinary`).
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ * @returns {boolean}
+ */
+function emitExtension(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    /** @param {number} opcode */
+    const simd = opcode=>b.simd(opcode);
+    /** @param {number[]} bytes */
+    const shuffle = bytes=>b.op(0xfd, [SIMD.shuffle, ...bytes]);
+    /** @param {number} opcode @param {number} lane */
+    const laneOp = (opcode, lane)=>b.op(0xfd, [opcode, lane]);
+    const isMm = dst?.kind === 'mm' || src?.kind === 'mm';
+    const t0 = vecTemp(e);
+    const t1 = vecTemp2(e);
+    const t2 = e.vecTempLocal(2);
+    /** The two operands in t0 (the destination) and t1 (the source), as packedBinary hands them. */
+    const take = ()=>{
+        b.localSet(t1);
+        b.localSet(t0);
+    };
+    switch (op)
+    {
+        case 'pshufb':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // An index with its top bit set is a zero; wasm's swizzle gives one
+                // for any index past 15. MMX's index takes its low three bits.
+                b.v128const(new Array(16).fill(isMm ? 0x87 : 0x8f));
+                simd(SIMD.and);
+                simd(SIMD.swizzle);
+            });
+            return true;
+        case 'phaddw': case 'phaddd': case 'phaddsw': case 'phsubw': case 'phsubd': case 'phsubsw':
+        {
+            const dword = op.endsWith('d');
+            const size = dword ? 4 : 2;
+            const lanes = (isMm ? 8 : 16) / size;
+            // The destination's pairs then the source's: their first elements
+            // against their second ones.
+            const second = isMm ? 16 / size : lanes;
+            const firsts = Array.from({ length: 16 / size }, (_, i)=>(i < lanes / 2 ? 2 * i
+                : second + 2 * (i - lanes / 2)) % (32 / size));
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                b.localGet(t0).localGet(t1);
+                shuffle(laneShuffle(size, i=>firsts[i]));
+                b.localGet(t0).localGet(t1);
+                shuffle(laneShuffle(size, i=>firsts[i] + 1));
+                const subtract = op.startsWith('phsub');
+                simd(dword ? (subtract ? SIMD.i32x4Sub : SIMD.i32x4Add)
+                    : op.endsWith('sw') ? (subtract ? SIMD.i16x8SubSatS : SIMD.i16x8AddSatS)
+                        : subtract ? SIMD.i16x8Sub : SIMD.i16x8Add);
+            });
+            return true;
+        }
+        case 'pmaddubsw':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // Unsigned bytes of the destination by signed bytes of the source,
+                // each pair of products summed with signed saturation.
+                take();
+                b.localGet(t0).v128const(new Array(8).fill([0xff, 0]).flat());
+                simd(SIMD.and);
+                b.localGet(t1).i32const(8);
+                simd(SIMD.i16x8Shl);
+                b.i32const(8);
+                simd(SIMD.i16x8ShrS);
+                simd(SIMD.i16x8Mul);
+                b.localGet(t0).i32const(8);
+                simd(SIMD.i16x8ShrU);
+                b.localGet(t1).i32const(8);
+                simd(SIMD.i16x8ShrS);
+                simd(SIMD.i16x8Mul);
+                simd(SIMD.i16x8AddSatS);
+            });
+            return true;
+        case 'psignb': case 'psignw': case 'psignd':
+        {
+            const [neg, lt, eq] = op === 'psignb' ? [SIMD.i8x16Neg, SIMD.i8x16LtS, SIMD.i8x16Eq]
+                : op === 'psignw' ? [SIMD.i16x8Neg, SIMD.i16x8LtS, SIMD.i16x8Eq]
+                    : [SIMD.i32x4Neg, SIMD.i32x4LtS, SIMD.i32x4Eq];
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                // Negated where the source is negative, zero where it is zero.
+                b.localGet(t0);
+                simd(neg);
+                b.localGet(t0);
+                b.localGet(t1).v128const(new Array(16).fill(0));
+                simd(lt);
+                simd(SIMD.bitselect);
+                b.localGet(t1).v128const(new Array(16).fill(0));
+                simd(eq);
+                simd(SIMD.andnot);
+            });
+            return true;
+        }
+        case 'pmulhrsw':
+            packedBinary(e, dst, src, isMm, ()=>{
+                // (a * b + 0x4000) >> 15, which wasm saturates where the processor
+                // does not: -32768 * -32768 is 0x8000 there, 0x7fff here.
+                take();
+                b.localGet(t0).localGet(t1);
+                simd(SIMD.i16x8Q15mulrSatS);
+                const minimum = new Array(8).fill([0, 0x80]).flat();
+                b.localGet(t0).v128const(minimum);
+                simd(SIMD.i16x8Eq);
+                b.localGet(t1).v128const(minimum);
+                simd(SIMD.i16x8Eq);
+                simd(SIMD.and);
+                simd(SIMD.xor);
+            });
+            return true;
+        case 'pabsb': case 'pabsw': case 'pabsd':
+        {
+            const opcode = op === 'pabsb' ? SIMD.i8x16Abs : op === 'pabsw' ? SIMD.i16x8Abs
+                : SIMD.i32x4Abs;
+            packedBinary(e, dst, src, isMm, ()=>{
+                b.localSet(t1);
+                b.drop();
+                b.localGet(t1);
+                simd(opcode);
+            });
+            return true;
+        }
+        case 'palignr':
+        {
+            // The destination above the source, shifted right by the immediate's bytes.
+            const shift = /** @type {number} */ (imm.value) & 0xff;
+            const width = isMm ? 8 : 16;
+            packedBinary(e, dst, src, isMm, ()=>{
+                take();
+                b.localGet(t1).localGet(t0);
+                const at = (/** @type {number} */ i)=>i + shift;
+                shuffle(Array.from({ length: 16 }, (_, i)=>(at(i) < width ? at(i)
+                    : at(i) < 2 * width ? 16 + at(i) - width : 0)));
+                b.v128const(Array.from({ length: 16 }, (_, i)=>(at(i) < 2 * width ? 0xff : 0)));
+                simd(SIMD.and);
+            });
+            return true;
+        }
+        case 'pblendvb': case 'blendvps': case 'blendvpd':
+            readV(e, src, 16);
+            readV(e, dst, 16);
+            readV(e, operands[2], 16);
+            if (op === 'pblendvb')
+            {
+                b.v128const(new Array(16).fill(0));
+                simd(SIMD.i8x16LtS);
+            }
+            else
+            {
+                b.i32const(op === 'blendvps' ? 31 : 63);
+                simd(op === 'blendvps' ? SIMD.i32x4ShrS : SIMD.i64x2ShrS);
+            }
+            simd(SIMD.bitselect);
+            writeV(e, dst, null);
+            return true;
+        case 'blendps': case 'blendpd': case 'pblendw':
+        {
+            const size = op === 'pblendw' ? 2 : op === 'blendpd' ? 8 : 4;
+            const selector = /** @type {number} */ (imm.value);
+            readV(e, dst, 16);
+            readV(e, src, 16);
+            shuffle(laneShuffle(size, i=>((selector >> i & 1) !== 0 ? 16 / size + i : i)));
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'ptest':
+            readV(e, dst, 16);
+            b.localSet(t0);
+            readV(e, src, 16);
+            b.localSet(t1);
+            if (!flagsLive)
+            {
+                return true;
+            }
+            e.eagerWrite(CF | PF | AF | ZF | SF | OF);
+            b.localGet(t0).localGet(t1);
+            simd(SIMD.and);
+            simd(SIMD.anyTrue);
+            b.op(I32.eqz);
+            e.orFlag(ZF);
+            b.localGet(t1).localGet(t0);
+            simd(SIMD.andnot);
+            simd(SIMD.anyTrue);
+            b.op(I32.eqz);
+            e.orFlag(CF);
+            return true;
+        case 'pmovsxbw': case 'pmovsxbd': case 'pmovsxbq': case 'pmovsxwd': case 'pmovsxwq':
+        case 'pmovsxdq': case 'pmovzxbw': case 'pmovzxbd': case 'pmovzxbq': case 'pmovzxwd':
+        case 'pmovzxwq': case 'pmovzxdq':
+        {
+            const signed = op[4] === 's';
+            const sizes = /** @type {Record<string, number>} */ ({ b: 1, w: 2, d: 4, q: 8 });
+            const from = sizes[op[6]];
+            const to = sizes[op[7]];
+            writeV(e, dst, ()=>{
+                readV(e, src, (16 / to) * from);
+                for (let width = from; width < to; width *= 2)
+                {
+                    simd(width === 1
+                        ? (signed ? SIMD.i16x8ExtendLowI8x16S : SIMD.i16x8ExtendLowI8x16U)
+                        : width === 2 ? (signed ? SIMD.i32x4ExtendLowI16x8S
+                            : SIMD.i32x4ExtendLowI16x8U)
+                            : signed ? SIMD.i64x2ExtendLowI32x4S : SIMD.i64x2ExtendLowI32x4U);
+                }
+            });
+            return true;
+        }
+        case 'pmuldq':
+            packedBinary(e, dst, src, false, ()=>{
+                take();
+                b.localGet(t0).localGet(t0);
+                shuffle(dwordShuffle([0, 2, 0, 2]));
+                b.localGet(t1).localGet(t1);
+                shuffle(dwordShuffle([0, 2, 0, 2]));
+                simd(SIMD.i64x2ExtmulLowI32x4S);
+            });
+            return true;
+        case 'pcmpeqq': case 'pcmpgtq': case 'packusdw': case 'pminsb': case 'pminsd':
+        case 'pminuw': case 'pminud': case 'pmaxsb': case 'pmaxsd': case 'pmaxuw': case 'pmaxud':
+        case 'pmulld':
+        {
+            const opcode = /** @type {Record<string, number>} */ ({
+                pcmpeqq: SIMD.i64x2Eq, pcmpgtq: SIMD.i64x2GtS, packusdw: SIMD.i16x8NarrowI32x4U,
+                pminsb: SIMD.i8x16MinS, pminsd: SIMD.i32x4MinS, pminuw: SIMD.i16x8MinU,
+                pminud: SIMD.i32x4MinU, pmaxsb: SIMD.i8x16MaxS, pmaxsd: SIMD.i32x4MaxS,
+                pmaxuw: SIMD.i16x8MaxU, pmaxud: SIMD.i32x4MaxU, pmulld: SIMD.i32x4Mul,
+            })[op];
+            packedBinary(e, dst, src, false, ()=>simd(opcode));
+            return true;
+        }
+        case 'phminposuw':
+            writeV(e, dst, ()=>{
+                // The least word by halving the vector against itself three
+                // times; its index the first lane equal to it.
+                readV(e, src, 16);
+                b.localSet(t0);
+                b.localGet(t0);
+                [[4, 5, 6, 7, 0, 1, 2, 3], [2, 3, 0, 1, 2, 3, 0, 1], [1, 0, 1, 0, 1, 0, 1, 0]]
+                    .forEach(words=>{
+                        b.localTee(t1).localGet(t1).localGet(t1);
+                        shuffle(wordShuffle(words));
+                        simd(SIMD.i16x8MinU);
+                    });
+                laneOp(SIMD.i16x8ExtractLaneU, 0);
+                b.localSet(Local.t1);
+                b.localGet(t0).localGet(Local.t1);
+                simd(SIMD.i16x8Splat);
+                simd(SIMD.i16x8Eq);
+                simd(SIMD.i16x8Bitmask);
+                b.op(0x68); // i32.ctz
+                b.i32const(16).op(I32.shl).localGet(Local.t1).op(I32.or).localSet(Local.t1);
+                b.v128const(new Array(16).fill(0)).localGet(Local.t1);
+                laneOp(SIMD.i32x4ReplaceLane, 0);
+            });
+            return true;
+        case 'movntdqa':
+            writeV(e, dst, ()=>readV(e, src, 16));
+            return true;
+        case 'roundps': case 'roundpd': case 'roundss': case 'roundsd':
+        {
+            const double = op.endsWith('pd') || op.endsWith('sd');
+            const scalar = op.endsWith('ss') || op.endsWith('sd');
+            const how = /** @type {number} */ (imm.value);
+            const ops = double ? F64X2_ROUND : F32X4_ROUND;
+            readV(e, src, scalar ? (double ? 8 : 4) : 16);
+            b.localSet(t2);
+            if ((how & 4) !== 0)
+            {
+                roundByMxcsr(e, t2, ops, true);
+            }
+            else
+            {
+                b.localGet(t2);
+                simd([ops.nearest, ops.floor, ops.ceil, ops.trunc][how & 3]);
+                b.localSet(t2);
+            }
+            if (scalar)
+            {
+                // The low lane rounded, the rest the destination's.
+                readV(e, dst, 16);
+                b.localGet(t2);
+                shuffle(double ? [16, 17, 18, 19, 20, 21, 22, 23, 8, 9, 10, 11, 12, 13, 14, 15]
+                    : [16, 17, 18, 19, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+                writeV(e, dst, null);
+                return true;
+            }
+            writeV(e, dst, ()=>b.localGet(t2));
+            return true;
+        }
+        case 'dpps': case 'dppd':
+        {
+            const double = op === 'dppd';
+            const size = double ? 8 : 4;
+            const how = /** @type {number} */ (imm.value);
+            const lanes = 16 / size;
+            /** A mask of the lanes whose bits in `bits` are set. @param {number} bits */
+            const maskOf = bits=>Array.from({ length: 16 }, (_, at)=>
+                ((bits >> Math.floor(at / size) & 1) !== 0 ? 0xff : 0));
+            writeV(e, dst, ()=>{
+                // The products the high bits pick, +0 elsewhere; each lane's sum its
+                // own reduction, as the processor's: (p[i^1] + p[i]) + (p[i^3] +
+                // p[i^2]) for single precision, p[i] + p[i^1] for double.
+                readV(e, dst, 16);
+                readV(e, src, 16);
+                simd(double ? SIMD.f64x2Mul : SIMD.f32x4Mul);
+                b.v128const(maskOf(how >> 4 & (lanes === 4 ? 0xf : 3)));
+                simd(SIMD.and);
+                b.localSet(t0);
+                if (double)
+                {
+                    b.localGet(t0).localGet(t0).localGet(t0);
+                    shuffle(laneShuffle(8, i=>i ^ 1));
+                    simd(SIMD.f64x2Add);
+                }
+                else
+                {
+                    b.localGet(t0).localGet(t0);
+                    shuffle(laneShuffle(4, i=>i ^ 1));
+                    b.localGet(t0);
+                    simd(SIMD.f32x4Add);
+                    b.localTee(t1).localGet(t1).localGet(t1);
+                    shuffle(laneShuffle(4, i=>i ^ 2));
+                    simd(SIMD.f32x4Add);
+                }
+                b.v128const(maskOf(how & (lanes === 4 ? 0xf : 3)));
+                simd(SIMD.and);
+            });
+            return true;
+        }
+        case 'mpsadbw':
+        {
+            const how = /** @type {number} */ (imm.value);
+            const from = (how >> 2 & 1) * 4;
+            const block = (how & 3) * 4;
+            /** The source's byte `at` in every word. @param {number} at */
+            const spread = at=>{
+                b.localGet(t1);
+                laneOp(SIMD.i8x16ExtractLaneU, at);
+                simd(SIMD.i16x8Splat);
+            };
+            writeV(e, dst, ()=>{
+                readV(e, dst, 16);
+                b.localSet(t0);
+                readV(e, src, 16);
+                b.localSet(t1);
+                for (let j = 0; j < 4; j++)
+                {
+                    // |d[from + i + j] - s[block + j]| in eight words, as max - min,
+                    // summed over j.
+                    b.localGet(t0).localGet(t0);
+                    shuffle(Array.from({ length: 16 }, (_, i)=>(i < 8 ? from + i + j : 0)));
+                    simd(SIMD.i16x8ExtendLowI8x16U);
+                    b.localSet(t2);
+                    b.localGet(t2);
+                    spread(block + j);
+                    simd(SIMD.i16x8MaxU);
+                    b.localGet(t2);
+                    spread(block + j);
+                    simd(SIMD.i16x8MinU);
+                    simd(SIMD.i16x8Sub);
+                    if (j > 0)
+                    {
+                        simd(SIMD.i16x8Add);
+                    }
+                }
+            });
+            return true;
+        }
+        case 'pextrb': case 'pextrw': case 'pextrd': case 'extractps':
+        {
+            const size = op === 'pextrb' ? 1 : op === 'pextrw' ? 2 : 4;
+            const lane = /** @type {number} */ (imm.value) & (16 / size - 1);
+            const extract = size === 1 ? SIMD.i8x16ExtractLaneU : size === 2
+                ? SIMD.i16x8ExtractLaneU : SIMD.i32x4ExtractLane;
+            if (dst.kind === 'reg')
+            {
+                readV(e, src, 16);
+                laneOp(extract, lane);
+                writeReg(e, /** @type {number} */ (dst.reg), 4, false);
+                return true;
+            }
+            prepareAddress(e, dst, true);
+            noteStore(e, size);
+            b.localGet(Local.addr);
+            readV(e, src, 16);
+            b.simdMem(size === 1 ? SIMD.store8Lane : size === 2 ? SIMD.store16Lane
+                : SIMD.store32Lane, { ...ram(e), align: 0, lane });
+            return true;
+        }
+        case 'pinsrb': case 'pinsrd':
+        {
+            const size = op === 'pinsrb' ? 1 : 4;
+            const lane = /** @type {number} */ (imm.value) & (16 / size - 1);
+            prepareAddress(e, src);
+            readV(e, dst, 16);
+            readOp(e, src);
+            laneOp(size === 1 ? SIMD.i8x16ReplaceLane : SIMD.i32x4ReplaceLane, lane);
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'insertps':
+        {
+            const how = /** @type {number} */ (imm.value);
+            readV(e, dst, 16);
+            if (src.kind === 'mem')
+            {
+                prepareAddress(e, src);
+                b.localGet(Local.addr).load('i32', ram(e));
+            }
+            else
+            {
+                readV(e, src, 16);
+                laneOp(SIMD.i32x4ExtractLane, how >> 6 & 3);
+            }
+            laneOp(SIMD.i32x4ReplaceLane, how >> 4 & 3);
+            if ((how & 0xf) !== 0)
+            {
+                b.v128const(Array.from({ length: 16 }, (_, at)=>((how >> (at >> 2) & 1) !== 0
+                    ? 0 : 0xff)));
+                simd(SIMD.and);
+            }
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'pcmpestri': case 'pcmpestrm': case 'pcmpistri': case 'pcmpistrm':
+            stringCompare(e, instruction, flagsLive);
+            return true;
+        default:
             return false;
+    }
+}
+
+/**
+ * The string compares (`pcmpestri` and the rest), as `ir-simd.js` models the
+ * SDM's PCMPxSTRx: the immediate is known here, so its format, aggregation,
+ * polarity and output are chosen now, and each comparison of elements is a
+ * vector compare of an element spread over a vector against the other operand,
+ * its bits gathered by a bitmask. Masks are of elements, low bit first, in i32
+ * locals: the valid elements of each operand (t0, t1), IntRes1 then IntRes2
+ * (t2).
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function stringCompare(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const [dst, src, imm] = operands;
+    const how = /** @type {number} */ (imm.value);
+    const words = (how & 1) !== 0;
+    const signed = (how & 2) !== 0;
+    const aggregation = how >> 2 & 3;
+    const polarity = how >> 4 & 3;
+    const n = words ? 8 : 16;
+    const all = (1 << n) - 1;
+    const left = vecTemp(e);
+    const right = vecTemp2(e);
+    /** @param {number} opcode */
+    const simd = opcode=>b.simd(opcode);
+    const eq = words ? SIMD.i16x8Eq : SIMD.i8x16Eq;
+    const bitmask = words ? SIMD.i16x8Bitmask : SIMD.i8x16Bitmask;
+    /** Element i of the first operand in every lane. @param {number} i */
+    const spread = i=>{
+        b.localGet(left).localGet(left);
+        b.op(0xfd, [SIMD.shuffle, ...Array.from({ length: 16 }, (_, at)=>(words
+            ? 2 * i + (at & 1) : i))]);
+    };
+    readV(e, dst, 16);
+    b.localSet(left);
+    readV(e, src, 16);
+    b.localSet(right);
+    /**
+     * An operand's valid elements, as a mask, into `into`.
+     *
+     * @param {number} vector @param {number} length  the register of its explicit length
+     * @param {number} into
+     */
+    function valid(vector, length, into){
+        if (op.startsWith('pcmpe'))
+        {
+            // |length| saturated to the element count: |INT_MIN| is past any count.
+            // In long mode the register is a quadword: its dword, or with REX.W
+            // the whole of it held to a dword's range, which saturates alike.
+            const reg = registerLocal(e, length);
+            if (e.width.bits === 64)
+            {
+                if (((instruction.prefixes.rex ?? 0) & 8) !== 0)
+                {
+                    b.localGet(reg).i64const(-(2n ** 31n)).localGet(reg).i64const(-(2n ** 31n))
+                        .op(I64.gtS).select();
+                    b.localTee(LONG_WIDE).i64const(2n ** 31n - 1n).localGet(LONG_WIDE)
+                        .i64const(2n ** 31n - 1n).op(I64.ltS).select();
+                }
+                else
+                {
+                    b.localGet(reg);
+                }
+                b.op(I64.wrap).localSet(into);
+            }
+            else
+            {
+                b.localGet(reg).localSet(into);
+            }
+            b.localGet(into).localGet(into).i32const(31).op(I32.shrS).op(I32.xor)
+                .localGet(into).i32const(31).op(I32.shrS).op(I32.sub).localSet(into);
+            b.localGet(into).i32const(n).localGet(into).i32const(n).op(0x4d) // i32.le_u
+                .select();
+            b.localSet(into);
+            b.i32const(1).localGet(into).op(I32.shl).i32const(1).op(I32.sub).localSet(into);
+            return;
+        }
+        // The elements below the first null: the lowest bit of the nulls' mask, or
+        // of n past them, less one.
+        b.localGet(vector).v128const(new Array(16).fill(0));
+        simd(eq);
+        simd(bitmask);
+        b.i32const(1 << n).op(I32.or).localTee(into);
+        b.i32const(0).localGet(into).op(I32.sub).op(I32.and).i32const(1).op(I32.sub)
+            .localSet(into);
+    }
+    valid(left, 0, Local.t0);
+    valid(right, 2, Local.t1);
+    /** Pushes the mask of b's elements equal to a's element i. @param {number} i */
+    const equalTo = i=>{
+        spread(i);
+        b.localGet(right);
+        simd(eq);
+        simd(bitmask);
+    };
+    /** Pushes a's bit i, from t0. @param {number} i */
+    const validA = i=>{
+        b.localGet(Local.t0).i32const(i).op(I32.shrU).i32const(1).op(I32.and);
+    };
+    if (aggregation === 0)
+    {
+        // Equal any: b's element j equal to any valid element of a.
+        b.i32const(0).localSet(Local.t2);
+        for (let i = 0; i < n; i++)
+        {
+            equalTo(i);
+            b.i32const(0);
+            validA(i);
+            b.select();
+            b.localGet(Local.t2).op(I32.or).localSet(Local.t2);
+        }
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.and).localSet(Local.t2);
+    }
+    else if (aggregation === 1)
+    {
+        // Ranges: b's element j within any valid pair of a's, low <= b <= high.
+        const [ge, le] = words ? (signed ? [SIMD.i16x8GeS, SIMD.i16x8LeS]
+            : [SIMD.i16x8GeU, SIMD.i16x8LeU])
+            : signed ? [SIMD.i8x16GeS, SIMD.i8x16LeS] : [SIMD.i8x16GeU, SIMD.i8x16LeU];
+        b.i32const(0).localSet(Local.t2);
+        for (let k = 0; k < n; k += 2)
+        {
+            b.localGet(right);
+            spread(k);
+            simd(ge);
+            b.localGet(right);
+            spread(k + 1);
+            simd(le);
+            simd(SIMD.and);
+            simd(bitmask);
+            b.i32const(0);
+            b.localGet(Local.t0).i32const(k).op(I32.shrU).i32const(3).op(I32.and).i32const(3)
+                .op(I32.eq);
+            b.select();
+            b.localGet(Local.t2).op(I32.or).localSet(Local.t2);
+        }
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.and).localSet(Local.t2);
+    }
+    else if (aggregation === 2)
+    {
+        // Equal each: element j against element j, both invalid counting as equal.
+        b.localGet(left).localGet(right);
+        simd(eq);
+        simd(bitmask);
+        b.localGet(Local.t0).op(I32.and).localGet(Local.t1).op(I32.and);
+        b.localGet(Local.t0).localGet(Local.t1).op(I32.or).i32const(all).op(I32.xor);
+        b.op(I32.or).localSet(Local.t2);
+    }
+    else
+    {
+        // Equal ordered: a, from its start, found in b at element j: every valid
+        // element i of a equal to b's j + i, an invalid one of a matching anything,
+        // one of b past its end matching nothing.
+        b.i32const(all).localSet(Local.t2);
+        for (let i = 0; i < n; i++)
+        {
+            equalTo(i);
+            b.localGet(Local.t1).op(I32.and);
+            if (i > 0)
+            {
+                b.i32const(i).op(I32.shrU).i32const(all & ~((1 << (n - i)) - 1)).op(I32.or);
+            }
+            b.i32const(all);
+            validA(i);
+            b.select();
+            b.localGet(Local.t2).op(I32.and).localSet(Local.t2);
+        }
+    }
+    if (polarity === 1)
+    {
+        b.localGet(Local.t2).i32const(all).op(I32.xor).localSet(Local.t2);
+    }
+    else if (polarity === 3)
+    {
+        b.localGet(Local.t2).localGet(Local.t1).op(I32.xor).localSet(Local.t2);
+    }
+    if (flagsLive)
+    {
+        // CF IntRes2 not zero, ZF b shorter than n, SF a shorter, OF IntRes2's bit 0,
+        // before the output, whose writes may take the locals.
+        e.eagerWrite(CF | PF | AF | ZF | SF | OF);
+        b.localGet(Local.t2).i32const(0).op(I32.ne);
+        e.orFlag(CF);
+        b.localGet(Local.t1).i32const(all).op(I32.ne);
+        e.orFlag(ZF);
+        b.localGet(Local.t0).i32const(all).op(I32.ne);
+        e.orFlag(SF);
+        b.localGet(Local.t2).i32const(1).op(I32.and);
+        e.orFlag(OF);
+    }
+    if (op.endsWith('i'))
+    {
+        // The index of the least significant bit set, or the most's; n for none.
+        b.i32const(n);
+        if ((how & 0x40) !== 0)
+        {
+            b.i32const(31).localGet(Local.t2).op(0x67).op(I32.sub); // i32.clz
+        }
+        else
+        {
+            b.localGet(Local.t2).op(0x68); // i32.ctz
+        }
+        b.localGet(Local.t2).op(I32.eqz);
+        b.select();
+        writeReg(e, 1, 4, false);
+    }
+    else if ((how & 0x40) !== 0)
+    {
+        // A mask of elements: each bit spread over its element.
+        const bits = words ? Array.from({ length: 8 }, (_, i)=>[1 << i, 0]).flat()
+            : Array.from({ length: 16 }, (_, i)=>1 << (i & 7));
+        b.localGet(Local.t2);
+        simd(SIMD.i16x8Splat);
+        if (!words)
+        {
+            // Bytes 0..7 from the low byte of the mask, 8..15 from the high one.
+            b.localTee(left).localGet(left);
+            b.op(0xfd, [SIMD.shuffle, ...Array.from({ length: 16 }, (_, at)=>(at < 8 ? 0 : 1))]);
+        }
+        b.v128const(bits);
+        simd(SIMD.and);
+        b.v128const(bits);
+        simd(words ? SIMD.i16x8Eq : SIMD.i8x16Eq);
+        b.localSet(e.xmmLocal(0, true));
+    }
+    else
+    {
+        b.v128const(new Array(16).fill(0)).localGet(Local.t2);
+        b.op(0xfd, [SIMD.i32x4ReplaceLane, 0]);
+        b.localSet(e.xmmLocal(0, true));
     }
 }
 
 // --- operand access ---
 
+/** The SSE instructions whose 16-byte memory operand need not be aligned. */
+const UNALIGNED = new Set(['movups', 'movupd', 'movdqu', 'lddqu']);
+
 /**
- * Computes a memory operand's address into `addr`; nothing for a register.
+ * Computes a memory operand's address into `addr` (`prepare`, long mode's
+ * window included); nothing for a register.
  * `store` when the operand is only written and `noteStore` follows at once:
  * the page test then covers code too, one test rather than two.
  *
  * @param {E} e @param {Operand} operand @param {boolean} [store]
  */
 function prepareAddress(e, operand, store = false){
-    if (operand.kind === 'mem')
+    prepare(e, operand, { store });
+    if (operand.kind === 'mem' && operand.size === 16 && e.width.bits === 64
+        && !UNALIGNED.has(e.current.op))
     {
-        emitAddress(e, operand, true);
-        e.b.localSet(Local.addr);
-        checkAccess(e, operand.size, { store });
+        // Long mode's reference is the processor's: a legacy SSE instruction's
+        // 16-byte operand misaligned is #GP (the 32-bit emitter lets it through).
+        e.b.localGet(Local.addr).i32const(15).op(I32.and);
+        e.openGuard('misaligned', EMPTY);
+        e.exitBefore(e.current.eip, Exit.FAULT, 13);
+        e.close();
     }
 }
 
@@ -989,18 +1788,26 @@ function readV(e, operand, width){
         return;
     }
     prepareAddress(e, operand);
+    // `addr` whole, not a wrapped sum's offset (`readAddress`): an x64 host's
+    // vector load adds an offset to the memory's base in an instruction of its own.
     b.localGet(Local.addr);
     if (width === 16)
     {
-        b.simdMem(SIMD.load, { align: 4, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load, { ...ram(e), align: 4 });
     }
     else if (width === 8)
     {
-        b.simdMem(SIMD.load64Zero, { align: 3, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load64Zero, { ...ram(e), align: 3 });
+    }
+    else if (width === 2)
+    {
+        // A word into a zero vector's first lane (pmovsxbq's and pmovzxbq's source).
+        b.v128const(new Array(16).fill(0));
+        b.simdMem(SIMD.load16Lane, { ...ram(e), align: 1, lane: 0 });
     }
     else
     {
-        b.simdMem(SIMD.load32Zero, { align: 2, offset: e.layout.ramBase });
+        b.simdMem(SIMD.load32Zero, { ...ram(e), align: 2 });
     }
 }
 
@@ -1036,15 +1843,15 @@ function writeV(e, operand, pushValue, width = 16){
     }
     if (width === 16)
     {
-        b.simdMem(SIMD.store, { align: 4, offset: e.layout.ramBase });
+        b.simdMem(SIMD.store, { ...ram(e), align: 4 });
     }
     else if (width === 8)
     {
-        b.simdMem(SIMD.store64Lane, { align: 3, offset: e.layout.ramBase, lane: 0 });
+        b.simdMem(SIMD.store64Lane, { ...ram(e), align: 3, lane: 0 });
     }
     else
     {
-        b.simdMem(SIMD.store32Lane, { align: 2, offset: e.layout.ramBase, lane: 0 });
+        b.simdMem(SIMD.store32Lane, { ...ram(e), align: 2, lane: 0 });
     }
 }
 
@@ -1057,7 +1864,7 @@ function readM(e, operand){
         return;
     }
     prepareAddress(e, operand);
-    b.localGet(Local.addr).load('i64', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).load('i64', ram(e));
 }
 
 /**
@@ -1073,6 +1880,9 @@ function writeM(e, operand, pushValue){
         const mm = e.mmLocal(physical, true);
         pushValue?.();
         b.localSet(mm);
+        // Which registers this run wrote, for the exit (`MMX_WRITTEN_SHIFT`).
+        b.localGet(e.mmxTouchedLocal()).i32const(1 << MMX_WRITTEN_SHIFT + physical).op(I32.or)
+            .localSet(e.mmxTouchedLocal());
         // The register's x87 view follows its MMX view, so the two agree where
         // they meet again later in the region (see `x87FromMmx`).
         x87FromMmx(e, physical, mm);
@@ -1093,7 +1903,7 @@ function writeM(e, operand, pushValue){
         b.localGet(Local.addr);
         b.localGet(Local.t64);
     }
-    b.store('i64', { offset: e.layout.ramBase });
+    b.store('i64', ram(e));
 }
 
 /**
@@ -1183,35 +1993,53 @@ function pushLow(e, operand, double, again = false){
     const { b } = e;
     if (operand.kind === 'xmm')
     {
+        const low = e.lows.get(/** @type {number} */ (operand.reg));
+        if (low !== undefined && low.double === double)
+        {
+            b.localGet(low.local);
+            return;
+        }
         b.localGet(e.xmmLocal(/** @type {number} */ (operand.reg)));
         b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+        if (e.controls.length === e.blockDepth)
+        {
+            // Taken out once: the block's later scalar reads have it.
+            const local = e.lowLocal(/** @type {number} */ (operand.reg), double);
+            b.localTee(local);
+            setLow(e, operand, local, double);
+        }
         return;
     }
     if (!again)
     {
         prepareAddress(e, operand);
     }
-    b.localGet(Local.addr).load(double ? 'f64' : 'f32', { offset: e.layout.ramBase });
+    b.load(double ? 'f64' : 'f32', ramAt(readAddress(e, operand)));
 }
 
 /**
- * Whether a scalar float form is worked on its low lane alone (`scalarFloat`,
- * `scalarSelect`) rather than as the vector form with that lane shuffled into
- * dst: on a host whose default NaN is positive, an arm64 one. There the
- * vector form's fix-up of the default NaN and the shuffle -- a register copy
- * and four lane moves -- made one `mulss` fourteen instructions around the
- * multiply, six this way. On x86 the vector form is the multiply and one
- * blend, and the scalar one ran slower (Chromium 141, cork-bench paired:
- * fmath-sse 1.18, game-sse 1.02).
+ * Whether a scalar load leaves its value in the low lane's local alone and owes
+ * the vector, zeroed (`pendingLows`), rather than loading the vector: on a host
+ * whose default NaN is positive, an arm64 one. On x64 the vector load is the
+ * one `movss` that clears the other lanes, where the zeroed vector put back
+ * costs a zeroing and an insert at the block's end: owed there, cork-bench
+ * game-sse took 1.4 % more machine instructions an iteration and fmath-sse
+ * 1.7 % fewer.
  *
  * @param {E} e
  */
-const scalarsApart = e=>!e.context.features.defaultNaNNegative;
+const owesLoads = e=>e.context.features.armHost ?? !e.context.features.defaultNaNNegative;
 
 /**
  * The scalar form of a float arithmetic instruction (`addss` to `divsd`,
- * `sqrtss`, `sqrtsd`) where `scalarsApart`: the low lane in wasm's own f32
- * or f64 arithmetic, put back over dst, whose other lanes stay as they were.
+ * `sqrtss`, `sqrtsd`): the low lane in wasm's own f32 or f64 arithmetic, put
+ * back over dst, whose other lanes stay as they were. The vector form with that
+ * lane shuffled into dst made one `mulss` fourteen arm64 instructions around the
+ * multiply (the default NaN's fix-up, a register copy and four lane moves), six
+ * this way; on x64 it was the multiply and a blend each time, where the lane
+ * held in a local (`lows`) is the multiply alone and one insert at the block's
+ * end (cork-bench under valgrind, V8 14.6: fmath-sse 7.4 % fewer machine
+ * instructions an iteration; game-sse, whose blocks are short, 0.1 % more).
  *
  * @param {E} e @param {Operand} dst @param {Operand} src
  * @param {number} opcode  the f32 or f64 operation
@@ -1219,23 +2047,135 @@ const scalarsApart = e=>!e.context.features.defaultNaNNegative;
  */
 function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
     const { b } = e;
-    b.localGet(e.xmmLocal(/** @type {number} */ (dst.reg)));
+    const reg = /** @type {number} */ (dst.reg);
+    if (e.controls.length === e.blockDepth)
+    {
+        // The vector's lane left owed (`pendingLows`): the next scalar form
+        // reads the local, and the lane is put back once, where needed.
+        oweOtherWidth(e, reg, double);
+        if (!unaryForm)
+        {
+            pushLow(e, dst, double);
+        }
+        pushLow(e, src, double);
+        b.op(opcode);
+        if (!e.context.features.defaultNaNNegative)
+        {
+            scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+        }
+        const low = e.lowLocal(reg, double);
+        b.localSet(low);
+        oweLow(e, reg, low, double, 'replace');
+        return;
+    }
+    b.localGet(e.xmmLocal(reg));
     if (!unaryForm)
     {
         pushLow(e, dst, double);
     }
     pushLow(e, src, double);
     b.op(opcode);
-    scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+    if (!e.context.features.defaultNaNNegative)
+    {
+        scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+    }
+    const low = e.lowLocal(/** @type {number} */ (dst.reg), double);
+    b.localTee(low);
     b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
     writeV(e, dst, null);
+    setLow(e, dst, low, double);
+}
+
+/** The forms that work on an owed low lane (`pendingLows`) as it is. */
+const OWING = new Set(['addss', 'subss', 'mulss', 'divss', 'addsd', 'subsd', 'mulsd', 'divsd',
+    'sqrtss', 'sqrtsd', 'movss', 'movsd', 'comiss', 'ucomiss', 'comisd', 'ucomisd',
+    'cvtss2sd', 'cvtsd2ss', 'cvttss2si', 'cvtss2si', 'cvttsd2si', 'cvtsd2si']);
+
+/** The whole-register moves, which hand an owed lane on between registers. */
+const MOVES = new Set(['movaps', 'movups', 'movapd', 'movupd', 'movdqa', 'movdqu']);
+
+/**
+ * Whether a form works on its registers' owed low lanes as they are.
+ *
+ * @param {Instruction} instruction
+ */
+function owes({ op, operands }){
+    return OWING.has(op)
+        || MOVES.has(op) && operands[0].kind === 'xmm' && operands[1].kind === 'xmm';
 }
 
 /**
- * `minss` to `maxsd` where `scalarsApart`: the low lane of dst the lesser
- * (`min`) or the greater of its own and src's, as a compare and a select --
- * src's whenever the compare is false, a NaN or two zeros included -- put
- * back over dst.
+ * Puts back a register's owed lane of the other width, before a form of
+ * this width holds its low lane in a local of its own.
+ *
+ * @param {E} e @param {number} reg @param {boolean} double
+ */
+function oweOtherWidth(e, reg, double){
+    const low = e.lows.get(reg);
+    if (low !== undefined && low.double !== double)
+    {
+        e.settleLows([reg], true);
+        e.lows.delete(reg);
+    }
+}
+
+/**
+ * Notes that `local` alone holds the register's low lane (`pendingLows`),
+ * its vector's lane owed: `zero`, all the other lanes are zero, else they
+ * stay as the vector has them (a lane still owed as zero stays so).
+ *
+ * @param {E} e @param {number} reg @param {number} local @param {boolean} double
+ * @param {'replace' | 'zero'} how
+ */
+function oweLow(e, reg, local, double, how){
+    e.lows.set(reg, { local, double });
+    e.xmmWritten.add(reg);
+    e.pendingLows.set(reg, how === 'zero' || e.pendingLows.get(reg) === 'zero' ? 'zero' : how);
+}
+
+/**
+ * A whole-register copy from a register whose low lane a local holds
+ * (`lows`): the vector as it stands and that local both copied, so the
+ * copy owes what the source owes, and neither is put back for it.
+ *
+ * @param {E} e @param {number} to @param {number} from
+ */
+function copyHeld(e, to, from){
+    const { b } = e;
+    const held = /** @type {{ local: number, double: boolean }} */ (e.lows.get(from));
+    const owed = e.pendingLows.get(from);
+    e.pendingLows.delete(to);
+    e.lows.delete(to);
+    b.localGet(/** @type {number} */ (e.xmmLocals.get(from)))
+        .localSet(/** @type {number} */ (e.xmmLocals.get(to)));
+    const low = e.lowLocal(to, held.double);
+    b.localGet(held.local).localSet(low);
+    e.xmmWritten.add(to);
+    e.lows.set(to, { local: low, double: held.double });
+    if (owed !== undefined)
+    {
+        e.pendingLows.set(to, owed);
+    }
+}
+
+/**
+ * Notes that `local` holds dst's low lane as the vector does, for the next
+ * scalar form's read (`lows`): where the write is the block's own straight
+ * line, which every later read in the block comes after.
+ *
+ * @param {E} e @param {Operand} dst @param {number} local @param {boolean} double
+ */
+function setLow(e, dst, local, double){
+    if (e.controls.length === e.blockDepth)
+    {
+        e.lows.set(/** @type {number} */ (dst.reg), { local, double });
+    }
+}
+
+/**
+ * `minss` to `maxsd`: the low lane of dst the lesser (`min`) or the greater
+ * of its own and src's, as a compare and a select -- src's whenever the
+ * compare is false, a NaN or two zeros included -- put back over dst.
  *
  * @param {E} e @param {Operand} dst @param {Operand} src @param {boolean} double
  * @param {boolean} min
@@ -1257,7 +2197,8 @@ function scalarSelect(e, dst, src, double, min){
 
 /**
  * The scalar result on the stack, a NaN while no operand was, made the
- * processor's default NaN, sign set, as `defaultNaN` does a lane. The common
+ * processor's default NaN, sign set, as `defaultNaN` does a lane: on a host
+ * whose NaN is fixed up (`exactNaN`), as the packed forms are. The common
  * path is the result compared with itself; the operands are read again only
  * when that finds a NaN.
  *
@@ -1594,11 +2535,10 @@ function compare(e, predicate, double){
 function comparison(e, dst, src, double, flagsLive){
     const { b } = e;
     prepareAddress(e, src);
-    readV(e, dst, 16);
-    b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+    // The low lanes as the scalar forms hold them (`lows`).
+    pushLow(e, dst, double);
     b.localSet(double ? Local.d0 : Local.f0);
-    readV(e, src, double ? 8 : 4);
-    b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+    pushLow(e, src, double, true);
     b.localSet(double ? Local.d1 : Local.f1);
     if (!flagsLive)
     {
@@ -1606,25 +2546,33 @@ function comparison(e, dst, src, double, flagsLive){
     }
     const a = double ? Local.d0 : Local.f0;
     const c = double ? Local.d1 : Local.f1;
-    const [feq, flt, fne] = double ? [0x61, 0x63, 0x62] : [F32.eq, F32.lt, F32.ne];
-    // Read by the branch right after it alone: the branch compares f0 and f1.
-    if (e.fusesCompare(e.region.blocks[e.blockIndex].instructions.indexOf(e.current), ()=>false))
+    // The block's branch compares the operands itself. A compiler schedules
+    // other work between the two (an x64 gcc a store, a multiply); what
+    // stands there leaves the flags be. Read by that branch alone, the flags
+    // are never made, and a way out between the two makes them
+    // (`payFloatCompare`); read past it, or by no such branch, they wait in
+    // the record as the operands' bits (`recordFloatCompare`). The scalar
+    // forms use f0 and f1, so the operands wait in locals of their own.
+    const instructions = e.region.blocks[e.blockIndex].instructions;
+    const at = instructions.indexOf(e.current);
+    const branch = e.branchReads(at, keepsFlags);
+    const alone = branch && e.fusesCompare(at, keepsFlags);
+    if (!alone)
     {
-        e.fcmp = { a, c, double };
+        e.recordFloatCompare(a, c, double);
+    }
+    if (!branch)
+    {
         return;
     }
-    e.eagerWrite(CF | PF | AF | ZF | SF | OF);
-    // unordered: ZF = PF = CF = 1
-    b.localGet(a).localGet(a).op(fne);
-    b.localGet(c).localGet(c).op(fne);
-    b.op(I32.or);
-    b.localSet(Local.t1);
-    b.localGet(Local.t1);
-    e.orFlag(PF);
-    b.localGet(Local.t1).localGet(a).localGet(c).op(feq).op(I32.or);
-    e.orFlag(ZF);
-    b.localGet(Local.t1).localGet(a).localGet(c).op(flt).op(I32.or);
-    e.orFlag(CF);
+    if (at + 2 < instructions.length)
+    {
+        const [ka, kc] = [e.compareLocal(0, double), e.compareLocal(1, double)];
+        b.localGet(a).localSet(ka).localGet(c).localSet(kc);
+        e.fcmp = { a: ka, c: kc, double, recorded: !alone };
+        return;
+    }
+    e.fcmp = { a, c, double, recorded: !alone };
 }
 
 /**
@@ -1662,6 +2610,79 @@ function scalarToInt(e, double){
     }
     b.op(I32.or);
     b.op(0x1b); // select(indefinite, sat, bad)
+}
+
+/**
+ * As `scalarToInt`, to a quadword: the indefinite (2^63's bit alone) where
+ * the value is a NaN or out of the i64 range.
+ *
+ * @param {E} e @param {boolean} double
+ */
+function scalarToQuad(e, double){
+    const { b } = e;
+    const local = double ? Local.d0 : Local.f0;
+    b.i64const(-0x8000000000000000n);
+    b.localGet(local);
+    b.op(0xfc, [double ? 0x06 : 0x04]); // i64.trunc_sat_f64_s / f32_s
+    b.localGet(local).localGet(local).op(double ? 0x62 : F32.ne);
+    b.localGet(local);
+    if (double)
+    {
+        b.f64const(9223372036854775808).op(0x66); // f64.ge
+    }
+    else
+    {
+        b.f32const(9223372036854775808).op(F32.ge);
+    }
+    b.op(I32.or);
+    b.localGet(local);
+    if (double)
+    {
+        b.f64const(-9223372036854775808).op(0x63); // f64.lt
+    }
+    else
+    {
+        b.f32const(-9223372036854775808).op(F32.lt);
+    }
+    b.op(I32.or);
+    b.op(0x1b); // select(indefinite, sat, bad)
+}
+
+/**
+ * Long mode's movq between an xmm or mm register and a general register or a
+ * quadword of memory: into an xmm the high quadword cleared.
+ *
+ * @param {E} e @param {Operand} dst @param {Operand} src
+ */
+function moveQuad(e, dst, src){
+    const { b } = e;
+    if (dst.kind === 'xmm' || dst.kind === 'mm')
+    {
+        prepareAddress(e, src);
+        if (dst.kind === 'mm')
+        {
+            readOp(e, src);
+            writeM(e, dst, null);
+            return;
+        }
+        b.v128const(new Array(16).fill(0));
+        readOp(e, src);
+        b.op(0xfd, [SIMD.i64x2ReplaceLane, 0]);
+        writeV(e, dst, null);
+        return;
+    }
+    prepareAddress(e, dst);
+    writeOp(e, dst, ()=>{
+        if (src.kind === 'xmm')
+        {
+            readV(e, src, 16);
+            b.op(0xfd, [SIMD.i64x2ExtractLane, 0]);
+        }
+        else
+        {
+            readM(e, src);
+        }
+    });
 }
 
 /**

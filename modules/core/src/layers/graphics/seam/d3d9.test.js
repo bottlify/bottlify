@@ -20,11 +20,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
-import { createPublisher } from './com.js';
+import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import {
-    BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, transformSlot,
-} from './shadow.js';
+    BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, storeCount, transformSlot,
+} from './block.js';
 import * as guestCode from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import { commandSlot } from '../d3d9/commands.js';
@@ -46,7 +46,7 @@ import {
     IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS, IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9,
     IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex, IID_IDirect3DSwapChain9Ex,
 } from '../d3d9/interfaces.js';
-import { guidBytes } from './d3d7.js';
+import { guidBytes } from '../../../system/guid.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
@@ -54,10 +54,12 @@ import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes, refreshOf } from '../../win32/user32/display.js';
 import { createSystemFunctions } from '../../win32/user32/system.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
+const E_NOTIMPL = 0x80004001;
 /** A query whose answer is not ready yet. */
 const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002;
@@ -105,7 +107,7 @@ function machine(){
         where.bytes.set(value, where.at);
     };
 
-    const memory = {
+    const memory = withPointers({
         readBytes,
         writeBytes,
         /** @param {number} address */
@@ -117,7 +119,7 @@ function machine(){
         writeU32: (address, value)=>writeBytes(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ])),
-    };
+    });
 
     /** @type {Map<number, any>} */
     const registered = new Map();
@@ -150,7 +152,9 @@ function machine(){
 
     return {
         memory,
-        services: { readMemory: readBytes, writeMemory: writeBytes },
+        /** The first four megabytes, as words: what a side sharing guest memory writes into. */
+        words: new Int32Array(low.buffer),
+        services: withPointers({ readMemory: readBytes, writeMemory: writeBytes }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
 
@@ -212,9 +216,10 @@ function machine(){
  *           windowClientSize?: ((window: number) => { width: number,
  *               height: number } | null) | null,
  *           screen?: typeof SCREEN & { refresh?: number }, paced?: boolean,
- *           traps?: Set<string> }} [options]
+ *           traps?: Set<string>, windowShown?: (window: number) => boolean }} [options]
  *     `screen` the display, its rate among it; `paced` a Present's wait counted; `traps`
- *     the guest routines kept as traps, by name or group
+ *     the guest routines kept as traps, by name or group; `windowShown` the windows the
+ *     desktop shows
  */
 function seamed(options = {}){
     const box = machine();
@@ -222,7 +227,9 @@ function seamed(options = {}){
     const divergences = [];
     /** @type {(number | boolean | string | undefined)[][]} */
     const resolutions = [];
-    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const publisher = createPublisher({ publishInterface: box.publishInterface,
+        cells: options.shadow
+            ? createCountCells({ allocate: box.allocate, memory: box.memory }) : undefined });
     // One measurable window, so a size asked for as zero has a client area to
     // be answered with; a test that wants the unmeasurable path passes null.
     /** @param {number} window */
@@ -257,6 +264,7 @@ function seamed(options = {}){
         waitUntil: options.paced ? (/** @type {number} */ deadline,
             /** @type {number} */ hr)=>hr : undefined,
         windowClientSize,
+        windowShown: options.windowShown,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         /** @param {number} w @param {number} h
@@ -408,7 +416,7 @@ test('the root makes a device and describes itself in the shape the header gives
     assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0300);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0300);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxTextureWidth), 4096);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 1);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 4);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxPixelShader30InstructionSlots), 512,
         'the last field was written, so nothing past it was');
     assert.equal(h.fields.readF32(caps + D3DCAPS9.MaxPointSize), 64);
@@ -461,6 +469,39 @@ test('the raster status follows the display\'s clock, which the caps say can be 
     h.release(root);
 });
 
+test('a target made by another device is not bound', ()=>{
+    // Wine's d3d9 test_render_target_device_mismatch.
+    const h = seamed();
+    const root = h.create();
+    const first = h.createDevice(root).device;
+    const second = h.createDevice(root).device;
+    const out = 0x3200;
+    assert.equal(h.device(second, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(first, 'SetRenderTarget', [0, target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(first, 'SetDepthStencilSurface', [target]), D3DERR_INVALIDCALL);
+    assert.equal(h.device(second, 'SetRenderTarget', [0, target]), D3D_OK);
+});
+
+test('a fullscreen device gives the display back to the registry mode at its last release', ()=>{
+    // Wine's test_mode_change: whatever mode was set since, and only for a
+    // device that set one.
+    const h = seamed();
+    const root = h.create();
+    const windowed = h.createDevice(root).device;
+    assert.equal(h.release(windowed), 0);
+    assert.deepEqual(h.resolutions, [], 'a windowed device set no mode, and restores none');
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    assert.notEqual(device, 0);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true]);
+    assert.equal(h.release(device), 0);
+    assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined]);
+    assert.equal(h.resolutions.length, 3, 'the mode, the window placed in it, the mode given back');
+    h.release(root);
+});
+
 test('a fullscreen device names the window it takes with it', ()=>{
     // The real device places its window at the mode's size; the window is
     // named so whoever answers can do the same, and fullscreen is the signal.
@@ -472,6 +513,21 @@ test('a fullscreen device names the window it takes with it', ()=>{
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true]);
 });
 
+test('D3DCREATE_NOWINDOWCHANGES sets the mode and leaves the window as it is', ()=>{
+    // Wine's test_window_style: the device window keeps its rectangle.
+    const D3DCREATE_NOWINDOWCHANGES = 0x800;
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: 0x777 },
+    D3DCREATE.HARDWARE_VERTEXPROCESSING | D3DCREATE_NOWINDOWCHANGES);
+    assert.notEqual(device, 0);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.resolutions.map(([w, hh, window])=>[w, hh, window]),
+        [[640, 480, undefined], [640, 480, 0], [640, 480, 0]],
+        'the mode, and no window named to place');
+});
+
 test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
     // A mode switch resizes the window and the program hears WM_SIZE for it
     // once its device exists. A window already at the mode's size hears
@@ -480,11 +536,11 @@ test('a fullscreen device tells its window the mode at its first frame, once', (
     const root = h.create();
     const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
         Windowed: 0, hDeviceWindow: 0x777 });
-    assert.equal(h.resolutions.length, 1, 'creation placed the window');
+    assert.equal(h.resolutions.length, 2, 'creation set the mode and placed the window');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true, 'announced']);
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
-    assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
+    assert.equal(h.resolutions.length, 3, 'the second frame says nothing');
 
     const windowed = h.createDevice(h.create()).device;
     const before = h.resolutions.length;
@@ -530,8 +586,8 @@ test('a reset that changes the mode names the window it presents into', ()=>{
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
-        'back to windowed, the screen waits for a frame');
+    assert.deepEqual(h.resolutions.at(-1), [1280, 1024, undefined, undefined],
+        'back to windowed, the display is the registry mode until a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
         'and the frame names the window');
@@ -574,6 +630,9 @@ test('a zero back buffer size windowed is the window\'s client area, written bac
     assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, false],
         'and the screen its first frame takes is its window');
     assert.deepEqual(h.divergences, [], 'a window that was measured is not an assumption');
+    assert.equal(h.device(device, 'Present', [0x1000, 0, 0, 0]), D3D_OK);
+    assert.ok(h.divergences.some(line=>/Present with a source or destination rectangle/
+        .test(line)), 'a rectangle not honoured is said');
     h.release(device);
     h.release(root);
 });
@@ -664,9 +723,8 @@ test('the adapter lists its modes per format, bounded by the display and not the
     // The monitor is the one user32 names for every window, so the handle
     // goes straight into GetMonitorInfo (Wine's d3d9 device.c requires
     // !!monitor); an adapter that does not exist has none.
-    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
-        classes: new Map() });
-    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler());
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map() });
+    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler([0, 1]));
     assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
     assert.equal(ask('GetAdapterMonitor', [1]), 0);
     assert.equal(ask('RegisterSoftwareDevice', [0x1234]), D3D_OK);
@@ -680,7 +738,7 @@ test('a texture is made without a shared handle, described and locked at this ve
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateTexture',
-            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         assert.equal(h.device(device, 'CreateTexture',
             [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -856,6 +914,13 @@ test('a surface names its container: its texture, its swap chain, or its device'
     // The same pointer, as single inheritance lays it out: D3DX casts a base
     // texture back to the texture by its type and calls GetLevelDesc through it.
     assert.equal(base.pointer, texture, 'the base texture is the texture');
+    putGuid(h, iid, [0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46]);
+    assert.deepEqual(containerOf(level), { hr: D3D_OK, pointer: texture },
+        'and so is its IUnknown');
+    h.release(texture);
+    assert.equal(h.box.call(texture, 0, [iid, container]), D3D_OK);
+    assert.equal(h.box.memory.readU32(container), texture, 'QueryInterface for IUnknown too');
+    h.release(texture);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelCount')), 1);
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelDesc'),
         [0, out]), D3D_OK);
@@ -898,7 +963,7 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     const { device } = h.createDevice(root);
     const out = 0x3000;
     assert.equal(h.device(device, 'CreateCubeTexture',
-        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), D3DERR_INVALIDCALL,
+        [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000]), E_NOTIMPL,
     'a shared handle is the extended interface\'s');
     assert.equal(h.device(device, 'CreateCubeTexture',
         [8, 0, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
@@ -921,7 +986,8 @@ test('a cube texture is made, and answers for its faces through its own vtable',
     assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 32);
     const fifth = h.fields.readU32(locked + D3DLOCKED_RECT.pBits);
     assert.equal(call('UnlockRect', [5, 0]), D3D_OK);
-    assert.equal(call('UnlockRect', [5, 0]), D3DERR_INVALIDCALL, 'a face owes its unlock');
+    assert.equal(call('UnlockRect', [5, 0]), D3D_OK,
+        'a face not locked is forgiven (test_lockrect_invalid)');
     assert.equal(call('LockRect', [0, 0, locked, 0, 0]), D3D_OK);
     assert.notEqual(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), fifth);
     assert.equal(call('UnlockRect', [0, 0]), D3D_OK);
@@ -959,7 +1025,7 @@ test('a volume texture is made, and its levels lock, describe and name it as a b
         const { device } = h.createDevice(root);
         const out = 0x3000;
         assert.equal(h.device(device, 'CreateVolumeTexture',
-            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), D3DERR_INVALIDCALL,
+            [4, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out, 0x4000]), E_NOTIMPL,
         'a shared handle is the extended interface\'s');
         h.box.memory.writeU32(out, 0xdeadbeef);
         assert.equal(h.device(device, 'CreateVolumeTexture',
@@ -1225,6 +1291,26 @@ test('a shader ending just short of the end of its memory is read without readin
     h.release(root);
 });
 
+test('a shader whose def holds a literal that looks like a comment is read to its end', ()=>{
+    // 3DMark06's sun light: def c16, 0.5, 0, 16, 9.999998, and 9.999998 is
+    // 0x411ffffe, a "comment" of 16671 tokens to a scan that took any word for one.
+    const h = seamed({ caps: { pixelShaderVersion: { major: 3, minor: 0 } } });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const at = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(Uint32Array.from([
+        versionToken(SHADER_KIND.PIXEL, 3, 0),
+        0x05000051, 0xa00f0010, 0x3f000000, 0, 0x41800000, 0x411ffffe,
+        0x02000001, 0x800f0800, 0xa0e40010,
+        END_TOKEN,
+    ]).buffer));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreatePixelShader', [at, out]), D3D_OK);
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a shader on a device that runs none is refused with the pointer cleared', ()=>{
     const h = seamed({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
     const root = h.create();
@@ -1239,6 +1325,32 @@ test('a shader on a device that runs none is refused with the pointer cleared', 
     assert.ok(h.divergences.some(line=>line.includes('pixel shader')));
     assert.equal(h.release(device), 0);
     h.release(root);
+});
+
+test('a device whose last reference a state block held still lets go of its Direct3D object', ()=>{
+    // Wine's test_refcount: the state block's Release destroys the device.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.equal(h.device(device, 'BeginStateBlock'), D3D_OK);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'EndStateBlock', [out]), D3D_OK);
+    const block = h.box.memory.readU32(out);
+    assert.equal(h.release(device), 1, 'the block holds the device');
+    assert.equal(h.release(block), 0);
+    assert.equal(h.release(root), 0, 'and the device held the root no longer');
+});
+
+test('a loss the device is told of reaches the guest\'s TestCooperativeLevel at once', ()=>{
+    // The focus window's hook loses the device (`focus.js`); the guest
+    // answers D3D_OK from the block only while the block says so.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const block = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0);
+    h.object(device).injectDeviceLoss(false);
+    assert.notEqual(h.box.memory.readU32(block + SHADOW.COOPERATIVE), 0, 'the host\'s to answer');
 });
 
 test('a state block is recorded, handed back, and applied through its own vtable', ()=>{
@@ -1333,7 +1445,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)],
         [0xffff0000, 0xffffffff], 'two bytes, and nothing past them');
     assert.equal(onOcclusion('GetData', [data, 8, 1]), D3D_OK);
-    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0xffffffff]);
+    assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0],
+        'eight bytes of room take the count as 64 bits (test_occlusion_query)');
     assert.equal(h.release(occlusion), 0);
     assert.equal(h.release(device), 0);
     h.release(root);
@@ -1393,7 +1506,7 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0x4000, 12]), D3D_OK);
         assert.equal(h.device(device, 'DrawPrimitiveUP', [4, 1, 0, 12]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'DrawIndexedPrimitive', [4, 0xffffffff, 0, 3, 0, 1]),
-            D3DERR_INVALIDCALL, 'no indices bound');
+            D3D_OK, 'no indices bound draws nothing (test_draw_indexed)');
         assert.equal(h.device(device, 'DrawRectPatch', [1, 0, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
@@ -1578,6 +1691,113 @@ test('an additional swap chain has back buffers of its own, and GetSwapChain nam
         h.release(root);
     });
 
+test('a present is shown in the window it goes into, wherever the device\'s window is', ()=>{
+    // Under the desktop window manager a windowed present shows its back
+    // buffer in the window it presents into: the chain's own, the device's
+    // for its own chain, or the one Present names; a hidden window shows
+    // nothing. A device made on a hidden helper window shows every frame
+    // through a chain into the program's visible one.
+    const GAME = 0x00020050;
+    const OTHER = 0x00020060;
+    const shownWindows = new Set([GAME]);
+    const h = seamed({ windowShown: window=>shownWindows.has(window) });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    /** @type {[string, boolean][]} */
+    const presents = [];
+    const made = h.object(device);
+    const devicePresent = made.Present;
+    made.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['device', shown]);
+        return devicePresent(shown);
+    };
+    const at = 0x3400;
+    const out = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS9, { Windowed: 1, SwapEffect: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8, BackBufferWidth: 32, BackBufferHeight: 24,
+        BackBufferCount: 1, hDeviceWindow: GAME });
+    assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    const madeChain = h.object(chain);
+    const chainPresent = madeChain.Present;
+    madeChain.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['chain', shown]);
+        return chainPresent(shown);
+    };
+    /** @param {number} window */
+    const presentChain = window=>
+        h.box.call(chain, slot(IDIRECT3DSWAPCHAIN9_SLOTS, 'Present'), [0, 0, window, 0, 0]);
+
+    assert.equal(presentChain(0), D3D_OK);
+    assert.equal(presentChain(OTHER), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, GAME, 0]), D3D_OK);
+    assert.deepEqual(presents, [['chain', true], ['chain', false], ['device', false],
+        ['device', true]], 'into its own shown window, not into a hidden override, not into'
+        + ' the hidden device window, into the shown window the device\'s present names');
+    assert.deepEqual(h.resolutions, [[64, 64, HWND, false]],
+        'the device\'s first frame shown takes the screen');
+    assert.deepEqual(h.divergences.filter(line=>/shown window|not shown/.test(line)), [],
+        'one window showing pictures is done whole');
+
+    // The device's window shown as well: its picture is shown too, and two
+    // windows' pictures take the one screen in turn, which is said.
+    shownWindows.add(HWND);
+    presents.length = 0;
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(presentChain(0), D3D_OK);
+    assert.deepEqual(presents, [['device', true], ['chain', true]]);
+    assert.ok(h.divergences.some(line=>/two shown windows/.test(line)), h.divergences.join('\n'));
+
+    assert.equal(h.release(chain), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('the window a present shows a picture in is remembered: what the screen shows there is'
+    + ' that picture, not the window\'s own surface', ()=>{
+    // A windowed device's frames never reach the window's GDI surface; a
+    // paint pass that composed the desktop again put that surface, black,
+    // between them (a game's films and menus flickered). The screen keeps
+    // the picture in the window it was shown in (graphics/module.js).
+    const GAME = 0x00020050;
+    const shownWindows = new Set([GAME]);
+    const h = seamed({ windowShown: window=>shownWindows.has(window) });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.equal(h.seam.presentedWindow(), null, 'nothing shown yet');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentedWindow(), null, 'the hidden device window shows nothing');
+    assert.equal(h.device(device, 'Present', [0, 0, GAME, 0]), D3D_OK);
+    assert.deepEqual(h.seam.presentedWindow(), { window: GAME, fullscreen: false });
+    shownWindows.add(HWND);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.seam.presentedWindow(), { window: HWND, fullscreen: false },
+        'the last picture shown');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a full-screen device\'s present is shown whatever its window says', ()=>{
+    const h = seamed({ windowShown: ()=>false });
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    /** @type {boolean[]} */
+    const shown = [];
+    const made = h.object(device);
+    const present = made.Present;
+    made.Present = (/** @type {boolean} */ asked)=>{
+        shown.push(asked);
+        return present(asked);
+    };
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(shown, [true], 'it owns the screen');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 // --- Direct3D 9Ex ---
 
 /** @param {ReturnType<typeof seamed>} h @param {number} at @param {string} iid */
@@ -1600,6 +1820,9 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         assert.equal(h.box.call(ex, 0, [iid, queried]), D3D_OK);
         const base = h.box.memory.readU32(queried);
         assert.notEqual(base, 0);
+        // Single inheritance: the plain interface is the front of the extended
+        // one, the same pointer.
+        assert.equal(base, ex, 'IDirect3D9 is the IDirect3D9Ex pointer');
         assert.equal(h.root.refCount, 2, 'one object, one count');
         assert.equal(h.release(base), 1);
 
@@ -1610,6 +1833,7 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         writeIid(h, iid, IID_IDirect3DDevice9Ex);
         assert.equal(h.box.call(device, 0, [iid, queried]), D3D_OK);
         const deviceEx = h.box.memory.readU32(queried);
+        assert.equal(deviceEx, device, 'IDirect3DDevice9 is the IDirect3DDevice9Ex pointer');
         assert.equal(h.box.call(deviceEx, slot(EX_DEVICE_SLOTS, 'GetMaximumFrameLatency'),
             [0x7030]), D3D_OK);
         assert.equal(h.box.memory.readU32(0x7030), 3);
@@ -1619,6 +1843,7 @@ test('Direct3DCreate9Ex makes an IDirect3D9Ex that is an IDirect3D9, and the pla
         writeIid(h, iid, IID_IDirect3DSwapChain9Ex);
         assert.equal(h.box.call(chain, 0, [iid, queried]), D3D_OK);
         const chainEx = h.box.memory.readU32(queried);
+        assert.equal(chainEx, chain, 'and the chain\'s');
         assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
         assert.equal(h.box.call(chainEx, slot(EX_CHAIN_SLOTS, 'GetLastPresentCount'), [0x7050]),
             D3D_OK);
@@ -1727,13 +1952,38 @@ test('IDirect3D9Ex answers modes as D3DDISPLAYMODEEX, its LUID, and makes Ex dev
     assert.equal(deviceCall('ResetEx', [parameters, mode]), D3DERR_INVALIDCALL,
         'a window takes no mode');
 
-    // The depth stencil Ex create hands back through the pointer, and
-    // leaves it alone when it refuses.
+    // As the plain create does, the Ex one keeps a system-memory surface in
+    // the program's own memory (Wine's d3d9ex test_user_memory).
+    const handle = 0x71e0;
+    h.box.memory.writeU32(handle, 0x8000);
+    assert.equal(deviceCall('CreateOffscreenPlainSurfaceEx', [8, 8, D3DFMT.A8R8G8B8,
+        D3DPOOL.SYSTEMMEM, 0x71c0, handle, 0]), D3D_OK);
+    const own = h.box.memory.readU32(0x71c0);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'), [0x71f0, 0, 0]),
+        D3D_OK);
+    assert.equal(h.fields.readU32(0x71f0 + D3DLOCKED_RECT.pBits), 0x8000);
+    assert.equal(h.box.call(own, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+    assert.equal(h.release(own), 0);
+
+    // The depth stencil Ex create hands back through the pointer, leaves it
+    // alone when it refuses a usage (Wine's d3d9ex
+    // test_create_depth_stencil_surface_ex), and clears it when it refuses
+    // anything else, as the plain creates do (test_format_unknown).
     const surface = 0x71c0;
     h.box.memory.writeU32(surface, 0xdeadbeef);
     assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
         surface, 0, 2]), D3DERR_INVALIDCALL);
     assert.equal(h.box.memory.readU32(surface), 0xdeadbeef);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateRenderTargetEx', [64, 64, 0, 0, 0, 0, surface, 0, 0]],
+        ['CreateDepthStencilSurfaceEx', [64, 64, 0, 0, 0, 1, surface, 0, 0]],
+        ['CreateOffscreenPlainSurfaceEx', [64, 64, 0, 0, surface, 0, 9]],
+    ]))
+    {
+        h.box.memory.writeU32(surface, 0xdeadbeef);
+        assert.equal(deviceCall(name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.box.memory.readU32(surface), 0, `${name} cleared the pointer`);
+    }
     assert.equal(deviceCall('CreateDepthStencilSurfaceEx', [64, 64, D3DFMT.D24S8, 0, 0, 1,
         surface, 0, 0]), D3D_OK);
     h.release(h.box.memory.readU32(surface));
@@ -1763,7 +2013,7 @@ test('the adapter a Direct3D 9 program is told about is the one every generation
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.VendorId), shared.vendorId);
     assert.deepEqual([...h.box.services.readMemory(out + D3DADAPTER_IDENTIFIER9.DeviceIdentifier,
         16)], [...ADAPTER_GUID]);
-    assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'webgpu');
+    assert.equal(text(D3DADAPTER_IDENTIFIER9.Driver), 'bottlifyumd.dll');
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.WHQLLevel), 1);
     assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER9.FIELDS), 0xcdcdcdcd,
         'the padding after the fields is not written');
@@ -1898,7 +2148,7 @@ test('with guest memory, a device\'s setters and draws run in the guest, and its
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
         'SetTexture', 'SetStreamSource', 'SetVertexDeclaration', 'SetIndices', 'SetVertexShader',
         'SetPixelShader', 'SetFVF', 'SetVertexShaderConstantF', 'DrawPrimitive',
-        'DrawIndexedPrimitive', 'DrawPrimitiveUP'])
+        'DrawIndexedPrimitive', 'DrawPrimitiveUP', 'DrawIndexedPrimitiveUP'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }
@@ -2093,6 +2343,13 @@ test('a render target is set in the guest, and on the host it falls back to its 
     'the target\'s whole');
     assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGET_WIDTH),
         h.box.memory.readU32(owner + SHADOW.TARGET_HEIGHT)], [32, 16]);
+    // GetRenderTarget's pair is the surface and its count's word, the third
+    // of its interface's, there for the guest's GetRenderTarget to answer.
+    const cell = h.box.memory.readU32(target + 8);
+    assert.notEqual(cell, 0, 'the surface counts in guest memory');
+    assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGETS),
+        h.box.memory.readU32(owner + SHADOW.TARGETS + 4),
+        h.box.memory.readU32(owner + SHADOW.TARGETS_VALID) & 1], [target, cell, 1]);
     // The program lets go of the target while the device holds it: the
     // device keeps it.
     assert.equal(h.release(target), 0);
@@ -2151,18 +2408,67 @@ test('a create refused for its shared handle leaves no pointer behind', ()=>{
     // its out-parameter: a pointer from an earlier call there is a call into
     // a freed object.
     const h = seamed();
-    const root = h.create();
-    const { device } = h.createDevice(root);
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
     const out = 0x3000;
-    for (const [name, args] of /** @type {[string, number[]][]} */ ([
-        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
-        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+    for (const [name, args, hr] of /** @type {[string, number[], number][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0x4000],
+            D3DERR_INVALIDCALL],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000], D3DERR_NOTAVAILABLE],
     ]))
     {
         h.box.memory.writeU32(out, 0xdeadbeef);
-        assert.equal(h.device(device, name, args), D3DERR_INVALIDCALL, name);
+        assert.equal(h.device(device, name, args), hr, name);
         assert.equal(h.box.memory.readU32(out), 0, `${name} cleared its out-parameter`);
+    }
+});
+
+test('an Ex device keeps a system-memory surface in the program\'s own memory', ()=>{
+    // Wine's d3d9ex test_user_memory: the shared handle holds its address.
+    const h = seamed();
+    assert.equal(h.seam.publishRootEx(h.root, 0x2200), D3D_OK);
+    const { device } = h.createDevice(h.box.memory.readU32(0x2200));
+    const out = 0x3000;
+    const handle = 0x3100;
+    // Below where the seam allocates (`machine`).
+    const mem = 0x8000;
+    h.box.memory.writeU32(handle, mem);
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateOffscreenPlainSurface', [8, 8, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, handle]],
+    ]))
+    {
+        assert.equal(h.device(device, name, args), D3D_OK, name);
+        const surface = h.box.memory.readU32(out);
+        const locked = 0x3200;
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'),
+            [locked, 0, 0]), D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), mem, `${name} pBits`);
+        assert.equal(h.box.call(surface, slot(IDIRECT3DSURFACE9_SLOTS, 'UnlockRect'), []), D3D_OK);
+        assert.equal(h.release(surface), 0);
+    }
+});
+
+test('a device of the plain interface answers any shared handle with E_NOTIMPL', ()=>{
+    // Wine's test_shared_handle: before anything else is looked at.
+    const h = seamed();
+    const { device } = h.createDevice(h.create());
+    const out = 0x3000;
+    for (const [name, args] of /** @type {[string, number[]][]} */ ([
+        ['CreateTexture', [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateCubeTexture', [8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateVolumeTexture', [8, 4, 2, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0x4000]],
+        ['CreateOffscreenPlainSurface', [8, 4, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateRenderTarget', [8, 4, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0x4000]],
+        ['CreateDepthStencilSurface', [8, 4, D3DFMT.D24S8, 0, 0, 0, out, 0x4000]],
+        ['CreateVertexBuffer', [16, 0, 0, D3DPOOL.SYSTEMMEM, out, 0x4000]],
+        ['CreateIndexBuffer', [16, 0, 101, D3DPOOL.DEFAULT, out, 0x4000]],
+    ]))
+    {
+        h.box.memory.writeU32(out, 0xdeadbeef);
+        assert.equal(h.device(device, name, args), E_NOTIMPL, name);
+        assert.equal(h.box.memory.readU32(out), 0xdeadbeef, `${name} wrote nothing`);
     }
 });
 
@@ -2378,6 +2684,7 @@ test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write 
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     for (const name of ['TestCooperativeLevel'])
     {
@@ -2454,6 +2761,7 @@ test('an occlusion count that does not come leaves one poll in so many to the ho
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     const out = 0x3200;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
@@ -2497,6 +2805,7 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     const out = 0x3200;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
@@ -2531,10 +2840,13 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
     let polledInGuest = 0;
     /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
     const both = (js, name, args)=>{
+        // Both words: a count is 64 bits where there is room for them.
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const answer = js(guest, query, ...args) >>> 0;
-        const written = memory.readU32(data);
+        const written = [memory.readU32(data), memory.readU32(data + 4)];
         memory.writeU32(data, 0xdeadbeef);
+        memory.writeU32(data + 4, 0xdeadbeef);
         const hostAnswer = h.box.trap(query, name, args);
         if (answer === HANDED >>> 0)
         {
@@ -2546,8 +2858,15 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
             polledInGuest++;
         }
         assert.equal(answer, hostAnswer >>> 0, `${name}(${args})`);
-        assert.equal(written, memory.readU32(data), `${name}(${args}) writes`);
+        assert.deepEqual(written, [memory.readU32(data), memory.readU32(data + 4)],
+            `${name}(${args}) writes`);
+        if (name === 'GetData' && answer === D3D_OK && args[0] !== 0 && args[1] === 8)
+        {
+            assert.equal(written[1], 0, 'a count with room for 64 bits has its high word');
+            wide++;
+        }
     };
+    let wide = 0;
     for (let round = 0; round < 600; round++)
     {
         const roll = next() % 10;
@@ -2574,6 +2893,7 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
         }
     }
     assert.ok(measured > 20, `${measured} measurements`);
+    assert.ok(wide > 5, `${wide} counts read into eight bytes`);
     assert.ok(polledInGuest > 50 && inGuest > polledInGuest,
         `${polledInGuest} polls not done and ${inGuest - polledInGuest} counts in the guest`);
 });
@@ -2596,4 +2916,181 @@ test('a Present under vertical sync is held to the display\'s rate, and to a mod
         assert.equal(pacing.hz, held, `a display of ${refresh}, ${windowed ? 'windowed'
             : `asking ${asked}`}`);
     }
+});
+
+const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+
+test('a Present is paced by the interval of the device presenting, not of the one made last', ()=>{
+    // A game's first start probes its card with a second device of its own,
+    // IMMEDIATE, and lets it go: the device it draws with keeps vertical sync.
+    // Paced by the last device made, its frames ran unpaced, its cinematics
+    // and menus several times their speed, until a Reset of its own.
+    const h = seamed({ screen: { ...SCREEN, refresh: 60 }, paced: true });
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 1, hDeviceWindow: HWND });
+    const probe = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 1, hDeviceWindow: HWND, PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE });
+    assert.equal(h.device(probe.device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentPacing().interval, '0x80000000', 'the probe presents unpaced');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentPacing().interval, '0x0',
+        'the device it draws with presents at its own interval, DEFAULT: paced');
+});
+
+test('a declaration keeps its count in the guest, as a texture does', ()=>{
+    // A program that sets its declaration and shaders before every draw takes
+    // and gives back a reference on each, every time: counted on the host,
+    // that was two crossings per object per draw.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const elements = 0x3000;
+    h.box.services.writeMemory(elements, Uint8Array.from([
+        0, 0, 0, 0, D3DDECLTYPE.FLOAT3, 0, D3DDECLUSAGE.POSITION, 0,
+        0xff, 0, 0, 0, D3DDECLTYPE.UNUSED, 0, 0, 0,
+    ]));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreateVertexDeclaration', [elements, out]), D3D_OK);
+    const declaration = h.box.memory.readU32(out);
+    const cell = h.box.memory.readU32(declaration + 8);
+    assert.notEqual(cell, 0, 'the declaration\'s count has a word in the guest (none before)');
+    assert.equal(h.box.memory.readU32(cell), h.object(declaration).refCount);
+});
+
+test('an occlusion count the side that draws writes into the guest answers as the host does,'
+    + ' with one crossing a wait and a late count landing on no later measurement', ()=>{
+    // A device recorded for a graphics worker that shares guest memory: the
+    // worker writes each count into the query's block (`storeCount`) as the
+    // GPU gives it, and the guest's GetData answers every poll -- the first
+    // flush of a wait goes to the host to send the draws on. An Unreal Engine
+    // 3 title waited on its counts 33 ms each, 7 of them for the answer to
+    // cross back to its thread.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const memory = h.box.memory;
+    const HANDED = -1;
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>memory.readU32(at),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeU32(at, value >>> 0),
+        host: ()=>HANDED,
+        pointerBytes: 4,
+    });
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const query = memory.readU32(out);
+    const object = h.publisher.objectAt(query);
+    object.countsInGuest = true;
+    /** Where the next END's count goes, as the seam said: the block and the measurement. */
+    let into = /** @type {{ block: number, measurement: number } | null} */ (null);
+    object.countInto = (/** @type {number} */ block, /** @type {number} */ measurement)=>{
+        into = { block, measurement };
+    };
+    /** The measurement's count once it has come, null while it has not. */
+    let counted = /** @type {number | null} */ (null);
+    /** The measurement now waited on, and the one before it, whose count may come late. */
+    let current = /** @type {{ block: number, measurement: number } | null} */ (null);
+    let earlier = /** @type {{ block: number, measurement: number } | null} */ (null);
+    let measured = 0;
+    object.Issue = (/** @type {number} */ flags)=>{
+        // A BEGIN starts a measurement too: nothing is counted until its END.
+        earlier = current ?? earlier;
+        current = (flags & 2) === 0 ? into : null;
+        counted = null;
+        measured += (flags & 2) === 0 ? 1 : 0;
+        return D3D_OK;
+    };
+    object.GetData = (/** @type {{ value?: number } | null} */ held)=>{
+        if (counted === null)
+        {
+            return S_FALSE;
+        }
+        if (held)
+        {
+            held.value = counted;
+        }
+        return D3D_OK;
+    };
+    const data = 0x3300;
+    const next = (seed=>()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8)(17);
+    let crossings = 0;
+    let polledInGuest = 0;
+    let late = 0;
+    /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
+    const both = (js, name, args)=>{
+        memory.writeU32(data, 0xdeadbeef);
+        const answer = js(guest, query, ...args) >>> 0;
+        const written = memory.readU32(data);
+        memory.writeU32(data, 0xdeadbeef);
+        if (answer === HANDED >>> 0)
+        {
+            // Counted while a count the played side writes is waited on.
+            crossings += current && counted === null && name === 'GetData' ? 1 : 0;
+            h.box.trap(query, name, args);
+            return;
+        }
+        // The host's answer, asked of the object without the seam's moves.
+        const held = /** @type {{ value?: number }} */ ({});
+        const hostAnswer = name === 'GetData' ? object.GetData(held) : D3D_OK;
+        if (answer === S_FALSE)
+        {
+            polledInGuest++;
+        }
+        assert.equal(answer, hostAnswer >>> 0, `${name}(${args}) at measurement ${measured}`);
+        if (name === 'GetData' && answer === D3D_OK && args[0] !== 0)
+        {
+            assert.equal(written, held.value, 'the count the host has');
+        }
+    };
+    for (let round = 0; round < 3000; round++)
+    {
+        const roll = next() % 12;
+        if (roll === 0)
+        {
+            both(guestCode.QueryIssue, 'Issue', [[1, 2][next() % 2]]);
+        }
+        else if (roll === 1 && current && counted === null)
+        {
+            // The GPU has the count: the side that draws writes it in.
+            const count = next() % 1000;
+            assert.ok(storeCount(h.box.words, current.block, current.measurement, count));
+            counted = count;
+        }
+        else if (roll === 2 && earlier)
+        {
+            // An earlier measurement's count comes after the next was issued.
+            assert.equal(storeCount(h.box.words, earlier.block, earlier.measurement, 4321), false,
+                'a late count lands on nothing');
+            late++;
+        }
+        else
+        {
+            both(guestCode.QueryGetData, 'GetData', [next() % 5 === 0 ? 0 : data, 4, next() % 2]);
+        }
+    }
+    assert.ok(measured > 100 && late > 50, `${measured} measurements, ${late} late counts`);
+    assert.ok(crossings <= measured && polledInGuest > crossings * 5,
+        `${polledInGuest} polls answered in the guest, ${crossings} crossings while waiting`);
+});
+
+test('a shader whose def holds a literal that looks like a comment or the end is read whole', ()=>{
+    // ps_3_0: def c0, 0.99999988 (0x3f7ffffe, a comment token by its low word),
+    // a denormal that is the end token's bits, 1, 0; mov oC0, c0; end.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const tokens = [versionToken(SHADER_KIND.PIXEL, 3, 0),
+        0x05000051, 0xa00f0000, 0x3f7ffffe, 0x0000ffff, 0x3f800000, 0,
+        0x02000001, 0x800f0800, 0xa0e40000, END_TOKEN];
+    const at = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(Uint32Array.from(tokens).buffer));
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreatePixelShader', [at, out]), D3D_OK);
+    assert.notEqual(h.box.memory.readU32(out), 0);
+    assert.deepEqual(h.divergences, []);
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
 });

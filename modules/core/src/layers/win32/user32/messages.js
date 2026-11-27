@@ -23,6 +23,8 @@
  * and the flag only becomes a message once the queue has nothing else to give,
  * which is what lets a program finish the work it already had before it exits.
  */
+import { wholeAddress } from '../common/pointers.js';
+import { createDeadlines } from '../../../system/deadlines.js';
 
 /** The message that ends a message loop. */
 export const WM_PAINT = 0x000f;
@@ -39,7 +41,7 @@ export const WM_QUIT = 0x0012;
  * every frame, working through positions the pointer left long ago. From the
  * outside the game stops responding to the mouse entirely.
  */
-export const WM_MOUSEMOVE = 0x0200;
+const WM_MOUSEMOVE = 0x0200;
 
 /** A filter that accepts messages for any window, and thread messages besides. */
 export const ANY_WINDOW = null;
@@ -66,6 +68,10 @@ export const threadIdOf = thread=>{
  * @property {number} [x]         Cursor position, for messages that carry one.
  * @property {number} [y]
  * @property {boolean} [unicode]  Posted by a wide caller, so a character is a UTF-16 unit.
+ * @property {number} [side]     The input layer's left or right key of a shift, control
+ *     or alt, which the wParam names as one.
+ * @property {import('../common/pointers.js').WideParams} [wide]  The WPARAM and LPARAM a
+ *     64-bit poster passed, where the dwords do not say them.
  * @property {number | null} [thread]  The thread whose queue it goes to, for a
  *     message with no window; null for whichever thread looks first. Left out,
  *     a window's message goes to the thread that created the window.
@@ -96,10 +102,10 @@ export const QS_MOUSEBUTTON = 0x0004;
 export const QS_POSTMESSAGE = 0x0008;
 export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
-export const QS_SENDMESSAGE = 0x0040;
-export const QS_HOTKEY = 0x0080;
-export const QS_ALLPOSTMESSAGE = 0x0100;
-export const QS_RAWINPUT = 0x0400;
+const QS_SENDMESSAGE = 0x0040;
+const QS_HOTKEY = 0x0080;
+const QS_ALLPOSTMESSAGE = 0x0100;
+const QS_RAWINPUT = 0x0400;
 
 /** Raw input's one message, a class of its own. */
 const WM_INPUT = 0x00ff;
@@ -183,6 +189,55 @@ const classOf = message=>{
     return QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
 };
 
+/** The virtual keys of the mouse buttons. */
+const VK_LBUTTON = 0x01;
+const VK_RBUTTON = 0x02;
+const VK_MBUTTON = 0x04;
+const VK_XBUTTON1 = 0x05;
+const VK_XBUTTON2 = 0x06;
+
+/** Each modifier's left and right keys, by the virtual key both share. */
+const MODIFIER_SIDES = new Map([[0x10, [0xa0, 0xa1]], [0x11, [0xa2, 0xa3]], [0x12, [0xa4, 0xa5]]]);
+/** The right shift's scan code: the one shift a key message tells apart by it. */
+const RIGHT_SHIFT_SCAN = 0x36;
+/** A key message's lParam bit for a key with the E0 prefix. */
+const EXTENDED_KEY = 1 << 24;
+
+/**
+ * What an input message changes in the synchronous key state: the keys it
+ * presses or lets go, or null for a message that is no key or button. A
+ * button's client and non-client messages alike; a double click is a press.
+ *
+ * @param {number} message @param {number} wParam
+ * @returns {{ keys: number[], down: boolean } | null}
+ */
+function inputChange(message, wParam){
+    // WM_LBUTTONDOWN and WM_NCLBUTTONDOWN on, each button's down, up and
+    // double click; WM_XBUTTON* name their button in the high word.
+    switch (message){
+        // WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP.
+        case 0x100: case 0x104: case 0x101: case 0x105:
+            return { keys: [wParam & 0xff], down: message === 0x100 || message === 0x104 };
+        case 0x201: case 0x203: case 0xa1: case 0xa3:
+            return { keys: [VK_LBUTTON], down: true };
+        case 0x202: case 0xa2:
+            return { keys: [VK_LBUTTON], down: false };
+        case 0x204: case 0x206: case 0xa4: case 0xa6:
+            return { keys: [VK_RBUTTON], down: true };
+        case 0x205: case 0xa5:
+            return { keys: [VK_RBUTTON], down: false };
+        case 0x207: case 0x209: case 0xa7: case 0xa9:
+            return { keys: [VK_MBUTTON], down: true };
+        case 0x208: case 0xa8:
+            return { keys: [VK_MBUTTON], down: false };
+        case 0x20b: case 0x20d: case 0xab: case 0xad: case 0x20c: case 0xac:
+            return { keys: [(wParam >>> 16 & 0xffff) === 2 ? VK_XBUTTON2 : VK_XBUTTON1],
+                down: message !== 0x20c && message !== 0xac };
+        default:
+            return null;
+    }
+}
+
 /**
  * @param {Object} [options]
  * @param {() => number} [options.now]
@@ -218,12 +273,81 @@ export function createMessageQueue(options = {}){
     const quits = new Map();
     let posted = 0;
     let retrieved = 0;
+    /** @type {((thread: number | null, classes: number) => void)[]} */
+    const newsListeners = [];
     // The keys held as of the last key message taken, which is what
     // TranslateMessage reads the modifiers from: the input layer may have let
     // go of Control (a paste's chord is pressed and released at once) before
     // the program gets to the V it was held for.
     const keysAsTaken = new Uint8Array(256);
     let heldKnown = false;
+    /**
+     * Each thread's synchronous key state, GetKeyState's and
+     * GetKeyboardState's: the down bit (0x80) and the toggle bit (0x01) of
+     * every virtual key as of the last input message the thread took, the
+     * mouse buttons with the keys. Made from the keys as they are when the
+     * thread takes its first input message; before that it answers as they
+     * are. A slow loop that reads the left button while handling the
+     * WM_LBUTTONDOWN it took sees it down, however long ago it was let go.
+     *
+     * @type {Map<any, Uint8Array>}
+     */
+    const synced = new Map();
+    /** @param {any} thread */
+    const syncedOf = thread=>{
+        let table = synced.get(thread);
+        if (!table)
+        {
+            table = new Uint8Array(256);
+            for (let vk = 1; vk < 256; vk++)
+            {
+                const state = keyState(vk);
+                table[vk] = ((state & 0x8000) !== 0 ? 0x80 : 0) | (state & 0x01);
+            }
+            synced.set(thread, table);
+        }
+        return table;
+    };
+    /**
+     * An input message taken: its key's or button's transition, in the
+     * taking thread's state. A press of a key that was up flips its toggle.
+     *
+     * @param {any} thread
+     * @param {{ message: number, wParam: number, lParam?: number, side?: number }} entry
+     */
+    const takeInput = (thread, { message, wParam, lParam = 0, side = undefined })=>{
+        const change = inputChange(message, wParam);
+        if (change === null)
+        {
+            return;
+        }
+        const table = syncedOf(thread);
+        /** @param {number} vk @param {boolean} down */
+        const set = (vk, down)=>{
+            if (down && (table[vk] & 0x80) === 0)
+            {
+                table[vk] ^= 0x01;
+            }
+            table[vk] = (table[vk] & 0x01) | (down ? 0x80 : 0);
+        };
+        for (const vk of change.keys)
+        {
+            // A shift, control or alt is two keys under one name: the side
+            // the message's scan code or extended bit names goes with it, and
+            // the name is down while either side is.
+            const sides = MODIFIER_SIDES.get(vk);
+            if (!sides)
+            {
+                set(vk, change.down);
+                continue;
+            }
+            const right = side !== undefined ? side === sides[1]
+                : vk === VK_SHIFT ? (lParam >>> 16 & 0xff) === RIGHT_SHIFT_SCAN
+                    : (lParam & EXTENDED_KEY) !== 0;
+            set(right ? sides[1] : sides[0], change.down);
+            set(vk, ((table[sides[0]] | table[sides[1]]) & 0x80) !== 0);
+        }
+    };
 
     /**
      * What a thread's last look at its queue saw.
@@ -260,6 +384,10 @@ export function createMessageQueue(options = {}){
      * @param {number | null} thread @param {number} classes
      */
     const arrived = (thread, classes)=>{
+        for (const listener of newsListeners)
+        {
+            listener(thread, classes);
+        }
         if (thread === null)
         {
             lookOf(null).changed |= classes;
@@ -357,10 +485,43 @@ export function createMessageQueue(options = {}){
      * longer than its timer would find the queue full of stale ticks and never
      * reach anything else.
      *
-     * @type {Map<string, { hwnd: number, id: number, elapse: number,
-     *                      proc: number, due: number, thread: any }>}
+     * Each is found by its name (`timerKey`) and by its due time, kept in
+     * `timerDeadlines` under its `slot`.
+     *
+     * @typedef {{ key: string, slot: number, hwnd: number, id: number, whole?: bigint,
+     *     elapse: number, proc: number, thread: any }} Timer
+     * @type {Map<string, Timer>}
      */
     const timers = new Map();
+    const timerDeadlines = createDeadlines();
+    /** @type {(Timer | undefined)[]} */
+    const timerBySlot = [];
+
+    /** A timer gone. @param {Timer} timer */
+    const dropTimer = timer=>{
+        timers.delete(timer.key);
+        timerDeadlines.release(timer.slot);
+        timerBySlot[timer.slot] = undefined;
+    };
+
+    /**
+     * A timer's name: its window and its id, the id whole - two ids of a
+     * 64-bit program that differ past the dword are two timers.
+     *
+     * @param {number} hwnd @param {number | bigint} id
+     */
+    const timerKey = (hwnd, id)=>`${hwnd >>> 0}:${typeof id === 'bigint' ? id : id >>> 0}`;
+
+    /**
+     * What a tick carries beside its dwords: an id or a TIMERPROC past 4 GiB.
+     *
+     * @param {{ whole?: bigint, proc: number }} timer
+     * @returns {{ wide?: import('../common/pointers.js').WideParams }}
+     */
+    const timerWide = timer=>(timer.whole === undefined && timer.proc < 2 ** 32 ? {} : { wide: {
+        ...timer.whole === undefined ? {} : { w: timer.whole },
+        ...timer.proc < 2 ** 32 ? {} : { l: BigInt(timer.proc) },
+    } });
 
     /**
      * Whether a thread's pump may be handed this timer's tick. A window's
@@ -369,53 +530,18 @@ export function createMessageQueue(options = {}){
      * nothing is left that could ever retrieve it, and Windows destroys it
      * with the thread.
      *
-     * @param {string} key
-     * @param {{ hwnd: number, thread: any }} timer
+     * @param {Timer} timer
      * @param {number | null} asking  The thread looking, null for any.
      */
-    const deliverable = (key, timer, asking)=>{
+    const deliverable = (timer, asking)=>{
         if (timer.thread?.state === 'terminated')
         {
-            timers.delete(key);
+            dropTimer(timer);
             return false;
         }
         const owner = timer.hwnd !== 0 ? ownerOf?.(timer.hwnd) ?? null : threadIdOf(timer.thread);
         return asking === null || owner === null || owner === asking;
     };
-
-    /**
-     * Every timer something could still be handed, dropping those whose
-     * thread has ended: a wait that woke for one of those would wake for ever.
-     */
-    const livingTimers = ()=>{
-        for (const [key, timer] of timers)
-        {
-            if (timer.thread?.state === 'terminated')
-            {
-                timers.delete(key);
-            }
-        }
-        return timers.values();
-    };
-
-    /**
-     * The timer that is due, as the message it becomes.
-     *
-     * Its due time moves on only when the caller takes the message. A look that
-     * does not remove leaves the tick where it is, because that is what Windows
-     * does and because a pump written the ordinary way -- look first, retrieve
-     * second -- otherwise loses every tick to its own look: the first call
-     * consumes it, the second finds an empty queue, and the program settles
-     * down to wait for a tick it has already been handed and thrown away.
-     *
-     * @param {MessageFilter} filter
-     */
-    /**
-     * No timer is due before this; -Infinity once a timer is set or moves on,
-     * until the next look works it out again. A timer killed leaves it early,
-     * which costs a look the walk, never a tick.
-     */
-    let soonestTimer = -Infinity;
 
     /** How well a timer's ticks are delivered against what it asked for. */
     let timerTicks = 0;
@@ -467,53 +593,141 @@ export function createMessageQueue(options = {}){
      * at that moment, not when asked for: a hover reports where the pointer
      * is when it comes due, and a request whose reason has gone makes none.
      *
-     * @type {Map<string, { due: number, make: () => PostedMessage | null }>}
+     * @type {Map<string, { key: string, slot: number, make: () => PostedMessage | null }>}
      */
     const later = new Map();
+    const laterDeadlines = createDeadlines();
+    /** @type {({ key: string, slot: number, make: () => PostedMessage | null } | undefined)[]} */
+    const laterBySlot = [];
 
-    /** Posts every message asked for later whose moment has come. */
+    /** @param {string} key */
+    const cancelLater = key=>{
+        const entry = later.get(key);
+        if (!entry)
+        {
+            return false;
+        }
+        later.delete(key);
+        laterDeadlines.release(entry.slot);
+        laterBySlot[entry.slot] = undefined;
+        return true;
+    };
+
+    /** A message asked for later whose moment has come, posted. @param {number} slot */
+    const releaseOne = slot=>{
+        const entry = /** @type {{ key: string, make: () => PostedMessage | null }} */ (
+            laterBySlot[slot]);
+        cancelLater(entry.key);
+        const message = entry.make();
+        if (message)
+        {
+            postMessage(message);
+        }
+    };
+
+    let releasing = false;
+    /**
+     * Posts every message asked for later whose moment has come, soonest
+     * first. A post that has someone look at the queue again, a news
+     * listener or the message's own making, finds the release under way.
+     */
     const releaseLater = ()=>{
-        if (later.size === 0)
+        if (releasing)
         {
             return;
         }
-        const at = now();
-        for (const [key, entry] of later)
+        releasing = true;
+        try
         {
-            if (entry.due > at)
-            {
-                continue;
-            }
-            later.delete(key);
-            const message = entry.make();
-            if (message)
-            {
-                postMessage(message);
-            }
+            laterDeadlines.takeDue(now(), releaseOne);
+        }
+        finally
+        {
+            releasing = false;
         }
     };
 
     /**
      * When the soonest timer or message asked for later comes due, or null:
-     * both are what a thread waiting on an empty queue can be woken by.
+     * both are what a thread waiting on an empty queue can be woken by. A
+     * timer whose thread has ended is dropped: a wait that woke for it would
+     * wake for ever.
      */
     const soonestDue = ()=>{
-        let soonest = null;
-        for (const timer of livingTimers())
+        for (let slot = timerDeadlines.first(); slot >= 0; slot = timerDeadlines.first())
         {
-            if (soonest === null || timer.due < soonest)
+            const timer = /** @type {Timer} */ (timerBySlot[slot]);
+            if (timer.thread?.state !== 'terminated')
             {
-                soonest = timer.due;
+                break;
             }
+            dropTimer(timer);
         }
-        for (const entry of later.values())
+        const due = Math.min(timerDeadlines.soonest(), laterDeadlines.soonest());
+        return due === Infinity ? null : due;
+    };
+
+    /**
+     * What the visits of a look over the due timers read and answer, made
+     * once: a look is asked hundreds of thousands of times a second.
+     * `times` is [now, after]: a timer due after `after` only counts.
+     */
+    const scan = {
+        /** @type {MessageFilter | null} */
+        filter: null,
+        /** @type {number | null} */
+        asking: null,
+        /** @type {any} */
+        found: null,
+        times: new Float64Array(2),
+    };
+
+    /**
+     * Whether a timer due between the scan's times is deliverable to the
+     * thread asking: it stops the look. Every timer looked at stays where it
+     * was.
+     *
+     * @param {number} slot @param {number} due
+     */
+    const seeDue = (slot, due)=>{
+        const timer = /** @type {Timer} */ (timerBySlot[slot]);
+        const handed = deliverable(timer, scan.asking);
+        keep(slot, timer, due);
+        scan.found = handed && due > scan.times[1];
+        return scan.found;
+    };
+
+    /**
+     * A timer a look took out and did not hand over goes back as it was;
+     * one `deliverable` dropped does not.
+     *
+     * @param {number} slot @param {Timer} timer @param {number} due
+     */
+    const keep = (slot, timer, due)=>{
+        if (timerBySlot[slot] === timer)
         {
-            if (soonest === null || entry.due < soonest)
-            {
-                soonest = entry.due;
-            }
+            timerDeadlines.move(slot, due);
         }
-        return soonest;
+    };
+
+    /**
+     * Whether a timer due now, and after `after`, could be handed to `asking`.
+     *
+     * @param {number | null} asking @param {number} after
+     */
+    const timerDue = (asking, after)=>{
+        const at = now();
+        if (at < timerDeadlines.soonest())
+        {
+            return false;
+        }
+        scan.asking = asking;
+        scan.times[1] = after;
+        scan.found = false;
+        timerDeadlines.takeDue(at, seeDue);
+        const found = scan.found === true;
+        scan.found = null;
+        return found;
     };
 
     /** @param {MessageFilter} filter */
@@ -527,73 +741,96 @@ export function createMessageQueue(options = {}){
         return accepts(paint, filter) ? paint : null;
     };
 
-    /** @param {MessageFilter} filter */
+    /**
+     * The soonest due timer the scan's filter takes, as the message it
+     * becomes (`takeTimer`): it stops the look.
+     *
+     * @param {number} slot @param {number} due
+     */
+    const takeDue = (slot, due)=>{
+        const timer = /** @type {Timer} */ (timerBySlot[slot]);
+        const filter = /** @type {MessageFilter} */ (scan.filter);
+        if (!deliverable(timer, filter.thread ?? null))
+        {
+            keep(slot, timer, due);
+            return false;
+        }
+        const at = scan.times[0];
+        const message = {
+            hwnd: timer.hwnd,
+            message: WM_TIMER,
+            wParam: timer.id,
+            // A TIMERPROC travels in lParam, and DispatchMessage calls it
+            // instead of the window procedure. That is the contract, not a
+            // convenience: a timer with no window has nowhere else to go.
+            lParam: timer.proc >>> 0,
+            ...timerWide(timer),
+            time: at >>> 0,
+            x: 0,
+            y: 0,
+        };
+        if (!accepts(message, filter))
+        {
+            timerDeadlines.move(slot, due);
+            return false;
+        }
+        scan.found = message;
+        // A look that does not remove leaves the tick exactly where it is.
+        if (!filter.remove)
+        {
+            timerDeadlines.move(slot, due);
+            return true;
+        }
+        // How late this tick was handed over. A program that paces itself
+        // by a timer runs at the rate the timer is actually delivered at,
+        // not the rate it asked for, and lateness here is a frame rate lost
+        // somewhere nobody would think to look.
+        const late = at - due;
+        if (late > 0)
+        {
+            timerLateMs += late;
+            timerLateTicks++;
+            worstTimerLateMs = Math.max(worstTimerLateMs, late);
+        }
+        timerTicks++;
+        // Against the moment it came due rather than against now, so a
+        // handler that runs long does not make the timer drift later and
+        // later. Skipped forward when it has fallen a whole period behind,
+        // because catching up on missed ticks is a backlog nobody wants.
+        timerDeadlines.move(slot, Math.max(at, due) + timer.elapse);
+        return true;
+    };
+
+    /**
+     * The timer that is due, as the message it becomes; of several, the one
+     * due soonest, those due together in the order they were set.
+     *
+     * Its due time moves on only when the caller takes the message. A look that
+     * does not remove leaves the tick where it is, because that is what Windows
+     * does and because a pump written the ordinary way -- look first, retrieve
+     * second -- otherwise loses every tick to its own look: the first call
+     * consumes it, the second finds an empty queue, and the program settles
+     * down to wait for a tick it has already been handed and thrown away.
+     *
+     * @param {MessageFilter} filter
+     */
     const takeTimer = filter=>{
         const at = now();
         // A queue is looked at hundreds of thousands of times a second and a
-        // timer comes due a few dozen: the earliest due time is kept, so a
-        // look before it walks no timers and makes no garbage.
-        if (at < soonestTimer)
+        // timer comes due a few dozen: a look before the soonest due time
+        // looks at no timer and makes no garbage.
+        if (at < timerDeadlines.soonest())
         {
             return null;
         }
-        soonestTimer = Infinity;
-        for (const timer of timers.values())
-        {
-            soonestTimer = Math.min(soonestTimer, timer.due);
-        }
-        if (at < soonestTimer)
-        {
-            return null;
-        }
-        for (const [key, timer] of timers)
-        {
-            if (timer.due > at || !deliverable(key, timer, filter.thread ?? null))
-            {
-                continue;
-            }
-            const message = {
-                hwnd: timer.hwnd,
-                message: WM_TIMER,
-                wParam: timer.id,
-                // A TIMERPROC travels in lParam, and DispatchMessage calls it
-                // instead of the window procedure. That is the contract, not a
-                // convenience: a timer with no window has nowhere else to go.
-                lParam: timer.proc,
-                time: at >>> 0,
-                x: 0,
-                y: 0,
-            };
-            if (!accepts(message, filter))
-            {
-                continue;
-            }
-            // A look that does not remove leaves the tick exactly where it is.
-            if (!filter.remove)
-            {
-                return message;
-            }
-            // How late this tick was handed over. A program that paces itself
-            // by a timer runs at the rate the timer is actually delivered at,
-            // not the rate it asked for, and lateness here is a frame rate lost
-            // somewhere nobody would think to look.
-            const late = at - timer.due;
-            if (late > 0)
-            {
-                timerLateMs += late;
-                timerLateTicks++;
-                worstTimerLateMs = Math.max(worstTimerLateMs, late);
-            }
-            timerTicks++;
-            // Against the moment it came due rather than against now, so a
-            // handler that runs long does not make the timer drift later and
-            // later. Skipped forward when it has fallen a whole period behind,
-            // because catching up on missed ticks is a backlog nobody wants.
-            timer.due = Math.max(at, timer.due) + timer.elapse;
-            soonestTimer = -Infinity;
-            return message;
-        }
-        return null;
+        scan.filter = filter;
+        scan.times[0] = at;
+        scan.found = null;
+        timerDeadlines.takeDue(at, takeDue);
+        const message = scan.found;
+        scan.filter = null;
+        scan.found = null;
+        return message;
     };
 
     /**
@@ -694,6 +931,14 @@ export function createMessageQueue(options = {}){
     };
 
     /**
+     * The look `waiting` asks the window half for a paint with, made once:
+     * it is asked at every look.
+     *
+     * @type {MessageFilter}
+     */
+    const paintProbe = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: null };
+
+    /**
      * Every class waiting to be retrieved now, the synthesised ones included.
      *
      * @param {number | null} [thread]  Whose queue; the running thread's if left out.
@@ -717,19 +962,14 @@ export function createMessageQueue(options = {}){
         {
             inQueue |= QS_SENDMESSAGE;
         }
-        const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false, thread: asking };
-        if (dirtyWindow && dirtyWindow(filter) !== 0)
+        paintProbe.thread = asking;
+        if (dirtyWindow && dirtyWindow(paintProbe) !== 0)
         {
             inQueue |= QS_PAINT;
         }
-        const at = now();
-        for (const [key, timer] of timers)
+        if (timerDue(asking, -Infinity))
         {
-            if (timer.due <= at && deliverable(key, timer, asking))
-            {
-                inQueue |= QS_TIMER;
-                break;
-            }
+            inQueue |= QS_TIMER;
         }
         return inQueue;
     };
@@ -810,6 +1050,10 @@ export function createMessageQueue(options = {}){
             y: (message.y ?? 0) | 0,
             // Posted by a wide caller: a character in it is a UTF-16 unit.
             ...message.unicode ? { unicode: true } : {},
+            // The input layer's left or right modifier key, for the key state.
+            ...message.side !== undefined ? { side: message.side } : {},
+            // What a 64-bit poster passed that the dwords do not say.
+            ...message.wide ? { wide: message.wide } : {},
         };
         if (message.x !== undefined)
         {
@@ -868,6 +1112,21 @@ export function createMessageQueue(options = {}){
 
         /** @param {PostedMessage} incoming */
         post: postMessage,
+
+        /**
+         * The low-level hooks' look at device input before the input layer
+         * posts it, filled in by the window manager, which owns the hooks:
+         * `hooked(kind)` says whether a WH_MOUSE_LL or WH_KEYBOARD_LL hook is
+         * installed, and `show(kind, message)` answers what it said -- other
+         * than zero takes the input away -- or a promise of that while a
+         * hook of another thread answers. Null until then, and device input
+         * is posted unseen.
+         *
+         * @type {{ hooked: (kind: 'mouse' | 'keyboard') => boolean,
+         *     show: (kind: 'mouse' | 'keyboard', message: PostedMessage)
+         *         => number | Promise<number> } | null}
+         */
+        lowLevel: null,
 
         /**
          * Whether a message taken from the queue came from the input layer
@@ -1046,14 +1305,9 @@ export function createMessageQueue(options = {}){
             releaseLater();
             const look = lookOf(asking);
             let fresh = look.changed;
-            const at = now();
-            for (const [key, timer] of timers)
+            if (timerDue(asking, look.at))
             {
-                if (timer.due > look.at && timer.due <= at && deliverable(key, timer, asking))
-                {
-                    fresh |= QS_TIMER;
-                    break;
-                }
+                fresh |= QS_TIMER;
             }
             return fresh;
         },
@@ -1073,32 +1327,49 @@ export function createMessageQueue(options = {}){
          * period rather than making a second, which is what a program relies on
          * when it retunes a timer it already owns.
          *
-         * @param {number} hwnd @param {number} id @param {number} elapse
-         * @param {number} proc  A TIMERPROC, or zero for a queued WM_TIMER.
+         * @param {number} hwnd
+         * @param {number | bigint} id  A bigint where a 64-bit program's id is past
+         *     a dword - a pointer of its own, commonly.
+         * @param {number} elapse
+         * @param {number} proc  A TIMERPROC, whole, or zero for a queued WM_TIMER.
          */
         setTimer(hwnd, id, elapse, proc){
             // Windows clamps to its own resolution rather than firing a zero
             // period continuously, and a program that asks for zero means "as
             // often as you can".
             const period = Math.max(10, elapse >>> 0);
-            soonestTimer = -Infinity;
-            timers.set(`${hwnd >>> 0}:${id >>> 0}`, {
-                hwnd: hwnd >>> 0, id: id >>> 0, elapse: period, proc: proc >>> 0,
-                due: now() + period,
+            const key = timerKey(hwnd, id);
+            const was = timers.get(key);
+            /** @type {Timer} */
+            const timer = {
+                key, slot: was ? was.slot : timerDeadlines.claim(),
+                hwnd: hwnd >>> 0, id: Number(BigInt(id) & 0xffffffffn), elapse: period,
+                proc: wholeAddress(proc),
+                ...typeof id === 'bigint' ? { whole: id } : {},
                 thread: (hwnd >>> 0) === 0 ? currentThread() : null,
-            });
+            };
+            timers.set(key, timer);
+            timerBySlot[timer.slot] = timer;
+            // Set again, it keeps its place among the timers due with it.
+            if (was)
+            {
+                timerDeadlines.move(timer.slot, now() + period);
+            }
+            else
+            {
+                timerDeadlines.add(now() + period, timer.slot);
+            }
         },
 
         /**
          * Whether a timer of this window and id is set -- for a thread
          * timer, one set by the thread asking.
          *
-         * @param {number} hwnd @param {number} id
+         * @param {number} hwnd @param {number | bigint} id
          */
         hasTimer(hwnd, id){
-            const key = `${hwnd >>> 0}:${id >>> 0}`;
-            const timer = timers.get(key);
-            return timer !== undefined && deliverable(key, timer, running());
+            const timer = timers.get(timerKey(hwnd, id));
+            return timer !== undefined && deliverable(timer, running());
         },
 
         /**
@@ -1107,25 +1378,30 @@ export function createMessageQueue(options = {}){
          * names, because a WM_TIMER can be posted by anyone with any lParam,
          * and calling it would run whatever address the poster chose.
          *
-         * @param {number} hwnd @param {number} id @param {number} proc
+         * @param {number} hwnd @param {number | bigint} id @param {number} proc
          */
         isTimerProc(hwnd, id, proc){
-            const timer = timers.get(`${hwnd >>> 0}:${id >>> 0}`);
-            return timer !== undefined && timer.proc !== 0 && timer.proc === (proc >>> 0);
+            const timer = timers.get(timerKey(hwnd, id));
+            return timer !== undefined && timer.proc !== 0 && timer.proc === wholeAddress(proc);
         },
 
-        /** @param {number} hwnd @param {number} id */
+        /** @param {number} hwnd @param {number | bigint} id */
         killTimer(hwnd, id){
-            return timers.delete(`${hwnd >>> 0}:${id >>> 0}`);
+            const timer = timers.get(timerKey(hwnd, id));
+            if (timer)
+            {
+                dropTimer(timer);
+            }
+            return timer !== undefined;
         },
 
         /** Every timer belonging to a window that has gone. @param {number} hwnd */
         killTimersFor(hwnd){
-            for (const [key, timer] of timers)
+            for (const timer of timers.values())
             {
                 if (timer.hwnd === (hwnd >>> 0))
                 {
-                    timers.delete(key);
+                    dropTimer(timer);
                 }
             }
         },
@@ -1147,13 +1423,23 @@ export function createMessageQueue(options = {}){
          * @param {() => PostedMessage | null} make
          */
         postLater(key, delay, make){
-            later.set(key, { due: now() + delay, make });
+            const was = later.get(key);
+            const entry = { key, slot: was ? was.slot : laterDeadlines.claim(), make };
+            later.set(key, entry);
+            laterBySlot[entry.slot] = entry;
+            // Asked again, it keeps its place among the messages due with it.
+            if (was)
+            {
+                laterDeadlines.move(entry.slot, now() + delay);
+            }
+            else
+            {
+                laterDeadlines.add(now() + delay, entry.slot);
+            }
         },
 
-        /** Forgets what was asked for under `key`. @param {string} key */
-        cancelLater(key){
-            return later.delete(key);
-        },
+        /** Forgets what was asked for under `key`. */
+        cancelLater,
 
         /**
          * The one retrieval path: PeekMessage and GetMessage differ in what they
@@ -1191,6 +1477,7 @@ export function createMessageQueue(options = {}){
                     pending.splice(index, 1);
                     retrieved++;
                     last = entry;
+                    takeInput(running(), entry);
                     if (entry.message === WM_KEYDOWN || entry.message === WM_SYSKEYDOWN
                         || entry.message === WM_KEYUP || entry.message === WM_SYSKEYUP)
                     {
@@ -1260,6 +1547,32 @@ export function createMessageQueue(options = {}){
         last: ()=>last,
 
         /**
+         * GetKeyState's answer for the asking thread, or null before it took
+         * any input message (then the keys as they are answer).
+         *
+         * @param {number} vk
+         */
+        syncedKeyState: vk=>{
+            const table = synced.get(running());
+            return table ? ((table[vk & 0xff] & 0x80) !== 0 ? 0x8000 : 0)
+                | (table[vk & 0xff] & 0x01) : null;
+        },
+        /** GetKeyboardState's table for the asking thread, or null as above. */
+        syncedKeyboard: ()=>synced.get(running())?.slice() ?? null,
+        /**
+         * SetKeyboardState: the asking thread's state from then on.
+         *
+         * @param {Uint8Array} bytes
+         */
+        setSyncedKeyboard: bytes=>{
+            const table = syncedOf(running());
+            for (let vk = 0; vk < 256; vk++)
+            {
+                table[vk] = bytes[vk] & 0x81;
+            }
+        },
+
+        /**
          * Whether a key was down as of the last key message taken, or null
          * before the first: the synchronous state, which moves as the thread
          * takes its key messages rather than as the keys move.
@@ -1318,6 +1631,17 @@ export function createMessageQueue(options = {}){
         },
 
         /**
+         * Tells `listener` of every arrival as it comes: the thread it is for
+         * (null for every thread) and its QS_* classes -- for a wait the queue
+         * is not polled in, which has to be woken.
+         *
+         * @param {(thread: number | null, classes: number) => void} listener
+         */
+        whenNews(listener){
+            newsListeners.push(listener);
+        },
+
+        /**
          * Tells the queue how to find whether a thread has been sent a message
          * it has not taken.
          *
@@ -1354,17 +1678,7 @@ export function createMessageQueue(options = {}){
                 .sort((one, two)=>two[1] - one[1])
                 .slice(0, 12)
                 .map(([message, count])=>[`0x${message.toString(16)}`, count])),
-            timerDue: (()=>{
-                let soonest = null;
-                for (const timer of timers.values())
-                {
-                    if (soonest === null || timer.due < soonest)
-                    {
-                        soonest = timer.due;
-                    }
-                }
-                return soonest;
-            })(),
+            timerDue: timerDeadlines.size() > 0 ? timerDeadlines.soonest() : null,
             timers: timers.size,
             hotKeys: hotKeys.size,
             // What each armed timer actually asked for, and when it is next

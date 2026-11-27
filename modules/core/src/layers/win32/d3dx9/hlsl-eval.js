@@ -42,7 +42,21 @@ import { evaluateIntrinsic, fmodFloat, isPureIntrinsic } from './hlsl-intrinsics
  *     coords: number[], extra: { value?: number, ddx?: number[], ddy?: number[] })
  *     => number[]} [sample]
  * @property {(axis: 'x' | 'y', value: Value) => Value} [derivative]
+ * @property {(op: TextureOp) => number[]} [texture]   A Shader Model 4 texture method; for
+ *     GetDimensions, the values of its outs in order.
  * @property {number} [maxIterations]
+ */
+
+/**
+ * A method of a Shader Model 4 texture as the interpreter asks for it.
+ *
+ * @typedef {Object} TextureOp
+ * @property {string} method        'Sample', 'Load', 'Index', 'GetDimensions' and the rest.
+ * @property {Symbol} texture
+ * @property {number} element       Of an array of textures.
+ * @property {Symbol | null} sampler
+ * @property {number[][]} args      Each argument's lanes, converted as the method takes them.
+ * @property {string} dim
  */
 
 /**
@@ -77,7 +91,7 @@ const NOT_CONSTANT = { notConstant: true };
  * The lanes of an operator applied to the lanes of its operands.
  *
  * @param {string} op @param {number[]} a @param {number[]} b
- * @param {'bool' | 'int' | 'float'} base   The element type the operands are in.
+ * @param {'bool' | 'int' | 'uint' | 'float'} base   The element type the operands are in.
  * @returns {number[]}
  */
 function binaryLanes(op, a, b, base){
@@ -93,10 +107,29 @@ function binaryLanes(op, a, b, base){
 }
 
 /**
- * @param {string} op @param {number} x @param {number} y @param {'bool' | 'int' | 'float'} base
+ * @param {string} op @param {number} x @param {number} y
+ * @param {'bool' | 'int' | 'uint' | 'float'} base
  * @returns {number}
  */
 function binaryLane(op, x, y, base){
+    if (base === 'uint')
+    {
+        // Unsigned: wraps in 32 bits, shifts in zeros; a division by zero is 0 as for an int.
+        switch (op)
+        {
+            case '&': return (x & y) >>> 0;
+            case '|': return (x | y) >>> 0;
+            case '^': return (x ^ y) >>> 0;
+            case '<<': return (x << (y & 31)) >>> 0;
+            case '>>': return x >>> (y & 31);
+            case '+': return (x + y) >>> 0;
+            case '-': return (x - y) >>> 0;
+            case '*': return Math.imul(x, y) >>> 0;
+            case '/': return y === 0 ? 0 : Math.floor(x / y) >>> 0;
+            case '%': return y === 0 ? 0 : (x % y) >>> 0;
+            default: break;
+        }
+    }
     switch (op)
     {
         case '<': return x < y ? 1 : 0;
@@ -414,10 +447,11 @@ export function createEvaluator(module, env = /** @type {Environment} */ ({})){
                 }
                 const ref = lref(e.operand, frame);
                 const old = cloneValue(ref.get());
-                const isInt = e.operand.type.base === 'int';
+                const base = e.operand.type.base;
                 const step = e.op === '++' ? 1 : -1;
                 const lanes = flattenValue(old, e.operand.type)
-                    .map(x=>isInt ? (x + step) | 0 : f32(x + step));
+                    .map(x=>base === 'int' ? (x + step) | 0 : base === 'uint' ? (x + step) >>> 0
+                        : f32(x + step));
                 const updated = buildValue(e.operand.type, lanes);
                 ref.set(updated);
                 return e.prefix ? updated : old;
@@ -451,6 +485,7 @@ export function createEvaluator(module, env = /** @type {Environment} */ ({})){
                 return last;
             }
             case 'call': return evalCall(e, frame);
+            case 'texop': return evalTexture(e, frame);
             case 'construct': {
                 const lanes = e.args.flatMap((/** @type {any} */ a)=>flattenValue(ev(a, frame),
                     a.type));
@@ -492,17 +527,65 @@ export function createEvaluator(module, env = /** @type {Environment} */ ({})){
         }
     }
 
+    /**
+     * The texture and the element of an array of them an expression names.
+     * @param {any} e @param {Frame} frame @returns {{ sym: Symbol, element: number }}
+     */
+    const textureOf = (e, frame)=>{
+        if (e.kind === 'ident')
+        {
+            return { sym: e.sym, element: 0 };
+        }
+        if (e.kind === 'index')
+        {
+            const inner = textureOf(e.object, frame);
+            const stride = e.object.type.kind === 'array' ? e.object.type.length : 1;
+            return { sym: inner.sym,
+                element: inner.element * stride + Number(ev(e.index, frame)) };
+        }
+        throw new Error('a texture that is not a variable');
+    };
+
+    /** @param {any} e @param {Frame} frame @returns {Value} */
+    function evalTexture(e, frame){
+        if (constMode)
+        {
+            throw NOT_CONSTANT;
+        }
+        if (!env.texture)
+        {
+            throw new Error('the environment has no texture function');
+        }
+        const named = textureOf(e.texture, frame);
+        const sampler = e.sampler ? textureOf(e.sampler, frame).sym : null;
+        const args = e.args.map((/** @type {any} */ a)=>flattenValue(ev(a, frame), a.type));
+        const lanes = env.texture({ method: e.method, texture: named.sym, element: named.element,
+            sampler, args,
+            dim: e.dim });
+        if (e.method === 'GetDimensions')
+        {
+            e.outs.forEach((/** @type {any} */ out, /** @type {number} */ i)=>{
+                lref(out, frame).set(convertValue(lanes[i], { kind: 'scalar', base: 'uint' },
+                    out.type));
+            });
+            return 0;
+        }
+        return buildValue(e.type, lanes);
+    }
+
     /** @param {any} e @param {Frame} frame @returns {Value} */
     function evalUnary(e, frame){
         const type = e.opType;
         const lanes = flattenValue(ev(e.operand, frame), type);
         const isInt = type.base !== 'float';
+        const wrap = type.base === 'uint' ? (/** @type {number} */ x)=>x >>> 0
+            : (/** @type {number} */ x)=>x | 0;
         switch (e.op)
         {
-            case '-': return buildValue(e.type, lanes.map(x=>isInt ? (-x) | 0 : f32(-x)));
+            case '-': return buildValue(e.type, lanes.map(x=>isInt ? wrap(-x) : f32(-x)));
             case '+': return buildValue(e.type, lanes);
             case '!': return buildValue(e.type, lanes.map(x=>x === 0 ? 1 : 0));
-            case '~': return buildValue(e.type, lanes.map(x=>~x));
+            case '~': return buildValue(e.type, lanes.map(x=>wrap(~x)));
             default: throw new Error(`unknown unary operator ${e.op}`);
         }
     }

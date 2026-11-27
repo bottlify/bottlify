@@ -8,9 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import {
-    ATTRIBUTE_NAMES, CANONICAL_LAYOUT, CANONICAL_STRIDE, expandIndices, expandMode, packVertices,
-    planLayout, scanIndices, topologyOf, vertexFormatOf,
+    ATTRIBUTE_NAMES, CANONICAL_LAYOUT, CANONICAL_STRIDE, expandIndices, expandMode,
+    instanceElements, packVertices, planLayout, scanIndices, topologyOf, vertexFormatOf,
+    vertexRange,
 } from './gpu-layout.js';
+import { readElement } from './arrays.js';
 
 /** @param {Partial<import('./arrays.js').ArrayPointer>} fields */
 const pointer = fields=>({ size: 3, type: GL.FLOAT, stride: 0, pointer: 0, buffer: 0, ...fields });
@@ -25,7 +27,7 @@ test('an interleaved vertex in one buffer is one slot with an attribute per arra
             normalised: false },
     ]);
     assert.ok(layout);
-    assert.deepEqual(layout.slots, [{ buffer: 7, base: 0x1950, stride: 60 }]);
+    assert.deepEqual(layout.slots, [{ buffer: 7, base: 0x1950, stride: 60, divisor: 0 }]);
     assert.deepEqual(layout.attributes.map(a=>[a.name, a.slot, a.offset, a.format]), [
         ['position', 0, 0, 'float32x3'],
         ['texCoord0', 0, 12, 'float32x2'],
@@ -74,7 +76,7 @@ test('a pointer off a word boundary opens its slot at the word below it', ()=>{
             pointer: 2 }), normalised: true },
     ]);
     assert.ok(layout);
-    assert.deepEqual(layout.slots, [{ buffer: 0, base: 0, stride: 8 }]);
+    assert.deepEqual(layout.slots, [{ buffer: 0, base: 0, stride: 8, divisor: 0 }]);
     assert.equal(layout.attributes[0].offset, 2);
     assert.equal(layout.attributes[0].format, 'unorm8x2');
     // A four-byte format at that offset breaks the alignment rule and is refused.
@@ -82,6 +84,28 @@ test('a pointer off a word boundary opens its slot at the word below it', ()=>{
         { name: 'position', pointer: pointer({ size: 2, type: GL.SHORT, stride: 8, pointer: 2 }),
             normalised: false },
     ]), null);
+});
+
+test('half floats (3.0, GL_ARB_half_float_vertex) go to the GPU as they lie in pairs and fours,'
+    + ' and are read as values where they cannot', ()=>{
+    assert.deepEqual(vertexFormatOf(GL.HALF_FLOAT, 4, false),
+        { format: 'float16x4', components: 4, scalar: 'f32', bytes: 8 });
+    assert.equal(vertexFormatOf(GL.HALF_FLOAT, 2, true)?.format, 'float16x2',
+        'a float type is never normalised');
+    assert.equal(vertexFormatOf(GL.HALF_FLOAT, 3, false), null);
+    const layout = planLayout([
+        { name: 'position', pointer: pointer({ type: GL.FLOAT, size: 2, stride: 32, buffer: 4 }),
+            normalised: false },
+        { name: 'attrib1', pointer: pointer({ type: GL.HALF_FLOAT, size: 4, stride: 32,
+            pointer: 8, buffer: 4 }), normalised: false },
+    ]);
+    assert.deepEqual(layout?.attributes.map(a=>a.format), ['float32x2', 'float16x4']);
+    // 1.0, -2.0, 0.5, 65504 and the smallest subnormal, 2^-24.
+    const halves = new Uint16Array([0x3c00, 0xc000, 0x3800, 0x7bff, 0x0001]);
+    const bytes = new Uint8Array(halves.buffer);
+    assert.deepEqual(readElement((at, length)=>bytes.subarray(at, at + length),
+        { size: 3, type: GL.HALF_FLOAT, stride: 4, pointer: 0, buffer: 0 }, 1, true),
+    [0.5, 65504, 2 ** -24], 'the second element, four bytes on, never normalised');
 });
 
 test('an array the GPU has no format for refuses the whole layout', ()=>{
@@ -264,3 +288,21 @@ test('three bytes or shorts in client memory are read as four, the shader taking
             normalised: true },
     ]), null, 'nor off the four-byte boundary the wider format needs');
 });
+
+test('a divided array opens a slot of its own, and the vertex range follows the base vertex',
+    ()=>{
+        const layout = /** @type {NonNullable<ReturnType<typeof planLayout>>} */ (planLayout([
+            { name: 'position', pointer: pointer({ stride: 16, pointer: 0, buffer: 5 }),
+                normalised: false },
+            { name: 'color', pointer: pointer({ size: 4, type: GL.UNSIGNED_BYTE, stride: 16,
+                pointer: 12, buffer: 5, divisor: 1 }), normalised: true },
+        ]));
+        assert.deepEqual(layout.slots.map(slot=>slot.divisor), [0, 1],
+            'the same buffer and stride, but read by instance');
+        assert.deepEqual(vertexRange({ first: 0, count: 3, baseVertex: 4 }, { min: 1, max: 2 }),
+            { min: 5, max: 6 });
+        assert.deepEqual(vertexRange({ first: 2, count: 3, baseVertex: 4 }, null),
+            { min: 2, max: 4 }, 'a range draw takes no base vertex');
+        assert.deepEqual(instanceElements({ buffer: 0, base: 8, stride: 4, divisor: 3 }, 4, 1),
+            [4, 4, 4, 8], 'element floor(i / 3) after the base instance');
+    });

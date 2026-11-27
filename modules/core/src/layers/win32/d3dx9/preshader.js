@@ -95,6 +95,11 @@ function dot(a, n){
  *     computes, a parameter given as it is -- the component it moves; null otherwise.
  * @property {(values: (constant: Constant) => number[] | null) => number[]} run
  *     The output registers' components, given each input's numbers.
+ * @property {(values: (constant: Constant) => number[] | null) =>
+ *     { float: number[], int: number[], bool: number[] }} outputs
+ *     The float, int and bool output tables, a component the program did not
+ *     write a hole: a shader's preshader writes each into the shader's
+ *     constant registers of the same numbers, those it wrote and no others.
  * @property {readonly Instruction[]} instructions  The program, for whoever runs it elsewhere.
  * @property {readonly number[]} immediates  Its literals, the IMMED table.
  */
@@ -206,59 +211,73 @@ export function readPreshader(words){
         && only.inputs[0].table === TABLE.CONST && !only.inputs[0].index
         && only.output.table === TABLE.OCONST && only.output.offset === 0
         ? { offset: only.inputs[0].offset } : null;
+    /**
+     * The register tables after the program, given each input's numbers.
+     *
+     * @param {(constant: Constant) => number[] | null} values
+     * @returns {number[][]}
+     */
+    const evaluate = values=>{
+        /** @type {number[][]} */
+        const tables = [[], immediates.slice(), [], [], [], [], [], []];
+        for (const constant of inputs)
+        {
+            const numbers = values(constant);
+            const t = INPUT_TABLE[constant.set];
+            if (!numbers || t === undefined)
+            {
+                continue;
+            }
+            const { registers, count } = registerValues(constant, numbers);
+            for (let r = 0; r < count; r++)
+            {
+                for (let c = 0; c < width(t); c++)
+                {
+                    tables[t][(constant.index + r) * width(t) + c] = Math.fround(
+                        registers[r * 4 + c]);
+                }
+            }
+        }
+        /** @param {Operand} o @param {number} component */
+        const read = (o, component)=>{
+            const base = o.index ? Math.round(tables[o.index.table][o.index.offset] ?? 0) : 0;
+            return tables[o.table][base * width(o.table) + o.offset + component] ?? 0;
+        };
+        /** @param {Operand} o @param {number} component @param {number} value */
+        const write = (o, component, value)=>{
+            tables[o.table][o.offset + component] = o.table === TABLE.IMMED ? value
+                : o.table === TABLE.OICONST ? Math.round(value)
+                    : o.table === TABLE.OBCONST ? (value ? 1 : 0) : Math.fround(value);
+        };
+        for (const { op, scalar, count, inputs: ins, output } of program)
+        {
+            if (op.all)
+            {
+                const args = ins.flatMap((o, k)=>Array.from({ length: count }, (_, j)=>
+                    read(o, scalar && k === 0 ? 0 : j)));
+                write(output, 0, op.run(args, count));
+                continue;
+            }
+            for (let j = 0; j < count; j++)
+            {
+                write(output, j, op.run(ins.map((o, k)=>read(o, scalar && k === 0 ? 0 : j)),
+                    count));
+            }
+        }
+        return tables;
+    };
+    /** @param {number[]} registers */
+    const dense = registers=>Array.from(registers, v=>v ?? 0);
     return {
         inputs,
         copies,
         instructions: program,
         immediates,
-        run: values=>{
-            /** @type {number[][]} */
-            const tables = [[], immediates.slice(), [], [], [], [], [], []];
-            for (const constant of inputs)
-            {
-                const numbers = values(constant);
-                const t = INPUT_TABLE[constant.set];
-                if (!numbers || t === undefined)
-                {
-                    continue;
-                }
-                const { registers, count } = registerValues(constant, numbers);
-                for (let r = 0; r < count; r++)
-                {
-                    for (let c = 0; c < width(t); c++)
-                    {
-                        tables[t][(constant.index + r) * width(t) + c] = Math.fround(
-                            registers[r * 4 + c]);
-                    }
-                }
-            }
-            /** @param {Operand} o @param {number} component */
-            const read = (o, component)=>{
-                const base = o.index ? Math.round(tables[o.index.table][o.index.offset] ?? 0) : 0;
-                return tables[o.table][base * width(o.table) + o.offset + component] ?? 0;
-            };
-            /** @param {Operand} o @param {number} component @param {number} value */
-            const write = (o, component, value)=>{
-                tables[o.table][o.offset + component] = o.table === TABLE.IMMED ? value
-                    : o.table === TABLE.OICONST ? Math.round(value)
-                        : o.table === TABLE.OBCONST ? (value ? 1 : 0) : Math.fround(value);
-            };
-            for (const { op, scalar, count, inputs: ins, output } of program)
-            {
-                if (op.all)
-                {
-                    const args = ins.flatMap((o, k)=>Array.from({ length: count }, (_, j)=>
-                        read(o, scalar && k === 0 ? 0 : j)));
-                    write(output, 0, op.run(args, count));
-                    continue;
-                }
-                for (let j = 0; j < count; j++)
-                {
-                    write(output, j, op.run(ins.map((o, k)=>read(o, scalar && k === 0 ? 0 : j)),
-                        count));
-                }
-            }
-            return Array.from(tables[TABLE.OCONST], v=>v ?? 0);
+        run: values=>dense(evaluate(values)[TABLE.OCONST]),
+        outputs: values=>{
+            const tables = evaluate(values);
+            return { float: tables[TABLE.OCONST], int: tables[TABLE.OICONST],
+                bool: tables[TABLE.OBCONST] };
         },
     };
 }

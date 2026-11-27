@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -99,7 +99,6 @@ test('a message box a hook subclassed ends on its button with that button\'s ans
         const app = await createApp({
             executable: buildProgram(),
             imagePath: 'C:\\App\\Box.exe',
-            engine: 'cork',
         });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 20000 }), IDOK);

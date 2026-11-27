@@ -31,6 +31,9 @@
  */
 
 import { assemble } from '../msvcrt/guest-code.js';
+import { guestException } from '../common/raise.js';
+
+const STATUS_INTEGER_DIVIDE_BY_ZERO = 0xc0000094;
 
 /**
  * The operands as the helpers find them once they have saved EBX, ESI, EDI
@@ -262,16 +265,15 @@ export function createIntegerFunctions(host){
     };
 
     /**
-     * Dividing by zero traps on the processor, and this is the routine the trap
-     * would have come from. There is no divisor to substitute that would not be
-     * an answer the program never computed, so the failure is reported.
+     * Dividing by zero traps on the processor, in the routine itself: the
+     * program sees STATUS_INTEGER_DIVIDE_BY_ZERO, as from the guest's code.
      *
-     * @param {string} name @param {bigint} divisor
+     * @param {bigint} divisor
      */
-    const nonZero = (name, divisor)=>{
+    const nonZero = divisor=>{
         if (divisor === 0n)
         {
-            throw new Error(`${name}: the guest divided a 64-bit value by zero`);
+            throw guestException(STATUS_INTEGER_DIVIDE_BY_ZERO);
         }
         return divisor;
     };
@@ -307,7 +309,7 @@ export function createIntegerFunctions(host){
         handler: (/** @type {number[]} */ args)=>{
             const a = signed ? BigInt.asIntN(64, operand(args, 0)) : operand(args, 0);
             const divisor = operand(args, 2);
-            const b = nonZero(name, signed ? BigInt.asIntN(64, divisor) : divisor);
+            const b = nonZero(signed ? BigInt.asIntN(64, divisor) : divisor);
             const rest = BigInt.asUintN(64, a % b);
             host.setRegisters({ ebx: Number(rest >> 32n), ecx: Number(rest & 0xffffffffn) });
             return wide(a / b);
@@ -345,16 +347,16 @@ export function createIntegerFunctions(host){
          * BigInt division truncates towards zero and its remainder takes the sign
          * of the dividend, which is what C requires of both.
          */
-        _alldiv: binary('_alldiv', (a, b)=>a / nonZero('_alldiv', b), true),
+        _alldiv: binary('_alldiv', (a, b)=>a / nonZero(b), true),
 
         /** __int64 _allrem(__int64 a, __int64 b) */
-        _allrem: binary('_allrem', (a, b)=>a % nonZero('_allrem', b), true),
+        _allrem: binary('_allrem', (a, b)=>a % nonZero(b), true),
 
         /** unsigned __int64 _aulldiv(unsigned __int64 a, unsigned __int64 b) */
-        _aulldiv: binary('_aulldiv', (a, b)=>a / nonZero('_aulldiv', b), false),
+        _aulldiv: binary('_aulldiv', (a, b)=>a / nonZero(b), false),
 
         /** unsigned __int64 _aullrem(unsigned __int64 a, unsigned __int64 b) */
-        _aullrem: binary('_aullrem', (a, b)=>a % nonZero('_aullrem', b), false),
+        _aullrem: binary('_aullrem', (a, b)=>a % nonZero(b), false),
 
         /** _alldvrm and _aulldvrm: the quotient in EDX:EAX, the remainder in EBX:ECX. */
         _alldvrm: both('_alldvrm', true),
