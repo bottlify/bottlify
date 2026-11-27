@@ -470,10 +470,10 @@ export function _nextafter({ controlWord, setControlWord, host, pointerBytes }, 
  * times over before the first call returns.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end
+ * @param {Guest} guest @param {ptr} text @param {ptr} end
  * @returns {f64}
  */
-export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerBytes }, text,
+export function strtod({ u8, controlWord, setControlWord, host, pointerBytes, setPtr }, text,
     end)
 {
     if (text === 0)
@@ -548,17 +548,13 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerB
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
     if ((c | 0x20) === 0x65 || (c | 0x20) === 0x64)
     {
-        let after = (at + 1) >>> 0;
+        let after = at + 1;
         let d = u8(after);
         let minus = 0;
         if (d === 0x2d || d === 0x2b)
@@ -585,11 +581,7 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerB
     {
         if (end !== 0)
         {
-            setU32(end, at);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, at);
         }
         return negative !== 0 ? -0 : 0;
     }
@@ -627,11 +619,7 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerB
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? -value : value;
 }
@@ -641,7 +629,7 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerB
  * no end to report. No text is the handler's: zero and EINVAL.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {f64}
  */
 export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, text){
@@ -858,10 +846,10 @@ export function _fdsign({ floatBits }, x){
  * the reading, the end two bytes a character.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {ptr} end
+ * @param {Guest} guest @param {ptr} text @param {ptr} end
  * @returns {f64}
  */
-export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointerBytes }, text,
+export function wcstod({ u16, controlWord, setControlWord, host, pointerBytes, setPtr }, text,
     end)
 {
     if (text === 0)
@@ -936,17 +924,13 @@ export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointer
     {
         if (end !== 0)
         {
-            setU32(end, text);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, text);
         }
         return 0;
     }
     if ((c | 0x20) === 0x65 || (c | 0x20) === 0x64)
     {
-        let after = (at + 2) >>> 0;
+        let after = at + 2;
         let d = u16(after);
         let minus = 0;
         if (d === 0x2d || d === 0x2b)
@@ -973,11 +957,7 @@ export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointer
     {
         if (end !== 0)
         {
-            setU32(end, at);
-            if (pointerBytes === 8)
-            {
-                setU32(end + 4, 0);
-            }
+            setPtr(end, at);
         }
         return negative !== 0 ? -0 : 0;
     }
@@ -1015,11 +995,7 @@ export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointer
     }
     if (end !== 0)
     {
-        setU32(end, at);
-        if (pointerBytes === 8)
-        {
-            setU32(end + 4, 0);
-        }
+        setPtr(end, at);
     }
     return negative !== 0 ? -value : value;
 }
@@ -1029,7 +1005,7 @@ export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointer
  * no end to report. No text is the handler's: zero and EINVAL.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {f64}
  */
 export function _wtof({ u16, controlWord, setControlWord, host, pointerBytes }, text){
