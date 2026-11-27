@@ -86,6 +86,13 @@ import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
  *     answered, or into one new buffer.
  * @property {(address: number, bytes: Uint8Array) => void} setBytes
  * @property {(address: number, value: number, length: number) => void} fill
+ * @property {(address: number, length: number,
+ *     make: (chunk: Uint8Array, offset: number) => void) => void} setMade
+ *     `length` bytes made a chunk at a time and each written as it is made:
+ *     `make` fills the chunk with the bytes from `offset` on, a multiple of
+ *     eight. Bytes a handler makes to a guest's length (a pattern, random
+ *     bytes) are never all on the host at once, and a destination that is not
+ *     there faults at its first chunk, before the rest is made.
  * @property {(to: number, from: number, length: number) => void} copy
  *     Guest bytes moved within the guest, ranges overlapping or not.
  */
@@ -101,6 +108,42 @@ const word = new DataView(new ArrayBuffer(8));
 
 /** Units of a wide string put together before they are written: grown when one is longer. */
 let units = new Uint8Array(512);
+
+/** The chunk `writeMade` makes its bytes in, a multiple of eight. */
+const made = new Uint8Array(0x10000);
+
+/**
+ * `length` bytes made a chunk at a time, each written as it is made (the
+ * view's `setMade`, over any write of guest memory): `make` fills the chunk
+ * with the bytes from `offset` on, a multiple of eight, and makes no other
+ * bytes this way, the chunk being one for every caller. A destination that is
+ * not there faults at its first chunk, before the rest is made, as Windows'
+ * loop faults at its first byte not there.
+ *
+ * @param {(address: number, bytes: Uint8Array) => void} write
+ * @param {number} address @param {number} length
+ * @param {(chunk: Uint8Array, offset: number) => void} make
+ */
+export function writeMade(write, address, length, make){
+    for (let offset = 0; offset < length; offset += made.length)
+    {
+        const chunk = made.subarray(0, Math.min(made.length, length - offset));
+        make(chunk, offset);
+        write(address + offset, chunk);
+    }
+}
+
+/** @param {Uint8Array} chunk */
+const zeros = chunk=>void chunk.fill(0);
+
+/**
+ * `length` zero bytes, written a chunk at a time: for a library handed only
+ * a write, where the view's `fill` is the memory layer's own.
+ *
+ * @param {(address: number, bytes: Uint8Array) => void} write
+ * @param {number} address @param {number} length
+ */
+export const writeZeros = (write, address, length)=>writeMade(write, address, length, zeros);
 
 /** @param {unknown} e */
 const unterminated = e=>/** @type {{ code?: unknown }} */ (e)?.code === 'UNTERMINATED';
@@ -255,6 +298,7 @@ export function createGuest(memory, pointerSize = 4){
         },
         setBytes: writeBytes,
         fill: memory.fillBytes,
+        setMade: (address, length, make)=>writeMade(writeBytes, address, length, make),
         // The memory layer's read is a copy already, so the source is read
         // whole before the destination is written: an overlap moves as memmove.
         copy: (to, from, length)=>writeBytes(to, memory.readBytes(from, length)),
