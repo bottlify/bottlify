@@ -34,9 +34,11 @@ const TRUNCATE = 0xffffffff;
 
 /**
  * @typedef {Object} Msvcr80Host
- * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {import('../common/guest.js').Guest} guest  At the process's pointer width.
+ * @property {(address: number, length: number) => Uint8Array} readMemory  For the
+ *           functions whose code runs in the guest (`guestEntry`).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
+ * @property {number} [pointerSize]  8 in a 64-bit process: the guest code's width.
  * @property {(entry: number, args: number[], thread?: unknown) => any} [callGuest]
  *           What calls the program's invalid-parameter handler.
  * @property {() => unknown} [currentThread]
@@ -57,12 +59,7 @@ export function createMsvcr80Functions(crt, host){
 
     const encode = guestEntry(inGuest.encodePointer, COMPILED.encodePointer, host);
 
-    /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
+    const { guest } = host;
 
     const seam = /** @type {any} */ (crt)[INVALID_PARAMETERS];
     // This runtime's own handler, apart from the universal runtime's: each
@@ -77,21 +74,11 @@ export function createMsvcr80Functions(crt, host){
 
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
-        setU32(crt._errno.handler([]), code);
+        guest.set32(crt._errno.handler([]), code);
         seam?.watch.note(code);
         return code;
     };
 
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
-    const pointer = host.pointerSize ?? 4;
-    /** A pointer, every address below 4 GiB. @param {number} address @param {number} value */
-    const setPointer = (address, value)=>{
-        const bytes = new Uint8Array(pointer);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
-    };
 
     /**
      * `strtok_s` and `wcstok_s`: the next token of `text`, or of where the
@@ -106,17 +93,15 @@ export function createMsvcr80Functions(crt, host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([text, delimiters, context])=>{
-            const start = (context >>> 0) === 0 ? 0 : (text >>> 0) || readU32(context);
+            const start = wholeAddress(context) === 0 ? 0
+                : wholeAddress(text) || guest.ptr(context);
             if ((delimiters >>> 0) === 0 || start === 0)
             {
                 fail(EINVAL);
                 return 0;
             }
             /** @param {number} address */
-            const read = address=>{
-                const bytes = host.readMemory(address, unit);
-                return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
-            };
+            const read = address=>(unit === 1 ? guest.u8(address) : guest.u16(address));
             const set = new Set();
             for (let at = wholeAddress(delimiters); read(at) !== 0; at += unit)
             {
@@ -129,7 +114,7 @@ export function createMsvcr80Functions(crt, host){
             }
             if (read(at) === 0)
             {
-                setPointer(context, at);
+                guest.setPtr(context, at);
                 return 0;
             }
             const token = at;
@@ -139,10 +124,10 @@ export function createMsvcr80Functions(crt, host){
             }
             if (read(at) !== 0)
             {
-                host.writeMemory(at, new Uint8Array(unit));
+                guest.fill(at, 0, unit);
                 at += unit;
             }
-            setPointer(context, at);
+            guest.setPtr(context, at);
             return token;
         },
     });
@@ -162,7 +147,7 @@ export function createMsvcr80Functions(crt, host){
             {
                 return fail(EINVAL);
             }
-            setU32(out, -1);
+            guest.set32(out, -1);
             if ((path >>> 0) === 0)
             {
                 return fail(EINVAL);
@@ -170,9 +155,9 @@ export function createMsvcr80Functions(crt, host){
             return settle(crt[open].handler([path, flags, share, mode]), fd=>{
                 if ((fd | 0) < 0)
                 {
-                    return readU32(crt._errno.handler([]));
+                    return guest.u32(crt._errno.handler([]));
                 }
-                setU32(out, fd);
+                guest.set32(out, fd);
                 return 0;
             });
         },
@@ -276,15 +261,15 @@ export function createMsvcr80Functions(crt, host){
                 const written = crt._vsnprintf.handler([buffer, limit, format, list]) | 0;
                 if (written >= 0)
                 {
-                    host.writeMemory(wholeAddress(buffer) + written, Uint8Array.of(0));
+                    guest.set8(wholeAddress(buffer) + written, 0);
                     return written;
                 }
                 if ((count >>> 0) === TRUNCATE || (count >>> 0) <= room)
                 {
-                    host.writeMemory(wholeAddress(buffer) + limit, Uint8Array.of(0));
+                    guest.set8(wholeAddress(buffer) + limit, 0);
                     return -1;
                 }
-                host.writeMemory(wholeAddress(buffer), Uint8Array.of(0));
+                guest.set8(buffer, 0);
                 fail(ERANGE);
                 return -1;
             },
@@ -305,14 +290,13 @@ export function createMsvcr80Functions(crt, host){
                 {
                     return fail(EINVAL);
                 }
-                const stream = crt.fopen.handler([name, mode]) >>> 0;
-                setU32(file, stream);
+                const stream = wholeAddress(crt.fopen.handler([name, mode]));
+                guest.setPtr(file, stream);
                 if (stream !== 0)
                 {
                     return 0;
                 }
-                return new DataView(host.readMemory(crt._errno.handler([]), 4).buffer)
-                    .getInt32(0, true);
+                return guest.i32(crt._errno.handler([]));
             },
         },
 
@@ -474,12 +458,12 @@ export function createMsvcr80Functions(crt, host){
                 const length = crt._vsnwprintf.handler([0, 0, format, list]) | 0;
                 if (length < 0 || length + 1 > (size >>> 0))
                 {
-                    host.writeMemory(wholeAddress(buffer), Uint8Array.of(0, 0));
+                    guest.set16(buffer, 0);
                     fail(length < 0 ? EINVAL : ERANGE);
                     return -1;
                 }
                 crt._vsnwprintf.handler([buffer, size, format, list]);
-                host.writeMemory(wholeAddress(buffer) + length * 2, Uint8Array.of(0, 0));
+                guest.set16(wholeAddress(buffer) + length * 2, 0);
                 return length;
             },
         }),

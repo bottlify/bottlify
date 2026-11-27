@@ -4775,6 +4775,7 @@ export function createWin32Module(){
                     // the frame an unwind reaches (`kernel32/seh64.js`).
                     ...seh64 ? seh64.crt : {},
                     ...createMsvcrtFunctions({
+                        guest,
                         pointerSize,
                         readMemory,
                         writeMemory,
@@ -7207,7 +7208,7 @@ export function createWin32Module(){
                     files: volume }),
             }));
             lazyLibraries.define('MSVCR80.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize,
+                { guest, readMemory, writeMemory, pointerSize,
                     // What calls the program's invalid-parameter handler.
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
@@ -7221,10 +7222,10 @@ export function createWin32Module(){
             // functions, reached through the entries its headers call instead.
             lazyLibraries.define('ucrtbase.dll', ()=>createUcrtbaseFunctions(
                 libraries['MSVCR80.dll'], {
+                    guest,
                     pointerSize,
                     readMemory,
                     writeMemory,
-                    readCString,
                     commandLine: {
                         narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
                         wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
@@ -7261,7 +7262,7 @@ export function createWin32Module(){
             // no copy in the bottle finds them here, as on a Windows the
             // redistributable was installed on.
             lazyLibraries.define('MSVCR90.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
+                { guest, readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             lazyLibraries.define('MSVCP90.dll', ()=>createMsvcp80Functions(libraries['MSVCR90.dll'],

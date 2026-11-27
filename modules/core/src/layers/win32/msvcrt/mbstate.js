@@ -16,8 +16,8 @@
 
 import { EILSEQ, EINVAL, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
-import { wideStringAt } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
+import { WHOLE } from '../common/guest.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -34,9 +34,7 @@ const INCOMPLETE = 0xfffffffe;
 
 /**
  * @typedef {Object} RestartableHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest
  * @property {(code: number) => void} [errno]
  */
 
@@ -50,33 +48,41 @@ export function createRestartableFunctions(host){
      */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
-    /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
-        .getUint32(0, true);
+    const { guest } = host;
 
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        if ((address >>> 0) !== 0)
+    /**
+     * A count answered through a `size_t *`: a pointer wide, written whole,
+     * (size_t)-1 every bit of it at either width; nothing for a null one.
+     *
+     * @param {number} at @param {number} value
+     */
+    const setCount = (at, value)=>{
+        if (wholeAddress(at) === 0)
         {
-            const bytes = new Uint8Array(4);
-            new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-            host.writeMemory(wholeAddress(address), bytes);
+            return;
+        }
+        if (value === FAILED)
+        {
+            guest.fill(at, 0xff, guest.pointerSize);
+        }
+        else
+        {
+            guest.setPtr(at, value);
         }
     };
 
     /** A narrow string's bytes, each a character of its own value. @param {number} at */
-    const narrowUnits = at=>Array.from(encodeAnsi(host.readCString(wholeAddress(at), MAX_STRING)));
+    const narrowUnits = at=>Array.from(encodeAnsi(guest.cstr(at, MAX_STRING)));
 
     /** A wide string's units. @param {number} at */
-    const wideUnits = at=>Array.from(wideStringAt(host.readMemory, at >>> 0),
-        unit=>unit.charCodeAt(0));
+    const wideUnits = at=>Array.from(guest.wstr(at, WHOLE), unit=>unit.charCodeAt(0));
 
     /** @param {number} at @param {number[]} units */
     const writeUnits = (at, units)=>{
         const bytes = new Uint8Array(units.length * 2);
         const view = new DataView(bytes.buffer);
         units.forEach((unit, index)=>view.setUint16(index * 2, unit, true));
-        host.writeMemory(wholeAddress(at), bytes);
+        guest.setBytes(at, bytes);
     };
 
     /** @param {number} code */
@@ -86,7 +92,12 @@ export function createRestartableFunctions(host){
     };
 
     /** The state a conversion was handed, left zero: no character is ever part-way. */
-    const clear = (/** @type {number} */ state)=>writeU32(state, 0);
+    const clear = (/** @type {number} */ state)=>{
+        if (wholeAddress(state) !== 0)
+        {
+            guest.set32(state, 0);
+        }
+    };
 
     /**
      * mbstowcs_s's and wcstombs_s's shared body: the units converted, the
@@ -104,21 +115,21 @@ export function createRestartableFunctions(host){
         {
             if ((size >>> 0) !== 0)
             {
-                writeU32(converted, 0);
+                setCount(converted, 0);
                 return fail(EINVAL);
             }
-            writeU32(converted, wanted.length + 1);
+            setCount(converted, wanted.length + 1);
             return 0;
         }
         if ((size >>> 0) === 0)
         {
-            writeU32(converted, 0);
+            setCount(converted, 0);
             return fail(EINVAL);
         }
         if (narrowing && wanted.some(unit=>unit > 0xff))
         {
             write(destination, [0]);
-            writeU32(converted, 0);
+            setCount(converted, 0);
             return fail(EILSEQ);
         }
         if (wanted.length + 1 > (size >>> 0))
@@ -126,15 +137,15 @@ export function createRestartableFunctions(host){
             if (!truncate)
             {
                 write(destination, [0]);
-                writeU32(converted, 0);
+                setCount(converted, 0);
                 return fail(ERANGE);
             }
             write(destination, [...wanted.slice(0, (size >>> 0) - 1), 0]);
-            writeU32(converted, size >>> 0);
+            setCount(converted, size >>> 0);
             return STRUNCATE;
         }
         write(destination, [...wanted, 0]);
-        writeU32(converted, wanted.length + 1);
+        setCount(converted, wanted.length + 1);
         return 0;
     };
 
@@ -157,7 +168,7 @@ export function createRestartableFunctions(host){
         const kept = units.slice(0, count >>> 0);
         const whole = units.length < (count >>> 0);
         write(destination, whole ? [...kept, 0] : kept);
-        writeU32(source, whole ? 0 : readU32(source) + kept.length * unitBytes);
+        guest.setPtr(source, whole ? 0 : guest.ptr(source) + kept.length * unitBytes);
         return kept.length;
     };
 
@@ -182,7 +193,7 @@ export function createRestartableFunctions(host){
             {
                 return INCOMPLETE;
             }
-            return host.readMemory(wholeAddress(string), 1)[0] === 0 ? 0 : 1;
+            return guest.u8(string) === 0 ? 0 : 1;
         }) },
 
         /**
@@ -200,7 +211,7 @@ export function createRestartableFunctions(host){
             {
                 return INCOMPLETE;
             }
-            const byte = host.readMemory(wholeAddress(string), 1)[0];
+            const byte = guest.u8(string);
             if ((destination >>> 0) !== 0)
             {
                 writeUnits(destination, [byte]);
@@ -224,7 +235,7 @@ export function createRestartableFunctions(host){
                 host.errno?.(EILSEQ);
                 return FAILED;
             }
-            host.writeMemory(wholeAddress(destination), Uint8Array.of(c & 0xff));
+            guest.set8(destination, c & 0xff);
             return 1;
         }) },
 
@@ -236,19 +247,19 @@ export function createRestartableFunctions(host){
             clear(state);
             if ((c & 0xffff) > 0xff)
             {
-                writeU32(length, FAILED);
+                setCount(length, FAILED);
                 return fail(EILSEQ);
             }
             if ((destination >>> 0) !== 0)
             {
                 if ((size >>> 0) === 0)
                 {
-                    writeU32(length, FAILED);
+                    setCount(length, FAILED);
                     return fail(EINVAL);
                 }
-                host.writeMemory(wholeAddress(destination), Uint8Array.of(c & 0xff));
+                guest.set8(destination, c & 0xff);
             }
-            writeU32(length, 1);
+            setCount(length, 1);
             return 0;
         }),
 
@@ -266,7 +277,7 @@ export function createRestartableFunctions(host){
                 host.errno?.(EINVAL);
                 return FAILED;
             }
-            return restartable(destination, source, count, narrowUnits(readU32(source)), 1,
+            return restartable(destination, source, count, narrowUnits(guest.ptr(source)), 1,
                 writeUnits);
         }) },
 
@@ -283,7 +294,7 @@ export function createRestartableFunctions(host){
                 host.errno?.(EINVAL);
                 return FAILED;
             }
-            const units = wideUnits(readU32(source));
+            const units = wideUnits(guest.ptr(source));
             const limit = (destination >>> 0) === 0 ? units.length : count >>> 0;
             if (units.slice(0, limit).some(unit=>unit > 0xff))
             {
@@ -291,7 +302,7 @@ export function createRestartableFunctions(host){
                 return FAILED;
             }
             return restartable(destination, source, count, units, 2,
-                (at, bytes)=>host.writeMemory(wholeAddress(at), Uint8Array.from(bytes)));
+                (at, bytes)=>guest.setBytes(at, Uint8Array.from(bytes)));
         }) },
 
         /**
@@ -308,27 +319,27 @@ export function createRestartableFunctions(host){
             if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0)
                 || ((destination >>> 0) !== 0 && room === 0))
             {
-                writeU32(converted, FAILED);
+                setCount(converted, FAILED);
                 return fail(EINVAL);
             }
-            const start = readU32(source);
+            const start = guest.ptr(source);
             const units = narrowUnits(start).slice(0, count >>> 0);
             if ((destination >>> 0) === 0)
             {
-                writeU32(converted, units.length + 1);
+                setCount(converted, units.length + 1);
                 return 0;
             }
             if (units.length + 1 > room)
             {
                 const kept = units.slice(0, room - 1);
                 writeUnits(destination, [...kept, 0]);
-                writeU32(source, start + kept.length);
-                writeU32(converted, room);
+                guest.setPtr(source, start + kept.length);
+                setCount(converted, room);
                 return 0;
             }
             writeUnits(destination, [...units, 0]);
-            writeU32(source, 0);
-            writeU32(converted, units.length + 1);
+            guest.setPtr(source, 0);
+            setCount(converted, units.length + 1);
             return 0;
         }),
 
@@ -343,7 +354,7 @@ export function createRestartableFunctions(host){
         mbstowcs_s: cdecl(20, ([converted, destination, size, source, count])=>{
             if ((source >>> 0) === 0)
             {
-                writeU32(converted, 0);
+                setCount(converted, 0);
                 return fail(EINVAL);
             }
             return secure(converted, destination, size, narrowUnits(source), count,
@@ -369,10 +380,10 @@ export function createRestartableFunctions(host){
     function wideSecure(converted, destination, size, source, count){
         if ((source >>> 0) === 0)
         {
-            writeU32(converted, 0);
+            setCount(converted, 0);
             return fail(EINVAL);
         }
         return secure(converted, destination, size, wideUnits(source), count,
-            (at, bytes)=>host.writeMemory(wholeAddress(at), Uint8Array.from(bytes)), true);
+            (at, bytes)=>guest.setBytes(at, Uint8Array.from(bytes)), true);
     }
 }

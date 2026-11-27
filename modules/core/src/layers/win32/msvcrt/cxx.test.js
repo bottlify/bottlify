@@ -88,7 +88,7 @@ const build = ()=>{
         aborted,
         graph: buildHierarchy(memory),
         table: /** @type {Record<string, any>} */ (createCxxFunctions({
-            readMemory: memory.readMemory,
+            guest: memory.guest,
             readCString: memory.readCString,
             abort: message=>aborted.push(message),
         })),

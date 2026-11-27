@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
+import { guestWindow } from './guest-window.fixture.js';
 import { fusedMultiplyAdd } from './ucrt-math.js';
 import { moduleKeyOf } from '../../../process/libraries.js';
 
@@ -98,10 +99,9 @@ function setup(texts = {}, { watched = false } = {}){
         writeText(Number(at), `${text}\0`);
     }
     const ucrt = createUcrtbaseFunctions(crt, {
+        guest: guestWindow(memory),
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readCString: address=>String.fromCharCode(...memory.slice(address,
-            memory.indexOf(0, address))),
         callGuest: (entry, args)=>{
             called.push(['guest', entry, ...args]);
             return 0;
@@ -299,7 +299,8 @@ test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
     const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
         _wcstoui64: wideUnsigned });
     const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        readMemory: ()=>new Uint8Array(0), writeMemory: ()=>{} }));
+        guest: guestWindow(new Uint8Array(16)), readMemory: ()=>new Uint8Array(0),
+        writeMemory: ()=>{} }));
     assert.equal(ucrt.wcstoll, wide);
     assert.equal(ucrt.wcstoull, wideUnsigned);
     assert.equal(ucrt.strtoll, narrow);
@@ -309,10 +310,12 @@ test('lround and lroundf round half away from zero; a value no long holds is 0 a
     /** @type {number[]} */
     const errnos = [];
     const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
+    // Each errno the calls set, as the runtime writes it.
+    const guest = { ...guestWindow(new Uint8Array(16)),
+        set32: (/** @type {number} */ _at, /** @type {number} */ value)=>errnos.push(value | 0) };
     const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
-        writeMemory: (/** @type {number} */ _at, /** @type {Uint8Array} */ bytes)=>
-            errnos.push(new DataView(bytes.buffer).getInt32(0, true)) })));
+        guest, fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
+        writeMemory: ()=>{} })));
     const words = (/** @type {number} */ x)=>{
         const view = new DataView(new ArrayBuffer(8));
         view.setFloat64(0, x, true);
@@ -345,8 +348,8 @@ test('fma rounds once: the error of a product is kept, ties go to even, floats r
 test('ilogb is the exponent as an int; zero and NaN have their own answers', ()=>{
     const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
     const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
-        writeMemory: ()=>{} })));
+        guest: guestWindow(new Uint8Array(16)), fpu: { push: ()=>{}, pop: ()=>0 },
+        readMemory: ()=>new Uint8Array(4), writeMemory: ()=>{} })));
     const words = (/** @type {number} */ x)=>{
         const view = new DataView(new ArrayBuffer(8));
         view.setFloat64(0, x, true);
