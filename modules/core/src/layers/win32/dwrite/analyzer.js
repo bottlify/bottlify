@@ -70,6 +70,43 @@ const isZeroWidth = code=>code === 0x200b || code === 0x200c || code === 0x200d
  */
 
 /**
+ * One glyph of a run laid over its coverage, read where the font engine
+ * keeps it: each pixel's centre taken back through the transform into the
+ * run, the glyph's coverage there kept where it is more than the pixel has.
+ *
+ * @param {import('../gdi32/drawing.js').GlyphRead} image
+ * @param {{ out: Uint8Array, rect: { left: number, top: number }, width: number,
+ *     height: number, origin: { x: number, y: number }, matrix: ArrayLike<number>, ppd: number,
+ *     det: number, fit: number, ascent: number, x: number, y: number }} run
+ * @returns {true}
+ */
+const coverGlyph = (image, run)=>{
+    if (image.width === 0)
+    {
+        return true;
+    }
+    const { out, rect, width, height, origin, matrix, ppd, det, fit, ascent, x, y } = run;
+    for (let row = 0; row < height; row++)
+    {
+        for (let column = 0; column < width; column++)
+        {
+            const tx = rect.left + column + 0.5 - origin.x - matrix[4] * ppd;
+            const ty = rect.top + row + 0.5 - origin.y - matrix[5] * ppd;
+            const rx = (tx * matrix[3] - ty * matrix[2]) / det;
+            const ry = (ty * matrix[0] - tx * matrix[1]) / det;
+            const gx = Math.floor((rx - x) / fit - image.left);
+            const gy = Math.floor((ry - y) / fit + ascent - image.top);
+            if (gx >= 0 && gy >= 0 && gx < image.width && gy < image.height)
+            {
+                const at = row * width + column;
+                out[at] = Math.max(out[at], image.bytes[image.offset + gy * image.width + gx]);
+            }
+        }
+    }
+    return true;
+};
+
+/**
  * @param {AnalysisHost} a
  */
 export function createAnalysis(a){
@@ -548,33 +585,22 @@ export function createAnalysis(a){
                 + ' glyphs with', 'loss');
             return out;
         }
-        const drawn = placed.map((/** @type {{ glyph: number, x: number, y: number }} */
-            { glyph, x, y })=>({ x, y, image: host.measure.glyph(glyph, request) }));
-        for (let row = 0; row < height; row++)
+        // Each glyph read where the engine keeps it, its coverage the most of
+        // any glyph over a pixel: a pixel's value is the same whichever glyph
+        // is read first.
+        const run = { out, rect, width, height, origin, matrix, ppd, det, fit,
+            ascent: metrics.ascent, x: 0, y: 0 };
+        for (const { glyph, x, y } of placed)
         {
-            for (let column = 0; column < width; column++)
+            run.x = x;
+            run.y = y;
+            host.measure.glyph(glyph, request, coverGlyph, run);
+        }
+        if (state.mode === RENDERING.ALIASED)
+        {
+            for (let at = 0; at < out.length; at++)
             {
-                // The pixel's centre, back through the transform into the run.
-                const tx = rect.left + column + 0.5 - origin.x - matrix[4] * ppd;
-                const ty = rect.top + row + 0.5 - origin.y - matrix[5] * ppd;
-                const rx = (tx * matrix[3] - ty * matrix[2]) / det;
-                const ry = (ty * matrix[0] - tx * matrix[1]) / det;
-                let value = 0;
-                for (const { x, y, image } of drawn)
-                {
-                    if (!image || image.width === 0)
-                    {
-                        continue;
-                    }
-                    const gx = Math.floor((rx - x) / fit - image.left);
-                    const gy = Math.floor((ry - y) / fit + metrics.ascent - image.top);
-                    if (gx >= 0 && gy >= 0 && gx < image.width && gy < image.height)
-                    {
-                        value = Math.max(value, image.coverage[gy * image.width + gx]);
-                    }
-                }
-                out[row * width + column] = state.mode === RENDERING.ALIASED
-                    ? (value >= 128 ? 255 : 0) : value;
+                out[at] = out[at] >= 128 ? 255 : 0;
             }
         }
         return out;

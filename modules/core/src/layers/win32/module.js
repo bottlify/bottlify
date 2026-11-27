@@ -5838,8 +5838,10 @@ export function createWin32Module(){
                         // The font engine GDI draws with, for D3DX's font.
                         fontMetrics: (/** @type {any} */ font)=>
                             config?.graphics?.fontMetrics?.(font) ?? null,
-                        glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
-                            config?.graphics?.glyph?.(code, font) ?? null,
+                        glyph: (/** @type {number} */ code, /** @type {any} */ font,
+                            /** @type {(glyph: any, arg: any) => any} */ read,
+                            /** @type {any} */ arg)=>
+                            config?.graphics?.glyph?.(code, font, read, arg) ?? null,
                         callGuest: call=>bridge.callGuest(call),
                         drive: steps=>bridge.drive(steps),
                         currentThread: ()=>kernel.currentThread(),
@@ -6027,7 +6029,8 @@ export function createWin32Module(){
                         metrics: font=>config?.graphics?.fontMetrics?.(font) ?? null,
                         textWidth: (font, text)=>config?.graphics?.textWidth?.(font, text)
                             ?? null,
-                        glyph: (code, font)=>config?.graphics?.glyph?.(code, font) ?? null,
+                        glyph: (code, font, read, arg)=>config?.graphics?.glyph?.(code, font, read,
+                            arg) ?? null,
                     },
                     gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
                 // The monitor configuration API: one physical monitor, no DDC/CI.

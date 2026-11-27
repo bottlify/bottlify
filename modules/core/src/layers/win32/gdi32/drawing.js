@@ -334,11 +334,11 @@ function readGammaRamp(bytes){
  * @property {(font: import('./structs.js').LogFontFields) => FontMeasure | null} [fontMetrics]
  *           What the font engine measures for a font; null, or absent, when
  *           there is no engine and the estimate stands.
- * @property {(code: number, font: import('./structs.js').LogFontFields) => {
- *     advance: number, left: number, top: number, width: number, height: number,
- *     coverage: Uint8Array } | null} [glyph]
- *           One character's coverage in a font, as the engine draws it; null,
- *           or absent, without an engine.
+ * @property {<T, A>(code: number, font: import('./structs.js').LogFontFields,
+ *     read: (glyph: GlyphRead, arg: A) => T, arg?: A) => T | null} [glyph]
+ *           One character's coverage in a font, as the engine draws it, read
+ *           in place inside `read`, whose answer is the call's; null, or
+ *           absent, without an engine.
  * @property {(font: import('./structs.js').LogFontFields, text: string) => number | null}
  *           [textWidth]
  *           How wide the engine draws a string in a font; null, or absent,
@@ -374,6 +374,15 @@ function readGammaRamp(bytes){
  *
  * @typedef {Pick<import('./structs.js').TextMetricFields, 'height' | 'ascent' | 'descent'
  *     | 'internalLeading' | 'externalLeading' | 'aveCharWidth' | 'maxCharWidth'>} FontMeasure
+ */
+
+/**
+ * A glyph as a font engine hands it to a read: its box against the pen and
+ * its advance, and its `width * height` bytes of coverage, 255 fully inked,
+ * in `bytes` from `offset` - the engine's memory, valid only inside the read.
+ *
+ * @typedef {{ advance: number, left: number, top: number, width: number, height: number,
+ *     bytes: Uint8Array, offset: number }} GlyphRead
  */
 
 /** @param {any} rect */

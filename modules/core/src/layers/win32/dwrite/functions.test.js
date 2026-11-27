@@ -443,9 +443,11 @@ test('a glyph run analysis: bounds from the boxes, a texture of the asked type',
         metrics: ()=>({ ascent: 20, descent: 5, externalLeading: 0, aveCharWidth: 10,
             maxCharWidth: 20 }),
         textWidth: ()=>12,
-        glyph: (/** @type {number} */ code, /** @type {any} */ font)=>(drawn.push([code, font.height]),
-        { advance: 12, left: 0, top: 4, width: 10, height: 16,
-            coverage: new Uint8Array(160).fill(255) }),
+        glyph: (/** @type {number} */ code, /** @type {any} */ font,
+            /** @type {(glyph: any, arg: any) => any} */ read, /** @type {any} */ arg)=>(
+            drawn.push([code, font.height]),
+            read({ advance: 12, left: 0, top: 4, width: 10, height: 16,
+                bytes: new Uint8Array(163).fill(255).fill(0, 0, 3), offset: 3 }, arg)),
     } });
     const factory = await h.factory(1);
     const out = h.alloc(4);

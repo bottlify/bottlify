@@ -115,9 +115,27 @@ const CHARACTER_MAP = (()=>{
  * @property {(font: any) => { ascent: number, descent: number, externalLeading: number,
  *     aveCharWidth: number, maxCharWidth: number } | null} metrics
  * @property {(font: any, text: string) => number | null} textWidth
- * @property {(code: number, font: any) => { advance: number, left: number, top: number,
- *     width: number, height: number, coverage: Uint8Array } | null} glyph
+ * @property {<T, A>(code: number, font: any,
+ *     read: (glyph: import('../gdi32/drawing.js').GlyphRead, arg: A) => T, arg?: A) => T | null}
+ *     glyph  a glyph read in place inside `read`, whose answer is the call's
  */
+
+/**
+ * A drawn glyph's inked box in design units, y up from the baseline, or
+ * false for one with no ink: read where the engine keeps the glyph.
+ *
+ * @param {import('../gdi32/drawing.js').GlyphRead} drawn @param {number} ascent  the cell's
+ * @returns {{ xMin: number, yMin: number, xMax: number, yMax: number } | false}
+ */
+const inkedBox = (drawn, ascent)=>{
+    if (drawn.width === 0 || drawn.height === 0)
+    {
+        return false;
+    }
+    const up = ascent - drawn.top;
+    return { xMin: drawn.left * SCALE, xMax: (drawn.left + drawn.width) * SCALE,
+        yMax: up * SCALE, yMin: (up - drawn.height) * SCALE };
+};
 
 /** Characters Arial's widths put narrow and wide, for the estimates. */
 const NARROW = new Set([...'iljI.,:;!|\'`[]()ft']);
@@ -184,8 +202,8 @@ export function createSystemFace(font, measure){
         {
             return null;
         }
-        const drawn = measured ? measure.glyph(glyph, request) : null;
-        if (!drawn)
+        const drawn = measured ? measure.glyph(glyph, request, inkedBox, measured.ascent) : null;
+        if (drawn === null)
         {
             // No engine: the box a Latin glyph of that advance would have.
             const c = String.fromCharCode(glyph);
@@ -195,13 +213,7 @@ export function createSystemFace(font, measure){
                 yMin: /[gjpqy]/.test(c) ? -Math.round(descent * 0.9) : 0,
                 yMax: tall ? Math.round(UNITS_PER_EM * 0.716) : Math.round(UNITS_PER_EM * 0.519) };
         }
-        if (drawn.width === 0 || drawn.height === 0 || !measured)
-        {
-            return null;
-        }
-        const up = measured.ascent - drawn.top;
-        return { xMin: drawn.left * SCALE, xMax: (drawn.left + drawn.width) * SCALE,
-            yMax: up * SCALE, yMin: (up - drawn.height) * SCALE };
+        return drawn === false ? null : drawn;
     };
 
     /** @type {Uint8Array | null} */

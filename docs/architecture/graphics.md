@@ -97,9 +97,26 @@ flowchart TB
   way, where the graphics layer made them; the run's presenter, which the run makes outside
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
-  `lendBackend`), plain memory until then. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  `lendBackend`), plain memory until then. A Direct3D 8 or 9 frame's uniform arena, which its
+  draws take their blocks from and its replay reads, is memory held in the run's cache
+  (`d3d8/render.js` `createUniformArena`, `cache/scratch.js` `hold`), one hold a generation:
+  outgrown mid-frame, it holds a larger one and lets the old go only at its next reset, after
+  the frame that read it replayed, and all of them when the device goes. The glyphs GDI draws
+  text with (`gdi/fonts.js`) are pages of the run's cache under `glyphs/`, each a face's request
+  and a run of 32 codes: a record a code (its advance, its box, where its coverage starts) and
+  the coverage of the glyphs drawn so far, a glyph drawn for the first time putting its page
+  again with it added. Named by what they hold (a family a program added a face to is named by
+  that face's bytes), they are shared by the run's processes; one the cache lets go of is drawn
+  again as it is asked for, and where the cache has no room a page is plain memory, let go of
+  all at once past 1 MiB. A glyph is read in place (`glyph(code, font, read, arg)`): TextOut,
+  GetGlyphOutline, DirectWrite's system faces and D3DX's font read its coverage inside the
+  read, and D3DX's font reads it again when it writes its page of the device. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
-  it while the level is unchanged. A game loads
+  it, and an S3TC level's texels decoded from its blocks, while the level is unchanged, in memory
+  held in the run's cache (`opengl/context-textures.js` `rgbaCache`, the context's `holds`) that
+  it samples in place, let go of when the level is written or collected. A display list keeps an
+  S3TC rectangle's blocks, not its texels, and its own copy of every byte array a call hands it.
+  A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
   image (`glGetTexImage`) by the context that draws copies it back from the device, once what
