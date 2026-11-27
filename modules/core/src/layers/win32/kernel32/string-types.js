@@ -283,30 +283,54 @@ const ctype3 = (code, character)=>{
     return type;
 };
 
-/** One answer per type, made on first asking for each unit. */
-const answered = {
-    [CT_CTYPE1]: new Int32Array(0x10000).fill(-1),
-    [CT_CTYPE2]: new Int32Array(0x10000).fill(-1),
-    [CT_CTYPE3]: new Int32Array(0x10000).fill(-1),
-};
 const derive = { [CT_CTYPE1]: ctype1, [CT_CTYPE2]: ctype2, [CT_CTYPE3]: ctype3 };
 
+/** Whether GetStringType takes `infoType`: one of the three, exactly. @param {number} infoType */
+export const isStringType = infoType=>infoType === CT_CTYPE1 || infoType === CT_CTYPE2
+    || infoType === CT_CTYPE3;
+
 /**
- * The word GetStringType writes for a unit, or null for an info type it does
- * not take (one of the three, exactly).
+ * GetStringType's words for one info type, a unit's at its index: each fits
+ * the WORD the call writes.
  *
- * @param {number} infoType @param {number} code  a UTF-16 unit
- * @returns {number | null}
+ * @param {CT_CTYPE1 | CT_CTYPE2 | CT_CTYPE3} infoType
  */
-export function stringType(infoType, code){
-    if (infoType !== CT_CTYPE1 && infoType !== CT_CTYPE2 && infoType !== CT_CTYPE3)
+const tableOf = infoType=>{
+    const table = new Uint16Array(0x10000);
+    const type = derive[infoType];
+    for (let code = 0; code < 0x10000; code++)
     {
-        return null;
+        table[code] = type(code, String.fromCharCode(code));
     }
-    const known = answered[infoType];
-    if (known[code] < 0)
-    {
-        known[code] = derive[infoType](code, String.fromCharCode(code));
-    }
-    return known[code];
+    return table;
+};
+
+/**
+ * GetStringType's answers from the run's tables (`run-tables.js`), one for
+ * each info type, made when a call first asks for it.
+ *
+ * @param {import('../common/run-tables.js').RunTables} tables
+ * @returns {(infoType: number, text: string) => Uint16Array | null}  the word
+ *     for each unit of `text`, or null for an info type the call does not take
+ */
+export function stringTypes(tables){
+    const of = {
+        [CT_CTYPE1]: tables.table('ctype/1', Uint16Array, ()=>tableOf(CT_CTYPE1)),
+        [CT_CTYPE2]: tables.table('ctype/2', Uint16Array, ()=>tableOf(CT_CTYPE2)),
+        [CT_CTYPE3]: tables.table('ctype/4', Uint16Array, ()=>tableOf(CT_CTYPE3)),
+    };
+    return (infoType, text)=>{
+        if (!isStringType(infoType))
+        {
+            return null;
+        }
+        return of[/** @type {CT_CTYPE1 | CT_CTYPE2 | CT_CTYPE3} */ (infoType)].read(table=>{
+            const words = new Uint16Array(text.length);
+            for (let at = 0; at < text.length; at++)
+            {
+                words[at] = table[text.charCodeAt(at)];
+            }
+            return words;
+        });
+    };
 }

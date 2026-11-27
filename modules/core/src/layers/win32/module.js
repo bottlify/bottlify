@@ -241,6 +241,7 @@ import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
 import { safeArrayLayout } from './common/safearray.js';
 import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 import { utf16z } from './common/utf16.js';
+import { runTables } from './common/run-tables.js';
 import { fromBase64 } from '../../system/base64.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
@@ -1303,6 +1304,9 @@ export function createWin32Module(){
             // Ranges read again kept in the run's cache, for every process of it.
             const filesOnly = createVolume(filesystem, config?.fetchBlocks ?? null,
                 { kept: host.requireApi('cache').space('reads') });
+            // The constant tables (code pages, string types), one of each for the
+            // run, leaving only when their room is wanted: each costs a make.
+            const tables = runTables(host.requireApi('cache').space('tables', { idle: 'stay' }));
             const volume = withSystemLibraries(
                 filesOnly,
                 ()=>systemLibraryNames(),
@@ -4290,7 +4294,7 @@ export function createWin32Module(){
                         },
                     }),
                     ...conversionsInGuest(createLocaleFunctions({
-                        readMemory, writeMemory, stringLength,
+                        readMemory, writeMemory, stringLength, tables,
                         setLastError: setError,
                         divergence: config?.divergence,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -7879,6 +7883,8 @@ export function createWin32Module(){
                  * the host, and how many crossings the contended ones cost.
                  */
                 criticalSections: ()=>critical.diagnostics(),
+                /** The run's constant tables this process made, read from the cache and kept. */
+                runTables: ()=>tables.figures(),
                 /** Calls across processes this one sends, runs and has waiting. */
                 comChannel: ()=>(/** @type {any} */ (libraries['ole32.dll'])?.[COM_DIAGNOSTICS]?.() ?? null),
 
@@ -8166,6 +8172,7 @@ export function createWin32Module(){
                     multimediaTimers: current ? current.multimediaTimers() : null,
                     wasapiStreams: current ? current.wasapiStreams() : null,
                     criticalSections: current ? current.criticalSections() : null,
+                    runTables: current ? current.runTables() : null,
                     com: current ? current.comChannel() : null,
                     messages: current ? current.messages() : {},
                     // What is left of the one arena everything the guest is handed

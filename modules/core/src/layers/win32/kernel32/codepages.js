@@ -14,8 +14,9 @@
  * these are the Windows pages: its shift_jis is code page 932, gbk 936, its
  * euc-kr the unified Hangul code 949), so a page is read out of the decoder
  * the first time a program names it -- each byte, and for a lead byte each
- * pair -- and the reverse table is built from that on the first encode. A
- * platform without one of these decoders does not carry that page.
+ * pair -- and the reverse table is built from that on the first encode, both
+ * once for the run (`codePages`). A platform without one of these decoders
+ * does not carry that page.
  *
  * What the pages do beyond their tables is Windows': a lead byte whose trail
  * is not one -- or that ends the input -- is the default character and the
@@ -121,41 +122,55 @@ const WC_NO_BEST_FIT_CHARS = 0x400;
  *           character is among the first `written` bytes.
  */
 
-/** @type {Map<number, CodePage | null>} */
-const pages = new Map();
-
 /**
- * A code page this machine carries, or null.
+ * The code pages this machine carries, their tables the run's
+ * (`run-tables.js`): a page's bytes read out of the decoder, each byte's
+ * character and for a double-byte page each pair's (`codepage/<id>`), made the
+ * first time a program names the page; and the reverse, a code unit's bytes
+ * (`codepage/<id>/reverse`), made from that on the first encode.
  *
- * @param {number} id
- * @returns {CodePage | null}
+ * @param {import('../common/run-tables.js').RunTables} tables
+ * @returns {(id: number) => CodePage | null}  a page, or null where it is not carried
  */
-export function codePage(id){
-    if (!pages.has(id))
-    {
-        pages.set(id, build(id));
-    }
-    return /** @type {CodePage | null} */ (pages.get(id));
+export function codePages(tables){
+    /** @type {Map<number, CodePage | null>} */
+    const pages = new Map();
+    return id=>{
+        if (!pages.has(id))
+        {
+            pages.set(id, build(id, tables));
+        }
+        return /** @type {CodePage | null} */ (pages.get(id));
+    };
 }
 
-/** @param {number} id @returns {CodePage | null} */
-function build(id){
+/** @param {number} id @returns {TextDecoder | null} */
+const decoderOf = id=>{
     const label = DECODERS.get(id);
     if (label === undefined)
     {
         return null;
     }
-    /** @type {TextDecoder} */
-    let decoder;
     try
     {
-        decoder = new TextDecoder(label, { fatal: true });
+        return new TextDecoder(label, { fatal: true });
     }
     catch (e){
         void e;
         return null;
     }
-    const single = new Uint16Array(256).fill(UNDEFINED);
+};
+
+/**
+ * A page's forward table: each byte's character, LEAD for a lead byte, at
+ * 0..0xff; for a double-byte page each pair's at 0x100 + (lead << 8 | trail).
+ * UNDEFINED where there is none.
+ *
+ * @param {number} id @param {TextDecoder} decoder @param {Set<number>} leads
+ */
+function forwardTable(id, decoder, leads){
+    const table = new Uint16Array(leads.size === 0 ? 0x100 : 0x10100).fill(UNDEFINED);
+    const pairs = table.subarray(0x100);
     const one = new Uint8Array(1);
     const two = new Uint8Array(2);
     /** @param {Uint8Array} bytes */
@@ -170,21 +185,11 @@ function build(id){
             return UNDEFINED;
         }
     };
-    const leadRanges = LEAD_RANGES.get(id) ?? [];
-    const leads = new Set();
-    for (let at = 0; at < leadRanges.length; at += 2)
-    {
-        for (let byte = leadRanges[at]; byte <= leadRanges[at + 1]; byte++)
-        {
-            leads.add(byte);
-        }
-    }
-    const pairs = leads.size === 0 ? null : new Uint16Array(0x10000).fill(UNDEFINED);
     for (let byte = 0; byte < 256; byte++)
     {
-        if (pairs !== null && leads.has(byte))
+        if (leads.has(byte))
         {
-            single[byte] = LEAD;
+            table[byte] = LEAD;
             two[0] = byte;
             for (let trail = 0x40; trail < 0x100; trail++)
             {
@@ -195,43 +200,65 @@ function build(id){
         }
         one[0] = byte;
         const code = read(one);
-        single[byte] = isPrivateUse(code) || HOLES.get(id)?.includes(byte) ? UNDEFINED
+        table[byte] = isPrivateUse(code) || HOLES.get(id)?.includes(byte) ? UNDEFINED
             : code === UNDEFINED && byte >= 0x80 && byte <= 0x9f ? byte : code;
     }
+    return table;
+}
 
-    /** Code unit to byte, or to lead << 8 | trail; UNDEFINED where none. @type {Uint16Array | null} */
-    let reverse = null;
-    const reverseTable = ()=>{
-        if (reverse === null)
+/**
+ * A page's reverse table from its forward one: a code unit's byte, or its
+ * lead << 8 | trail, the first that reads as it; UNDEFINED where none does.
+ *
+ * @param {Uint16Array} forward
+ */
+function reverseTable(forward){
+    const table = new Uint16Array(0x10000).fill(UNDEFINED);
+    for (let byte = 0; byte < 256; byte++)
+    {
+        const code = forward[byte];
+        if (code < LEAD && table[code] === UNDEFINED)
         {
-            const table = new Uint16Array(0x10000).fill(UNDEFINED);
-            for (let byte = 0; byte < 256; byte++)
-            {
-                const code = single[byte];
-                if (code < LEAD && table[code] === UNDEFINED)
-                {
-                    table[code] = byte;
-                }
-            }
-            if (pairs !== null)
-            {
-                for (let pair = 0; pair < 0x10000; pair++)
-                {
-                    const code = pairs[pair];
-                    if (code < LEAD && table[code] === UNDEFINED)
-                    {
-                        table[code] = pair;
-                    }
-                }
-            }
-            reverse = table;
+            table[code] = byte;
         }
-        return reverse;
-    };
+    }
+    for (let pair = 0; pair < forward.length - 0x100; pair++)
+    {
+        const code = forward[0x100 + pair];
+        if (code < LEAD && table[code] === UNDEFINED)
+        {
+            table[code] = pair;
+        }
+    }
+    return table;
+}
+
+/**
+ * @param {number} id @param {import('../common/run-tables.js').RunTables} tables
+ * @returns {CodePage | null}
+ */
+function build(id, tables){
+    if (decoderOf(id) === null)
+    {
+        return null;
+    }
+    const leadRanges = LEAD_RANGES.get(id) ?? [];
+    const leads = new Set();
+    for (let at = 0; at < leadRanges.length; at += 2)
+    {
+        for (let byte = leadRanges[at]; byte <= leadRanges[at + 1]; byte++)
+        {
+            leads.add(byte);
+        }
+    }
+    const forward = tables.table(`codepage/${id}`, Uint16Array,
+        ()=>forwardTable(id, /** @type {TextDecoder} */ (decoderOf(id)), leads));
+    const reverse = tables.table(`codepage/${id}/reverse`, Uint16Array,
+        ()=>forward.read(reverseTable));
+    const double = leads.size !== 0;
 
     /** @type {(text: string, flags: number, fallback: number[] | null) => Encoded} */
-    const encode = (text, flags, fallback)=>{
-        const table = reverseTable();
+    const encode = (text, flags, fallback)=>reverse.read(table=>{
         const substitute = fallback ?? [DEFAULT];
         /** @type {number[]} */
         const out = [];
@@ -260,27 +287,27 @@ function build(id){
         }
         return {
             bytes: Uint8Array.from(out),
-            fit: room=>(inside.has(room) ? room - 1 : room),
-            usedDefault: written=>firstDefault !== -1 && firstDefault < written,
+            fit: (/** @type {number} */ room)=>(inside.has(room) ? room - 1 : room),
+            usedDefault: (/** @type {number} */ written)=>firstDefault !== -1 && firstDefault < written,
         };
-    };
+    });
 
     return {
         id,
         name: NAMES.get(id) ?? String(id),
-        maxCharSize: pairs === null ? 1 : 2,
+        maxCharSize: double ? 2 : 1,
         leadRanges,
-        isLead: byte=>single[byte & 0xff] === LEAD,
-        decode(bytes, strict){
+        isLead: byte=>leads.has(byte & 0xff),
+        decode: (bytes, strict)=>forward.read(table=>{
             /** @type {number[]} */
             const units = [];
             for (let at = 0; at < bytes.length; at++)
             {
-                const code = single[bytes[at]];
-                if (code === LEAD && pairs !== null)
+                const code = table[bytes[at]];
+                if (code === LEAD)
                 {
                     const pair = at + 1 < bytes.length
-                        ? pairs[bytes[at] << 8 | bytes[at + 1]] : UNDEFINED;
+                        ? table[0x100 + (bytes[at] << 8 | bytes[at + 1])] : UNDEFINED;
                     if (pair !== UNDEFINED)
                     {
                         units.push(pair);
@@ -305,7 +332,7 @@ function build(id){
                 text += String.fromCharCode(...units.slice(at, at + 4096));
             }
             return text;
-        },
+        }),
         encode,
     };
 }
