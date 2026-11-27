@@ -21,13 +21,16 @@
  */
 
 import { compareNames, nameKey } from '../ole32/cfb.js';
-import { formatGuid } from '../../../system/guid.js';
+import { CFB_ENTRY, CFB_HEADER } from '../common/compound-writer.js';
+import { GUID_SIZE, formatGuid } from '../../../system/guid.js';
+import { fieldOf } from '../../../system/layout.js';
 
 const SIGNATURE = Object.freeze([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-const HEADER_SIZE = 512;
-const DIRECTORY_ENTRY_SIZE = 128;
+const HEADER_SIZE = CFB_HEADER.SIZE;
+const DIRECTORY_ENTRY_SIZE = CFB_ENTRY.SIZE;
 const MINI_SECTOR_SIZE = 64;
-const HEADER_DIFAT_ENTRIES = 109;
+const HEADER_DIFAT_ENTRIES = /** @type {import('../../../system/layout.js').Field} */ (
+    fieldOf(CFB_HEADER, 'difat')).count;
 
 const MAXREGSECT = 0xfffffffa;
 const ENDOFCHAIN = 0xfffffffe;
@@ -119,8 +122,8 @@ export async function openCompound(source){
     {
         throw new CompoundError('not a compound file');
     }
-    const sectorShift = u16(header, 0x1e);
-    if ((sectorShift !== 9 && sectorShift !== 12) || u16(header, 0x20) !== 6)
+    const sectorShift = u16(header, CFB_HEADER.sectorShift);
+    if ((sectorShift !== 9 && sectorShift !== 12) || u16(header, CFB_HEADER.miniSectorShift) !== 6)
     {
         throw new CompoundError('unknown sector sizes');
     }
@@ -171,16 +174,17 @@ export async function openCompound(source){
 
     // The DIFAT: the header's 109 FAT sector numbers, then a chain of
     // sectors whose last word names the next.
-    const fatSectorCount = u32(header, 0x2c);
+    const fatSectorCount = u32(header, CFB_HEADER.fatSectors);
     /** @type {number[]} */
     const fatSectors = [];
     for (let index = 0; index < HEADER_DIFAT_ENTRIES && fatSectors.length < fatSectorCount;
         index++)
     {
-        fatSectors.push(u32(header, 0x4c + index * 4));
+        fatSectors.push(u32(header, CFB_HEADER.difat + index * 4));
     }
-    let difat = u32(header, 0x44);
-    for (let seen = 0; seen < u32(header, 0x48) && fatSectors.length < fatSectorCount; seen++)
+    let difat = u32(header, CFB_HEADER.difatStart);
+    const difatCount = u32(header, CFB_HEADER.difatSectors);
+    for (let seen = 0; seen < difatCount && fatSectors.length < fatSectorCount; seen++)
     {
         if (!valid(difat))
         {
@@ -223,37 +227,38 @@ export async function openCompound(source){
         return chain;
     };
 
-    const directoryChain = chainOf(fat, u32(header, 0x30), sectorCount);
+    const directoryChain = chainOf(fat, u32(header, CFB_HEADER.directoryStart), sectorCount);
     const directory = await readRuns(runsOf(directoryChain), directoryChain.length * sectorSize);
     const entryCount = directory.length / DIRECTORY_ENTRY_SIZE;
 
     /** @param {number} index */
     const entryAt = index=>{
         const at = index * DIRECTORY_ENTRY_SIZE;
-        const nameBytes = u16(directory, at + 0x40);
+        const nameBytes = u16(directory, at + CFB_ENTRY.nameLength);
         const units = nameBytes >= 2 && nameBytes <= 64 && nameBytes % 2 === 0
             ? nameBytes / 2 - 1 : 0;
         let name = '';
         for (let unit = 0; unit < units; unit++)
         {
-            const code = u16(directory, at + unit * 2);
+            const code = u16(directory, at + CFB_ENTRY.name + unit * 2);
             if (code === 0)
             {
                 break;
             }
             name += String.fromCharCode(code);
         }
-        const high = sectorShift === 9 ? 0 : u32(directory, at + 0x7c);
+        const high = sectorShift === 9 ? 0 : u32(directory, at + CFB_ENTRY.sizeHigh);
         return {
             name,
-            type: directory[at + 0x42],
-            left: u32(directory, at + 0x44),
-            right: u32(directory, at + 0x48),
-            child: u32(directory, at + 0x4c),
-            start: u32(directory, at + 0x74),
-            size: u32(directory, at + 0x78) + high * 0x1_0000_0000,
-            clsid: formatGuid(directory.subarray(at + 0x50, at + 0x60)),
-            entry: directory.slice(at, at + 0x80),
+            type: directory[at + CFB_ENTRY.type],
+            left: u32(directory, at + CFB_ENTRY.left),
+            right: u32(directory, at + CFB_ENTRY.right),
+            child: u32(directory, at + CFB_ENTRY.child),
+            start: u32(directory, at + CFB_ENTRY.start),
+            size: u32(directory, at + CFB_ENTRY.size) + high * 0x1_0000_0000,
+            clsid: formatGuid(directory.subarray(at + CFB_ENTRY.clsid,
+                at + CFB_ENTRY.clsid + GUID_SIZE)),
+            entry: directory.slice(at, at + DIRECTORY_ENTRY_SIZE),
         };
     };
 
@@ -318,9 +323,9 @@ export async function openCompound(source){
 
     // The mini stream: the root's own chain, cut into 64-byte sectors that a
     // mini FAT chains. Small, so read once, and only if anything lives there.
-    const cutoff = u32(header, 0x38);
-    const miniFatChain = u32(header, 0x3c) <= MAXREGSECT
-        ? chainOf(fat, u32(header, 0x3c), sectorCount) : [];
+    const cutoff = u32(header, CFB_HEADER.miniStreamCutoff);
+    const miniFatChain = u32(header, CFB_HEADER.miniFatStart) <= MAXREGSECT
+        ? chainOf(fat, u32(header, CFB_HEADER.miniFatStart), sectorCount) : [];
     const miniFat = miniFatChain.length > 0 ? await wordsOf(miniFatChain) : new Uint32Array(0);
     /** @type {Promise<Uint8Array> | null} */
     let miniStream = null;
