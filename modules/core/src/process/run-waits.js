@@ -20,39 +20,65 @@
 export const HOST_ANSWER_TICKS = 64;
 
 /**
- * Waits for `pending`, a yield to the event loop between turns, answering the
- * other executors each time their bell rings meanwhile. A trap of theirs is
- * otherwise answered when the next turn begins, and a yield the browser
- * stretched - to compose a frame, run its timers, deliver a worker's message -
- * holds every one asked in it that long: a .NET game's loader on another
- * executor waited over a millisecond for 37% of its answers, while the thread
- * here spent half its time yielding between the frames of a loading screen.
+ * The other executors answered while the run loop yields to the event loop,
+ * each time their bell rings meanwhile. A trap of theirs is otherwise
+ * answered when the next turn begins, and a yield the browser stretched - to
+ * compose a frame, run its timers, deliver a worker's message - holds every
+ * one asked in it that long: a .NET game's loader on another executor waited
+ * over a millisecond for 37% of its answers, while the thread here spent half
+ * its time yielding between the frames of a loading screen.
  *
- * @param {Promise<void>} pending
- * @param {{ rung: () => number, waitAsync: (seen: number, ms: number) => Promise<void> }
- *     | null | undefined} bell
+ * Made once a run, not once a yield: the loop yields thousands of times a
+ * second, and a promise, a race and closures a yield were 2.5 KB of garbage
+ * each (node). The look at the bell is parked across yields - it outlives the
+ * yield it was armed in and serves the next one, armed again only once it has
+ * ended - and answers in its own callback, made once here, while the loop
+ * awaits the yield itself between `begin` and `end`.
+ *
+ * @param {{ rung: () => number, waitAsync: (seen: number, ms: number) => Promise<unknown> }} bell
  * @param {() => void} answer
- * @returns {Promise<void>}
+ * @returns {{ begin: () => void, end: () => void }}
  */
-export async function answeringWhile(pending, bell, answer){
-    if (!bell?.waitAsync)
-    {
-        return pending;
-    }
-    const yielded = { done: false };
-    const over = pending.then(()=>{
-        yielded.done = true;
-    });
-    while (!yielded.done)
-    {
-        const seen = bell.rung();
-        await Promise.race([over, bell.waitAsync(seen, ANSWERING_LOOK_MS)]);
-        if (!yielded.done && bell.rung() !== seen)
+export function answeringWhile(bell, answer){
+    /** A yield is under way: a ring now is answered. */
+    let yielding = false;
+    /** A look is parked on the bell, from the count `seen`. */
+    let looking = false;
+    let seen = 0;
+    const look = ()=>{
+        looking = true;
+        seen = bell.rung();
+        bell.waitAsync(seen, ANSWERING_LOOK_MS).then(looked);
+    };
+    const looked = ()=>{
+        looking = false;
+        // Between yields the look is left unarmed: no turn's answer waits on
+        // it, the turn answers as it begins, and the next yield arms it again.
+        if (!yielding)
+        {
+            return;
+        }
+        if (bell.rung() !== seen)
         {
             answer();
         }
-    }
-    return over;
+        if (yielding && !looking)
+        {
+            look();
+        }
+    };
+    return {
+        begin(){
+            yielding = true;
+            if (!looking)
+            {
+                look();
+            }
+        },
+        end(){
+            yielding = false;
+        },
+    };
 }
 
 /**
@@ -138,10 +164,17 @@ export function idleWait({ fetching, idlers, suspended, spun, others = false }){
     {
         return null;
     }
-    const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
     // A turn the others ran retired nothing here and still resets the count:
     // with a call waiting on the host, the loop would come straight back for
     // as long as they run. Their bell ends the wait as the answer does.
     const timer = spun >= IDLE_SPINS_BEFORE_TIMER || others && suspended > 0;
-    return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
+    const on = fetching > 0 ? 0 : idlers > 0 ? 2 : 4;
+    return IDLE_WAITS[on + (timer ? 1 : 0)];
 }
+
+/**
+ * The waits `idleWait` answers, made once: it is asked at every turn that
+ * waits, and a record and a phase's name a time were garbage.
+ */
+const IDLE_WAITS = Object.freeze(['fetch', 'message', 'host'].flatMap(on=>[false, true]
+    .map(timer=>Object.freeze({ phase: `idle-${on}${timer ? '-wait' : ''}`, timer }))));

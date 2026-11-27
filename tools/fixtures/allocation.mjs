@@ -27,15 +27,23 @@ const total = node=>node.selfSize
     + node.children.reduce((/** @type {number} */ sum, /** @type {any} */ child)=>sum + total(child), 0);
 
 /**
- * @param {Session} session @param {() => void} body @param {number} calls
+ * @param {Session} session @param {() => void | Promise<unknown>} body @param {number} calls
+ * @param {boolean} awaited  each call's promise awaited before the next
  * @returns {Promise<number>}
  */
-async function sampled(session, body, calls){
+async function sampled(session, body, calls, awaited){
     await session.post('HeapProfiler.startSampling', { samplingInterval: INTERVAL,
         includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
     for (let i = 0; i < calls; i++)
     {
-        body();
+        if (awaited)
+        {
+            await body();
+        }
+        else
+        {
+            body();
+        }
     }
     const { profile } = await session.post('HeapProfiler.stopSampling');
     return total(profile.head);
@@ -50,17 +58,43 @@ async function sampled(session, body, calls){
  * @param {{ calls?: number }} [options]
  * @returns {Promise<number>}
  */
-export async function bytesPerCall(body, { calls = 20000 } = {}){
+export function bytesPerCall(body, { calls = 20000 } = {}){
+    return measured(body, ()=>{}, calls, false);
+}
+
+/** A promise settled once, what the empty body of an awaited loop answers. */
+const SETTLED = Promise.resolve();
+
+/**
+ * The bytes an asynchronous `body` allocates a call, each call's promise
+ * awaited before the next: a wait, a yield, a call answered later. Less what
+ * the same loop makes awaiting a promise already settled, so what is counted
+ * is the body's own, not the loop's await - or less what `empty` makes, the
+ * same body without what is measured (an async function's own promise, say).
+ *
+ * @param {() => Promise<unknown>} body
+ * @param {{ calls?: number, empty?: () => Promise<unknown> }} [options]
+ * @returns {Promise<number>}
+ */
+export function bytesPerAwait(body, { calls = 2000, empty = ()=>SETTLED } = {}){
+    return measured(body, empty, calls, true);
+}
+
+/**
+ * @param {() => void | Promise<unknown>} body @param {() => void | Promise<unknown>} empty
+ * @param {number} calls @param {boolean} awaited
+ * @returns {Promise<number>}
+ */
+async function measured(body, empty, calls, awaited){
     const session = new Session();
     session.connect();
     try
     {
         await session.post('HeapProfiler.enable');
-        const empty = ()=>{};
         for (let i = 0; i < calls; i++)
         {
-            body();
-            empty();
+            await body();
+            await empty();
         }
         // The least of three: the sampler counts every allocation of the
         // thread, and work another test left running only ever adds to it.
@@ -68,8 +102,8 @@ export async function bytesPerCall(body, { calls = 20000 } = {}){
         let made = Infinity;
         for (let round = 0; round < 3; round++)
         {
-            around = Math.min(around, await sampled(session, empty, calls));
-            made = Math.min(made, await sampled(session, body, calls));
+            around = Math.min(around, await sampled(session, empty, calls, awaited));
+            made = Math.min(made, await sampled(session, body, calls, awaited));
         }
         return Math.max(0, made - around) / calls;
     }
