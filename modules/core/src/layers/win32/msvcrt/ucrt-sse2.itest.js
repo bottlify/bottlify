@@ -20,6 +20,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
+import { guestThrough } from './guest-window.fixture.js';
 
 const PROGRAM = 0x8000;
 const TRAPS = 0x8f00;
@@ -73,9 +74,8 @@ test('sin and cos in the guest answer XMM0 and errno as their SSE2 handlers', ()
     const fns = createUcrtMathFunctions({
         fpu: /** @type {any} */ (machine).fpu(),
         errno: code=>errnos.push(code),
-        readMemory: (at, length)=>machine.readPhysical(at, length).slice(),
-        writeMemory: (at, bytes)=>machine.writePhysical(at, bytes),
-        pointerSize: 4,
+        guest: guestThrough((at, length)=>machine.readPhysical(at, length).slice(),
+            (at, bytes)=>machine.writePhysical(at, bytes)),
         readXmm: index=>/** @type {any} */ (machine).readXmm(index),
         writeXmm: (index, words)=>/** @type {any} */ (machine).writeXmm(index, words),
     });

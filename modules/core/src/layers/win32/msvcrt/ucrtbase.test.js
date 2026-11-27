@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
+import { createMsvcr80Functions } from './msvcr80.js';
 import { guestWindow } from './guest-window.fixture.js';
 import { fusedMultiplyAdd } from './ucrt-math.js';
 import { moduleKeyOf } from '../../../process/libraries.js';
@@ -100,8 +101,6 @@ function setup(texts = {}, { watched = false } = {}){
     }
     const ucrt = createUcrtbaseFunctions(crt, {
         guest: guestWindow(memory),
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
         callGuest: (entry, args)=>{
             called.push(['guest', entry, ...args]);
             return 0;
@@ -299,8 +298,7 @@ test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
     const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
         _wcstoui64: wideUnsigned });
     const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        guest: guestWindow(new Uint8Array(16)), readMemory: ()=>new Uint8Array(0),
-        writeMemory: ()=>{} }));
+        guest: guestWindow(new Uint8Array(16)) }));
     assert.equal(ucrt.wcstoll, wide);
     assert.equal(ucrt.wcstoull, wideUnsigned);
     assert.equal(ucrt.strtoll, narrow);
@@ -314,8 +312,7 @@ test('lround and lroundf round half away from zero; a value no long holds is 0 a
     const guest = { ...guestWindow(new Uint8Array(16)),
         set32: (/** @type {number} */ _at, /** @type {number} */ value)=>errnos.push(value | 0) };
     const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        guest, fpu: { push: ()=>{}, pop: ()=>0 }, readMemory: ()=>new Uint8Array(4),
-        writeMemory: ()=>{} })));
+        guest, fpu: { push: ()=>{}, pop: ()=>0 } })));
     const words = (/** @type {number} */ x)=>{
         const view = new DataView(new ArrayBuffer(8));
         view.setFloat64(0, x, true);
@@ -348,8 +345,7 @@ test('fma rounds once: the error of a product is kept, ties go to even, floats r
 test('ilogb is the exponent as an int; zero and NaN have their own answers', ()=>{
     const crt = /** @type {any} */ ({ _errno: { handler: ()=>0x9000 } });
     const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
-        guest: guestWindow(new Uint8Array(16)), fpu: { push: ()=>{}, pop: ()=>0 },
-        readMemory: ()=>new Uint8Array(4), writeMemory: ()=>{} })));
+        guest: guestWindow(new Uint8Array(16)), fpu: { push: ()=>{}, pop: ()=>0 } })));
     const words = (/** @type {number} */ x)=>{
         const view = new DataView(new ArrayBuffer(8));
         view.setFloat64(0, x, true);
@@ -369,4 +365,28 @@ test('an _o_ name is the same entry as the plain one', ()=>{
     const { ucrt } = setup();
     assert.equal(ucrt._o_malloc, ucrt.malloc);
     assert.equal(ucrt._o__execute_onexit_table, ucrt._execute_onexit_table);
+});
+
+test('at 64 bits past 4 GiB: a pointer whose low dword is zero is no null', ()=>{
+    const base = 0x100000000;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>bytes.set([...text, '\0'].map(c=>c.charCodeAt(0)), at - base);
+    const errno = base + 0x800;
+    const crt = createMsvcr80Functions(/** @type {any} */ ({
+        _errno: { handler: ()=>errno } }), { guest });
+    // The command line at the window's first byte.
+    put(base, '"a b.exe"  -x');
+    const ucrt = /** @type {any} */ (createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        guest, commandLine: { narrow: ()=>base, wide: ()=>0 } })));
+    assert.equal(ucrt._get_narrow_winmain_command_line.handler([]), base + 11,
+        'the line past the program\'s name');
+    // strtok_s's delimiters at the window's first byte.
+    put(base, ',');
+    put(base + 0x100, 'one,two');
+    const context = base + 0x200;
+    assert.equal(crt.strtok_s.handler([base + 0x100, base, context]), base + 0x100);
+    assert.equal(guest.ptr(context), base + 0x104, 'carried on past the token, whole');
+    assert.equal(guest.u32(errno), 0, 'no EINVAL');
 });
