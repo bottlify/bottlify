@@ -5,24 +5,13 @@
  */
 
 /**
- * What the processor path keeps of its contexts' idle texture levels: the
- * run's cache rather than the drawing thread's heap.
- *
- * A level's own bytes - legacy RGBA `texels`, a sized level's `data`, the
- * S3TC blocks it keeps - are the only copy, written in place by sub-image
- * writes. A level no draw has sampled since the look before (`look`, about
- * once a second) hands them to the texel store (`level-spill.js`), and its
- * first reader or writer takes them back as they were. A drawn level keeps
- * them: the rasteriser reads them every draw, and a draw that took them back
- * from the cache each second would copy them out each second.
- *
- * The RGBA the rasteriser samples, made from a sized level's data or decoded
- * from its blocks, is held memory of the cache already (`context-textures.js`
- * `rgbaCache`): read every draw and made again at will, it is never spilled,
- * only let go of with the bytes it was made from.
- *
- * The root makes it only over its names in the run's cache: there is no
- * second, plain way to keep a level.
+ * The processor path's idle texture levels in the run's cache: a level no
+ * draw has sampled since the look before (`look`, about once a second) hands
+ * its own bytes to the texel store (`level-spill.js`), and its first reader
+ * or writer takes them back. A drawn level keeps them, as the rasteriser
+ * reads them every draw. The RGBA it samples is held memory of the cache
+ * already (`context-textures.js` `rgbaCache`): made again at will, it is not
+ * spilled but let go of with the bytes it was made from.
  */
 
 import { createTexelStore } from '../internal/texel-store.js';

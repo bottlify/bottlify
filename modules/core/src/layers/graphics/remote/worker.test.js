@@ -485,14 +485,13 @@ test('told to, the worker sends its frames as bytes from then on', async()=>{
         assert.equal(frames()[1].bitmap, undefined);
         assert.ok(frames()[1].pixels instanceof Uint8Array, 'then bytes');
         assert.equal(frames()[1].width, 8);
+        // Read before its answer: shown, its memory is the next frame's.
+        const second = frames()[1].pixels[0];
         scope.onmessage({ data: { type: 'shown' } });
         await draw(0xff000003);
         assert.equal(frames().length, 3);
-        assert.deepEqual([frames()[1].pixels[0], frames()[2].pixels[0]], [2, 3],
-            'each frame its own picture, the one sent before left as it was');
-        const shown = await keeper.under();
-        assert.equal(shown.bodies, 1, 'the frame in flight held; the one before let go of'
-            + ' as the next was sent, one in flight at a time');
+        assert.deepEqual([second, frames()[2].pixels[0]], [2, 3], 'each frame its own picture');
+        assert.equal((await keeper.under()).bodies, 1, 'the frame in flight held');
         scope.onmessage({ data: { type: 'shown', serial: frames()[2].serial } });
         assert.equal((await keeper.under()).bodies, 0, 'answered, their memory let go of');
         const readBacks = gpu.of('createBuffer').filter((/** @type {any} */ call)=>

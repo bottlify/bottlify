@@ -5,21 +5,14 @@
  */
 
 /**
- * A texture level's own bytes handed to the texel store while nothing needs
- * them (`internal/texel-store.js`), and back as they were at their first
- * reader. Both of OpenGL's drawing sides keep levels this way: the device
- * path the levels no draw has uploaded yet (`gpu.js` `spill`), the processor
- * path the levels no draw has sampled for a while (`processor-levels.js`).
- *
- * A level's bytes of one kind - its RGBA `texels`, a sized level's `data`,
- * the S3TC blocks it keeps (`compressed`) - are each the only copy of what
- * the program made. Spilled, the level's property becomes an accessor: read,
- * it takes the bytes back (one copy out of the cache) and is a plain value
- * again, so a write in place, a decode or a read-back meets the same bytes;
- * set, it lets them go. A reader that only reads (an upload) reads them in
- * place where they wait (`readLevel`). Only a plain value is spilled: a
- * property already an accessor (a sized level's RGBA, made from its data; a
- * view's, read from the level it views) is not the level's own bytes.
+ * A texture level's own bytes - RGBA `texels`, a sized level's `data`, kept
+ * S3TC blocks (`compressed`), each the only copy - handed to the texel store
+ * while nothing needs them: by the device path before a draw uploads them
+ * (`gpu.js` `spill`), by the processor path while no draw samples them
+ * (`processor-levels.js`). The property becomes an accessor: read, it takes
+ * the bytes back as the level's own (a write in place meets them); set, it
+ * lets them go; an upload reads them in place (`readLevel`). An accessor
+ * already there (a sized level's RGBA, a view's) is not the level's bytes.
  */
 
 import { KEPT_FROM } from '../internal/texel-store.js';
@@ -35,19 +28,12 @@ import { KEPT_FROM } from '../internal/texel-store.js';
  *     names: WeakMap<object, string> }} Spillable
  */
 
-/** @param {any} value */
-const plainBytes = value=>(value instanceof Uint8Array ? value : null);
-
-/** @type {Record<Spillable['property'], () => Spillable>} */
-const KINDS = {
-    texels: ()=>({ property: 'texels', bytesOf: plainBytes, made: bytes=>bytes,
-        names: new WeakMap() }),
-    data: ()=>({ property: 'data', bytesOf: plainBytes, made: bytes=>bytes,
-        names: new WeakMap() }),
-    compressed: ()=>({ property: 'compressed',
-        bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
-        made: (bytes, format)=>({ format, bytes }), names: new WeakMap() }),
-};
+/** @param {Spillable['property']} property @returns {Spillable} */
+const kindOf = property=>(property === 'compressed'
+    ? { property, bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
+        made: (bytes, format)=>({ format, bytes }), names: new WeakMap() }
+    : { property, bytesOf: value=>(value instanceof Uint8Array ? value : null),
+        made: bytes=>bytes, names: new WeakMap() });
 
 /** @param {object} image @param {string} property @param {any} value */
 const plain = (image, property, value)=>Object.defineProperty(image, property,
@@ -58,26 +44,19 @@ const plain = (image, property, value)=>Object.defineProperty(image, property,
  *     kinds: readonly Spillable['property'][] }} options
  */
 export function createLevelSpill({ store, kinds }){
-    const spillable = kinds.map(kind=>KINDS[kind]());
+    const spillable = kinds.map(kindOf);
     // A key a level, never the texture's name and level: a name the program
     // deleted and made again would meet the bytes of the one before it until
     // the next `forget` let them go.
     let names = 0;
     const counts = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, inPlace: 0,
         forgotten: 0 };
-    /**
-     * The texture each key waiting in the store is a level of: a level of
-     * one the program deleted is read by nothing, and its key is let go of
-     * by `forget`, which is handed the textures that are alive.
-     *
-     * @type {Map<string, object>}
-     */
+    /** The texture each key waiting in the store is a level of, for `forget`. @type {Map<string, object>} */
     const spilledOf = new Map();
 
     /**
-     * A waiting level's bytes back as the level's own, the level plain again:
-     * a reader through the property may write them in place, so they are
-     * the level's and not a view of the cache (`TexelStore.take`).
+     * A waiting level's bytes back as the level's own, not a view of the
+     * cache: a reader through the property may write them in place.
      *
      * @param {Spillable} kind @param {object} image @param {string} key @param {number} format
      */
@@ -93,9 +72,8 @@ export function createLevelSpill({ store, kinds }){
     };
 
     /**
-     * A level whose bytes of one kind wait in the store under `key`. Made
-     * apart from `spillLevel`, so its accessors hold no reference to the
-     * bytes they let go of.
+     * A level whose bytes of one kind wait in the store under `key`; its
+     * accessors hold no reference to the bytes they let go of.
      *
      * @param {Spillable} kind @param {object} texture @param {object} image @param {string} key
      * @param {number} format  an S3TC level's format
@@ -122,10 +100,8 @@ export function createLevelSpill({ store, kinds }){
         kinds: spillable,
 
         /**
-         * A level's bytes of every kind handed to the store, where they are a
-         * plain value large enough: they move into the run's cache once it
-         * grants their room, and a write or a read meanwhile meets them in
-         * the store.
+         * A level's bytes of every kind that is a plain value large enough
+         * handed to the store.
          *
          * @param {object} texture @param {object} image
          * @returns {number}  the bytes handed over
@@ -153,9 +129,8 @@ export function createLevelSpill({ store, kinds }){
         },
 
         /**
-         * A level's bytes of one kind read for something that only reads
-         * them: in place where they wait in the store under `waits`, else as
-         * the level holds them (`held`).
+         * A level's bytes of one kind read: in place where they wait under
+         * `waits`, else as the level holds them (`held`).
          *
          * @param {string | undefined} waits @param {() => any} held
          * @param {(bytes: any) => void} read
@@ -174,8 +149,7 @@ export function createLevelSpill({ store, kinds }){
         waits: image=>spillable.some(kind=>kind.names.has(image)),
 
         /**
-         * The levels waiting in the store of a texture not among `alive`,
-         * which the program deleted, let go of: nothing reads them again.
+         * What waits of a texture not among `alive` (deleted) let go of.
          *
          * @param {Set<object>} alive
          */

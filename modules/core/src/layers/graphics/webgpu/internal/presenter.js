@@ -392,13 +392,10 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *     bytesPerRow: number, format: string }) => void,
  *     bytes: (length: number) => Uint8Array | null,
  *     figures?: () => Record<string, number> }} [options.display]
- *        Where a process with no GPU of its own - one in a worker of its own -
- *        sends a surface's picture, in the bytes an upload would carry, for
- *        the thread that has the GPU to show (`send`): written into memory
- *        held in the run's cache (`bytes`, null where it has no room, the
- *        frame then not sent and counted `unsent`), which the receiver reads
- *        in place (`host/process.worker.js` `sendFrames`); `figures` counts
- *        the holds for the report.
+ *        Where a process in a worker of its own sends a surface's picture, in
+ *        the bytes an upload would carry, written into memory held in the
+ *        run's cache (`bytes`; null for no room, the frame counted `unsent`;
+ *        `host/process.worker.js` `sendFrames`).
  * @param {(name: string) => import('../../../cache/scratch.js').Scratch} [options.scratches]
  *        Memory the presenter keeps between frames, held in the run's cache:
  *        where a surface in guest memory is converted on its way up. Plain
@@ -485,8 +482,7 @@ export function createPresenter(options = {}){
     let burst = null;
     /**
      * Where a surface is converted on its way up, kept from frame to frame:
-     * the upload copies it before it returns. A frame sent elsewhere
-     * (`display`) is written into memory of its own, held until it is shown.
+     * the upload copies it before it returns.
      */
     const converted = (options.scratches ?? (name=>plainScratches.scratch(name)))(
         'present/converted');
@@ -1382,7 +1378,6 @@ export function createPresenter(options = {}){
                 attached: attachments.length - 1,
                 failures: [...failures],
                 latency: latency.diagnostics(),
-                // The memory the frames sent and not yet shown are held in.
                 sent: options.display?.figures?.() ?? null,
                 disposed,
             };

@@ -477,14 +477,11 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         buffer.mapAsync(MAP_READ).then(()=>{
             // The one copy: a mapped range is the buffer's until it is unmapped.
-            // Into memory held in the run's cache, which the program's thread
-            // reads in place and whose answer lets it go (`letGoShown`).
-            // One frame is in flight at a time: every one before this was shown.
-            letGoShown(serial - 1);
-            // A name a frame in flight: held anew, it takes back at once the
-            // room the frame before let go of.
-            const held = backendCache?.space.hold?.(`frame/${serial & 1}`,
-                bytesPerRow * height) ?? null;
+            // Into memory held in the run's cache, read in place by the
+            // program's thread; the frame before, one in flight at a time, was
+            // shown, and its name held anew takes its room back at once.
+            letGoHeld();
+            const held = backendCache?.space.hold?.('frame', bytesPerRow * height) ?? null;
             if (held === null)
             {
                 buffer.unmap();
@@ -498,7 +495,7 @@ export function serveGraphics(scope, deps){
             }
             held.bytes.set(new Uint8Array(buffer.getMappedRange()));
             buffer.unmap();
-            heldFrames.set(serial, held.release);
+            heldFrame = held.release;
             scope.postMessage({ type: 'frame', pixels: held.bytes, bytesPerRow, width, height,
                 frameIndex, format, dropped, source: surface.source,
                 ...sentWith(surface, serial) });
@@ -508,21 +505,14 @@ export function serveGraphics(scope, deps){
             sending = false;
         });
     };
-    /** What lets go of each frame read back and not yet shown, by its serial. @type {Map<number, () => void>} */
-    const heldFrames = new Map();
+    /** What lets go of the frame read back last, until it is shown. @type {(() => void) | null} */
+    let heldFrame = null;
+    const letGoHeld = ()=>{
+        heldFrame?.();
+        heldFrame = null;
+    };
     /** Frames read back that found no room. */
     let unshown = 0;
-    /** @param {number} upTo  the serial of the newest frame shown */
-    const letGoShown = upTo=>{
-        for (const [serial, release] of heldFrames)
-        {
-            if (((upTo - serial) | 0) >= 0)
-            {
-                heldFrames.delete(serial);
-                release();
-            }
-        }
-    };
     /**
      * The buffer frames are read back through, kept while frames are the
      * same size on the same device: one frame is in flight at a time
@@ -971,10 +961,6 @@ export function serveGraphics(scope, deps){
                 shownWord = data.word instanceof Int32Array ? data.word : null;
                 break;
             case 'shown':
-                if (typeof data.serial === 'number')
-                {
-                    letGoShown(data.serial);
-                }
                 if (typeof data.at === 'number')
                 {
                     const took = Math.max(0, sharedNow() - data.at);
@@ -989,6 +975,7 @@ export function serveGraphics(scope, deps){
                 {
                     break;
                 }
+                letGoHeld();
                 sending = false;
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
@@ -1003,8 +990,7 @@ export function serveGraphics(scope, deps){
                 if (data.cache)
                 {
                     backendRooms.releaseAll();
-                    heldFrames.forEach(release=>release());
-                    heldFrames.clear();
+                    letGoHeld();
                     backendCache?.close();
                     backendCache = channelSpace(data.cache, data.cache);
                 }

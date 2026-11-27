@@ -63,7 +63,7 @@ test('a process\'s frames are held in the run\'s cache, read in place by the run
         assert.equal(written.length, frames);
         assert.ok(written.every((bytes, frame)=>bytes.length === length
             && bytes.every(byte=>byte === frame)), 'each frame shown with its own bytes');
-        assert.deepEqual(display.figures(), { held: 0, heldBytes: 0, refused: 0 },
+        assert.deepEqual(display.figures(), { held: 0, refused: 0 },
             'every frame answered, none held');
         cache.idle(0);
         assert.equal(cache.keeper.under('frames/').bodies, 0, 'the memory the cache\'s again');
