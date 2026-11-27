@@ -23,6 +23,7 @@ import { createReader, openClient } from '@bottlify/cellar';
 import { createScratches, plainScratches } from './scratch.js';
 
 /** @typedef {import('./scratch.js').Scratch} Scratch */
+/** @typedef {import('./scratch.js').Held} Held */
 
 /**
  * One layer's names in the cache.
@@ -70,7 +71,9 @@ const NOTHING = Object.freeze({
  */
 export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null),
     serve: /** @type {Serve} */ (()=>null), owner: /** @type {Owner} */ (()=>null),
-    scratch: /** @type {(name: string) => Scratch} */ (name=>plainScratches.scratch(name)) });
+    scratch: /** @type {(name: string) => Scratch} */ (name=>plainScratches.scratch(name)),
+    hold: /** @type {(name: string, length: number) => Held} */ ((name, length)=>
+        plainScratches.hold(name, length)) });
 
 /**
  * Names of the run's cache an owner on this thread holds alone (`ownedSpace`),
@@ -335,6 +338,18 @@ export function serveKeeper(server, keeper, { owner, onTail = ()=>{} }){
  * owner held, saying how many it held, so that the keeper's side counts what
  * it finds past them as a tail (`OwnerTail`).
  *
+ * Memory the owner writes and reads in place for as long as it holds it
+ * (`space.hold`: a played device's resource bytes, its scratches) is room the
+ * worker waits for, as for a cold body: the keeper's thread answers it on its
+ * event loop, so the wait ends as long as that thread never waits on the
+ * worker. A page may not wait at all; a thread that may waits on a graphics
+ * worker only for a Direct3D 8 or 9 lend it is reading, and a root that
+ * lends holds nothing (`remote/worker.js`). The keeper never takes it back, cools it or
+ * moves it; `release` lets go of it without a word across the channel (its
+ * room the keeper's at its next sweep), and the owner's going takes back what
+ * it still held (Cellar's `release`), counted in what it says it held, so it
+ * is no tail.
+ *
  * @param {Joined} joined
  * @param {{ channel: SharedArrayBuffer, prefix: string }} served  the owner's channel and
  *     the prefix of its names, as the keeper's side served them (`RunCache.serve`)
@@ -369,13 +384,15 @@ export function channelSpace(joined, { channel, prefix }){
             },
         },
     });
-    const { space, held } = ownerNames(reader, prefix);
+    const { space, held, holds } = ownerNames(reader, prefix, ()=>!closed);
     return {
         space,
         /** This owner's names' prefix in the run's cache. */
         prefix,
         /** The bodies this owner holds, as it counts them. */
         held: ()=>held.size,
+        /** The memory it holds (`space.hold`), as it counts it. */
+        holding: ()=>holdingOf(holds),
         /**
          * Room for `key`'s body of `length` bytes, asked for without waiting:
          * true once it is granted (a reserve then takes it at once), false where
@@ -433,8 +450,9 @@ export function channelSpace(joined, { channel, prefix }){
                 return null;
             }
             closed = true;
-            // A reservation granted and not written is the owner's too.
-            return released(askLater, client, held.size + granted.size + asking);
+            // A reservation granted and not written is the owner's too, and
+            // so is the memory it holds, which the keeper's release takes back.
+            return released(askLater, client, held.size + holds.size + granted.size + asking);
         },
     };
 }
@@ -447,7 +465,8 @@ export function channelSpace(joined, { channel, prefix }){
  * written through this thread's own reader, which reaches the keeper itself:
  * room is taken when a body is put, so nothing is asked ahead (`ask` grants at
  * once, `forgo` has nothing to let go of), and only the release crosses the
- * channel.
+ * channel. Memory it holds (`space.hold`) is held through that reader too,
+ * under the same contract as a worker's.
  *
  * @param {Reader} reader
  * @param {{ channel: SharedArrayBuffer, prefix: string }} served  the owner's channel and
@@ -457,12 +476,13 @@ export function ownedSpace(reader, { channel, prefix }){
     const client = openClient(channel);
     /** @param {any} call */
     const askLater = call=>client.call(encoder.encode(JSON.stringify(call)), { read: parsed });
-    const { space, held } = ownerNames(reader, prefix);
     let closed = false;
+    const { space, held, holds } = ownerNames(reader, prefix, ()=>!closed);
     return {
         space,
         prefix,
         held: ()=>held.size,
+        holding: ()=>holdingOf(holds),
         /**
          * Granted at once while the owner is out: `put` takes the room.
          *
@@ -480,7 +500,7 @@ export function ownedSpace(reader, { channel, prefix }){
                 return null;
             }
             closed = true;
-            return released(askLater, client, held.size);
+            return released(askLater, client, held.size + holds.size);
         },
     };
 }
@@ -489,23 +509,48 @@ export function ownedSpace(reader, { channel, prefix }){
  * An owner's names over `reader`, with the keys it put and has not let go of
  * counted, as its release says them. Bodies an owner hands over are the only
  * copy of them for this run: to the disk when idle, never away, and nothing
- * the next run reads.
+ * the next run reads. Memory it holds (`hold`) is its own as well, counted
+ * apart (`holds`) and let go of with it: the keeper's release takes it back.
  *
- * @param {Reader} reader @param {string} prefix
- * @returns {{ space: CacheSpace, held: Set<string> }}
+ * @param {Reader} reader @param {string} prefix @param {() => boolean} out  whether the
+ *     owner has not gone yet: a hold after it went is refused
+ * @returns {{ space: CacheSpace, held: Set<string>, holds: Map<string, { length: number }> }}
  */
-function ownerNames(reader, prefix){
+function ownerNames(reader, prefix, out){
     const names = cacheSpace(reader, prefix.slice(0, -1), { onlyCopy: true, disk: 'run' });
     /** @type {Set<string>} */
     const held = new Set();
+    /**
+     * The memory held now, by key: a key held again is a hold of its own,
+     * the earlier one let go of by the reader (`Reader.hold`).
+     *
+     * @type {Map<string, { length: number }>}
+     */
+    const holds = new Map();
     return {
         held,
+        holds,
         space: {
             look: names.look,
             with: names.with,
-            // An owner's names are bodies it hands over; memory it would hold is no
-            // owner's of this kind.
-            hold: ()=>null,
+            hold: (key, length)=>{
+                const got = out() ? names.hold?.(key, length) ?? null : null;
+                if (got === null)
+                {
+                    return null;
+                }
+                const mine = { length };
+                holds.set(key, mine);
+                return { bytes: got.bytes, release: ()=>{
+                    // Once, and only while it is this hold's: a key held anew
+                    // is another hold, and the owner gone took it back itself.
+                    if (holds.get(key) === mine && out())
+                    {
+                        holds.delete(key);
+                        got.release();
+                    }
+                } };
+            },
             put: (key, bytes)=>{
                 const kept = names.put(key, bytes);
                 if (kept)
@@ -520,6 +565,20 @@ function ownerNames(reader, prefix){
             },
         },
     };
+}
+
+/**
+ * The memory an owner holds, as it counts it: how many holds, and their bytes.
+ *
+ * @param {Map<string, { length: number }>} holds
+ */
+function holdingOf(holds){
+    let bytes = 0;
+    for (const { length } of holds.values())
+    {
+        bytes += length;
+    }
+    return { holds: holds.size, bytes };
 }
 
 /**
@@ -574,9 +633,11 @@ export function createCacheModule(){
          *     join: Join,
          *     serve: Serve,
          *     owner: Owner,
-         *     scratch: (name: string) => Scratch }>}
+         *     scratch: (name: string) => Scratch,
+         *     hold: (name: string, length: number) => Held }>}
          *     `scratch`: memory a layer keeps between calls, held in the run's cache
-         *     (`scratch.js`)
+         *     (`scratch.js`); `hold`: memory of one length an object keeps for its
+         *     life, likewise
          */
         async create(config){
             reader = config?.reader ?? null;
@@ -586,9 +647,11 @@ export function createCacheModule(){
             scratches = own;
             /** @param {string} name */
             const scratch = name=>own.scratch(name);
+            /** @param {string} name @param {number} length */
+            const hold = (name, length)=>own.hold(name, length);
             if (given === null)
             {
-                return { ...noCache, scratch };
+                return { ...noCache, scratch, hold };
             }
             const join = config?.join ?? null;
             const serve = config?.serve ?? null;
@@ -603,6 +666,7 @@ export function createCacheModule(){
                     return served ? ownedSpace(given, served) : null;
                 },
                 scratch,
+                hold,
             };
         },
 
@@ -616,8 +680,9 @@ export function createCacheModule(){
                     // there; this process holds none of its own.
                     bytesHeld: {},
                     reader: reader?.figures() ?? 'no cache: every read is a miss',
-                    // What the layers keep between calls: held in the run's cache,
-                    // or plain memory where it had no room or there is none.
+                    // What the layers keep between calls and for an object's life:
+                    // held in the run's cache, or plain memory where it had no room
+                    // or there is none.
                     scratch: scratches?.figures() ?? 'not made',
                 },
                 issues: [],
