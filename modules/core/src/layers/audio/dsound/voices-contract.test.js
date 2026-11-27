@@ -47,6 +47,7 @@ import {
     ARENA_OFFSET, ARENA_BYTES, OUTPUT_RATE, STATE, STATE_OPEN, createSeam, mixBlock,
 } from '../output/mix.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { testWin32 } from '../win32.fixture.js';
 
 /**
  * A view of the sound output's table at `offset`, as the device makes one:
@@ -174,7 +175,7 @@ async function machine(){
             {
                 return { callGuest: async()=>0 };
             }
-            return name === 'win32' ? {} : name === 'cache' ? cache : memory;
+            return name === 'win32' ? testWin32() : name === 'cache' ? cache : memory;
         },
         provide: ()=>{},
     });

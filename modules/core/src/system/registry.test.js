@@ -37,17 +37,20 @@ test('creation order is topological with dependencies first', ()=>{
     assert.deepEqual(plan.map(entry=>entry.name), ['base', 'mid', 'top']);
 });
 
-test('disabled modules are excluded unless required', ()=>{
+test('a disabled module nobody requires is left out', ()=>{
     const registry = new ModuleRegistry([defn('top', ['mid']), defn('mid'), defn('side')]);
-    const plan = registry.resolve({ mid: false, side: false });
-    const names = plan.map(entry=>entry.name);
-    assert.ok(names.includes('top'), 'enabled module stays');
-    assert.ok(names.includes('mid'), 'required-but-disabled stays');
-    assert.ok(!names.includes('side'), 'disabled leaf is dropped');
-    const mid = plan.find(entry=>entry.name === 'mid');
-    assert.ok(mid);
-    assert.equal(mid.module.diagnostics().status, 'stub');
-    assert.equal(mid.config, null);
+    assert.deepEqual(registry.resolve({ side: false }).map(entry=>entry.name), ['mid', 'top']);
+});
+
+test('a required module switched off fails the build, naming it and who needs it', ()=>{
+    const registry = new ModuleRegistry(
+        [defn('top', ['mid']), defn('mid', ['base']), defn('base')]);
+    assert.throws(()=>registry.resolve({ mid: false }),
+        /Module "mid" is required by "top" and is switched off/);
+    assert.throws(()=>registry.resolve({ base: null }),
+        /Module "base" is required by "mid" and is switched off/);
+    assert.deepEqual(registry.resolve({ top: false, mid: false }).map(entry=>entry.name), ['base'],
+        'switched off with everything that needs it, it is simply out');
 });
 
 test('dependency cycle is rejected', ()=>{

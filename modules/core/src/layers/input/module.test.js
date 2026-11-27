@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import { inputModule, viewportOrigin } from './module.js';
 import { WM } from './router.js';
 import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
-import { createStubApi } from '../../system/stub.js';
 import { writeGuid } from '../../system/guid.js';
 import { IID_IDirectInput8A, GUID_SysMouse } from './dinput/seam.js';
 import { withPointers } from '../memory/pointers.fixture.js';
@@ -35,7 +34,8 @@ async function open({ win32, config } = {}){
     const apis = /** @type {Record<string, any>} */ ({
         memory,
         bridge: {},
-        win32: win32 ?? { queue: ()=>queue },
+        // One top-level window, the one the program has in front.
+        win32: win32 ?? { queue: ()=>queue, windows: ()=>[{ hwnd: String(HWND), child: false }] },
     });
     const api = await inputModule.create(
         { foreground: ()=>HWND, ...config },
@@ -131,15 +131,6 @@ test('XInput\'s ordinals are offered beside its table', async()=>{
     assert.equal(ordinals[108], 'XInputGetCapabilitiesEx');
     assert.ok(Object.values(ordinals).every(name=>name in api.libraries()['XINPUT1_4.dll']),
         'every number names an export the table has');
-
-    await inputModule.dispose();
-});
-
-test('a build with no win32 still takes input, it just has nowhere to post it', async()=>{
-    const { api } = await open({ win32: createStubApi('win32') });
-
-    assert.equal(api.send({ kind: 'key', code: 'KeyW', down: true }), true);
-    assert.equal(api.keyState(0x57), 0x8000, 'the state is still there to be read');
 
     await inputModule.dispose();
 });

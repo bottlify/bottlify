@@ -28,7 +28,7 @@ import {
 import { withPointers } from '../memory/pointers.fixture.js';
 import { testCache } from '../cache/testing.fixture.js';
 import { noCache } from '../cache/module.js';
-import { createStubApi } from '../../system/stub.js';
+import { testWin32 } from './win32.fixture.js';
 
 /**
  * A run's cache with room for one sound output's table (20 MiB, a segment of
@@ -170,7 +170,7 @@ async function playing({ silent = false, drained = true, memory, cache, divergen
             }
             if (name === 'win32')
             {
-                return {};
+                return testWin32();
             }
             if (name === 'cache')
             {
@@ -650,7 +650,8 @@ test('the MPEG provider can be left out, for a run to compare against', async()=
     const cache = (await testCache(ONE_TABLE)).api;
     const api = await audioModule.create({ ...f.config, mp3: false }, {
         requireApi: (/** @type {string} */ name)=>
-            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
+            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache
+                : name === 'win32' ? testWin32() : f.memory,
         provide: ()=>{},
     });
     assert.deepEqual(Object.keys(api.libraries()), ['DSOUND.dll']);
@@ -662,7 +663,8 @@ test('the decoder behind the provider follows the configuration', async()=>{
     const cache = (await testCache(ONE_TABLE)).api;
     const host = {
         requireApi: (/** @type {string} */ name)=>
-            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
+            name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache
+                : name === 'win32' ? testWin32() : f.memory,
         provide: ()=>{},
     };
     // Nothing offered: the hosted minimp3, which answers inside the call.
@@ -842,26 +844,26 @@ test('a program that writes the primary buffer itself is heard from it', async()
     }
 });
 
-test('a stubbed win32 leaves DirectMusic and the MP3 codec out; a real one refusing is a failure',
-    async()=>{
-        const cache = (await testCache(ONE_TABLE)).api;
-        /** @param {any} win32 */
-        const create = win32=>{
-            const f = fixture();
-            return audioModule.create({ ...f.config, drained: true }, {
-                requireApi: (/** @type {string} */ name)=>({
-                    bridge: { callGuest: async()=>0 }, win32, cache, memory: f.memory,
-                })[name],
-                provide: ()=>{},
-            });
-        };
-        const api = await create(createStubApi('win32'));
-        assert.ok(api.libraries()['DSOUND.dll'], 'DirectSound is there without win32');
-        api.output().release();
-        await assert.rejects(create({ com: ()=>{
-            throw new Error('the class registry is not made yet');
-        } }), /the class registry is not made yet/);
-        await assert.rejects(create({ installAcmCodec: ()=>{
-            throw new Error('the codec manager refused it');
-        } }), /the codec manager refused it/);
-    });
+test('a win32 refusing its class registry or the MP3 codec is a failure', async()=>{
+    const cache = (await testCache(ONE_TABLE)).api;
+    /** @param {any} win32 */
+    const create = win32=>{
+        const f = fixture();
+        return audioModule.create({ ...f.config, drained: true }, {
+            requireApi: (/** @type {string} */ name)=>({
+                bridge: { callGuest: async()=>0 }, win32, cache, memory: f.memory,
+            })[name],
+            provide: ()=>{},
+        });
+    };
+    const api = await create(testWin32());
+    assert.ok(api.libraries()['DSOUND.dll']);
+    assert.ok(api.dmusic(), 'the classes of DirectMusic are registered');
+    api.output().release();
+    await assert.rejects(create(testWin32({ com: ()=>{
+        throw new Error('the class registry is not made yet');
+    } })), /the class registry is not made yet/);
+    await assert.rejects(create(testWin32({ installAcmCodec: ()=>{
+        throw new Error('the codec manager refused it');
+    } })), /the codec manager refused it/);
+});

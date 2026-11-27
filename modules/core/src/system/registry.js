@@ -5,7 +5,6 @@
  */
 
 import { normalizeConfig } from './config.js';
-import { createStubModule } from './stub.js';
 
 /**
  * Build plan: one entry is what to create and with which configuration.
@@ -20,8 +19,9 @@ import { createStubModule } from './stub.js';
  * Registry of module definitions and their resolution into a concrete build plan.
  *
  * Resolution rules:
- *  - a disabled module (false/null) is excluded from the build UNLESS an enabled
- *    module requires it: then it is installed as a stub so the interface is bound;
+ *  - a disabled module (false/null) is excluded from the build; one an enabled
+ *    module requires is an error naming both, before anything is created: a
+ *    layer something needs is never left out quietly;
  *  - creation order is a topological sort over `requires` (cycles rejected);
  *  - an unknown name in `requires` or in the configuration is an error.
  */
@@ -69,26 +69,30 @@ export class ModuleRegistry {
         const selection = normalizeConfig(desired, [...this.#definitions.keys()]);
 
         // Closure over active names: everything declared in `requires` of an enabled
-        // module must be present (disabled ones become stubs in that case).
+        // module must be enabled too.
         const active = new Set();
-        const activate = (/** @type {string} */ name)=>{
+        const activate = (/** @type {string} */ name, /** @type {string | null} */ by)=>{
             if (active.has(name))
             {
                 return;
             }
-            active.add(name);
             const definition = this.#definitions.get(name);
             if (!definition)
             {
                 throw new Error(`Unknown module "${name}"`);
             }
-            for (const required of definition.requires) activate(required);
+            if (by !== null && selection.get(name)?.enabled !== true)
+            {
+                throw new Error(`Module "${name}" is required by "${by}" and is switched off`);
+            }
+            active.add(name);
+            for (const required of definition.requires) activate(required, name);
         };
         for (const [name, toggle] of selection)
         {
             if (toggle.enabled)
             {
-                activate(name);
+                activate(name, null);
             }
         }
 
@@ -97,20 +101,9 @@ export class ModuleRegistry {
         const plan = [];
         for (const name of order)
         {
-            const toggle = selection.get(name);
-            if (!toggle)
-            {
-                throw new Error(`Unresolved toggle for "${name}"`);
-            }
-            const definition = this.#definitions.get(name);
-            if (!definition)
-            {
-                throw new Error(`Unknown module "${name}"`);
-            }
-            const module = toggle.enabled
-                ? definition
-                : createStubModule(name, definition.version, []);
-            plan.push({ name, module, config: toggle.enabled ? toggle.config : null });
+            const module = /** @type {import("./contract.js").BottlifyModule} */ (
+                this.#definitions.get(name));
+            plan.push({ name, module, config: selection.get(name)?.config ?? null });
         }
         return plan;
     }

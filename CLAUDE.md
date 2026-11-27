@@ -107,8 +107,9 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
 - **Modules are standalone libraries.** Each `src/layers/<name>/module.js` declares `name`,
   `requires`, `create(config, host)`, `diagnostics()`, `dispose()`; a module reaches another only
   through `host.requireApi(name)` for a name in its own `requires` — no direct imports, no shared
-  singletons. A disabled module something needs is installed as a stub, so pulling a module out
-  degrades the system without breaking it. `npm run check:boundaries` enforces the graph:
+  singletons. A module switched off that another requires is an error when the system is built,
+  naming both; there are no stubs, and nothing stands in for a missing layer. Only a module nothing
+  requires can be left out. `npm run check:boundaries` enforces the graph:
 
   ```
   log → nothing          cache, filesystem, media → log          cpu → cache, log
