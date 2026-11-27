@@ -1724,11 +1724,9 @@ export function createMsvcrtFunctions(host){
         } : {},
         ...(host.fpu
             ? createMathFunctions({
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 fpu: host.fpu,
                 errno,
-                pointerSize: host.pointerSize ?? 4,
                 ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             })
             : {}),
