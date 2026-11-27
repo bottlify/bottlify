@@ -51,7 +51,7 @@
   "layers/win32/msvcrt/eh64.js": 2,
   "layers/win32/msvcrt/msvcp60-streams.js": 6,
   "layers/win32/msvcrt/seh.js": 1,
-  "layers/win32/msvcrt/time.js": 2,
+  "layers/win32/msvcrt/time.js": 1,
   "layers/win32/ntdll/debug-buffer.js": 2,
   "layers/win32/ntdll/process.js": 2,
   "layers/win32/ntdll/query.js": 6,
