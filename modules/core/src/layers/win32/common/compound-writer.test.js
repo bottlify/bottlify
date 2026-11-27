@@ -9,8 +9,8 @@ import assert from 'node:assert/strict';
 import { parseCompoundFile } from '../ole32/cfb.js';
 import { bytesSource, openCompound } from '../msi/compound.js';
 import {
-    COPY_CHUNK, CompoundWriteError, compareNames, compoundBytes, compoundBytesSync, memorySource,
-    nameKey, planCompound, storageOf, streamOf, writeCompound,
+    CFB_ENTRY, CFB_HEADER, COPY_CHUNK, CompoundWriteError, compareNames, compoundBytes,
+    compoundBytesSync, memorySource, nameKey, planCompound, storageOf, streamOf, writeCompound,
 } from './compound-writer.js';
 import { isPattern, pattern, patternSource, pieceFile } from './compound-writer.fixture.js';
 
@@ -256,4 +256,13 @@ test('names compare by length first and then without regard to case', ()=>{
     assert.ok(compareNames('AB', 'aa') > 0);
     assert.equal(compareNames('abc', 'ABC'), 0);
     assert.equal(nameKey('Root Entry'), 'ROOT ENTRY');
+});
+
+test('the header and a directory entry are laid out as [MS-CFB] 2.2 and 2.6 give them', ()=>{
+    assert.deepEqual([CFB_HEADER.minorVersion, CFB_HEADER.sectorShift, CFB_HEADER.directorySectors,
+        CFB_HEADER.miniStreamCutoff, CFB_HEADER.difatSectors, CFB_HEADER.difat, CFB_HEADER.SIZE],
+    [0x18, 0x1e, 0x28, 0x38, 0x48, 0x4c, 512]);
+    assert.deepEqual([CFB_ENTRY.nameLength, CFB_ENTRY.type, CFB_ENTRY.color, CFB_ENTRY.left,
+        CFB_ENTRY.clsid, CFB_ENTRY.created, CFB_ENTRY.modified, CFB_ENTRY.start, CFB_ENTRY.size,
+        CFB_ENTRY.SIZE], [0x40, 0x42, 0x43, 0x44, 0x50, 0x64, 0x6c, 0x74, 0x78, 128]);
 });
