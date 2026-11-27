@@ -53,6 +53,7 @@ import { COMPILED as SETTERS_LONG } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
 import { wholeAddress } from '../common/pointers.js';
 import { bitsFloat, floatBits } from '../../../system/floats.js';
+import { fnv1aLowBytes } from '../../../system/hash.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -122,20 +123,6 @@ export const EFFECT_BLOCK = Object.freeze({ RECORDING: 0, ARENA: 4, ARENA_BYTES:
     COMMIT: 16, ACTIVE: 20, PASSES: 24, WALK: 28, STARTED: 32, FLAGS: 36, TECHNIQUE: 40,
     TECHNIQUES: 44, NAMES: 48, RESOLVE: 52, SIZE: 56 });
 
-/**
- * A name's hash in the table of names, as `Resolve` in the guest takes it:
- * FNV-1a over its bytes.
- *
- * @param {string} name
- */
-export function nameHash(name){
-    let hash = 0x811c9dc5 | 0;
-    for (let i = 0; i < name.length; i++)
-    {
-        hash = Math.imul(hash ^ (name.charCodeAt(i) & 0xff), 16777619);
-    }
-    return hash >>> 0;
-}
 /**
  * A technique's record in guest memory: its passes as the block's PASSES
  * lists them for the state manager set, and its state blocks by the two
@@ -2604,7 +2591,7 @@ export function createEffects(host, helpers, options = {}){
         slotWords[0] = slots - 1;
         const copies = strings(effect.owned, named.map(([name])=>name));
         named.forEach(([name, p], i)=>{
-            const hash = nameHash(name);
+            const hash = fnv1aLowBytes(name);
             let slot = hash & (slots - 1);
             while (slotWords[1 + 3 * slot + 2] !== 0)
             {

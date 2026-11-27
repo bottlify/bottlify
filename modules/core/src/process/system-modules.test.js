@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSystemModules } from './system-modules.js';
+import { createSystemModules, shapeOf } from './system-modules.js';
 
 const ALIGN = 0x10000;
 
@@ -117,4 +117,43 @@ test('an export that runs unbroken is told to the kernel at its address and leng
         Held: { code: ()=>new Uint8Array(12), unbroken: true },
     });
     assert.deepEqual(atomic, [[record.addressOf('Held'), 12]]);
+});
+
+test('a table\'s shape is what it was before the hash was shared: processes compare it', ()=>{
+    // The function as it was, its lines only rewrapped.
+    /** @param {Record<string, any>} table */
+    const before = table=>{
+        let hash = 0x811c9dc5;
+        for (const [exported, fn] of Object.entries(table))
+        {
+            const text = `;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}`
+                + `${fn.data ? 'd' : ''}${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}`
+                + `${fn.guestLong ? 'G' : ''}${fn.argBytes ?? ''}`;
+            for (let index = 0; index < text.length; index++)
+            {
+                hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+            }
+        }
+        return (hash >>> 0).toString(16);
+    };
+    let state = 0x510e527f;
+    const next = (/** @type {number} */ below)=>{
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        return (state >>> 0) % below;
+    };
+    const parts = ['code', 'long', 'data', 'handler', 'guest', 'guestLong'];
+    for (let round = 0; round < 200; round++)
+    {
+        /** @type {Record<string, any>} */
+        const table = {};
+        for (let at = next(12); at > 0; at--)
+        {
+            table[`Fn${next(1000)}`] = Object.fromEntries([
+                ...parts.filter(()=>next(2) === 0).map(part=>[part, true]),
+                ...(next(2) === 0 ? [['argBytes', 4 * next(8)]] : [])]);
+        }
+        assert.equal(shapeOf(table), before(table));
+    }
 });

@@ -25,6 +25,8 @@
  * instruction count, the shape.
  */
 
+import { FNV_OFFSET, POSITION_OFFSET, fnv1aStep, positionStep } from '../hash.js';
+
 /**
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
@@ -66,12 +68,12 @@ export function cacheKey({ version, features, variant = '', layoutId, bundleId, 
  * @param {Uint8Array} bytes
  */
 export function moduleDigest(bytes){
-    let low = 0x811c9dc5;
-    let high = 0x050c5d1f;
+    let low = FNV_OFFSET;
+    let high = POSITION_OFFSET;
     for (let i = 0; i < bytes.length; i++)
     {
-        low = Math.imul(low ^ bytes[i], 0x01000193);
-        high = Math.imul(high ^ bytes[i] ^ i & 0xff, 0x01000193);
+        low = fnv1aStep(low, bytes[i]);
+        high = positionStep(high, bytes[i], i);
     }
     return `${(high >>> 0).toString(16)}${(low >>> 0).toString(16).padStart(8, '0')}`
         + `-${bytes.length.toString(16)}`;

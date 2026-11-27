@@ -16,6 +16,8 @@
  * executors of the same process.
  */
 
+import { FNV_OFFSET, fnv1aString } from '../hash.js';
+
 /** Bytes the state block takes in cork's own layout. */
 export const STATE_BLOCK_SIZE = 512;
 /**
@@ -760,13 +762,10 @@ export const basesOf = layout=>({ stateBase: layout.regs, tablesBase: layout.tab
  * @param {Record<string, number | string>} fields
  */
 export function layoutId(fields){
-    let hash = 0x811c9dc5;
+    let hash = FNV_OFFSET;
     for (const key of Object.keys(fields).sort())
     {
-        for (const char of `${key}=${fields[key]};`)
-        {
-            hash = Math.imul(hash ^ char.charCodeAt(0), 0x01000193) >>> 0;
-        }
+        hash = fnv1aString(`${key}=${fields[key]};`, hash);
     }
     return hash.toString(16).padStart(8, '0');
 }

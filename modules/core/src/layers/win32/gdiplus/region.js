@@ -26,6 +26,7 @@ import {
     clonePath, emptyPath, figures, insidePolygons,
 } from './path.js';
 import { pixelRuns } from './raster.js';
+import { crc32 } from '../../../system/hash.js';
 
 /** CombineMode. */
 export const CombineMode = Object.freeze({ Replace: 0, Intersect: 1, Union: 2, Xor: 3,
@@ -366,22 +367,9 @@ const regionData = node=>{
     view.setUint32(8, MAGIC_REGION, true);
     view.setUint32(12, combinations(node) * 2, true);
     out.set(body, 16);
+    // GDI+ fills the checksum with the CRC-32 of what follows it.
     view.setUint32(4, crc32(out.subarray(8)), true);
     return out;
-};
-
-/** CRC-32 of the data after the checksum, as GDI+ fills that field. @param {Uint8Array} bytes */
-const crc32 = bytes=>{
-    let c = 0xffffffff;
-    for (const byte of bytes)
-    {
-        c ^= byte;
-        for (let k = 0; k < 8; k++)
-        {
-            c = c & 1 ? 0xedb88320 ^ c >>> 1 : c >>> 1;
-        }
-    }
-    return (c ^ 0xffffffff) >>> 0;
 };
 
 /**

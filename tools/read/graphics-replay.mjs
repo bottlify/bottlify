@@ -51,6 +51,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Session } from 'node:inspector/promises';
 import { CAPTURE, captureRecords } from '../../modules/core/src/layers/graphics/remote/capture.js';
+import { FNV_OFFSET, FNV_PRIME } from '../../modules/core/src/system/hash.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
@@ -108,14 +109,14 @@ const quantile = (values, q)=>{
  * was made in), bytes by their content, a dictionary by its keys in order.
  */
 const createDigest = ()=>{
-    let a = 0x811c9dc5;
+    let a = FNV_OFFSET;
     let b = 0x2f6b1a77;
     let count = 0;
     const scratch = new Float64Array(1);
     const words = new Int32Array(scratch.buffer);
     /** @param {number} word */
     const mix = word=>{
-        a = Math.imul(a ^ word, 0x01000193);
+        a = Math.imul(a ^ word, FNV_PRIME);
         b = Math.imul(b ^ word, 0x5bd1e995);
     };
     /** @param {string} text */
@@ -203,7 +204,7 @@ const createDigest = ()=>{
         take: ()=>{
             const line = `${(a >>> 0).toString(16).padStart(8, '0')}`
                 + `${(b >>> 0).toString(16).padStart(8, '0')} ${count}`;
-            a = 0x811c9dc5;
+            a = FNV_OFFSET;
             b = 0x2f6b1a77;
             count = 0;
             return line;

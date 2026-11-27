@@ -122,6 +122,7 @@ import { diskDirectory } from '../lib/disk-directory.mjs';
 import { cpuProfiler } from '../lib/thread-profile.mjs';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../../modules/core/src/app.js';
+import { crc32 } from '../../modules/core/src/system/hash.js';
 import { createDirectoryTranslationStore, createMemoryDirectory }
     from '../../modules/core/src/layers/cpu/internal/translation-store.js';
 import { createFakeDevice } from '../../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
@@ -563,20 +564,6 @@ const describeWindows = windows=>{
         add(top, 0);
     }
     return lines;
-};
-
-/** @param {Uint8Array} bytes @returns {number} */
-const crc32 = bytes=>{
-    let crc = ~0;
-    for (const byte of bytes)
-    {
-        crc ^= byte;
-        for (let bit = 0; bit < 8; bit++)
-        {
-            crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-        }
-    }
-    return ~crc >>> 0;
 };
 
 /**

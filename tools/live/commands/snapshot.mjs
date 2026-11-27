@@ -25,6 +25,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { connect } from '../../lib/connect.mjs';
+import { crc32 } from '../../../modules/core/src/system/hash.js';
 
 const argv = process.argv.slice(2);
 const outAt = argv.indexOf('--out');
@@ -48,33 +49,15 @@ const half = bits=>{
         : sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
 };
 
-const crcTable = Array.from({ length: 256 }, (_, n)=>{
-    let c = n;
-    for (let k = 0; k < 8; k++)
-    {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    return c >>> 0;
-});
-
 /** @param {number} width @param {number} height @param {Uint8Array} rgba */
 const png = (width, height, rgba)=>{
-    /** @param {Buffer} bytes */
-    const crc = bytes=>{
-        let c = 0xffffffff;
-        for (const byte of bytes)
-        {
-            c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
-        }
-        return (c ^ 0xffffffff) >>> 0;
-    };
     /** @param {string} type @param {Buffer} data */
     const chunk = (type, data)=>{
         const head = Buffer.alloc(8);
         head.writeUInt32BE(data.length, 0);
         head.write(type, 4, 'ascii');
         const tail = Buffer.alloc(4);
-        tail.writeUInt32BE(crc(Buffer.concat([head.subarray(4), data])), 0);
+        tail.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
         return Buffer.concat([head, data, tail]);
     };
     const header = Buffer.alloc(13);

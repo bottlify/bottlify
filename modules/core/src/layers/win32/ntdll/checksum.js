@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { crc32 } from '../../../system/hash.js';
 
 /**
  * The checksums ntdll computes over a caller's bytes.
@@ -15,36 +16,6 @@ import { wholeAddress } from '../common/pointers.js';
  * to the second.
  */
 
-/** The table of the reflected polynomial, made once. */
-const TABLE = (()=>{
-    const table = new Uint32Array(256);
-    for (let n = 0; n < 256; n++)
-    {
-        let c = n;
-        for (let k = 0; k < 8; k++)
-        {
-            c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-        }
-        table[n] = c >>> 0;
-    }
-    return table;
-})();
-
-/**
- * The CRC-32 of `bytes`, continued from `initial`.
- *
- * @param {number} initial @param {Uint8Array} bytes
- * @returns {number}
- */
-export function crc32(initial, bytes){
-    let crc = ~initial >>> 0;
-    for (const byte of bytes)
-    {
-        crc = TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-    }
-    return ~crc >>> 0;
-}
-
 /**
  * @param {{ readMemory: (address: number, length: number) => Uint8Array }} host
  */
@@ -54,9 +25,8 @@ export function createChecksumFunctions(host){
         RtlComputeCrc32: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([initial, data, length])=>crc32(initial >>> 0,
-                (length | 0) <= 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(data),
-                    length | 0)),
+            handler: ([initial, data, length])=>crc32((length | 0) <= 0 ? new Uint8Array(0)
+                : host.readMemory(wholeAddress(data), length | 0), initial >>> 0),
         },
     };
 }

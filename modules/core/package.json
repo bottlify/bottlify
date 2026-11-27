@@ -73,7 +73,6 @@
     "src/layers/cpu/internal/translation-store.js",
     "src/layers/cpu/internal/translation-store.writer.js",
     "src/layers/filesystem/internal/bundle/saved.js",
-    "src/layers/filesystem/internal/bundle/crc32.js",
     "src/layers/filesystem/internal/bundle/format.js",
     "src/layers/filesystem/internal/errors.js",
     "src/layers/filesystem/internal/iso/build.js",
@@ -160,6 +159,7 @@
     "src/storage.js",
     "src/system/address.js",
     "src/system/guid.js",
+    "src/system/hash.js",
     "src/system/opfs-file.js",
     "src/zstd.js"
   ],

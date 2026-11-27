@@ -69,6 +69,7 @@ import { modeOf } from './play/modes.js';
 import { threadWindow } from '../lib/thread-window.mjs';
 import { rootsFromArgv } from '../lib/relay-option.mjs';
 import { frameDrops } from '../../modules/core/src/frame-drops.js';
+import { crc32 } from '../../modules/core/src/system/hash.js';
 import { BUNDLES_DIR } from '../lib/common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -222,7 +223,7 @@ function toPng(width, height, bgra){
         head.writeUInt32BE(body.length, 0);
         head.write(type, 4, 'latin1');
         const crc = Buffer.alloc(4);
-        crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), body])) >>> 0, 0);
+        crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), body])), 0);
         return Buffer.concat([head, body, crc]);
     };
     const header = Buffer.alloc(13);
@@ -236,20 +237,6 @@ function toPng(width, height, bgra){
         chunk('IDAT', deflateSync(raw)),
         chunk('IEND', Buffer.alloc(0)),
     ]);
-}
-
-/** @param {Buffer} bytes @returns {number} */
-function crc32(bytes){
-    let crc = ~0;
-    for (const byte of bytes)
-    {
-        crc ^= byte;
-        for (let bit = 0; bit < 8; bit++)
-        {
-            crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-        }
-    }
-    return ~crc;
 }
 
 /** @param {string[]} argv */

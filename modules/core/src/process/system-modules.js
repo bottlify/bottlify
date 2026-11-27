@@ -14,6 +14,7 @@
  */
 
 import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/synth.js';
+import { FNV_OFFSET, fnv1aString } from '../system/hash.js';
 
 /**
  * @typedef {Object} SystemModulesHost
@@ -84,18 +85,14 @@ const LAYOUTS = new Map();
  * @returns {string}
  */
 export function shapeOf(table){
-    let hash = 0x811c9dc5;
+    let hash = FNV_OFFSET;
     for (const [exported, fn] of Object.entries(table))
     {
-        const text = `;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}${fn.data ? 'd' : ''}`
-            + `${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}${fn.guestLong ? 'G' : ''}`
-            + `${fn.argBytes ?? ''}`;
-        for (let index = 0; index < text.length; index++)
-        {
-            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
-        }
+        hash = fnv1aString(`;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}`
+            + `${fn.data ? 'd' : ''}${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}`
+            + `${fn.guestLong ? 'G' : ''}${fn.argBytes ?? ''}`, hash);
     }
-    return (hash >>> 0).toString(16);
+    return hash.toString(16);
 }
 
 /**

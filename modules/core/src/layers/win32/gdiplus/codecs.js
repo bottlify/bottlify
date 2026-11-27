@@ -16,6 +16,8 @@
  * than Windows' compressed one (decision A263).
  */
 
+import { crc32 } from '../../../system/hash.js';
+
 /** ImageFormat* GUIDs (gdiplusimaging.h), by name. */
 export const IMAGE_FORMAT = Object.freeze({
     Undefined: '{B96B3CA9-0728-11D3-9D7B-0000F81EF32E}',
@@ -196,31 +198,6 @@ export function encodeBmp({ width, height, bpp, rows, palette }){
     rows.forEach((row, y)=>out.set(row.subarray(0, stride), offset + (height - 1 - y) * stride));
     return out;
 }
-
-/** CRC-32 (ISO 3309), as PNG's chunks carry it. */
-const CRC_TABLE = (()=>{
-    const table = new Uint32Array(256);
-    for (let n = 0; n < 256; n++)
-    {
-        let c = n;
-        for (let k = 0; k < 8; k++)
-        {
-            c = c & 1 ? 0xedb88320 ^ c >>> 1 : c >>> 1;
-        }
-        table[n] = c >>> 0;
-    }
-    return table;
-})();
-
-/** @param {Uint8Array} bytes */
-const crc32 = bytes=>{
-    let c = 0xffffffff;
-    for (const byte of bytes)
-    {
-        c = CRC_TABLE[(c ^ byte) & 0xff] ^ c >>> 8;
-    }
-    return (c ^ 0xffffffff) >>> 0;
-};
 
 /**
  * A zlib stream of `data` in stored deflate blocks.

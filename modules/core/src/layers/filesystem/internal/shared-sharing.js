@@ -24,6 +24,7 @@
 
 import { ErrorCode, fsError } from './errors.js';
 import { wake, waitFor } from '@bottlify/cellar';
+import { FNV_OFFSET, fnv1aString } from '../../../system/hash.js';
 
 /** How many files the run may hold open at once, across every process. */
 export const SLOTS = 2048;
@@ -63,15 +64,8 @@ export function createSharingMemory(){
     return new SharedArrayBuffer((HEADER + SLOTS * SLOT_WORDS) * 4);
 }
 
-/** @param {string} key @param {number} seed */
-const hashOf = (key, seed)=>{
-    let hash = seed;
-    for (let index = 0; index < key.length; index++)
-    {
-        hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
-    }
-    return hash | 0;
-};
+/** Signed, as the slot's Int32Array reads it back. @param {string} key @param {number} seed */
+const hashOf = (key, seed)=>fnv1aString(key, seed) | 0;
 
 /** @param {import('./handles.js').OpenTerms} terms */
 const bitsOf = terms=>(terms.access.read ? READ : 0) | (terms.access.write ? WRITE : 0)
@@ -123,7 +117,7 @@ export function openSharedSharing(memory){
     };
 
     /** @param {string} key */
-    const shapeOf = key=>({ key, length: key.length, a: hashOf(key, 0x811c9dc5 | 0),
+    const shapeOf = key=>({ key, length: key.length, a: hashOf(key, FNV_OFFSET),
         b: hashOf(key, 0x2545f491) });
 
     /**

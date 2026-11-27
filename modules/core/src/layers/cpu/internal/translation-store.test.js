@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { unframe } from './record-frame.js';
+import { fnv1a } from '../../../system/hash.js';
 import {
     clearTranslations, createDirectoryTranslationStore, createMemoryDirectory, fileNameOf,
     readPieces, resolveTranslationStore,
@@ -1328,12 +1329,7 @@ const digest = bytes=>{
     {
         return String(bytes);
     }
-    let hash = 0x811c9dc5;
-    for (const byte of bytes)
-    {
-        hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
-    }
-    return `${bytes.length}:${hash.toString(16)}`;
+    return `${bytes.length}:${fnv1a(bytes).toString(16)}`;
 };
 
 test('a key put twice answers its last put\'s bytes though the first one\'s write ends last',
@@ -1516,3 +1512,32 @@ test('a record its run forgets is gone at the next opening, its module with its 
         const third = await createDirectoryTranslationStore(root, 'bundle');
         assert.equal((await third.get('region/never'))?.[0], 3, 'written again, it is back');
     });
+
+test('a record\'s name is what it was before the hash was shared: the names are on OPFS', ()=>{
+    // The function as it was, verbatim.
+    /** @param {string} key */
+    const before = key=>{
+        let a = 0x811c9dc5;
+        let b = 0x1000193;
+        for (let i = 0; i < key.length; i++)
+        {
+            const c = key.charCodeAt(i);
+            a = Math.imul(a ^ c, 0x01000193) >>> 0;
+            b = Math.imul(b + c, 0x9e3779b1) >>> 0;
+        }
+        return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}.cork`;
+    };
+    let state = 0x3c6ef372;
+    const next = (/** @type {number} */ below)=>{
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        return (state >>> 0) % below;
+    };
+    for (let round = 0; round < 300; round++)
+    {
+        const key = String.fromCharCode(...Array.from({ length: next(80) },
+            ()=>(next(4) === 0 ? next(0x10000) : 0x20 + next(0x5f))));
+        assert.equal(fileNameOf(key), before(key), JSON.stringify(key));
+    }
+});

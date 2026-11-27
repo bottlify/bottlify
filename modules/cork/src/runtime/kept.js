@@ -25,6 +25,8 @@
  * worker never waits on it.
  */
 
+import { FNV_OFFSET, FNV_PRIME, fnv1aStep } from '../hash.js';
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -68,20 +70,21 @@ const ENTRY_WORDS = 5;
  */
 
 /**
- * Two lanes of FNV-1a over the key's UTF-16 units, each from its own basis:
- * the name a key's function is kept under. A name two keys share costs a miss
- * (the entry says whose it is), never a wrong function.
+ * Two lanes of FNV-1a over the key's UTF-16 units, each from its own basis,
+ * the second over each unit plus its place: the name a key's function is kept
+ * under. A name two keys share costs a miss (the entry says whose it is),
+ * never a wrong function.
  *
  * @param {string} key
  */
 export function keptName(key){
-    let a = 0x811c9dc5;
-    let b = 0x01000193;
+    let a = FNV_OFFSET;
+    let b = FNV_PRIME;
     for (let i = 0; i < key.length; i++)
     {
         const unit = key.charCodeAt(i);
-        a = Math.imul(a ^ unit, 0x01000193);
-        b = Math.imul(b ^ (unit + i), 0x01000193);
+        a = fnv1aStep(a, unit);
+        b = fnv1aStep(b, unit + i);
     }
     return `${(a >>> 0).toString(36)}.${(b >>> 0).toString(36)}`;
 }

@@ -18,7 +18,7 @@ import { HEAP_POOLS, NOT_MEASURED } from '../memory-zones.js';
 import { BLOCK_MISS, createBundleSource } from '../layers/filesystem/internal/bundle/source.js';
 import { decompressZstd } from '../zstd.js';
 import { inflateRaw } from '../storage.js';
-import { crc32 } from '../layers/filesystem/internal/bundle/crc32.js';
+import { crc32 } from '../system/hash.js';
 import { createUnionSource } from '../layers/filesystem/internal/union-source.js';
 import { keepOriginStorageWithin } from '../storage-budget.js';
 

@@ -23,6 +23,8 @@
  *   buffer identity so a stale group cannot rebind the wrong one.
  */
 
+import { FNV_OFFSET, fnv1a } from '../../../../system/hash.js';
+
 /** @type {WeakMap<object, number>} */
 const identities = new WeakMap();
 let nextIdentity = 1;
@@ -164,11 +166,7 @@ export function createBindingCache(options){
                 words[at++] = resourceId(resource);
             }
         }
-        let hash = 0x811c9dc5;
-        for (let i = 0; i < at; i++)
-        {
-            hash = Math.imul(hash ^ words[i], 0x01000193);
-        }
+        const hash = fnv1a(words, FNV_OFFSET, at);
         const bucket = keys.get(hash);
         if (bucket !== undefined)
         {

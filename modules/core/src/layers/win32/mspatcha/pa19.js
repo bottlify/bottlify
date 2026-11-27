@@ -56,7 +56,7 @@
  */
 
 import { LZXD_WINDOW, LzxError, decodeLzxd } from '../cabinet/lzx.js';
-import { crc32 } from '../../filesystem/internal/bundle/crc32.js';
+import { crc32 } from '../../../system/hash.js';
 import { parsePe } from '../../loader/internal/pe.js';
 
 /** The Patch API's own errors, as GetLastError reports them. */

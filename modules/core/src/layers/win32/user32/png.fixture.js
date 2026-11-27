@@ -12,27 +12,9 @@
  */
 
 import { deflateSync, inflateSync } from 'node:zlib';
+import { crc32 } from '../../../system/hash.js';
 
 const SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-
-const CRC_TABLE = new Int32Array(256).map((_, n)=>{
-    let c = n;
-    for (let k = 0; k < 8; k++)
-    {
-        c = (c & 1) !== 0 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    return c;
-});
-
-/** @param {Uint8Array} bytes */
-function crc(bytes){
-    let c = -1;
-    for (const b of bytes)
-    {
-        c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
-    }
-    return (c ^ -1) >>> 0;
-}
 
 /** @param {string} type @param {Uint8Array} data */
 function chunk(type, data){
@@ -44,7 +26,7 @@ function chunk(type, data){
         out[4 + i] = type.charCodeAt(i);
     }
     out.set(data, 8);
-    view.setUint32(8 + data.length, crc(out.subarray(4, 8 + data.length)));
+    view.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
     return out;
 }
 

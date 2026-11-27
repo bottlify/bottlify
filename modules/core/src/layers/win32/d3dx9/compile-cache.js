@@ -24,6 +24,8 @@
  * of the tokens and of the table (null for none).
  */
 
+import { FNV_PRIME, fnv1aString } from '../../../system/hash.js';
+
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
 
 /** @typedef {{ name: string, system: boolean, parent: string, text: string }} Included */
@@ -39,22 +41,21 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /**
- * A digest of `text` to name it by: two 32-bit FNV-1a lanes over its UTF-16
- * units, apart by their seeds. Not a promise of no collision -- the body's key
- * is -- only a name short enough for the cache's table.
+ * A digest of `text` to name it by: FNV-1a over its UTF-16 units, and a
+ * second lane from another seed that folds its high bits down at each step.
+ * Not a promise of no collision -- the body's key is -- only a name short
+ * enough for the cache's table; kept as it is, since the cache keeps the names.
  *
  * @param {string} text @returns {string}
  */
 export function compileName(text){
-    let a = 0x811c9dc5;
+    const a = fnv1aString(text);
     let b = 0x050c5d1f;
     for (let i = 0; i < text.length; i++)
     {
-        const unit = text.charCodeAt(i);
-        a = Math.imul(a ^ unit, 0x01000193);
-        b = Math.imul(b ^ unit, 0x01000193) ^ b >>> 15;
+        b = Math.imul(b ^ text.charCodeAt(i), FNV_PRIME) ^ b >>> 15;
     }
-    return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
+    return `${a.toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
         + `-${text.length.toString(36)}`;
 }
 

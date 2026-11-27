@@ -460,3 +460,33 @@ test('a compile kept under a name another key\'s digest also gives is not that k
         assert.notDeepEqual([...words(g.buffer(answered.shader), g.memory)], shader,
             'compiled for itself');
     });
+
+test('a compile\'s name is what it was before the hash was shared: the cache keeps the names', ()=>{
+    // The function as it was, its lines only rewrapped.
+    /** @param {string} text */
+    const before = text=>{
+        let a = 0x811c9dc5;
+        let b = 0x050c5d1f;
+        for (let i = 0; i < text.length; i++)
+        {
+            const unit = text.charCodeAt(i);
+            a = Math.imul(a ^ unit, 0x01000193);
+            b = Math.imul(b ^ unit, 0x01000193) ^ b >>> 15;
+        }
+        return `${(a >>> 0).toString(16).padStart(8, '0')}`
+            + `${(b >>> 0).toString(16).padStart(8, '0')}-${text.length.toString(36)}`;
+    };
+    let state = 0xa54ff53a;
+    const next = (/** @type {number} */ below)=>{
+        state ^= state << 13;
+        state ^= state >>> 17;
+        state ^= state << 5;
+        return (state >>> 0) % below;
+    };
+    for (let round = 0; round < 300; round++)
+    {
+        const text = String.fromCharCode(...Array.from({ length: next(200) },
+            ()=>(next(4) === 0 ? next(0x10000) : 0x20 + next(0x5f))));
+        assert.equal(compileName(text), before(text), JSON.stringify(text));
+    }
+});
