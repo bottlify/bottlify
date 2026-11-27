@@ -72,6 +72,7 @@ import { textureBreach } from '../webgpu/features.js';
 import { pageMarksOf, writtenSpans } from '../webgpu/internal/changed.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import { SYSTEM_VALUE } from './dxbc.js';
+import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * The shapes WGSL has a depth texture of, which a float texture over a depth
@@ -97,6 +98,9 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  * @property {boolean} [rg11b10Renderable]  Likewise, rg11b10ufloat-renderable.
  * @property {GuestStorage} [guest]  Where a resource the program maps keeps the bytes a
  *     map hands out: guest memory, so a map is an address and no copy.
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     Where each resource's bytes are held for its life (`backingOf`): the run's cache
+ *     (`cache/scratch.js` `hold`); absent, plain memory under the same contract.
  * @property {number} [featureLevel]  The device's D3D_FEATURE_LEVEL (10_0 without one).
  * @property {{ dumpFrames: number, written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Frames to write down from now on, on asking (`app.debug.dumpFrames`): each draw,
@@ -573,6 +577,14 @@ const DEPTH_FLOAT_SHADER = [
 ].join('\n');
 
 /**
+ * What lets go of a resource's held bytes once its backing is collected
+ * (`backingOf`): one for every renderer, since a registry collected with the
+ * renderer that made it - a device the program let go of with its
+ * resources - would call back for none of them.
+ */
+const HELD_BYTES = new FinalizationRegistry((/** @type {() => void} */ release)=>release());
+
+/**
  * @param {RenderServices} services
  */
 export function createRenderer(services){
@@ -636,6 +648,17 @@ export function createRenderer(services){
 
     /** @type {WeakMap<object, any>} resource -> backing */
     const backings = new WeakMap();
+    /**
+     * Where a resource's bytes are held: memory of the run's cache, zero as
+     * new memory is, or plain memory where there is no cache or no room in
+     * it. They are let go of when nothing can reach the backing any more -
+     * not at the program's last reference, which a view, a share's other
+     * device, a copy or a read-back in flight outlive, and only the collector
+     * knows when the last of those went; the owner's going (the root, the
+     * process) takes back what is still held before then (`HELD_BYTES`).
+     */
+    const holds = services.holds ?? ((/** @type {string} */ name, /** @type {number} */ length)=>
+        plainScratches.hold(name, length));
     /** @type {WeakMap<object, any>} view -> GPU texture view */
     const views = new WeakMap();
     /**
@@ -1101,6 +1124,14 @@ export function createRenderer(services){
         }
     };
 
+    /**
+     * Where a view of a resource's bytes starts in them: held memory lies at
+     * an offset of the cache's segment, not at the start of a buffer.
+     *
+     * @param {any} backing @param {Uint8Array} view
+     */
+    const offsetIn = (backing, view)=>view.byteOffset - backing.bytes.byteOffset;
+
     /** @param {any} resource */
     const backingOf = resource=>{
         let backing = backings.get(resource);
@@ -1110,7 +1141,8 @@ export function createRenderer(services){
         }
         const desc = resource.desc;
         const layout = layoutOf(resource);
-        const bytes = new Uint8Array(layout.sliceBytes * layout.slices);
+        const held = holds('d3d10/resource', layout.sliceBytes * layout.slices);
+        const bytes = held.bytes;
         backing = {
             id: nextBacking++, layout, bytes, gpu: null, texture: null, surface: null,
             sampleCount: desc.SampleDesc ? desc.SampleDesc.Count : 1,
@@ -1119,6 +1151,7 @@ export function createRenderer(services){
             // since the guest's were, so a map writes them there first.
             hostNewer: false,
         };
+        HELD_BYTES.register(backing, held.release);
         if (!backend)
         {
             backings.set(resource, backing);
@@ -4601,7 +4634,7 @@ export function createRenderer(services){
                 backing.hostNewer = backing.guest !== null;
             }
             return { data: held.bytes, rowPitch: held.rowPitch, depthPitch: held.depthPitch,
-                ...(backing.guest ? { address: guestMapped(backing, held.bytes.byteOffset),
+                ...(backing.guest ? { address: guestMapped(backing, offsetIn(backing, held.bytes)),
                     bytes: held.bytes.length } : {}) };
         },
 
@@ -4621,7 +4654,7 @@ export function createRenderer(services){
                 return;
             }
             const held = subresourceBytes(resource, subresource);
-            const changed = guestWritten(backing, held.bytes.byteOffset, held.bytes.length);
+            const changed = guestWritten(backing, offsetIn(backing, held.bytes), held.bytes.length);
             if (changed)
             {
                 upload(resource, subresource, flags, null,

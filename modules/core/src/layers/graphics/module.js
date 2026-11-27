@@ -435,6 +435,24 @@ const scratchesOf = cache=>name=>{
     }
 };
 
+/**
+ * Memory of one length an object of the machine's graphics keeps for its life
+ * (a Direct3D 10 resource's bytes), held in the run's cache likewise
+ * (`cache/scratch.js` `hold`).
+ *
+ * @param {any} cache
+ * @returns {(name: string, length: number) => import('../cache/scratch.js').Held}
+ */
+const holdsOf = cache=>(name, length)=>{
+    try
+    {
+        return cache.hold(name, length);
+    }
+    catch {
+        return plainScratches.hold(name, length);
+    }
+};
+
 /** The graphics layer's module for one graph; see `defaultModules`. */
 /**
  * The drawable OpenGL sees for a device context: a window's is its client
@@ -519,6 +537,7 @@ export function createGraphicsModule(){
             // disk, rather than the worker's own heap.
             const cache = /** @type {any} */ (host.requireApi('cache'));
             const scratches = scratchesOf(cache);
+            const holds = holdsOf(cache);
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -735,7 +754,7 @@ export function createGraphicsModule(){
              * @param {import('./d3d10/device.js').DeviceOptions} options
              */
             const direct3d10 = options=>(remote
-                ? remote.root('d3d10', createDirect3D10, options)
+                ? remote.root('d3d10', createDirect3D10, options, cache)
                 : createDirect3D10(options));
 
             /**
@@ -1073,6 +1092,10 @@ export function createGraphicsModule(){
                 /** @returns {any} */
                 d3d10: (/** @type {any} */ caps)=>direct3d10({
                     factoryOptions: caps?.factoryOptions,
+                    // Each resource's bytes, held in the run's cache; the played
+                    // side in the graphics worker holds its own under the root's
+                    // names there.
+                    holds,
                     backend: device && !remote ? api.backend() : undefined,
                     createSampler: device && !remote
                         ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
