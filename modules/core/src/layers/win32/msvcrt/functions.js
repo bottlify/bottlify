@@ -1161,10 +1161,7 @@ export function createMsvcrtFunctions(host){
     // starts: what getenv reads, _putenv changes and main is handed.
     const environment = host.allocate
         ? createEnvironment({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate: host.allocate,
             errno,
             ...host.environment ? { environment: host.environment } : {},

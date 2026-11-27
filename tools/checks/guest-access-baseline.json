@@ -687,11 +687,6 @@
    "string writeString": 1,
    "string writeWideString": 1
   },
-  "msvcrt/environ.js": {
-   "accessor writePointer": 1,
-   "accessor writeU32": 1,
-   "string readWide": 1
-  },
   "msvcrt/functions.js": {
    "string readString": 1,
    "string readWide": 1,

@@ -25,18 +25,16 @@
 
 import { EINVAL, ERANGE } from './globals.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
-import { wideStringAt } from './widetext.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
-/** A string is read no further than this. */
+/** A string is read no further than this many bytes. */
 const MAX_STRING = 1 << 20;
 
 /**
  * @typedef {Object} EnvironmentHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  The process's memory, its
+ *     arrays and size_t answers laid out at its pointer width.
  * @property {(bytes: number) => number} allocate
  * @property {(code: number) => void} errno
  * @property {() => Record<string, string>} [environment]
@@ -54,7 +52,6 @@ const MAX_STRING = 1 << 20;
  * @property {(name: string, initial?: number) => number} cell
  *     A cell of the runtime's own, for a `__p__` accessor when the export's
  *     own address is not to be had: room for a pointer of either width.
- * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -75,24 +72,15 @@ export function createEnvironment(host){
     let initenv = 0;
     let wenviron = 0;
     let winitenv = 0;
-    const width = pointerWidth(host.pointerSize);
-
-    /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address, bytes);
-    };
-
-    /** @param {number} address @param {number} value */
-    const writePointer = (address, value)=>host.writeMemory(address, width.bytes(value));
+    const { guest } = host;
+    const width = pointerWidth(guest.pointerSize);
 
     /** @param {Uint8Array} bytes */
     const place = bytes=>{
         const address = host.allocate(bytes.length);
         if (address !== 0)
         {
-            host.writeMemory(address, bytes);
+            guest.setBytes(address, bytes);
         }
         return address;
     };
@@ -121,9 +109,9 @@ export function createEnvironment(host){
             const at = host.addressOf?.(name) ?? 0;
             if (at !== 0)
             {
-                writePointer(at, value);
+                guest.setPtr(at, value);
             }
-            writePointer(host.cell(name), value);
+            guest.setPtr(host.cell(name), value);
         }
     };
 
@@ -220,48 +208,43 @@ export function createEnvironment(host){
         return equals <= 0 ? null : [text.slice(0, equals), text.slice(equals + 1)];
     };
 
-    /** @param {number} pointer */
-    const readNarrow = pointer=>host.readCString(pointer, MAX_STRING);
-
-    /** @param {number} pointer */
-    const readWide = pointer=>wideStringAt(host.readMemory, pointer);
-
     /** Where a variable's value starts in its narrow string. @param {Variable} variable */
     const narrowValue = variable=>variable.narrow + encodeAnsi(variable.name).length + 1;
 
     /**
      * getenv_s's body, for either width: the length with the terminator
-     * through `length`, the value into a buffer that holds it, ERANGE for
-     * one that does not; no name, or none set, is a length of none.
+     * through `length`, a size_t a pointer wide, the value into a buffer
+     * that holds it, ERANGE for one that does not; no name, or none set, is
+     * a length of none.
      *
      * @param {number} length @param {number} buffer @param {number} size
      * @param {string | null} name @param {number} unit
      */
     const getenvInto = (length, buffer, size, name, unit)=>{
-        if ((length >>> 0) === 0 || ((buffer >>> 0) === 0 && (size >>> 0) !== 0))
+        if (wholeAddress(length) === 0 || (wholeAddress(buffer) === 0 && (size >>> 0) !== 0))
         {
             host.errno(EINVAL);
             return EINVAL;
         }
         const index = name === null ? -1 : find(name);
-        if ((buffer >>> 0) !== 0 && (size >>> 0) !== 0)
+        if (wholeAddress(buffer) !== 0 && (size >>> 0) !== 0)
         {
-            host.writeMemory(buffer, new Uint8Array(unit));
+            guest.fill(buffer, 0, unit);
         }
         if (index < 0)
         {
-            writeU32(length, 0);
+            guest.setPtr(length, 0);
             return 0;
         }
         const value = start()[index].value;
         const bytes = unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
-        writeU32(length, bytes.length / unit);
+        guest.setPtr(length, bytes.length / unit);
         if (bytes.length / unit > (size >>> 0))
         {
             host.errno(ERANGE);
             return ERANGE;
         }
-        host.writeMemory(buffer, bytes);
+        guest.setBytes(buffer, bytes);
         return 0;
     };
 
@@ -277,20 +260,21 @@ export function createEnvironment(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, length, name])=>{
-            if ((buffer >>> 0) === 0 || (name >>> 0) === 0)
+            if (wholeAddress(buffer) === 0 || wholeAddress(name) === 0)
             {
                 host.errno(EINVAL);
                 return EINVAL;
             }
-            const index = unit === 1 ? find(readNarrow(name)) : find(readWide(name), true);
+            const index = unit === 1 ? find(guest.cstr(name, MAX_STRING))
+                : find(guest.wstr(name, MAX_STRING), true);
             const value = index < 0 ? null : start()[index].value;
             const bytes = value === null ? null
                 : unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
             const copy = bytes ? place(bytes) : 0;
-            writePointer(buffer, copy);
-            if ((length >>> 0) !== 0)
+            guest.setPtr(buffer, copy);
+            if (wholeAddress(length) !== 0)
             {
-                writePointer(length,
+                guest.setPtr(length,
                     copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length / unit);
             }
             return 0;
@@ -346,7 +330,7 @@ export function createEnvironment(host){
                 {
                     return 0;
                 }
-                const index = find(readNarrow(name));
+                const index = find(guest.cstr(name, MAX_STRING));
                 return index < 0 ? 0 : narrowValue(start()[index]);
             },
         },
@@ -363,7 +347,7 @@ export function createEnvironment(host){
                     return 0;
                 }
                 const all = startWide();
-                const index = find(readWide(name), true);
+                const index = find(guest.wstr(name, MAX_STRING), true);
                 return index < 0 ? 0 : all[index].wide + (all[index].name.length + 1) * 2;
             },
         },
@@ -379,7 +363,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const pair = wholeAddress(text) === 0 ? null : parse(readNarrow(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(guest.cstr(text, MAX_STRING));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -397,7 +381,7 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([text])=>{
                 startWide();
-                const pair = wholeAddress(text) === 0 ? null : parse(readWide(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(guest.wstr(text, MAX_STRING));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -413,8 +397,9 @@ export function createEnvironment(host){
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name, value])=>putenvPair(wholeAddress(name) === 0 ? null : readNarrow(name),
-                wholeAddress(value) === 0 ? null : readNarrow(value), false),
+            handler: ([name, value])=>putenvPair(
+                wholeAddress(name) === 0 ? null : guest.cstr(name, MAX_STRING),
+                wholeAddress(value) === 0 ? null : guest.cstr(value, MAX_STRING), false),
         },
 
         /** errno_t _wputenv_s(const wchar_t *name, const wchar_t *value) */
@@ -424,8 +409,8 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([name, value])=>{
                 startWide();
-                return putenvPair(wholeAddress(name) === 0 ? null : readWide(name),
-                    wholeAddress(value) === 0 ? null : readWide(value), true);
+                return putenvPair(wholeAddress(name) === 0 ? null : guest.wstr(name, MAX_STRING),
+                    wholeAddress(value) === 0 ? null : guest.wstr(value, MAX_STRING), true);
             },
         },
 
@@ -436,7 +421,7 @@ export function createEnvironment(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                wholeAddress(name) === 0 ? null : readNarrow(name), 1),
+                wholeAddress(name) === 0 ? null : guest.cstr(name, MAX_STRING), 1),
         },
 
         /** errno_t _wgetenv_s(size_t *length, wchar_t *buffer, size_t size, const wchar_t *name) */
@@ -446,7 +431,7 @@ export function createEnvironment(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                wholeAddress(name) === 0 ? null : readWide(name), 2),
+                wholeAddress(name) === 0 ? null : guest.wstr(name, MAX_STRING), 2),
         },
 
         /**
@@ -483,7 +468,7 @@ export function createEnvironment(host){
                 start();
                 if (wholeAddress(out) !== 0)
                 {
-                    writePointer(out, environ);
+                    guest.setPtr(out, environ);
                 }
                 return 0;
             },
@@ -497,7 +482,7 @@ export function createEnvironment(host){
             handler: ([out])=>{
                 if (wholeAddress(out) !== 0)
                 {
-                    writePointer(out, wenviron);
+                    guest.setPtr(out, wenviron);
                 }
                 return 0;
             },
