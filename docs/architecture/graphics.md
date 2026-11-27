@@ -97,7 +97,12 @@ flowchart TB
   way, where the graphics layer made them; the run's presenter, which the run makes outside
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
-  `lendBackend`), plain memory until then. A Direct3D 8 or 9 frame's uniform arena, which its
+  `lendBackend`), plain memory until then. A picture sent to another thread as bytes - a
+  process in a worker of its own (`host/process.worker.js` `sendFrames`), or the graphics
+  worker's frames where the page cannot take a picture from it - is written into memory held in
+  the run's cache, and the message carries the view of it, which the thread that shows it reads
+  in place onto its device; its answer (`shown`) lets the hold go, and the cache takes the room
+  back. One with no room there is not sent, and is a loss (`unsent` in the presenter's report). A Direct3D 8 or 9 frame's uniform arena, which its
   draws take their blocks from and its replay reads, is memory held in the run's cache
   (`d3d8/render.js` `createUniformArena`, `cache/scratch.js` `hold`), one hold a generation:
   outgrown mid-frame, it holds a larger one and lets the old go only at its next reset, after
@@ -116,7 +121,11 @@ flowchart TB
   held in the run's cache (`opengl/context-textures.js` `rgbaCache`, the context's `holds`) that
   it samples in place, let go of when the level is written or collected. A display list keeps an
   S3TC rectangle's blocks, not its texels, and its own copy of every byte array a call hands it.
-  A game loads
+  On the processor a level's own bytes - its RGBA texels, a sized level's data, its kept S3TC
+  blocks - go to the texel store once no draw has sampled the level since the look before
+  (about a second of swaps), through the same accessors as the device path's
+  (`opengl/level-spill.js`, `opengl/processor-levels.js`), its held RGBA let go of with them;
+  its first reader or writer takes them back. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
   image (`glGetTexImage`) by the context that draws copies it back from the device, once what

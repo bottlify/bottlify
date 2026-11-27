@@ -1007,9 +1007,10 @@ export function createGraphicsModule(){
                     // guest's own code.
                     compressedTextures,
                     astcTextures,
-                    // Made only where the contexts draw here: a root in the
-                    // graphics worker is given names of its own there.
-                    texelCache: device && !remote ? ownTexels() : null,
+                    // Made only where the contexts draw here, on a device or on
+                    // the processor: a root in the graphics worker is given names
+                    // of its own there.
+                    texelCache: remote ? null : ownTexels(),
                     // The RGBA a context drawn on the processor here samples.
                     holds: remote ? undefined : holds,
                     presenter: ()=>state.shown,

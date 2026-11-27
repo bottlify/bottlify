@@ -273,7 +273,7 @@ function keepRgba(level, held){
  *
  * @param {import('./objects.js').TextureLevel | undefined} level
  */
-function forgetRgba(level){
+export function forgetRgba(level){
     for (let at = level; at; at = at.source)
     {
         dropRgba(at);
@@ -2642,7 +2642,7 @@ export function installTextureCalls(context, kernel){
         // them every draw and keeps them, decoded into memory held in the run's
         // cache (`rgbaCache`). The blocks are read from the level, not held
         // apart: the drawing side may move them into the run's cache while no
-        // draw needs them (`gpu.js` `spill`).
+        // draw needs them (`gpu.js` `spill`, `processor-levels.js`).
         /** @type {import('./objects.js').TextureLevel} */
         const level = {
             width, height, internalFormat: internal, border,

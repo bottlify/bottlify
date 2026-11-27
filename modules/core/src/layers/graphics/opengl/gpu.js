@@ -66,7 +66,8 @@ import { createGlGeometry } from './gpu-geometry.js';
 import { TESS_DRAW_ENTRIES, createGlTessellation } from './gpu-tessellation.js';
 import { createGlCompute, createGlMemory } from './gpu-compute.js';
 import { IMAGE_FORMATS } from './glsl-storage.js';
-import { KEPT_FROM, createTexelStore } from '../internal/texel-store.js';
+import { createTexelStore } from '../internal/texel-store.js';
+import { createLevelSpill } from './level-spill.js';
 
 /** The formats an image unit binds a texture's storage in: WebGPU's storage formats. */
 const IMAGE_STORAGE = new Set(IMAGE_FORMATS.map(([, , format])=>format));
@@ -537,122 +538,11 @@ export function createGpuRenderer(services){
     /**
      * What of a level can wait in the store (`spill`): its texels, and the
      * blocks of an S3TC level kept compressed (a device without them decodes
-     * them at the upload). `bytesOf` names the bytes a value holds and `made`
-     * makes the value again from them; `names` the key a level's bytes wait
-     * under.
-     *
-     * @typedef {{ property: 'texels' | 'compressed',
-     *     bytesOf: (value: any) => Uint8Array | null,
-     *     made: (bytes: Uint8Array, format: number) => any,
-     *     names: WeakMap<object, string> }} Spillable
+     * them at the upload).
      */
-    /** @type {readonly Spillable[]} */
-    const spillable = [
-        { property: 'texels', bytesOf: value=>(value instanceof Uint8Array ? value : null),
-            made: bytes=>bytes, names: new WeakMap() },
-        { property: 'compressed',
-            bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
-            made: (bytes, format)=>({ format, bytes }), names: new WeakMap() },
-    ];
-    const [spilledTexels, spilledBlocks] = spillable;
-    /**
-     * A level's bytes of one kind read for an upload: in place where they
-     * wait in the store under `waits`, else as the level holds them (`held`).
-     *
-     * @param {string | undefined} waits @param {() => any} held
-     * @param {(bytes: any) => void} read
-     */
-    const readLevel = (waits, held, read)=>{
-        if (waits === undefined)
-        {
-            read(held());
-            return;
-        }
-        texelStore.with(waits, read);
-        spills.inPlace++;
-    };
-    // A key a level, never the texture's name and level: a name the program
-    // deleted and made again would meet the bytes of the one before it until
-    // the next `spill` let them go.
-    let spillNames = 0;
-    const spills = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, inPlace: 0,
-        forgotten: 0 };
-    /**
-     * The texture each key waiting in the store is a level of: a level of
-     * one the program deleted is read by nothing, and its key is let go of at
-     * the next `spill`, which is handed the textures that are alive.
-     *
-     * @type {Map<string, object>}
-     */
-    const spilledOf = new Map();
-    /** @param {object} image @param {string} property @param {any} value */
-    const plain = (image, property, value)=>Object.defineProperty(image, property,
-        { value, writable: true, configurable: true, enumerable: true });
-    /**
-     * A level whose bytes of one kind wait in the store under `key`: the
-     * property takes them back (`takeBack`) and a write over it drops them.
-     * Made apart from `spillLevel`, so its accessors hold no reference to the
-     * bytes they let go of.
-     *
-     * @param {Spillable} kind @param {object} texture @param {object} image @param {string} key
-     * @param {number} format  an S3TC level's format
-     */
-    const waiting = (kind, texture, image, key, format)=>{
-        kind.names.set(image, key);
-        spilledOf.set(key, texture);
-        Object.defineProperty(image, kind.property, {
-            configurable: true, enumerable: true,
-            get(){
-                return takeBack(kind, image, key, format);
-            },
-            set(value){
-                plain(image, kind.property, value);
-                kind.names.delete(image);
-                spilledOf.delete(key);
-                texelStore.drop(key);
-            },
-        });
-    };
-    /**
-     * A waiting level's bytes back as the level's own, the level plain again:
-     * a reader through the property may write them in place, so they are
-     * the level's and not a view of the cache (`TexelStore.take`).
-     *
-     * @param {Spillable} kind @param {object} image @param {string} key @param {number} format
-     */
-    const takeBack = (kind, image, key, format)=>{
-        const length = texelStore.lengthOf(key);
-        const value = kind.made(texelStore.take(key) ?? new Uint8Array(length), format);
-        plain(image, kind.property, value);
-        kind.names.delete(image);
-        spilledOf.delete(key);
-        spills.back++;
-        spills.backBytes += length;
-        return value;
-    };
-    /**
-     * One level's bytes of one kind handed to the store (`spill`), if they
-     * are a plain value large enough: they move into the run's cache once it
-     * grants their room, and a write or a read meanwhile meets them in the
-     * store.
-     *
-     * @param {Spillable} kind @param {any} texture @param {object} image
-     */
-    const spillLevel = (kind, texture, image)=>{
-        const held = Object.getOwnPropertyDescriptor(image, kind.property);
-        const was = held && 'value' in held ? held.value : null;
-        const bytes = kind.bytesOf(was);
-        if (bytes === null || bytes.byteLength < KEPT_FROM)
-        {
-            return;
-        }
-        const key = String(++spillNames);
-        texelStore.put(key, bytes);
-        spills.levels++;
-        spills.bytes += bytes.byteLength;
-        spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
-        waiting(kind, texture, image, key, was?.format ?? 0);
-    };
+    const levelSpill = createLevelSpill({ store: texelStore, kinds: ['texels', 'compressed'] });
+    const [spilledTexels, spilledBlocks] = levelSpill.kinds;
+    const readLevel = levelSpill.readLevel;
     /** The key of the next bytes a frame keeps until its replay: each its own. */
     let keptForFrames = 0;
     /**
@@ -6223,15 +6113,7 @@ export function createGpuRenderer(services){
                 return;
             }
             const alive = new Set(all);
-            for (const [key, texture] of spilledOf)
-            {
-                if (!alive.has(texture))
-                {
-                    spilledOf.delete(key);
-                    texelStore.drop(key);
-                    spills.forgotten++;
-                }
-            }
+            levelSpill.forget(alive);
             for (const texture of alive)
             {
                 if (textures.has(texture))
@@ -6240,10 +6122,7 @@ export function createGpuRenderer(services){
                 }
                 for (const image of texture.levels?.values() ?? [])
                 {
-                    for (const kind of spillable)
-                    {
-                        spillLevel(kind, texture, image);
-                    }
+                    levelSpill.spill(texture, image);
                 }
             }
         },
@@ -6272,7 +6151,7 @@ export function createGpuRenderer(services){
                         ?.bytes?.byteLength ?? 0;
                     held.blockBytes += blocks;
                     held.undrawnBlockBytes += copy === undefined ? blocks : 0;
-                    if (spillable.some(kind=>kind.names.has(image)))
+                    if (levelSpill.waits(image))
                     {
                         held.cachedLevels++;
                     }
@@ -6301,7 +6180,8 @@ export function createGpuRenderer(services){
         diagnostics: ()=>({
             ...stats,
             // Texels and blocks moved into the run's cache while undrawn, and taken back.
-            spills: texelStore.cached ? { ...spills, store: texelStore.figures() } : 'no cache',
+            spills: texelStore.cached ? { ...levelSpill.figures(), store: texelStore.figures() }
+                : 'no cache',
             // What the store holds and has done, the frames' bytes kept for their replays
             // among it.
             keptTexels: texelStore.figures(),

@@ -306,6 +306,10 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  *           levels, only their shapes: a context whose twin elsewhere draws
  *           has the data sent there with each call and never reads it again.
  *           Such a context reads a level back (glGetTexImage) as black.
+ * @property {import('./processor-levels.js').ProcessorLevels} [levels]
+ *           Where the processor path hands the levels no draw samples to the texel
+ *           store (`processor-levels.js`), shared by the root's contexts; absent,
+ *           nothing moves.
  * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
  *           Memory held in the run's cache for as long as what keeps it lives: the
  *           RGBA a level's data or blocks make for the processor's rasteriser, which
@@ -587,6 +591,7 @@ export function createGlContext(options = {}){
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
         keepTexels: options.keepTexels !== false,
+        levels: gpu ? null : options.levels ?? null,
         holdTexels: length=>(options.holds ?? plainScratches.hold)('gl/rgba', length),
         currentVertex,
         currentAttributes,

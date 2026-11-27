@@ -81,6 +81,18 @@ function fakeDevice(){
     };
 }
 
+test('a frame the worker found no room for in the run\'s cache is a loss here', ()=>{
+    const worker = fakeWorker();
+    /** @type {any[][]} */
+    const said = [];
+    const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{},
+        divergence: (...seen)=>said.push(seen) });
+    end.root('d3d9', ()=>({}), {});
+    worker.answer({ type: 'unshown', message: 'a frame of 64 bytes found no room' });
+    assert.deepEqual(said, [['graphics', 'a frame of 64 bytes found no room', 'loss']]);
+    end.dispose();
+});
+
 test('a frame the worker sends back is presented as one drawn here, its texture kept', ()=>{
     const worker = fakeWorker();
     const device = fakeDevice();
