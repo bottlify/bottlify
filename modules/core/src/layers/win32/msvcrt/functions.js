@@ -1114,7 +1114,7 @@ export function createMsvcrtFunctions(host){
     // One set of the runtime's variables for the whole table: errno is set by
     // whichever function fails and read through the address `_errno` hands out.
     const globals = createGlobals({
-        allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+        allocate, guest: host.guest,
         // The two a start-up reads and writes by the name it imported.
         placed: name=>(name === 'fmode' || name === 'commode'
             ? host.addressOf?.(`_${name}`) ?? 0 : 0),
@@ -1514,9 +1514,7 @@ export function createMsvcrtFunctions(host){
         // than a start-up that half runs.
         ...(host.allocate && host.commandLine && host.exitProcess
             ? createStartupFunctions({
-                pointerSize: host.pointerSize,
-                readMemory: host.readMemory,
-                writeMemory: host.writeMemory,
+                guest: host.guest,
                 allocate: host.allocate,
                 commandLine: host.commandLine,
                 ...host.imagePath ? { imagePath: host.imagePath } : {},

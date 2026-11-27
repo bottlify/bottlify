@@ -695,12 +695,6 @@
    "string writeString": 1,
    "string writeWide": 1
   },
-  "msvcrt/startup.js": {
-   "accessor dword": 1,
-   "accessor readPointer": 1,
-   "accessor writePointer": 1,
-   "accessor writeU32": 1
-  },
   "msvcrt/time.js": {
    "accessor dword": 1,
    "accessor readInt": 1,
