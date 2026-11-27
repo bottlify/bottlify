@@ -172,7 +172,7 @@ export function writeFields(memory, address, layout, values){
     {
         const bytes = new Uint8Array(wideField(layout, name) ? 8 : 4);
         putFields(new DataView(bytes.buffer), -layout[name], layout, { [name]: value });
-        memory.writeMemory((address + layout[name]) >>> 0, bytes);
+        memory.writeMemory(address + layout[name], bytes);
     }
 }
 
