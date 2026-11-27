@@ -4761,8 +4761,7 @@ export function createWin32Module(){
 
                 'msvcrt.dll': ()=>({
                     ...createCrtSeh({
-                        readMemory,
-                        writeMemory,
+                        guest,
                         isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),

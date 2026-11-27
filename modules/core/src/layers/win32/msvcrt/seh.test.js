@@ -10,6 +10,7 @@ import {
     createCrtSeh, SCOPE_FRAME, SCOPE_ENTRY, NO_TRY_LEVEL, JMP_BUF, JMP_COOKIE,
 } from './seh.js';
 import { Disposition, EH_UNWINDING, RECORD } from '../kernel32/seh.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const FRAME = 0x20000;
 const TABLE = 0x30000;
@@ -36,10 +37,7 @@ function machine(options = {}){
     let registers = { esp: 0x40000, eip: 0x401000, ebp: 0x50, ebx: 0x51, edi: 0x52, esi: 0x53 };
 
     const host = {
-        /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>bytes.slice(at, at + length),
-        /** @param {number} at @param {Uint8Array} value */
-        writeMemory: (at, value)=>bytes.set(value, at),
+        guest: guestWindow(bytes),
         /** @param {number} at */
         isMapped: at=>at > 0 && at < bytes.length,
         registers: ()=>({ ...registers }),

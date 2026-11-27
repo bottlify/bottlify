@@ -733,10 +733,6 @@
    "string readString": 1,
    "string readWide": 1
   },
-  "msvcrt/seh.js": {
-   "accessor readU32": 1,
-   "accessor writeU32": 1
-  },
   "msvcrt/startup.js": {
    "accessor dword": 1,
    "accessor readPointer": 1,

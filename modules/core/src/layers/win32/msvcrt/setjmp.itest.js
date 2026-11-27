@@ -18,6 +18,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { SETJMP_CODE, createCrtSeh } from './seh.js';
+import { guestThrough } from './guest-window.fixture.js';
 
 const PROGRAM = 0x8000;
 const SETJMP = 0x9000;
@@ -64,10 +65,8 @@ test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', (
     /** The handlers, over the same memory, with the registers the call was made with. */
     let registers = /** @type {Record<string, number>} */ ({});
     const crt = createCrtSeh(/** @type {any} */ ({
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            host.readPhysical(at, length).slice(),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
-            host.writePhysical(at, bytes),
+        guest: guestThrough((/** @type {number} */ at, /** @type {number} */ length)=>
+            host.readPhysical(at, length).slice(), host.writePhysical),
         isMapped: ()=>true,
         registers: ()=>registers,
         setRegisters: ()=>{},
