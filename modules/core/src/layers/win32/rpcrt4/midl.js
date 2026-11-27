@@ -712,7 +712,7 @@ export function createMidl(host){
             {
                 return RPC_S_OUT_OF_MEMORY;
             }
-            w32(out >>> 0, made);
+            w32(wholeAddress(out), made);
             return RPC_S_OK;
         },
     });
@@ -741,7 +741,7 @@ export function createMidl(host){
             const handle = nextBinding++;
             bindings.set(handle, { object: uuid === null ? null : formatGuid(uuid),
                 protseq: parts.protseq, address: parts.address, endpoint: parts.endpoint });
-            w32(out >>> 0, handle);
+            w32(wholeAddress(out), handle);
             return RPC_S_OK;
         },
     });
@@ -757,8 +757,9 @@ export function createMidl(host){
     const registerIf = {
         argBytes: 12,
         /** @param {number[]} args */
-        handler: ([spec, managerType, epv])=>registerInterface(spec >>> 0, managerType >>> 0,
-            epv >>> 0),
+        handler: ([spec, managerType, epv])=>registerInterface(spec >>> 0,
+            wholeAddress(managerType),
+            wholeAddress(epv)),
     };
     // The same registration with the options it also takes, which a server that
     // listens on its own account does not use here.

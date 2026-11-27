@@ -271,7 +271,7 @@ export function registerMsxmlClasses(host){
         : host.readWideString(wholeAddress(bstr), MAX_TEXT * 2));
     /** @param {string} text @returns {number} a BSTR from the heap, or 0 */
     const allocateBstr = text=>{
-        const block = host.heap.allocate(4 + text.length * 2 + 2) >>> 0;
+        const block = wholeAddress(host.heap.allocate(4 + text.length * 2 + 2));
         if (block === 0)
         {
             return 0;

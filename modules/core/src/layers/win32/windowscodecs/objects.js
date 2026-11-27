@@ -428,7 +428,7 @@ export function createCodecs(host){
     const makeBitmap = (width, height, f, options = {})=>{
         const stride = options.stride ?? Math.ceil(width * f.bpp / 32) * 4;
         const owned = options.address === undefined;
-        const address = owned ? host.heap.allocate(Math.max(4, stride * height)) >>> 0
+        const address = owned ? wholeAddress(host.heap.allocate(Math.max(4, stride * height)))
             : /** @type {number} */ (options.address) >>> 0;
         if (address === 0)
         {

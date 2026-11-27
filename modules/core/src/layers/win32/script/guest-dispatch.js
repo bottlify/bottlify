@@ -30,6 +30,7 @@ import {
 } from './external.js';
 import { ForeignValue, unknownValue } from './values.js';
 import { VARIANT_SIZE, createVariantCodec } from './variant.js';
+import { wholeAddress } from '../../../system/address.js';
 
 /**
  * @typedef {import('./values.js').Value} Value
@@ -120,7 +121,7 @@ export function createGuestBridge(com, hooks){
      * @returns {Promise<T>}
      */
     const withBlock = async(bytes, use)=>{
-        const block = com.allocate(bytes) >>> 0;
+        const block = wholeAddress(com.allocate(bytes));
         if (block === 0)
         {
             throw new ExternalError(E_OUTOFMEMORY);

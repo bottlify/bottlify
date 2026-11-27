@@ -488,11 +488,11 @@ export function createIpStringFunctions(host){
         handler: ([address, buffer])=>{
             if ((buffer >>> 0) === 0 || (address >>> 0) === 0)
             {
-                return ((buffer >>> 0) - width(wide).unit) >>> 0;
+                return wholeAddress(wholeAddress(buffer) - width(wide).unit);
             }
             const text = format(host.readMemory(wholeAddress(address), size));
-            width(wide).write(buffer >>> 0, text);
-            return ((buffer >>> 0) + text.length * width(wide).unit) >>> 0;
+            width(wide).write(wholeAddress(buffer), text);
+            return wholeAddress(buffer) + text.length * width(wide).unit;
         },
     });
 
@@ -542,9 +542,9 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_ACCESS_VIOLATION;
             }
-            const text = width(wide).read(string >>> 0);
+            const text = width(wide).read(wholeAddress(string));
             const read = parseIpv4(text, (strict & 0xff) !== 0);
-            putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
+            putDword(wholeAddress(terminator), wholeAddress(string) + read.end * width(wide).unit);
             if ('error' in read)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -563,11 +563,12 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_ACCESS_VIOLATION;
             }
-            const text = width(wide).read(string >>> 0);
+            const text = width(wide).read(wholeAddress(string));
             const read = parseIpv6(text, host.readMemory(wholeAddress(address), 16));
             if (read.end !== null)
             {
-                putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
+                putDword(wholeAddress(terminator),
+                    wholeAddress(string) + read.end * width(wide).unit);
             }
             host.writeMemory(wholeAddress(address), read.bytes);
             return read.error ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
@@ -588,7 +589,7 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            const text = width(wide).read(string >>> 0);
+            const text = width(wide).read(wholeAddress(string));
             const read = parseIpv4(text, (strict & 0xff) !== 0);
             if ('error' in read)
             {
@@ -617,7 +618,7 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            const text = width(wide).read(string >>> 0);
+            const text = width(wide).read(wholeAddress(string));
             const bracketed = text.startsWith('[');
             const inner = bracketed ? text.slice(1) : text;
             // The address is stored as it is read, whatever comes after it.
@@ -658,7 +659,7 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            putDword(scope >>> 0, scopeId >>> 0);
+            putDword(wholeAddress(scope), scopeId >>> 0);
             host.writeMemory(wholeAddress(port), Uint8Array.of(number >> 8, number & 0xff));
             return STATUS_SUCCESS;
         },

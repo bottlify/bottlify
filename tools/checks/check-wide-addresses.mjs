@@ -37,6 +37,17 @@
  * calls after it, which is why only the dwords a call itself writes are
  * compared.
  *
+ * A call that answers two values outside both windows that differ (a handle
+ * 0x150 low, 0x148 high) is made again on both layers made afresh: one that
+ * then agrees differed by what an earlier call left on one side alone, and
+ * is counted, not listed.
+ *
+ * Before the sweep, each handler the bridge hands an address whole (its
+ * `addresses`, written or declared from the signature table) is read by its
+ * own source (`cutHandlers`): one that cuts such an argument back to a dword
+ * fails, whether or not the sweep's data reaches the cut. KNOWN_CUTS lists
+ * what is left, with why.
+ *
  * The kernel and the bridge are stood in for as in check-guest-pointers.mjs.
  * KNOWN lists what differs today, by `library!function`, so the gate runs
  * green while saying what is open: a new difference fails, and so does a
@@ -62,7 +73,7 @@ import { isMain } from '../lib/common.mjs';
 import { noCache } from '../../modules/core/src/layers/cache/module.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
-import { checkReturns, pointersOf } from './check-wide-arguments.mjs';
+import { checkReturns, cutsIn, pointersOf } from './check-wide-arguments.mjs';
 import { longAnswer, wholeAddresses, zeroExtendsOf } from '../../modules/core/src/layers/bridge/internal/dispatch.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -122,7 +133,7 @@ function argumentBytes(){
  *
  * @param {number} base
  */
-async function layerAt(base){
+export async function layerAt(base){
     const query = `?at=${base}`;
     /** @param {string} path */
     const load = path=>import(`${pathToFileURL(join(LAYERS, path)).href}${query}`);
@@ -229,6 +240,58 @@ async function layerAt(base){
 }
 
 /**
+ * Handlers that cut an argument they declare an address back to a dword, by
+ * `library!function`, with each cut as written - left as they are, with why:
+ * the list only shrinks.
+ *
+ * @type {Map<string, string>}
+ */
+export const KNOWN_CUTS = new Map([
+    ['ADVAPI32.dll!BuildTrusteeWithObjectsAndSidA',
+        'OBJECTS_AND_SID is laid out 32-bit, its SID pointer a dword: the 64-bit layout'
+            + ' is the fix'],
+]);
+
+/**
+ * The handlers that cut an argument the bridge hands them whole (`addresses`,
+ * written in the spec or declared from the signature table) back to its low
+ * dword (`cutsIn`): an address past 4 GiB names the memory 4 GiB below it.
+ * Read from each handler's own source as the libraries hold it, so a handler
+ * a helper makes, under no signature comment of its own, is read too; the
+ * differential sweep sees such a cut only where its data reaches it.
+ *
+ * @param {Record<string, Record<string, any>>} libraries
+ * @param {RegExp | null} [only]
+ * @returns {Map<string, string[]>}
+ */
+export function cutHandlers(libraries, only = null){
+    /** @type {Map<string, string[]>} */
+    const found = new Map();
+    /** @type {Set<Function>} */
+    const seen = new Set();
+    for (const [library, table] of Object.entries(libraries))
+    {
+        for (const [name, entry] of Object.entries(table ?? {}))
+        {
+            const spec = entry?.[ORIGINAL_EXPORT] ?? entry;
+            const addresses = entry?.addresses ?? spec?.addresses;
+            if (typeof spec?.handler !== 'function' || !Array.isArray(addresses)
+                || seen.has(spec.handler) || (only && !only.test(`${library}!${name}`)))
+            {
+                continue;
+            }
+            seen.add(spec.handler);
+            const cuts = cutsIn(spec.handler.toString(), addresses);
+            if (cuts.length > 0)
+            {
+                found.set(`${library}!${name}`, cuts);
+            }
+        }
+    }
+    return found;
+}
+
+/**
  * RAX as the bridge writes it for a 64-bit call: its own `longAnswer`, the
  * spec's type deciding (`zeroExtendsOf`) - an address zero-extended, any other
  * dword sign-extended.
@@ -272,8 +335,9 @@ export function signatures(){
     const places = new Map();
     /**
      * The other spelling of a name a comment gives one of (`PathIsUNCA` over a
-     * maker of both, `CreateFile` over CreateFileA and CreateFileW): taken
-     * where no comment of its own names it.
+     * maker of both, `CreateFile` over CreateFileA and CreateFileW, a comment
+     * over the spec `BuildTrusteeWithObjectsAndSidA/W` both are): taken where no
+     * comment of its own names it.
      *
      * @type {Map<string, string | null>}
      */
@@ -281,9 +345,11 @@ export function signatures(){
     /** @param {Map<string, string | null>} into @param {string} name @param {string | null} list */
     const agree = (into, name, list)=>into.set(name,
         into.has(name) && into.get(name) !== list ? null : list);
-    /** @param {string} name @returns {string | null} */
-    const otherSpelling = name=>(/^\w{3,}[AW]$/.test(name)
-        ? `${name.slice(0, -1)}${name.endsWith('A') ? 'W' : 'A'}` : null);
+    /** @param {string} name @param {string} text  the comment's file @returns {string[]} */
+    const otherSpelling = (name, text)=>(/^\w{3,}[AW]$/.test(name)
+        ? [`${name.slice(0, -1)}${name.endsWith('A') ? 'W' : 'A'}`]
+        : [`${name}A`, `${name}W`].filter(spelling=>
+            new RegExp(String.raw`^\s*${spelling}\s*:`, 'm').test(text)));
     /** @param {string} dir */
     const walk = dir=>{
         for (const name of readdirSync(dir))
@@ -295,7 +361,8 @@ export function signatures(){
             }
             else if (name.endsWith('.js') && !/\.(i?test|fixture|x86|x64)\.js$/.test(name))
             {
-                for (const one of checkReturns(readFileSync(path, 'utf8'), { exported: true }))
+                const text = readFileSync(path, 'utf8');
+                for (const one of checkReturns(text, { exported: true }))
                 {
                     const list = one.params == null ? null
                         : pointersOf(one.params, { addresses: true }).join(',');
@@ -304,8 +371,7 @@ export function signatures(){
                     {
                         typed.set(each, (typed.get(each) ?? false) || one.pointer);
                         agree(places, each, list);
-                        const other = otherSpelling(each);
-                        if (other)
+                        for (const other of otherSpelling(each, text))
                         {
                             agree(spelled, other, list);
                         }
@@ -580,13 +646,16 @@ function nextBlock(layer){
  * parts the two arenas: every block after it lies elsewhere in its window, and
  * the dwords later calls write would differ by that alone. So before each call
  * the next block of both heaps is compared, and where they parted `rebuild`
- * makes both layers again.
+ * makes both layers again. A call that made an object on one layer alone parts
+ * their handle counters instead: a later call answering two values outside both
+ * windows that differ (a region's handle 0x150 low, 0x148 high) is made again
+ * on both layers made afresh, and is a difference only if it still differs.
  *
  * @param {Layer} low @param {Layer} high
  * @param {RegExp | null} [only]  the `library!function` names to call, all where null
  * @param {((low: Layer, high: Layer) => Promise<{ low: Layer, high: Layer }>) | null} [rebuild]
  * @returns {Promise<{ handlers: number, calls: number, differences: Difference[],
- *     unmeasured: Set<string>, parted: string[], low: Layer, high: Layer }>}
+ *     unmeasured: Set<string>, parted: string[], drifted: string[], low: Layer, high: Layer }>}
  */
 export async function compare(low, high, only = null, rebuild = null){
     // The layers called, made again where they parted; the order and the
@@ -594,6 +663,11 @@ export async function compare(low, high, only = null, rebuild = null){
     let [lo, hi] = [low, high];
     /** @type {string[]} the calls after which the arenas were found parted */
     const parted = [];
+    /** @type {string[]} the calls that differed by a value only until made on fresh layers */
+    const drifted = [];
+    /** @param {bigint | null} rax @param {number} base */
+    const inWindow = (rax, base)=>rax !== null && rax >= BigInt(base)
+        && rax < BigInt(base + WINDOW);
     let last = '';
     /** @type {Difference[]} */
     const differences = [];
@@ -651,85 +725,112 @@ export async function compare(low, high, only = null, rebuild = null){
             for (const [label, shape] of shapes)
             {
                 calls++;
-                if (rebuild && nextBlock(lo) !== nextBlock(hi))
+                // Made once, and once more on fresh layers where it differed by state.
+                let fresh = false;
+                const found = differences.length;
+                for (;;)
                 {
-                    ({ low: lo, high: hi } = await rebuild(lo, hi));
-                    pristine = Uint8Array.from(lo.window);
-                    parted.push(last);
+                    if (rebuild && nextBlock(lo) !== nextBlock(hi))
+                    {
+                        ({ low: lo, high: hi } = await rebuild(lo, hi));
+                        pristine = Uint8Array.from(lo.window);
+                        parted.push(last);
+                    }
+                    last = `${library}!${name} with ${label}`;
+                    if (TRACE)
+                    {
+                        // The call a run stops in is the last line said.
+                        process.stderr.write(`${last}\n`);
+                    }
+                    // Each window as it was: a handler writes through what it is handed.
+                    lo.window.set(pristine.subarray(0, ARENA.offset));
+                    hi.window.set(pristine.subarray(0, ARENA.offset));
+                    const lowBefore = Uint8Array.from(lo.window);
+                    const highBefore = Uint8Array.from(hi.window);
+                    const mine = lo.libraries[library]?.[name];
+                    const theirs = hi.libraries[library]?.[name];
+                    // The arguments as the bridge hands them: each the function
+                    // declares an address (`addresses`) whole past 4 GiB.
+                    const whole = mine?.addresses ?? mine?.[ORIGINAL_EXPORT]?.addresses
+                        ?? null;
+                    const bridged = (/** @type {any[]} */ args)=>{
+                        wholeAddresses(whole, args, args.high);
+                        return args;
+                    };
+                    const a = await outcome((mine?.[ORIGINAL_EXPORT] ?? mine).handler,
+                        bridged(argumentsAt(shape, lo.base)));
+                    const b = await outcome((theirs?.[ORIGINAL_EXPORT] ?? theirs).handler,
+                        bridged(argumentsAt(shape, hi.base)));
+                    const key = `${library}!${name}`;
+                    const lateBy = (/** @type {number} */ base)=>late.find(e=>
+                        String(/** @type {{ stack?: unknown }} */ (e)?.stack)
+                            .includes(`?at=${base}:`));
+                    const lateLow = lateBy(lo.base);
+                    const lateHigh = lateBy(hi.base);
+                    late.length = 0;
+                    if ((lateLow === undefined) !== (lateHigh === undefined))
+                    {
+                        const said = (/** @type {any} */ e)=>(e === undefined
+                            ? 'nothing' : String(e?.code ?? e?.message ?? e));
+                        differences.push({ key, label, detail: `threw ${said(lateLow)} low,`
+                            + ` ${said(lateHigh)} high, after it answered` });
+                        break;
+                    }
+                    if (a.threw === STAND_IN || b.threw === STAND_IN)
+                    {
+                        unmeasured.add(key);
+                        break;
+                    }
+                    if ((a.threw ?? null) !== (b.threw ?? null))
+                    {
+                        differences.push({ key, label,
+                            detail: `threw ${a.threw ?? 'nothing'} low,`
+                                + ` ${b.threw ?? 'nothing'} high` });
+                        break;
+                    }
+                    const spec = entry?.[ORIGINAL_EXPORT] ?? entry;
+                    const lowRax = raxOf(a.answer, spec);
+                    const highRax = raxOf(b.answer, spec);
+                    const kind = zeroExtendsOf(spec) ? 'address'
+                        : values.has(name) ? 'value' : undefined;
+                    if (!sameAnswer(lowRax, highRax, lo.base, hi.base, kind))
+                    {
+                        // Two values outside both windows - a handle, a count - that
+                        // differ say the two layers' state parted before this call
+                        // (one made an object the other did not): the call is made
+                        // again on both made afresh, and differs only if it still does.
+                        if (!fresh && rebuild && !inWindow(lowRax, lo.base)
+                            && !inWindow(highRax, hi.base))
+                        {
+                            ({ low: lo, high: hi } = await rebuild(lo, hi));
+                            pristine = Uint8Array.from(lo.window);
+                            fresh = true;
+                            continue;
+                        }
+                        differences.push({ key, label,
+                            detail: `RAX 0x${lowRax?.toString(16)} low,`
+                                + ` 0x${highRax?.toString(16)} high` });
+                        break;
+                    }
+                    const at = writeDifferences(lowBefore, lo.window, highBefore, hi.window,
+                        lo.base, hi.base);
+                    if (at.length > 0)
+                    {
+                        differences.push({ key, label,
+                            detail: 'memory differs at window offset '
+                                + at.map(o=>`0x${o.toString(16)}`).join(', ') });
+                    }
+                    break;
                 }
-                last = `${library}!${name} with ${label}`;
-                if (TRACE)
+                if (fresh && differences.length === found)
                 {
-                    // The call a run stops in is the last line said.
-                    process.stderr.write(`${last}\n`);
-                }
-                // Each window as it was: a handler writes through what it is handed.
-                lo.window.set(pristine.subarray(0, ARENA.offset));
-                hi.window.set(pristine.subarray(0, ARENA.offset));
-                const lowBefore = Uint8Array.from(lo.window);
-                const highBefore = Uint8Array.from(hi.window);
-                const mine = lo.libraries[library]?.[name];
-                const theirs = hi.libraries[library]?.[name];
-                // The arguments as the bridge hands them: each the function
-                // declares an address (`addresses`) whole past 4 GiB.
-                const whole = mine?.addresses ?? mine?.[ORIGINAL_EXPORT]?.addresses ?? null;
-                const bridged = (/** @type {any[]} */ args)=>{
-                    wholeAddresses(whole, args, args.high);
-                    return args;
-                };
-                const a = await outcome((mine?.[ORIGINAL_EXPORT] ?? mine).handler,
-                    bridged(argumentsAt(shape, lo.base)));
-                const b = await outcome((theirs?.[ORIGINAL_EXPORT] ?? theirs).handler,
-                    bridged(argumentsAt(shape, hi.base)));
-                const key = `${library}!${name}`;
-                const lateBy = (/** @type {number} */ base)=>late.find(e=>String(
-                    /** @type {{ stack?: unknown }} */ (e)?.stack).includes(`?at=${base}:`));
-                const lateLow = lateBy(lo.base);
-                const lateHigh = lateBy(hi.base);
-                late.length = 0;
-                if ((lateLow === undefined) !== (lateHigh === undefined))
-                {
-                    const said = (/** @type {any} */ e)=>(e === undefined ? 'nothing'
-                        : String(e?.code ?? e?.message ?? e));
-                    differences.push({ key, label, detail: `threw ${said(lateLow)} low,`
-                        + ` ${said(lateHigh)} high, after it answered` });
-                    continue;
-                }
-                if (a.threw === STAND_IN || b.threw === STAND_IN)
-                {
-                    unmeasured.add(key);
-                    continue;
-                }
-                if ((a.threw ?? null) !== (b.threw ?? null))
-                {
-                    differences.push({ key, label,
-                        detail: `threw ${a.threw ?? 'nothing'} low,`
-                            + ` ${b.threw ?? 'nothing'} high` });
-                    continue;
-                }
-                const spec = entry?.[ORIGINAL_EXPORT] ?? entry;
-                const lowRax = raxOf(a.answer, spec);
-                const highRax = raxOf(b.answer, spec);
-                const kind = zeroExtendsOf(spec) ? 'address'
-                    : values.has(name) ? 'value' : undefined;
-                if (!sameAnswer(lowRax, highRax, lo.base, hi.base, kind))
-                {
-                    differences.push({ key, label, detail: `RAX 0x${lowRax?.toString(16)} low,`
-                        + ` 0x${highRax?.toString(16)} high` });
-                    continue;
-                }
-                const at = writeDifferences(lowBefore, lo.window, highBefore, hi.window,
-                    lo.base, hi.base);
-                if (at.length > 0)
-                {
-                    differences.push({ key, label, detail: 'memory differs at window offset '
-                        + at.map(o=>`0x${o.toString(16)}`).join(', ') });
+                    drifted.push(`${library}!${name}`);
                 }
             }
         }
     }
     process.off('unhandledRejection', hearLate);
-    return { handlers, calls, differences, unmeasured, parted, low: lo, high: hi };
+    return { handlers, calls, differences, unmeasured, parted, drifted, low: lo, high: hi };
 }
 
 /** `--trace`: each call named before it is made, for a run that never comes back. */
@@ -744,9 +845,13 @@ async function main(){
     const only = option('--only') === undefined ? null : new RegExp(String(option('--only')));
     const knownFile = option('--known') ?? KNOWN_FILE;
     /** @type {{ handlers: number, calls: number, differences: { key: string, label: string,
-     *     detail: string }[], unmeasured: Set<string>, parted: string[] }} */
+     *     detail: string }[], unmeasured: Set<string>, parted: string[], drifted: string[] }} */
     let found;
-    const result = await compare(await layerAt(LOW), await layerAt(highBase), only,
+    const first = await layerAt(LOW);
+    // What the sweep's data may never reach: a handler that cuts an address it
+    // is handed whole, read from its own source.
+    const cut = cutHandlers(first.libraries, only);
+    const result = await compare(first, await layerAt(highBase), only,
         async(low, high)=>{
             // Made again of the same modules: a layer keeps its state in what
             // `create` answers, and modules loaded anew for each were never let go -
@@ -758,7 +863,7 @@ async function main(){
     await result.low.dispose();
     await result.high.dispose();
     found = result;
-    const { handlers, calls, differences, unmeasured, parted } = found;
+    const { handlers, calls, differences, unmeasured, parted, drifted } = found;
     if (process.argv.includes('--write-known'))
     {
         /** @type {Record<string, string>} */
@@ -794,13 +899,28 @@ async function main(){
     {
         console.error(`${key} no longer differs: take it off ${knownFile}`);
     }
+    const cutting = [...cut].filter(([key])=>!KNOWN_CUTS.has(key));
+    const uncut = [...KNOWN_CUTS.keys()].filter(key=>!cut.has(key) && (!only || only.test(key)));
+    for (const [key, cuts] of cutting)
+    {
+        console.error(`${key} cuts an address it is handed whole to a dword: ${cuts.join(', ')}`
+            + ' (keep it with wholeAddress)');
+    }
+    for (const key of uncut)
+    {
+        console.error(`${key} no longer cuts an address: take it off KNOWN_CUTS`);
+    }
     console.log(`wide addresses: ${handlers} handlers, ${calls} calls at 0x${LOW.toString(16)} and`
         + ` 0x${highBase.toString(16)}, ${new Set(fresh.map(d=>d.key)).size} new differences,`
         + ` ${differing.size - new Set(fresh.map(d=>d.key)).size} known,`
         + ` ${unmeasured.size} not measured (a stand-in reached),`
         + ` both layers made again ${parted.length} times where a call parted their arenas`
-        + (parted.length > 0 ? ` (after ${parted.join('; ')})` : ''));
-    process.exitCode = fresh.length > 0 || stale.length > 0 ? 1 : 0;
+        + (parted.length > 0 ? ` (after ${parted.join('; ')})` : '')
+        + `, and ${drifted.length} times where a value differed by state alone`
+        + (drifted.length > 0 ? ` (${drifted.join(', ')}: the same made afresh)` : '')
+        + `; ${cut.size} handlers cut an address handed whole, ${cut.size - cutting.length} known`);
+    process.exitCode = fresh.length > 0 || stale.length > 0 || cutting.length > 0
+        || uncut.length > 0 ? 1 : 0;
 }
 
 if (isMain(import.meta.url))

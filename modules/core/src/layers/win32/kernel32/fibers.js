@@ -97,7 +97,7 @@ export function createFiberFunctions(host){
 
     /** @param {number} parameter @returns {number} the record, or 0 */
     const record = parameter=>{
-        const fiber = host.allocate(FIBER.SIZE) >>> 0;
+        const fiber = wholeAddress(host.allocate(FIBER.SIZE));
         if (fiber !== 0)
         {
             for (let at = 0; at < FIBER.SIZE; at += 4)

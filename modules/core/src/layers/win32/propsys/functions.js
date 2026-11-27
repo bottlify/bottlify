@@ -144,7 +144,7 @@ export function createPropsysFunctions(host){
     };
     /** Task memory holding the bytes, or 0. @param {Uint8Array} bytes */
     const taskCopy = bytes=>{
-        const at = host.heap.allocate(Math.max(bytes.length, 1)) >>> 0;
+        const at = wholeAddress(host.heap.allocate(Math.max(bytes.length, 1)));
         if (at !== 0 && bytes.length > 0)
         {
             put(at, bytes);
@@ -506,7 +506,7 @@ export function createPropsysFunctions(host){
          *     PROPVAR_COMPARE_UNIT, PROPVAR_COMPARE_FLAGS)
          */
         PropVariantCompareEx: { argBytes: 16,
-            handler: (/** @type {number[]} */ [a, b, , flags])=>compare(a >>> 0, b >>> 0, flags) },
+            handler: (/** @type {number[]} */ [a, b, , flags])=>compare(wholeAddress(a), wholeAddress(b), flags) },
 
         PropVariantToInt16: toInteger(RANGE.I16, 2),
         PropVariantToUInt16: toInteger(RANGE.U16, 2),
@@ -651,7 +651,7 @@ export function createPropsysFunctions(host){
         InitPropVariantFromStringVector: { argBytes: 12,
             handler: (/** @type {number[]} */ [strings, count, out])=>{
                 const n = count >>> 0;
-                const vector = host.heap.allocate(Math.max(n * 4, 1)) >>> 0;
+                const vector = wholeAddress(host.heap.allocate(Math.max(n * 4, 1)));
                 if (vector === 0)
                 {
                     return E_OUTOFMEMORY;

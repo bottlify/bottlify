@@ -204,7 +204,8 @@ function fakeKernel(){
     };
 }
 
-function fakeHost(){
+/** @param {number} [base]  where its memory lies: past 4 GiB for a 64-bit program's */
+function fakeHost(base = 0){
     const bytes = new Uint8Array(0x1000);
     let free = 0x800;
     const kernel = fakeKernel();
@@ -223,10 +224,10 @@ function fakeHost(){
         },
         currentThread: ()=>current,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address - base, address - base + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
-            bytes.set(data, address);
+            bytes.set(data, address - base);
         },
         park: ()=>PARKED,
         /** @type {number[]} */
@@ -237,14 +238,16 @@ function fakeHost(){
         advanceClock: milliseconds=>kernel.state.advanced.push(milliseconds),
         /** Guest memory for code and counters, from the top of this little machine. */
         allocate: (/** @type {number} */ size)=>{
-            const at = free;
+            const at = base + free;
             free += size;
             return at;
         },
         /** @type {any} */
         critical: null,
         /** @param {number} address */
-        readI32: address=>new DataView(bytes.buffer).getInt32(address, true),
+        readI32: address=>new DataView(bytes.buffer).getInt32(address - base, true),
+        /** @param {number} address */
+        readU64: address=>Number(new DataView(bytes.buffer).getBigUint64(address - base, true)),
         /** @param {number} handle @param {string} type @param {any} object */
         register(handle, type, object){
             kernel.handles.table.set(handle, { type, object });
@@ -445,6 +448,19 @@ test('InitializeCriticalSectionEx has no debug information unless it is forced',
     assert.equal(host.readI32(debug + 4), 0x200, 'naming its section');
     assert.equal(fns.InitializeCriticalSectionEx.handler([0x200, 0, 0x10]), 0);
     assert.equal(host.errors.at(-1), 87);
+});
+
+test('a 64-bit section past 4 GiB and its forced debug record name each other whole', ()=>{
+    // Each pointer the record and the section hold is eight bytes: the section's
+    // own address was written as its low dword, the record's 4 GiB below it.
+    const base = 0x1_4000_0000;
+    const host = fakeHost(base);
+    const fns = createSyncFunctions(/** @type {any} */ ({ ...host, pointerSize: 8 }));
+    const section = base + 0x200;
+    assert.equal(fns.InitializeCriticalSectionEx.handler([section, 0, 0x10000000]), 1);
+    const debug = host.readU64(section);
+    assert.ok(debug >= base && debug < base + 0x1000, `DebugInfo 0x${debug.toString(16)}`);
+    assert.equal(host.readU64(debug + 8), section, 'CriticalSection, after Type and its index');
 });
 
 test('SetCriticalSectionSpinCount keeps the count in the section and answers the old one', ()=>{

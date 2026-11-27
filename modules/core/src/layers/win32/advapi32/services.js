@@ -1066,7 +1066,7 @@ export function createServiceFunctions(host){
                 out = new Uint8Array(head + (text?.length ?? 0));
                 if (text)
                 {
-                    pointer.set(new DataView(out.buffer), 0, (buffer >>> 0) + head);
+                    pointer.set(new DataView(out.buffer), 0, wholeAddress(buffer) + head);
                     out.set(text, head);
                 }
             }
@@ -1092,7 +1092,7 @@ export function createServiceFunctions(host){
                 return fail((buffer >>> 0) === 0 && (size >>> 0) !== 0 ? ERROR_INVALID_ADDRESS
                     : ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory?.(buffer >>> 0, out);
+            host.writeMemory?.(wholeAddress(buffer), out);
             return 1;
         },
     });
@@ -1203,7 +1203,7 @@ export function createServiceFunctions(host){
                 }
                 else if ((buffer >>> 0) !== 0 && size !== 0)
                 {
-                    host.writeMemory?.(buffer >>> 0, new Uint8Array(wide ? 2 : 1));
+                    host.writeMemory?.(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
                 }
                 return fail(ERROR_SERVICE_DOES_NOT_EXIST);
             }
@@ -1212,12 +1212,12 @@ export function createServiceFunctions(host){
             {
                 if ((buffer >>> 0) !== 0 && size > 0)
                 {
-                    host.writeMemory?.(buffer >>> 0, new Uint8Array(wide ? 2 : 1));
+                    host.writeMemory?.(wholeAddress(buffer), new Uint8Array(wide ? 2 : 1));
                 }
                 writeDword(sizeAddress, wide ? answer.length : answer.length * 2);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory?.(buffer >>> 0, encode(wide, answer));
+            host.writeMemory?.(wholeAddress(buffer), encode(wide, answer));
             if (wide)
             {
                 writeDword(sizeAddress, answer.length);

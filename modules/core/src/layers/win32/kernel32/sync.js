@@ -21,7 +21,7 @@ import { SYNCHRONIZE, allows } from './access.js';
 import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
 import { CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup }
     from './debug-registers.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -925,11 +925,10 @@ export function createSyncFunctions(host){
                     {
                         host.writeMemory(debug, new Uint8Array(debugSize));
                         // CriticalSection, the pointer after Type and CreatorBackTraceIndex.
-                        writeI32(debug + handleSize, pointer | 0);
+                        const width = pointerWidth(handleSize);
+                        host.writeMemory(debug + handleSize, width.bytes(wholeAddress(pointer)));
                         // DebugInfo, the section's first field, which initialise set to -1.
-                        const field = new Uint8Array(handleSize);
-                        new DataView(field.buffer).setUint32(0, debug >>> 0, true);
-                        host.writeMemory(wholeAddress(pointer), field);
+                        host.writeMemory(wholeAddress(pointer), width.bytes(debug));
                     }
                 }
                 return 1;

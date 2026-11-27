@@ -9,13 +9,19 @@ import assert from 'node:assert/strict';
 import { IJL, IJL_ORDINALS, createIjlLibrary } from './ijl.js';
 import { FLAT, block, encode } from './jpeg.fixture.js';
 
-/** A flat guest memory, with the structure and the buffers laid where a test says. */
-function guest(){
+/**
+ * A flat guest memory, with the structure and the buffers laid where a test says.
+ *
+ * @param {number} [high]  where the same bytes lie past 4 GiB, as a 64-bit program's
+ */
+function guest(high){
     const memory = new Uint8Array(0x20000);
     let next = 0x10000;
+    const below = (/** @type {number} */ address)=>(high !== undefined && address >= high
+        ? address - high : address);
     const lib = createIjlLibrary({
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readMemory: (address, length)=>memory.slice(below(address), below(address) + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, below(address)),
         allocate: bytes=>{
             const at = next;
             next += (bytes + 15) & ~15;
@@ -81,6 +87,22 @@ test('init clears the structure and sets the default quality', ()=>{
     assert.equal(g.read32(PROPS + OFF.DIBBytes), 0);
     assert.equal(g.read32(PROPS + OFF.jquality), 75);
     assert.equal(g.fns.ijlInit.handler([0]), IJL.INVALID_JPEG_PROPERTIES);
+});
+
+test('a structure past 4 GiB is the one initialised, read and let go', ()=>{
+    // Its low dword, 0x40001000, is nothing of the program's.
+    const high = 0x1_4000_0000;
+    const g = guest(high);
+    g.memory.fill(0xaa, PROPS, PROPS + 80);
+    assert.equal(g.fns.ijlInit.handler([high + PROPS]), IJL.OK);
+    assert.equal(g.read32(PROPS + OFF.jquality), 75);
+    assert.equal(g.read32(PROPS + OFF.DIBBytes), 0);
+    g.place(JPEG_AT, FOUR);
+    g.u32(PROPS + OFF.JPGBytes, JPEG_AT);
+    g.u32(PROPS + OFF.JPGSizeBytes, FOUR.length);
+    assert.equal(g.fns.ijlRead.handler([high + PROPS, 1]), IJL.OK, 'IJL_JBUFF_READPARAMS');
+    assert.equal(g.read32(PROPS + OFF.JPGWidth), 8);
+    assert.equal(g.fns.ijlFree.handler([high + PROPS]), IJL.OK);
 });
 
 test('reading the parameters of a buffer describes the picture without decoding it', ()=>{

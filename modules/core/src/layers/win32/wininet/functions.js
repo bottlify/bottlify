@@ -1741,7 +1741,8 @@ export function createWininetFunctions(host){
     /** What InternetGetConnectedState reports: RAS is always there, a LAN only online. */
     /** @param {boolean} wide */
     const checkConnection = wide=>(/** @type {number[]} */ [url])=>{
-        const cracked = (url >>> 0) === 0 ? null : crackUrl(reader(wide)(url >>> 0, MAX_TEXT));
+        const cracked = (url >>> 0) === 0 ? null : crackUrl(reader(wide)(wholeAddress(url),
+            MAX_TEXT));
         // ponytail: a transport is taken to reach every host; FLAG_ICC_FORCE_CONNECTION
         // could ask the server itself once a title needs the difference.
         if (!cracked?.host?.text || !online())

@@ -25,4 +25,9 @@ test('the table is the signature comments\' address places, by every name a func
     assert.match(source, /\n {4}EnumCalendarInfoW: \[0\],/);
     assert.doesNotMatch(source, /\n {4}'#/, 'no name by number: it is one library\'s');
     assert.deepEqual(POINTER_ARGUMENTS.PathIsUNCW, [0]);
+    // A comment over a spec the file exports as both spellings, named by neither.
+    assert.match(source, /\n {4}BuildTrusteeWithObjectsAndSidA: \[0, 1, 2, 3, 4\],/);
+    assert.match(source, /\n {4}BuildTrusteeWithObjectsAndSidW: \[0, 1, 2, 3, 4\],/);
+    // A REF... typedef is a const pointer: REFCLSID, REFIID.
+    assert.match(source, /\n {4}CoCreateInstance: \[0, 1, 3, 4\],/);
 });

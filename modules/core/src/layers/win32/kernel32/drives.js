@@ -411,16 +411,17 @@ export function createDriveFunctions(host){
             const disc = discAt(root);
             if (disc)
             {
-                writeDwordIf(sectorsPerCluster >>> 0, 1);
-                writeDwordIf(bytesPerSector >>> 0, DISC_SECTOR);
-                writeDwordIf(freeClusters >>> 0, 0);
-                writeDwordIf(totalClusters >>> 0, Math.ceil((disc.size ?? 0) / DISC_SECTOR));
+                writeDwordIf(wholeAddress(sectorsPerCluster), 1);
+                writeDwordIf(wholeAddress(bytesPerSector), DISC_SECTOR);
+                writeDwordIf(wholeAddress(freeClusters), 0);
+                writeDwordIf(wholeAddress(totalClusters),
+                    Math.ceil((disc.size ?? 0) / DISC_SECTOR));
                 return 1;
             }
-            writeDwordIf(sectorsPerCluster >>> 0, SECTORS_PER_CLUSTER);
-            writeDwordIf(bytesPerSector >>> 0, BYTES_PER_SECTOR);
-            writeDwordIf(freeClusters >>> 0, FREE_CLUSTERS);
-            writeDwordIf(totalClusters >>> 0, TOTAL_CLUSTERS);
+            writeDwordIf(wholeAddress(sectorsPerCluster), SECTORS_PER_CLUSTER);
+            writeDwordIf(wholeAddress(bytesPerSector), BYTES_PER_SECTOR);
+            writeDwordIf(wholeAddress(freeClusters), FREE_CLUSTERS);
+            writeDwordIf(wholeAddress(totalClusters), TOTAL_CLUSTERS);
             return 1;
         },
     });
@@ -449,9 +450,9 @@ export function createDriveFunctions(host){
                 }
             };
             const disc = discAt(root);
-            writeQwordIf(available >>> 0, disc ? 0 : FREE_BYTES);
-            writeQwordIf(total >>> 0, disc ? disc.size ?? 0 : VOLUME_BYTES);
-            writeQwordIf(free >>> 0, disc ? 0 : FREE_BYTES);
+            writeQwordIf(wholeAddress(available), disc ? 0 : FREE_BYTES);
+            writeQwordIf(wholeAddress(total), disc ? disc.size ?? 0 : VOLUME_BYTES);
+            writeQwordIf(wholeAddress(free), disc ? 0 : FREE_BYTES);
             return 1;
         },
     });
@@ -1011,7 +1012,7 @@ export function createDriveFunctions(host){
                 if ((block >>> 0) !== 0)
                 {
                     overlappedResult(writeDwordIf, overlappedLayout(host.pointerSize),
-                        block >>> 0, status, information);
+                        wholeAddress(block), status, information);
                 }
                 return status;
             };

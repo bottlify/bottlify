@@ -251,7 +251,7 @@ export function createMfObjects(kit, host){
                     `an audio subtype ${subtype.value} with no wave format tag is not represented`);
                 return MF_E_UNSUPPORTED_REPRESENTATION;
             }
-            const record = host.heap.allocate(AM_MEDIA_TYPE_SIZE) >>> 0;
+            const record = wholeAddress(host.heap.allocate(AM_MEDIA_TYPE_SIZE));
             const block = kit.taskCopy(format);
             if (record === 0 || block === 0)
             {
@@ -479,7 +479,7 @@ export function createMfObjects(kit, host){
      * @param {number} max @param {number} [mask]
      */
     const createBuffer = (max, mask = 0)=>{
-        const block = host.heap.allocate(Math.max(max >>> 0, 1) + (mask >>> 0)) >>> 0;
+        const block = wholeAddress(host.heap.allocate(Math.max(max >>> 0, 1) + (mask >>> 0)));
         if (block === 0)
         {
             return null;
@@ -514,7 +514,7 @@ export function createMfObjects(kit, host){
         }
         /** @param {number} slot */
         const word = slot=>drive((function* (){
-            const scratch = host.heap.allocate(4) >>> 0;
+            const scratch = wholeAddress(host.heap.allocate(4));
             try
             {
                 putU32s(scratch, [0]);
@@ -827,7 +827,7 @@ export function createMfObjects(kit, host){
      * @returns {{ object: any, copied: number | Promise<number> } | null}
      */
     const createEvent = (type, extended, status, value)=>{
-        const held = host.heap.allocate(16) >>> 0;
+        const held = wholeAddress(host.heap.allocate(16));
         if (held === 0)
         {
             return null;

@@ -167,7 +167,8 @@ export function createSListFunctions(host){
                     argBytes: 16,
                     /** @param {number[]} args */
                     handler: ([header, first, last, count])=>
-                        pushList(header >>> 0, first >>> 0, last >>> 0, count >>> 0),
+                        pushList(wholeAddress(header), wholeAddress(first), wholeAddress(last),
+                            count >>> 0),
                 });
                 fastPush = (host.allocateCode ?? host.allocate)(FAST_PUSH_LENGTH);
                 const relative = (trap - (fastPush + FAST_PUSH_LENGTH)) | 0;

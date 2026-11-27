@@ -239,7 +239,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         argBytes: 12,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [family, , out])=>{
-            const face = families.get(family >>> 0);
+            const face = families.get(wholeAddress(family));
             if (face === undefined || (out >>> 0) === 0)
             {
                 return InvalidParameter;

@@ -633,7 +633,7 @@ export function createSeh(host){
                 }
                 const handle = nextVectored;
                 nextVectored = (nextVectored + VECTORED_HANDLE_STRIDE) >>> 0;
-                const record = { handle, entry: entry >>> 0 };
+                const record = { handle, entry: wholeAddress(entry) };
                 if (first !== 0)
                 {
                     list.unshift(record);

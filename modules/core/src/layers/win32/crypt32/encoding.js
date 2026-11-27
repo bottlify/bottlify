@@ -264,13 +264,14 @@ export function createEncodingFunctions(host){
             if ((skip >>> 0) !== 0)
             {
                 const begin = text.indexOf('-----BEGIN');
-                setDword(skip >>> 0, found.format === STRING.BASE64HEADER && begin > 0 ? begin : 0);
+                setDword(wholeAddress(skip),
+                    found.format === STRING.BASE64HEADER && begin > 0 ? begin : 0);
             }
             if ((used >>> 0) !== 0)
             {
-                setDword(used >>> 0, found.format);
+                setDword(wholeAddress(used), found.format);
             }
-            return answerBytes(found.bytes, out >>> 0, size >>> 0);
+            return answerBytes(found.bytes, wholeAddress(out), wholeAddress(size));
         },
     });
 
@@ -294,12 +295,12 @@ export function createEncodingFunctions(host){
             // without it.
             if ((out >>> 0) === 0)
             {
-                setDword(size >>> 0, text.length + 1);
+                setDword(wholeAddress(size), text.length + 1);
                 return 1;
             }
-            if (dword(size >>> 0) < text.length + 1)
+            if (dword(wholeAddress(size)) < text.length + 1)
             {
-                setDword(size >>> 0, text.length + 1);
+                setDword(wholeAddress(size), text.length + 1);
                 return fail(ERROR_MORE_DATA);
             }
             const encoded = new Uint8Array(wide ? text.length * 2 + 2 : text.length + 1);
@@ -316,7 +317,7 @@ export function createEncodingFunctions(host){
                 }
             }
             host.writeMemory(wholeAddress(out), encoded);
-            setDword(size >>> 0, text.length);
+            setDword(wholeAddress(size), text.length);
             return 1;
         },
     });
@@ -560,15 +561,16 @@ export function createEncodingFunctions(host){
             {
                 if ((error >>> 0) !== 0)
                 {
-                    setDword(error >>> 0, (text >>> 0) + parsed.error * (wide ? 2 : 1));
+                    setDword(wholeAddress(error),
+                        wholeAddress(text) + parsed.error * (wide ? 2 : 1));
                 }
                 return fail(CRYPT_E_INVALID_X500_STRING);
             }
             if ((error >>> 0) !== 0)
             {
-                setDword(error >>> 0, 0);
+                setDword(wholeAddress(error), 0);
             }
-            return answerBytes(parsed.encoded, out >>> 0, size >>> 0);
+            return answerBytes(parsed.encoded, wholeAddress(out), wholeAddress(size));
         },
     });
 

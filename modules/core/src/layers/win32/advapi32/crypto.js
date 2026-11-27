@@ -290,7 +290,7 @@ export function createCryptoFunctions(host){
         let handle = next;
         if (host.allocate)
         {
-            handle = host.allocate(8) >>> 0;
+            handle = wholeAddress(host.allocate(8));
             writeDword(handle, handle);
         }
         else
