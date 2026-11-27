@@ -13,6 +13,8 @@
  * modules came, as Windows walks them.
  */
 
+import { wholeAddress } from '../system/address.js';
+
 /**
  * A module record as the table needs it: the rest is the caller's.
  *
@@ -140,7 +142,8 @@ export function createModuleTable({ keyOf, placesNamed, importsOf, onLoaded }){
          * @param {number} address
          */
         containing(address){
-            const at = address >>> 0;
+            // Whole: a 64-bit image at its own base lies past 4 GiB.
+            const at = wholeAddress(address);
             for (const module of byBase.values())
             {
                 if (at >= module.base && at < module.base + (module.size ?? 0))

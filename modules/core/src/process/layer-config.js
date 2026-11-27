@@ -15,6 +15,7 @@ import { moduleKeyOf, readWholeFile, resourceOfImage, withLibraryExtension } fro
 import { GRAPHICS_CHOICES } from '../layers/graphics/choice.js';
 import { CORK_TSC_MHZ } from '../layers/cpu/internal/cork-host.js';
 import { DIR_EXCEPTION } from '../layers/loader/internal/pe.js';
+import { wholeAddress } from '../system/address.js';
 import { captureTrace, formatTrace } from '../trace.js';
 import { ENGINE_CODE_BYTES, FIRST_PROCESS_ID } from './process-layout.js';
 import { allocateCleared, reusedRanges, TRACED_KEPT } from './process-layout.js';
@@ -988,7 +989,9 @@ export async function layerConfig(deps){
                  * @param {number} address
                  */
                 imageOf: address=>{
-                    const at = address >>> 0;
+                    // Whole: a 64-bit image at its own base lies past 4 GiB,
+                    // and its low dword is another place.
+                    const at = wholeAddress(address);
                     for (const module of modules.all())
                     {
                         if (module.loaded === false || !module.image

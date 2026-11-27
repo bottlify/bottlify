@@ -84,6 +84,10 @@ test('a module no bare name finds is still there by its base, and the program by
     assert.equal(table.containing(0x00400123), main);
     assert.equal(table.containing(0x00410000), null, 'past its size');
     assert.deepEqual([...table.all()], [face, main], 'in the order they came');
+    const wide = record('wide.dll', 0x140000000);
+    table.add(wide, 'wide');
+    assert.equal(table.containing(0x140000123), wide, 'an image past 4 GiB, by its whole address');
+    assert.equal(table.containing(0x40000123), null, 'and not by its low dword');
 });
 
 test('a module marked loaded brings in what it imports, each told once, and lists as loaded', ()=>{

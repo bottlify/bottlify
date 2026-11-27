@@ -241,7 +241,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * argument is a dword widened by its sign as JavaScript holds it: a
      * negative one -- an LPARAM of -1, a handle such as HWND_TOPMOST -- is
      * sign-extended as a LONG is, any other zero-extended, which keeps every
-     * address below 4 GiB given unsigned as it is. A bigint is a quadword
+     * address below 4 GiB given unsigned as it is, and one past 4 GiB is
+     * written whole. A bigint is a quadword
      * whole: an LPARAM or a pointer that came into the host whole goes back
      * to the guest whole.
      *
@@ -260,8 +261,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 memory.writeU32(at + 4, Number(BigInt.asUintN(32, value >> 32n)));
                 return;
             }
-            memory.writeU32(at, value);
-            memory.writeU32(at + 4, value < 0 ? 0xffffffff : 0);
+            // A number past 4 GiB is an address whole - a thrown object a
+            // destructor is handed in a wide window - not its low dword.
+            memory.writeU32(at, value >>> 0);
+            memory.writeU32(at + 4, value < 0 ? 0xffffffff : Math.floor(value / 2 ** 32));
         };
         for (let index = 0; index < slots; index++)
         {

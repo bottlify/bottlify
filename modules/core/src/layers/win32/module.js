@@ -56,7 +56,7 @@ import { createSpawner, createSpawnFunctions, writeThroughProtection } from './k
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
 import { createUnwinder } from './kernel32/unwind.js';
-import { createSeh64 } from './kernel32/seh64.js';
+import { createSeh64, raxOf } from './kernel32/seh64.js';
 import { GUEST_EXCEPTION } from './common/raise.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
@@ -2748,7 +2748,7 @@ export function createWin32Module(){
                     // A JIT's lookup callback, called on the thread whose
                     // exception is being dispatched.
                     /** @param {number} entry @param {number[]} args */
-                    callGuest: (entry, args)=>Promise.resolve(bridge.callGuest({ entry, args })),
+                    callGuest: (entry, args)=>raxOf(bridge.callGuest({ entry, args })),
                 })
                 : null;
             /** @type {ReturnType<typeof createSeh64> | null} */
@@ -2760,8 +2760,8 @@ export function createWin32Module(){
                     longState: ()=>cpuRegisters.long(),
                     /** @param {any} call */
                     callFunclet: ({ entry, rcx = 0, rdx = 0, r8 = 0, r9 = 0, stack, thread })=>
-                        bridge.callGuest({ entry, args: [rcx, rdx, r8, r9], thread,
-                            stackAtRest: stack }),
+                        raxOf(bridge.callGuest({ entry, args: [rcx, rdx, r8, r9], thread,
+                            stackAtRest: stack })),
                     /** @param {any} where */
                     continueAt: where=>bridge.continueAt({ eip: where.rip, esp: where.rsp,
                         long: where.long }, { below: where.rsp }),
@@ -8105,7 +8105,8 @@ export function createWin32Module(){
                             return null;
                         }
                         const faultContext = seh64.captureContext();
-                        faultContext.rip = fault.vector === 3 ? fault.eip - 1 >>> 0 : fault.eip;
+                        faultContext.rip = fault.vector === 3 ? wholeAddress(fault.eip - 1)
+                            : fault.eip;
                         return seh64.onFault(fault, faultContext).then(result=>(result.handled
                             ? result.continuation ?? null : null));
                     }

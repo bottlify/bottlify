@@ -10,19 +10,33 @@
  * processor faults reaching their `__except` filter through the images' unwind
  * tables, a `__finally` the unwind runs on the way, and a hundred faults in a
  * row. No handler chain at FS:[0] is involved -- a 64-bit thread has none.
+ *
+ * Run twice: where its relocations let the image be put, and with them
+ * stripped at 0x140000000 over a wide window, where every frame's address, its
+ * handler, its scope's filter and target and the address the exception was
+ * raised at lie past 4 GiB and are whole only with every bit of them.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
+import { fixedPastFourGiB } from './fixed-base.fixture.js';
 
 const FIXTURE = new URL('../test/fixtures/seh64.exe', import.meta.url);
 
-test('a 64-bit program dispatches exceptions through its unwind tables',
-    { timeout: 120000 }, async t=>{
-        const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            commandLine: '"C:\\seh64.exe"' });
+for (const wide of [false, true])
+{
+    test(`a 64-bit program dispatches exceptions through its unwind tables${wide
+        ? ', its image past 4 GiB' : ''}`, { timeout: 120000 }, async t=>{
+        const bytes = new Uint8Array(await readFile(FIXTURE));
+        if (wide)
+        {
+            allowMemory64();
+        }
+        const app = await createApp({ executable: wide ? fixedPastFourGiB(bytes) : bytes,
+            commandLine: '"C:\\seh64.exe"', ...wide ? { memorySize: 8 * 2 ** 30 } : {} });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];
@@ -51,3 +65,4 @@ test('a 64-bit program dispatches exceptions through its unwind tables',
         assert.doesNotMatch(calls, /_setjmp/, 'a mark is set in the guest');
         assert.equal(code, 0, text);
     });
+}

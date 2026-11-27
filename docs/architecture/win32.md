@@ -180,6 +180,9 @@ sequenceDiagram
   renderer the program wrote - so a call into a peer never runs on the thread that started it.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
+  A 64-bit routine is handed an address past 4 GiB whole, and answers RAX whole: the call's
+  promise carries its high half (`high`), which a 64-bit exception dispatch reads where a catch
+  block answers where its function goes on.
   Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM
   method a stub runs for another process, a `TIMERPROC` in `DispatchMessage`), the host puts a
   frame of its own on the chain just above the callback (`kernel32/dllentry.js`): an exception the
