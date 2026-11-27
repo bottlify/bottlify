@@ -153,6 +153,12 @@ sequenceDiagram
   stack. An object whose documented layout goes on past that first word (Media Foundation's
   `MFASYNCRESULT`, whose status and callback a program reads and writes itself) is given the
   bytes it needs after it, zeroed, and keeps its fields there.
+  A library whose objects count their own references (Direct3D, DirectDraw, DirectSound,
+  DirectInput) hands them to the bridge through one adapter,
+  [`bridge/com-seam.js`](../../modules/core/src/layers/bridge/com-seam.js): one identity per
+  object, one method table per interface description, QueryInterface's answer and the way
+  back from a pointer to its object are written there once, and the library gives only how its
+  objects count.
   A class that may be aggregated (DirectShow's filters and clocks) is made inside the program's
   controlling unknown when CoCreateInstance is given one: the program gets the object's own
   IUnknown, which counts the object alone, and every other interface it hands out answers

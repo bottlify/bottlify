@@ -29,7 +29,7 @@
  *   rather than returning a wrong value.
  */
 
-import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
+import { createComPublisher, IID_IUNKNOWN } from '../../bridge/com-seam.js';
 import { readGuid } from '../../../system/guid.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 import {
@@ -480,178 +480,77 @@ export function describe(id, slots, implemented = {}){
 }
 
 /**
- * One method list per interface descriptor, shared by every object that
- * exposes it, as a compiled program shares one vtable among all instances of
- * a class. The publisher keys its table of stubs by the list's identity, so a
- * list built afresh for each object was a table of stubs per object -- and
- * the stubs come out of a table of sixteen thousand, which a program making a
- * thousand textures had used up. Each method is reached through the adapter
- * the call arrived on, which is what makes one list serve every object.
+ * DirectSound's counting (`bridge/com-seam.js`). Some interfaces keep counts
+ * of their own, as on Windows -- a buffer's notify, property-set and 3D ones,
+ * a device's IUnknown: each holds the object once while it is held, and the
+ * object's own count leaves those holds out.
  *
- * @type {WeakMap<any, any[]>}
+ * @param {import('../../bridge/com-seam.js').ComSeat} seat
+ * @param {ReadonlySet<string>} ownCounted
+ * @returns {import('../../bridge/com-seam.js').ComCounting}
  */
-const methodLists = new WeakMap();
-/** IUnknown alone, one list for everyone: it names no method of the object's own. */
-const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
-
-/** @param {any} descriptor */
-function methodsFor(descriptor){
-    let methods = methodLists.get(descriptor);
-    if (!methods)
-    {
-        methods = [
-            ...IUNKNOWN_METHODS,
-            ...descriptor.methods.map((/** @type {any} */ method)=>({
-                name: method.name,
-                argBytes: method.argBytes,
-                ...method.floats ? { floats: method.floats } : {},
-                ...method.quadwords ? { quadwords: method.quadwords } : {},
-
-                ...method.structs ? { structs: method.structs } : {},
-                invoke: method.invoke
-                    ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
-                        method.invoke(adapter.api, args) ?? 0
-                    : undefined,
-            })),
-        ];
-        methodLists.set(descriptor, methods);
-    }
-    return methods;
+function countedApart({ api }, ownCounted){
+    /** @type {Map<string, number>} */
+    const sides = new Map();
+    const held = ()=>[...sides.values()].filter(count=>count > 0).length;
+    return {
+        addRef(id){
+            if (id !== undefined && ownCounted.has(id))
+            {
+                const count = (sides.get(id) ?? 0) + 1;
+                sides.set(id, count);
+                if (count === 1)
+                {
+                    api.addRef?.();
+                }
+                return count;
+            }
+            return (api.addRef?.() ?? 1) - held();
+        },
+        release(id){
+            if (id !== undefined && ownCounted.has(id))
+            {
+                const before = sides.get(id) ?? 0;
+                sides.set(id, Math.max(0, before - 1));
+                if (before === 1)
+                {
+                    api.release?.();
+                }
+                return Math.max(0, before - 1);
+            }
+            if (held() >= (api.references ?? 1))
+            {
+                return 0;
+            }
+            return (api.release?.() ?? 0) - held();
+        },
+        // Whether the bridge keeps the pointer at a count of zero: a primary
+        // buffer lives as long as its device does.
+        reachable: ()=>api.reachable?.() ?? false,
+        // One count for every interface an object answers to, so its last
+        // reference ends them all; `reachable` still keeps each.
+        destroyed: ()=>api.destroyed === true,
+    };
 }
 
-
 /**
- * One adapter per object, so that one object is one identity.
- *
- * The publisher memoises by object reference; two adapters for one buffer are
- * two identities, and a program comparing interface pointers then believes it
- * holds two buffers.
+ * DirectSound's objects as COM interfaces.
  *
  * @param {Object} deps
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  */
 export function createPublisher({ publishInterface }){
-    const adapters = new WeakMap();
-    /** @type {Map<number, any>} */
-    const byPointer = new Map();
-    let published = 0;
-    /**
-     * Interfaces asked for and not answered, by id. A program that wanted
-     * one it did not get takes another path silently, and which one it wanted
-     * is the only trace of that decision.
-     *
-     * @type {Record<string, number>}
-     */
-    const refused = {};
-
-    /**
-     * @param {any} api @param {any[]} interfaces
-     * @param {ReadonlySet<string>} ownCounted  The interfaces that count their
-     *     references apart from the object's own.
-     */
-    const adapterFor = (api, interfaces, ownCounted)=>{
-        let adapter = adapters.get(api);
-        if (!adapter)
-        {
-            const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
-            // Some interfaces keep counts of their own, as on Windows -- a
-            // buffer's notify, property-set and 3D ones, a device's IUnknown:
-            // each holds the object once while it is held, and the object's
-            // own count leaves those holds out.
-            /** @type {Map<string, number>} */
-            const sides = new Map();
-            const held = ()=>[...sides.values()].filter(count=>count > 0).length;
-            adapter = {
-                api,
-                /** @param {string} id */
-                interfaceFor(id){
-                    if (id === IID_IUNKNOWN)
-                    {
-                        return { id, methods: IUNKNOWN_ONLY };
-                    }
-                    const descriptor = declared.get(id);
-                    if (!descriptor)
-                    {
-                        refused[id] = (refused[id] ?? 0) + 1;
-                        return null;
-                    }
-                    // One pointer for two interfaces, the later table holding
-                    // the earlier's slots and more.
-                    if (descriptor.sharedWith)
-                    {
-                        return { id, sharedWith: descriptor.sharedWith,
-                            methods: methodsFor(declared.get(descriptor.sharedWith)) };
-                    }
-                    return { id, methods: methodsFor(descriptor) };
-                },
-                /** @param {string} id */
-                addRef(id){
-                    if (ownCounted.has(id))
-                    {
-                        const count = (sides.get(id) ?? 0) + 1;
-                        sides.set(id, count);
-                        if (count === 1)
-                        {
-                            api.addRef?.();
-                        }
-                        return count;
-                    }
-                    return (api.addRef?.() ?? 1) - held();
-                },
-                /** @param {string} id */
-                release(id){
-                    if (ownCounted.has(id))
-                    {
-                        const before = sides.get(id) ?? 0;
-                        sides.set(id, Math.max(0, before - 1));
-                        if (before === 1)
-                        {
-                            api.release?.();
-                        }
-                        return Math.max(0, before - 1);
-                    }
-                    if (held() >= (api.references ?? 1))
-                    {
-                        return 0;
-                    }
-                    return (api.release?.() ?? 0) - held();
-                },
-                // Whether the bridge keeps the pointer at a count of zero: a
-                // primary buffer lives as long as its device does.
-                reachable: ()=>api.reachable?.() ?? false,
-                // One count for every interface an object answers to, so its
-                // last reference ends them all; `reachable` still keeps each.
-                get destroyed(){
-                    return api.destroyed === true;
-                },
-                // The bridge let the pointer go, and its words with it.
-                /** @param {number} pointer */
-                forgotten: pointer=>{
-                    if (byPointer.get(pointer) === api)
-                    {
-                        byPointer.delete(pointer);
-                    }
-                },
-            };
-            adapters.set(api, adapter);
-        }
-        return adapter;
-    };
-
+    const seam = createComPublisher({ publishInterface, counting: countedApart });
     return {
+        ...seam,
         /**
          * @param {any} api @param {any[]} interfaces @param {string} id
-         * @param {ReadonlySet<string>} [ownCounted]
+         * @param {ReadonlySet<string>} [ownCounted]  The interfaces that count
+         *     their references apart from the object's own; fixed by the
+         *     object's first publish.
          */
-        publish(api, interfaces, id, ownCounted = COUNTED_ON_THEIR_OWN){
-            const pointer = publishInterface(adapterFor(api, interfaces, ownCounted), id);
-            if (pointer !== 0)
-            {
-                byPointer.set(pointer >>> 0, api);
-                published++;
-            }
-            return pointer;
-        },
+        publish: (api, interfaces, id, ownCounted = COUNTED_ON_THEIR_OWN)=>
+            seam.publish(api, interfaces, id, ownCounted),
         /**
          * Moves the reference an object was made with from one of its
          * interfaces to another, as a class factory asked for the second.
@@ -659,17 +558,10 @@ export function createPublisher({ publishInterface }){
          * @param {any} api @param {string} from @param {string} to
          */
         hand(api, from, to){
-            const adapter = adapters.get(api);
+            const adapter = seam.adapterFor(api);
             adapter?.addRef(to);
             adapter?.release(from);
         },
-        /** @param {number} pointer */
-        objectAt: pointer=>((pointer >>> 0) === 0
-            ? null
-            : byPointer.get(pointer >>> 0) ?? null),
-        count: ()=>published,
-        /** Interface ids asked for and refused, with counts. */
-        refused: ()=>({ ...refused }),
     };
 }
 

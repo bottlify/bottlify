@@ -25,7 +25,7 @@
  * offsets its buffered events carry are the ones its format gave.
  */
 
-import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
+import { createComPublisher, IID_IUNKNOWN } from '../../bridge/com-seam.js';
 import { readGuid, parseGuid } from '../../../system/guid.js';
 import {
     createInputDevice, objectsOf, KEYBOARD, MOUSE, DIMOUSE_OFS, MOUSE_BUTTONS,
@@ -544,27 +544,35 @@ function readFormat(readU32, guidAt, format, objects, refused = ()=>{}, pointer 
  * @param {string} id
  * @param {[string, number][]} slots
  * @param {Record<string, (target: any, args: number[], descriptor: any) => any>} [implemented]
- * @param {{ wide?: boolean, legacy?: boolean, sharedWith?: string, unknown?: boolean }} [options]
+ * @param {{ wide?: boolean, legacy?: boolean, sharedWith?: string, identity?: boolean }} [options]
  *     `wide` for a W interface, `legacy` for one of the pre-8 generations.
  *     Both are facts the method itself needs and the interface it arrived on
  *     is the only thing that carries them. `sharedWith` names the interface
  *     whose pointer answers this one too -- its table holding this one's and
- *     more -- and `unknown` makes this interface's pointer the object's
- *     IUnknown, as COM identity has one of them be.
+ *     more -- and `identity` makes this interface's pointer the object's
+ *     IUnknown, as COM identity has one of them be. Each method is handed
+ *     the descriptor it was described with, after its arguments.
  */
 export function describe(id, slots, implemented = {}, options = {}){
-    return {
+    const descriptor = {
         id,
         wide: options.wide === true,
         legacy: options.legacy === true,
         sharedWith: options.sharedWith,
-        unknown: options.unknown === true,
-        methods: slots.map(([name, args])=>({
+        identity: options.identity === true,
+        /** @type {{ name: string, argBytes: number, invoke?: (target: any, args: number[]) => any }[]} */
+        methods: [],
+    };
+    descriptor.methods = slots.map(([name, args])=>{
+        const invoke = implemented[name];
+        return {
             name,
             argBytes: 4 + args * 4,
-            invoke: implemented[name],
-        })),
-    };
+            invoke: invoke && ((/** @type {any} */ target, /** @type {number[]} */ given)=>
+                invoke(target, given, descriptor)),
+        };
+    });
+    return descriptor;
 }
 
 /** IDirectInput, after IUnknown's three. */
@@ -654,128 +662,19 @@ export const IDIRECTINPUTDEVICE8_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /**
- * One method list per interface descriptor, shared by every object that
- * exposes it, as a compiled program shares one vtable among all instances of
- * a class. The publisher keys its table of stubs by the list's identity, so a
- * list built afresh for each object was a table of stubs per object -- and
- * the stubs come out of a table of sixteen thousand, which a program making a
- * thousand textures had used up. Each method is reached through the adapter
- * the call arrived on, which is what makes one list serve every object.
- *
- * @type {WeakMap<any, any[]>}
- */
-const methodLists = new WeakMap();
-/** IUnknown alone, one list for everyone: it names no method of the object's own. */
-const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
-
-/** @param {any} descriptor */
-function methodsFor(descriptor){
-    let methods = methodLists.get(descriptor);
-    if (!methods)
-    {
-        methods = [
-            ...IUNKNOWN_METHODS,
-            ...descriptor.methods.map((/** @type {any} */ method)=>({
-                name: method.name,
-                argBytes: method.argBytes,
-                ...method.floats ? { floats: method.floats } : {},
-                ...method.quadwords ? { quadwords: method.quadwords } : {},
-
-                ...method.structs ? { structs: method.structs } : {},
-                invoke: method.invoke
-                    ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
-                        method.invoke(adapter.api, args, descriptor) ?? 0
-                    : undefined,
-            })),
-        ];
-        methodLists.set(descriptor, methods);
-    }
-    return methods;
-}
-
-
-/**
- * One adapter per object, so that one object is one identity.
+ * DirectInput's objects as COM interfaces (`bridge/com-seam.js`): a null
+ * interface id is E_POINTER with the caller's pointer left as it was, and a
+ * device answers only to the generations it was made for (`offers`).
  *
  * @param {Object} deps
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  */
 export function createPublisher({ publishInterface }){
-    const adapters = new WeakMap();
-    /** @type {Map<number, any>} */
-    const byPointer = new Map();
-    let published = 0;
-
-    /** @param {any} api @param {any[]} interfaces */
-    const adapterFor = (api, interfaces)=>{
-        let adapter = adapters.get(api);
-        if (!adapter)
-        {
-            const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
-            adapter = {
-                api,
-                // DirectInput answers a null interface id with E_POINTER and
-                // leaves the caller's pointer as it was.
-                nullInterface: 'pointer',
-                /** @param {string} id */
-                interfaceFor(id){
-                    if (id !== IID_IUNKNOWN && api.offers && !api.offers(id))
-                    {
-                        return null;
-                    }
-                    const descriptor = id === IID_IUNKNOWN
-                        ? interfaces.find(entry=>entry.unknown === true)
-                        : declared.get(id);
-                    if (!descriptor)
-                    {
-                        return id === IID_IUNKNOWN ? { id, methods: IUNKNOWN_ONLY } : null;
-                    }
-                    const sharedWith = descriptor.sharedWith
-                        ?? (id === IID_IUNKNOWN ? descriptor.id : undefined);
-                    return {
-                        id,
-                        methods: methodsFor(descriptor),
-                        ...sharedWith === undefined ? {} : { sharedWith },
-                    };
-                },
-                addRef: ()=>api.addRef?.() ?? 1,
-                release: ()=>api.release?.() ?? 0,
-                // A device keeps one count whichever generation it is reached
-                // through, so its last reference ends them all; an object that
-                // says nothing ends only the interface it was released through.
-                get destroyed(){
-                    return api.destroyed === true;
-                },
-                /** @param {number} pointer */
-                forgotten: pointer=>{
-                    if (byPointer.get(pointer) === api)
-                    {
-                        byPointer.delete(pointer);
-                    }
-                },
-            };
-            adapters.set(api, adapter);
-        }
-        return adapter;
-    };
-
-    return {
-        /** @param {any} api @param {any[]} interfaces @param {string} id */
-        publish(api, interfaces, id){
-            const pointer = publishInterface(adapterFor(api, interfaces), id);
-            if (pointer !== 0)
-            {
-                byPointer.set(pointer >>> 0, api);
-                published++;
-            }
-            return pointer;
-        },
-        /** @param {number} pointer */
-        objectAt: pointer=>((pointer >>> 0) === 0
-            ? null
-            : byPointer.get(pointer >>> 0) ?? null),
-        count: ()=>published,
-    };
+    return createComPublisher({
+        publishInterface,
+        nullInterface: 'pointer',
+        offers: (api, id)=>!api.offers || api.offers(id),
+    });
 }
 
 /**
@@ -2299,9 +2198,9 @@ export function createDirectInput(
     const legacyA = describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods,
         { legacy: true });
     const legacyW = describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods,
-        { legacy: true, wide: true, unknown: true });
+        { legacy: true, wide: true, identity: true });
     /** @param {string} id @param {any} table */
-    const sameAs = (id, table)=>({ ...table, id, sharedWith: table.id, unknown: false });
+    const sameAs = (id, table)=>({ ...table, id, sharedWith: table.id, identity: false });
     const legacyRootInterfaces = [
         sameAs(IID_IDirectInputA, legacyA), sameAs(IID_IDirectInput2A, legacyA), legacyA,
         sameAs(IID_IDirectInputW, legacyW), sameAs(IID_IDirectInput2W, legacyW), legacyW,
