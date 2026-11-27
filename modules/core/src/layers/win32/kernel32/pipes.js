@@ -51,6 +51,7 @@ import { INTERACTIVE_SESSION } from './teb.js';
 import { allows, mappedAccess } from './access.js';
 import { wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
+import { foldName } from '../../../system/text.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -729,7 +730,7 @@ export function createNamedPipes(host){
     /** The run's key for a pipe's name. @param {string} name */
     const keyOf = name=>{
         const prefix = PREFIXES.find(one=>name.toLowerCase().startsWith(one)) ?? PREFIXES[0];
-        return TABLE_PREFIX + name.slice(prefix.length).toLowerCase();
+        return TABLE_PREFIX + foldName(name.slice(prefix.length));
     };
     /** @param {string} key @returns {Pipe | null} */
     const pipeAt = key=>{

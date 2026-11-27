@@ -28,6 +28,7 @@ import {
 } from './processor.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16, utf16z } from '../common/utf16.js';
+import { foldName } from '../../../system/text.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
@@ -139,7 +140,7 @@ export function defaultEnvironment(windows, folders, processors = 1, process = {
  * @returns {Record<string, string>}
  */
 const sortedBlock = variables=>Object.fromEntries(Object.entries(variables)
-    .sort(([left], [right])=>(left.toUpperCase() < right.toUpperCase() ? -1 : 1)));
+    .sort(([left], [right])=>(foldName(left) < foldName(right) ? -1 : 1)));
 
 /**
  * A registry value an environment block is built from: its name, its text,
@@ -166,7 +167,7 @@ export function sessionEnvironment(base, machine, user){
     /** @type {Record<string, string>} */
     const block = { ...base };
     /** @param {string} name */
-    const spelling = name=>Object.keys(block).find(key=>key.toUpperCase() === name.toUpperCase());
+    const spelling = name=>Object.keys(block).find(key=>foldName(key) === foldName(name));
     /** @param {string} text */
     const expand = text=>text.replace(/%([^%]+)%/g, (whole, name)=>{
         const key = spelling(name);
@@ -178,7 +179,7 @@ export function sessionEnvironment(base, machine, user){
         {
             const text = expanding ? expand(value) : value;
             const key = spelling(name) ?? name;
-            block[key] = joined && name.toUpperCase() === 'PATH' && block[key]
+            block[key] = joined && foldName(name) === 'PATH' && block[key]
                 ? `${block[key]};${text}` : text;
         }
     }
@@ -201,7 +202,7 @@ export function machineArchitecture(variables, { long, wow64 }){
     /** @type {Record<string, string>} */
     const seen = {};
     /** @param {string} name */
-    const spelling = name=>Object.keys(variables).find(key=>key.toUpperCase() === name) ?? name;
+    const spelling = name=>Object.keys(variables).find(key=>foldName(key) === name) ?? name;
     const architecture = spelling('PROCESSOR_ARCHITECTURE');
     const beneath = spelling('PROCESSOR_ARCHITEW6432');
     for (const [name, value] of Object.entries(variables))
@@ -241,17 +242,17 @@ export function createEnvironmentFunctions(host){
      */
     let folded = null;
     const byFolded = ()=>(folded ??= new Map(Object.entries(host.environment())
-        .map(([name, value])=>[name.toUpperCase(), { name, value }])));
+        .map(([name, value])=>[foldName(name), { name, value }])));
     const variables = {
         /** @param {string} name */
-        get: name=>byFolded().get(name.toUpperCase())?.value,
+        get: name=>byFolded().get(foldName(name))?.value,
         /** @param {string} name @param {string} value */
         set: (name, value)=>{
-            const key = name.toUpperCase();
+            const key = foldName(name);
             byFolded().set(key, { name: byFolded().get(key)?.name ?? name, value });
         },
         /** @param {string} name */
-        delete: name=>byFolded().delete(name.toUpperCase()),
+        delete: name=>byFolded().delete(foldName(name)),
         /** @returns {[string, string][]} */
         entries: ()=>[...byFolded().values()].map(({ name, value })=>[name, value]),
     };

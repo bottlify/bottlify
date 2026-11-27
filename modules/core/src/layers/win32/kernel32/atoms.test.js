@@ -120,6 +120,35 @@ test('the wide spellings add and find in the same table', ()=>{
     assert.equal(fns.FindAtomW.handler([0x1234]), 0x1234, 'an integer atom is itself');
 });
 
+test('an atom name is one name as Windows\' case table folds it, and no other', ()=>{
+    // The atom table compares through RtlUpcaseUnicodeChar: the Kelvin sign is
+    // not k, though JavaScript's lower case makes them one.
+    const bytes = new Uint8Array(0x10400);
+    const fns = createAtomFunctions({
+        writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: ()=>'',
+        readWideString(address, maxLength){
+            let text = '';
+            for (let at = address; text.length < maxLength && (bytes[at] | bytes[at + 1]) !== 0;
+                at += 2)
+            {
+                text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+            }
+            return text;
+        },
+    });
+    const put = (/** @type {number} */ at, /** @type {string} */ text)=>{
+        [...text, '\0'].forEach((unit, index)=>{
+            bytes[at + index * 2] = unit.charCodeAt(0) & 0xff;
+            bytes[at + index * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+        return at;
+    };
+    const atom = fns.AddAtomW.handler([put(0x10100, 'mark ÿ')]);
+    assert.equal(fns.FindAtomW.handler([put(0x10200, 'MARK Ÿ')]), atom);
+    assert.equal(fns.FindAtomW.handler([put(0x10200, 'mar\u212a ÿ')]), 0);
+});
+
 test('the wide name reads back in UTF-16, cut to the characters asked for', ()=>{
     const bytes = new Uint8Array(0x10400);
     const fns = createAtomFunctions({
