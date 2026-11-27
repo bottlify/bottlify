@@ -55,6 +55,8 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_DIRECTORY = 267;
+/** A handle a child started with bInheritHandles takes. */
+const HANDLE_FLAG_INHERIT = 0x1;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
@@ -544,8 +546,6 @@ export function createSpawner(host){
  * @property {(handles: number[]) => { handle: number, type: string, object: any }[]}
  *     [duplicates]  Of these handles, the open files and pipe ends a child is handed
  *     duplicates of whether inheritable or not, each with the flags it has here.
- * @property {(handle: number) => void} [inheritable]  Marks a handle inheritable, as
- *     OpenProcess's bInheritHandle asks.
  * @property {() => Record<string, string>} [environment]
  *           This process's variables as they are now, which a child given no
  *           block inherits.
@@ -1068,14 +1068,9 @@ export function createSpawnFunctions(host){
                     host.setLastError(access.error);
                     return 0;
                 }
-                /** The handle, inheritable where bInheritHandle asked. @param {number} handle */
-                const kept = handle=>{
-                    if (inherit !== 0)
-                    {
-                        host.inheritable?.(handle);
-                    }
-                    return handle;
-                };
+                /** A handle onto it, inheritable where bInheritHandle asked. @param {any} process */
+                const kept = process=>kernel.handles.open('process', process, access.granted,
+                    inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
                 // The same default GetCurrentProcessId falls back to.
                 if (wanted === ((host.processId ?? 0x1000) >>> 0))
                 {
@@ -1087,7 +1082,7 @@ export function createSpawnFunctions(host){
                     // the pseudo-handle's object.
                     const self = kernel.processes.find?.(wanted)
                         ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
-                    return kept(kernel.handles.open('process', self, access.granted));
+                    return kept(self);
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.
@@ -1098,7 +1093,7 @@ export function createSpawnFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return kept(kernel.handles.open('process', child, access.granted));
+                return kept(child);
             },
         },
 

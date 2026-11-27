@@ -1316,28 +1316,34 @@ export function createKernelModule(){
                     /**
                      * @param {string} type @param {any} object
                      * @param {number | null} [access]  fewer rights than all
+                     * @param {number} [flags]  HANDLE_FLAG_*
                      */
-                    open: (type, object, access)=>live()
-                        ? state.handles.open(type, object, access) : 0,
+                    open: (type, object, access, flags)=>live()
+                        ? state.handles.open(type, object, access, flags) : 0,
                     /**
                      * An object under a number chosen elsewhere: an inherited
-                     * handle keeps its parent's number and rights.
+                     * handle keeps its parent's number, rights and flags.
                      *
                      * @param {number} handle @param {string} type @param {any} object
-                     * @param {number | null} [access]
+                     * @param {number | null} [access] @param {number} [flags]
                      */
-                    adopt: (handle, type, object, access)=>live()
-                        ? state.handles.adopt(handle, type, object, access) : false,
+                    adopt: (handle, type, object, access, flags)=>live()
+                        ? state.handles.adopt(handle, type, object, access, flags) : false,
                     /**
                      * The rights a handle was granted, null for all of them.
                      *
                      * @param {number} handle
                      */
                     access: handle=>live() ? state.handles.access(handle) : null,
+                    /** HANDLE_FLAG_*, null for no handle. @param {number} handle */
+                    flags: handle=>live() ? state.handles.flags(handle) : null,
+                    /** @param {number} handle @param {number} mask @param {number} flags */
+                    setFlags: (handle, mask, flags)=>live()
+                        && state.handles.setFlags(handle, mask, flags),
                     /** @param {number} handle @param {string} [type] */
                     resolve: (handle, type)=>live() ? state.handles.resolve(handle, type) : null,
-                    /** @param {number} handle */
-                    close: handle=>live() ? state.handles.close(handle) : null,
+                    /** @param {number} handle @param {boolean} [ending]  the process's end */
+                    close: (handle, ending)=>live() ? state.handles.close(handle, ending) : null,
                     /**
                      * What kind of object a handle names, without resolving it.
                      *

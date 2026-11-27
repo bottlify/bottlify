@@ -228,6 +228,7 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(handle: number) => number | null} [handleAccess]
+ * @property {(handle: number) => number | null} [handleFlags]
  * @property {() => import('./query.js').OpenHandle[]} [openHandles]
  *           The handles this process holds, what SystemHandleInformation lists.
  * @property {number} [processId]  This process's id.
@@ -663,6 +664,7 @@ export function createNtdllFunctions(host){
             version: host.windows,
             handleType: host.handleType,
             handleAccess: host.handleAccess,
+            handleFlags: host.handleFlags,
             // A file's or folder's name is its path under the volume's device,
             // as GetFinalPathNameByHandle's VOLUME_NAME_NT spells it.
             objectName: handle=>{
@@ -957,19 +959,17 @@ export function createNtdllFunctions(host){
         /**
          * NTSTATUS NtClose(HANDLE Handle)
          *
-         * CloseHandle answered as a status: one handle table, so whatever the
-         * handle names -- a file NtCreateFile opened, an event, a thread -- it
-         * closes the same way, and a handle it does not hold is
-         * STATUS_INVALID_HANDLE.
+         * kernel32's, which CloseHandle answers from: one handle table, so
+         * whatever the handle names it closes the same way. A registry key
+         * is the registry's own.
          */
-        ...(kernel32.CloseHandle
+        ...(natives.NtClose
             ? {
                 NtClose: {
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([handle])=>registry?.close(handle >>> 0)
-                        ?? (kernel32.CloseHandle.handler([handle]) !== 0
-                            ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
+                        ?? natives.NtClose.handler([handle]),
                 },
             }
             : {}),

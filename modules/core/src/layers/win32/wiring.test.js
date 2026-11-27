@@ -22,6 +22,8 @@ import { filesystemModule } from '../filesystem/module.js';
 import { createMemoryModule } from '../memory/module.js';
 import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
 import { noCache } from '../cache/module.js';
+import { createHandleTable, FIRST_HANDLE } from '../kernel/internal/handles.js';
+import { createProcessTable } from '../kernel/internal/processes.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -34,9 +36,6 @@ const ARENA = { base: 0x100000, size: 0x200000 };
 function hostOver(replace = {}){
     const bytes = new Uint8Array(0x400000);
     const view = new DataView(bytes.buffer);
-    /** @type {Map<number, { type: string, object: any }>} */
-    const opened = new Map();
-    let nextHandle = 0x100;
     /** @type {Record<string, any>} */
     const apis = {
         memory: {
@@ -82,20 +81,7 @@ function hostOver(replace = {}){
             scanCString: ()=>({ index: 0, byte: 0 }),
         },
         kernel: {
-            handles: {
-                /** @param {string} type @param {any} object */
-                open(type, object){
-                    const handle = nextHandle++;
-                    opened.set(handle, { type, object });
-                    return handle;
-                },
-                /** @param {number} handle */
-                close: handle=>(opened.delete(handle) ? true : null),
-                /** @param {number} handle */
-                resolve: handle=>opened.get(handle)?.object ?? null,
-                /** @param {number} handle */
-                typeOf: handle=>opened.get(handle)?.type ?? null,
-            },
+            handles: createHandleTable(),
             clock: { virtualTime: ()=>0 },
             currentThread: ()=>null,
             exitThread: ()=>{},
@@ -145,6 +131,7 @@ async function build(replace){
         },
         registers: replace?.registers,
         trustedRoots: replace?.trustedRoots,
+        spawned: replace?.spawned,
     }), host));
     return {
         bytes, view, libraries: api.libraries(), lastError: ()=>api.lastError(),
@@ -393,6 +380,41 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
         await win32Module.dispose();
         await filesystemModule.dispose();
     }
+});
+
+test('the process\'s end closes every handle it holds, one protected from close too', async()=>{
+    // CloseHandle refuses a handle marked HANDLE_FLAG_PROTECT_FROM_CLOSE;
+    // the end of the process closes it all the same, as Windows' does: a
+    // file opened to be deleted on close goes then.
+    const GENERIC_WRITE = 0x40000000;
+    const CREATE_ALWAYS = 2;
+    const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+    const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+    const thread = { id: 1 };
+    const { bytes, libraries, lastError } = await build({
+        filesystem, kernel: { currentThread: ()=>thread },
+        modules: { processDetach: ()=>[] },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    /** @param {number} at @param {string} path */
+    const create = (at, path)=>{
+        bytes.set([...path, '\0'].map(ch=>ch.charCodeAt(0)), at);
+        return kernel32.CreateFileA.handler(
+            [at, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, 0]);
+    };
+    const kept = create(0x1000, 'C:\\kept.tmp');
+    const plain = create(0x1100, 'C:\\plain.tmp');
+    assert.equal(kernel32.SetHandleInformation.handler([kept, 2, 2]), 1);
+    assert.equal(kernel32.CloseHandle.handler([kept]), 0, 'protected from close');
+    assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+    assert.notEqual(filesystem.stat('C:\\kept.tmp'), null, 'still open');
+
+    kernel32.ExitProcess.handler([0]);
+    assert.equal(filesystem.stat('C:\\kept.tmp'), null, 'closed by the end, protected or not');
+    assert.equal(filesystem.stat('C:\\plain.tmp'), null, 'and one never closed');
+    void plain;
+    await win32Module.dispose();
+    await filesystemModule.dispose();
 });
 
 test('msvcrt\'s __int64 answers reach EDX through the processor\'s registers', async()=>{
@@ -982,4 +1004,120 @@ test('a string past the limit a handler reads is cut there; '
         (/** @type {any} */ e)=>e.code === 'GUEST_ACCESS' && e.address === 0x400000);
     await win32Module.dispose();
     await memoryModule.dispose();
+});
+
+test('a closed handle\'s flags go with it: its number reused is neither inherited nor protected',
+    async()=>{
+        // The kernel's own table, with three numbers before it reuses a
+        // closed one, the first closed first: CreateProcess with
+        // bInheritHandles hands a child what that table says is inheritable
+        // now, not what a closed handle was.
+        const thread = { id: 1 };
+        /** @type {any[]} */
+        const spawned = [];
+        const filesystem = await filesystemModule.create({ pageFile: await testPageFile() });
+        const { view, libraries, lastError } = await build({
+            filesystem,
+            kernel: { handles: createHandleTable({ limit: FIRST_HANDLE + 8 }),
+                processes: createProcessTable(), currentThread: ()=>thread,
+                createEvent: (/** @type {any} */ options)=>({ ...options }) },
+            spawned: (/** @type {any} */ request)=>spawned.push(request),
+        });
+        const kernel32 = libraries['KERNEL32.dll'];
+        const INHERIT = 0x2000;
+        [12, 0, 1].forEach((value, at)=>view.setUint32(INHERIT + at * 4, value, true));
+        const LINE = 0x2100;
+        [...'C:\\Windows\\System32\\reg.exe', '\0'].forEach((ch, at)=>
+            view.setUint8(LINE + at, ch.charCodeAt(0)));
+        const STARTUP = 0x2200;
+        view.setUint32(STARTUP, 68, true);
+        const INFORMATION = 0x2300;
+        /** @returns {number[]} the numbers a child started now inherits */
+        const inherited = ()=>{
+            assert.equal(kernel32.CreateProcessA.handler(
+                [0, LINE, 0, 0, 1, 0, 0, 0, STARTUP, INFORMATION]), 1);
+            const request = spawned.at(-1);
+            for (const handle of [view.getUint32(INFORMATION, true),
+                view.getUint32(INFORMATION + 4, true)])
+            {
+                kernel32.CloseHandle.handler([handle]);
+            }
+            return (request.inheritedHandles ?? []).map((/** @type {any} */ one)=>one.handle);
+        };
+
+        const marked = kernel32.CreateEventA.handler([INHERIT, 1, 0, 0]);
+        assert.deepEqual(inherited(), [marked], 'an inheritable event is inherited');
+        assert.equal(kernel32.SetHandleInformation.handler([marked, 2, 2]), 1);
+        assert.equal(kernel32.CloseHandle.handler([marked]), 0, 'protected from close');
+        assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+        assert.equal(kernel32.SetHandleInformation.handler([marked, 2, 0]), 1);
+        assert.equal(kernel32.CloseHandle.handler([marked]), 1);
+
+        // The process's and thread's numbers were closed before it.
+        const before = [0, 0].map(()=>kernel32.CreateEventA.handler([0, 1, 0, 0]));
+        const plain = kernel32.CreateEventA.handler([0, 1, 0, 0]);
+        before.forEach(handle=>kernel32.CloseHandle.handler([handle]));
+        assert.equal(plain, marked, 'the closed number is the one reused');
+        assert.equal(kernel32.GetHandleInformation.handler([plain, 0x2400]), 1);
+        assert.equal(view.getUint32(0x2400, true), 0, 'no flags of the closed handle');
+        assert.deepEqual(inherited(), [], 'nor is it a child\'s');
+        assert.equal(kernel32.CloseHandle.handler([plain]), 1, 'nor protected');
+        await win32Module.dispose();
+        await filesystemModule.dispose();
+    });
+
+test('ntdll\'s handle calls are the ones kernel32 answers from: NtClose, NtDuplicateObject,'
+    + ' a handle\'s flags', async()=>{
+    // Wine's server: closing a protected handle is STATUS_HANDLE_NOT_CLOSABLE,
+    // which CloseHandle answers as ERROR_INVALID_HANDLE. Its process.c
+    // test_DuplicateHandle: DUPLICATE_SAME_ATTRIBUTES copies the source's flags.
+    const thread = { id: 1 };
+    const { view, libraries, lastError } = await build({
+        kernel: { handles: createHandleTable(), currentThread: ()=>thread,
+            createEvent: (/** @type {any} */ options)=>({ ...options }) },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    const ntdll = libraries['ntdll.dll'];
+    const OBJECT_HANDLE_FLAG_INFORMATION = 4;
+    /** @param {number} handle @returns {number[]} Inherit, ProtectFromClose */
+    const flagsOf = handle=>{
+        assert.equal(ntdll.NtQueryObject.handler(
+            [handle, OBJECT_HANDLE_FLAG_INFORMATION, 0x2000, 2, 0x2010]), 0);
+        assert.equal(view.getUint32(0x2010, true), 2, 'its length');
+        return [view.getUint8(0x2000), view.getUint8(0x2001)];
+    };
+    const event = kernel32.CreateEventA.handler([0, 1, 0, 0]);
+    view.setUint16(0x2100, 0x0101, true);
+    assert.equal(ntdll.NtSetInformationObject.handler(
+        [event, OBJECT_HANDLE_FLAG_INFORMATION, 0x2100, 2]), 0);
+    assert.deepEqual(flagsOf(event), [1, 1]);
+    assert.equal(kernel32.GetHandleInformation.handler([event, 0x2200]), 1);
+    assert.equal(view.getUint32(0x2200, true), 3, 'the same flags, read by kernel32');
+
+    assert.equal(ntdll.NtClose.handler([event]) >>> 0, 0xc0000235, 'STATUS_HANDLE_NOT_CLOSABLE');
+    assert.equal(kernel32.CloseHandle.handler([event]), 0);
+    assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+    assert.deepEqual(flagsOf(event), [1, 1], 'still open');
+
+    const DUPLICATE_SAME_ACCESS = 2;
+    const DUPLICATE_SAME_ATTRIBUTES = 4;
+    assert.equal(ntdll.NtDuplicateObject.handler([0xffffffff, event, 0xffffffff, 0x2300, 0, 0,
+        DUPLICATE_SAME_ACCESS | DUPLICATE_SAME_ATTRIBUTES]), 0);
+    const copy = view.getUint32(0x2300, true);
+    assert.deepEqual(flagsOf(copy), [1, 1], 'the source\'s flags');
+    assert.equal(ntdll.NtDuplicateObject.handler([0xffffffff, event, 0xffffffff, 0x2300, 0,
+        0x02, DUPLICATE_SAME_ACCESS]), 0);
+    assert.deepEqual(flagsOf(view.getUint32(0x2300, true)), [1, 0], 'OBJ_INHERIT, as asked');
+    assert.equal(ntdll.NtDuplicateObject.handler([0xffffffff, 0x7770, 0xffffffff, 0x2300, 0, 0,
+        0]) >>> 0, 0xc0000008, 'STATUS_INVALID_HANDLE');
+
+    view.setUint16(0x2100, 0, true);
+    for (const handle of [event, copy])
+    {
+        assert.equal(ntdll.NtSetInformationObject.handler(
+            [handle, OBJECT_HANDLE_FLAG_INFORMATION, 0x2100, 2]), 0);
+        assert.equal(ntdll.NtClose.handler([handle]), 0);
+    }
+    assert.equal(ntdll.NtClose.handler([event]) >>> 0, 0xc0000008, 'closed');
+    await win32Module.dispose();
 });

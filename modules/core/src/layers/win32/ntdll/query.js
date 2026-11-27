@@ -167,6 +167,8 @@ const OBJECT_BASIC = Object.freeze({
 });
 
 const OBJECT_TYPES_INFORMATION = 3;
+/** ObjectHandleFlagInformation: two BOOLEANs, Inherit and ProtectFromClose. */
+const OBJECT_HANDLE_FLAG_INFORMATION = 4;
 
 /**
  * OBJECT_TYPE_INFORMATION as a 32-bit process reads it: the name's
@@ -357,6 +359,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(handle: number) => number | null} [handleAccess]  The rights a
  *           handle was granted, null for every right (the handle table's
  *           `access`). Without it every handle has every right.
+ * @property {(handle: number) => number | null} [handleFlags]  A handle's
+ *           HANDLE_FLAG_* flags, null for no handle (the handle table's `flags`).
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => { win32: string, native: string }} [imagePath]  The program's
  *           path, and as the object manager names it: ProcessImageFileName's
@@ -1253,6 +1257,24 @@ export function createQueryFunctions(host){
                     return STATUS.SUCCESS;
                 }
                 const named = wholeAddress(handle);
+                if ((infoClass >>> 0) === OBJECT_HANDLE_FLAG_INFORMATION && host.handleFlags)
+                {
+                    // A pseudo-handle has none, as GetHandleInformation answers.
+                    const flags = named === CURRENT_PROCESS || named === CURRENT_THREAD ? null
+                        : host.handleFlags(named);
+                    if (flags === null)
+                    {
+                        return STATUS.INVALID_HANDLE;
+                    }
+                    writeU32If(wholeAddress(returnLength), 2);
+                    if ((length >>> 0) < 2 || buffer === 0)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(wholeAddress(buffer),
+                        Uint8Array.of(flags & 1, flags >>> 1 & 1));
+                    return STATUS.SUCCESS;
+                }
                 if (named !== CURRENT_PROCESS && named !== CURRENT_THREAD
                     && (host.handleType?.(named) ?? null) === null)
                 {

@@ -52,6 +52,7 @@ function processOf({ table, id, across }){
                 handles.set(next, { type, object });
                 return next;
             },
+            list: ()=>[...handles].map(([handle, entry])=>({ handle, ...entry })),
             resolve: (handle, type)=>{
                 const entry = handles.get(handle);
                 if (!entry || (type && entry.type !== type))
@@ -91,7 +92,7 @@ function processOf({ table, id, across }){
         /** A handle adopted onto an object under the parent's number. @param {number} handle @param {any} object */
         adopt(handle, object){
             handles.set(handle, { type: 'pipe', object });
-            pipes.adopted(handle, object);
+            pipes.adopted(object);
         },
     };
 }

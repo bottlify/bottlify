@@ -29,7 +29,7 @@ const CROSSING_FIELDS = /** @type {const} */ (['path', 'read', 'write', 'writeAt
  * @property {number | null} access  the handle's granted rights
  * @property {Record<string, any>} object  the open's fields, as values
  * @property {boolean} [consoleOnly]  handed only to a console program (`handedDown`)
- * @property {number} [flags]  a duplicate's handle flags, as the parent's handle has them
+ * @property {number} [flags]  the handle's HANDLE_FLAG_*, as the parent's table has them
  */
 
 /**
@@ -42,7 +42,8 @@ const CROSSING_FIELDS = /** @type {const} */ (['path', 'read', 'write', 'writeAt
 export function crossingFiles(inherited){
     return (inherited ?? []).filter(one=>one.type === 'file' && one.object)
         .map(one=>({ handle: one.handle, type: 'file', access: one.access ?? null,
-            ...one.consoleOnly ? { consoleOnly: true, flags: one.flags ?? 0 } : {},
+            ...one.consoleOnly ? { consoleOnly: true } : {},
+            ...one.flags === undefined ? {} : { flags: one.flags },
             object: Object.fromEntries(CROSSING_FIELDS
                 .filter(field=>one.object[field] !== undefined)
                 .map(field=>[field, one.object[field]])) }));
