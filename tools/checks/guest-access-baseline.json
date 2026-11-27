@@ -756,26 +756,6 @@
    "string readWide": 1,
    "string writeWide": 1
   },
-  "msvcrt/msvcp60-streams.js": {
-   "accessor i32": 1,
-   "accessor readWord": 1,
-   "accessor setU16": 1,
-   "accessor u16": 1
-  },
-  "msvcrt/msvcp60.js": {
-   "accessor ptr": 1,
-   "accessor setU32": 1,
-   "accessor setU8": 1,
-   "accessor u32": 1,
-   "accessor u8": 1,
-   "string cstr": 1
-  },
-  "msvcrt/msvcp80.js": {
-   "accessor f32": 1,
-   "accessor setU32": 1,
-   "accessor setWord": 1,
-   "accessor u32": 1
-  },
   "msvcrt/msvcr80.js": {
    "accessor readU32": 1,
    "accessor setPointer": 1,

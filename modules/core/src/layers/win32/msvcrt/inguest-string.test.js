@@ -20,6 +20,7 @@ import { COMPILED as LONG } from './inguest-string.x64.js';
 import * as sources from './inguest-string.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { createMsvcp80Functions } from './msvcp80.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const { same, sameAt64 } = equivalence(COMPILED, sources, undefined, LONG);
 
@@ -178,6 +179,7 @@ test('the host grows a string as the library does, and trims it back inline', ()
         '??3@YAXPAX@Z': { handler: (/** @type {number[]} */ [block])=>freed.push(block) },
     };
     const table = createMsvcp80Functions(crt, {
+        guest: guestWindow(memory),
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
@@ -230,6 +232,7 @@ test('assignment, appending and comparison read their text before they grow', ()
         '??3@YAXPAX@Z': { handler: ()=>0 },
     };
     const table = createMsvcp80Functions(crt, {
+        guest: guestWindow(memory),
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
@@ -284,9 +287,9 @@ test('a 64-bit process\'s string: forty bytes, the text after the iterator list,
     /** @type {number[]} */
     const singles = [];
     const table = createMsvcp80Functions(crt, {
+        guest: guestWindow(memory, { pointerSize: 8 }),
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
-        pointerSize: 8,
         fpu: /** @type {any} */ ({ setResult: ()=>{},
             setSingleResult: (/** @type {number} */ value)=>singles.push(value) }),
     });

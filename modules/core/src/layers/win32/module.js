@@ -7213,7 +7213,7 @@ export function createWin32Module(){
                     currentThread: ()=>kernel.currentThread() }));
             // And its C++ library, over that runtime's operator new and delete.
             lazyLibraries.define('MSVCP80.dll', ()=>createMsvcp80Functions(libraries['MSVCR80.dll'],
-                { readMemory, writeMemory, fillMemory, pointerSize,
+                { guest, readMemory, writeMemory, fillMemory,
                     ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
@@ -7265,17 +7265,18 @@ export function createWin32Module(){
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread() }));
             lazyLibraries.define('MSVCP90.dll', ()=>createMsvcp80Functions(libraries['MSVCR90.dll'],
-                { readMemory, writeMemory, fillMemory, pointerSize,
+                { guest, readMemory, writeMemory, fillMemory,
                     ...floatResults ? { fpu: floatResults } : {} }));
             lazyLibraries.define('MSVCR71.dll', ()=>({ ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter }));
             lazyLibraries.define('MSVCP71.dll', ()=>createMsvcp80Functions(libraries['MSVCR71.dll'],
-                { readMemory, writeMemory, fillMemory }));
+                { guest, readMemory, writeMemory, fillMemory,
+                    ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 6's C++ library, which Windows itself carries: its
             // strings are shared by count, as that compiler's headers inline.
             lazyLibraries.define('MSVCP60.dll', ()=>createMsvcp60Functions(
                 libraries['msvcrt.dll'], {
-                    readMemory, writeMemory,
+                    guest,
                     addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
                     divergence: config?.divergence,
                 }));
