@@ -503,6 +503,8 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {string} [skipTexture]
  * @property {string} [probeTexture]
  * @property {boolean} [fog]
+ * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]  The
+ *     renderer's (`createRenderer`).
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepConstantBlocks]  The renderer's (`createRenderer`).
@@ -572,7 +574,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted, countsInGuest, storeCount,
         drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites, keepConstantBlocks, verifyDynamic,
+        watchWrites, keepConstantBlocks, verifyDynamic, texelCache,
         ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -585,7 +587,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted, countsInGuest, storeCount,
         drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites, keepConstantBlocks, verifyDynamic,
+        watchWrites, keepConstantBlocks, verifyDynamic, texelCache,
     };
     if (backend && !readMemory)
     {
@@ -1098,6 +1100,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             skipTexture: services.skipTexture,
             probeTexture: services.probeTexture,
             fog: services.fog,
+            texelCache: services.texelCache ?? null,
             mips: services.mips,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,

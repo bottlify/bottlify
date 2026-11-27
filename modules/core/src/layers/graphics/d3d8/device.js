@@ -301,6 +301,8 @@ function isTransformType(type){
  * @property {string} [probeTexture]
  *     Copy the target out after each dumped draw that samples this texture.
  * @property {boolean} [fog]
+ * @property {import('../internal/texel-store.js').TexelCache | null} [texelCache]  The
+ *     renderer's (`createRenderer`).
  *     Whether fog is applied at all. Off, every draw renders as if the
  *     program had never enabled it: a frame that clears up with it was fog.
  * @property {boolean} [nanProbe]
@@ -452,7 +454,8 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
-        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, ...caps
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, texelCache,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -462,7 +465,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
-        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic,
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, texelCache,
     };
     if (backend && !readMemory)
     {
@@ -866,6 +869,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             skipTexture: services.skipTexture ?? null,
             probeTexture: services.probeTexture ?? null,
             fog: services.fog,
+            texelCache: services.texelCache ?? null,
             mips: services.mips,
             nanProbe: services.nanProbe === true,
             verifyDynamic: services.verifyDynamic === true,

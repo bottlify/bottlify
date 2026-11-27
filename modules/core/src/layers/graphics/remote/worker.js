@@ -43,7 +43,8 @@
  *                                    frames carry back; `frameLatency` the frames its
  *                                    presents may leave the GPU drawing (`latency.js`;
  *                                    absent, Direct3D's three, 0 no bound); `cache` the
- *                                    run's, which an OpenGL root keeps idle texels in
+ *                                    run's, which an OpenGL, Direct3D 8 or 9 root keeps
+ *                                    the texels it holds past a call in
  *   { type: 'memory', root, memory, number }  root `root`'s guest memory grew: the
  *                                    longer view, the `number`th, which the batches
  *                                    sent after its mark wait for (`KIND.MARK`)
@@ -581,9 +582,10 @@ export function serveGraphics(scope, deps){
         }
         /** What the played side says, on the root's ring back. @param {any} message */
         const post = message=>receiver?.post(message);
-        // The run's cache, where the root keeps what it holds of a program's
-        // textures while no draw needs them (`opengl/gpu.js` `spill`), under
-        // names of its own it lets go of when it ends.
+        // The run's cache, where the root keeps the texels it holds past a
+        // call (`internal/texel-store.js`: OpenGL's levels no draw needs yet,
+        // Direct3D 8 and 9's uploads waiting for their frame), under names of
+        // its own it lets go of when it ends.
         const texelCache = options.cacheLink
             ? channelSpace(options.cacheLink, options.cacheLink) : null;
         /**
@@ -693,6 +695,8 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D(FACTORIES[api], {
                 ...options,
+                cacheLink: undefined,
+                texelCache,
                 liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),

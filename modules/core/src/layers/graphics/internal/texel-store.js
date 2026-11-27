@@ -79,7 +79,7 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
     const counts = {
         put: 0, putBytes: 0,
         moved: 0, movedBytes: 0,
-        refused: 0, forgone: 0,
+        asking: 0, refused: 0, forgone: 0,
         taken: 0, takenBytes: 0,
         lost: 0,
         plainBytes: 0, cachedBytes: 0,
@@ -108,7 +108,10 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
     const move = (key, body, into)=>{
         const name = String(++names);
         body.name = name;
-        into.ask(name, body.length).then(granted=>{
+        counts.asking++;
+        into.ask(name, body.length).finally(()=>{
+            counts.asking--;
+        }).then(granted=>{
             if (bodies.get(key) !== body)
             {
                 if (granted)
@@ -255,7 +258,8 @@ export function createTexelStore({ cache = null, divergence = null, from = KEPT_
 
         /**
          * What the store holds and has done: bodies and their bytes in plain
-         * memory and in the cache; those put, moved into the cache, refused
+         * memory and in the cache; room asked for and not answered yet
+         * (`asking`); those put, moved into the cache, refused
          * room, whose room was let go of because they went first (`forgone`),
          * taken back (`takenBytes` copied out of the cache) and lost.
          */

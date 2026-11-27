@@ -66,7 +66,11 @@ flowchart TB
   a level kept as S3TC, about once a second to the store (`opengl/gpu.js` `spill`); nothing on
   the graphics thread holds them once they moved. The first draw's upload of a level it then lets
   go of reads them where they wait; any other reader of the level (a decode, a write in place, a
-  read-back) takes them back as they were, copied once out of the cache. A game loads
+  read-back) takes them back as they were, copied once out of the cache. A Direct3D 8 or 9
+  upload that waits in its frame's order (a level written while the frame being recorded
+  already samples it) hands its texels to the store as they stood, and the replay reads them
+  there; the frame lets them go with its arena (`d3d8/render.js` `releaseFrame`). An upload
+  that goes to the queue at once keeps nothing. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
   image (`glGetTexImage`) by the context that draws copies it back from the device, once what
