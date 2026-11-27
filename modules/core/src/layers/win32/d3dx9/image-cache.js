@@ -30,6 +30,7 @@
  */
 
 import { contentName } from '../../../system/hash.js';
+import { utf8 } from '../../../system/text.js';
 
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
 
@@ -56,10 +57,6 @@ import { contentName } from '../../../system/hash.js';
  * @property {boolean} cube
  * @property {Uint8Array[][]} faces  each face's levels
  */
-
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
 
 /**
  * Whether the bytes of `body` from `at` are `bytes`, compared in place.
@@ -112,7 +109,7 @@ export function createImageCache(space = KEEP_NOTHING){
      */
     const encode = (asked, file, plain)=>{
         const lengths = plain.faces.map(levels=>levels.map(level=>level.length));
-        const header = encoder.encode(JSON.stringify({ asked, file: file.length,
+        const header = utf8.encode(JSON.stringify({ asked, file: file.length,
             info: plain.info, w: plain.w, h: plain.h, depth: plain.depth, count: plain.count,
             target: plain.target, cube: plain.cube, lengths }));
         const levels = lengths.flat().reduce((sum, length)=>sum + length, 0);
@@ -146,7 +143,7 @@ export function createImageCache(space = KEEP_NOTHING){
             return null;
         }
         // The body is the cache's shared memory, which TextDecoder will not read.
-        const header = JSON.parse(decoder.decode(body.slice(4, 4 + length)));
+        const header = JSON.parse(utf8.decode(body.slice(4, 4 + length)));
         if (header.asked !== asked || header.file !== file.length
             || !holds(body, 4 + length, file))
         {

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../../../system/text.js';
+
 /**
  * A reader for the Distinguished Encoding Rules (ITU-T X.690), the encoding of
  * every certificate and signed message the verifier reads.
@@ -263,7 +265,7 @@ export function readString(node){
     }
     if (node.tag === TAG.UTF8_STRING)
     {
-        return new TextDecoder().decode(body);
+        return utf8.decode(body);
     }
     return String.fromCharCode(...body);
 }

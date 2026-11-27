@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf16be, utf16le, utf8 } from '../../../system/text.js';
+
 /**
  * The XML MSXML's DOM holds: a document parsed into nodes, and nodes written
  * back out as text.
@@ -71,25 +73,25 @@ const NAME_CHAR = /[A-Za-z0-9_:.\-·À-�]/;
 export function decodeDocument(bytes){
     if (bytes[0] === 0xff && bytes[1] === 0xfe)
     {
-        return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+        return utf16le.decode(bytes.subarray(2));
     }
     if (bytes[0] === 0xfe && bytes[1] === 0xff)
     {
-        return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+        return utf16be.decode(bytes.subarray(2));
     }
     if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)
     {
-        return new TextDecoder('utf-8').decode(bytes.subarray(3));
+        return utf8.decode(bytes.subarray(3));
     }
     if (bytes[0] === 0x3c && bytes[1] === 0)
     {
-        return new TextDecoder('utf-16le').decode(bytes);
+        return utf16le.decode(bytes);
     }
     const head = String.fromCharCode(...bytes.subarray(0, 200));
     const named = /encoding\s*=\s*["']([^"']+)["']/.exec(head)?.[1].toLowerCase() ?? 'utf-8';
     if (named === 'utf-8' || named === 'utf8')
     {
-        return new TextDecoder('utf-8').decode(bytes);
+        return utf8.decode(bytes);
     }
     let text = '';
     for (const byte of bytes)

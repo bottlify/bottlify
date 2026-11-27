@@ -16,6 +16,7 @@
  */
 
 import { guestFault, unterminated } from './faults.js';
+import { windows1252 } from '../../../system/text.js';
 
 /**
  * @typedef {Object} RawMemory
@@ -78,7 +79,7 @@ const CP1252_C1 = [
     0x0000, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
     0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x0000, 0x017e, 0x0178,
 ];
-const LATIN1 = new TextDecoder('latin1');
+const LATIN1 = windows1252;
 const C1 = /[\u0080-\u009f]/;
 const C1_ALL = /[\u0080-\u009f]/g;
 

@@ -15,6 +15,7 @@
 import { decode } from './protobuf.js';
 import { decompressZstd } from '../zstd.js';
 import { decodeLzma } from './lzma.js';
+import { utf8 } from '../system/text.js';
 
 /** @typedef {import('./protobuf.js').Schema} Schema */
 /** The manifest's sections, each a magic and (but the last) a length. */
@@ -267,7 +268,6 @@ export async function manifest(server, { depot, gid, code, key }, get){
     {
         throw new Error(`steam: manifest ${gid} of depot ${depot} has no payload or metadata`);
     }
-    const decoder = new TextDecoder();
     /** @type {ManifestFile[]} */
     const files = [];
     for (const mapping of payload.mappings)
@@ -277,7 +277,7 @@ export async function manifest(server, { depot, gid, code, key }, get){
         {
             const encrypted = Uint8Array.from(atob(name), c=>c.charCodeAt(0));
             const clear = await symmetricDecrypt(encrypted, key);
-            name = decoder.decode(clear).replace(/\0+$/, '');
+            name = utf8.decode(clear).replace(/\0+$/, '');
         }
         files.push({
             name,

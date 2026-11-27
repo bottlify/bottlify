@@ -27,6 +27,7 @@
 // system; a launcher clears them from here, as it opens the saves.
 export { clearTranslations } from './layers/cpu/internal/translation-store.js';
 import { replaceWhole } from './system/opfs-file.js';
+import { utf8 } from './system/text.js';
 // Everything this browser keeps of a bottle -- caches and saves -- listed and
 // removed by kind, for a launcher's storage screen.
 export { bottleStorage, clearBottleStorage, storageName } from './storage-budget.js';
@@ -71,7 +72,7 @@ const withLinks = (session, links)=>(links && links.length > 0 ? { ...session, l
 
 /** The links entry's bytes, or null when there are no links to carry. @param {Session} session */
 const linksBytes = session=>(session.links && session.links.length > 0
-    ? new TextEncoder().encode(JSON.stringify(session.links)) : null);
+    ? utf8.encode(JSON.stringify(session.links)) : null);
 
 /**
  * The one shape a session has inside the engine, from whatever a provider or
@@ -164,17 +165,16 @@ export const inflateRaw = bytes=>recode(bytes, 'deflate-raw', false);
 export async function packSession(session){
     const normal = normaliseSession(session);
     const { files, registry } = normal;
-    const encoder = new TextEncoder();
-    const parts = files.map(file=>({ name: encoder.encode(file.path), bytes: file.bytes }));
+    const parts = files.map(file=>({ name: utf8.encode(file.path), bytes: file.bytes }));
     if (registry)
     {
-        parts.push({ name: encoder.encode(REGISTRY_ENTRY),
-            bytes: encoder.encode(JSON.stringify(registry)) });
+        parts.push({ name: utf8.encode(REGISTRY_ENTRY),
+            bytes: utf8.encode(JSON.stringify(registry)) });
     }
     const links = linksBytes(normal);
     if (links)
     {
-        parts.push({ name: encoder.encode(LINKS_ENTRY), bytes: links });
+        parts.push({ name: utf8.encode(LINKS_ENTRY), bytes: links });
     }
     const size = parts.reduce((total, part)=>total + 8 + part.name.length + part.bytes.length, 4);
 
@@ -210,7 +210,6 @@ export async function unpackSession(packed){
         throw new Error('storage: this is not a packed session');
     }
 
-    const decoder = new TextDecoder();
     /** @type {SessionFile[]} */
     const files = [];
     let registry = null;
@@ -220,15 +219,15 @@ export async function unpackSession(packed){
     {
         const nameLength = view.getUint32(at, true);
         const byteLength = view.getUint32(at + 4, true);
-        const name = decoder.decode(raw.subarray(at + 8, at + 8 + nameLength));
+        const name = utf8.decode(raw.subarray(at + 8, at + 8 + nameLength));
         const start = at + 8 + nameLength;
         if (name === REGISTRY_ENTRY)
         {
-            registry = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
+            registry = JSON.parse(utf8.decode(raw.subarray(start, start + byteLength)));
         }
         else if (name === LINKS_ENTRY)
         {
-            links = JSON.parse(decoder.decode(raw.subarray(start, start + byteLength)));
+            links = JSON.parse(utf8.decode(raw.subarray(start, start + byteLength)));
         }
         else
         {
@@ -299,7 +298,7 @@ const ENTRY_MAGIC = 0x45544201;
  */
 const entryName = async path=>{
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256',
-        new TextEncoder().encode(path)));
+        utf8.encode(path)));
     return [...digest.subarray(0, 16)].map(byte=>byte.toString(16).padStart(2, '0')).join('');
 };
 
@@ -341,7 +340,7 @@ async function* entryFiles(folder){
 
 /** An entry's magic and name, which its bytes follow. @param {string} path */
 const entryHeader = path=>{
-    const name = new TextEncoder().encode(path);
+    const name = utf8.encode(path);
     const out = new Uint8Array(8 + name.length);
     const view = new DataView(out.buffer);
     view.setUint32(0, ENTRY_MAGIC, true);
@@ -461,7 +460,7 @@ export function opfsSession(key, directory){
         }
     };
     /** @param {any} session */
-    const registryBytes = session=>new TextEncoder().encode(JSON.stringify(session.registry));
+    const registryBytes = session=>utf8.encode(JSON.stringify(session.registry));
 
     /**
      * The folder an edit writes into, a session left in the one-file form moved
@@ -512,7 +511,7 @@ export function opfsSession(key, directory){
             return null;
         }
         const start = 8 + view.getUint32(4, true);
-        const path = new TextDecoder().decode(
+        const path = utf8.decode(
             new Uint8Array(await file.slice(8, start).arrayBuffer()));
         return { path, start };
     };
@@ -616,7 +615,6 @@ export function opfsSession(key, directory){
                 const file = await handle.getFile();
                 return unpackSession(new Uint8Array(await file.arrayBuffer()));
             }
-            const decoder = new TextDecoder();
             /** @type {SessionFile[]} */
             const files = [];
             let registry = null;
@@ -635,7 +633,7 @@ export function opfsSession(key, directory){
                         head.start + offset + length).arrayBuffer());
                 if (head.path === REGISTRY_ENTRY || head.path === LINKS_ENTRY)
                 {
-                    const read = JSON.parse(decoder.decode(await body()));
+                    const read = JSON.parse(utf8.decode(await body()));
                     if (head.path === REGISTRY_ENTRY)
                     {
                         registry = read;
@@ -668,7 +666,7 @@ export function opfsSession(key, directory){
             const normal = normaliseSession(session);
             const { files, registry } = normal;
             const links = linksBytes(normal);
-            const linksText = links ? new TextDecoder().decode(links) : null;
+            const linksText = links ? utf8.decode(links) : null;
             return inTurn(async()=>{
                 const dir = await open();
                 const folder = await dir.getDirectoryHandle(folderName, { create: true });

@@ -32,6 +32,7 @@ import { argumentsOf, splitArguments } from './command-line.js';
 import { ROOTS, importRegEntries, parseRegFile } from './regfile.js';
 import { readText } from './notepad.js';
 import { utf16, utf16z } from '../common/utf16.js';
+import { utf8 } from '../../../system/text.js';
 
 const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
 
@@ -310,7 +311,7 @@ export async function runReg(context){
     const dword = at=>new DataView(context.read(at, 4).buffer).getUint32(0, true);
     /** @param {string} text */
     const say = async text=>{
-        const bytes = new TextEncoder().encode(text);
+        const bytes = utf8.encode(text);
         const output = await kernel32('GetStdHandle', [STD_OUTPUT_HANDLE]);
         await kernel32('WriteFile', [output, context.bytes(bytes), bytes.length,
             context.block(4), 0]);
@@ -325,7 +326,7 @@ export async function runReg(context){
         {
             return false;
         }
-        return /^\s*y/i.test(new TextDecoder().decode(context.read(buffer, dword(read))));
+        return /^\s*y/i.test(utf8.decode(context.read(buffer, dword(read))));
     };
     /** @param {number} code */
     const failure = async code=>{

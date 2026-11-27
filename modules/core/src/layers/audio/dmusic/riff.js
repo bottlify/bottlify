@@ -23,8 +23,10 @@
  * is zero.
  */
 
+import { windows1252 } from '../../../system/text.js';
+
 /** A four-character code as text, so a chunk reads as what a person calls it. */
-const FOURCC = new TextDecoder('latin1');
+const FOURCC = windows1252;
 
 /**
  * @typedef {Object} Chunk

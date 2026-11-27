@@ -18,6 +18,7 @@
  */
 
 import { waitFor, wake } from '@bottlify/cellar';
+import { utf8 } from '../../../system/text.js';
 
 /**
  * Where each word lies, as indices into the channel's `Int32Array`. `EPOCH`
@@ -170,7 +171,7 @@ export function channelOf(buffer, bell = null, spin = SPIN_MS){
         flags: ()=>Atomics.load(words, Word.FLAGS),
         /** @param {unknown} what */
         write(what){
-            const bytes = new TextEncoder().encode(JSON.stringify(what));
+            const bytes = utf8.encode(JSON.stringify(what));
             if (bytes.length > TEXT_BYTES)
             {
                 throw new Error(`executor: ${bytes.length} bytes of text, the channel holds`
@@ -181,7 +182,7 @@ export function channelOf(buffer, bell = null, spin = SPIN_MS){
         },
         read(){
             // A shared view decodes through a copy: TextDecoder takes no shared memory.
-            return JSON.parse(new TextDecoder().decode(
+            return JSON.parse(utf8.decode(
                 text.slice(0, Atomics.load(words, Word.LENGTH))));
         },
     };

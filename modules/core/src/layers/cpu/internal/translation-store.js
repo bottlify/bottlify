@@ -30,6 +30,7 @@
 import { openSync, replaceWhole, writeAll, writeAt } from '../../../system/opfs-file.js';
 import { fnv1aString } from '../../../system/hash.js';
 import { frame, plain, unframe, unframeLater } from './record-frame.js';
+import { utf8 } from '../../../system/text.js';
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
 /**
@@ -367,7 +368,7 @@ export function fileNameOf(key){
 }
 
 /** @param {any} file */
-const textOf = async file=>new TextDecoder().decode(new Uint8Array(await file.arrayBuffer()));
+const textOf = async file=>utf8.decode(new Uint8Array(await file.arrayBuffer()));
 
 /** A generation's records or index, by the name `generationName` gives it. */
 const GENERATION_FILE = new RegExp(`^(${RECORDS}|${INDEX})\\.\\d+$`);
@@ -799,11 +800,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 needsOf.delete(region);
             }
         }
-        const indexBytes = new TextEncoder().encode([...bySession].sort((a, b)=>a[0] - b[0])
+        const indexBytes = utf8.encode([...bySession].sort((a, b)=>a[0] - b[0])
             .map(([number, lines])=>`# ${number}\n${lines.join('')}`).join('')
             + [...needsOf].map(([region, module])=>`= ${region} ${module}\n`).join(''));
         await replaceWhole(directory, generationName(INDEX, next), [indexBytes]);
-        await replaceWhole(directory, CURRENT, [new TextEncoder().encode(String(next))]);
+        await replaceWhole(directory, CURRENT, [utf8.encode(String(next))]);
         access?.close();
         const old = generation;
         generation = next;
@@ -856,7 +857,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                     // again is longer by any byte that was no UTF-8.
                     const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
                     indexEnd = bytes.length;
-                    const text = new TextDecoder().decode(bytes);
+                    const text = utf8.decode(bytes);
                     for (const line of text.split('\n'))
                     {
                         const parts = line.split(' ');
@@ -940,7 +941,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 dirty = false;
                 await Promise.resolve();
                 await flushRecords();
-                const bytes = new TextEncoder().encode(pendingLines.join(''));
+                const bytes = utf8.encode(pendingLines.join(''));
                 pendingLines = [];
                 const at = indexEnd;
                 indexEnd += bytes.length;
@@ -1426,7 +1427,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 }
                 if (identity)
                 {
-                    await replaceWhole(directory, SEEDED, [new TextEncoder().encode(identity)]);
+                    await replaceWhole(directory, SEEDED, [utf8.encode(identity)]);
                 }
                 return { taken: true, added: writes.length,
                     present: entries.length - writes.length };

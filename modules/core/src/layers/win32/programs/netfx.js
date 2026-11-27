@@ -23,6 +23,7 @@
 
 import { FRAMEWORK_LAYERS } from '../mscoree/need.js';
 import { FRAMEWORK_V4, SHIM_IMPLEMENTATION } from '../mscoree/functions.js';
+import { utf16le } from '../../../system/text.js';
 
 const MAX_PATH = 260;
 const INVALID_FILE_ATTRIBUTES = 0xffffffff;
@@ -45,7 +46,7 @@ export async function runFrameworkSetup(context){
 
     const folder = context.block(MAX_PATH * 2);
     const length = await kernel32('GetWindowsDirectoryW', [folder, MAX_PATH]);
-    const windows = new TextDecoder('utf-16le').decode(context.read(folder, length * 2));
+    const windows = utf16le.decode(context.read(folder, length * 2));
     // A 64-bit machine's Framework is both widths, and its layer carries both.
     const shim = `${windows}\\Microsoft.NET\\Framework${wide ? '64' : ''}\\${FRAMEWORK_V4}`
         + `\\${SHIM_IMPLEMENTATION}`;

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../../../system/text.js';
+
 /**
  * A library custom action of the other width, run in a custom action server:
  * a process of the library's own width (msiexec.exe -Embedding, as Windows
@@ -72,12 +74,10 @@ export function recordFrom(fields){
 export function createChannel(io){
     /** @type {Uint8Array} */
     let held = new Uint8Array(0);
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
     return {
         /** @param {any} message @returns {Promise<boolean>} */
         send: async message=>{
-            const body = encoder.encode(JSON.stringify(message));
+            const body = utf8.encode(JSON.stringify(message));
             const framed = new Uint8Array(4 + body.length);
             new DataView(framed.buffer).setUint32(0, body.length, true);
             framed.set(body, 4);
@@ -96,7 +96,7 @@ export function createChannel(io){
                     const length = new DataView(held.buffer, held.byteOffset).getUint32(0, true);
                     if (held.length >= 4 + length)
                     {
-                        const message = JSON.parse(decoder.decode(held.subarray(4, 4 + length)));
+                        const message = JSON.parse(utf8.decode(held.subarray(4, 4 + length)));
                         held = held.slice(4 + length);
                         return message;
                     }

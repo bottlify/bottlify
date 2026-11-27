@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf8 } from '../system/text.js';
+
 /**
  * QR codes, as ISO/IEC 18004 describes them, for the short URL a sign-in
  * shows: byte mode, error correction level M, versions 1 to 10 (up to 213
@@ -291,7 +293,7 @@ function penalty(grid){
  * @returns {boolean[][]}  Rows of modules, true for dark, without the quiet zone.
  */
 export function encodeQr(text){
-    const bytes = new TextEncoder().encode(text);
+    const bytes = utf8.encode(text);
     const version = VERSIONS_M.findIndex(([, blocks], index)=>index > 0
         && blocks.reduce((sum, n)=>sum + n, 0) * 8 >= 4 + (index < 10 ? 8 : 16) + bytes.length * 8);
     if (version < 0)

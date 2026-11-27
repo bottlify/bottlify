@@ -47,6 +47,7 @@ import {
     schedule, makeDirectories, create, readFile, writeFile, componentOf, installing,
     componentWide, registryPath, registryRoot, registryValue,
 } from './steps.js';
+import { windows1252 } from '../../../system/text.js';
 
 export {
     INSTALLMESSAGE, readFile, writeFile,
@@ -485,7 +486,7 @@ async function writeIniValues(engine){
         const action = Number(row[6] ?? 0);
         await schedule(engine, 'WriteIniValues', async()=>{
             const bytes = await readFile(host.files, path);
-            const text = bytes ? new TextDecoder('latin1').decode(bytes) : '';
+            const text = bytes ? windows1252.decode(bytes) : '';
             writeFile(host.files, path, encodeAnsi(editIni(text, section, key, value, action)));
         });
     }
@@ -846,7 +847,7 @@ async function appSearch(engine){
                         found = value.type === REG_DWORD
                             ? `#${new DataView(value.data.buffer, value.data.byteOffset, 4)
                                 .getUint32(0, true)}`
-                            : new TextDecoder('latin1').decode(value.data).replace(/\0[^]*$/, '');
+                            : windows1252.decode(value.data).replace(/\0[^]*$/, '');
                     }
                 }
             }

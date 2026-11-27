@@ -20,6 +20,7 @@ import { createEmptyDatabase } from './database.js';
 import { INSTALLSTATE, createSession } from './session.js';
 import { runSequence } from './actions.js';
 import { createRegistration, valueText } from './registration.js';
+import { utf8, windows1252 } from '../../../system/text.js';
 
 /** @type {import('./session.js').Machine} */
 export const MACHINE = {
@@ -92,7 +93,7 @@ export async function machine(folders = [], files = {}){
     for (const [path, content] of Object.entries(files))
     {
         const node = volume.open(path, { write: true, create: true });
-        volume.write(node, 0, typeof content === 'string' ? new TextEncoder().encode(content)
+        volume.write(node, 0, typeof content === 'string' ? utf8.encode(content)
             : content);
         volume.close(node);
     }
@@ -151,7 +152,7 @@ export async function text(files, path){
     const node = files.open(path, { read: true });
     const bytes = await files.read(node, 0, stat.size);
     files.close(node);
-    return new TextDecoder('latin1').decode(bytes);
+    return windows1252.decode(bytes);
 }
 
 /**

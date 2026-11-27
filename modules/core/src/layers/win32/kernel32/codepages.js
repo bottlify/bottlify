@@ -27,6 +27,10 @@
  * WC_NO_BEST_FIT_CHARS forbids it; otherwise the default character.
  */
 
+import { decoderFor } from '../../../system/text.js';
+
+/** @typedef {ReturnType<typeof decoderFor>} Decoder */
+
 /** Windows' code page identifiers and the decoder that reads each. */
 const DECODERS = new Map([
     [874, 'windows-874'], [1250, 'windows-1250'], [1251, 'windows-1251'],
@@ -144,7 +148,7 @@ export function codePages(tables){
     };
 }
 
-/** @param {number} id @returns {TextDecoder | null} */
+/** @param {number} id @returns {Decoder | null} */
 const decoderOf = id=>{
     const label = DECODERS.get(id);
     if (label === undefined)
@@ -153,7 +157,7 @@ const decoderOf = id=>{
     }
     try
     {
-        return new TextDecoder(label, { fatal: true });
+        return decoderFor(label, { fatal: true });
     }
     catch (e){
         void e;
@@ -166,7 +170,7 @@ const decoderOf = id=>{
  * 0..0xff; for a double-byte page each pair's at 0x100 + (lead << 8 | trail).
  * UNDEFINED where there is none.
  *
- * @param {number} id @param {TextDecoder} decoder @param {Set<number>} leads
+ * @param {number} id @param {Decoder} decoder @param {Set<number>} leads
  */
 function forwardTable(id, decoder, leads){
     const table = new Uint16Array(leads.size === 0 ? 0x100 : 0x10100).fill(UNDEFINED);
@@ -252,7 +256,7 @@ function build(id, tables){
         }
     }
     const forward = tables.table(`codepage/${id}`, Uint16Array,
-        ()=>forwardTable(id, /** @type {TextDecoder} */ (decoderOf(id)), leads));
+        ()=>forwardTable(id, /** @type {Decoder} */ (decoderOf(id)), leads));
     const reverse = tables.table(`codepage/${id}/reverse`, Uint16Array,
         ()=>forward.read(reverseTable));
     const double = leads.size !== 0;

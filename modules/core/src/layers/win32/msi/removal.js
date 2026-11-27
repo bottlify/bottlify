@@ -29,6 +29,7 @@ import {
 import { editIni, undoIniAction, INI_ACTION } from './ini.js';
 import { environmentKey, environmentRow, removedValue } from './environment.js';
 import { removeKeyTree, valueText } from './registration.js';
+import { windows1252 } from '../../../system/text.js';
 
 /** @typedef {import('./engine.js').Engine} Engine */
 
@@ -332,7 +333,7 @@ async function editIniFile(engine, path, section, key, value, action){
     {
         return;
     }
-    const text = editIni(new TextDecoder('latin1').decode(bytes), section, key, value, action);
+    const text = editIni(windows1252.decode(bytes), section, key, value, action);
     if (text.trim() === '')
     {
         deleteFile(files, path);

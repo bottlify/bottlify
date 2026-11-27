@@ -26,6 +26,7 @@ import { NAME_STR, stringToName } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
 import { fromBase64, toBase64 } from '../../../system/base64.js';
 import { utf16z } from '../common/utf16.js';
+import { utf8 } from '../../../system/text.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_DATA = 13;
@@ -323,7 +324,7 @@ export function createEncodingFunctions(host){
     // The process's sealing key, and the one every process of the machine
     // shares for the cross-process and same-logon flags.
     const processKey = crypto.getRandomValues(new Uint8Array(32));
-    const machineKey = new TextEncoder().encode('crypt32 CryptProtectMemory machine');
+    const machineKey = utf8.encode('crypt32 CryptProtectMemory machine');
     /**
      * XORs a buffer with a keystream from the key: protecting and unprotecting
      * are the same operation, and the length never changes, as the API needs.

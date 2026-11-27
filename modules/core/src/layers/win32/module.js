@@ -243,6 +243,7 @@ import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 import { utf16z } from './common/utf16.js';
 import { runTables } from './common/run-tables.js';
 import { fromBase64 } from '../../system/base64.js';
+import { utf16le, utf8 } from '../../system/text.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
 // 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
@@ -5383,7 +5384,7 @@ export function createWin32Module(){
                         contentType: extension=>{
                             const key = hive.open(hive.root(HKEY_CLASSES_ROOT), extension);
                             const value = key ? hive.getValue(key, 'Content Type') : null;
-                            return value ? new TextDecoder('utf-16le').decode(value.data)
+                            return value ? utf16le.decode(value.data)
                                 .replace(/\0[^]*$/, '') || null : null;
                         } }),
                     // A control that loads its content by URL - Flash Player
@@ -5614,7 +5615,7 @@ export function createWin32Module(){
                         const strings = [service.name, service.displayName, service.binary,
                             service.startName ?? null];
                         const encoded = strings.map(text=>(text === null ? null
-                            : new TextEncoder().encode(`${text}\0`)));
+                            : utf8.encode(`${text}\0`)));
                         const size = encoded.reduce((sum, bytes)=>sum + (bytes?.length ?? 0), 0);
                         const block = heap.allocate(Math.max(size, 1));
                         if (!block)
@@ -6437,7 +6438,7 @@ export function createWin32Module(){
                                     {
                                         const written = libraries['KERNEL32.dll']?.GetLocaleInfoW
                                             ?.handler([LOCALE_USER_DEFAULT, type, at, length]) ?? 0;
-                                        return written > 1 ? new TextDecoder('utf-16le')
+                                        return written > 1 ? utf16le
                                             .decode(readMemory(at, (written - 1) * 2)) : null;
                                     }
                                     finally

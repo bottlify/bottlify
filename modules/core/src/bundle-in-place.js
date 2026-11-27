@@ -23,6 +23,7 @@ import {
 import { crc32 } from './system/hash.js';
 import { createSha256 } from './layers/win32/crypto/digest.js';
 import { writeAll } from './system/opfs-file.js';
+import { utf8 } from './system/text.js';
 
 /**
  * Random access to the container's bytes, as a worker's
@@ -465,7 +466,7 @@ export async function finishBundle(handle, files, directories,
             ...digest ? { sha256: hex(digest.digest()) } : {} });
     }
 
-    const indexBytes = new TextEncoder().encode(
+    const indexBytes = utf8.encode(
         JSON.stringify({ blockSize, files: index, directories, blocks }));
     await handle.truncate(end + indexBytes.length);
     writeAll(handle, indexBytes, end);

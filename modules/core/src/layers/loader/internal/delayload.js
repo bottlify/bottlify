@@ -32,6 +32,7 @@
  */
 
 import { readMapped } from './pe.js';
+import { utf8 } from '../../../system/text.js';
 
 const DIR_DELAY_IMPORT = 13;
 
@@ -74,7 +75,7 @@ export function readDelayImports(bytes, image){
     const cString = rva=>{
         const text = readMapped(bytes, image, rva, MAX_NAME);
         const end = text.indexOf(0);
-        return new TextDecoder().decode(text.subarray(0, end < 0 ? MAX_NAME : end));
+        return utf8.decode(text.subarray(0, end < 0 ? MAX_NAME : end));
     };
 
     /** @type {DelayLoadedDll[]} */
