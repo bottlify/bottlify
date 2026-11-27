@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import { createReader, openKeeper } from '@bottlify/cellar';
 import { formRegion } from '../region.js';
-import { createEmitCache, relinkBatch } from './emit-built.js';
+import { relinkBatch } from './emit-built.js';
 import { entryOf, keptEmitCache, keptName, putAll, readEntry, readingSpace } from './kept.js';
 import { ownLayout } from './layout.js';
 import { machine, piece, translateUntil, untilTranslatorsLoaded } from '../testing/seeded-pieces.js';
@@ -147,17 +147,19 @@ function random(seed){
     };
 }
 
-// The contract against the thread's own cache: seeded runs of keeps and takes,
-// keys and shapes drawn from small sets so that takes hit, miss on the shape
-// and keep again; with room for all, the run's cache answers each take as the
-// thread's own does.
+// The contract against a plain map of the last keep under each key: seeded
+// runs of keeps and takes, keys and shapes drawn from small sets so that takes
+// hit, miss on the shape and keep again; with room for all, the run's cache
+// answers each take as the map does.
 for (const seed of [11, 12, 13, 14])
 {
-    test(`keeps and takes answer as the thread's own cache does (seed ${seed})`, async()=>{
+    test(`keeps and takes answer as the last keep under each key (seed ${seed})`, async()=>{
         const next = random(seed);
         const run = await cellarOf();
         const ours = keptEmitCache(run.space);
-        const local = createEmitCache();
+        /** @type {Map<string, { shape: number[], kept: import('./kept.js').KeptFunction }>} */
+        const last = new Map();
+        let lastHits = 0;
         for (let step = 0; step < 2000; step++)
         {
             const key = `ctx:${Math.floor(next() * 60)}:${next() < 0.1 ? 'clé' : 'h'}`;
@@ -165,19 +167,20 @@ for (const seed of [11, 12, 13, 14])
             if (next() < 0.4)
             {
                 const n = Math.floor(next() * 1000);
-                local.keep(key, shape, kept(n));
+                last.set(key, { shape, kept: kept(n) });
                 ours.keep(key, shape, kept(n));
             }
             else
             {
-                // The thread's own cache hands back its entry, its shape and size beside.
-                const theirs = local.take(key, shape);
-                assert.deepEqual(ours.take(key, shape), theirs && { typeIndex: theirs.typeIndex,
-                    locals: theirs.locals, body: theirs.body, hints: theirs.hints,
-                    region: theirs.region }, `step ${step}`);
+                const one = last.get(key);
+                const theirs = one?.shape.length === shape.length
+                    && one.shape.every((value, at)=>value === shape[at])
+                    ? one.kept : undefined;
+                lastHits += Number(theirs !== undefined);
+                assert.deepEqual(ours.take(key, shape), theirs, `step ${step}`);
             }
         }
-        assert.equal(ours.hits, local.hits);
+        assert.equal(ours.hits, lastHits);
         assert.ok(ours.hits > 100);
         run.close();
     });
@@ -226,9 +229,9 @@ function relinkOf(name, count){
 // The gate of the run's cache (a second path beside emitting every function):
 // seeded sequences of batches - regions of the benchmark programs in random
 // subsets and orders, some checked, some for the wide precision - emitted with
-// no cache, with a cache of one thread's own, and through the run's cache by
-// three translators in turn, one that writes and two that read and hand their
-// keeps over; each batch's module and answers alike in all three.
+// no cache and through the run's cache by three translators in turn, one that
+// writes and two that read and hand their keeps over; each batch's module and
+// answers alike in both.
 for (const seed of [1, 2, 3, 4, 5, 6])
 {
     test(`batches through the run's cache three translators share are the ones emitted afresh`
@@ -239,7 +242,6 @@ for (const seed of [1, 2, 3, 4, 5, 6])
         const run = await cellarOf();
         const readers = [run.readOnly(), run.readOnly()];
         const shared = [keptEmitCache(run.space), ...readers.map(space=>keptEmitCache(space))];
-        const local = createEmitCache();
         let hits = 0;
         for (let batch = 0; batch < 12; batch++)
         {
@@ -256,10 +258,8 @@ for (const seed of [1, 2, 3, 4, 5, 6])
             hits += cache.hits - before;
             // A reader's keeps reach the run's cache with its answer.
             readers.forEach(space=>putAll(run.space, space.taken()));
-            const viaLocal = relinkBatch(relink, layout, FEATURES, options, local);
             assert.deepEqual(viaRun.module, fresh.module, `batch ${batch}: the run's cache`);
             assert.deepEqual(viaRun.results, fresh.results, `batch ${batch}: its answers`);
-            assert.deepEqual(viaLocal.module, fresh.module, `batch ${batch}: local`);
         }
         assert.ok(hits > 0, 'the translators took one another\'s functions');
         run.close();

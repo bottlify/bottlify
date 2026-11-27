@@ -72,28 +72,11 @@ import { ModuleBuilder } from '../wasm/encoder.js';
 /**
  * Region functions already emitted, kept by the module's context, the region's
  * entry and hash, and what its job asked of the emitter (`jobKey`); a hit must
- * also match the region's `shapeOf`. Kept in this thread (`createEmitCache`) or
- * in the run's cache every thread of the run shares (`keptEmitCache`).
+ * also match the region's `shapeOf`. Kept in the run's cache every thread of
+ * the run shares (`keptEmitCache`), and nowhere else.
  *
- * @typedef {Object} EmitCache
- * @property {(signature: string) => string} context  what keys name a module's context by
- * @property {(key: string, shape: number[]) => KeptFunction | undefined} take
- * @property {(key: string, shape: number[], kept: KeptFunction) => void} keep
- * @property {number} hits  the functions this cache handed back
- */
-
-/**
- * @typedef {EmitCache & {
- *     kept: Map<string, KeptFunction & { shape: Float64Array, size: number }>,
- *     contexts: Map<string, number>, bytes: number, limit: number }} LocalEmitCache
- *     kept: the least recently used first, `region` shared by every batch that takes the
- *     function (nothing writes it); contexts: `contextKey` → the number keys name it by;
- *     bytes: the sizes of what is kept
- */
-
-/**
  * A region's function is a pure function of the formed region, the x87 top and
- * shape test it is compiled for, and the module it is emitted into -- and a
+ * shape test it is compiled for, and the module it is emitted into - and a
  * module prepared with the same layout, features and options indexes its types,
  * imports, helpers and transfer function alike, whatever other regions it
  * holds. So a relink or a merge, which emits running regions again into a
@@ -102,56 +85,12 @@ import { ModuleBuilder } from '../wasm/encoder.js';
  * of them again. The region is still formed from the pages first, which is the
  * check that its bytes are what they were.
  *
- * @param {number} [limit]  bytes of functions kept, the least recently used going first
- * @returns {LocalEmitCache}
+ * @typedef {Object} EmitCache
+ * @property {(signature: string) => string} context  what keys name a module's context by
+ * @property {(key: string, shape: number[]) => KeptFunction | undefined} take
+ * @property {(key: string, shape: number[], kept: KeptFunction) => void} keep
+ * @property {number} hits  the functions this cache handed back
  */
-export function createEmitCache(limit = 48 << 20){
-    /** @type {LocalEmitCache} */
-    const cache = {
-        kept: new Map(), contexts: new Map(), bytes: 0, limit, hits: 0,
-        context(signature){
-            const number = cache.contexts.get(signature) ?? cache.contexts.size;
-            cache.contexts.set(signature, number);
-            return String(number);
-        },
-        take(key, shape){
-            const kept = cache.kept.get(key);
-            if (kept === undefined || !sameShape(kept.shape, shape))
-            {
-                return undefined;
-            }
-            cache.kept.delete(key);
-            cache.kept.set(key, kept);
-            cache.hits++;
-            return kept;
-        },
-        keep(key, shape, { typeIndex, locals, body, hints, region }){
-            const size = key.length + shape.length * 8 + body.length + locals.length * 8
-                + hints.length * 8 + region.labels.length * 32 + 256;
-            const old = cache.kept.get(key);
-            if (old !== undefined)
-            {
-                cache.kept.delete(key);
-                cache.bytes -= old.size;
-            }
-            // The shape as a typed array: guest addresses past 2^30 are not small
-            // integers, and an array of them is an object per address to the collector.
-            cache.kept.set(key, { typeIndex, locals, body, hints, region,
-                shape: Float64Array.from(shape), size });
-            cache.bytes += size;
-            for (const [oldest, one] of cache.kept)
-            {
-                if (cache.bytes <= cache.limit)
-                {
-                    break;
-                }
-                cache.kept.delete(oldest);
-                cache.bytes -= one.size;
-            }
-        },
-    };
-    return cache;
-}
 
 /**
  * What a module's region functions read of the module besides their region: the
@@ -239,22 +178,6 @@ function jobKey(job){
         }
     }
     return key;
-}
-
-/** @param {Float64Array} kept @param {number[]} shape */
-function sameShape(kept, shape){
-    if (kept.length !== shape.length)
-    {
-        return false;
-    }
-    for (let i = 0; i < shape.length; i++)
-    {
-        if (kept[i] !== shape[i])
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 /**
