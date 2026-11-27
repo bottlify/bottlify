@@ -10,6 +10,7 @@ import { registerStandardEffects } from './dsound/effects.js';
 import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
+import { TABLE_BYTES } from './output/mix.js';
 import { createMp3Provider } from './asi/provider.js';
 import { createMinimp3Decoder } from './asi/minimp3.js';
 import { splitFrames } from './asi/mp3.js';
@@ -38,6 +39,11 @@ const DSSCL_WRITEPRIMARY = 4;
  *   publishing into nowhere, which is what a build with no bridge behind it --
  *   a test, an inspection of the configuration -- should get.
  *
+ * The output's memory - the table the mixer writes and the device reads - is
+ * held in the run's cache (`cache`), where every byte the run holds is counted
+ * and budgeted: one segment of it, for as long as the output stands. A machine
+ * with no cache around it makes a buffer of its own, and says so.
+ *
  * The mixer is where sound leaves. It is host-independent on purpose: it adds
  * every open source together, converts to one format, and writes ahead into a
  * ring in shared memory. What turns that into something audible is a WebAudio
@@ -50,6 +56,9 @@ const DSSCL_WRITEPRIMARY = 4;
  * device that is not consuming looks like from inside a program, and is
  * therefore the honest thing for it to look like from inside this one.
  */
+
+/** Outputs this thread's machines held in the run's cache, each under a name of its own. */
+let outputsHeld = 0;
 
 /** The audio layer's module for one graph; see `defaultModules`. */
 export function createAudioModule(){
@@ -68,7 +77,7 @@ export function createAudioModule(){
     return {
         name: 'audio',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory']),
+        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'cache']),
 
         /**
          * @param {any} config
@@ -144,6 +153,34 @@ export function createAudioModule(){
             // DirectSound buffers are read out. Whoever drives the machine reaches
             // the mixer directly, so hooking this anywhere else in this module
             // would leave it never called.
+            // A new output's memory, held in the run's cache; the output a
+            // machine inherits is held already.
+            /** @type {import('./output/mixer.js').SoundMemory | undefined} */
+            let made;
+            if (!config?.memory?.table)
+            {
+                /** @type {{ bytes: Uint8Array, release: () => void } | null} */
+                let held = null;
+                try
+                {
+                    held = host.requireApi('cache').space('sound')
+                        .hold?.(`output/${++outputsHeld}`, TABLE_BYTES) ?? null;
+                }
+                catch {
+                    // A build with the cache switched off: its stub refuses the
+                    // call, and the output is a buffer of its own, said below.
+                }
+                if (held)
+                {
+                    made = { table: held.bytes, release: held.release };
+                }
+                else
+                {
+                    config?.divergence?.('audio', 'the sound output has no room in the run\'s cache'
+                        + ' (or there is none): its table is a buffer of its own, outside the'
+                        + ' run\'s budget');
+                }
+            }
             const mixer = createMixer({
                 sampleRate: config?.sampleRate,
                 fill: ()=>feedBuffers(),
@@ -151,6 +188,7 @@ export function createAudioModule(){
                 // already handed whoever reads its far end. Absent on the first
                 // process, which makes its own.
                 memory: config?.memory,
+                made,
                 // A process beside another on the same output, not in its place.
                 beside: config?.beside,
             });

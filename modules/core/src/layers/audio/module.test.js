@@ -26,6 +26,18 @@ import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
 import { withPointers } from '../memory/pointers.fixture.js';
+import { testCache } from '../cache/testing.fixture.js';
+
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
 
 /** DSBCAPS_CTRLFREQUENCY, CTRLPAN and CTRLVOLUME together. */
 const DSBCAPS_CTRLDEFAULT = 0x000000e0;
@@ -122,10 +134,11 @@ function fixture(){
 /**
  * A module with one playing sound buffer full of something to hear.
  *
- * @param {{ silent?: boolean, drained?: boolean, memory?: { table: ArrayBufferLike } }}
- *     [options]
+ * @param {{ silent?: boolean, drained?: boolean, memory?: any, cache?: any,
+ *     divergence?: (api: string, detail: string) => void }} [options]
+ *     `cache`: the run's cache the module is given (none: a machine built alone)
  */
-async function playing({ silent = false, drained = true, memory } = {}){
+async function playing({ silent = false, drained = true, memory, cache, divergence } = {}){
     const f = fixture();
     /** @type {number[]} */
     const signalled = [];
@@ -133,6 +146,7 @@ async function playing({ silent = false, drained = true, memory } = {}){
         ...f.config,
         drained,
         memory,
+        ...(divergence ? { divergence } : {}),
         /** @param {number} handle */
         signal: handle=>signalled.push(handle),
     }, {
@@ -146,6 +160,10 @@ async function playing({ silent = false, drained = true, memory } = {}){
             if (name === 'win32')
             {
                 return {};
+            }
+            if (name === 'cache')
+            {
+                return cache ?? { space: ()=>({ hold: ()=>null }) };
             }
             assert.equal(name, 'memory');
             return f.memory;
@@ -194,7 +212,7 @@ function playingVoices(f){
     const lengths = [];
     for (let slot = 0; slot < SLOTS; slot++)
     {
-        const header = new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32);
+        const header = tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32);
         if (Atomics.load(header, KIND) === KIND_DMA && Atomics.load(header, PLAYING) !== 0)
         {
             lengths.push(Atomics.load(header, LENGTH));
@@ -212,19 +230,56 @@ function playingVoices(f){
 function deviceReads(f, ms){
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     for (let at = 0; at < Math.ceil(outputRate * ms / 1000 / 128); at++)
     {
         mixBlock({ global, slots, seams, block, blockFrames: 128, outputRate, arena });
     }
 }
+
+test('the sound output is memory held in the run\'s cache: counted there, written in place, '
+    + 'given back when the output closes', async()=>{
+    const run = await testCache({ budget: 64 << 20, segmentBytes: 16 << 20 });
+    const f = await playing({ cache: { space: (/** @type {string} */ name)=>run.space(name) } });
+    const output = f.api.output();
+    const { table } = output.memory;
+    assert.deepEqual(Object.keys(output.memory), ['table'],
+        'what crosses to a worker: the table alone');
+    assert.ok(table instanceof Uint8Array, 'a view of memory, not a buffer of its own');
+    assert.ok(run.keeper.segmentBuffers().includes(/** @type {any} */ (table.buffer)),
+        'in one of the run cache\'s segments');
+    assert.equal(run.keeper.under('sound/').hotBytes, table.byteLength, 'counted under sound/');
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    assert.deepEqual(playingVoices(f), [BUFFER_BYTES], 'a voice in it, read where it lies');
+    // Many sweeps past every idle and abandon time: still the output's.
+    for (let i = 0; i < 20; i++)
+    {
+        run.clock.time += 600_000;
+        run.keeper.sweep();
+    }
+    assert.equal(run.keeper.under('sound/').hotBytes, table.byteLength, 'never taken back');
+    output.release();
+    assert.equal(run.keeper.under('sound/').bodies, 0, 'and given back once released');
+});
+
+test('with no cache the output is a buffer of its own, and that is said once', async()=>{
+    /** @type {string[]} */
+    const said = [];
+    const f = await playing({ divergence: (api, detail)=>said.push(`${api}: ${detail}`) });
+    assert.ok(f.api.output().memory.table instanceof Uint8Array);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.api.pump();
+    assert.deepEqual(playingVoices(f), [BUFFER_BYTES], 'and it plays');
+    assert.equal(said.filter(line=>/run's cache/.test(line)).length, 1, said.join('\n'));
+});
 
 test('a process that replaces another mixes into the same sound output', async()=>{
     // The table is the machine's, not the program's: the page was handed it
@@ -271,12 +326,12 @@ test('with shared memory, a playing buffer is a sound card\'s voice over the buf
         loud.api.pump();
 
         const table = loud.api.output().table;
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
         assert.equal(Atomics.load(header, KIND), KIND_DMA, 'a voice, not a queue');
         assert.equal(Atomics.load(header, LENGTH), BUFFER_BYTES, 'the whole buffer');
         assert.equal(Atomics.load(header, PLAYING), 1);
         assert.equal(Atomics.load(header, LOOPING), 1);
-        const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+        const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
         const base = Atomics.load(header, BASE);
         assert.ok(arena.subarray(base, base + BUFFER_BYTES).every(byte=>byte === 0x40),
             'byte-equal to what the guest wrote');
@@ -290,7 +345,8 @@ test('with shared memory, a buffer\'s voice plays from where Play found the curs
     // 4-6 ms short).
     const loud = await playing();
     loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
-    const header = new Int32Array(loud.api.output().table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, loud.api.output().table,
+        slotHeaderOffset(0), SLOT_HEADER_INT32);
     assert.equal(Atomics.load(header, KIND), KIND_DMA, 'the voice is there at Play');
     assert.equal(Atomics.load(header, PLAYING) !== 0, true);
     loud.advance(5);
@@ -305,9 +361,9 @@ test('with shared memory, a buffer\'s pan reaches its voice', async()=>{
     f.api.pump();
 
     const table = f.api.output().table;
-    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(2 * 2);
     resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
         seam: createSeam() });
@@ -321,9 +377,9 @@ test('with shared memory, a volume or a pan changed while the buffer plays reach
     f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
     f.api.pump();
     const table = f.api.output().table;
-    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const heard = ()=>{
         const block = new Float32Array(2 * 2);
         resampleInto({ block, blockFrames: 2, header, pcm, arena, outputRate: 48000,
@@ -354,7 +410,8 @@ test('with shared memory, a retuned buffer\'s slot reads at its new rate', async
     f.advance(20);
     f.api.pump();
 
-    const header = new Int32Array(f.api.output().table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, f.api.output().table,
+        slotHeaderOffset(0), SLOT_HEADER_INT32);
     assert.equal(Atomics.load(header, SLOT_RATE), 44100);
 });
 
@@ -370,13 +427,13 @@ test('with shared memory, a stalled engine thread is not heard: the device plays
 
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     // Three hundred milliseconds of device blocks, and not one pump.
     const blocks = Math.ceil(outputRate * 0.3 / 128);
@@ -407,13 +464,13 @@ test('with shared memory, what the device plays and nobody wrote is counted stal
     f.api.pump();
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     for (let at = 0; at < Math.ceil(outputRate * 0.3 / 128); at++)
     {
@@ -456,8 +513,8 @@ test('with shared memory, a released DirectSound buffer frees its slot: 40 over 
         // the slot back to STATE_FREE; every track in this test lands on
         // slot 0, the sole free slot each time.
         const table = f.api.output().table;
-        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
-        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        const header = tableView(Int32Array, table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const pcm = tableView(Uint8Array, table, slotPcmOffset(0), SLOT_BYTES);
         resampleInto({
             block: new Float32Array(2), blockFrames: 1, header, pcm,
             outputRate: f.api.output().sampleRate, seam: createSeam(),
@@ -627,13 +684,13 @@ async function refillAcrossAStall(stallMs){
     const [held] = f.api.buffers();
     const table = f.api.output().table;
     const outputRate = f.api.output().sampleRate;
-    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, table, 0, GLOBAL_HEADER_INT32);
     const slots = Array.from({ length: SLOTS }, (_, slot)=>({
-        header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-        pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        header: tableView(Int32Array, table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+        pcm: tableView(Uint8Array, table, slotPcmOffset(slot), SLOT_BYTES),
     }));
     const seams = slots.map(()=>createSeam());
-    const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
+    const arena = tableView(Uint8Array, table, ARENA_OFFSET, ARENA_BYTES);
     const block = new Float32Array(128 * 2);
     const bytesPerMs = RATE * CHANNELS * (BITS / 8) / 1000;
     const LOCK_AT = 0x380;

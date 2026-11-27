@@ -26,7 +26,7 @@ flowchart TB
     DM["DirectMusic: tracks"]
     MX["Mixer<br/>output/mixer.js"]
   end
-  TB["<b>Shared memory</b><br/>voice table:<br/>64 slots, each a 128-byte header<br/>and a 64 KiB ring,<br/>and a copy arena, 16 MiB"]
+  TB["<b>Run cache, held memory</b><br/>voice table, 16 MiB:<br/>64 slots, each a 128-byte header<br/>and a 64 KiB ring,<br/>and a copy arena, 12 MiB"]
   RD["<b>AudioWorklet</b><br/>reads on its own clock,<br/>resamples, mixes<br/>output/mix.js"]
   DS --> DB
   WO --> WM
@@ -38,6 +38,13 @@ flowchart TB
   RD --> SPK["Speakers"]
 ```
 
+- **The table's memory** is the run's cache's (Cellar): 16 MiB held whole under `sound/output/<n>`
+  for as long as the output stands (`hold`), counted in the cache's budget and its figures
+  (`runCache().spaces`), never taken back, cooled or moved. The engine writes it and the AudioWorklet
+  reads it in place; the page, a rebuilt machine and a process in a worker are handed the table
+  (`{ table }`, a view of that memory). A process that runs beside another with an output of its own
+  gives its table back as it goes. A machine with no cache around it (a layer built alone) makes a
+  buffer of its own and says so (`divergence`).
 - **A voice** is a slot in the table: a header of 32 words (`RATE`, `CHANNELS`, `BITS`, `GAIN`, the
   left and right cut, `POSITION`, `LOOPING`, `PLAYING`, `LAPS` and others) plus a copy of the buffer
   in the arena. When the engine first sees a buffer playing, it copies it whole; after that, only

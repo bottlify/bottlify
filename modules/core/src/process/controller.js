@@ -1050,6 +1050,8 @@ export function processController(deps){
             takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
+            /** Lets go of the output's memory, where this process made it: it goes. */
+            release: ()=>core.api('audio').output().release?.(),
             format: ()=>{
                 const mixer = core.api('audio').output();
                 return { sampleRate: mixer.sampleRate, channels: mixer.channels };

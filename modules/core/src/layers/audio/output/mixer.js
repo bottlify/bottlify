@@ -47,6 +47,14 @@ const OUTPUT_CHANNELS = 2;
 const sampleCodeOf = format=>format.bitsPerSample | (format.float ? FLOAT_SAMPLES : 0);
 
 /**
+ * A sound output's memory: the track table (`TABLE_BYTES`), a view of memory
+ * shared with whoever plays it, and what lets it go once the output closes.
+ *
+ * @typedef {{ table: Uint8Array, release?: () => void }} SoundMemory
+ *     `release` only where it is made (`made`); what crosses to a worker is `{ table }`
+ */
+
+/**
  * The mixer over a track table (`createSharedMixer`).
  *
  * `fill` is asked for more sound before each mix. A wave device pushes its
@@ -60,10 +68,15 @@ const sampleCodeOf = format=>format.bitsPerSample | (format.float ? FLOAT_SAMPLE
  * replaced, not the device, and whoever reads the far end -- a worklet, a
  * person's own sound card -- still holds it.
  *
+ * `made` is memory made for a new output (`SoundMemory`, the run's cache
+ * holds it); with neither, the mixer makes a buffer of its own, for a mixer
+ * with no run around it.
+ *
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
- * @param {{ table: ArrayBufferLike }} [options.memory]
+ * @param {SoundMemory} [options.memory]
+ * @param {SoundMemory} [options.made]
  * @param {{ arena: [number, number] | null }} [options.beside]
  */
 export function createMixer(options = {}){
@@ -209,16 +222,34 @@ export function convert(pcm, format, rate, state){
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
- * @param {{ table: ArrayBufferLike }} [options.memory]
+ * @param {SoundMemory} [options.memory]
+ * @param {SoundMemory} [options.made]
  * @param {{ arena: [number, number] | null }} [options.beside]
  *     A process beside another on the same table rather than in its place:
  *     the other's slots are left as they are, and the arena this one mirrors
  *     its voices in is the span the other lent it, or none.
  */
-function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, beside } = {}){
-    const buffer = memory?.table ?? allocateTable();
+function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, made, beside } = {}){
     const isFresh = !memory?.table;
-    const global = new Int32Array(buffer, 0, GLOBAL_HEADER_INT32);
+    /** @type {SoundMemory} */
+    const kept = memory?.table ? memory : made ?? { table: new Uint8Array(allocateTable()) };
+    const table = kept.table;
+    /** What lets the memory go, where this mixer's output was made over it (`release`). */
+    let owned = kept === made ? made.release : undefined;
+    const { buffer, byteOffset } = table;
+    if (isFresh)
+    {
+        // Memory held for it may hold what was there before: every header a
+        // reader goes by begins empty. A ring's or the arena's bytes are read
+        // only where a header says they were written, and are left untouched,
+        // so a page of them is memory only once a voice writes it.
+        new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32).fill(0);
+        for (let slot = 0; slot < SLOTS; slot++)
+        {
+            new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32).fill(0);
+        }
+    }
+    const global = new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32);
     if (isFresh)
     {
         Atomics.store(global, OUTPUT_RATE, sampleRate);
@@ -229,8 +260,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     for (let slot = 0; slot < SLOTS; slot++)
     {
         slots.push({
-            header: new Int32Array(buffer, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(buffer, slotPcmOffset(slot), SLOT_BYTES),
+            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
         });
     }
     if (!isFresh && !beside)
@@ -259,8 +290,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
 
     // The arena behind the slots: the DMA voices' mirrors. A table made before
     // it had one has none, and every sound buffer then plays through a queue.
-    const arena = buffer.byteLength >= ARENA_OFFSET + ARENA_BYTES
-        ? new Uint8Array(buffer, ARENA_OFFSET, ARENA_BYTES) : null;
+    const arena = table.byteLength >= ARENA_OFFSET + ARENA_BYTES
+        ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null;
     /**
      * Its free spans, [offset, bytes], in offset order. A voice takes the first
      * that fits, rounded to sixteen bytes; closing one gives its span back and
@@ -320,8 +351,21 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     return {
         sampleRate,
         channels: OUTPUT_CHANNELS,
-        table: buffer,
-        memory: { table: buffer },
+        table,
+        // What a rebuilt machine or another thread is handed: the table alone,
+        // which crosses to a worker as it is.
+        memory: { table },
+
+        /**
+         * Lets go of the memory this output was made over, once nothing will
+         * play it again: a process's own output, as the process goes. An
+         * output inherited is its maker's to let go of. Once.
+         */
+        release(){
+            const releasing = owned;
+            owned = undefined;
+            releasing?.();
+        },
         capacityFrames,
 
         /** @param {PcmFormat} format */
@@ -837,7 +881,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
     }
 }
 
-/** @returns {ArrayBufferLike} a fresh, zeroed track table. */
+/** @returns {SharedArrayBuffer} a fresh, zeroed track table of a mixer's own. */
 function allocateTable(){
     return new SharedArrayBuffer(TABLE_BYTES);
 }

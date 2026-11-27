@@ -174,12 +174,11 @@ export const STATE_CLOSING = 2;
 export const GAIN_SCALE = 65536;
 
 /**
- * The arena: the DMA voices' mirrors, after the last slot. Sixteen MiB holds
- * a generation's streaming buffers many times over (a sound library's is a
- * few hundred KiB) and a good many whole sounds; a buffer that does not fit
- * plays through the engine's queue as before.
+ * The table's bytes: the header, the slots and the arena. One segment of the
+ * run's cache, held whole for the output's life: memory the engine writes and
+ * the device reads in place, counted with every other byte the run holds.
  */
-export const ARENA_BYTES = 16 << 20;
+export const TABLE_BYTES = 16 << 20;
 
 /** Ints in the global header, ahead of the first slot. */
 export const GLOBAL_HEADER_INT32 = 8;
@@ -201,6 +200,16 @@ export function slotHeaderOffset(slot){
 export function slotPcmOffset(slot){
     return slotHeaderOffset(slot) + SLOT_HEADER_BYTES;
 }
+
+/** Where the arena starts: after the last slot. */
+export const ARENA_OFFSET = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
+/**
+ * The arena: the DMA voices' mirrors, the rest of the table - twelve MiB,
+ * which holds a generation's streaming buffers many times over (a sound
+ * library's is a few hundred KiB) and a good many whole sounds; a buffer that
+ * does not fit plays through the engine's queue as before.
+ */
+export const ARENA_BYTES = TABLE_BYTES - ARENA_OFFSET;
 
 /**
  * The resampler's seam between one output block and the next, kept per slot
@@ -629,7 +638,3 @@ export function mixBlock({ global, slots, seams, block, blockFrames, outputRate,
 }
 
 /* WORKLET-SHARED:END */
-
-/** Engine-only: where the arena starts, and the whole table's byte size, to allocate it. */
-export const ARENA_OFFSET = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
-export const TABLE_BYTES = ARENA_OFFSET + ARENA_BYTES;

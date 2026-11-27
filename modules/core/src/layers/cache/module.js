@@ -32,6 +32,9 @@ import { createReader, openClient } from '@bottlify/cellar';
  * @property {(key: string, bytes: Uint8Array) => boolean} put  a copy kept: false where there
  *     was no room
  * @property {(key: string) => void} drop
+ * @property {(key: string, length: number) => { bytes: Uint8Array, release: () => void } | null}
+ *     [hold]  memory of `length` bytes this thread writes and reads in place for as long as it
+ *     holds it, counted in the run's budget under the space; null where there is no room
  */
 
 /**
@@ -55,6 +58,7 @@ const NOTHING = Object.freeze({
     with: ()=>undefined,
     put: ()=>false,
     drop: ()=>{},
+    hold: ()=>null,
 });
 
 /**
@@ -124,6 +128,11 @@ export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idl
         with: (key, read, options)=>reader.with(named(key), read, options),
         put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk, idle }),
         drop: key=>reader.drop(named(key)),
+        hold: (key, length)=>{
+            const whole = `${name}/${key}`;
+            const bytes = reader.hold(whole, length);
+            return bytes ? { bytes, release: ()=>reader.abandon(whole) } : null;
+        },
     };
 }
 
@@ -149,7 +158,7 @@ export function joinedSpace(joined, name){
     });
     const space = cacheSpace(reader, name);
     return {
-        space: { ...space, put: ()=>false, drop: ()=>{} },
+        space: { ...space, put: ()=>false, drop: ()=>{}, hold: ()=>null },
         adopt: message=>reader.adopt(message),
     };
 }
@@ -358,6 +367,9 @@ export function channelSpace(joined, { channel, prefix }){
     const space = {
         look: names.look,
         with: names.with,
+        // An owner's names are bodies it hands over; memory it would hold is no
+        // owner's of this kind.
+        hold: ()=>null,
         put: (key, bytes)=>{
             const kept = names.put(key, bytes);
             if (kept)

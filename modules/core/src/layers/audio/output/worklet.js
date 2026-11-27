@@ -166,12 +166,11 @@ const STATE_CLOSING = 2;
 const GAIN_SCALE = 65536;
 
 /**
- * The arena: the DMA voices' mirrors, after the last slot. Sixteen MiB holds
- * a generation's streaming buffers many times over (a sound library's is a
- * few hundred KiB) and a good many whole sounds; a buffer that does not fit
- * plays through the engine's queue as before.
+ * The table's bytes: the header, the slots and the arena. One segment of the
+ * run's cache, held whole for the output's life: memory the engine writes and
+ * the device reads in place, counted with every other byte the run holds.
  */
-const ARENA_BYTES = 16 << 20;
+const TABLE_BYTES = 16 << 20;
 
 /** Ints in the global header, ahead of the first slot. */
 const GLOBAL_HEADER_INT32 = 8;
@@ -193,6 +192,16 @@ function slotHeaderOffset(slot){
 function slotPcmOffset(slot){
     return slotHeaderOffset(slot) + SLOT_HEADER_BYTES;
 }
+
+/** Where the arena starts: after the last slot. */
+const ARENA_OFFSET = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
+/**
+ * The arena: the DMA voices' mirrors, the rest of the table - twelve MiB,
+ * which holds a generation's streaming buffers many times over (a sound
+ * library's is a few hundred KiB) and a good many whole sounds; a buffer that
+ * does not fit plays through the engine's queue as before.
+ */
+const ARENA_BYTES = TABLE_BYTES - ARENA_OFFSET;
 
 /**
  * The resampler's seam between one output block and the next, kept per slot
@@ -630,29 +639,30 @@ function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena 
 /**
  * A track table as the output reads it: its header, its slots, and the DMA
  * voices' mirrors after the last slot -- a table made without them plays its
- * queues alone.
+ * queues alone. The table is a view of memory the run holds (a span of its
+ * cache's segment), so every view here starts at its offset.
  *
- * @param {ArrayBufferLike} table
+ * @param {Uint8Array} table
  * @returns {PlayedTable}
  */
 function playedTable(table){
+    const { buffer, byteOffset } = table;
     const slots = [];
     const seams = [];
     for (let slot = 0; slot < SLOTS; slot++)
     {
         slots.push({
-            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+            header: new Int32Array(buffer, byteOffset + slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(buffer, byteOffset + slotPcmOffset(slot), SLOT_BYTES),
         });
         seams.push(createSeam());
     }
-    const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
     return {
-        global: new Int32Array(table, 0, GLOBAL_HEADER_INT32),
+        global: new Int32Array(buffer, byteOffset, GLOBAL_HEADER_INT32),
         slots,
         seams,
-        arena: table.byteLength >= arenaAt + ARENA_BYTES
-            ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null,
+        arena: table.byteLength >= ARENA_OFFSET + ARENA_BYTES
+            ? new Uint8Array(buffer, byteOffset + ARENA_OFFSET, ARENA_BYTES) : null,
     };
 }
 

@@ -76,11 +76,14 @@ export function processSound(deps){
     const ownSound = ()=>{
         const id = ++soundTables;
         let told = false;
+        /** The process's own output, let go of with it. @type {(() => void) | null} */
+        let release = null;
         return {
             options: { ...options.audio, memory: undefined, beside: undefined },
             /** @param {any} built */
             announce(built){
                 const memory = built?.audio?.memory?.();
+                release = ()=>built?.audio?.release?.();
                 if (memory && 'table' in memory)
                 {
                     told = true;
@@ -88,6 +91,9 @@ export function processSound(deps){
                 }
             },
             giveBack(){
+                // Its table is memory the run held for it, given back.
+                release?.();
+                release = null;
                 if (told)
                 {
                     told = false;

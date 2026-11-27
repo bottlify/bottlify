@@ -17,6 +17,17 @@ import {
 } from './mix.js';
 import { readSoundTable } from '../../../host/sound-meter.js';
 
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
+
 const MIX_PATH = fileURLToPath(new URL('./mix.js', import.meta.url));
 const WORKLET_PATH = fileURLToPath(new URL('./worklet.js', import.meta.url));
 
@@ -156,7 +167,7 @@ test('a silent block counts STARVED_BLOCKS and STARVED_FRAMES', ()=>{
     const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
     processor.process([], [outputBlock(16)]);
 
-    const global = new Int32Array(mixer.table, 0, GLOBAL_HEADER_INT32);
+    const global = tableView(Int32Array, mixer.table, 0, GLOBAL_HEADER_INT32);
     assert.equal(Atomics.load(global, BLOCKS), 1);
     assert.equal(Atomics.load(global, STARVED_BLOCKS), 1);
     assert.equal(Atomics.load(global, STARVED_FRAMES), 16);
@@ -170,7 +181,8 @@ test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
 
     const Processor = loadWorkletClass();
     const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
-    const header = new Int32Array(mixer.table, slotHeaderOffset(track.slot), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, mixer.table,
+        slotHeaderOffset(track.slot), SLOT_HEADER_INT32);
     processor.process([], [outputBlock(16)]);
     assert.equal(track.played(), 16);
     assert.equal(Atomics.load(header, READ), 32);
@@ -198,7 +210,7 @@ test('a page reads the speaker\'s gaps off the table the worklet plays', ()=>{
     {
         processor.process([], [outputBlock(4)]);
     }
-    assert.deepEqual(readSoundTable(/** @type {SharedArrayBuffer} */ (mixer.table)),
+    assert.deepEqual(readSoundTable(mixer.table),
         { rate: 48000, blocks: 3, starvedBlocks: 2, starvedFrames: 6 },
         'four frames, then two of four, then none: two blocks short by six frames');
 });
