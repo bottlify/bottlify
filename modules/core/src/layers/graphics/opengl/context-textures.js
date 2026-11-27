@@ -1556,7 +1556,14 @@ export function installTextureCalls(context, kernel){
                     return cached;
                 }
                 const made = level.data ? rgbaOf(level.data, kept, width, height, depth) : null;
-                rgbaCache.set(level, made);
+                // On a device the RGBA is read by a call (a read-back, a copy)
+                // and made again at the next: kept, every level read once would
+                // hold it beside its data for as long as the texture lives. The
+                // processor's rasteriser reads it every draw and keeps it.
+                if (!kernel.gpuBacked())
+                {
+                    rgbaCache.set(level, made);
+                }
                 return made;
             },
             set texels(value){

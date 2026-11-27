@@ -55,6 +55,7 @@ import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { SIZED_FORMATS, TEX, gpuStorageOf, sizedFormatOf } from './formats.js';
 import { blankStorage, depthSlice, deviceBytes } from './texture-levels.js';
+import { decodeS3tc } from './texture.js';
 import { rootKeyOf } from './texture-views.js';
 import {
     CANONICAL_LAYOUT, clientReads, drawsGeometryInput, expandIndices, geometryOrder,
@@ -553,7 +554,23 @@ export function createGpuRenderer(services){
             bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
             made: (bytes, format)=>({ format, bytes }), names: new WeakMap() },
     ];
-    const [spilledTexels] = spillable;
+    const [spilledTexels, spilledBlocks] = spillable;
+    /**
+     * A level's bytes of one kind read for an upload: in place where they
+     * wait in the store under `waits`, else as the level holds them (`held`).
+     *
+     * @param {string | undefined} waits @param {() => any} held
+     * @param {(bytes: any) => void} read
+     */
+    const readLevel = (waits, held, read)=>{
+        if (waits === undefined)
+        {
+            read(held());
+            return;
+        }
+        texelStore.with(waits, read);
+        spills.inPlace++;
+    };
     // A key a level, never the texture's name and level: a name the program
     // deleted and made again would meet the bytes of the one before it until
     // the next `spill` let them go.
@@ -635,6 +652,49 @@ export function createGpuRenderer(services){
         spills.bytes += bytes.byteLength;
         spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
         waiting(kind, texture, image, key, was?.format ?? 0);
+    };
+    /** The key of the next bytes a frame keeps until its replay: each its own. */
+    let keptForFrames = 0;
+    /**
+     * Bytes a command of `recording` takes to the queue at its replay - an
+     * upload's texels or blocks, a depth write's words, as they stood when it
+     * was recorded and the only copy of them, since the program may write the
+     * level again before the replay - handed to the store (the caller writes
+     * them no more), and the key the command holds in their place. The frame
+     * lets them go once it is replayed (`releaseKept`).
+     *
+     * @param {{ texels: string[] }} recording @param {Uint8Array} bytes
+     * @returns {string}
+     */
+    const keptForReplay = (recording, bytes)=>{
+        const key = `frame:${++keptForFrames}`;
+        texelStore.put(key, bytes);
+        recording.texels.push(key);
+        return key;
+    };
+    /** @param {{ texels: string[] }} recording */
+    const releaseKept = recording=>{
+        for (const key of recording.texels)
+        {
+            texelStore.drop(key);
+        }
+        recording.texels.length = 0;
+    };
+    /**
+     * A command's bytes kept for its replay, read in place inside `read`; a
+     * key let go of before the replay is the frame's bytes lost, said, and
+     * `read` not called.
+     *
+     * @param {string} key @param {(bytes: Uint8Array) => void} read
+     */
+    const readKept = (key, read)=>{
+        if (!texelStore.has(key))
+        {
+            lose('a frame\'s texels were let go of before it was replayed: the level keeps what'
+                + ' it held');
+            return;
+        }
+        texelStore.with(key, read);
     };
     // Whether this frame is written down, and which textures' draws it drops:
     // what the run asked at its start, or what a page asked of the running
@@ -755,6 +815,8 @@ export function createGpuRenderer(services){
      * @property {(() => void) | null} replayed  told once its replay has run (`fence`)
      * @property {OcclusionCount[]} [ending]  the occlusion queries it ended, finished
      *     once it has been replayed and counted
+     * @property {string[]} texels  the keys of what its uploads and depth writes keep in
+     *     the store until it is replayed (`keptForReplay`)
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -1752,14 +1814,16 @@ export function createGpuRenderer(services){
                     origin: { x: area.x, y: area.y, z: cube ? face : 0 },
                     depthOrArrayLayers: oneArray ? image.height
                         : solid || twoArray ? imageDepth : 1,
-                    // A command keeps bytes of its own: the level's own
-                    // storage is copied, an area packed here already is.
-                    data: ordered && slice === image.data ? slice.slice() : slice,
+                    data: slice,
                 };
                 if (ordered)
                 {
+                    // The store keeps bytes of its own: the level's own
+                    // storage is copied, an area packed here already is.
                     recording.commands.push({ kind: 'upload',
-                        upload: { ...request, staging: true } });
+                        upload: { ...request, data: null, staging: true },
+                        key: keptForReplay(recording, slice === image.data ? slice.slice()
+                            : slice) });
                 }
                 else
                 {
@@ -1799,7 +1863,8 @@ export function createGpuRenderer(services){
                 kind: 'depth', pipeline,
                 surface: { texture: record.gpu.texture, width, height, mipLevel: level,
                     layer: face + slice },
-                words: depthWriteWords(width, depths, stencils),
+                key: keptForReplay(recording, new Uint8Array(
+                    depthWriteWords(width, depths, stencils).buffer)),
             });
         }
     };
@@ -2051,11 +2116,18 @@ export function createGpuRenderer(services){
         // commands of the frame being recorded.
         const ordered = carried
             || (record.usedIn !== undefined && unflushed.has(record.usedIn));
-        /** @param {any} request */
+        /**
+         * Ordered, its bytes are handed to the store: the caller makes them
+         * bytes of their own then, never a view of the level or the store.
+         *
+         * @param {any} request
+         */
         const upload = request=>{
             if (ordered)
             {
-                recording.commands.push({ kind: 'upload', upload: { ...request, staging: true } });
+                recording.commands.push({ kind: 'upload',
+                    upload: { ...request, data: null, staging: true },
+                    key: keptForReplay(recording, request.data) });
                 return;
             }
             backend.uploadTexture(request);
@@ -2072,36 +2144,45 @@ export function createGpuRenderer(services){
                 continue;
             }
             stats.uploads++;
+            // A level's blocks or texels waiting in the store go up from where
+            // they wait, and wait on: taken back, they would be copied out
+            // only to be let go of below or held here again.
+            const blocksWait = spilledBlocks.names.get(image);
             if (bcFormat)
             {
-                const compressed = /** @type {NonNullable<typeof image.compressed>} */ (
-                    image.compressed);
-                // Transcoded, the blocks are bytes of their own already.
-                const astc = bcFormat === ASTC_FROM_DXT1
-                    ? /** @type {Uint8Array} */ (dxt1ToAstc(compressed.bytes, image.width,
-                        image.height))
-                    : null;
-                if (astc)
-                {
-                    stats.transcoded.levels++;
-                    stats.transcoded.blockBytes += compressed.bytes.byteLength;
-                    stats.transcoded.astcBytes += astc.byteLength;
-                }
-                upload({
-                    texture: record.gpu.texture,
-                    format: bcFormat,
-                    mipLevel: level,
-                    width: image.width,
-                    height: image.height,
-                    origin: { x: 0, y: 0, z: face },
-                    data: astc ?? (ordered ? compressed.bytes.slice() : compressed.bytes),
-                });
+                /** @param {Uint8Array} blocks */
+                const uploadBlocks = blocks=>{
+                    // Transcoded, the blocks are bytes of their own already.
+                    const astc = bcFormat === ASTC_FROM_DXT1
+                        ? /** @type {Uint8Array} */ (dxt1ToAstc(blocks, image.width,
+                            image.height))
+                        : null;
+                    if (astc)
+                    {
+                        stats.transcoded.levels++;
+                        stats.transcoded.blockBytes += blocks.byteLength;
+                        stats.transcoded.astcBytes += astc.byteLength;
+                    }
+                    upload({
+                        texture: record.gpu.texture,
+                        format: bcFormat,
+                        mipLevel: level,
+                        width: image.width,
+                        height: image.height,
+                        origin: { x: 0, y: 0, z: face },
+                        data: astc ?? (ordered ? blocks.slice() : blocks),
+                    });
+                };
+                readLevel(blocksWait, ()=>/** @type {NonNullable<typeof image.compressed>} */ (
+                    image.compressed).bytes, uploadBlocks);
                 continue;
             }
-            if (image.compressed && rect === null)
+            const blockBytes = blocksWait === undefined
+                ? image.compressed?.bytes.byteLength ?? 0 : texelStore.lengthOf(blocksWait);
+            if (blockBytes > 0 && rect === null)
             {
                 stats.decoded.levels++;
-                stats.decoded.blockBytes += image.compressed.bytes.byteLength;
+                stats.decoded.blockBytes += blockBytes;
                 stats.decoded.texelBytes += image.width * image.height * 4;
             }
             /** @param {Uint8Array | null | undefined} texels */
@@ -2122,17 +2203,16 @@ export function createGpuRenderer(services){
                     });
                 }
             };
-            // A level waiting in the store that is let go of below goes up
-            // from where it waits: taken back, it would be copied out only to
-            // be let go of.
-            const waits = letsGo ? spilledTexels.names.get(image) : undefined;
-            if (waits === undefined)
+            if (blocksWait !== undefined)
             {
-                uploadAreas(image.texels);
+                // While its blocks wait, a level's texels are what they decode
+                // to: a write into it holds texels and lets the blocks go.
+                readLevel(blocksWait, ()=>null, blocks=>uploadAreas(decodeS3tc(blocks,
+                    /** @type {number} */ (image.compressedFormat), image.width,
+                    image.height)));
                 continue;
             }
-            texelStore.with(waits, uploadAreas);
-            spills.inPlace++;
+            readLevel(spilledTexels.names.get(image), ()=>image.texels, uploadAreas);
         }
         texture.dirty.clear();
         record.usedIn = recording.id;
@@ -2155,11 +2235,16 @@ export function createGpuRenderer(services){
                 const texels = waits === undefined
                     ? Object.getOwnPropertyDescriptor(image, 'texels')?.value?.byteLength ?? 0
                     : texelStore.lengthOf(waits);
-                const blocks = Object.getOwnPropertyDescriptor(image, 'compressed')?.value;
+                const blocksWait = spilledBlocks.names.get(image);
+                const blocks = blocksWait === undefined
+                    ? Object.getOwnPropertyDescriptor(image, 'compressed')?.value?.bytes
+                        .byteLength ?? 0
+                    : texelStore.lengthOf(blocksWait);
                 if (level >= levels || !texels && !blocks)
                 {
                     continue;
                 }
+                // Set, a waiting level's property lets its bytes go from the store.
                 if (texels)
                 {
                     stats.letGo += texels;
@@ -2167,7 +2252,7 @@ export function createGpuRenderer(services){
                 }
                 if (blocks)
                 {
-                    stats.blocksLetGo += blocks.bytes.byteLength;
+                    stats.blocksLetGo += blocks;
                     image.compressed = null;
                 }
                 releasedLevels.add(image);
@@ -2280,6 +2365,7 @@ export function createGpuRenderer(services){
                 },
                 /** @type {(() => void) | null} told once its replay has run */
                 replayed: null,
+                texels: [],
             };
             unflushed.add(recording.id);
             recordings.set(context, recording);
@@ -5278,8 +5364,10 @@ export function createGpuRenderer(services){
                 const command = recording.commands[at];
                 if (command.kind === 'upload')
                 {
-                    // A staged copy closes the pass it lands in.
-                    backend.uploadTexture(command.upload);
+                    // Read where the store keeps it: the staging copy is made
+                    // before the call returns. A staged copy closes the pass
+                    // it lands in.
+                    readKept(command.key, data=>backend.uploadTexture({ ...command.upload, data }));
                     pass = null;
                     continue;
                 }
@@ -5348,7 +5436,9 @@ export function createGpuRenderer(services){
                 }
                 if (command.kind === 'depth')
                 {
-                    frame.writeDepth(command.surface, command.words, pipeline);
+                    // Its words read in place: the write copies them into a buffer.
+                    readKept(command.key, words=>frame.writeDepth(command.surface, words,
+                        pipeline));
                     pass = null;
                     continue;
                 }
@@ -5535,6 +5625,7 @@ export function createGpuRenderer(services){
             // Ended whatever happened, or every later frame fails at beginFrame.
             frame.end();
             unflushed.delete(recording.id);
+            releaseKept(recording);
             recording.replayed?.();
         }
         // The frame is submitted, so the probe read-backs resolve; each one
@@ -5628,6 +5719,7 @@ export function createGpuRenderer(services){
             })
             .catch(error=>{
                 unflushed.delete(recording.id);
+                releaseKept(recording);
                 lose(error instanceof Error ? error.message : String(error));
             });
         return chain.then(()=>shot);
@@ -5874,6 +5966,7 @@ export function createGpuRenderer(services){
                 })
                 .catch(error=>{
                     unflushed.delete(recording.id);
+                    releaseKept(recording);
                     lose(error instanceof Error ? error.message : String(error));
                 });
             // Asked, the next frame's draws name what they bind; at its end the
@@ -6209,6 +6302,9 @@ export function createGpuRenderer(services){
             ...stats,
             // Texels and blocks moved into the run's cache while undrawn, and taken back.
             spills: texelStore.cached ? { ...spills, store: texelStore.figures() } : 'no cache',
+            // What the store holds and has done, the frames' bytes kept for their replays
+            // among it.
+            keptTexels: texelStore.figures(),
             resident: pipelines.size,
             samplers: samplers.size,
             unflushed: unflushed.size,
