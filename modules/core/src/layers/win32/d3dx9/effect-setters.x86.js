@@ -639,7 +639,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetArrayRange: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['host'],
         host: 14,

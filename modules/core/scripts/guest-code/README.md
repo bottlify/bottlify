@@ -33,7 +33,9 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
   stack), `i64`, `void`.
 - **A pointer**: a `ptr` parameter, or a variable declared with a pointer expression (a pointer
   with constants and integers added or taken away: `const end = text + count`; several integers
-  are summed in 32 bits first, a signed index within 2 GiB of the pointer). It
+  are summed in 32 bits first, a signed index within 2 GiB of the pointer), or one declared
+  `/** @type {ptr} */`, which may start as an integer - `let found = 0`, a null a pointer is
+  given later - extended by zeros. It
   is taken whole where a pointer stands: the address of a load, a store, `copyUp`, `copyDown`
   or `fill`; a comparison with another pointer or a constant; `=`, `+=`, `-=`, `++` and `--`
   of a pointer variable; an argument of `call` or of a `@guestCode` function whose parameter

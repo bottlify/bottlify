@@ -105,8 +105,10 @@ const DEFAULT_ORDINAL_BASE = 1;
  *   the guest address `target`, filled in here, where the code's own address
  *   is known -- a direct jump into a host stub, as a trampoline makes.
  * @property {{ at: number, to: string, offset?: number }[]} [pointers]
- *   In `data` or `code`: the four bytes at `at` are the address of the export
- *   named `to`, `offset` bytes into it, filled in here, where every export has
+ *   In `data` or `code`: the bytes at `at` are the address of the export
+ *   named `to`, `offset` bytes into it - in `data` a pointer, eight bytes in a
+ *   64-bit module, and in `code` four, a 64-bit module's an absolute disp32
+ *   below 2 GiB - filled in here, where every export has
  *   its place -- a vtable's slots, the runtime type information a vtable and a
  *   type point into, a table's pointers to the blocks it holds, and the
  *   variable a function of the library keeps its state in.
@@ -239,8 +241,15 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
         const slot = trampolinesRva + index * TRAMPOLINE_STRIDE;
         bytes.fill(INT3, slot, slot + TRAMPOLINE_STRIDE);
         const rva = dataRvas.get(index) ?? codeRvas.get(index) ?? slot;
-        /** The addresses of other exports the entry's bytes hold. */
-        const point = ()=>{
+        /**
+         * The addresses of other exports the entry's bytes hold: a variable's
+         * slot is a pointer, a quadword in a 64-bit module, wherever it is
+         * placed; code holds an absolute disp32, which x86-64 extends by its
+         * sign, so its target lies below 2 GiB there.
+         *
+         * @param {boolean} code
+         */
+        const point = code=>{
             for (const { at, to, offset = 0 } of entry.pointers ?? [])
             {
                 const target = indexOf.get(to);
@@ -248,13 +257,26 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
                 {
                     throw new Error(`export "${entry.name}" points at "${to}", which is not one`);
                 }
-                view.setUint32(rva + at, base + exportRva(target) + offset, true);
+                const address = base + exportRva(target) + offset;
+                if (long && !code)
+                {
+                    view.setBigUint64(rva + at, BigInt(address), true);
+                }
+                else if (long && address >= 2 ** 31)
+                {
+                    throw new Error(`export "${entry.name}" holds the address of "${to}" as a `
+                        + `disp32, which does not reach 0x${address.toString(16)}`);
+                }
+                else
+                {
+                    view.setUint32(rva + at, address >>> 0, true);
+                }
             }
         };
         if (entry.data)
         {
             bytes.set(entry.data, rva);
-            point();
+            point(false);
         }
         else if (entry.code)
         {
@@ -263,7 +285,7 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
             {
                 view.setUint32(rva + at, (target - (base + rva + at + 4)) >>> 0, true);
             }
-            point();
+            point(true);
         }
         else
         {

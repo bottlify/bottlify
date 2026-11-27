@@ -185,7 +185,7 @@ test('the UCRT\'s printers take their options quadword as two slots at 32 bits a
         {
             same(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST], memory },
                 HANDED);
-            sameAt64(name, { stack: [options, buffer, count, format_, 0x5eed, LIST, high],
+            sameAt64(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST],
                 memory: wide }, HANDED);
         }
     }
@@ -207,6 +207,8 @@ test('printInto renders what the host\'s printer renders: the text, its length a
             const helpers = {
                 u8: (/** @type {number} */ a)=>guestMemory[at(a)],
                 u32: (/** @type {number} */ a)=>view.getUint32(at(a), true),
+                ptr: (/** @type {number} */ a)=>view.getUint32(at(a), true)
+                    + (slotBytes === 8 ? view.getUint32(at(a) + 4, true) * 2 ** 32 : 0),
                 setU8: (/** @type {number} */ a, /** @type {number} */ v)=>{
                     guestMemory[at(a)] = v;
                 },
@@ -281,6 +283,8 @@ test('printIntoWide renders what the host\'s wide printer renders: the text in u
             const helpers = {
                 u16: (/** @type {number} */ a)=>view.getUint16(at(a), true),
                 u32: (/** @type {number} */ a)=>view.getUint32(at(a), true),
+                ptr: (/** @type {number} */ a)=>view.getUint32(at(a), true)
+                    + (slotBytes === 8 ? view.getUint32(at(a) + 4, true) * 2 ** 32 : 0),
                 setU16: (/** @type {number} */ a, /** @type {number} */ v)=>
                     view.setUint16(at(a), v, true),
                 setU32: (/** @type {number} */ a, /** @type {number} */ v)=>
@@ -358,7 +362,7 @@ test('the wide printers in the guest answer, write and count as their JavaScript
         {
             same(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST], memory },
                 HANDED);
-            sameAt64(name, { stack: [options, buffer, count, format_, 0x5eed, LIST, high],
+            sameAt64(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST],
                 memory: wide }, HANDED);
         }
     }

@@ -419,7 +419,7 @@ export function D3DXVec3TransformCoord({ f32, setF32 }, out, v, m){
  * matrix read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -440,9 +440,9 @@ export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, 
     const e13 = f32(m + 52);
     const e14 = f32(m + 56);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -457,8 +457,8 @@ export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, 
         setF32(to, x / divisor);
         setF32(to + 4, y / divisor);
         setF32(to + 8, z / divisor);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }

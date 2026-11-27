@@ -910,7 +910,7 @@ export function Resolve({ u8, u32 }, block, name){
  * the host takes for any parameter, setting every array whole anyway.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} start @param {u32} end
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} start @param {u32} end
  * @returns {u32}
  */
 export function SetArrayRange({ host }, self, h, start, end){ // eslint-disable-line no-unused-vars

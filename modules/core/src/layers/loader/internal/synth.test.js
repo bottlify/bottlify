@@ -529,6 +529,41 @@ test('a function\'s code may hold the address of a variable of its library', ()=
     assert.equal(module.bytes[draw - BASE + 5], 0xc3, 'and the rest of the code as it was');
 });
 
+test('a 64-bit module\'s variable holds another export\'s address whole, past 4 GiB too', ()=>{
+    // A module placed at its file's base past 4 GiB, as a 64-bit DLL linked at
+    // 0x180000000 asks: a table of quadword slots, the second into itself.
+    const high = 0x1_8000_0000;
+    const module = synthesiseModule({
+        name: 'LIB64.dll',
+        base: high,
+        long: true,
+        exports: [
+            { name: 'what', target: 0x2000 },
+            { name: 'table', data: new Uint8Array(24),
+                pointers: [{ at: 0, to: 'what' }, { at: 8, to: 'table', offset: 16 }] },
+        ],
+    });
+    const table = /** @type {number} */ (module.addressOf('table'));
+    const view = new DataView(module.bytes.buffer);
+    assert.equal(view.getBigUint64(table - high, true),
+        BigInt(/** @type {number} */ (module.addressOf('what'))), 'the first slot whole');
+    assert.equal(view.getBigUint64(table - high + 8, true), BigInt(table + 16),
+        'a pointer into the export, whole');
+    assert.equal(view.getBigUint64(table - high + 16, true), 0n, 'the bytes past them untouched');
+    // Code holds an absolute disp32, sign-extended: a variable past 2 GiB is
+    // out of its reach, which is said rather than written short.
+    assert.throws(()=>synthesiseModule({
+        name: 'LIB64.dll',
+        base: high,
+        long: true,
+        exports: [
+            { name: 'draw', code: new Uint8Array([0x8b, 0x04, 0x25, 0, 0, 0, 0, 0xc3]),
+                pointers: [{ at: 3, to: 'seed' }] },
+            { name: 'seed', data: new Uint8Array(4) },
+        ],
+    }), /disp32/);
+});
+
 test('a program is an executable whose entry calls one routine and exits with its answer', ()=>{
     const program = synthesiseProgram({ library: 'bottlify.dll', routine: 'msiexec' });
     const image = parsePe(program.bytes);
