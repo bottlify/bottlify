@@ -5,104 +5,86 @@
  */
 
 /**
- * The Vulkan structures a program passes by pointer, laid out the way a
- * 32-bit Windows compiler lays them out.
+ * The Vulkan structures a program passes by pointer, each declared once as
+ * vulkan_core.h (and vulkan_win32.h for the surface) declares it and laid
+ * out by `system/layout.js`. The runtime serves 32-bit programs - its
+ * commands are stdcall traps - so each export is the structure at four
+ * bytes a pointer; `layoutOf(table).at(8)` is the same declaration in a
+ * 64-bit process.
  *
- * Three rules produce every offset below, and every one of them is a trap for
- * a reader used to the 64-bit headers:
+ * Three rules of the header produce every offset, and every one of them is a
+ * trap for a reader used to the 64-bit build:
  *
- * - **A pointer and a `size_t` are four bytes.** So `pNext` is at 4 and the
- *   first real field at 8, and a structure of pointers and counts packs with
- *   no padding at all.
+ * - **A pointer and a `size_t` are a pointer's size** (`ptr`). So in a 32-bit
+ *   process `pNext` is at 4 and the first real field at 8, and a structure of
+ *   pointers and counts packs with no padding at all.
  * - **A `VkDeviceSize`, a `uint64_t` and every non-dispatchable handle are
- *   eight bytes, aligned to eight.** Non-dispatchable handles are 64-bit even
- *   on a 32-bit build -- the header says so, in a `#define` most people never
- *   read -- so `VkSwapchainCreateInfoKHR.surface` sits at 16, not 12, with four
- *   bytes of padding after `flags`. A structure containing one of these is
- *   itself eight-aligned, and its size rounds up to a multiple of eight.
+ *   eight bytes, aligned to eight, at either width.** Non-dispatchable
+ *   handles are 64-bit even on a 32-bit build - the header says so, in a
+ *   `#define` most people never read - so `VkSwapchainCreateInfoKHR.surface`
+ *   sits at 16, not 12, with four bytes of padding after `flags`. A
+ *   structure holding one is eight-aligned, its size a multiple of eight.
  * - **A dispatchable handle is a pointer.** `VkDevice`, `VkQueue` and
- *   `VkCommandBuffer` are four bytes, so an array of command buffers is an
- *   array of dwords while an array of semaphores is an array of qwords.
- *
- * Every offset is spelled out rather than computed, because a computed one is
- * only as right as the rule that computed it and the test derives them all a
- * second time from the field types to hold this file to the registry.
+ *   `VkCommandBuffer` are four bytes in a 32-bit process, so an array of
+ *   command buffers is an array of dwords while an array of semaphores is an
+ *   array of qwords.
  */
 
+import { layoutOf, struct, union } from '../../../system/layout.js';
 import { readToTerminator } from '../../win32/common/scan-windows.js';
+
+/** @typedef {import('../../../system/layout.js').Declared} Declared */
+
+/** A non-dispatchable handle: a 64-bit value at either width. */
+const HANDLE = 'u64';
+/** VkDeviceSize. */
+const DEVICE_SIZE = 'u64';
+
+/** The two fields every extensible structure begins with. */
+const HEAD = /** @type {const} */ ([['sType', 'u32'], ['pNext', 'ptr']]);
+
+/** @param {readonly Declared[]} fields */
+const at4 = fields=>struct(fields).at(4);
+/** @param {readonly string[]} names @param {'u32' | 'i32' | 'f32'} kind @returns {Declared[]} */
+const all = (names, kind)=>names.map(name=>[name, kind]);
 
 // --- base types ------------------------------------------------------------
 
-export const VkExtent2D = Object.freeze({ width: 0x00, height: 0x04, SIZE: 0x08 });
-export const VkExtent3D = Object.freeze({ width: 0x00, height: 0x04, depth: 0x08, SIZE: 0x0c });
-export const VkOffset2D = Object.freeze({ x: 0x00, y: 0x04, SIZE: 0x08 });
-export const VkRect2D = Object.freeze({ offset: 0x00, extent: 0x08, SIZE: 0x10 });
-export const VkViewport = Object.freeze({
-    x: 0x00, y: 0x04, width: 0x08, height: 0x0c, minDepth: 0x10, maxDepth: 0x14, SIZE: 0x18,
-});
+export const VkExtent2D = at4(all(['width', 'height'], 'u32'));
+export const VkExtent3D = at4(all(['width', 'height', 'depth'], 'u32'));
+export const VkOffset2D = at4(all(['x', 'y'], 'i32'));
+export const VkRect2D = at4([['offset', layoutOf(VkOffset2D)],
+    ['extent', layoutOf(VkExtent2D)]]);
+export const VkViewport = at4(all(['x', 'y', 'width', 'height', 'minDepth', 'maxDepth'],
+    'f32'));
 
 // --- instance and device creation -----------------------------------------
 
-export const VkApplicationInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    pApplicationName: 0x08,
-    applicationVersion: 0x0c,
-    pEngineName: 0x10,
-    engineVersion: 0x14,
-    apiVersion: 0x18,
-    SIZE: 0x1c,
-});
+/** VK_MAX_EXTENSION_NAME_SIZE and VK_MAX_DESCRIPTION_SIZE. */
+const MAX_NAME = 256;
 
-export const VkInstanceCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    pApplicationInfo: 0x0c,
-    enabledLayerCount: 0x10,
-    ppEnabledLayerNames: 0x14,
-    enabledExtensionCount: 0x18,
-    ppEnabledExtensionNames: 0x1c,
-    SIZE: 0x20,
-});
+export const VkApplicationInfo = at4([...HEAD, ['pApplicationName', 'ptr'],
+    ['applicationVersion', 'u32'], ['pEngineName', 'ptr'], ['engineVersion', 'u32'],
+    ['apiVersion', 'u32']]);
 
-export const VkDeviceQueueCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    queueFamilyIndex: 0x0c,
-    queueCount: 0x10,
-    pQueuePriorities: 0x14,
-    SIZE: 0x18,
-});
+export const VkInstanceCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['pApplicationInfo', 'ptr'], ['enabledLayerCount', 'u32'], ['ppEnabledLayerNames', 'ptr'],
+    ['enabledExtensionCount', 'u32'], ['ppEnabledExtensionNames', 'ptr']]);
 
-export const VkDeviceCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    queueCreateInfoCount: 0x0c,
-    pQueueCreateInfos: 0x10,
-    enabledLayerCount: 0x14,
-    ppEnabledLayerNames: 0x18,
-    enabledExtensionCount: 0x1c,
-    ppEnabledExtensionNames: 0x20,
-    pEnabledFeatures: 0x24,
-    SIZE: 0x28,
-});
+export const VkDeviceQueueCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['queueFamilyIndex', 'u32'], ['queueCount', 'u32'], ['pQueuePriorities', 'ptr']]);
 
-export const VkExtensionProperties = Object.freeze({
-    extensionName: 0x000,
-    specVersion: 0x100,
-    SIZE: 0x104,
-});
+export const VkDeviceCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['queueCreateInfoCount', 'u32'], ['pQueueCreateInfos', 'ptr'],
+    ['enabledLayerCount', 'u32'], ['ppEnabledLayerNames', 'ptr'],
+    ['enabledExtensionCount', 'u32'], ['ppEnabledExtensionNames', 'ptr'],
+    ['pEnabledFeatures', 'ptr']]);
 
-export const VkLayerProperties = Object.freeze({
-    layerName: 0x000,
-    specVersion: 0x100,
-    implementationVersion: 0x104,
-    description: 0x108,
-    SIZE: 0x208,
-});
+export const VkExtensionProperties = at4([['extensionName', 'u8', MAX_NAME],
+    ['specVersion', 'u32']]);
+
+export const VkLayerProperties = at4([['layerName', 'u8', MAX_NAME], ['specVersion', 'u32'],
+    ['implementationVersion', 'u32'], ['description', 'u8', MAX_NAME]]);
 
 // --- the physical device ---------------------------------------------------
 
@@ -110,139 +92,77 @@ export const VkLayerProperties = Object.freeze({
  * The limits. Three `VkDeviceSize` fields in the middle and three at the end
  * are what make this structure's layout differ from a list of dwords: the
  * first of each run is preceded by four bytes of padding, and everything after
- * it moves.
+ * it moves. `minMemoryMapAlignment` is the one `size_t`, which is why the
+ * 32-bit structure is eight bytes shorter than the 64-bit one.
  */
-export const VkPhysicalDeviceLimits = Object.freeze({
-    maxImageDimension1D: 0x000,
-    maxImageDimension2D: 0x004,
-    maxImageDimension3D: 0x008,
-    maxImageDimensionCube: 0x00c,
-    maxImageArrayLayers: 0x010,
-    maxTexelBufferElements: 0x014,
-    maxUniformBufferRange: 0x018,
-    maxStorageBufferRange: 0x01c,
-    maxPushConstantsSize: 0x020,
-    maxMemoryAllocationCount: 0x024,
-    maxSamplerAllocationCount: 0x028,
-    bufferImageGranularity: 0x030,
-    sparseAddressSpaceSize: 0x038,
-    maxBoundDescriptorSets: 0x040,
-    maxPerStageDescriptorSamplers: 0x044,
-    maxPerStageDescriptorUniformBuffers: 0x048,
-    maxPerStageDescriptorStorageBuffers: 0x04c,
-    maxPerStageDescriptorSampledImages: 0x050,
-    maxPerStageDescriptorStorageImages: 0x054,
-    maxPerStageDescriptorInputAttachments: 0x058,
-    maxPerStageResources: 0x05c,
-    maxDescriptorSetSamplers: 0x060,
-    maxDescriptorSetUniformBuffers: 0x064,
-    maxDescriptorSetUniformBuffersDynamic: 0x068,
-    maxDescriptorSetStorageBuffers: 0x06c,
-    maxDescriptorSetStorageBuffersDynamic: 0x070,
-    maxDescriptorSetSampledImages: 0x074,
-    maxDescriptorSetStorageImages: 0x078,
-    maxDescriptorSetInputAttachments: 0x07c,
-    maxVertexInputAttributes: 0x080,
-    maxVertexInputBindings: 0x084,
-    maxVertexInputAttributeOffset: 0x088,
-    maxVertexInputBindingStride: 0x08c,
-    maxVertexOutputComponents: 0x090,
-    maxTessellationGenerationLevel: 0x094,
-    maxTessellationPatchSize: 0x098,
-    maxTessellationControlPerVertexInputComponents: 0x09c,
-    maxTessellationControlPerVertexOutputComponents: 0x0a0,
-    maxTessellationControlPerPatchOutputComponents: 0x0a4,
-    maxTessellationControlTotalOutputComponents: 0x0a8,
-    maxTessellationEvaluationInputComponents: 0x0ac,
-    maxTessellationEvaluationOutputComponents: 0x0b0,
-    maxGeometryShaderInvocations: 0x0b4,
-    maxGeometryInputComponents: 0x0b8,
-    maxGeometryOutputComponents: 0x0bc,
-    maxGeometryOutputVertices: 0x0c0,
-    maxGeometryTotalOutputComponents: 0x0c4,
-    maxFragmentInputComponents: 0x0c8,
-    maxFragmentOutputAttachments: 0x0cc,
-    maxFragmentDualSrcAttachments: 0x0d0,
-    maxFragmentCombinedOutputResources: 0x0d4,
-    maxComputeSharedMemorySize: 0x0d8,
-    maxComputeWorkGroupCount: 0x0dc,
-    maxComputeWorkGroupInvocations: 0x0e8,
-    maxComputeWorkGroupSize: 0x0ec,
-    subPixelPrecisionBits: 0x0f8,
-    subTexelPrecisionBits: 0x0fc,
-    mipmapPrecisionBits: 0x100,
-    maxDrawIndexedIndexValue: 0x104,
-    maxDrawIndirectCount: 0x108,
-    maxSamplerLodBias: 0x10c,
-    maxSamplerAnisotropy: 0x110,
-    maxViewports: 0x114,
-    maxViewportDimensions: 0x118,
-    viewportBoundsRange: 0x120,
-    viewportSubPixelBits: 0x128,
-    minMemoryMapAlignment: 0x12c,
-    minTexelBufferOffsetAlignment: 0x130,
-    minUniformBufferOffsetAlignment: 0x138,
-    minStorageBufferOffsetAlignment: 0x140,
-    minTexelOffset: 0x148,
-    maxTexelOffset: 0x14c,
-    minTexelGatherOffset: 0x150,
-    maxTexelGatherOffset: 0x154,
-    minInterpolationOffset: 0x158,
-    maxInterpolationOffset: 0x15c,
-    subPixelInterpolationOffsetBits: 0x160,
-    maxFramebufferWidth: 0x164,
-    maxFramebufferHeight: 0x168,
-    maxFramebufferLayers: 0x16c,
-    framebufferColorSampleCounts: 0x170,
-    framebufferDepthSampleCounts: 0x174,
-    framebufferStencilSampleCounts: 0x178,
-    framebufferNoAttachmentsSampleCounts: 0x17c,
-    maxColorAttachments: 0x180,
-    sampledImageColorSampleCounts: 0x184,
-    sampledImageIntegerSampleCounts: 0x188,
-    sampledImageDepthSampleCounts: 0x18c,
-    sampledImageStencilSampleCounts: 0x190,
-    storageImageSampleCounts: 0x194,
-    maxSampleMaskWords: 0x198,
-    timestampComputeAndGraphics: 0x19c,
-    timestampPeriod: 0x1a0,
-    maxClipDistances: 0x1a4,
-    maxCullDistances: 0x1a8,
-    maxCombinedClipAndCullDistances: 0x1ac,
-    discreteQueuePriorities: 0x1b0,
-    pointSizeRange: 0x1b4,
-    lineWidthRange: 0x1bc,
-    pointSizeGranularity: 0x1c4,
-    lineWidthGranularity: 0x1c8,
-    strictLines: 0x1cc,
-    standardSampleLocations: 0x1d0,
-    optimalBufferCopyOffsetAlignment: 0x1d8,
-    optimalBufferCopyRowPitchAlignment: 0x1e0,
-    nonCoherentAtomSize: 0x1e8,
-    SIZE: 0x1f0,
-});
+export const VkPhysicalDeviceLimits = at4([
+    ...all(['maxImageDimension1D', 'maxImageDimension2D', 'maxImageDimension3D',
+        'maxImageDimensionCube', 'maxImageArrayLayers', 'maxTexelBufferElements',
+        'maxUniformBufferRange', 'maxStorageBufferRange', 'maxPushConstantsSize',
+        'maxMemoryAllocationCount', 'maxSamplerAllocationCount'], 'u32'),
+    ['bufferImageGranularity', DEVICE_SIZE], ['sparseAddressSpaceSize', DEVICE_SIZE],
+    ...all(['maxBoundDescriptorSets', 'maxPerStageDescriptorSamplers',
+        'maxPerStageDescriptorUniformBuffers', 'maxPerStageDescriptorStorageBuffers',
+        'maxPerStageDescriptorSampledImages', 'maxPerStageDescriptorStorageImages',
+        'maxPerStageDescriptorInputAttachments', 'maxPerStageResources',
+        'maxDescriptorSetSamplers', 'maxDescriptorSetUniformBuffers',
+        'maxDescriptorSetUniformBuffersDynamic', 'maxDescriptorSetStorageBuffers',
+        'maxDescriptorSetStorageBuffersDynamic', 'maxDescriptorSetSampledImages',
+        'maxDescriptorSetStorageImages', 'maxDescriptorSetInputAttachments',
+        'maxVertexInputAttributes', 'maxVertexInputBindings', 'maxVertexInputAttributeOffset',
+        'maxVertexInputBindingStride', 'maxVertexOutputComponents',
+        'maxTessellationGenerationLevel', 'maxTessellationPatchSize',
+        'maxTessellationControlPerVertexInputComponents',
+        'maxTessellationControlPerVertexOutputComponents',
+        'maxTessellationControlPerPatchOutputComponents',
+        'maxTessellationControlTotalOutputComponents',
+        'maxTessellationEvaluationInputComponents', 'maxTessellationEvaluationOutputComponents',
+        'maxGeometryShaderInvocations', 'maxGeometryInputComponents',
+        'maxGeometryOutputComponents', 'maxGeometryOutputVertices',
+        'maxGeometryTotalOutputComponents', 'maxFragmentInputComponents',
+        'maxFragmentOutputAttachments', 'maxFragmentDualSrcAttachments',
+        'maxFragmentCombinedOutputResources', 'maxComputeSharedMemorySize'], 'u32'),
+    ['maxComputeWorkGroupCount', 'u32', 3], ['maxComputeWorkGroupInvocations', 'u32'],
+    ['maxComputeWorkGroupSize', 'u32', 3],
+    ...all(['subPixelPrecisionBits', 'subTexelPrecisionBits', 'mipmapPrecisionBits',
+        'maxDrawIndexedIndexValue', 'maxDrawIndirectCount'], 'u32'),
+    ['maxSamplerLodBias', 'f32'], ['maxSamplerAnisotropy', 'f32'], ['maxViewports', 'u32'],
+    ['maxViewportDimensions', 'u32', 2], ['viewportBoundsRange', 'f32', 2],
+    ['viewportSubPixelBits', 'u32'], ['minMemoryMapAlignment', 'ptr'],
+    ['minTexelBufferOffsetAlignment', DEVICE_SIZE],
+    ['minUniformBufferOffsetAlignment', DEVICE_SIZE],
+    ['minStorageBufferOffsetAlignment', DEVICE_SIZE], ['minTexelOffset', 'i32'],
+    ['maxTexelOffset', 'u32'], ['minTexelGatherOffset', 'i32'], ['maxTexelGatherOffset', 'u32'],
+    ['minInterpolationOffset', 'f32'], ['maxInterpolationOffset', 'f32'],
+    ...all(['subPixelInterpolationOffsetBits', 'maxFramebufferWidth', 'maxFramebufferHeight',
+        'maxFramebufferLayers', 'framebufferColorSampleCounts', 'framebufferDepthSampleCounts',
+        'framebufferStencilSampleCounts', 'framebufferNoAttachmentsSampleCounts',
+        'maxColorAttachments', 'sampledImageColorSampleCounts',
+        'sampledImageIntegerSampleCounts', 'sampledImageDepthSampleCounts',
+        'sampledImageStencilSampleCounts', 'storageImageSampleCounts', 'maxSampleMaskWords',
+        'timestampComputeAndGraphics'], 'u32'),
+    ['timestampPeriod', 'f32'],
+    ...all(['maxClipDistances', 'maxCullDistances', 'maxCombinedClipAndCullDistances',
+        'discreteQueuePriorities'], 'u32'),
+    ['pointSizeRange', 'f32', 2], ['lineWidthRange', 'f32', 2], ['pointSizeGranularity', 'f32'],
+    ['lineWidthGranularity', 'f32'], ['strictLines', 'u32'], ['standardSampleLocations', 'u32'],
+    ['optimalBufferCopyOffsetAlignment', DEVICE_SIZE],
+    ['optimalBufferCopyRowPitchAlignment', DEVICE_SIZE], ['nonCoherentAtomSize', DEVICE_SIZE],
+]);
 
-export const VkPhysicalDeviceSparseProperties = Object.freeze({
-    residencyStandard2DBlockShape: 0x00,
-    residencyStandard2DMultisampleBlockShape: 0x04,
-    residencyStandard3DBlockShape: 0x08,
-    residencyAlignedMipSize: 0x0c,
-    residencyNonResidentStrict: 0x10,
-    SIZE: 0x14,
-});
+export const VkPhysicalDeviceSparseProperties = at4(all(['residencyStandard2DBlockShape',
+    'residencyStandard2DMultisampleBlockShape', 'residencyStandard3DBlockShape',
+    'residencyAlignedMipSize', 'residencyNonResidentStrict'], 'u32'));
 
-export const VkPhysicalDeviceProperties = Object.freeze({
-    apiVersion: 0x000,
-    driverVersion: 0x004,
-    vendorID: 0x008,
-    deviceID: 0x00c,
-    deviceType: 0x010,
-    deviceName: 0x014,
-    pipelineCacheUUID: 0x114,
-    limits: 0x128,
-    sparseProperties: 0x318,
-    SIZE: 0x330,
-});
+/** VK_UUID_SIZE. */
+const UUID_SIZE = 16;
+
+export const VkPhysicalDeviceProperties = at4([
+    ...all(['apiVersion', 'driverVersion', 'vendorID', 'deviceID', 'deviceType'], 'u32'),
+    ['deviceName', 'u8', MAX_NAME], ['pipelineCacheUUID', 'u8', UUID_SIZE],
+    ['limits', layoutOf(VkPhysicalDeviceLimits)],
+    ['sparseProperties', layoutOf(VkPhysicalDeviceSparseProperties)],
+]);
 
 /**
  * Fifty-five `VkBool32`s, in registry order. The order is the layout, so it
@@ -269,529 +189,226 @@ export const PHYSICAL_DEVICE_FEATURES = Object.freeze([
     'inheritedQueries',
 ]);
 
-export const VkPhysicalDeviceFeatures = Object.freeze({
-    SIZE: PHYSICAL_DEVICE_FEATURES.length * 4,
-    /** @param {string} name */
-    offsetOf: name=>PHYSICAL_DEVICE_FEATURES.indexOf(name) * 4,
-});
+export const VkPhysicalDeviceFeatures = at4(all(PHYSICAL_DEVICE_FEATURES, 'u32'));
 
-export const VkFormatProperties = Object.freeze({
-    linearTilingFeatures: 0x00,
-    optimalTilingFeatures: 0x04,
-    bufferFeatures: 0x08,
-    SIZE: 0x0c,
-});
+export const VkFormatProperties = at4(all(['linearTilingFeatures', 'optimalTilingFeatures',
+    'bufferFeatures'], 'u32'));
 
-export const VkQueueFamilyProperties = Object.freeze({
-    queueFlags: 0x00,
-    queueCount: 0x04,
-    timestampValidBits: 0x08,
-    minImageTransferGranularity: 0x0c,
-    SIZE: 0x18,
-});
+export const VkQueueFamilyProperties = at4([
+    ...all(['queueFlags', 'queueCount', 'timestampValidBits'], 'u32'),
+    ['minImageTransferGranularity', layoutOf(VkExtent3D)],
+]);
 
-export const VkMemoryType = Object.freeze({ propertyFlags: 0x00, heapIndex: 0x04, SIZE: 0x08 });
+export const VkMemoryType = at4(all(['propertyFlags', 'heapIndex'], 'u32'));
 /** A `VkDeviceSize` then a dword: sixteen bytes, four of them padding. */
-export const VkMemoryHeap = Object.freeze({ size: 0x00, flags: 0x08, SIZE: 0x10 });
+export const VkMemoryHeap = at4([['size', DEVICE_SIZE], ['flags', 'u32']]);
 
-export const VkPhysicalDeviceMemoryProperties = Object.freeze({
-    memoryTypeCount: 0x000,
-    memoryTypes: 0x004,
-    memoryHeapCount: 0x104,
-    memoryHeaps: 0x108,
-    SIZE: 0x208,
-});
+/** VK_MAX_MEMORY_TYPES and VK_MAX_MEMORY_HEAPS. */
+const MAX_MEMORY_TYPES = 32;
+const MAX_MEMORY_HEAPS = 16;
+
+export const VkPhysicalDeviceMemoryProperties = at4([['memoryTypeCount', 'u32'],
+    ['memoryTypes', layoutOf(VkMemoryType), MAX_MEMORY_TYPES], ['memoryHeapCount', 'u32'],
+    ['memoryHeaps', layoutOf(VkMemoryHeap), MAX_MEMORY_HEAPS]]);
 
 // --- surface and swapchain -------------------------------------------------
 
-export const VkWin32SurfaceCreateInfoKHR = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    hinstance: 0x0c,
-    hwnd: 0x10,
-    SIZE: 0x14,
-});
+/** vulkan_win32.h's: the module and the window are a HINSTANCE and an HWND. */
+export const VkWin32SurfaceCreateInfoKHR = at4([...HEAD, ['flags', 'u32'],
+    ['hinstance', 'handle'], ['hwnd', 'handle']]);
 
-export const VkSurfaceCapabilitiesKHR = Object.freeze({
-    minImageCount: 0x00,
-    maxImageCount: 0x04,
-    currentExtent: 0x08,
-    minImageExtent: 0x10,
-    maxImageExtent: 0x18,
-    maxImageArrayLayers: 0x20,
-    supportedTransforms: 0x24,
-    currentTransform: 0x28,
-    supportedCompositeAlpha: 0x2c,
-    supportedUsageFlags: 0x30,
-    SIZE: 0x34,
-});
+export const VkSurfaceCapabilitiesKHR = at4([['minImageCount', 'u32'],
+    ['maxImageCount', 'u32'], ['currentExtent', layoutOf(VkExtent2D)],
+    ['minImageExtent', layoutOf(VkExtent2D)], ['maxImageExtent', layoutOf(VkExtent2D)],
+    ...all(['maxImageArrayLayers', 'supportedTransforms', 'currentTransform',
+        'supportedCompositeAlpha', 'supportedUsageFlags'], 'u32')]);
 
-export const VkSurfaceFormatKHR = Object.freeze({ format: 0x00, colorSpace: 0x04, SIZE: 0x08 });
+export const VkSurfaceFormatKHR = at4(all(['format', 'colorSpace'], 'u32'));
 
-export const VkSwapchainCreateInfoKHR = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    surface: 0x10,
-    minImageCount: 0x18,
-    imageFormat: 0x1c,
-    imageColorSpace: 0x20,
-    imageExtent: 0x24,
-    imageArrayLayers: 0x2c,
-    imageUsage: 0x30,
-    imageSharingMode: 0x34,
-    queueFamilyIndexCount: 0x38,
-    pQueueFamilyIndices: 0x3c,
-    preTransform: 0x40,
-    compositeAlpha: 0x44,
-    presentMode: 0x48,
-    clipped: 0x4c,
-    oldSwapchain: 0x50,
-    SIZE: 0x58,
-});
+export const VkSwapchainCreateInfoKHR = at4([...HEAD, ['flags', 'u32'], ['surface', HANDLE],
+    ...all(['minImageCount', 'imageFormat', 'imageColorSpace'], 'u32'),
+    ['imageExtent', layoutOf(VkExtent2D)],
+    ...all(['imageArrayLayers', 'imageUsage', 'imageSharingMode', 'queueFamilyIndexCount'],
+        'u32'),
+    ['pQueueFamilyIndices', 'ptr'],
+    ...all(['preTransform', 'compositeAlpha', 'presentMode', 'clipped'], 'u32'),
+    ['oldSwapchain', HANDLE]]);
 
-export const VkPresentInfoKHR = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    waitSemaphoreCount: 0x08,
-    pWaitSemaphores: 0x0c,
-    swapchainCount: 0x10,
-    pSwapchains: 0x14,
-    pImageIndices: 0x18,
-    pResults: 0x1c,
-    SIZE: 0x20,
-});
+export const VkPresentInfoKHR = at4([...HEAD, ['waitSemaphoreCount', 'u32'],
+    ['pWaitSemaphores', 'ptr'], ['swapchainCount', 'u32'], ['pSwapchains', 'ptr'],
+    ['pImageIndices', 'ptr'], ['pResults', 'ptr']]);
 
 // --- images ----------------------------------------------------------------
 
-export const VkImageCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    imageType: 0x0c,
-    format: 0x10,
-    extent: 0x14,
-    mipLevels: 0x20,
-    arrayLayers: 0x24,
-    samples: 0x28,
-    tiling: 0x2c,
-    usage: 0x30,
-    sharingMode: 0x34,
-    queueFamilyIndexCount: 0x38,
-    pQueueFamilyIndices: 0x3c,
-    initialLayout: 0x40,
-    SIZE: 0x44,
-});
+export const VkImageCreateInfo = at4([...HEAD,
+    ...all(['flags', 'imageType', 'format'], 'u32'), ['extent', layoutOf(VkExtent3D)],
+    ...all(['mipLevels', 'arrayLayers', 'samples', 'tiling', 'usage', 'sharingMode',
+        'queueFamilyIndexCount'], 'u32'),
+    ['pQueueFamilyIndices', 'ptr'], ['initialLayout', 'u32']]);
 
-export const VkComponentMapping = Object.freeze({ r: 0x00, g: 0x04, b: 0x08, a: 0x0c, SIZE: 0x10 });
+export const VkComponentMapping = at4(all(['r', 'g', 'b', 'a'], 'u32'));
 
-export const VkImageSubresourceRange = Object.freeze({
-    aspectMask: 0x00,
-    baseMipLevel: 0x04,
-    levelCount: 0x08,
-    baseArrayLayer: 0x0c,
-    layerCount: 0x10,
-    SIZE: 0x14,
-});
+export const VkImageSubresourceRange = at4(all(['aspectMask', 'baseMipLevel', 'levelCount',
+    'baseArrayLayer', 'layerCount'], 'u32'));
 
-export const VkImageViewCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    image: 0x10,
-    viewType: 0x18,
-    format: 0x1c,
-    components: 0x20,
-    subresourceRange: 0x30,
-    SIZE: 0x48,
-});
+export const VkImageViewCreateInfo = at4([...HEAD, ['flags', 'u32'], ['image', HANDLE],
+    ['viewType', 'u32'], ['format', 'u32'], ['components', layoutOf(VkComponentMapping)],
+    ['subresourceRange', layoutOf(VkImageSubresourceRange)]]);
 
-export const VkMemoryRequirements = Object.freeze({
-    size: 0x00,
-    alignment: 0x08,
-    memoryTypeBits: 0x10,
-    SIZE: 0x18,
-});
+export const VkMemoryRequirements = at4([['size', DEVICE_SIZE], ['alignment', DEVICE_SIZE],
+    ['memoryTypeBits', 'u32']]);
 
-export const VkMemoryAllocateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    allocationSize: 0x08,
-    memoryTypeIndex: 0x10,
-    SIZE: 0x18,
-});
+export const VkMemoryAllocateInfo = at4([...HEAD, ['allocationSize', DEVICE_SIZE],
+    ['memoryTypeIndex', 'u32']]);
 
-export const VkBufferCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    size: 0x10,
-    usage: 0x18,
-    sharingMode: 0x1c,
-    queueFamilyIndexCount: 0x20,
-    pQueueFamilyIndices: 0x24,
-    SIZE: 0x28,
-});
+export const VkBufferCreateInfo = at4([...HEAD, ['flags', 'u32'], ['size', DEVICE_SIZE],
+    ...all(['usage', 'sharingMode', 'queueFamilyIndexCount'], 'u32'),
+    ['pQueueFamilyIndices', 'ptr']]);
 
 // --- render passes and framebuffers ---------------------------------------
 
-export const VkAttachmentDescription = Object.freeze({
-    flags: 0x00,
-    format: 0x04,
-    samples: 0x08,
-    loadOp: 0x0c,
-    storeOp: 0x10,
-    stencilLoadOp: 0x14,
-    stencilStoreOp: 0x18,
-    initialLayout: 0x1c,
-    finalLayout: 0x20,
-    SIZE: 0x24,
-});
+export const VkAttachmentDescription = at4(all(['flags', 'format', 'samples', 'loadOp',
+    'storeOp', 'stencilLoadOp', 'stencilStoreOp', 'initialLayout', 'finalLayout'], 'u32'));
 
-export const VkAttachmentReference = Object.freeze({ attachment: 0x00, layout: 0x04, SIZE: 0x08 });
+export const VkAttachmentReference = at4(all(['attachment', 'layout'], 'u32'));
 
-export const VkSubpassDescription = Object.freeze({
-    flags: 0x00,
-    pipelineBindPoint: 0x04,
-    inputAttachmentCount: 0x08,
-    pInputAttachments: 0x0c,
-    colorAttachmentCount: 0x10,
-    pColorAttachments: 0x14,
-    pResolveAttachments: 0x18,
-    pDepthStencilAttachment: 0x1c,
-    preserveAttachmentCount: 0x20,
-    pPreserveAttachments: 0x24,
-    SIZE: 0x28,
-});
+export const VkSubpassDescription = at4([
+    ...all(['flags', 'pipelineBindPoint', 'inputAttachmentCount'], 'u32'),
+    ['pInputAttachments', 'ptr'], ['colorAttachmentCount', 'u32'], ['pColorAttachments', 'ptr'],
+    ['pResolveAttachments', 'ptr'], ['pDepthStencilAttachment', 'ptr'],
+    ['preserveAttachmentCount', 'u32'], ['pPreserveAttachments', 'ptr'],
+]);
 
-export const VkSubpassDependency = Object.freeze({
-    srcSubpass: 0x00,
-    dstSubpass: 0x04,
-    srcStageMask: 0x08,
-    dstStageMask: 0x0c,
-    srcAccessMask: 0x10,
-    dstAccessMask: 0x14,
-    dependencyFlags: 0x18,
-    SIZE: 0x1c,
-});
+export const VkSubpassDependency = at4(all(['srcSubpass', 'dstSubpass', 'srcStageMask',
+    'dstStageMask', 'srcAccessMask', 'dstAccessMask', 'dependencyFlags'], 'u32'));
 
-export const VkRenderPassCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    attachmentCount: 0x0c,
-    pAttachments: 0x10,
-    subpassCount: 0x14,
-    pSubpasses: 0x18,
-    dependencyCount: 0x1c,
-    pDependencies: 0x20,
-    SIZE: 0x24,
-});
+export const VkRenderPassCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['attachmentCount', 'u32'], ['pAttachments', 'ptr'], ['subpassCount', 'u32'],
+    ['pSubpasses', 'ptr'], ['dependencyCount', 'u32'], ['pDependencies', 'ptr']]);
 
-export const VkFramebufferCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    renderPass: 0x10,
-    attachmentCount: 0x18,
-    pAttachments: 0x1c,
-    width: 0x20,
-    height: 0x24,
-    layers: 0x28,
-    SIZE: 0x30,
-});
+export const VkFramebufferCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['renderPass', HANDLE], ['attachmentCount', 'u32'], ['pAttachments', 'ptr'],
+    ...all(['width', 'height', 'layers'], 'u32')]);
 
 // --- command buffers -------------------------------------------------------
 
-export const VkCommandPoolCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    queueFamilyIndex: 0x0c,
-    SIZE: 0x10,
-});
+export const VkCommandPoolCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['queueFamilyIndex', 'u32']]);
 
-export const VkCommandBufferAllocateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    commandPool: 0x08,
-    level: 0x10,
-    commandBufferCount: 0x14,
-    SIZE: 0x18,
-});
+export const VkCommandBufferAllocateInfo = at4([...HEAD, ['commandPool', HANDLE],
+    ['level', 'u32'], ['commandBufferCount', 'u32']]);
 
-export const VkCommandBufferInheritanceInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    renderPass: 0x08,
-    subpass: 0x10,
-    framebuffer: 0x18,
-    occlusionQueryEnable: 0x20,
-    queryFlags: 0x24,
-    pipelineStatistics: 0x28,
-    SIZE: 0x30,
-});
+export const VkCommandBufferInheritanceInfo = at4([...HEAD, ['renderPass', HANDLE],
+    ['subpass', 'u32'], ['framebuffer', HANDLE],
+    ...all(['occlusionQueryEnable', 'queryFlags', 'pipelineStatistics'], 'u32')]);
 
-export const VkCommandBufferBeginInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    pInheritanceInfo: 0x0c,
-    SIZE: 0x10,
-});
+export const VkCommandBufferBeginInfo = at4([...HEAD, ['flags', 'u32'],
+    ['pInheritanceInfo', 'ptr']]);
 
 /** A union of four floats, four ints or four uints: sixteen bytes either way. */
-export const VkClearColorValue = Object.freeze({ SIZE: 0x10 });
-export const VkClearDepthStencilValue = Object.freeze({ depth: 0x00, stencil: 0x04, SIZE: 0x08 });
+const CLEAR_COLOR = union([['float32', 'f32', 4], ['int32', 'i32', 4], ['uint32', 'u32', 4]]);
+export const VkClearColorValue = CLEAR_COLOR.at(4);
+export const VkClearDepthStencilValue = at4([['depth', 'f32'], ['stencil', 'u32']]);
 /** The larger of the two members, which is the colour. */
-export const VkClearValue = Object.freeze({ color: 0x00, depthStencil: 0x00, SIZE: 0x10 });
+export const VkClearValue = union([['color', CLEAR_COLOR],
+    ['depthStencil', layoutOf(VkClearDepthStencilValue)]]).at(4);
 
-export const VkRenderPassBeginInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    renderPass: 0x08,
-    framebuffer: 0x10,
-    renderArea: 0x18,
-    clearValueCount: 0x28,
-    pClearValues: 0x2c,
-    SIZE: 0x30,
-});
+export const VkRenderPassBeginInfo = at4([...HEAD, ['renderPass', HANDLE],
+    ['framebuffer', HANDLE], ['renderArea', layoutOf(VkRect2D)], ['clearValueCount', 'u32'],
+    ['pClearValues', 'ptr']]);
 
-export const VkSubmitInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    waitSemaphoreCount: 0x08,
-    pWaitSemaphores: 0x0c,
-    pWaitDstStageMask: 0x10,
-    commandBufferCount: 0x14,
-    pCommandBuffers: 0x18,
-    signalSemaphoreCount: 0x1c,
-    pSignalSemaphores: 0x20,
-    SIZE: 0x24,
-});
+export const VkSubmitInfo = at4([...HEAD, ['waitSemaphoreCount', 'u32'],
+    ['pWaitSemaphores', 'ptr'], ['pWaitDstStageMask', 'ptr'], ['commandBufferCount', 'u32'],
+    ['pCommandBuffers', 'ptr'], ['signalSemaphoreCount', 'u32'], ['pSignalSemaphores', 'ptr']]);
 
-export const VkFenceCreateInfo = Object.freeze({
-    sType: 0x00, pNext: 0x04, flags: 0x08, SIZE: 0x0c,
-});
-export const VkSemaphoreCreateInfo = Object.freeze({
-    sType: 0x00, pNext: 0x04, flags: 0x08, SIZE: 0x0c,
-});
+export const VkFenceCreateInfo = at4([...HEAD, ['flags', 'u32']]);
+export const VkSemaphoreCreateInfo = at4([...HEAD, ['flags', 'u32']]);
 
 // --- pipelines ---------------------------------------------------------------
 
-export const VkShaderModuleCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    codeSize: 0x0c,
-    pCode: 0x10,
-    SIZE: 0x14,
-});
+export const VkShaderModuleCreateInfo = at4([...HEAD, ['flags', 'u32'], ['codeSize', 'ptr'],
+    ['pCode', 'ptr']]);
 
-export const VkPipelineShaderStageCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    stage: 0x0c,
-    module: 0x10,
-    pName: 0x18,
-    pSpecializationInfo: 0x1c,
-    SIZE: 0x20,
-});
+export const VkPipelineShaderStageCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['stage', 'u32'], ['module', HANDLE], ['pName', 'ptr'], ['pSpecializationInfo', 'ptr']]);
 
-export const VkVertexInputBindingDescription = Object.freeze({
-    binding: 0x00, stride: 0x04, inputRate: 0x08, SIZE: 0x0c,
-});
+export const VkVertexInputBindingDescription = at4(all(['binding', 'stride', 'inputRate'],
+    'u32'));
 
-export const VkVertexInputAttributeDescription = Object.freeze({
-    location: 0x00, binding: 0x04, format: 0x08, offset: 0x0c, SIZE: 0x10,
-});
+export const VkVertexInputAttributeDescription = at4(all(['location', 'binding', 'format',
+    'offset'], 'u32'));
 
-export const VkPipelineVertexInputStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    vertexBindingDescriptionCount: 0x0c,
-    pVertexBindingDescriptions: 0x10,
-    vertexAttributeDescriptionCount: 0x14,
-    pVertexAttributeDescriptions: 0x18,
-    SIZE: 0x1c,
-});
+export const VkPipelineVertexInputStateCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['vertexBindingDescriptionCount', 'u32'], ['pVertexBindingDescriptions', 'ptr'],
+    ['vertexAttributeDescriptionCount', 'u32'], ['pVertexAttributeDescriptions', 'ptr']]);
 
-export const VkPipelineInputAssemblyStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    topology: 0x0c,
-    primitiveRestartEnable: 0x10,
-    SIZE: 0x14,
-});
+export const VkPipelineInputAssemblyStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'topology', 'primitiveRestartEnable'], 'u32')]);
 
-export const VkPipelineTessellationStateCreateInfo = Object.freeze({
-    sType: 0x00, pNext: 0x04, flags: 0x08, patchControlPoints: 0x0c, SIZE: 0x10,
-});
+export const VkPipelineTessellationStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'patchControlPoints'], 'u32')]);
 
-export const VkPipelineViewportStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    viewportCount: 0x0c,
-    pViewports: 0x10,
-    scissorCount: 0x14,
-    pScissors: 0x18,
-    SIZE: 0x1c,
-});
+export const VkPipelineViewportStateCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['viewportCount', 'u32'], ['pViewports', 'ptr'], ['scissorCount', 'u32'],
+    ['pScissors', 'ptr']]);
 
-export const VkPipelineRasterizationStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    depthClampEnable: 0x0c,
-    rasterizerDiscardEnable: 0x10,
-    polygonMode: 0x14,
-    cullMode: 0x18,
-    frontFace: 0x1c,
-    depthBiasEnable: 0x20,
-    depthBiasConstantFactor: 0x24,
-    depthBiasClamp: 0x28,
-    depthBiasSlopeFactor: 0x2c,
-    lineWidth: 0x30,
-    SIZE: 0x34,
-});
+export const VkPipelineRasterizationStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'depthClampEnable', 'rasterizerDiscardEnable', 'polygonMode', 'cullMode',
+        'frontFace', 'depthBiasEnable'], 'u32'),
+    ...all(['depthBiasConstantFactor', 'depthBiasClamp', 'depthBiasSlopeFactor', 'lineWidth'],
+        'f32')]);
 
-export const VkPipelineMultisampleStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    rasterizationSamples: 0x0c,
-    sampleShadingEnable: 0x10,
-    minSampleShading: 0x14,
-    pSampleMask: 0x18,
-    alphaToCoverageEnable: 0x1c,
-    alphaToOneEnable: 0x20,
-    SIZE: 0x24,
-});
+export const VkPipelineMultisampleStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'rasterizationSamples', 'sampleShadingEnable'], 'u32'),
+    ['minSampleShading', 'f32'], ['pSampleMask', 'ptr'],
+    ...all(['alphaToCoverageEnable', 'alphaToOneEnable'], 'u32')]);
 
-export const VkStencilOpState = Object.freeze({
-    failOp: 0x00,
-    passOp: 0x04,
-    depthFailOp: 0x08,
-    compareOp: 0x0c,
-    compareMask: 0x10,
-    writeMask: 0x14,
-    reference: 0x18,
-    SIZE: 0x1c,
-});
+export const VkStencilOpState = at4(all(['failOp', 'passOp', 'depthFailOp', 'compareOp',
+    'compareMask', 'writeMask', 'reference'], 'u32'));
 
-export const VkPipelineDepthStencilStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    depthTestEnable: 0x0c,
-    depthWriteEnable: 0x10,
-    depthCompareOp: 0x14,
-    depthBoundsTestEnable: 0x18,
-    stencilTestEnable: 0x1c,
-    front: 0x20,
-    back: 0x3c,
-    minDepthBounds: 0x58,
-    maxDepthBounds: 0x5c,
-    SIZE: 0x60,
-});
+export const VkPipelineDepthStencilStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'depthTestEnable', 'depthWriteEnable', 'depthCompareOp',
+        'depthBoundsTestEnable', 'stencilTestEnable'], 'u32'),
+    ['front', layoutOf(VkStencilOpState)], ['back', layoutOf(VkStencilOpState)],
+    ...all(['minDepthBounds', 'maxDepthBounds'], 'f32')]);
 
-export const VkPipelineColorBlendAttachmentState = Object.freeze({
-    blendEnable: 0x00,
-    srcColorBlendFactor: 0x04,
-    dstColorBlendFactor: 0x08,
-    colorBlendOp: 0x0c,
-    srcAlphaBlendFactor: 0x10,
-    dstAlphaBlendFactor: 0x14,
-    alphaBlendOp: 0x18,
-    colorWriteMask: 0x1c,
-    SIZE: 0x20,
-});
+export const VkPipelineColorBlendAttachmentState = at4(all(['blendEnable',
+    'srcColorBlendFactor', 'dstColorBlendFactor', 'colorBlendOp', 'srcAlphaBlendFactor',
+    'dstAlphaBlendFactor', 'alphaBlendOp', 'colorWriteMask'], 'u32'));
 
-export const VkPipelineColorBlendStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    logicOpEnable: 0x0c,
-    logicOp: 0x10,
-    attachmentCount: 0x14,
-    pAttachments: 0x18,
-    blendConstants: 0x1c,
-    SIZE: 0x2c,
-});
+export const VkPipelineColorBlendStateCreateInfo = at4([...HEAD,
+    ...all(['flags', 'logicOpEnable', 'logicOp', 'attachmentCount'], 'u32'),
+    ['pAttachments', 'ptr'], ['blendConstants', 'f32', 4]]);
 
-export const VkPipelineDynamicStateCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    dynamicStateCount: 0x0c,
-    pDynamicStates: 0x10,
-    SIZE: 0x14,
-});
+export const VkPipelineDynamicStateCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['dynamicStateCount', 'u32'], ['pDynamicStates', 'ptr']]);
 
-export const VkPushConstantRange = Object.freeze({
-    stageFlags: 0x00, offset: 0x04, size: 0x08, SIZE: 0x0c,
-});
+export const VkPushConstantRange = at4(all(['stageFlags', 'offset', 'size'], 'u32'));
 
-export const VkPipelineLayoutCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    setLayoutCount: 0x0c,
-    pSetLayouts: 0x10,
-    pushConstantRangeCount: 0x14,
-    pPushConstantRanges: 0x18,
-    SIZE: 0x1c,
-});
+export const VkPipelineLayoutCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['setLayoutCount', 'u32'], ['pSetLayouts', 'ptr'], ['pushConstantRangeCount', 'u32'],
+    ['pPushConstantRanges', 'ptr']]);
 
-export const VkDescriptorSetLayoutBinding = Object.freeze({
-    binding: 0x00,
-    descriptorType: 0x04,
-    descriptorCount: 0x08,
-    stageFlags: 0x0c,
-    pImmutableSamplers: 0x10,
-    SIZE: 0x14,
-});
+export const VkDescriptorSetLayoutBinding = at4([
+    ...all(['binding', 'descriptorType', 'descriptorCount', 'stageFlags'], 'u32'),
+    ['pImmutableSamplers', 'ptr'],
+]);
 
-export const VkDescriptorSetLayoutCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    bindingCount: 0x0c,
-    pBindings: 0x10,
-    SIZE: 0x14,
-});
+export const VkDescriptorSetLayoutCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['bindingCount', 'u32'], ['pBindings', 'ptr']]);
 
 /**
- * Ten pointers to state blocks, then two handles: `layout` is the first
- * eight-byte field and sits at 56 after the pointers pack with no gap.
+ * Ten pointers to state blocks, then two handles: in a 32-bit process
+ * `layout` is the first eight-byte field and sits at 56 after the pointers
+ * pack with no gap.
  */
-export const VkGraphicsPipelineCreateInfo = Object.freeze({
-    sType: 0x00,
-    pNext: 0x04,
-    flags: 0x08,
-    stageCount: 0x0c,
-    pStages: 0x10,
-    pVertexInputState: 0x14,
-    pInputAssemblyState: 0x18,
-    pTessellationState: 0x1c,
-    pViewportState: 0x20,
-    pRasterizationState: 0x24,
-    pMultisampleState: 0x28,
-    pDepthStencilState: 0x2c,
-    pColorBlendState: 0x30,
-    pDynamicState: 0x34,
-    layout: 0x38,
-    renderPass: 0x40,
-    subpass: 0x48,
-    basePipelineHandle: 0x50,
-    basePipelineIndex: 0x58,
-    SIZE: 0x60,
-});
+export const VkGraphicsPipelineCreateInfo = at4([...HEAD, ['flags', 'u32'],
+    ['stageCount', 'u32'], ['pStages', 'ptr'], ['pVertexInputState', 'ptr'],
+    ['pInputAssemblyState', 'ptr'], ['pTessellationState', 'ptr'], ['pViewportState', 'ptr'],
+    ['pRasterizationState', 'ptr'], ['pMultisampleState', 'ptr'],
+    ['pDepthStencilState', 'ptr'], ['pColorBlendState', 'ptr'], ['pDynamicState', 'ptr'],
+    ['layout', HANDLE], ['renderPass', HANDLE], ['subpass', 'u32'],
+    ['basePipelineHandle', HANDLE], ['basePipelineIndex', 'i32']]);
 
 // --- reading and writing ----------------------------------------------------
 
