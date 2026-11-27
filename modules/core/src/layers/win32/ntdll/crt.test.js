@@ -134,11 +134,11 @@ test('the wide readings skip the Latin-1 blanks alone, msvcrt\'s reading otherwi
 });
 
 test('sscanf reads no floating-point field, and stops at one', ()=>{
-    const { view, io } = memoryIo();
+    const { memory, view, io } = memoryIo();
     const strings = new Map([[0x10, '10'], [0x20, '%d'], [0x30, '%f'], [0x40, '%d %f %d'],
         [0x50, '1 2.5 3']]);
-    const msvcrt = createScanFunctions(/** @type {any} */ ({ ...io, pointerSize: 4,
-        readCString: (/** @type {number} */ at)=>strings.get(at) ?? '' }));
+    const msvcrt = createScanFunctions(/** @type {any} */ ({ guest: { ...guestWindow(memory),
+        cstr: (/** @type {number} */ at)=>strings.get(at) ?? '' } }));
     const ntdll = /** @type {Record<string, any>} */ (createNtdllCrt({ ...io, crt: msvcrt }));
     assert.equal(ntdll.sscanf.handler([0x10, 0x20, 0x200]), 1);
     assert.equal(view.getInt32(0x200, true), 10);

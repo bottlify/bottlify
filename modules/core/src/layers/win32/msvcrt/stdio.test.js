@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createStdioFunctions } from './stdio.js';
 import { createDescriptors, createIoFunctions } from './io.js';
 import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 // The volume fake lives with the rest of the harness; other layers' tests
 // import it from here.
@@ -26,9 +27,7 @@ function build(options = {}){
     /** @type {number[]} */
     const errno = [];
     const fns = /** @type {any} */ (createStdioFunctions({
-        readMemory: memory.readMemory,
-        writeMemory: memory.writeMemory,
-        readCString: memory.readCString,
+        guest: memory.guest,
         allocate: memory.allocate,
         free: ()=>true,
         files,
@@ -1278,14 +1277,12 @@ test('fread of a binary stream puts the volume\'s bytes into the buffer, copied 
         files.readInto = counted;
         /** @type {ArrayBufferLike[]} */
         const sources = [];
-        const write = memory.writeMemory;
-        memory.writeMemory = (address, source)=>{
-            sources.push(source.buffer);
-            write(address, source);
-        };
         const fns = /** @type {any} */ (createStdioFunctions({
-            readMemory: memory.readMemory, writeMemory: memory.writeMemory,
-            readCString: memory.readCString, allocate: memory.allocate, free: ()=>true,
+            guest: { ...memory.guest, setBytes: (address, source)=>{
+                sources.push(source.buffer);
+                memory.guest.setBytes(address, source);
+            } },
+            allocate: memory.allocate, free: ()=>true,
             files, write: ()=>{}, iob: ()=>IOB, errno: ()=>{},
         }));
         const stream = fns.fopen.handler([memory.put('C:\\big.bin'), memory.put('rb')]);
@@ -1315,4 +1312,42 @@ test('fread of a binary stream puts the volume\'s bytes into the buffer, copied 
         assert.ok(at(0, 0) && [...memory.bytes.subarray(buffer + 1, buffer + 5000)]
             .every((value, i)=>value === data[i]), 'then the file from where it was');
     }
+});
+
+test('at 64 bits past 4 GiB: fopen_s writes a whole FILE *, and that FILE is the stream', ()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x4000);
+    const view = new DataView(bytes.buffer);
+    let next = base + 0x1000;
+    const files = fakeVolume({ 'C:\\data.bin': new Uint8Array([1, 2, 3, 4, 5, 6, 7]) });
+    const fns = /** @type {any} */ (createStdioFunctions({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        allocate: size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        },
+        free: ()=>true,
+        files,
+        iob: ()=>0,
+    }));
+    /** @param {string} text */
+    const put = text=>{
+        const at = next;
+        bytes.set([...text, '\0'].map(c=>c.charCodeAt(0)), at - base);
+        next += text.length + 16 & ~15;
+        return at;
+    };
+    const out = base + 0x100;
+    bytes.fill(0xcc, 0x100, 0x108);
+    assert.equal(fns.fopen_s.handler([out, put('C:\\data.bin'), put('rb')]), 0);
+    const stream = view.getUint32(0x100, true) + view.getUint32(0x104, true) * 2 ** 32;
+    assert.ok(stream > base, 'the FILE *, whole');
+    const buffer = base + 0x200;
+    assert.equal(fns.fread.handler([buffer, 1, 4, stream]), 4, 'the stream it names');
+    assert.deepEqual([...bytes.subarray(0x200, 0x204)], [1, 2, 3, 4]);
+    const pos = base + 0x300;
+    assert.equal(fns.fgetpos.handler([stream, pos]), 0);
+    assert.equal(view.getBigInt64(0x300, true), 4n);
+    assert.equal(fns.fclose.handler([stream]), 0);
 });

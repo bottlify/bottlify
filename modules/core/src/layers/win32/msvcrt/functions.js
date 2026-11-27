@@ -322,7 +322,7 @@ export function createMsvcrtFunctions(host){
     const readWide = pointer=>wideStringAt(host.readMemory, pointer);
 
     /** Where %Z reads and %n writes. */
-    const memoryAccess = guestAccess(host.readMemory, host.writeMemory);
+    const memoryAccess = guestAccess(host.guest);
 
     /**
      * Text in the ANSI page the text was read in, a byte a character, so a
@@ -1194,10 +1194,7 @@ export function createMsvcrtFunctions(host){
 
     const stdio = host.files && host.allocate && host.free
         ? createStdioFunctions({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate: host.allocate,
             free: host.free,
             files,
