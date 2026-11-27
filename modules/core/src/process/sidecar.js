@@ -50,8 +50,7 @@ export async function bindSidecar(deps){
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
         const guestView = createGuestView(/** @type {GuestMemory} */ (memory));
         // Resolved against the graphics seam the first time a kernel actually
-        // asks, not at bind time (`resolveOpenglEntry`): a build with no
-        // OpenGL layer (a Direct3D title) still binds every kernel.
+        // asks, not at bind time (`resolveOpenglEntry`).
         const kernelGl = createKernelGl(
             resolveOpenglEntry(/** @type {{ opengl: () => ReturnType<
                 typeof import('../layers/graphics/opengl/exports.js').createOpengl> }} */ (
@@ -225,36 +224,24 @@ export function createGuestView(memory){
 }
 
 /**
- * The lazy, remembered resolve of the OpenGL seam `frame.gl` needs:
- * `graphics.opengl()` is not called until a kernel's first `entry()` call,
- * and a seam that throws (a build with no OpenGL layer) is remembered rather
- * than retried on every later call, so a Direct3D title still binds its
- * kernels with `entry` answering `null` for every name.
+ * The OpenGL seam `frame.gl` needs, asked of the graphics layer when a kernel
+ * first asks for an entry point, not when kernels are bound: a kernel that
+ * never draws through OpenGL binds without one. A kernel that asks while the
+ * graphics layer has made no OpenGL seam is told so, as an error naming it.
+ *
  * @param {{ opengl: () => {
- *   entry: (name: string) => ((args: number[]) => number) | null } }} graphics
+ *   entry: (name: string) => ((args: number[]) => number) | null } | undefined }} graphics
  * @returns {{ entry: (name: string) => ((args: number[]) => number) | null }}
  */
 export function resolveOpenglEntry(graphics){
-    let openglLayer = /** @type {ReturnType<typeof graphics.opengl> | null} */ (null);
-    let openglSeamFailed = false;
     return {
         entry(name){
-            if (openglSeamFailed)
+            const seam = graphics.opengl();
+            if (!seam)
             {
-                return null;
+                throw new Error(`OPENGL32.dll!${name}: the graphics layer has made no OpenGL seam`);
             }
-            if (!openglLayer)
-            {
-                try
-                {
-                    openglLayer = graphics.opengl();
-                }
-                catch {
-                    openglSeamFailed = true;
-                    return null;
-                }
-            }
-            return openglLayer.entry(name);
+            return seam.entry(name);
         },
     };
 }
@@ -268,10 +255,6 @@ export function resolveOpenglEntry(graphics){
  * trace of the run stays honest when a kernel issues the work the guest would
  * have issued. Nothing else of the engine reaches the kernel through this.
  *
- * A build with no OpenGL seam (a Direct3D title) has an `opengl.entry` that
- * throws or is otherwise unusable; that answers `null` for every name rather
- * than taking the run down, so a title with no OpenGL still binds its kernels.
- *
  * @param {{ entry: (name: string) => ((args: number[]) => number) | null }} opengl
  * @param {(call: { name: string, args: number[], result: string }) => void} journalCall
  * @param {() => boolean} traced   whether `call.gpu` is on at TRACE right now
@@ -281,14 +264,7 @@ export function createKernelGl(opengl, journalCall, traced, counters){
     return {
         /** @param {string} name @returns {((args: number[]) => number) | null} */
         entry(name){
-            let handler;
-            try
-            {
-                handler = opengl.entry(name);
-            }
-            catch {
-                return null;
-            }
+            const handler = opengl.entry(name);
             if (!handler)
             {
                 return null;

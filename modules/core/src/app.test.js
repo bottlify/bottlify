@@ -1740,21 +1740,16 @@ test('a call through createKernelGl counts, and journals only when traced() is t
     assert.deepEqual(journalled, [{ name: 'OPENGL32.dll!glEnable', args: [0xb90], result: '0x0' }]);
 });
 
-test('a seam that throws makes every entry answer null rather than throwing', ()=>{
+test('a seam that throws, or none made, is an error to the kernel that asked', ()=>{
     const gl = createKernelGl({
         entry(){
-            throw new Error('no OpenGL seam in this build');
+            throw new Error('the seam refused');
         },
     }, ()=>{}, ()=>true, { calls: 0 });
-    assert.equal(gl.entry('glEnable'), null);
-});
-
-test('resolveOpenglEntry remembers a seam that throws once, and reuses one that resolves', ()=>{
-    let calls = 0;
-    const throwing = resolveOpenglEntry({ opengl(){ calls++; throw new Error('no seam'); } });
-    assert.equal(throwing.entry('glEnable'), null);
-    assert.equal(throwing.entry('glEnable'), null);
-    assert.equal(calls, 1, 'the failure is remembered, not retried');
+    assert.throws(()=>gl.entry('glEnable'), /the seam refused/);
+    const none = resolveOpenglEntry({ opengl: ()=>undefined });
+    assert.throws(()=>none.entry('glEnable'),
+        /OPENGL32.dll!glEnable: the graphics layer has made no OpenGL seam/);
 
     const layer = fakeOpengl({ glEnable: ()=>0 });
     const resolving = resolveOpenglEntry({ opengl: ()=>layer });
