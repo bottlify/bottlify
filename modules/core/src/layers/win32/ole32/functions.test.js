@@ -2010,5 +2010,5 @@ test('a 64-bit CoGetContextToken hands out the context\'s pointer whole, past 4 
     host.vtables.publish = (object, interfaceId)=>(publish(object, interfaceId) === 0 ? 0 : HIGH);
     initialize(fns, 2);
     assert.equal(await fns.CoGetContextToken.handler([PPV]), S_OK);
-    assert.equal(host.u32(PPV) + host.u32(PPV + 4) * 2 ** 32, HIGH, "all eight bytes");
+    assert.equal(host.u32(PPV) + host.u32(PPV + 4) * 2 ** 32, HIGH, 'all eight bytes');
 });
