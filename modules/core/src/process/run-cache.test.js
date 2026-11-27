@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLinkMemory, createReader, linkCarrier, openKeeperClient, openLink }
+import { createLinkMemory, createReader, grainsOf, linkCarrier, openKeeperClient, openLink }
     from '@bottlify/cellar';
 import { CACHE_CALLS, openRunCache } from './run-cache.js';
 import { relayedJoin } from '../layers/cache/module.js';
@@ -83,13 +83,16 @@ test('the figures weigh each space on its own: its bodies, those in memory, the 
                 { onlyCopy: false, known: 1 });
             assert.ok(place !== null);
             const standing = {
-                reads: { bodies: 2, bytes: 4352, hotBytes: 4352, placedBytes: 2 * 4096 },
-                translations: { bodies: 1, bytes: 5000, hotBytes: 5000, placedBytes: 8192 },
+                reads: { bodies: 2, bytes: 4352, hotBytes: 4352,
+                    placedBytes: grainsOf(256) + grainsOf(4096) },
+                translations: { bodies: 1, bytes: 5000, hotBytes: 5000,
+                    placedBytes: grainsOf(5000) },
             };
             const figures = run.figures();
             assert.deepEqual(figures.spaces, standing);
             assert.deepEqual(figures.peakSpaces, standing, 'the most placed is now');
-            assert.equal(figures.peakRoundingBytes, 2 * 4096 + 8192 - 4352 - 5000);
+            assert.equal(figures.peakRoundingBytes,
+                grainsOf(256) + grainsOf(4096) + grainsOf(5000) - 4352 - 5000);
             // Let go of: the spaces are empty now, the peak keeps them as they stood.
             run.reader.drop('reads/a');
             run.reader.drop('reads/b');
@@ -294,9 +297,10 @@ test('a process in a worker of its own is served names of its own: its scratches
         const out = run.figures().ownersOut;
         assert.deepEqual(Object.keys(out), ['scratch/1/', held.texels],
             'its scratches and its in-thread root, numbered by the run');
-        assert.deepEqual(out['scratch/1/'], { bodies: 2, bytes: 128 * 1024 + 13 * 4096,
-            hotBytes: 128 * 1024 + 13 * 4096, placedBytes: 128 * 1024 + 64 * 1024 },
-        'the scratch and the hold (its pages), each in a block of the budget');
+        // Each room is all the cache places for its length.
+        const rooms = grainsOf(100_000) + grainsOf(50_000);
+        assert.deepEqual(out['scratch/1/'], { bodies: 2, bytes: rooms, hotBytes: rooms,
+            placedBytes: rooms }, 'the scratch and the hold, each placed in the budget');
         assert.equal(out[held.texels].bodies, 1);
         assert.equal(run.reader.with(`${held.texels}a`, body=>body[8191], { wait: true }), 7,
             'its root\'s texels read in place on the keeper\'s thread');
@@ -371,7 +375,7 @@ test('the run\'s own scratches (its presenter\'s) are held under names of its ow
     assert.ok(room.buffer instanceof SharedArrayBuffer);
     const [prefix] = Object.keys(run.figures().ownersOut);
     assert.match(prefix, /^scratch\/\d+\/$/);
-    assert.equal(run.under(prefix).hotBytes, 16 * 1024);
+    assert.equal(run.under(prefix).hotBytes, grainsOf(10_000));
     run.close();
     assert.deepEqual(tails, [], 'no tail: the run took it with it');
 });

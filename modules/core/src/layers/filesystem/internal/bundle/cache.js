@@ -106,10 +106,9 @@ const SWEEP_MS = 1000;
 const SAVE_MS = 2000;
 
 /** A segment's bytes: a power of two a block fits in, at most 16 MiB, within the budget. */
-const segmentFor = (/** @type {number} */ blockSize, /** @type {number} */ budget)=>{
-    const block = Math.max(4096, 2 ** Math.ceil(Math.log2(blockSize)));
-    return Math.max(block, Math.min(16 << 20, 2 ** Math.floor(Math.log2(Math.max(budget, 1)))));
-};
+const segmentFor = (/** @type {number} */ blockSize, /** @type {number} */ budget)=>Math.max(
+    2 ** Math.ceil(Math.log2(blockSize)),
+    Math.min(16 << 20, 2 ** Math.floor(Math.log2(Math.max(budget, 1)))));
 
 
 /**

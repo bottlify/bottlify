@@ -11,10 +11,9 @@
  * budget and its one report rather than kept as a heap of its own.
  *
  * A scratch grows when a call asks for more than it holds: a larger room is
- * held (rounded up to the cache's next block, a power of two from a page)
- * and the old one let go, and the room is kept for the next call, which then
- * makes nothing: a program that blits its whole screen every frame asks for
- * the same bytes every frame. A room the cache has none for is refused
+ * held (`roomFor`) and the old one let go, and the room is kept for the
+ * next call, which then makes nothing: a program that blits its whole screen
+ * every frame asks for the same bytes every frame. A room the cache has none for is refused
  * (`NoRoom`, counted): no memory of another kind stands in for it.
  *
  * The view `bytes` answers is valid until the next `bytes` of the same
@@ -25,27 +24,18 @@
  *
  * A hold (`hold`) is memory of one length kept for the life of what keeps
  * it - a Direct3D 10 resource's bytes - rather than between calls: held in
- * the cache at that length in whole pages, and zero, as new memory is.
+ * the cache at that length as the cache places it, and zero, as new memory is.
  */
 
-/** The smallest room: the cache's block, one page. */
-const UNIT = 4096;
+import { grainsOf } from '@bottlify/cellar';
 
 /**
- * The bytes a room for `length` takes: the cache's block for it, a power of
- * two from a page, so a room held is all of the block it is placed in.
+ * The bytes a room for `length` takes: all the cache places for it, so a room
+ * held is all of its room in the budget. A room of nothing is one all the same.
  *
  * @param {number} length
  */
-export const roomFor = length=>{
-    if (length > 1 << 30)
-    {
-        // Past any block the cache has: a room of its own size.
-        return length;
-    }
-    const units = Math.ceil(length / UNIT);
-    return units <= 1 ? UNIT : UNIT << (32 - Math.clz32(units - 1));
-};
+export const roomFor = length=>grainsOf(Math.max(1, length));
 
 /**
  * Memory of `length` bytes held under `key`, or null where there is none to
@@ -177,7 +167,7 @@ export function createScratches(hold){
          */
         hold(name, length){
             const number = ++counts.holds;
-            const size = Math.max(UNIT, Math.ceil(length / UNIT) * UNIT);
+            const size = roomFor(length);
             const got = take(`${name}/${number}`, size);
             // A block of the cache holds what its last holder left in it.
             const bytes = got.bytes.subarray(0, length).fill(0);

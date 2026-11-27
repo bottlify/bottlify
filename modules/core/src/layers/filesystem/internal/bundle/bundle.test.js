@@ -22,7 +22,7 @@ import { createBundleSource, BLOCK_MISS } from './source.js';
 import { createBlockCache } from './cache.js';
 import { cachedBundle } from './saved.js';
 import { fakeOpfs } from '../opfs.fixture.js';
-import { INDEX_FILES, readSaved } from '@bottlify/cellar';
+import { INDEX_FILES, grainsOf, readSaved } from '@bottlify/cellar';
 
 const BLOCK_SIZE = 1024;
 
@@ -306,8 +306,9 @@ test('a block the cache let go of is a miss, fetched again, every read whole', a
     // sweeps by their records, not by their reads, and a read of several
     // blocks in a room of few may push its own blocks out.
     const bundle = await open();
-    // A body takes 4 KiB of the room at least.
-    const cache = await cacheOf(bundle, { resident: [], budget: 4 * 4096 });
+    // Room for four blocks, each all the cache places for its length.
+    const budget = 4 * grainsOf(BLOCK_SIZE);
+    const cache = await cacheOf(bundle, { resident: [], budget });
     const source = createBundleSource({ bundle, blocks: cache });
     let fetched = 0;
     /** @param {string} path @param {number} at @param {number} length */
@@ -349,7 +350,7 @@ test('a block the cache let go of is a miss, fetched again, every read whole', a
                 }
             }
         }
-        assert.ok(cache.diagnostics().cellar.segmentBytes <= 4 * 4096, 'under the cache\'s budget');
+        assert.ok(cache.diagnostics().cellar.segmentBytes <= budget, 'under the cache\'s budget');
     }
     assert.ok(fetched > bundle.blockCount, `${fetched} fetches for ${bundle.blockCount} blocks`);
 });

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { answerKeeper, createChannel, openClient, openKeeper, serveKeeperChannel }
+import { answerKeeper, createChannel, grainsOf, openClient, openKeeper, serveKeeperChannel }
     from '@bottlify/cellar';
 import { createCacheModule } from './module.js';
 import { openRunCache } from '../../process/run-cache.js';
@@ -124,9 +124,9 @@ test('two owners of one kind - two roots\' texels - the run serves names of thei
         { joined: { shared: joined.shared, segments: joined.segments }, channels: served });
         assert.deepEqual([said.a, said.b], [1, 2], 'each owner reads what it put');
         assert.deepEqual(run.under(served[0].prefix),
-            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: 4096 });
+            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: grainsOf(64) });
         assert.deepEqual(run.under(served[1].prefix),
-            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: 4096 });
+            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: grainsOf(64) });
     }
     finally
     {
@@ -167,7 +167,7 @@ test('an owner that goes lets go of every name it held, after the calls it sent 
             'the four it held and the room granted it, which waits for a writer that is gone');
         await unserved(run);
         assert.deepEqual(run.under(said.prefix),
-            { bodies: 1, bytes: 100, hotBytes: 100, placedBytes: 4096 },
+            { bodies: 1, bytes: 100, hotBytes: 100, placedBytes: grainsOf(100) },
             'only the reservation left, which the keeper takes back after its age');
         assert.deepEqual(tails, []);
     }
@@ -313,9 +313,11 @@ test('memory an owner in a worker holds is the run\'s cache, written there and r
         assert.ok(first.b.every((/** @type {number} */ byte)=>byte === 8));
         assert.deepEqual(first.holding, { holds: 2, bytes: 105_000 });
         assert.deepEqual(run.under(served.prefix),
-            { bodies: 2, bytes: 105_000, hotBytes: 105_000, placedBytes: 131_072 + 8192 },
-            'counted under the owner, in blocks of the budget');
-        assert.ok(run.figures().placedBytes >= 131_072 + 8192, 'in the cache\'s budget');
+            { bodies: 2, bytes: 105_000, hotBytes: 105_000,
+                placedBytes: grainsOf(100_000) + grainsOf(5000) },
+            'counted under the owner, as the cache places them in the budget');
+        assert.ok(run.figures().placedBytes >= grainsOf(100_000) + grainsOf(5000),
+            'in the cache\'s budget');
         first.a[0] = 1;
         first.a[99_999] = 2;
         worker.postMessage('read');
@@ -323,7 +325,7 @@ test('memory an owner in a worker holds is the run\'s cache, written there and r
         assert.deepEqual(second.seen, [1, 2], 'the worker reads what this thread wrote');
         assert.deepEqual(second.holding, { holds: 1, bytes: 100_000 });
         assert.deepEqual(run.under(served.prefix),
-            { bodies: 1, bytes: 100_000, hotBytes: 100_000, placedBytes: 131_072 },
+            { bodies: 1, bytes: 100_000, hotBytes: 100_000, placedBytes: grainsOf(100_000) },
             'one let go of, its room the keeper\'s');
         worker.postMessage('go');
         const third = await next();
@@ -403,7 +405,8 @@ test('a worker owner\'s scratches and holds are held under its names, one past a
             scratch: new URL('./scratch.js', import.meta.url).href });
         assert.deepEqual(said.during.shared, [true, true, true]);
         assert.equal(said.during.zero, true);
-        const heldBytes = 512 * 1024 + 13 * 4096 + (20 << 20);
+        // Each room is all the cache places for it.
+        const heldBytes = grainsOf(300_000) + grainsOf(50_000) + grainsOf(20 << 20);
         assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 3, heldBytes,
             grows: 2, refused: 0 });
         assert.deepEqual(said.during.holding, { holds: 3, bytes: heldBytes },
