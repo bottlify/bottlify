@@ -8,9 +8,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocaleFunctions } from './locale.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
-/** @param {{ currentThread?: () => any, divergence?: (api: string, detail: string) => void,
- *     pointerSize?: number }} [extra] */
+/** @param {{ currentThread?: () => any, divergence?: (api: string, detail: string) => void }}
+ *     [extra] */
 const build = (extra = {})=>{
     const memory = fakeMemory();
     return {
@@ -33,18 +34,27 @@ test('localeconv is the C locale\'s, and the same structure every call', ()=>{
     assert.equal(table.localeconv.handler([]), conventions);
 });
 
-test('a 64-bit lconv holds its ten strings as quadword pointers, its chars after them', ()=>{
+test('a 64-bit lconv holds its ten strings as quadword pointers, whole past 4 GiB, its chars'
+    + ' after them', ()=>{
     // Read as dwords, decimal_point's quadword was the decimal point and the
     // thousands separator together, and a printf of a float faulted on it.
-    const { memory, table } = build({ pointerSize: 8 });
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const table = /** @type {Record<string, any>} */ (createLocaleFunctions({
+        guest: guestWindow(bytes, { base, pointerSize: 8 }),
+        allocate: ()=>base + 0x100,
+    }));
     const conventions = table.localeconv.handler([]);
+    assert.equal(conventions, base + 0x100);
     for (let at = 0; at < 10; at++)
     {
-        assert.equal(memory.u32(conventions + at * 8 + 4), 0, `string ${at}'s high half`);
-        assert.equal(memory.text(memory.u32(conventions + at * 8)), at === 0 ? '.' : '',
-            `string ${at}`);
+        const offset = conventions - base + at * 8;
+        const string = view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 2 ** 32;
+        assert.ok(string > base, `string ${at}, whole`);
+        assert.equal(bytes[string - base], at === 0 ? 0x2e : 0, `string ${at}`);
     }
-    assert.deepEqual([...memory.bytes.subarray(conventions + 80, conventions + 88)],
+    assert.deepEqual([...bytes.subarray(0x100 + 80, 0x100 + 88)],
         new Array(8).fill(127), 'every number CHAR_MAX, past the pointers');
 });
 

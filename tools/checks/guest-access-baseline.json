@@ -695,9 +695,6 @@
   "msvcrt/io.js": {
    "string wide": 1
   },
-  "msvcrt/locale.js": {
-   "accessor dword": 1
-  },
   "msvcrt/mbcs.js": {
    "accessor setU8": 1,
    "accessor u8": 1

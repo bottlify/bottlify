@@ -1492,10 +1492,7 @@ export function createMsvcrtFunctions(host){
             ...host.divergence ? { divergence: host.divergence } : {},
         }),
         ...createLocaleFunctions({
-            pointerSize: host.pointerSize,
-            readMemory: host.readMemory,
-            writeMemory: host.writeMemory,
-            readCString: host.readCString,
+            guest: host.guest,
             allocate,
             ...host.currentThread ? { currentThread: host.currentThread } : {},
             ...host.divergence ? { divergence: host.divergence } : {},

@@ -47,22 +47,12 @@ const CATEGORIES = 6;
 
 /**
  * @typedef {Object} LocaleHost
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
+ * @property {import('../common/guest.js').Guest} guest  The process's memory: in a
+ *           64-bit one the lconv's strings are quadword pointers.
  * @property {(bytes: number) => number} allocate
  * @property {() => any} [currentThread]  Who holds a lock. Absent, one thread.
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {number} [pointerSize]  8 in a 64-bit process, whose lconv's
- *           strings are quadword pointers; absent, 4.
  */
-
-/** @param {number} value @returns {Uint8Array} */
-const dword = value=>{
-    const bytes = new Uint8Array(4);
-    new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
 
 /** ASCII lowered, as the C locale folds. @param {number} byte */
 const lower = byte=>(byte >= 0x41 && byte <= 0x5a ? byte + 0x20 : byte);
@@ -73,7 +63,8 @@ const upper = byte=>(byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte);
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
-    const width = pointerWidth(host.pointerSize);
+    const { guest } = host;
+    const width = pointerWidth(guest.pointerSize);
     // The pointers first, so the chars after them move with their width:
     // 48 bytes in a 32-bit process, 88 in a 64-bit one.
     const lconvSize = LCONV.STRINGS * width.size + LCONV.CHARS;
@@ -88,10 +79,10 @@ export function createLocaleFunctions(host){
     const bytesOf = (pointer, count, terminated)=>{
         if ((count | 0) < 0)
         {
-            const text = host.readCString(pointer, MAX_STRING);
+            const text = guest.cstr(pointer, MAX_STRING);
             return encodeAnsi(terminated ? `${text}\0` : text);
         }
-        const bytes = host.readMemory(pointer, count | 0);
+        const bytes = guest.bytes(pointer, count | 0);
         const end = bytes.indexOf(0);
         return end < 0 ? bytes : bytes.subarray(0, end);
     };
@@ -118,7 +109,7 @@ export function createLocaleFunctions(host){
         }
         bytes.fill(CHAR_MAX, LCONV.STRINGS * width.size, lconvSize);
         bytes.set([0x2e, 0, 0], lconvSize);
-        host.writeMemory(block, bytes);
+        guest.setBytes(block, bytes);
         conventions = block;
         return block;
     };
@@ -178,7 +169,7 @@ export function createLocaleFunctions(host){
         return 0;
     };
     /** @param {number} file */
-    const fileLock = file=>`file 0x${(file >>> 0).toString(16)}`;
+    const fileLock = file=>`file 0x${wholeAddress(file).toString(16)}`;
 
     return {
         /**
@@ -274,7 +265,7 @@ export function createLocaleFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(destination), bytes);
+                guest.setBytes(destination, bytes);
                 return bytes.length;
             },
         },
@@ -285,8 +276,8 @@ export function createLocaleFunctions(host){
          * The C locale's: zero for each, which the library reads as "no
          * locale -- bytes are bytes".
          */
-        __lc_codepage: { data: ()=>dword(0) },
-        __lc_collate_cp: { data: ()=>dword(0) },
+        __lc_codepage: { data: ()=>new Uint8Array(4) },
+        __lc_collate_cp: { data: ()=>new Uint8Array(4) },
         __lc_handle: { data: ()=>new Uint8Array(CATEGORIES * 4) },
 
         /**
@@ -296,8 +287,8 @@ export function createLocaleFunctions(host){
          * unguarded. Nothing here changes the locale, so both stay zero,
          * which tells a reader it need not take the locale lock.
          */
-        __setlc_active: { data: ()=>dword(0) },
-        __unguarded_readlc_active: { data: ()=>dword(0) },
+        __setlc_active: { data: ()=>new Uint8Array(4) },
+        __unguarded_readlc_active: { data: ()=>new Uint8Array(4) },
 
         /**
          * void _lock(int lockNumber)
