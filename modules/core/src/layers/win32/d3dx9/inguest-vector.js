@@ -377,7 +377,7 @@ export function D3DXVec2TransformNormal({ f32, setF32 }, out, v, m){
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -394,9 +394,9 @@ export function D3DXVec2TransformArray({ f32, setF32 }, out, outStride, v, vStri
     const e13 = f32(m + 52);
     const e14 = f32(m + 56);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -410,8 +410,8 @@ export function D3DXVec2TransformArray({ f32, setF32 }, out, outStride, v, vStri
         setF32(to + 4, y);
         setF32(to + 8, z);
         setF32(to + 12, w);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -423,7 +423,7 @@ export function D3DXVec2TransformArray({ f32, setF32 }, out, outStride, v, vStri
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -437,9 +437,9 @@ export function D3DXVec2TransformCoordArray({ f32, setF32 }, out, outStride, v, 
     const e12 = f32(m + 48);
     const e13 = f32(m + 52);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -450,8 +450,8 @@ export function D3DXVec2TransformCoordArray({ f32, setF32 }, out, outStride, v, 
         const y = Math.fround(vx * e1 + vy * e5 + e13);
         setF32(to, x / divisor);
         setF32(to + 4, y / divisor);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -463,7 +463,7 @@ export function D3DXVec2TransformCoordArray({ f32, setF32 }, out, outStride, v, 
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -472,9 +472,9 @@ export function D3DXVec2TransformNormalArray({ f32, setF32 }, out, outStride, v,
     const e1 = f32(m + 4);
     const e4 = f32(m + 16);
     const e5 = f32(m + 20);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -484,8 +484,8 @@ export function D3DXVec2TransformNormalArray({ f32, setF32 }, out, outStride, v,
         const y = vx * e1 + vy * e5;
         setF32(to, x);
         setF32(to + 4, y);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -497,7 +497,7 @@ export function D3DXVec2TransformNormalArray({ f32, setF32 }, out, outStride, v,
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -518,9 +518,9 @@ export function D3DXVec3TransformArray({ f32, setF32 }, out, outStride, v, vStri
     const e13 = f32(m + 52);
     const e14 = f32(m + 56);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -535,8 +535,8 @@ export function D3DXVec3TransformArray({ f32, setF32 }, out, outStride, v, vStri
         setF32(to + 4, y);
         setF32(to + 8, z);
         setF32(to + 12, w);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -548,7 +548,7 @@ export function D3DXVec3TransformArray({ f32, setF32 }, out, outStride, v, vStri
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -562,9 +562,9 @@ export function D3DXVec3TransformNormalArray({ f32, setF32 }, out, outStride, v,
     const e8 = f32(m + 32);
     const e9 = f32(m + 36);
     const e10 = f32(m + 40);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -577,8 +577,8 @@ export function D3DXVec3TransformNormalArray({ f32, setF32 }, out, outStride, v,
         setF32(to, x);
         setF32(to + 4, y);
         setF32(to + 8, z);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -590,7 +590,7 @@ export function D3DXVec3TransformNormalArray({ f32, setF32 }, out, outStride, v,
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -611,9 +611,9 @@ export function D3DXVec4TransformArray({ f32, setF32 }, out, outStride, v, vStri
     const e13 = f32(m + 52);
     const e14 = f32(m + 56);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -629,8 +629,8 @@ export function D3DXVec4TransformArray({ f32, setF32 }, out, outStride, v, vStri
         setF32(to + 4, y);
         setF32(to + 8, z);
         setF32(to + 12, w);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -642,7 +642,7 @@ export function D3DXVec4TransformArray({ f32, setF32 }, out, outStride, v, vStri
  * read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} m @param {u32} n
  * @returns {ptr}
  */
@@ -663,9 +663,9 @@ export function D3DXPlaneTransformArray({ f32, setF32 }, out, outStride, v, vStr
     const e13 = f32(m + 52);
     const e14 = f32(m + 56);
     const e15 = f32(m + 60);
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -681,8 +681,8 @@ export function D3DXPlaneTransformArray({ f32, setF32 }, out, outStride, v, vStr
         setF32(to + 4, y);
         setF32(to + 8, z);
         setF32(to + 12, w);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -949,7 +949,7 @@ export function D3DXVec3Project({ f32, u32, setF32 }, out, v, viewport, projecti
  * projects it, the matrices and the viewport read once, before the first.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} viewport @param {ptr} projection @param {ptr} view
  * @param {ptr} world @param {u32} n
  * @returns {ptr}
@@ -1195,9 +1195,9 @@ export function D3DXVec3ProjectArray({ f32, u32, setF32 }, out, outStride, v, vS
         minZ = f32(viewport + 16);
         depth = f32(viewport + 20) - minZ;
     }
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -1220,8 +1220,8 @@ export function D3DXVec3ProjectArray({ f32, u32, setF32 }, out, outStride, v, vS
             setF32(to + 4, top + (1 - y) * height / 2);
             setF32(to + 8, minZ + z * depth);
         }
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -1545,7 +1545,7 @@ export function D3DXVec3Unproject({ f32, u32, setF32 }, out, v, viewport, projec
  * first; NULL, and nothing written, for a product with no inverse.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
+ * @param {Guest} guest @param {ptr} out @param {u32} outStride @param {ptr} v
  * @param {u32} vStride @param {ptr} viewport @param {ptr} projection @param {ptr} view
  * @param {ptr} world @param {u32} n
  * @returns {ptr}
@@ -1845,9 +1845,9 @@ export function D3DXVec3UnprojectArray({ f32, u32, setF32 }, out, outStride, v, 
         minZ = f32(viewport + 16);
         depth = f32(viewport + 20) - minZ;
     }
-    /** @type {u32} */
+    /** @type {ptr} */
     let to = out;
-    /** @type {u32} */
+    /** @type {ptr} */
     let from = v;
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
@@ -1870,8 +1870,8 @@ export function D3DXVec3UnprojectArray({ f32, u32, setF32 }, out, outStride, v, 
         setF32(to, x / divisor);
         setF32(to + 4, y / divisor);
         setF32(to + 8, z / divisor);
-        to = (to + outStride) >>> 0;
-        from = (from + vStride) >>> 0;
+        to += outStride;
+        from += vStride;
     }
     return out;
 }
@@ -2115,13 +2115,13 @@ export function D3DXFresnelTerm(costheta, refractionindex){
  * half rounded to nearest even, a subnormal one truncated.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} values @param {u32} n
+ * @param {Guest} guest @param {ptr} out @param {ptr} values @param {u32} n
  * @returns {ptr}
  */
 export function D3DXFloat32To16Array({ u32, setU16 }, out, values, n){
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
-        const bits = u32((values + i * 4) >>> 0);
+        const bits = u32(values + i * 4);
         const sign = bits >>> 16 & 0x8000;
         const magnitude = bits & 0x7fffffff;
         const exponent = magnitude >>> 23;
@@ -2149,7 +2149,7 @@ export function D3DXFloat32To16Array({ u32, setU16 }, out, values, n){
         {
             half = sign | (magnitude & 0x7fffff | 0x800000) >>> 126 - exponent;
         }
-        setU16((out + i * 2) >>> 0, half);
+        setU16(out + i * 2, half);
     }
     return out;
 }
@@ -2160,13 +2160,13 @@ export function D3DXFloat32To16Array({ u32, setU16 }, out, values, n){
  * is 65536 and 0x7fff 131008, as the library converts them.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} values @param {u32} n
+ * @param {Guest} guest @param {ptr} out @param {ptr} values @param {u32} n
  * @returns {ptr}
  */
 export function D3DXFloat16To32Array({ u16, setU32 }, out, values, n){
     for (/** @type {u32} */ let i = 0; i < n; i++)
     {
-        const half = u16((values + i * 2) >>> 0);
+        const half = u16(values + i * 2);
         const sign = (half & 0x8000) << 16;
         let exponent = half >>> 10 & 0x1f;
         let mantissa = half & 0x3ff;
@@ -2187,7 +2187,7 @@ export function D3DXFloat16To32Array({ u16, setU32 }, out, values, n){
             }
             bits = (sign | exponent << 23 | (mantissa & 0x3ff) << 13) >>> 0;
         }
-        setU32((out + i * 4) >>> 0, bits);
+        setU32(out + i * 4, bits);
     }
     return out;
 }
