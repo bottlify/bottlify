@@ -624,9 +624,7 @@ export function guestEntry(source, compiled, host, fallback){
     };
     /** @type {Guest | null} */
     const guest = uses.length === 0 ? null : memory
-        ? /** @type {Guest} */ ({ ...guestMemory({ guest: host.guest,
-            readMemory: host.readMemory, writeMemory: host.writeMemory,
-            fillMemory: host.fillMemory, call: host.call, pointerSize: pointerBytes }),
+        ? /** @type {Guest} */ ({ ...guestMemory({ ...host, pointerSize: pointerBytes }),
             ...words, ...bits })
         : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words, ...bits,
             host: ()=>{
