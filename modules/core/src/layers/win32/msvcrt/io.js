@@ -86,6 +86,8 @@ const CRITICAL_SECTION = struct([['DebugInfo', 'ptr'], ['LockCount', 'i32'],
  * An entry starts with the handle (an intptr_t), `wxflag`, three bytes of
  * lookahead, a flag word and a critical section - msvcrt.dll's ends there,
  * its flag word the Unicode translation (`exflag`).
+ *
+ * @type {import('../../../system/layout.js').Declared[]}
  */
 const IOINFO_ENTRY = [['osfhnd', 'handle'], ['wxflag', 'u8'], [null, 'u8', 3],
     ['exflag', 'i32'], ['crit', CRITICAL_SECTION]];

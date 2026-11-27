@@ -236,7 +236,7 @@ test('at 64 bits past 4 GiB: __pxcptinfoptrs\'s cell is a whole pointer, kept wh
         errno: ()=>{},
         allocate: ()=>base + 0x10,
         guest,
-        callGuest: async()=>void seen.push(guest.ptr(base + 0x10)),
+        callGuest: async()=>seen.push(guest.ptr(base + 0x10)) && 0,
     }));
     const cell = fns.__pxcptinfoptrs.handler([]);
     assert.equal(cell, base + 0x10);
