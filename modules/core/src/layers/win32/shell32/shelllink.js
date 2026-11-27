@@ -183,7 +183,7 @@ function newLinkState(){
  *         => Uint8Array | Promise<Uint8Array>,
  *     open: (path: string, mode: { read?: boolean, write?: boolean, create?: boolean,
  *         truncate?: boolean, shareRead?: boolean, shareWrite?: boolean }) => unknown,
- *     openRefusal?: () => string | null }} [files]
+ *     refusal?: () => string | null }} [files]
  *           The volume a link is saved on and loaded from. Absent, Save cannot
  *           leave a file and says so rather than answering success.
  * @property {(text: string) => string} [expand]
@@ -364,7 +364,7 @@ function createShellLink(host){
     const diverge = (api, detail)=>host.divergence?.(api, detail);
 
     /** Whether the volume refused the last open for another open's terms. */
-    const refusedBySharing = ()=>host.files?.openRefusal?.() === 'SHARING_VIOLATION';
+    const refusedBySharing = ()=>host.files?.refusal?.() === 'SHARING_VIOLATION';
 
     /**
      * A full path that names no file, but does with a program's extension

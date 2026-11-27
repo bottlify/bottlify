@@ -549,7 +549,6 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Why the file may not be renamed or deleted as its opens stand, or null.
  * @property {(path: string) => boolean} [isOpen]  whether any process holds the file open
  * @property {(path: string) => string | null} [deviceOf]  the device a path names, upper case
- * @property {() => string | null} [openRefusal]  why the last `open` answered null
  * @property {() => string | null} [refusal]
  *           The volume's code for why the last open, `mkdir` or rename was refused.
  * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
@@ -2219,7 +2218,7 @@ export function createFileFunctions(host){
             return fail(ERROR_ACCESS_DENIED);
         }
         /** @param {string} path */
-        const refusal = path=>(files.openRefusal?.() === 'SHARING_VIOLATION'
+        const refusal = path=>(files.refusal?.() === 'SHARING_VIOLATION'
             ? ERROR_SHARING_VIOLATION : onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT
                 : files.stat(path)?.exists ? ERROR_ACCESS_DENIED : missing(path));
         // The source is read sharing everything; the destination written
@@ -2238,7 +2237,7 @@ export function createFileFunctions(host){
             shareRead: true, shareWrite: true, shareDelete: false };
         let deletable = true;
         let output = files.open(destination, { ...destinationOpen, delete: true });
-        if (!output && files.openRefusal?.() === 'SHARING_VIOLATION')
+        if (!output && files.refusal?.() === 'SHARING_VIOLATION')
         {
             deletable = false;
             output = files.open(destination, destinationOpen);
@@ -2958,7 +2957,7 @@ export function createFileFunctions(host){
         if (!node)
         {
             // Another open's terms refuse this one's, as CreateFile says it.
-            if (files.openRefusal?.() === 'SHARING_VIOLATION')
+            if (files.refusal?.() === 'SHARING_VIOLATION')
             {
                 return { error: ERROR_SHARING_VIOLATION };
             }

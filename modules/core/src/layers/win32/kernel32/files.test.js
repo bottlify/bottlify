@@ -3648,11 +3648,11 @@ test('CreateFile hands on its sharing terms; their refusal is a sharing violatio
         'executing reads, as sharing counts it; only deletion shared');
 
     anyFiles.open = ()=>null;
-    anyFiles.openRefusal = ()=>'SHARING_VIOLATION';
+    anyFiles.refusal = ()=>'SHARING_VIOLATION';
     assert.equal(fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]),
         INVALID_HANDLE_VALUE);
     assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
-    anyFiles.openRefusal = ()=>null;
+    anyFiles.refusal = ()=>null;
     fns.CreateFileA.handler([NAME, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]);
     assert.equal(error.code, ERROR_ACCESS_DENIED, 'any other refusal of a file that is there');
 });
@@ -3693,7 +3693,7 @@ test('CopyFile reads sharing everything and writes sharing all but deletion, ref
     assert.equal(error.code, 1224, 'ERROR_USER_MAPPED_FILE');
     anyFiles.mappedAs = ()=>null;
     anyFiles.open = ()=>null;
-    anyFiles.openRefusal = ()=>'SHARING_VIOLATION';
+    anyFiles.refusal = ()=>'SHARING_VIOLATION';
     assert.equal(fns.CopyFileA.handler([NAME, NAME2, 0]), 0);
     assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
 });

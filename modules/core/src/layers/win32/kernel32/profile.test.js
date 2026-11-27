@@ -818,7 +818,7 @@ test('the file is opened sharing reads and writes, and a refused open says why',
             modes.push(mode);
             return refuse ? null : open(path, mode);
         },
-        openRefusal: ()=>(refuse ? 'SHARING_VIOLATION' : null),
+        refusal: ()=>(refuse ? 'SHARING_VIOLATION' : null),
     });
     files.put('C:\\WORK\\H.INI', '[s]\r\nk=1\r\n');
     memory.put(FILE, 'C:\\WORK\\H.INI');

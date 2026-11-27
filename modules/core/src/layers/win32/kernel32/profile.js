@@ -267,7 +267,7 @@ export function createProfileFunctions(host){
      *
      * @param {string} path
      */
-    const openError = path=>(files.openRefusal?.() === 'SHARING_VIOLATION'
+    const openError = path=>(files.refusal?.() === 'SHARING_VIOLATION'
         ? ERROR_SHARING_VIOLATION
         : files.stat(path)?.isDirectory ? ERROR_ACCESS_DENIED : ERROR_FILE_NOT_FOUND);
 

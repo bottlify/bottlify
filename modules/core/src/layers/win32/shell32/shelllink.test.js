@@ -152,7 +152,7 @@ function setup(){
                 return data.length;
             },
             close: ()=>{},
-            openRefusal: ()=>fixture.refusal,
+            refusal: ()=>fixture.refusal,
         },
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),

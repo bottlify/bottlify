@@ -600,7 +600,7 @@ test('a section holds its file on its own terms once the file\'s handle is close
         {
             vol.close(node);
         }
-        return node !== null || vol.openRefusal();
+        return node !== null || vol.refusal();
     };
 
     let section = mapped('readonly');

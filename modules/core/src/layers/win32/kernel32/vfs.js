@@ -734,14 +734,13 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
         },
 
         /**
-         * Why the last `open` answered null: the volume's code -- NOT_FOUND,
-         * SHARING_VIOLATION and the rest -- or null when it opened.
+         * Why the last `open`, `mkdir` or rename was refused: the volume's code
+         * -- NOT_FOUND, SHARING_VIOLATION, INVALID_PATH and the rest -- or null
+         * when it was made.
          *
          * @returns {string | null}
          */
         refusal: ()=>refused,
-        /** The same, by the name the surfaces that only open ask it. */
-        openRefusal: ()=>refused,
 
 
         /**
