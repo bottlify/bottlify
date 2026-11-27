@@ -39,7 +39,7 @@
 
 import { EXCEPTION_NONCONTINUABLE, STATUS } from './seh.js';
 import { UNW_FLAG, copyContext, stackOf } from './unwind.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerArg, wholeAddress } from '../common/pointers.js';
 
 /** EXCEPTION_RECORD at 64 bits: the code and flags, then quadword fields. */
 const RECORD64 = Object.freeze({
@@ -1434,23 +1434,21 @@ export function createSeh64(host){
              */
             RtlLookupFunctionEntry: {
                 returns: 'pointer',
-                argBytes: 12,
-                // One register each at 64 bits, where the signature table
-                // counts the DWORD64 as two dwords.
-                addresses: [0, 1, 2],
+                argBytes: 16,
+                quadwords: [0],
                 /** @param {number[]} args */
-                handler: ([pc, imageBaseOut])=>{
+                handler: ([pc, pcHigh, imageBaseOut])=>{
                     /** @param {FunctionEntry | null} fn */
                     const answer = fn=>{
                         if (fn && wholeAddress(imageBaseOut) !== 0)
                         {
-                            writeQuad(imageBaseOut, fn.imageBase);
+                            writeQuad(wholeAddress(imageBaseOut), fn.imageBase);
                         }
                         return BigInt(fn ? fn.entry : 0);
                     };
                     // Answered at once from a table; a JIT's range waits on
                     // its callback.
-                    const at = wholeAddress(pc);
+                    const at = joined(pc, pcHigh);
                     const fn = unwinder.lookup(at);
                     return fn || !unwinder.asksCallback(at)
                         ? answer(fn)
@@ -1466,17 +1464,16 @@ export function createSeh64(host){
              */
             RtlVirtualUnwind: {
                 returns: 'pointer',
-                argBytes: 32,
-                // One register each at 64 bits: the DWORD64s are addresses too.
-                addresses: [1, 2, 3, 4, 5, 6, 7],
+                argBytes: 40,
+                quadwords: [1, 3],
                 /** @param {number[]} args */
-                handler: ([type, imageBase, controlPc, functionEntry, contextRecord,
-                    handlerDataOut, establisherOut])=>{
-                    const fn = unwinder.entryAt(wholeAddress(imageBase),
+                handler: ([type, imageBase, imageBaseHigh, controlPc, controlPcHigh,
+                    functionEntry, contextRecord, handlerDataOut, establisherOut])=>{
+                    const fn = unwinder.entryAt(joined(imageBase, imageBaseHigh),
                         wholeAddress(functionEntry));
                     const context = readContext(wholeAddress(contextRecord));
                     const unwound = unwinder.virtualUnwind(type >>> 0, fn,
-                        wholeAddress(controlPc), context);
+                        joined(controlPc, controlPcHigh), context);
                     writeContext(wholeAddress(contextRecord), context);
                     if (wholeAddress(handlerDataOut) !== 0)
                     {
@@ -1529,7 +1526,9 @@ export function createSeh64(host){
             },
 
             /**
-             * EXCEPTION_DISPOSITION __C_specific_handler(...)
+             * EXCEPTION_DISPOSITION __C_specific_handler(
+             *     struct _EXCEPTION_RECORD *ExceptionRecord, void *EstablisherFrame,
+             *     struct _CONTEXT *ContextRecord, struct _DISPATCHER_CONTEXT *DispatcherContext)
              *
              * The C language handler named in a function's unwind data. The
              * dispatcher interprets a frame's scope table itself where the
@@ -1541,7 +1540,7 @@ export function createSeh64(host){
              * Called with any other context, the search goes on.
              */
             __C_specific_handler: {
-                argBytes: 32, lastError: false, addresses: [0, 1, 2, 3],
+                argBytes: 16, lastError: false,
                 /** @param {number[]} args */
                 handler: ([, , , dispatcher])=>{
                     const found = dispatcherContextAt(dispatcher);
@@ -1566,12 +1565,11 @@ export function createSeh64(host){
              *     DWORD EntryCount, DWORD64 BaseAddress)
              */
             RtlAddFunctionTable: {
-                argBytes: 12,
-                // The DWORD64 base one register, an address as the table is.
-                addresses: [0, 2],
+                argBytes: 16,
+                quadwords: [2],
                 /** @param {number[]} args */
-                handler: ([table, count, base])=>
-                    (unwinder.add(wholeAddress(table), count >>> 0, wholeAddress(base)) ? 1 : 0),
+                handler: ([table, count, base, baseHigh])=>(unwinder.add(wholeAddress(table),
+                    count >>> 0, joined(base, baseHigh)) ? 1 : 0),
             },
 
             /**
@@ -1615,17 +1613,18 @@ export function createSeh64(host){
              */
             RtlAddGrowableFunctionTable: {
                 argBytes: 24,
-                // The range's ULONG_PTRs are addresses beside the two pointers.
-                addresses: [0, 1, 4, 5],
-                /** @param {number[]} args */
-                handler: ([out, table, count, max, base, end])=>{
+                // The range's ULONG_PTRs are numbers to the signature, not
+                // addresses the bridge joins: read whole from their high halves.
+                /** @param {number[] & { high?: number[] }} args */
+                handler: args=>{
+                    const [out, table, count, max] = args;
                     if (wholeAddress(out) === 0 || wholeAddress(table) === 0
                         || (count >>> 0) > (max >>> 0))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
                     writeQuad(wholeAddress(out), unwinder.addGrowable(wholeAddress(table),
-                        count >>> 0, max >>> 0, wholeAddress(base), wholeAddress(end)));
+                        count >>> 0, max >>> 0, pointerArg(args, 4), pointerArg(args, 5)));
                     return 0;
                 },
             },

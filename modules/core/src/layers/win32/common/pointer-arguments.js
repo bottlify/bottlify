@@ -5038,6 +5038,7 @@ export const POINTER_ARGUMENTS = Object.freeze({
     _TrackMouseEvent: [0],
     _Wcsftime: [0, 2, 3, 4],
     _XcptFilter: [1],
+    __C_specific_handler: [0, 1, 2, 3],
     __CppXcptFilter: [1],
     __CxxLongjmpUnwind: [0],
     __DestructExceptionObject: [0],
