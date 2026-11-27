@@ -465,8 +465,8 @@ test('a resource past a segment of the run\'s cache is held there at its length,
         CPUAccessFlags: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE, MiscFlags: 0 }, null, out),
     S_OK);
     assert.equal(given.length, 1);
-    assert.ok(given[0].buffer instanceof SharedArrayBuffer, 'in the cache, not plain memory');
-    assert.deepEqual(scratches.figures().plain, 0);
+    assert.ok(given[0].buffer instanceof SharedArrayBuffer, 'in the cache');
+    assert.equal(scratches.figures().refused, 0);
     assert.equal(cache.keeper.under('scratch/').placedBytes, bytes - 16 + 4096,
         'its pages, not a power of two');
     const written = randomBytes(random(7), 4096);

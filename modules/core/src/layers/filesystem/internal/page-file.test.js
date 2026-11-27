@@ -293,8 +293,10 @@ test('a piece one write fills whole is put in the cache from where its bytes lie
 
 test('once the cache has no room, a piece written again is held once, and pieces go back to the '
     + 'cache once it has room again', async()=>{
-    // No disk: the cache's memory is all it has, as a run with no folder.
-    const { keeper, space } = await pieceSpace(cacheSpace, { budget: 2 * PIECE_SIZE, disk: false });
+    // No disk: the cache's memory is all it has, as a run with no folder. Room
+    // for two pieces, each a segment of its own, beside the shared spare.
+    const { keeper, space } = await pieceSpace(cacheSpace, { budget: 4 * PIECE_SIZE,
+        segmentBytes: 2 * PIECE_SIZE, disk: false });
     const pageFile = createPageFile(space, { workingBytes: PIECE_SIZE });
     const store = createPageFileStore(pageFile);
     const held = ()=>keeper.under('pages/').bytes + pageFile.workingBytes();
@@ -370,9 +372,10 @@ test('contents handed out keep their bytes, and are copied a piece at a time, no
 });
 
 test('a put the cache has no room for is said once, and what was written stays readable', async()=>{
-    // A budget of two pieces and a disk of one: the cache holds three pieces' bodies at most.
+    // Room for two pieces (each a segment of its own, beside the shared spare)
+    // and a disk of one: the cache holds three pieces' bodies at most.
     const { space } = await pieceSpace(cacheSpace,
-        { budget: 2 * PIECE_SIZE, quota: PIECE_SIZE + 65536 });
+        { budget: 4 * PIECE_SIZE, segmentBytes: 2 * PIECE_SIZE, quota: PIECE_SIZE + 65536 });
     /** @type {Error[]} */
     const said = [];
     const pageFile = createPageFile(space, { workingBytes: PIECE_SIZE,

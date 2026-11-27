@@ -31,6 +31,13 @@ import { noCache } from '../cache/module.js';
 import { createStubApi } from '../../system/stub.js';
 
 /**
+ * A run's cache with room for one sound output's table (20 MiB, a segment of
+ * its own) beside its shared spare, and no more: a machine that does not let
+ * its table go leaves the next none.
+ */
+const ONE_TABLE = { budget: 48 << 20, segmentBytes: 16 << 20 };
+
+/**
  * A view of the sound output's table at `offset`, as the device makes one:
  * the table is a view of memory the run holds, so offsets count from its start.
  *
@@ -143,7 +150,7 @@ function fixture(){
 async function playing({ silent = false, drained = true, memory, cache, divergence } = {}){
     const f = fixture();
     // A cache of the machine's own, gone with it: a file of machines holds no table each.
-    const given = cache ?? (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
+    const given = cache ?? (await testCache(ONE_TABLE)).api;
     /** @type {number[]} */
     const signalled = [];
     const api = await audioModule.create({
@@ -640,7 +647,7 @@ test('DirectSound\'s ordinals are offered beside its table', async()=>{
 
 test('the MPEG provider can be left out, for a run to compare against', async()=>{
     const f = fixture();
-    const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
+    const cache = (await testCache(ONE_TABLE)).api;
     const api = await audioModule.create({ ...f.config, mp3: false }, {
         requireApi: (/** @type {string} */ name)=>
             name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
@@ -652,7 +659,7 @@ test('the MPEG provider can be left out, for a run to compare against', async()=
 
 test('the decoder behind the provider follows the configuration', async()=>{
     const f = fixture();
-    const cache = (await testCache({ budget: 64 << 20, segmentBytes: 32 << 20 })).api;
+    const cache = (await testCache(ONE_TABLE)).api;
     const host = {
         requireApi: (/** @type {string} */ name)=>
             name === 'bridge' ? { callGuest: async()=>0 } : name === 'cache' ? cache : f.memory,
@@ -663,6 +670,7 @@ test('the decoder behind the provider follows the configuration', async()=>{
     assert.deepEqual(api.decoder(), { name: 'minimp3', opens: 0, paddedFrames: 0 });
     assert.deepEqual(audioModule.diagnostics().metrics?.decoder,
         { name: 'minimp3', opens: 0, paddedFrames: 0 });
+    api.output().release();
 
     // A test's own decoder wins.
     api = await audioModule.create({ ...f.config, decoder: {
@@ -836,7 +844,7 @@ test('a program that writes the primary buffer itself is heard from it', async()
 
 test('a stubbed win32 leaves DirectMusic and the MP3 codec out; a real one refusing is a failure',
     async()=>{
-        const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
+        const cache = (await testCache(ONE_TABLE)).api;
         /** @param {any} win32 */
         const create = win32=>{
             const f = fixture();
@@ -849,6 +857,7 @@ test('a stubbed win32 leaves DirectMusic and the MP3 codec out; a real one refus
         };
         const api = await create(createStubApi('win32'));
         assert.ok(api.libraries()['DSOUND.dll'], 'DirectSound is there without win32');
+        api.output().release();
         await assert.rejects(create({ com: ()=>{
             throw new Error('the class registry is not made yet');
         } }), /the class registry is not made yet/);
