@@ -125,9 +125,11 @@ export function createOpenglRoot(services){
          */
         CreateContext(options){
             const drawsOn = options.processor ? undefined : renderer() ?? undefined;
-            if (!drawsOn)
+            // Over the root's names in the run's cache, which a root drawn by
+            // the run is always given.
+            if (!drawsOn && services.texelCache)
             {
-                processorLevels ??= createProcessorLevels({ cache: services.texelCache ?? null,
+                processorLevels ??= createProcessorLevels({ cache: services.texelCache,
                     forgetRgba, divergence: services.divergence ?? null });
             }
             const context = createGlContext({

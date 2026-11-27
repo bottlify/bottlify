@@ -125,17 +125,12 @@ export function createLevelSpill({ store, kinds }){
          * A level's bytes of every kind handed to the store, where they are a
          * plain value large enough: they move into the run's cache once it
          * grants their room, and a write or a read meanwhile meets them in
-         * the store. Without a cache under the store a move is no move, and
-         * nothing is spilled.
+         * the store.
          *
          * @param {object} texture @param {object} image
          * @returns {number}  the bytes handed over
          */
         spill(texture, image){
-            if (!store.cached)
-            {
-                return 0;
-            }
             let handed = 0;
             for (const kind of spillable)
             {

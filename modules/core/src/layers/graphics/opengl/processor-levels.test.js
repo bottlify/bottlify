@@ -10,10 +10,10 @@
  * at its first reader or writer, and the RGBA the rasteriser samples is held
  * memory of the cache. Seeded programs of legacy RGBA, sized and S3TC
  * textures - drawn, written in part, read back, left idle and drawn again -
- * run three ways: with no cache (the reference), with a cache that takes
- * every idle level, and with a cache too small for any of them (store and
- * holds refused, the bodies kept in plain memory behind the same accessors).
- * Every frame's pixels and every read-back must be the same.
+ * run three ways: every level kept where the program put it (the
+ * reference), idle levels handed to a roomy run's cache, and to a cramped
+ * one that puts them on its disk. Every frame's pixels and every read-back
+ * must be the same.
  */
 
 import { test } from 'node:test';
@@ -25,7 +25,9 @@ import { createOpenglRoot } from './root.js';
 import { createProcessorLevels } from './processor-levels.js';
 import { forgetRgba } from './context-textures.js';
 import { openRunCache } from '../../../process/run-cache.js';
-import { channelSpace } from '../../cache/module.js';
+import { cacheSpace, channelSpace } from '../../cache/module.js';
+import { fakeOpfs } from '../../filesystem/internal/opfs.fixture.js';
+import { openRunFolder } from '../../filesystem/internal/run-folder.js';
 import { testCache } from '../../cache/testing.fixture.js';
 import { createScratches } from '../../cache/scratch.js';
 
@@ -85,33 +87,67 @@ function makeTexture(gl, next){
 const flat = value=>[...(value?.packed ?? value ?? [])].join(',');
 
 /**
+ * The root's names in a run's cache as a thread beside the keeper's has them
+ * (`channelSpace`): each ask crosses to the keeper.
+ *
+ * @param {any} runCache
+ */
+function channelTexels(runCache){
+    /** @type {ReturnType<typeof channelSpace> | null} */
+    let texels = null;
+    const joined = runCache.join((/** @type {any} */ message)=>texels?.adopt(message));
+    texels = channelSpace(joined, runCache.serve('texels'));
+    return texels;
+}
+
+/**
+ * The root's names on the keeper's own thread, as its reader has them: a
+ * cold body is read back from the disk while this thread waits, which a
+ * channel's ask to a keeper on the same thread could not answer.
+ *
+ * @param {any} runCache
+ * @returns {import('../internal/texel-store.js').TexelCache & { close?: () => void }}
+ */
+function keeperTexels(runCache){
+    const space = cacheSpace(runCache.reader, 'texels', { onlyCopy: true, disk: 'run' });
+    return { space, ask: async()=>true, put: (key, bytes)=>space.put(key, bytes),
+        forgo: ()=>{} };
+}
+
+/** A body of 6 MiB that can be made again: put past the budget, it makes room. */
+const FILLER = 6 << 20;
+
+/**
  * One run of a seeded program on the processor: every frame's pixels and
  * every read-back, in order, and what the levels' keeper did.
  *
- * @param {number} seed @param {'plain' | 'cached' | 'starved'} arm
+ * `reference` keeps every level where the program put it (no levels' keeper);
+ * `roomy` hands idle levels to a run's cache with room for all; `cramped`
+ * to a run's cache of one 16 MiB segment over a disk (`fakeOpfs`), pressed
+ * after every look by bodies that can be made again, so idle levels go to
+ * the disk and come back from it.
+ *
+ * @param {number} seed @param {'reference' | 'roomy' | 'cramped'} arm
  */
 async function run(seed, arm){
     const next = random(seed);
-    const runCache = arm === 'plain' ? null
-        : await openRunCache(arm === 'cached' ? { budget: 64 << 20 }
-            : { budget: 1 << 12 });
-    /** @type {ReturnType<typeof channelSpace> | null} */
-    let texels = null;
-    if (runCache)
-    {
-        const joined = runCache.join(message=>texels?.adopt(message));
-        texels = channelSpace(joined, runCache.serve('texels'));
-    }
+    const runFolder = arm === 'cramped'
+        ? await openRunFolder({ root: fakeOpfs().root }) : null;
+    const runCache = await openRunCache(arm === 'cramped' ? { budget: 16 << 20, runFolder }
+        : { budget: 64 << 20 });
+    // The keeper's first pack opens behind a promise, as every file on OPFS.
+    await turn();
+    const texels = arm === 'cramped' ? keeperTexels(runCache) : channelTexels(runCache);
+    const fillers = cacheSpace(runCache.reader, 'reads');
+    let filled = 0;
     // The RGBA the rasteriser samples, held as the engine's thread holds it
-    // (`channelSpace`'s hold asks a keeper on another thread, and waits for
-    // it); starved, the cache has room for no hold at all.
-    const holds = arm === 'plain' ? undefined : createScratches(arm === 'cached'
-        ? (await testCache()).space('scratch').hold ?? null : ()=>null).hold;
+    // (`channelSpace`'s hold asks a keeper on another thread, and waits for it).
+    const holds = createScratches((await testCache()).space('scratch').hold ?? null).hold;
     /** @type {string[]} */
     const said = [];
-    const levels = createProcessorLevels({ cache: texels, forgetRgba,
-        divergence: detail=>said.push(detail) });
-    const gl = /** @type {any} */ (createGlContext({ levels, holds }));
+    const levels = arm === 'reference' ? null : createProcessorLevels({ cache: texels,
+        forgetRgba, divergence: detail=>said.push(detail) });
+    const gl = /** @type {any} */ (createGlContext({ levels: levels ?? undefined, holds }));
     gl.attach({ width: 16, height: 16, doubleBuffered: false, depthBits: 24 });
     gl.glPixelStorei(GL.UNPACK_ALIGNMENT, 1);
     gl.glEnable(GL.TEXTURE_2D);
@@ -159,43 +195,50 @@ async function run(seed, arm){
             seen.push(`read ${name}: ${flat(gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA,
                 GL.UNSIGNED_BYTE))}`);
         }
-        levels.look(all());
+        levels?.look(all());
         // The room is asked for without waiting: the moves land a few turns on.
         for (let turns = 0; turns < 20; turns++)
         {
             await turn();
         }
+        if (arm === 'cramped')
+        {
+            for (let made = 0; made < 3; made++)
+            {
+                fillers.put(String(++filled), new Uint8Array(FILLER));
+            }
+        }
     }
     gl.glDeleteTextures(names);
-    levels.look(all());
-    const figures = levels.figures();
-    runCache?.close();
-    texels?.close();
-    return { seen, figures, said };
+    levels?.look(all());
+    const figures = levels?.figures() ?? null;
+    const cache = runCache.figures();
+    runCache.close();
+    texels.close?.();
+    return { seen, figures, said, cache };
 }
 
-test('gate: the processor\'s levels draw and read back the same with every idle level in the'
-    + ' run\'s cache, with a cache too small for any, and with none', async()=>{
+test('gate: the processor\'s levels draw and read back the same handed to a roomy run\'s'
+    + ' cache, to a cramped one that puts them on its disk, and kept where they are', async()=>{
     for (let seed = 1; seed <= 6; seed++)
     {
-        const plain = await run(seed, 'plain');
-        const cached = await run(seed, 'cached');
-        const starved = await run(seed, 'starved');
-        for (const [name, other] of /** @type {const} */ ([['cached', cached],
-            ['starved', starved]]))
+        const reference = await run(seed, 'reference');
+        const roomy = await run(seed, 'roomy');
+        const cramped = await run(seed, 'cramped');
+        for (const [name, other] of /** @type {const} */ ([['roomy', roomy],
+            ['cramped', cramped]]))
         {
-            assert.equal(other.seen.length, plain.seen.length, `${name}, seed ${seed}`);
-            other.seen.forEach((line, at)=>assert.equal(line, plain.seen[at],
-                `${name}, seed ${seed}: ${plain.seen[at].slice(0, 40)}`));
+            assert.equal(other.seen.length, reference.seen.length, `${name}, seed ${seed}`);
+            other.seen.forEach((line, at)=>assert.equal(line, reference.seen[at],
+                `${name}, seed ${seed}: ${reference.seen[at].slice(0, 40)}`));
             assert.deepEqual(other.said, [], `${name}: nothing lost`);
+            // A different path in fact: idle levels moved into the cache and taken back.
+            assert.ok((other.figures?.store.moved ?? 0) > 0, `${name}, seed ${seed}: moved`);
+            assert.ok((other.figures?.spills.back ?? 0) > 0, `${name}, seed ${seed}: taken back`);
+            assert.equal(other.figures?.store.refused, 0, `${name}: no room refused`);
         }
-        assert.equal(plain.figures.spills.levels, 0, 'no cache: nothing moves');
-        // A different path in fact: levels moved and taken back, RGBA held.
-        assert.ok(cached.figures.store.moved > 0, `seed ${seed}: idle levels moved`);
-        assert.ok(cached.figures.spills.back > 0, `seed ${seed}: and taken back`);
-        // The starved arm runs the accessors with the bodies refused room.
-        assert.ok(starved.figures.spills.levels > 0, `seed ${seed}: levels handed over`);
-        assert.equal(starved.figures.store.moved, 0, 'none moved: no room');
+        assert.equal(roomy.cache.written, 0, 'roomy: nothing went to a disk');
+        assert.ok(cramped.cache.written > 0, `seed ${seed}: cramped, idle levels on its disk`);
     }
 });
 

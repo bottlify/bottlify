@@ -21,8 +21,8 @@
  * `rgbaCache`): read every draw and made again at will, it is never spilled,
  * only let go of with the bytes it was made from.
  *
- * Without a cache under the root nothing moves: the same contract, the bytes
- * in this heap.
+ * The root makes it only over its names in the run's cache: there is no
+ * second, plain way to keep a level.
  */
 
 import { createTexelStore } from '../internal/texel-store.js';
@@ -33,16 +33,16 @@ import { createLevelSpill } from './level-spill.js';
  */
 
 /**
- * @param {{ cache?: import('../internal/texel-store.js').TexelCache | null,
+ * @param {{ cache: import('../internal/texel-store.js').TexelCache,
  *     forgetRgba?: ((level: import('./objects.js').TextureLevel) => void) | null,
- *     divergence?: ((detail: string, severity?: 'loss') => void) | null }} [options]
+ *     divergence?: ((detail: string, severity?: 'loss') => void) | null }} options
  *     `cache`: the root's names in the run's cache, where idle levels wait;
  *     `forgetRgba`: lets an idle level's RGBA go (`context-textures.js`, handed in
  *     so this module is not one its kernel's types lead back to); `divergence`:
  *     where a level the cache lost is said
  */
-export function createProcessorLevels(options = {}){
-    const { cache = null, forgetRgba = null, divergence = null } = options;
+export function createProcessorLevels(options){
+    const { cache, forgetRgba = null, divergence = null } = options;
     const store = createTexelStore({ cache,
         divergence: (detail, severity)=>divergence?.(`a texture's ${detail}: it draws blank`,
             severity) });
@@ -84,7 +84,7 @@ export function createProcessorLevels(options = {}){
                 for (const level of texture.levels?.values() ?? [])
                 {
                     nextSeen.add(level);
-                    if (!store.cached || drawn.has(level) || !seen.has(level))
+                    if (drawn.has(level) || !seen.has(level))
                     {
                         continue;
                     }
