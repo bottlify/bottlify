@@ -10,6 +10,7 @@ import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-param
 import { createUcrtbaseFunctions } from './ucrtbase.js';
 import { createMsvcr80Functions } from './msvcr80.js';
 import { guestWindow } from './guest-window.fixture.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 import { fusedMultiplyAdd } from './ucrt-math.js';
 import { moduleKeyOf } from '../../../process/libraries.js';
 
@@ -390,3 +391,43 @@ test('at 64 bits past 4 GiB: a pointer whose low dword is zero is no null', ()=>
     assert.equal(guest.ptr(context), base + 0x104, 'carried on past the token, whole');
     assert.equal(guest.u32(errno), 0, 'no EINVAL');
 });
+
+test('at 64 bits past 4 GiB: a handler kept, a block made, a slot handed out are whole',
+    async()=>{
+        const base = 0x140000000;
+        const bytes = new Uint8Array(0x1000);
+        const guest = guestWindow(bytes, { base, pointerSize: 8 });
+        let next = base + 0x100;
+        /** @param {number} size */
+        const allocate = size=>{
+            const at = next;
+            next += size + 15 & ~15;
+            return at;
+        };
+        const days = base + 0x800;
+        guest.writeAnsi(days, ':Sun:Sunday');
+        const crt = /** @type {any} */ ({
+            malloc: { handler: (/** @type {number[]} */ [size])=>allocate(size) },
+            calloc: { handler: (/** @type {number[]} */ [count, size])=>allocate(count * size) },
+            free: { handler: ()=>0 },
+            _Getdays: { handler: ()=>days },
+            _Getmonths: { handler: ()=>days },
+        });
+        const ucrt = declaredTable(/** @type {any} */ (createUcrtbaseFunctions(crt,
+            /** @type {any} */ ({ guest }))));
+        const handler = base + 0x10;
+        await longCall(ucrt._set_invalid_parameter_handler, [handler]);
+        assert.equal(await longCall(ucrt._get_invalid_parameter_handler, []), BigInt(handler));
+        await longCall(ucrt._set_thread_local_invalid_parameter_handler, [handler + 0x10]);
+        assert.equal(await longCall(ucrt._get_thread_local_invalid_parameter_handler, []),
+            BigInt(handler + 0x10));
+        for (const name of ['_W_Getdays', '_W_Getmonths'])
+        {
+            const wide = Number(await longCall(ucrt[name], []));
+            assert.equal(guest.wstr(wide, 64), ':Sun:Sunday', name);
+        }
+        const names = Number(await longCall(ucrt.___lc_locale_name_func, []));
+        assert.ok(names > base && names < base + bytes.length);
+        const count = Number(await longCall(ucrt.__sys_nerr, []));
+        assert.ok(guest.u32(count) > 0, 'how many messages, through the whole address');
+    });

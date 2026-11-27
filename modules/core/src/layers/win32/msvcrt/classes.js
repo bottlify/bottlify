@@ -369,13 +369,13 @@ export function createClassFunctions(host){
         '??0bad_typeid@@QAE@PBD@Z': thiscall(8, ([self, message])=>
             construct(self, message, 'bad_typeid')),
 
-        /** The default constructor's closure: the message "bad typeid". */
+        /** The default constructor's closure, void: the message "bad typeid". */
         '??_Fbad_typeid@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_typeid');
             const copy = copyString('bad typeid');
             setPtr(self + NAME, copy);
             guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
-            return self;
+            return 0;
         }),
 
         /** bad_cast::bad_cast(const char * const &message) */
@@ -390,13 +390,13 @@ export function createClassFunctions(host){
         '??0bad_cast@@QAE@PBD@Z': thiscall(8, ([self, message])=>
             construct(self, message, 'bad_cast')),
 
-        /** The default constructor's closure: the message "bad cast". */
+        /** The default constructor's closure, void: the message "bad cast". */
         '??_Fbad_cast@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_cast');
             const copy = copyString('bad cast');
             setPtr(self + NAME, copy);
             guest.set32(self + DO_FREE, copy === 0 ? 0 : 1);
-            return self;
+            return 0;
         }),
 
         /** __non_rtti_object::__non_rtti_object(const char *message) */

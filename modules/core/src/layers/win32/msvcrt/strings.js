@@ -366,7 +366,7 @@ export function createStringFunctions(host){
             COMPILED[/** @type {'isalpha'} */ (name)], host)])),
 
         /**
-         * int _tolower(int c) / int _toupper(int c)
+         * int _tolower/_toupper(int c)
          *
          * The case moved by the distance from 'A' to 'a' whatever `c` is:
          * unlike tolower they do not ask whether it is a letter - the caller

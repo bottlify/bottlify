@@ -344,6 +344,7 @@ export function createStartupFunctions(host){
         const getter = pointer=>({
             convention: /** @type {'cdecl'} */ ('cdecl'),
             argBytes: 4,
+            addresses: [0],
             /** @param {number[]} args */
             handler: ([out])=>{
                 if (wholeAddress(out) === 0)
@@ -544,6 +545,7 @@ export function createStartupFunctions(host){
         },
 
         __p__fmode: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('fmode', 0),
@@ -566,6 +568,7 @@ export function createStartupFunctions(host){
         },
 
         __doserrno: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('doserrno', 0),

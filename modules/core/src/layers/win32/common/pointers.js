@@ -233,6 +233,18 @@ export const forwarded = (args, index, signed = false)=>{
 };
 
 /**
+ * Whether a C++ function's decorated name says it answers an address: a
+ * constructor, whose code answers its `this`, or a return type that is a
+ * pointer or a reference (`P`, `Q`, `A`) - read after the member's access,
+ * `this`'s qualifiers (with the `E` of `__ptr64`) and the convention, as in
+ * `UAEPAXI` and `UEAAPEAXI`, or after a static or global function's access.
+ *
+ * @param {string} name
+ */
+export const answersAddress = name=>name.startsWith('??0')
+    || /^\?.*?@@(?:[CDKLSTYZ]|[A-Z]E?[AB])[A-Z](?:\?[AB])?[PQA]/.test(name);
+
+/**
  * Declares on each function of the libraries the dwords of its arguments that
  * hold an address (`addresses`, the bridge's `readLongCall`), where it does not
  * declare them itself: a 64-bit caller's address is then handed to the handler
@@ -240,7 +252,9 @@ export const forwarded = (args, index, signed = false)=>{
  * places are the signature comment's (`table`, `pointer-arguments.js`); a C++
  * member's `this`, the first dword of a thiscall, is one too. A place the
  * function's own layout gives another meaning - half of a quadword, a float,
- * a structure passed by value - or one past its arguments is left out.
+ * a structure passed by value - or one past its arguments is left out. A C++
+ * function whose decorated name answers an address (`answersAddress`) is
+ * declared to (`returns`): its answer reaches RAX zero-extended and whole.
  *
  * In a 32-bit process, and in a 64-bit one whose addresses stay below 4 GiB,
  * nothing a handler is handed changes: the bridge joins only a high half that
@@ -260,8 +274,15 @@ export function declareAddresses(libraries, table){
             {
                 continue;
             }
-            if (spec.addresses !== undefined || typeof spec.handler !== 'function'
-                || spec.hook || spec.site || spec.invoke)
+            if (typeof spec.handler !== 'function' || spec.hook || spec.site || spec.invoke)
+            {
+                continue;
+            }
+            if (spec.returns === undefined && answersAddress(name))
+            {
+                spec.returns = 'pointer';
+            }
+            if (spec.addresses !== undefined)
             {
                 continue;
             }

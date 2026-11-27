@@ -2297,7 +2297,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     encodePointer: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: [],
         code: Uint8Array.of(

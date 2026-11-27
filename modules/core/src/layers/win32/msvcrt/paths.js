@@ -1169,7 +1169,7 @@ export function createPathFunctions(host){
         /** int _wrmdir(const wchar_t *path) */
         _wrmdir: operation(4, ([path])=>removal(utf16.read(path), ENOTEMPTY)),
 
-        /** int _wunlink(const wchar_t *path) / int _wremove(const wchar_t *path) */
+        /** int _wunlink/_wremove(const wchar_t *path) */
         _wunlink: operation(4, ([path])=>removal(utf16.read(path), EACCES)),
         _wremove: operation(4, ([path])=>removal(utf16.read(path), EACCES)),
 

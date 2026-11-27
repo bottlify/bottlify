@@ -35,6 +35,7 @@ function harness({ files = {} } = {}){
         return text;
     };
     const table = createIostreamFunctions({
+        pointerSize: 4,
         readMemory: (at, length)=>memory.slice(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
         readCString,
@@ -214,4 +215,9 @@ test('each virtual method pops what its caller pushed', ()=>{
     assert.equal(table['??_Eistrstream@@UAEPAXI@Z'].argBytes, 8);
     assert.equal(table['??0istrstream@@QAE@PADH@Z'].argBytes, 16, 'buffer, length, most derived');
     assert.equal(table._mtlock.convention, 'cdecl');
+});
+
+test('a 64-bit process is offered nothing: every name and layout here is 32-bit', ()=>{
+    const table = createIostreamFunctions(/** @type {any} */ ({ pointerSize: 8 }));
+    assert.deepEqual(Object.keys(table), []);
 });
