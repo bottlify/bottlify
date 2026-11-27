@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    checkAddresses, checkReturns, checkText, layoutOf, pointersOf, resultOf, returnsPointer,
-    cutAddresses,
+    checkAddresses, checkReturns, checkText, layoutOf, namesOf, pointersOf, resultOf,
+    returnsPointer, cutAddresses,
 } from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
@@ -117,6 +117,35 @@ test('an address result by a P typedef, an address handle, a later line, an ordi
         + '\'#71\': { argBytes: 4, handler: ()=>0 },');
     assert.match(String(ordinal[0]?.problem), /without returns/, 'a spec under a quoted key');
     assert.equal(ordinal[0]?.key, '#71');
+});
+
+test('a signature that names several functions at once is each of them', ()=>{
+    assert.deepEqual(namesOf('EnumSystemLocalesA/W'), ['EnumSystemLocalesA', 'EnumSystemLocalesW']);
+    assert.deepEqual(namesOf('GetTextExtentExPointA/W/I'),
+        ['GetTextExtentExPointA', 'GetTextExtentExPointW', 'GetTextExtentExPointI']);
+    assert.deepEqual(namesOf('Get/SetConsoleCursorInfo'),
+        ['GetConsoleCursorInfo', 'SetConsoleCursorInfo']);
+    assert.deepEqual(namesOf('Read/WriteConsoleOutputA/W'), ['ReadConsoleOutputA',
+        'ReadConsoleOutputW', 'WriteConsoleOutputA', 'WriteConsoleOutputW']);
+    assert.deepEqual(namesOf('Module32First/Module32FirstW'), ['Module32First', 'Module32FirstW']);
+    assert.deepEqual(namesOf('lstrlenA'), ['lstrlenA']);
+    // Over the A spec, with the W one after it and a second combined signature
+    // on a later line over specs of its own: each function is read, and its
+    // types' own A/W spellings (a LOCALE_ENUMPROCA/W, an LPCSTR/LPCWSTR) are
+    // the types they are.
+    const read = checkReturns(`/**
+         * BOOL EnumSystemLocalesA/W(LOCALE_ENUMPROCA/W lpLocaleEnumProc, DWORD dwFlags)
+         * BOOL EnumUILanguagesA/W(DWORD dwFlags, LPCSTR/LPCWSTR name, LONG_PTR lParam)
+         */
+        EnumSystemLocalesA: { argBytes: 8, handler: ()=>1 },
+        EnumSystemLocalesW: { argBytes: 8, handler: ()=>1 },
+        EnumUILanguagesA: { argBytes: 12, handler: ()=>1 },
+        EnumUILanguagesW: { argBytes: 12, handler: ()=>1 },`, { exported: true });
+    assert.deepEqual(read.map(one=>[one.name, pointersOf(one.params ?? '', { addresses: true })]), [
+        ['EnumSystemLocalesA', [0]], ['EnumSystemLocalesW', [0]],
+        ['EnumUILanguagesA', [1]], ['EnumUILanguagesW', [1]],
+    ]);
+    assert.deepEqual(layoutOf('HDC hdc, const DEVMODEA/W *init').quad, []);
 });
 
 test('the gate tries only addresses: a size is wide but no address', ()=>{

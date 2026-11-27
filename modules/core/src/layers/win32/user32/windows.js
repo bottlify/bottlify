@@ -8797,7 +8797,7 @@ export function createWindowFunctions(host){
          */
         CreateMDIWindowA: {
             argBytes: 40,
-            addresses: [0, 1, 8, 9],
+            addresses: [0, 1, 8],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
@@ -8806,7 +8806,7 @@ export function createWindowFunctions(host){
 
         CreateMDIWindowW: {
             argBytes: 40,
-            addresses: [0, 1, 8, 9],
+            addresses: [0, 1, 8],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
