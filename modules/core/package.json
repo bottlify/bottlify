@@ -161,6 +161,7 @@
     "src/system/address.js",
     "src/system/guid.js",
     "src/system/hash.js",
+    "src/system/layout.js",
     "src/system/opfs-file.js",
     "src/zstd.js"
   ],

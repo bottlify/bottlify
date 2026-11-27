@@ -25,6 +25,7 @@
 
 import { stableSort } from './stable-sort.js';
 import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { struct } from '../../../system/layout.js';
 
 /**
  * @typedef {Object} DataHost
@@ -39,18 +40,17 @@ import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
  */
 
 /**
- * The arrays' fields by a pointer's width. DPA: count, the pointer block, its
- * heap, how many slots it has, how many it grows by. DSA: count, the item
- * block, how many items it has room for, an item's size, the growth.
- *
- * @param {4 | 8} pointer
+ * The arrays' fields. DPA: count, the pointer block, its heap, how many slots
+ * it has, how many it grows by. DSA: count, the item block, how many items it
+ * has room for, an item's size, the growth.
  */
-const layoutOf = pointer=>({
-    DPA: Object.freeze({ COUNT: 0, PTRS: pointer, HEAP: 2 * pointer, CAPACITY: 3 * pointer,
-        GROW: 3 * pointer + 4, SIZE: pointer === 8 ? 32 : 20 }),
-    DSA: Object.freeze({ COUNT: 0, ITEMS: pointer, CAPACITY: 2 * pointer,
-        ITEM_SIZE: 2 * pointer + 4, GROW: 2 * pointer + 8, SIZE: pointer === 8 ? 32 : 20 }),
-});
+const DPA_LAYOUT = struct([['COUNT', 'i32'], ['PTRS', 'ptr'], ['HEAP', 'handle'],
+    ['CAPACITY', 'i32'], ['GROW', 'i32']]);
+const DSA_LAYOUT = struct([['COUNT', 'i32'], ['ITEMS', 'ptr'], ['CAPACITY', 'i32'],
+    ['ITEM_SIZE', 'i32'], ['GROW', 'i32']]);
+
+/** @param {4 | 8} pointer */
+const layoutOf = pointer=>({ DPA: DPA_LAYOUT.at(pointer), DSA: DSA_LAYOUT.at(pointer) });
 
 const DPA_APPEND = 0x7fffffff;
 const DPA_ERR = -1;

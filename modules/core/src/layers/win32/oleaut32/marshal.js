@@ -43,6 +43,7 @@ import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readToTerminator } from '../common/scan-windows.js';
 import { safeArrayLayout } from '../common/safearray.js';
+import { struct, union } from '../../../system/layout.js';
 
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
@@ -274,6 +275,16 @@ const put32 = (bytes, at, value)=>bytes.set(le32(value), at);
  * @property {(value: number) => Uint8Array} bytes  A pointer as it is stored.
  */
 
+/**
+ * VARIANT as oaidl.h declares it: the type and three reserved words, then the
+ * value, whose largest member is a record's two pointers.
+ */
+const VARIANT_LAYOUT = struct([['vt', 'u16'], [null, 'u16', 3],
+    ['value', union([['llVal', 'i64'], [['pvRecord', 'ptr'], ['pRecInfo', 'ptr']]])]]);
+/** DISPPARAMS as oaidl.h declares it. */
+const DISPPARAMS_LAYOUT = struct([['rgvarg', 'ptr'], ['rgdispidNamedArgs', 'ptr'],
+    ['cArgs', 'u32'], ['cNamedArgs', 'u32']]);
+
 /** @type {Map<number, Layout>} */
 const layouts = new Map();
 
@@ -288,14 +299,15 @@ export function layoutOf(pointerSize = 4){
         return known;
     }
     const long = pointerSize === 8;
+    const dispParams = DISPPARAMS_LAYOUT.at(pointerSize);
     /** @type {Layout} */
     const layout = Object.freeze({
         pointer: long ? 8 : 4,
-        variant: long ? 24 : 16,
+        variant: VARIANT_LAYOUT.sizeOf(pointerSize),
         slot: long ? 8 : 4,
         safeArray: safeArrayLayout(pointerSize),
-        dispParams: long ? { named: 8, count: 16, namedCount: 20, size: 24 }
-            : { named: 4, count: 8, namedCount: 12, size: 16 },
+        dispParams: Object.freeze({ named: dispParams.rgdispidNamedArgs,
+            count: dispParams.cArgs, namedCount: dispParams.cNamedArgs, size: dispParams.SIZE }),
         read: long
             ? (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>u32(bytes, at)
                 + u32(bytes, at + 4) * 2 ** 32

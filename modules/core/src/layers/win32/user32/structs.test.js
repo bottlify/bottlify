@@ -7,8 +7,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    DEVMODEA,
+    DEVMODEW,
+    DISPLAY_DEVICEA,
+    DISPLAY_DEVICEW,
+    MONITORINFO,
+    MONITORINFOEXA_SIZE,
     MSG,
     RECT,
+    WINDOWINFO,
+    WINDOWPLACEMENT,
     WNDCLASSA,
     WNDCLASSEXA,
     readMessage,
@@ -164,7 +172,7 @@ test('a 64-bit field widens a dword as its type does: a handle and an LPARAM by 
     assert.deepEqual(readMessage(memory, 0x80, L),
         { hwnd: 0x40, message: 0x0100, wParam: 0x80000001, lParam: 0xfffffffd, time: 7 });
 
-    writeFields(memory, 0x100, L, L.WINDOWPOS, { hwndInsertAfter: -1, flags: 4 });
+    writeFields(memory, 0x100, L.WINDOWPOS, { hwndInsertAfter: -1, flags: 4 });
     assert.equal(view.getBigInt64(0x100 + 8, true), -1n, 'HWND_TOPMOST is -1 whole');
     assert.equal(view.getUint32(0x100 + 32, true), 4);
 });
@@ -187,7 +195,7 @@ test('a 64-bit pointer field widens a dword by zero: an address past 2 GiB stays
     {
         assert.equal(view.getBigUint64(0x40 + L.WNDCLASSEXA[name], true), BigInt(value), name);
     }
-    writeFields(memory, 0x100, L, L.CREATESTRUCTA, { lpCreateParams: high, hInstance: high,
+    writeFields(memory, 0x100, L.CREATESTRUCTA, { lpCreateParams: high, hInstance: high,
         hwndParent: -1, lpszName: high + 4, lpszClass: high + 8 });
     for (const [name, value] of /** @type {[string, number][]} */ ([['lpCreateParams', high],
         ['hInstance', high], ['lpszName', high + 4], ['lpszClass', high + 8]]))
@@ -196,10 +204,10 @@ test('a 64-bit pointer field widens a dword by zero: an address past 2 GiB stays
     }
     assert.equal(view.getBigInt64(0x100 + L.CREATESTRUCTA.hwndParent, true), -1n,
         'a handle keeps its sign');
-    writeFields(memory, 0x200, L, L.CBT_CREATEWNDA, { lpcs: high, hwndInsertAfter: -2 });
+    writeFields(memory, 0x200, L.CBT_CREATEWNDA, { lpcs: high, hwndInsertAfter: -2 });
     assert.equal(view.getBigUint64(0x200 + L.CBT_CREATEWNDA.lpcs, true), BigInt(high));
     assert.equal(view.getBigInt64(0x200 + L.CBT_CREATEWNDA.hwndInsertAfter, true), -2n);
-    writeFields(memory, 0x300, L, L.NCCALCSIZE_PARAMS, { lppos: high });
+    writeFields(memory, 0x300, L.NCCALCSIZE_PARAMS, { lppos: high });
     assert.equal(view.getBigUint64(0x300 + L.NCCALCSIZE_PARAMS.lppos, true), BigInt(high));
 });
 
@@ -251,4 +259,59 @@ test('a 64-bit MSG carries a WPARAM and an LPARAM a dword does not say, both way
     assert.equal(view.getBigUint64(0x80 + L.lParam, true), 0xffffffffffffffffn);
     assert.equal(readMessage(memory, 0x80, layouts).wide, undefined);
     assert.equal(readMessage(memory, 0x80).wide, undefined, 'nor in a 32-bit MSG');
+});
+
+test('every structure has the SDK\'s size and offsets at both widths', ()=>{
+    // sizeof and offsetof of each, worked out from winuser.h's and wingdi.h's
+    // declarations by the x86 and x64 compilers' rule: a pointer, a handle, a
+    // WPARAM or an LPARAM 4 or 8 bytes and on its own size, every other field
+    // a DWORD, a LONG, a WORD or a char array on its natural boundary.
+    /** @type {[string, Record<string, number>, Record<string, number>][]} */
+    const expected = [
+        ['WNDCLASSA', { lpfnWndProc: 4, hInstance: 16, lpszClassName: 36, SIZE: 40 },
+            { lpfnWndProc: 8, hInstance: 24, lpszClassName: 64, SIZE: 72 }],
+        ['WNDCLASSEXA', { style: 4, lpfnWndProc: 8, hIconSm: 44, SIZE: 48 },
+            { style: 4, lpfnWndProc: 8, hIconSm: 72, SIZE: 80 }],
+        ['MSG', { wParam: 8, lParam: 12, time: 16, ptX: 20, SIZE: 28 },
+            { wParam: 16, lParam: 24, time: 32, ptX: 36, SIZE: 48 }],
+        ['PAINTSTRUCT', { rcPaint: 8, fRestore: 24, rgbReserved: 32, SIZE: 64 },
+            { rcPaint: 12, fRestore: 28, rgbReserved: 36, SIZE: 72 }],
+        ['CREATESTRUCTA', { cy: 16, style: 32, lpszName: 36, dwExStyle: 44, SIZE: 48 },
+            { cy: 32, style: 48, lpszName: 56, dwExStyle: 72, SIZE: 80 }],
+        ['CBT_CREATEWNDA', { hwndInsertAfter: 4, SIZE: 8 }, { hwndInsertAfter: 8, SIZE: 16 }],
+        ['WINDOWPOS', { x: 8, flags: 24, SIZE: 28 }, { x: 16, flags: 32, SIZE: 40 }],
+        ['NCCALCSIZE_PARAMS', { lppos: 48, SIZE: 52 }, { lppos: 48, SIZE: 56 }],
+        ['CBTACTIVATESTRUCT', { hWndActive: 4, SIZE: 8 }, { hWndActive: 8, SIZE: 16 }],
+        ['MOUSEHOOKSTRUCT', { hwnd: 8, wHitTestCode: 12, dwExtraInfo: 16, SIZE: 20 },
+            { hwnd: 8, wHitTestCode: 16, dwExtraInfo: 24, SIZE: 32 }],
+        ['INPUT', { dx: 4, dwFlags: 16, mouseExtra: 24, wVk: 4, keyFlags: 8, keyExtra: 16,
+            SIZE: 28 },
+        { dx: 8, dwFlags: 20, mouseExtra: 32, wVk: 8, keyFlags: 12, keyExtra: 24, SIZE: 40 }],
+    ];
+    for (const [name, narrow, wide] of expected)
+    {
+        for (const [width, offsets] of /** @type {const} */ ([[4, narrow], [8, wide]]))
+        {
+            const table = /** @type {Record<string, any>} */ (userLayouts(width))[name];
+            for (const [field, offset] of Object.entries(offsets))
+            {
+                assert.equal(table[field], offset, `${name}.${field} at ${width}`);
+            }
+        }
+    }
+    assert.equal(MONITORINFO.SIZE, 40);
+    assert.equal(MONITORINFOEXA_SIZE, 72);
+    assert.equal(DISPLAY_DEVICEA.StateFlags, 164);
+    assert.equal(DISPLAY_DEVICEA.SIZE, 424);
+    assert.equal(DISPLAY_DEVICEW.StateFlags, 324);
+    assert.equal(DISPLAY_DEVICEW.SIZE, 840);
+    assert.equal(WINDOWINFO.wCreatorVersion, 58);
+    assert.equal(WINDOWINFO.SIZE, 60);
+    assert.equal(WINDOWPLACEMENT.rcNormalPosition, 28);
+    assert.equal(WINDOWPLACEMENT.SIZE, 44);
+    assert.equal(DEVMODEA.dmDisplayOrientation, 52);
+    assert.equal(DEVMODEA.dmBitsPerPel, 104);
+    assert.equal(DEVMODEA.SIZE, 156);
+    assert.equal(DEVMODEW.dmBitsPerPel, 168);
+    assert.equal(DEVMODEW.SIZE, 220);
 });

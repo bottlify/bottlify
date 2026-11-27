@@ -1506,7 +1506,7 @@ export function createPaintFunctions(options){
                 }
                 const layout = layouts.PAINTSTRUCT;
                 return after(beginPaint(record), ({ hdc, rect, erase })=>{
-                    writeFields(host, paintStruct, layouts, layout,
+                    writeFields(host, paintStruct, layout,
                         { hdc, fErase: erase ? 1 : 0, fRestore: 0, fIncUpdate: 0 });
                     writeRect(host, paintStruct + layout.rcPaint, rect);
                     return handedOut(record.hwnd, hdc);

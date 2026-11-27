@@ -16,6 +16,8 @@
  * first bound, and one that read an element of strings read half of one.
  */
 
+import { struct } from '../../../system/layout.js';
+
 /**
  * @typedef {Object} SafeArrayLayout
  * @property {number} FEATURES  @property {number} ELEMENT_BYTES  @property {number} LOCKS
@@ -24,12 +26,19 @@
  * @property {number} POINTER  A pointer's size, as an element of strings or interfaces.
  */
 
-const NARROW = Object.freeze({
-    FEATURES: 2, ELEMENT_BYTES: 4, LOCKS: 8, DATA: 12, BOUNDS: 16, RECORD_INFO: -4, POINTER: 4,
-});
-const WIDE = Object.freeze({
-    FEATURES: 2, ELEMENT_BYTES: 4, LOCKS: 8, DATA: 16, BOUNDS: 24, RECORD_INFO: -8, POINTER: 8,
-});
+/** SAFEARRAY as oaidl.h declares it, its first SAFEARRAYBOUND in place. */
+const SAFEARRAY = struct([['cDims', 'u16'], ['FEATURES', 'u16'], ['ELEMENT_BYTES', 'u32'],
+    ['LOCKS', 'u32'], ['DATA', 'ptr'], ['BOUNDS', struct([['cElements', 'u32'],
+        ['lLbound', 'i32']])]]);
+
+/** @param {4 | 8} width @returns {Readonly<SafeArrayLayout>} */
+const at = width=>{
+    const { FEATURES, ELEMENT_BYTES, LOCKS, DATA, BOUNDS } = SAFEARRAY.at(width);
+    return Object.freeze({ FEATURES, ELEMENT_BYTES, LOCKS, DATA, BOUNDS, RECORD_INFO: -width,
+        POINTER: width });
+};
+const NARROW = at(4);
+const WIDE = at(8);
 
 /**
  * The SAFEARRAY of a process whose pointers are `pointerSize` bytes.

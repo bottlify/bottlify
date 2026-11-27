@@ -766,3 +766,18 @@ test('a record a library of the other width describes is laid out for the proces
         await marshalReply(callee, method, request, call);
     }
 });
+
+test('VARIANT, DISPPARAMS and SAFEARRAY have the SDK\'s sizes and offsets at both widths', ()=>{
+    // oaidl.h: a VARIANT is its VARTYPE and three reserved WORDs, then a
+    // union as large as a record's two pointers; a DISPPARAMS two pointers and
+    // two UINTs; a SAFEARRAY two USHORTs, two ULONGs, pvData, then its bounds.
+    assert.equal(layoutOf(4).variant, 16);
+    assert.equal(layoutOf(8).variant, 24);
+    assert.deepEqual({ ...layoutOf(4).dispParams },
+        { named: 4, count: 8, namedCount: 12, size: 16 });
+    assert.deepEqual({ ...layoutOf(8).dispParams },
+        { named: 8, count: 16, namedCount: 20, size: 24 });
+    assert.deepEqual([layoutOf(4).safeArray.DATA, layoutOf(4).safeArray.BOUNDS], [12, 16]);
+    assert.deepEqual([layoutOf(8).safeArray.DATA, layoutOf(8).safeArray.BOUNDS], [16, 24]);
+    assert.equal(layoutOf(8).safeArray.LOCKS, 8);
+});

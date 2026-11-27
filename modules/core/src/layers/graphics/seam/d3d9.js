@@ -1141,7 +1141,7 @@ export function createDirect3D9Seam(
         }
         if (hr === D3D_OK)
         {
-            fields.writeStruct(out >>> 0, LOCKED_BOX, long ? { ...locked, pBitsHigh: 0 } : locked);
+            fields.writeStruct(out >>> 0, LOCKED_BOX, locked);
         }
         else
         {
@@ -3486,7 +3486,6 @@ export function createDirect3D9Seam(
             MultiSampleQuality: 0,
             SwapEffect: parameters.swapEffect ?? 0,
             hDeviceWindow: parameters.hDeviceWindow ?? 0,
-            ...long ? { hDeviceWindowHigh: 0 } : {},
             Windowed: parameters.windowed === false ? 0 : 1,
             EnableAutoDepthStencil: parameters.enableAutoDepthStencil ? 1 : 0,
             AutoDepthStencilFormat: parameters.autoDepthStencilFormat ?? 0,

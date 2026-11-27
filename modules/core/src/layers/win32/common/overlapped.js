@@ -12,6 +12,13 @@
  * overlapped read came from the start of the file.
  */
 
+import { struct, union } from '../../../system/layout.js';
+
+/** OVERLAPPED as minwinbase.h declares it. */
+export const OVERLAPPED = struct([['Internal', 'ptr'], ['InternalHigh', 'ptr'],
+    [null, union([[['Offset', 'u32'], ['OffsetHigh', 'u32']], ['Pointer', 'ptr']])],
+    ['hEvent', 'handle']]);
+
 /**
  * @typedef {Object} OverlappedLayout
  * @property {number} internal      The status, a ULONG_PTR.
@@ -35,10 +42,11 @@ export function overlappedLayout(pointerSize = 4){
     {
         return known;
     }
-    const word = pointerSize === 8 ? 8 : 4;
+    const at = OVERLAPPED.at(pointerSize);
     /** @type {OverlappedLayout} */
-    const layout = { internal: 0, internalHigh: word, offset: 2 * word,
-        offsetHigh: 2 * word + 4, event: 2 * word + 8, word };
+    const layout = { internal: at.Internal, internalHigh: at.InternalHigh, offset: at.Offset,
+        offsetHigh: at.OffsetHigh, event: at.hEvent,
+        word: /** @type {4 | 8} */ (at.InternalHigh - at.Internal) };
     layouts.set(pointerSize, layout);
     return layout;
 }

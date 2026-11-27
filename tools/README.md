@@ -504,6 +504,7 @@ From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-2
 - [`checks/check-link-slots.mjs`](checks/check-link-slots.mjs) - One machine a slot of a process's link (`npm run check:boundaries`)
 - [`checks/check-lock-release.mjs`](checks/check-lock-release.mjs) - A locked word is not released by a plain store (`npm run check:boundaries`)
 - [`checks/check-overlapped-layout.mjs`](checks/check-overlapped-layout.mjs) - OVERLAPPED's offsets are written in one file (`npm run check:boundaries`)
+- [`checks/check-struct-tables.mjs`](checks/check-struct-tables.mjs) - no structure's offsets are written down by hand past the baseline (`node tools/checks/check-struct-tables.mjs [--write] [--list]`)
 - [`checks/check-package-files.mjs`](checks/check-package-files.mjs) - Core's package ships what its files import (`npm run check:boundaries`)
 - [`checks/check-routine-leaves.mjs`](checks/check-routine-leaves.mjs) - A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder (`npm run check:boundaries`)
 - [`checks/check-scan-windows.mjs`](checks/check-scan-windows.mjs) - A scan of guest memory stays in its region (`npm run check:boundaries`)

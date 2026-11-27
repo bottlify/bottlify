@@ -25,16 +25,42 @@
  */
 
 import { GUID_NULL, GUID_SIZE, parseGuid } from '../../../system/guid.js';
+import { GUID, bytesView, fieldOf, struct, write } from '../../../system/layout.js';
+
+/**
+ * The header as [MS-CFB] 2.2 lays it out: the signature and a class, the
+ * versions, the byte order and the two sector sizes, then where the
+ * directory, the mini FAT and the DIFAT start and how long each is, and the
+ * first 109 FAT sector numbers.
+ */
+export const CFB_HEADER = struct([['signature', 'u8', 8], ['clsid', GUID],
+    ['minorVersion', 'u16'], ['majorVersion', 'u16'], ['byteOrder', 'u16'],
+    ['sectorShift', 'u16'], ['miniSectorShift', 'u16'], [null, 'u16', 3],
+    ['directorySectors', 'u32'], ['fatSectors', 'u32'], ['directoryStart', 'u32'],
+    ['transaction', 'u32'], ['miniStreamCutoff', 'u32'], ['miniFatStart', 'u32'],
+    ['miniFatSectors', 'u32'], ['difatStart', 'u32'], ['difatSectors', 'u32'],
+    ['difat', 'u32', 109]]).at(4);
+
+/**
+ * A directory entry as [MS-CFB] 2.6 lays it out. Its times are FILETIMEs at
+ * four-byte offsets: the format is packed to four, not aligned as a
+ * compiler would align them.
+ */
+export const CFB_ENTRY = struct([['name', 'u16', 32], ['nameLength', 'u16'], ['type', 'u8'],
+    ['color', 'u8'], ['left', 'u32'], ['right', 'u32'], ['child', 'u32'], ['clsid', GUID],
+    ['stateBits', 'u32'], ['created', 'u64'], ['modified', 'u64'], ['start', 'u32'],
+    ['size', 'u32'], ['sizeHigh', 'u32']], { pack: 4 }).at(4);
 
 const SIGNATURE = Object.freeze([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 const SECTOR_SIZE = 512;
-const HEADER_SIZE = 512;
-const DIRECTORY_ENTRY_SIZE = 128;
+const HEADER_SIZE = CFB_HEADER.SIZE;
+const DIRECTORY_ENTRY_SIZE = CFB_ENTRY.SIZE;
 const MINI_SECTOR_SIZE = 64;
 /** A stream shorter than this lives in the mini stream. */
 const MINI_STREAM_CUTOFF = 4096;
 /** How many FAT sector numbers the header holds before DIFAT sectors are needed. */
-const HEADER_DIFAT_ENTRIES = 109;
+const HEADER_DIFAT_ENTRIES = /** @type {import('../../../system/layout.js').Field} */ (
+    fieldOf(CFB_HEADER, 'difat')).count;
 const WORDS_PER_SECTOR = SECTOR_SIZE / 4;
 const ENTRIES_PER_DIRECTORY_SECTOR = SECTOR_SIZE / DIRECTORY_ENTRY_SIZE;
 
@@ -395,23 +421,26 @@ export function planCompound(root){
                 view.setUint32(at + index * 4, words[index], true);
             }
         };
-        out.set(SIGNATURE, 0);
-        view.setUint16(0x18, 0x003e, true);
-        view.setUint16(0x1a, 3, true);
-        view.setUint16(0x1c, 0xfffe, true);
-        view.setUint16(0x1e, 9, true);
-        view.setUint16(0x20, 6, true);
-        view.setUint32(0x2c, fatSectors, true);
-        view.setUint32(0x30, directoryFirst, true);
-        view.setUint32(0x38, MINI_STREAM_CUTOFF, true);
-        view.setUint32(0x3c, miniFatStart, true);
-        view.setUint32(0x40, miniFatSectors, true);
-        view.setUint32(0x44, difatSectors === 0 ? ENDOFCHAIN : difatFirst, true);
-        view.setUint32(0x48, difatSectors, true);
+        const fields = bytesView(out);
+        /**
+         * @param {number} at @param {import('../../../system/layout.js').Table} table
+         * @param {Record<string, number>} values
+         */
+        const put = (at, table, values)=>{
+            for (const name in values)
+            {
+                write(fields, at, table, name, values[name]);
+            }
+        };
+        out.set(SIGNATURE, CFB_HEADER.signature);
+        put(0, CFB_HEADER, { minorVersion: 0x003e, majorVersion: 3, byteOrder: 0xfffe,
+            sectorShift: 9, miniSectorShift: 6, fatSectors, directoryStart: directoryFirst,
+            miniStreamCutoff: MINI_STREAM_CUTOFF, miniFatStart, miniFatSectors,
+            difatStart: difatSectors === 0 ? ENDOFCHAIN : difatFirst, difatSectors });
         for (let index = 0; index < HEADER_DIFAT_ENTRIES; index++)
         {
-            view.setUint32(0x4c + index * 4, index < fatSectors ? fatFirst + index : FREESECT,
-                true);
+            view.setUint32(CFB_HEADER.difat + index * 4,
+                index < fatSectors ? fatFirst + index : FREESECT, true);
         }
 
         putWords(offsetOf(fatFirst), fat);
@@ -438,24 +467,20 @@ export function planCompound(root){
             if (!slot)
             {
                 // Unused, apart from links that say "none" rather than entry 0.
-                view.setUint32(at + 0x44, NOSTREAM, true);
-                view.setUint32(at + 0x48, NOSTREAM, true);
-                view.setUint32(at + 0x4c, NOSTREAM, true);
+                put(at, CFB_ENTRY, { left: NOSTREAM, right: NOSTREAM, child: NOSTREAM });
                 continue;
             }
             const { node } = slot;
             const name = index === 0 ? 'Root Entry' : node.name;
             for (let unit = 0; unit < name.length; unit++)
             {
-                view.setUint16(at + unit * 2, name.charCodeAt(unit), true);
+                view.setUint16(at + CFB_ENTRY.name + unit * 2, name.charCodeAt(unit), true);
             }
-            view.setUint16(at + 0x40, (name.length + 1) * 2, true);
-            view.setUint8(at + 0x42, index === 0 ? TYPE_ROOT
-                : node.kind === 'stream' ? TYPE_STREAM : TYPE_STORAGE);
-            view.setUint8(at + 0x43, slot.black ? COLOR_BLACK : COLOR_RED);
-            view.setUint32(at + 0x44, slot.left, true);
-            view.setUint32(at + 0x48, slot.right, true);
-            view.setUint32(at + 0x4c, slot.child, true);
+            put(at, CFB_ENTRY, { nameLength: (name.length + 1) * 2,
+                type: index === 0 ? TYPE_ROOT : node.kind === 'stream' ? TYPE_STREAM : TYPE_STORAGE,
+                color: slot.black ? COLOR_BLACK : COLOR_RED, left: slot.left, right: slot.right,
+                child: slot.child, stateBits: node.stateBits ?? 0, start: slot.start,
+                size: slot.size });
             if (node.clsid && node.clsid !== GUID_NULL)
             {
                 const clsid = parseGuid(node.clsid);
@@ -463,13 +488,10 @@ export function planCompound(root){
                 {
                     throw new CompoundWriteError(`${node.clsid} is not a class`);
                 }
-                out.set(clsid.subarray(0, GUID_SIZE), at + 0x50);
+                out.set(clsid.subarray(0, GUID_SIZE), at + CFB_ENTRY.clsid);
             }
-            view.setUint32(at + 0x60, node.stateBits ?? 0, true);
-            view.setBigUint64(at + 0x64, node.created ?? 0n, true);
-            view.setBigUint64(at + 0x6c, node.modified ?? 0n, true);
-            view.setUint32(at + 0x74, slot.start, true);
-            view.setUint32(at + 0x78, slot.size, true);
+            write(fields, at, CFB_ENTRY, 'created', node.created ?? 0n);
+            write(fields, at, CFB_ENTRY, 'modified', node.modified ?? 0n);
         }
 
         putWords(offsetOf(miniFatFirst), miniFat);
