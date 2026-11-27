@@ -91,7 +91,7 @@ import {
 } from '../ddraw/constants.js';
 import { DDBD_16, DDBD_32, DEVICE_IDS } from '../d3d7/constants.js';
 import { pixelFormatForDepth } from '../ddraw/objects.js';
-import { blt, bltFast } from '../ddraw/blit.js';
+import { blitRooms, blt, bltFast } from '../ddraw/blit.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
@@ -398,6 +398,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  *        Guest memory for the descriptor a callback is shown. One block is
  *        taken and reused: a descriptor is the callback's to read while it
  *        runs and nobody's afterwards.
+ * @param {(name: string) => import('../../cache/scratch.js').Scratch} [deps.scratches]
+ *        Host memory the blits keep between calls, held in the run's cache
+ *        (`ddraw/blit.js` `blitRooms`); plain memory if absent.
  * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraInterfaces]
  *        Interfaces other seams put on the DirectDraw object -- IDirect3D7 is
  *        reached by QueryInterface from it, not made by an entry point.
@@ -443,6 +446,7 @@ const S3TC_OF_FOURCC = Object.freeze({
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
+        scratches,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -451,6 +455,8 @@ export function createDirectDrawSeam(
 )
 {
     const fields = createFields(memory);
+    /** Where this seam's blits work, one call at a time (`ddraw/blit.js`). */
+    const rooms = scratches ? blitRooms(scratches) : undefined;
     /**
      * An object whose count is read or lowered meets what Direct3D 7's rings
      * hold first: a texture the guest bound in a ring is held by the device
@@ -1369,6 +1375,7 @@ export function createDirectDrawSeam(
                 return whenCurrent(from ? [surface, from] : [surface], ()=>{
                     const outcome = blt({
                         ...request,
+                        rooms,
                         dest: blitView(surface),
                         src: from ? blitView(from) : undefined,
                     });
@@ -1418,7 +1425,7 @@ export function createDirectDrawSeam(
                 };
                 return whenCurrent([surface, from], ()=>{
                     const outcome = bltFast({
-                        ...request, dest: blitView(surface), src: blitView(from),
+                        ...request, rooms, dest: blitView(surface), src: blitView(from),
                     });
                     reportRefusal('BltFast', surface, from, outcome);
                     if (outcome === DD_OK)

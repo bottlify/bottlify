@@ -19,11 +19,15 @@ import { createFakeDevice } from './fake-device.js';
 import {
     GAMMA_ENTRIES, GAMMA_WGSL, createPresenter, expandRow, gammaTable, isIdentityRamp,
 } from './presenter.js';
+import { createScratches } from '../../../cache/scratch.js';
+import { testCache } from '../../../cache/testing.fixture.js';
 
 /**
  * Guest memory is a flat buffer; surfaces are wherever the test puts them.
  *
- * @param {{ windowed?: boolean }} [options]  Whether the machine offers a window.
+ * @param {{ windowed?: boolean,
+ *     scratches?: (name: string) => import('../../../cache/scratch.js').Scratch }} [options]
+ *     Whether the machine offers a window; where the presenter keeps what it converts.
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -52,6 +56,7 @@ function harness(options = {}){
             }
             : undefined,
         schedule: flush=>scheduled.push(flush),
+        scratches: options.scratches,
     });
     return {
         reads,
@@ -853,4 +858,67 @@ test('a process\'s windows over its GPU frame that has the screen are laid over 
     assert.deepEqual(shown(), Array(4).fill('33 33 33 33 33 33 33 33'),
         'lifted, the frame kept is the frame as drawn');
     assert.ok(presenter.diagnostics().veiled >= 2);
+});
+
+test('gate: a surface converted in a room of the run\'s cache, in a dirty one and in bytes of '
+    + 'its own reaches the queue as the same bytes, frame after frame', async()=>{
+    // A small cache: a picture past its segment is converted in plain memory.
+    const cache = await testCache({ budget: 1 << 14, segmentBytes: 1 << 13 });
+    const held = createScratches(cache.space('scratch').hold ?? null);
+    const dirty = createScratches((_key, length)=>({
+        bytes: new Uint8Array(length + 4096).fill(0xcd).subarray(4096), release: ()=>{} }));
+    let seed = 0xfeed;
+    const next = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed >>> 8;
+    };
+    for (const windowed of [false, true])
+    {
+        const arms = [held, dirty].map(scratches=>harness({ windowed,
+            scratches: scratches.scratch }));
+        /** @type {any[]} */
+        const sent = [];
+        /** @type {(() => void)[]} */
+        const scheduled = [];
+        const ram = new Uint8Array(0x10000);
+        const sending = createPresenter({
+            readMemory: (address, length)=>ram.slice(address, address + length),
+            windowMemory: windowed ? (address, length)=>ram.subarray(address, address + length)
+                : undefined,
+            schedule: flush=>scheduled.push(flush),
+            sendFrame: frame=>sent.push(frame),
+        });
+        // One presenter, frame after frame, of surfaces that grow and shrink:
+        // its room is reused, and a smaller picture after a larger one reads
+        // nothing the larger one left.
+        for (let frame = 0; frame < 120; frame++)
+        {
+            for (let at = 0; at < ram.length; at++)
+            {
+                ram[at] = next() & 0xff;
+            }
+            const bitCount = [8, 16, 32][next() % 3];
+            const width = 1 + next() % 60;
+            const height = 1 + next() % 40;
+            const pitch = width * (bitCount >>> 3) + next() % 9;
+            const palette = bitCount === 8 ? Array.from({ length: 256 }, ()=>next()) : null;
+            const surface = { buffer: 0x400 + next() % 0x400, width, height, pitch, bitCount,
+                palette };
+            sending.present(surface);
+            scheduled.splice(0).forEach(flush=>flush());
+            const expected = sent.at(-1).pixels;
+            for (const arm of arms)
+            {
+                arm.ram.set(ram);
+                arm.presenter.present(surface);
+                arm.settle();
+                assert.deepEqual(arm.uploaded(), expected,
+                    JSON.stringify({ frame, bitCount, width, height, pitch, windowed }));
+            }
+        }
+    }
+    const figures = held.figures();
+    assert.ok(figures.grows - figures.plainGrows > 0, 'rooms held in the run\'s cache');
+    assert.ok(figures.plainGrows > 0, 'and rooms that had none there');
+    assert.ok(figures.grows < 20, `grown a few times, not a frame (${figures.grows})`);
 });

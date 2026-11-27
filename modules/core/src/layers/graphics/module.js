@@ -26,6 +26,7 @@ import {
 import { textExtent } from './gdi/text.js';
 import { createScreen } from './gdi/screen.js';
 import { DEFAULT_VIDEO_MEMORY, GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
+import { plainScratches } from '../cache/scratch.js';
 
 /**
  * A window as the window manager lists it: enough to know where it is on
@@ -414,6 +415,26 @@ const offered = ask=>{
     }
 };
 
+/**
+ * Host memory a machine's graphics keep between calls - a blit's rooms, a
+ * level decoded on its way up, a staging mirror - held in the run's cache
+ * (`cache/scratch.js`); plain memory under the same contract where the cache
+ * layer is switched off, whose stub refuses the call. Made out here, so that
+ * what it is handed to (a presenter whose reactions the run's GPU device
+ * holds) holds the cache and nothing else of the machine.
+ *
+ * @param {any} cache @returns {(name: string) => import('../cache/scratch.js').Scratch}
+ */
+const scratchesOf = cache=>name=>{
+    try
+    {
+        return cache.scratch(name);
+    }
+    catch {
+        return plainScratches.scratch(name);
+    }
+};
+
 /** The graphics layer's module for one graph; see `defaultModules`. */
 /**
  * The drawable OpenGL sees for a device context: a window's is its client
@@ -497,6 +518,7 @@ export function createGraphicsModule(){
             // draw needs them: the run's cache, which lets idle bodies go to the
             // disk, rather than the worker's own heap.
             const cache = /** @type {any} */ (host.requireApi('cache'));
+            const scratches = scratchesOf(cache);
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -706,7 +728,7 @@ export function createGraphicsModule(){
              */
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services, cache)
-                : factory({ ...services, texelCache: device ? ownTexels() : null }));
+                : factory({ ...services, texelCache: device ? ownTexels() : null, scratches }));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.
              *
@@ -1136,6 +1158,7 @@ export function createGraphicsModule(){
                             device: device.device,
                             queue: device.queue,
                             presentTo: device.presentTo,
+                            scratches,
                         });
                     }
                     return state.backend;
@@ -1244,6 +1267,7 @@ export function createGraphicsModule(){
                 schedule: config?.schedule,
                 maxFps: config?.maxFps,
                 maxFrameLatency: config?.maxFrameLatency,
+                scratches,
             });
             // The backend is asked for on the first present rather than now, so a
             // build that never shows one of these surfaces never builds a GPU.
@@ -1463,6 +1487,7 @@ export function createGraphicsModule(){
                 processHeapAllocate: (/** @type {number} */ bytes)=>
                     win32.processHeapAllocate?.(bytes) ?? 0,
                 divergence: config?.divergence,
+                scratches,
                 // Where the work a device call does before its method -- the
                 // guest's state brought to the device -- is timed, inside the
                 // host call it is part of.

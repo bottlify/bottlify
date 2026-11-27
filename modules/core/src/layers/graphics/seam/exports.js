@@ -129,6 +129,9 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *        The bridge's way into guest code, which the DirectDraw enumerations need.
  * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void }} [deps.scratch]
  *        Guest memory for what a callback is shown.
+ * @param {(name: string) => import('../../cache/scratch.js').Scratch} [deps.scratches]
+ *        Host memory a library keeps between calls, held in the run's cache: a
+ *        blit's rooms.
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.
  * @param {(bytes: number) => number} [deps.allocate]
@@ -241,8 +244,8 @@ export function createGraphicsLibraries(
         flipQueued, publisher: shared, callGuest,
         free, exportAddress, moduleExportAddress, processHeapAllocate,
         currentThread,
-        scratch, render, allocate, allocateCode, divergence, cursor, placeCursor, cursorAt,
-        resolution, windowClientSize, windowShown,
+        scratch, scratches, render, allocate, allocateCode, divergence, cursor, placeCursor,
+        cursorAt, resolution, windowClientSize, windowShown,
         windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
@@ -479,6 +482,7 @@ export function createGraphicsLibraries(
     }));
     const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
+        scratches,
         aroundCall: call=>d3d7().aroundDevices(call),
         now, schedule, refresh,
         extraInterfaces: [d3d7().interface, ...d3dLegacy().interfaces],

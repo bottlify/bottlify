@@ -24,6 +24,7 @@
  */
 
 import { FNV_OFFSET, fnv1a } from '../../../../system/hash.js';
+import { plainScratches } from '../../../cache/scratch.js';
 
 /** @type {WeakMap<object, number>} */
 const identities = new WeakMap();
@@ -279,6 +280,8 @@ const UNIFORM_ALIGNMENT = 256;
  * @param {import('../contract.js').GpuQueueLike} options.queue
  * @param {number} [options.capacity]  Bytes in the ring.
  * @param {number} [options.usage]
+ * @param {import('../../../cache/scratch.js').Scratch} [options.staging]  where the copy of
+ *     the ring is laid, held in the run's cache; plain memory if absent
  * @returns {any}
  */
 export function createUniformPool(options){
@@ -293,6 +296,8 @@ export function createUniformPool(options){
     let laid = 0;
     /** @type {any} */
     let ring = null;
+    /** The copy's room: as large as the ring, grown with it. */
+    const room = options.staging ?? plainScratches.scratch('webgpu/uniforms');
     /** @type {Uint8Array} */
     let staging = new Uint8Array(0);
     /**
@@ -341,8 +346,12 @@ export function createUniformPool(options){
             size: capacity,
             usage: options.usage,
         });
-        staging = new Uint8Array(capacity);
-        stagingFloats = new Float32Array(staging.buffer);
+        // What the copy held was written to the ring above. A new ring's
+        // copy starts as the ring does, zeros: the gaps between its blocks
+        // are written with them, and a room the cache hands out holds what
+        // its last holder left.
+        staging = room.bytes(capacity).fill(0);
+        stagingFloats = new Float32Array(staging.buffer, staging.byteOffset, capacity >>> 2);
         created++;
         cursor = 0;
         pendingFrom = 0;

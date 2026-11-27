@@ -180,6 +180,7 @@ export function createBackend(options){
         // Readable back, so a frame's dump can compare the block a draw was
         // shaded with against the one recorded for it; the flag costs nothing.
         usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST | BufferUsage.COPY_SRC,
+        staging: options.scratches?.('webgpu/uniforms'),
     });
     // For the backend's life: a group names a layout, a texture view, a
     // sampler and the uniform ring, none of which changes per draw, so the

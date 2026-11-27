@@ -75,9 +75,23 @@ flowchart TB
   samples it) hands its bytes to the store as they stood, and the replay reads them there: an
   OpenGL frame lets them go once it is replayed (`opengl/gpu.js` `keptForReplay`), a Direct3D 8
   or 9 frame with its arena (`d3d8/render.js` `releaseFrame`). An upload that goes to the queue
-  at once keeps nothing: what it decodes or converts on the way (Direct3D 8 and 9's S3TC on a
-  device without block compression, into one room for a call's levels; Direct3D 10's converted
-  formats, each volume slice in its place) is bytes of the call, gone when it returns. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  at once keeps nothing of its own: a Direct3D 8 or 9 level is taken out tight from its rows,
+  widened to the format the backend samples, or decoded from S3TC on a device without block
+  compression in the renderer's rooms (`d3d8/render.js` `rooms`), scratches held in the run's
+  cache and reused by the next level, so a texture written every frame grows them once; on a
+  root drawn in the graphics worker they are plain memory, kept the same way. Direct3D 10's
+  converted formats, each volume slice in its place, are bytes of the call, gone when it
+  returns. A
+  DirectDraw blit works in rooms kept between blits - its copy of the source rectangle, it
+  converted to the destination's format, a DXTn source's texels and the row it builds - each a
+  scratch held in the run's cache (`ddraw/blit.js` `blitRooms`, `cache/scratch.js`): a program
+  that blits its whole screen every frame grows them once. The WebGPU backend's copy of its
+  uniform ring on this side (`webgpu/internal/bindings.js` `createUniformPool`), as large as
+  the ring and zeroed when the ring is made, and the picture the presenter converts a surface
+  in guest memory into on its way up (`webgpu/internal/presenter.js`) are scratches the same
+  way, where the graphics layer made them; the run's presenter, which the run makes outside
+  the layer, and a backend in the graphics worker keep theirs in plain memory, kept the same
+  way. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of

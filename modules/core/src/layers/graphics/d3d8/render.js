@@ -74,6 +74,7 @@ import {
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 import { bitsFloat, fromHalf, toHalf } from '../../../system/floats.js';
 import { toBase64 } from '../../../system/base64.js';
+import { plainScratches } from '../../cache/scratch.js';
 
 /**
  * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
@@ -617,6 +618,22 @@ export function filledIndices(type, indices, fill){
     return wide ? Uint32Array.from(out) : Uint16Array.from(out);
 }
 
+/**
+ * A colour format's expansion of `count` texels to the format the backend
+ * samples, into `room` where it is given.
+ *
+ * @typedef {(pixels: Uint8Array, count: number,
+ *     room?: import('../../cache/scratch.js').Scratch) => Uint8Array} Expansion
+ */
+
+/**
+ * `length` bytes a converter writes: of `room` where it is given (`expandTexels`),
+ * else of their own.
+ *
+ * @param {import('../../cache/scratch.js').Scratch | undefined} room @param {number} length
+ */
+const bytesFor = (room, length)=>(room ? room.bytes(length) : new Uint8Array(length));
+
 /** @param {number} value five bits @returns {number} eight */
 const five = value=>(value << 3) | (value >>> 2);
 /** @param {number} value four bits @returns {number} eight */
@@ -631,12 +648,12 @@ const six = value=>(value << 2) | (value >>> 4);
  * 16-bit texture cost to upload.
  *
  * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
- * @returns {(pixels: Uint8Array, count: number)=>Uint8Array}
+ * @returns {Expansion}
  */
 function sixteenBit(unpack){
     /** @type {Uint8Array | null} */
     let table = null;
-    return (pixels, count)=>{
+    return (pixels, count, room)=>{
         if (!table)
         {
             table = new Uint8Array(0x10000 * 4);
@@ -645,11 +662,11 @@ function sixteenBit(unpack){
                 table.set(unpack(word), word * 4);
             }
         }
-        const out = new Uint8Array(count * 4);
+        const out = bytesFor(room, count * 4);
         // Four bytes at a time, in the order they lie: the same on either
         // byte order, since both sides are read and written as one word.
         const words = new Uint32Array(table.buffer);
-        const into = new Uint32Array(out.buffer);
+        const into = new Uint32Array(out.buffer, out.byteOffset, count);
         for (let index = 0; index < count; index++)
         {
             into[index] = words[pixels[index * 2] | (pixels[index * 2 + 1] << 8)];
@@ -665,13 +682,14 @@ function sixteenBit(unpack){
  * low ones, which is what maps the top value to 255 rather than to 248; a
  * shift alone darkens every texture by a step nothing else explains.
  *
- * @type {Readonly<Record<number, (pixels: Uint8Array, count: number)=>Uint8Array>>}
+ * @type {Readonly<Record<number, Expansion>>}
  */
 const TEXEL_EXPANSION = Object.freeze({
     [D3DFMT.A8R8G8B8]: pixels=>pixels,
-    [D3DFMT.X8R8G8B8]: (pixels, count)=>{
+    [D3DFMT.X8R8G8B8]: (pixels, count, room)=>{
         // The fourth byte is undefined in memory and would sample as alpha.
-        const out = new Uint8Array(pixels.subarray(0, count * 4));
+        const out = bytesFor(room, count * 4);
+        out.set(pixels.subarray(0, count * 4));
         for (let at = 3; at < out.length; at += 4)
         {
             out[at] = 0xff;
@@ -697,9 +715,9 @@ const TEXEL_EXPANSION = Object.freeze({
     ]),
     // Ten bits a colour channel and two of alpha, kept at eight bits a channel
     // (said where the surface is made, `narrowed`).
-    [D3DFMT.A2R10G10B10]: (pixels, count)=>{
+    [D3DFMT.A2R10G10B10]: (pixels, count, room)=>{
         const words = new Uint32Array(pixels.buffer, pixels.byteOffset, count);
-        const out = new Uint8Array(count * 4);
+        const out = bytesFor(room, count * 4);
         for (let index = 0; index < count; index++)
         {
             const word = words[index];
@@ -710,8 +728,8 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
-    [D3DFMT.A8]: (pixels, count)=>{
-        const out = new Uint8Array(count * 4);
+    [D3DFMT.A8]: (pixels, count, room)=>{
+        const out = bytesFor(room, count * 4).fill(0);
         for (let index = 0; index < count; index++)
         {
             out[index * 4 + 3] = pixels[index];
@@ -723,8 +741,8 @@ const TEXEL_EXPANSION = Object.freeze({
     // or opaque. A font atlas in one of these draws as glyphs, not as the
     // rectangle it is stored in, only because the grey and the coverage each
     // land in the channel the blend and the shader read.
-    [D3DFMT.L8]: (pixels, count)=>{
-        const out = new Uint8Array(count * 4);
+    [D3DFMT.L8]: (pixels, count, room)=>{
+        const out = bytesFor(room, count * 4);
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index];
@@ -735,8 +753,8 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
-    [D3DFMT.A8L8]: (pixels, count)=>{
-        const out = new Uint8Array(count * 4);
+    [D3DFMT.A8L8]: (pixels, count, room)=>{
+        const out = bytesFor(room, count * 4);
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index * 2];
@@ -747,8 +765,8 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
-    [D3DFMT.A4L4]: (pixels, count)=>{
-        const out = new Uint8Array(count * 4);
+    [D3DFMT.A4L4]: (pixels, count, room)=>{
+        const out = bytesFor(room, count * 4);
         for (let index = 0; index < count; index++)
         {
             const packed = pixels[index];
@@ -762,8 +780,8 @@ const TEXEL_EXPANSION = Object.freeze({
     },
     // The signed formats go to `rgba8snorm`, red first: U and V as they lie,
     // and the channels V8U8 lacks at 1, as Direct3D samples them.
-    [D3DFMT.V8U8]: (pixels, count)=>{
-        const out = new Uint8Array(count * 4);
+    [D3DFMT.V8U8]: (pixels, count, room)=>{
+        const out = bytesFor(room, count * 4);
         for (let index = 0; index < count; index++)
         {
             out[index * 4] = pixels[index * 2];
@@ -776,8 +794,9 @@ const TEXEL_EXPANSION = Object.freeze({
     [D3DFMT.Q8W8V8U8]: pixels=>pixels,
     // U and V widened from five signed bits, the luminance from six unsigned
     // ones into the positive half, and the alpha L6V5U5 lacks at 1.
-    [D3DFMT.L6V5U5]: (pixels, count)=>{
-        const out = new Int8Array(count * 4);
+    [D3DFMT.L6V5U5]: (pixels, count, room)=>{
+        const bytes = bytesFor(room, count * 4);
+        const out = new Int8Array(bytes.buffer, bytes.byteOffset, count * 4);
         for (let index = 0; index < count; index++)
         {
             const packed = pixels[index * 2] | (pixels[index * 2 + 1] << 8);
@@ -788,7 +807,7 @@ const TEXEL_EXPANSION = Object.freeze({
             out[index * 4 + 2] = Math.round((packed >>> 10) * 127 / 63);
             out[index * 4 + 3] = 0x7f;
         }
-        return new Uint8Array(out.buffer);
+        return bytes;
     },
 });
 
@@ -801,16 +820,20 @@ const TEXEL_EXPANSION = Object.freeze({
  * @param {Uint8Array} pixels
  * @param {number} count   Texels.
  * @param {boolean} [float32]  whether the device keeps 32-bit floats whole
+ * @param {import('../../cache/scratch.js').Scratch} [room]  where a widened level goes, for
+ *     a caller that hands it on before it asks again (an upload to the queue); bytes of their
+ *     own if absent. A format taken as it lies is `pixels` themselves either way.
  * @returns {Uint8Array}
  */
-export function expandTexels(format, pixels, count, float32 = false){
+export function expandTexels(format, pixels, count, float32 = false, room = undefined){
     const wide = FORMAT_INFO[format]?.wide;
     if (wide?.luminance)
     {
         // Each texel's half made once, straight from where it lies, into its
         // three colour channels and an opaque alpha: one pass, one array.
         const from = new DataView(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-        const out = new Uint16Array(count * 4);
+        const bytes = bytesFor(room, count * 8);
+        const out = new Uint16Array(bytes.buffer, bytes.byteOffset, count * 4);
         for (let index = 0, at = 0; index < count; index++, at += 4)
         {
             const half = wide.stored === 'half' ? from.getUint16(index * 2, true)
@@ -821,7 +844,7 @@ export function expandTexels(format, pixels, count, float32 = false){
             out[at + 2] = half;
             out[at + 3] = HALF_ONE;
         }
-        return new Uint8Array(out.buffer);
+        return bytes;
     }
     if (wide)
     {
@@ -834,7 +857,7 @@ export function expandTexels(format, pixels, count, float32 = false){
     {
         throw new Error(`Texture format ${format} cannot be uploaded`);
     }
-    return expand(pixels, count);
+    return expand(pixels, count, room);
 }
 
 /** A buffer lock at least this long sends only the bytes its unlock finds changed. */
@@ -3300,6 +3323,10 @@ const CLEAR_STRIDE = 20;
  *     The root's names in the run's cache (`channelSpace`), where the texels of an
  *     upload that waits for its frame's replay are kept (`uploadTexels`); none keeps
  *     them in plain memory.
+ * @property {(name: string) => import('../../cache/scratch.js').Scratch} [scratches]
+ *     Memory the renderer keeps between calls, held in the run's cache: where a level
+ *     going to the queue at once is decoded, widened or taken out tight. Plain memory
+ *     if absent.
  */
 
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
@@ -3412,6 +3439,17 @@ export function createRenderer(options){
     const texelStore = createTexelStore({ cache: options.texelCache ?? null,
         divergence: (detail, severity)=>divergence?.('Direct3D', `an upload's ${detail}`,
             severity) });
+    /**
+     * Where a level that goes to the queue at once is made on its way (the
+     * queue copies it before the upload returns, and the next level is made
+     * in the same bytes): taken out tight from its rows, widened, decoded
+     * from blocks. Kept between calls in the run's cache, so a texture a
+     * program writes every frame costs no room a frame; an upload that waits
+     * in its frame's order, or that a dump keeps, makes bytes of its own.
+     */
+    const scratchOf = options.scratches ?? (name=>plainScratches.scratch(name));
+    const rooms = { rows: scratchOf('d3d/rows'), widened: scratchOf('d3d/widened'),
+        decoded: scratchOf('d3d/decoded') };
     /** The key of the next upload kept in the store: each upload its own. */
     let keptUploads = 0;
     // One id or several, comma-separated: a picture painted by a family of
@@ -5773,8 +5811,9 @@ export function createRenderer(options){
      * @returns {Uint8Array}
      */
     const texelsFrom = (view, format, width, rows, pitch, count, keeps)=>{
-        const texels = expandTexels(format, tightRows(view, format, width, rows, pitch), count,
-            float32);
+        const texels = expandTexels(format,
+            tightRows(view, format, width, rows, pitch, keeps ? undefined : rooms.rows), count,
+            float32, keeps ? undefined : rooms.widened);
         return keeps && texels.buffer === view.buffer ? texels.slice() : texels;
     };
 
@@ -6024,17 +6063,6 @@ export function createRenderer(options){
             // further still -- follows the same choice.
             const keepsBlocks = COMPRESSED_FORMAT[record.format] !== undefined
                 && compressedTextures && blockAligned(record.width, record.height);
-            /**
-             * Where a compressed level is decoded on its way up, the next one
-             * into the same bytes: the upload copies the texels before it
-             * returns. Made for this call's largest level and let go of with
-             * it, so the renderer keeps no room of its own between calls. An
-             * ordered upload or a dump keeps its texels, and decodes into
-             * bytes of its own.
-             *
-             * @type {Uint8Array | undefined}
-             */
-            let room;
             for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
                 const level = subresource % record.levels;
@@ -6098,15 +6126,11 @@ export function createRenderer(options){
                 // format expandTexels does not know), so it is decompressed
                 // instead of expanded; everything else is widened to the one
                 // uncompressed format the backend samples.
-                if (decodes && !ordered && !dumpDraws && (room?.length ?? 0) < width * height * 4)
-                {
-                    room = new Uint8Array(width * height * 4);
-                }
                 const texels = keepsBlocks
                     ? bytes
                     : decodes
                         ? decodeCompressed(bytes, record.format, width, height,
-                            ordered || dumpDraws ? undefined : room)
+                            keeps ? undefined : rooms.decoded.bytes(width * height * 4))
                         : texelsFrom(bytes, record.format, width, height, pitch, width * height,
                             keeps);
                 uploadTexels(record.gpu,
