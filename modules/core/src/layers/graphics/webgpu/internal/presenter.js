@@ -7,6 +7,7 @@
 import { createPacer } from './pacer.js';
 import { createFrameLatency } from './latency.js';
 import { baseOf, compositionPlan, needsComposing } from './compose.js';
+import { plainScratches } from '../../../cache/scratch.js';
 
 /**
  * A surface in guest memory, put on the screen -- and the canvas itself.
@@ -393,6 +394,10 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        -- sends a surface's picture, in the bytes an upload would carry, for
  *        the thread that has the GPU to show. Each frame's bytes are its own,
  *        so the receiver may take them.
+ * @param {(name: string) => import('../../../cache/scratch.js').Scratch} [options.scratches]
+ *        Memory the presenter keeps between frames, held in the run's cache:
+ *        where a surface in guest memory is converted on its way up. Plain
+ *        memory if absent.
  */
 export function createPresenter(options = {}){
     const gpu = options.device ?? null;
@@ -473,8 +478,13 @@ export function createPresenter(options = {}){
      * @type {{ promise: Promise<unknown>, settle: (value: unknown) => void } | null}
      */
     let burst = null;
-    /** @type {Uint8Array | null} */
-    let converted = null;
+    /**
+     * Where a surface is converted on its way up, kept from frame to frame:
+     * the upload copies it before it returns. A frame sent elsewhere
+     * (`sendFrame`) is bytes of its own, which the receiver takes.
+     */
+    const converted = (options.scratches ?? (name=>plainScratches.scratch(name)))(
+        'present/converted');
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
         dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0,
@@ -726,17 +736,14 @@ export function createPresenter(options = {}){
         const target = textureFor(using, surface);
         uploadedLabel = surface.label ?? 'guest bytes';
         const needed = surface.width * 4 * surface.height;
-        if (!converted || converted.byteLength !== needed)
-        {
-            converted = new Uint8Array(needed);
-        }
-        convert(from, surface, converted);
+        const pixels = converted.bytes(needed);
+        convert(from, surface, pixels);
         using.uploadTexture({
             texture: target.texture,
             format: FORMAT,
             width: surface.width,
             height: surface.height,
-            data: converted,
+            data: pixels,
         });
         counters.uploads++;
         counters.bytes += needed;
@@ -1388,7 +1395,7 @@ export function createPresenter(options = {}){
             composed?.texture.destroy?.();
             composed = null;
             texture = null;
-            converted = null;
+            converted.release();
             pending = null;
             burst?.settle(undefined);
             burst = null;

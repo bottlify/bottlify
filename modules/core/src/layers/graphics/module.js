@@ -1155,6 +1155,7 @@ export function createGraphicsModule(){
                             device: device.device,
                             queue: device.queue,
                             presentTo: device.presentTo,
+                            scratches,
                         });
                     }
                     return state.backend;
@@ -1263,6 +1264,7 @@ export function createGraphicsModule(){
                 schedule: config?.schedule,
                 maxFps: config?.maxFps,
                 maxFrameLatency: config?.maxFrameLatency,
+                scratches,
             });
             // The backend is asked for on the first present rather than now, so a
             // build that never shows one of these surfaces never builds a GPU.
