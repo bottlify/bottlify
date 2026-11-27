@@ -167,6 +167,12 @@ const tagOf = (/** @type {Node} */ node)=>node.reparse?.tag
 /** How many junctions a path may pass through before it is a loop. */
 const MAX_JUNCTIONS = 32;
 
+/**
+ * The longest name an NTFS volume holds, in UTF-16 units: the maximum
+ * component length GetVolumeInformation answers.
+ */
+const MAX_COMPONENT = 255;
+
 /** @param {string} directory @param {string} name */
 const joinPath = (directory, name)=>(directory.length === 0 ? name : `${directory}\\${name}`);
 
@@ -483,6 +489,31 @@ export function createOverlay({
         return node;
     };
 
+    /**
+     * Where a name is to be made: its parent, and the name. Every name made
+     * goes through here - a file, a directory, the target of a move or a
+     * link - so a path no NTFS volume could hold is refused once, before
+     * anything is made: a component is at most 255 UTF-16 units (MS-FSCC
+     * 2.1.5.2), and a longer one is STATUS_OBJECT_NAME_INVALID (MS-FSA
+     * 2.1.5.1), ERROR_INVALID_NAME to Win32.
+     *
+     * @param {string[]} components @param {string} rootRefusal  what a root is answered: no name
+     * @returns {{ parent: Node, name: string }}
+     */
+    const placeOf = (components, rootRefusal)=>{
+        const name = components[components.length - 1];
+        if (name === undefined)
+        {
+            throw fsError(ErrorCode.INVALID_PATH, rootRefusal);
+        }
+        if (components.some(component=>component.length > MAX_COMPONENT))
+        {
+            throw fsError(ErrorCode.INVALID_PATH,
+                `A name in "${components.join('\\')}" is longer than ${MAX_COMPONENT} units`);
+        }
+        return { parent: parentOf(components), name };
+    };
+
     /** @param {string[]} components @returns {Node} */
     const mustFind = components=>{
         const node = find(components);
@@ -742,12 +773,7 @@ export function createOverlay({
      * @returns {boolean}
      */
     const renameName = (node, to)=>{
-        const parent = parentOf(to);
-        const name = to[to.length - 1];
-        if (name === undefined)
-        {
-            throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
-        }
+        const { parent, name } = placeOf(to, 'A root is not a file');
         const existing = parent.children.get(foldName(name));
         if (existing && !existing.tombstone)
         {
@@ -1060,12 +1086,7 @@ export function createOverlay({
          */
         createFile(components){
             mustBeWritable(components);
-            const parent = parentOf(components);
-            const name = components[components.length - 1];
-            if (name === undefined)
-            {
-                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
-            }
+            const { parent, name } = placeOf(components, 'A root is not a file');
             const existing = parent.children.get(foldName(name));
             if (existing && !existing.tombstone)
             {
@@ -1091,12 +1112,7 @@ export function createOverlay({
          */
         createDirectory(components){
             mustBeWritable(components);
-            const parent = parentOf(components);
-            const name = components[components.length - 1];
-            if (name === undefined)
-            {
-                throw fsError(ErrorCode.INVALID_PATH, 'A root always exists');
-            }
+            const { parent, name } = placeOf(components, 'A root always exists');
             const existing = parent.children.get(foldName(name));
             if (existing && !existing.tombstone)
             {
@@ -1141,12 +1157,7 @@ export function createOverlay({
             {
                 return false;
             }
-            const parent = parentOf(to);
-            const name = to[to.length - 1];
-            if (name === undefined)
-            {
-                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
-            }
+            const { parent, name } = placeOf(to, 'A root is not a file');
             const existing = parent.children.get(foldName(name));
             if (existing && !existing.tombstone)
             {
@@ -1220,12 +1231,7 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, `"${node.path}" is a directory`);
             }
-            const parent = parentOf(to);
-            const name = to[to.length - 1];
-            if (name === undefined)
-            {
-                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
-            }
+            const { parent, name } = placeOf(to, 'A root is not a file');
             const existing = parent.children.get(foldName(name));
             if (existing && !existing.tombstone)
             {
