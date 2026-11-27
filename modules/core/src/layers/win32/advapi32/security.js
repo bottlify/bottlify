@@ -14,18 +14,19 @@
  */
 
 import {
-    ACL_HEADER, DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION,
+    ACL_HEADER, DACL_SECURITY_INFORMATION, EXPLICIT_ACCESS, GROUP_SECURITY_INFORMATION,
     LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION, SD,
     SE_DACL_AUTO_INHERITED, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_DEFAULTED, SE_DACL_PRESENT,
     SE_DACL_PROTECTED, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED, SE_SACL_AUTO_INHERITED,
     SE_SACL_AUTO_INHERIT_REQ, SE_SACL_DEFAULTED, SE_SACL_PRESENT, SE_SACL_PROTECTED,
-    SE_RM_CONTROL_VALID, SE_SELF_RELATIVE, createDescriptorCodec,
+    OBJECTS_AND_NAME, OBJECTS_AND_SID, SE_RM_CONTROL_VALID, SE_SELF_RELATIVE, TRUSTEE,
+    createDescriptorCodec,
 } from './descriptors.js';
 import {
     PRIVILEGES, SDDL_ACE_FLAGS, SDDL_RIGHTS, SDDL_SIDS, USER_SID_TEXT, accountNamed, encodeText,
     isThisMachine, isTokenMember, parseSid, sidBytes, sidText, wideTextAt,
 } from './tokens.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_NOACCESS = 998;
@@ -70,9 +71,6 @@ const VALID_INHERIT_FLAGS = 0x1f;
 const AclRevisionInformation = 1;
 const AclSizeInformation = 2;
 
-/** TRUSTEE: four DWORDs and the name, which each form reads its own way. */
-const TRUSTEE = Object.freeze({ MULTIPLE: 0, OPERATION: 4, FORM: 8, TYPE: 12, NAME: 16,
-    SIZE: 20 });
 const TRUSTEE_IS_SID = 0;
 const TRUSTEE_IS_NAME = 1;
 const TRUSTEE_IS_OBJECTS_AND_SID = 3;
@@ -82,8 +80,6 @@ const NO_MULTIPLE_TRUSTEE = 0;
 const ACE_OBJECT_TYPE_PRESENT = 1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT = 2;
 
-/** EXPLICIT_ACCESS: permissions, mode, inheritance, then the trustee. */
-const EXPLICIT_ACCESS_SIZE = 12 + TRUSTEE.SIZE;
 const GRANT_ACCESS = 1;
 const DENY_ACCESS = 3;
 const SET_AUDIT_SUCCESS = 5;
@@ -242,6 +238,8 @@ const domainOf = sid=>{
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} allocate  LocalFree-compatible.
+ * @property {4 | 8} [pointerSize]  The process's: a trustee's name and an
+ *     out-pointer are its width.
  */
 
 /**
@@ -250,6 +248,14 @@ const domainOf = sid=>{
  * @param {SecurityHost} host
  */
 export function createSecurityFunctions(host){
+    // A trustee and the structures around it at the process's width, and the
+    // pointers it and the out-parameters hold, read and written whole.
+    const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
+    const pointers = pointerIo(host, width.size);
+    const ONE = TRUSTEE.at(width.size);
+    const ENTRY = EXPLICIT_ACCESS.at(width.size);
+    const BY_SID = OBJECTS_AND_SID.at(width.size);
+    const BY_NAME = OBJECTS_AND_NAME.at(width.size);
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{
         host.setLastError(code);
@@ -385,7 +391,7 @@ export function createSecurityFunctions(host){
             const bytes = encodeText(text, wide);
             const block = host.allocate(bytes.length);
             host.writeMemory(block, bytes);
-            writeDword(wholeAddress(out), block);
+            pointers.write(wholeAddress(out), block);
             if ((length >>> 0) !== 0)
             {
                 writeDword(wholeAddress(length), text.length + 1);
@@ -415,13 +421,12 @@ export function createSecurityFunctions(host){
 
     /** @param {number} trustee @param {number} form @param {number} name */
     const writeTrustee = (trustee, form, name)=>{
-        const bytes = new Uint8Array(TRUSTEE.SIZE);
+        const bytes = new Uint8Array(ONE.SIZE);
         const view = new DataView(bytes.buffer);
-        view.setUint32(TRUSTEE.MULTIPLE, 0, true);
-        view.setUint32(TRUSTEE.OPERATION, NO_MULTIPLE_TRUSTEE, true);
-        view.setUint32(TRUSTEE.FORM, form, true);
-        view.setUint32(TRUSTEE.TYPE, TRUSTEE_IS_UNKNOWN, true);
-        view.setUint32(TRUSTEE.NAME, name >>> 0, true);
+        view.setUint32(ONE.OPERATION, NO_MULTIPLE_TRUSTEE, true);
+        view.setUint32(ONE.FORM, form, true);
+        view.setUint32(ONE.TYPE, TRUSTEE_IS_UNKNOWN, true);
+        width.set(view, ONE.NAME, wholeAddress(name));
         host.writeMemory(wholeAddress(trustee), bytes);
     };
 
@@ -436,21 +441,21 @@ export function createSecurityFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [trustee, objects, objectType, inheritedType, sid])=>{
-            const bytes = new Uint8Array(40);
+            const bytes = new Uint8Array(BY_SID.SIZE);
             let present = 0;
-            if ((objectType >>> 0) !== 0)
+            if (wholeAddress(objectType) !== 0)
             {
-                bytes.set(host.readMemory(wholeAddress(objectType), 16), 4);
+                bytes.set(host.readMemory(wholeAddress(objectType), 16), BY_SID.OBJECT_TYPE);
                 present |= ACE_OBJECT_TYPE_PRESENT;
             }
-            if ((inheritedType >>> 0) !== 0)
+            if (wholeAddress(inheritedType) !== 0)
             {
-                bytes.set(host.readMemory(wholeAddress(inheritedType), 16), 20);
+                bytes.set(host.readMemory(wholeAddress(inheritedType), 16), BY_SID.INHERITED_TYPE);
                 present |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
             }
             const view = new DataView(bytes.buffer);
-            view.setUint32(0, present, true);
-            view.setUint32(36, sid >>> 0, true);
+            view.setUint32(BY_SID.PRESENT, present, true);
+            width.set(view, BY_SID.SID, wholeAddress(sid));
             host.writeMemory(wholeAddress(objects), bytes);
             writeTrustee(trustee, TRUSTEE_IS_OBJECTS_AND_SID, objects);
             return 0;
@@ -470,12 +475,16 @@ export function createSecurityFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [trustee, objects, objectType, typeName,
             inheritedName, name])=>{
-            const present = ((typeName >>> 0) !== 0 ? ACE_OBJECT_TYPE_PRESENT : 0)
-                | ((inheritedName >>> 0) !== 0 ? ACE_INHERITED_OBJECT_TYPE_PRESENT : 0);
-            host.writeMemory(wholeAddress(objects), new Uint8Array([
-                ...dwordBytes(present), ...dwordBytes(objectType), ...dwordBytes(typeName),
-                ...dwordBytes(inheritedName), ...dwordBytes(name),
-            ]));
+            const present = (wholeAddress(typeName) !== 0 ? ACE_OBJECT_TYPE_PRESENT : 0)
+                | (wholeAddress(inheritedName) !== 0 ? ACE_INHERITED_OBJECT_TYPE_PRESENT : 0);
+            const bytes = new Uint8Array(BY_NAME.SIZE);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(BY_NAME.PRESENT, present, true);
+            view.setUint32(BY_NAME.OBJECT_TYPE, objectType, true);
+            width.set(view, BY_NAME.TYPE_NAME, wholeAddress(typeName));
+            width.set(view, BY_NAME.INHERITED_NAME, wholeAddress(inheritedName));
+            width.set(view, BY_NAME.NAME, wholeAddress(name));
+            host.writeMemory(wholeAddress(objects), bytes);
             writeTrustee(trustee, TRUSTEE_IS_OBJECTS_AND_NAME, objects);
             return 0;
         },
@@ -552,10 +561,10 @@ export function createSecurityFunctions(host){
             writeDword(count, entries.length);
             if (entries.length === 0)
             {
-                writeDword(out, 0);
+                pointers.write(wholeAddress(out), 0);
                 return ERROR_SUCCESS;
             }
-            const sidsAt = entries.length * EXPLICIT_ACCESS_SIZE;
+            const sidsAt = entries.length * ENTRY.SIZE;
             const size = sidsAt + entries.reduce((sum, ace)=>sum + (ace.sid?.length ?? 0), 0);
             const block = host.allocate(size);
             const bytes = new Uint8Array(size);
@@ -563,7 +572,7 @@ export function createSecurityFunctions(host){
             let sidAtOffset = sidsAt;
             entries.forEach((ace, index)=>{
                 const sid = /** @type {Uint8Array} */ (ace.sid);
-                const at = index * EXPLICIT_ACCESS_SIZE;
+                const at = index * ENTRY.SIZE;
                 const mode = modes.get(ace.type)
                     ?? ((ace.flags & FAILED_ACCESS_ACE_FLAG) !== 0
                         && (ace.flags & SUCCESSFUL_ACCESS_ACE_FLAG) === 0
@@ -571,14 +580,14 @@ export function createSecurityFunctions(host){
                 view.setUint32(at, ace.mask, true);
                 view.setUint32(at + 4, mode, true);
                 view.setUint32(at + 8, ace.flags & VALID_INHERIT_FLAGS & ~INHERITED_ACE, true);
-                view.setUint32(at + 12 + TRUSTEE.FORM, TRUSTEE_IS_SID, true);
-                view.setUint32(at + 12 + TRUSTEE.TYPE, TRUSTEE_IS_UNKNOWN, true);
-                view.setUint32(at + 12 + TRUSTEE.NAME, block + sidAtOffset, true);
+                view.setUint32(at + ENTRY.TRUSTEE + ONE.FORM, TRUSTEE_IS_SID, true);
+                view.setUint32(at + ENTRY.TRUSTEE + ONE.TYPE, TRUSTEE_IS_UNKNOWN, true);
+                width.set(view, at + ENTRY.TRUSTEE + ONE.NAME, wholeAddress(block) + sidAtOffset);
                 bytes.set(sid, sidAtOffset);
                 sidAtOffset += sid.length;
             });
             host.writeMemory(block, bytes);
-            writeDword(out, block);
+            pointers.write(wholeAddress(out), block);
             return ERROR_SUCCESS;
         },
     });
@@ -631,8 +640,8 @@ export function createSecurityFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const form = readDword(trustee + TRUSTEE.FORM);
-            const named = readDword(trustee + TRUSTEE.NAME);
+            const form = readDword(wholeAddress(trustee) + ONE.FORM);
+            const named = pointers.read(wholeAddress(trustee) + ONE.NAME);
             /** @type {Uint8Array | null} */
             let sid = null;
             if (form === TRUSTEE_IS_SID)
@@ -691,12 +700,21 @@ export function createSecurityFunctions(host){
     const sameSid = (left, right)=>left.length === right.length
         && left.every((byte, at)=>byte === right[at]);
 
-    /** @param {number} field  A TRUSTEE's field, read as it is. */
+    /** A TRUSTEE's form or type, read as it is. @param {'FORM' | 'TYPE'} field */
     const trusteeField = field=>({
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
-        handler: ([trustee])=>readDword(trustee + field),
+        handler: ([trustee])=>readDword(wholeAddress(trustee) + ONE[field]),
     });
+
+    /** LPTSTR GetTrusteeNameA/GetTrusteeNameW(PTRUSTEE pTrustee): the name as it is. */
+    const trusteeName = {
+        returns: 'pointer',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [trustee])=>pointers.read(wholeAddress(trustee) + ONE.NAME),
+    };
 
     /** The next LUID AllocateLocallyUniqueId hands out: above every privilege's. */
     let nextLuid = 0x10000;
@@ -930,16 +948,16 @@ export function createSecurityFunctions(host){
         BuildTrusteeWithObjectsAndNameA: buildTrusteeWithObjectsAndName,
         BuildTrusteeWithObjectsAndNameW: buildTrusteeWithObjectsAndName,
 
+        GetTrusteeNameA: trusteeName,
+        GetTrusteeNameW: trusteeName,
         /**
-         * LPTSTR GetTrusteeName(PTRUSTEE), TRUSTEE_FORM GetTrusteeForm(PTRUSTEE),
-         * TRUSTEE_TYPE GetTrusteeType(PTRUSTEE): the fields as they are.
+         * TRUSTEE_FORM GetTrusteeForm(PTRUSTEE), TRUSTEE_TYPE GetTrusteeType(PTRUSTEE):
+         * the fields as they are.
          */
-        GetTrusteeNameA: { ...trusteeField(TRUSTEE.NAME), returns: 'pointer' },
-        GetTrusteeNameW: trusteeField(TRUSTEE.NAME),
-        GetTrusteeFormA: trusteeField(TRUSTEE.FORM),
-        GetTrusteeFormW: trusteeField(TRUSTEE.FORM),
-        GetTrusteeTypeA: trusteeField(TRUSTEE.TYPE),
-        GetTrusteeTypeW: trusteeField(TRUSTEE.TYPE),
+        GetTrusteeFormA: trusteeField('FORM'),
+        GetTrusteeFormW: trusteeField('FORM'),
+        GetTrusteeTypeA: trusteeField('TYPE'),
+        GetTrusteeTypeW: trusteeField('TYPE'),
 
         /**
          * BOOL GetAclInformation(PACL pAcl, LPVOID pAclInformation,
@@ -1197,8 +1215,8 @@ export function createSecurityFunctions(host){
                     {
                         continue;
                     }
-                    const sid = readDword(trustee + TRUSTEE.FORM) === TRUSTEE_IS_SID
-                        ? sidAt(readDword(trustee + TRUSTEE.NAME)) : null;
+                    const sid = readDword(wholeAddress(trustee) + ONE.FORM) === TRUSTEE_IS_SID
+                        ? sidAt(pointers.read(wholeAddress(trustee) + ONE.NAME)) : null;
                     if (sid === null)
                     {
                         return ERROR_INVALID_PARAMETER;
@@ -1209,7 +1227,7 @@ export function createSecurityFunctions(host){
                 const block = host.allocate(bytes.length);
                 host.writeMemory(block, bytes);
                 writeDword(size, bytes.length);
-                writeDword(out, block);
+                pointers.write(wholeAddress(out), block);
                 return ERROR_SUCCESS;
             },
         };

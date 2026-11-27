@@ -1782,7 +1782,7 @@ export function _mbsupr({ u8, setU8, host }, text){
  * pointer, so it costs no crossing.
  *
  * @guestCode cdecl
- * @param {u32} pointer
+ * @param {ptr} pointer
  * @returns {ptr}
  */
 export function encodePointer(pointer){

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 import {
     ADMINISTRATORS_SID, TOKEN_NATIVES, createTokenFunctions, selfRelativeDescriptor,
 } from './tokens.js';
@@ -1422,4 +1423,29 @@ test('a 64-bit process\'s token information has pointers a quadword wide: TOKEN_
             `group ${at}: its SID after the entries, inside the buffer`);
         assert.equal(dword(BUFFER + 8 + at * 16 + 8) & 0x4, 0x4, `group ${at}: enabled, at 8`);
     }
+});
+
+test('in a 64-bit process an EXPLICIT_ACCESS\'s trustee is a pointer wide, and a SID\'s parts'
+    + ' are answered whole past 4 GiB', async()=>{
+    const { bytes, fns, dword } = setup({ pointerSize: 8 });
+    const view = new DataView(bytes.buffer);
+    const ENTRIES = 0x400;
+    const NEW = 0x3f8;
+    bytes.set(USERS, SID);
+    // EXPLICIT_ACCESS at 64 bits: the rights, the mode, the inheritance, then
+    // the TRUSTEE at 16 - its form at 12 into it and its SID's pointer at 24.
+    bytes.fill(0, ENTRIES, ENTRIES + 48);
+    view.setUint32(ENTRIES, 0x20019, true);
+    view.setUint32(ENTRIES + 4, 1, true);
+    view.setUint32(ENTRIES + 16 + 12, 0, true);
+    view.setUint32(ENTRIES + 16 + 24, SID, true);
+    assert.equal(fns.SetEntriesInAclW.handler([1, ENTRIES, 0, NEW]), 0);
+    assert.deepEqual(acesAt(bytes, dword(NEW)), [
+        { type: 0, flags: 0, mask: 0x20019, sid: [...USERS] }]);
+
+    const far = 0x140000100;
+    declaredTable(fns);
+    assert.equal(await longCall(fns.GetSidSubAuthority, [far, 1]), BigInt(far + 12));
+    assert.equal(await longCall(fns.GetSidSubAuthorityCount, [far]), BigInt(far + 1));
+    assert.equal(await longCall(fns.GetSidIdentifierAuthority, [far]), BigInt(far + 2));
 });

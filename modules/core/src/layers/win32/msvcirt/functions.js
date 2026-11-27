@@ -27,6 +27,12 @@ import { wholeAddress } from '../common/pointers.js';
  *
  * The layouts and the behaviour are read off Wine's conformance tests and its
  * account of the native library; the code is this project's.
+ *
+ * This is the 32-bit library, as msvcp60 is: every name is a 32-bit
+ * compiler's (`QAE` a member), every layout and vtable is a dword wide. A
+ * 64-bit program names a member `QEAA` and lays its objects out a pointer
+ * wide, so it would bind to none of these and could only be misread by them:
+ * the library offers a 64-bit process nothing, its imports missing as they are.
  */
 
 const EOF = -1;
@@ -85,6 +91,7 @@ const SLOT = {
 
 /**
  * @typedef {Object} IostreamHost
+ * @property {4 | 8} pointerSize  The process's: a 64-bit one is offered nothing.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -154,6 +161,10 @@ const latin1 = text=>Uint8Array.from(text, character=>character.charCodeAt(0) & 
  * @param {IostreamHost} host
  */
 export function createIostreamFunctions(host){
+    if (host.pointerSize !== 4)
+    {
+        return {};
+    }
     /** The thread whose call the running step answers. @type {any} */
     let thread = null;
     /** @param {{ entry: number, args: number[], ecx: number }} call */

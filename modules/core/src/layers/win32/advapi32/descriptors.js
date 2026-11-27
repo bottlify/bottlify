@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { struct } from '../../../system/layout.js';
 
 /**
  * Security descriptors read out of guest memory and written back: either form
@@ -12,6 +13,22 @@ import { wholeAddress } from '../common/pointers.js';
  * offsets -- read into its parts, and the self-relative form laid out from
  * them. The descriptor calls and the objects that keep one share the layout.
  */
+
+/**
+ * TRUSTEE: the multiple trustee and its operation, the form, the type, and
+ * the name, SID or objects structure the form says.
+ */
+export const TRUSTEE = struct([['MULTIPLE', 'ptr'], ['OPERATION', 'u32'], ['FORM', 'u32'],
+    ['TYPE', 'u32'], ['NAME', 'ptr']]);
+/** EXPLICIT_ACCESS: the rights, the ACCESS_MODE, the inheritance, then the trustee. */
+export const EXPLICIT_ACCESS = struct([['PERMISSIONS', 'u32'], ['MODE', 'u32'],
+    ['INHERITANCE', 'u32'], ['TRUSTEE', TRUSTEE]]);
+/** OBJECTS_AND_SID: which GUIDs are present, the two GUIDs, the SID. */
+export const OBJECTS_AND_SID = struct([['PRESENT', 'u32'], ['OBJECT_TYPE', 'u8', 16],
+    ['INHERITED_TYPE', 'u8', 16], ['SID', 'ptr']]);
+/** OBJECTS_AND_NAME: which names are present, the object's type and the three names. */
+export const OBJECTS_AND_NAME = struct([['PRESENT', 'u32'], ['OBJECT_TYPE', 'u32'],
+    ['TYPE_NAME', 'ptr'], ['INHERITED_NAME', 'ptr'], ['NAME', 'ptr']]);
 
 /** SECURITY_DESCRIPTOR, absolute on a 32-bit machine: pointers where the offsets go. */
 export const SD = Object.freeze({ REVISION: 0, CONTROL: 2, OWNER: 4, GROUP: 8, SACL: 12, DACL: 16,

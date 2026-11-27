@@ -333,14 +333,14 @@ export function createEventLogFunctions(host){
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory?.(address >>> 0, 4);
+        const bytes = host.readMemory?.(wholeAddress(address), 4);
         return bytes ? (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0 : 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory?.(address >>> 0, bytes);
+        host.writeMemory?.(wholeAddress(address), bytes);
     };
 
     /** @param {boolean} wide @returns {Reader} */

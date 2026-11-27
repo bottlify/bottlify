@@ -184,6 +184,7 @@ export { USER_NAME };
  *     ReturnType<typeof import('./registry-service.js').createRegistryService>>} hive
  *           The run's registry as this process reaches it: its width's view on a
  *           64-bit Windows, whose open, create and remove take a REGSAM.
+ * @property {4 | 8} [pointerSize]  The process's: a trustee's pointers are its width.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for the objects this library hands out by pointer -- a
  *           SID. Without it those calls fail as an out-of-memory would, which
