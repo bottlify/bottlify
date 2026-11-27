@@ -218,6 +218,11 @@ function processOn(table, id = 1, extra = {}){
             handles.delete(handle);
             pipes.closed(handle, object);
         },
+        /** The process's end, as the module ends one: its I/O, then every handle. */
+        end(){
+            pipes.processEnded();
+            [...handles.keys()].forEach(handle=>this.close(handle));
+        },
         error: ()=>lastError.get(current),
         errorOf: (/** @type {any} */ thread)=>lastError.get(thread),
         /** @param {string} thread */
@@ -661,7 +666,7 @@ test('a child\'s inherited end closes when the child ends: its reader reads to t
     child.pipes.adopted(entry.object, entry);
     p.close(client);
     assert.equal(child.write(entry.handle, 'out'), 1);
-    child.pipes.processEnded();
+    child.end();
     assert.equal(p.read(server, 10), 1, 'what the child wrote is still read');
     assert.equal(p.read(server, 10), 0);
     assert.equal(p.error(), ERROR_BROKEN_PIPE, 'and then the end of it');
@@ -684,7 +689,7 @@ test('a child\'s inherited end is its from CreateProcess: the parent closing its
     assert.equal(entry.held, false, 'the child took the handle held for it');
     dropUnclaimed([entry]);
     assert.equal(child.read(entry.handle, 10), 1, 'taken, it is not given back again');
-    child.pipes.processEnded();
+    child.end();
     assert.equal(p.write(server, 'x'), 0, 'with the child gone the pipe is broken');
     assert.equal(p.error(), ERROR_NO_DATA);
 
@@ -1570,7 +1575,7 @@ test('a process that ends takes its waiting write out of the pipe, unanswered', 
     const client = child.client();
     assert.equal(child.pipes.write(client, 0x3000, 2000, COUNT + 4, false, 0), 'parked');
     assert.equal(parent.pipes.read(server, 0x8000, 10, COUNT, false, 0), 1);
-    child.pipes.processEnded();
+    child.end();
     assert.equal(child.woken.length, 0, 'nobody is left to answer');
     assert.equal(parent.pipes.read(server, 0x8000, 10, COUNT, false, OVERLAPPED), 0,
         'the rest of its write is gone');

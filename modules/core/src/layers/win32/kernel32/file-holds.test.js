@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
-import { createFileFunctions } from './files.js';
+import { CLOSE_HANDLE, createFileFunctions } from './files.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createMappingFunctions } from './mapping.js';
 import { createThreadingFunctions } from './threading.js';
@@ -126,6 +126,8 @@ async function setup(){
         handleType: handle=>handles.typeOf(handle) ?? null,
         /** @param {any} node */
         retainNode: node=>volume.retain(node),
+        // The one close, files.js's, as the module wires it.
+        close: handle=>files[CLOSE_HANDLE](handle),
     });
 
     /** @param {number} access */

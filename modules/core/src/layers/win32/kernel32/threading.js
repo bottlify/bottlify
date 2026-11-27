@@ -75,7 +75,6 @@ const ERROR_FILENAME_EXCED_RANGE = 206;
 /** What reading an ANSI name of MAX_PATH characters or more throws, to refuse the call. */
 const TOO_LONG = Symbol('a name too long');
 const ERROR_INVALID_HANDLE = 6;
-const ERROR_NOT_SUPPORTED = 50;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_NOT_OWNER = 288;
 const ERROR_INVALID_PARAMETER = 87;
@@ -112,6 +111,13 @@ const CREATE_SUSPENDED = 0x4;
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
 const DUPLICATE_SAME_ACCESS = 0x00000002;
 const DUPLICATE_SAME_ATTRIBUTES = 0x00000004;
+/** NtSetInformationObject's and NtQueryObject's class of a handle's two flags. */
+const OBJECT_HANDLE_FLAG_INFORMATION = 4;
+/** HandleAttributes: the duplicate is inherited by a child. */
+const OBJ_INHERIT = 0x02;
+/** The status a refusal of the rights asked stands for (`duplicateAccess`). */
+const STATUS_OF_RIGHTS = /** @type {Record<number, number>} */ ({
+    5: STATUS.ACCESS_DENIED, 1314: STATUS.PRIVILEGE_NOT_HELD });
 
 /**
  * @typedef {Object} ThreadingHost
@@ -141,8 +147,6 @@ const DUPLICATE_SAME_ATTRIBUTES = 0x00000004;
  *           Keeps the SECURITY_ATTRIBUTES' descriptor a freshly created sync
  *           object was given, so GetKernelObjectSecurity hands it back.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
- * @property {(handle: number, object: any) => void} [closed]  told of each handle
- *     CloseHandle closes and what it named
  *           The one table every named sync object and file mapping shares --
  *           constructed once outside this process so a name a parent gave an
  *           object still finds it after a replacement rebuilds this layer.
@@ -172,12 +176,13 @@ const DUPLICATE_SAME_ATTRIBUTES = 0x00000004;
  *     open: (type: string, object: any, access?: number | null, flags?: number) => number,
  *     access?: (handle: number) => number | null,
  *     flags: (handle: number) => number | null,
- *     close: (handle: number) => any } | null)} [processTable]
+ *     close: (handle: number) => number } | null)} [processTable]
  *     The handle table of another process of the run on this thread, by its
- *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
+ *     id: where DuplicateHandle puts a duplicate for it, or takes one from it;
+ *     its close is that process's NtClose.
+ * @property {(handle: number) => number} close  NtClose of this process's handle,
+ *     the one close every kind of handle goes through (`files.js`): its NTSTATUS.
  * @property {(node: any) => void} [retainNode]
- * @property {(node: any) => void} [closeNode]  gives a hold back, closing the node
- *           with the last
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
  *           handle takes, so closing its source leaves the file open.
@@ -557,6 +562,15 @@ export function createThreadingFunctions(host){
 
     /** A handle's HANDLE_FLAG_* flags, null for a pseudo-handle or none. @param {number} handle */
     const flagsOf = handle=>(pseudo(handle) ? null : kernel.handles.flags(untagged(handle >>> 0)));
+    /**
+     * NtSetInformationObject's ObjectHandleFlagInformation, which
+     * SetHandleInformation answers from: both flags as given. Its NTSTATUS.
+     *
+     * @param {number} handle @param {number} flags
+     */
+    const setFlags = (handle, flags)=>(flagsOf(handle) !== null && kernel.handles.setFlags(
+        untagged(handle >>> 0), HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE, flags)
+        ? STATUS.SUCCESS : STATUS.INVALID_HANDLE);
 
     /**
      * What kind of object a handle names, the pseudo-handles included.
@@ -1036,6 +1050,148 @@ export function createThreadingFunctions(host){
         return at;
     };
 
+    /**
+     * NtDuplicateObject, which DuplicateHandle answers from: a second handle
+     * onto the same object, which is what a duplicate is -- not a copy of the
+     * object. Closing either leaves the other usable, which is the property a
+     * caller duplicates a handle to get.
+     *
+     * Either process may be another of the run's on this thread: a server
+     * hands its client the handles of the events it signals by duplicating
+     * them into the client, and the client uses the number it is sent. The
+     * duplicate is then in that process's table, under a number of its own. A
+     * process the run cannot reach (in a worker of its own) is taken for this
+     * one.
+     *
+     * The copy carries the source's rights with DUPLICATE_SAME_ACCESS and what
+     * was asked without it - nothing at all for 0 (`duplicateAccess`); the
+     * source's flags with DUPLICATE_SAME_ATTRIBUTES, else inheritable as
+     * OBJ_INHERIT asks. DUPLICATE_CLOSE_SOURCE closes the source as NtClose
+     * does, so one protected from close stays, as on Windows; with no target
+     * it only closes it.
+     *
+     * @param {number[]} args
+     * @returns {number} the NTSTATUS
+     */
+    const duplicate = args=>{
+        const [sourceProcess, source, targetProcess, target, desired, attributes, options] = args;
+        const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
+        const closing = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0;
+        /** @param {number | null} sourceFlags  null for a pseudo-handle */
+        const flagsFor = sourceFlags=>((options >>> 0 & DUPLICATE_SAME_ATTRIBUTES) !== 0
+            ? sourceFlags ?? 0 : (attributes & OBJ_INHERIT) !== 0 ? HANDLE_FLAG_INHERIT : 0);
+        /** @param {number} handle @param {number} made */
+        const written = (handle, made)=>{
+            host.writeMemory(wholeAddress(handle), new Uint8Array([made & 0xff, made >>> 8 & 0xff,
+                made >>> 16 & 0xff, made >>> 24 & 0xff]));
+            return STATUS.SUCCESS;
+        };
+        /** The table a process handle names, or null for this process's own. */
+        const tableOf = (/** @type {number} */ process)=>{
+            const record = (process >>> 0) === CURRENT_PROCESS ? null
+                : object(process >>> 0, 'process');
+            return record && !record.current && typeof record.id === 'number'
+                ? host.processTable?.(record.id) ?? null : null;
+        };
+        const from = tableOf(sourceProcess);
+        const into = tableOf(targetProcess);
+        if (target === 0 && closing)
+        {
+            return from ? from.close(source >>> 0) : host.close(source >>> 0);
+        }
+        if (from)
+        {
+            const foreign = from.resolve(source >>> 0);
+            const foreignKind = from.typeOf(source >>> 0);
+            if (!foreign || foreignKind === null || target === 0)
+            {
+                return STATUS.INVALID_HANDLE;
+            }
+            const rights = duplicateAccess(foreignKind, desired,
+                from.access?.(source >>> 0) ?? null, same);
+            if ('error' in rights)
+            {
+                return STATUS_OF_RIGHTS[rights.error];
+            }
+            host.namedObjects.reference(foreign);
+            const taken = (into ?? kernel.handles).open(foreignKind, foreign, rights.granted,
+                flagsFor(from.flags(source >>> 0)));
+            if (closing)
+            {
+                from.close(source >>> 0);
+            }
+            return written(target, taken);
+        }
+        // The console's own handles are the console wherever they are held: a
+        // duplicate is the same handle, as Windows 7 hands a console handle (a
+        // pseudo value) back.
+        if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
+        {
+            return written(target, source >>> 0);
+        }
+        const held = object(source >>> 0);
+        const kind = kindOf(source >>> 0);
+        if (!held || target === 0 || kind === null)
+        {
+            // Without the source handle's type there is nothing to reopen the
+            // object under, and a duplicate filed under the wrong type fails
+            // every later typed lookup -- a slower, stranger failure than
+            // refusing here.
+            return kind === null && held ? STATUS.NOT_SUPPORTED : STATUS.INVALID_HANDLE;
+        }
+        const rights = duplicateAccess(kind, desired,
+            pseudo(source) ? null : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
+        if ('error' in rights)
+        {
+            return STATUS_OF_RIGHTS[rights.error];
+        }
+        const flags = flagsFor(flagsOf(source));
+        // Within the process, a duplicate that closes its source takes the
+        // source's slot, the first free one, as Windows hands it: the entry
+        // is the duplicate's from then on, with what it held. The table
+        // refuses a source protected from close, and a pseudo-handle is none.
+        const moved = closing && !into && !pseudo(source) && (()=>{
+            try
+            {
+                kernel.handles.close(source >>> 0);
+                return kernel.handles.adopt(source >>> 0, kind, held, rights.granted, flags);
+            }
+            catch {
+                return false;
+            }
+        })();
+        if (moved)
+        {
+            return written(target, source >>> 0);
+        }
+        // A no-op on anything unnamed, and on a named object this is the
+        // reference a close will one day take back off -- a duplicate onto a
+        // mutex is a real handle onto it, the same as the one it was given.
+        host.namedObjects.reference(held);
+        // Into another process, an open file is that process's own open of it,
+        // which its table makes (`adoptFile`); here, one more hold. A pipe end
+        // counts its handles in every process: it breaks with the last of them.
+        if (held.node && (kind === 'mapping' || (kind === 'file' && !into)))
+        {
+            host.retainNode?.(held.node);
+        }
+        if (kind === 'pipe')
+        {
+            held.retain();
+        }
+        const made = (into ?? kernel.handles).open(kind, held, rights.granted, flags);
+        // A file the other process could not open as its own.
+        if (made === 0)
+        {
+            return STATUS.INVALID_HANDLE;
+        }
+        if (closing && !pseudo(source))
+        {
+            host.close(source >>> 0);
+        }
+        return written(target, made);
+    };
+
     const table = {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
@@ -1464,156 +1620,29 @@ export function createThreadingFunctions(host){
          *   HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle,
          *   DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)
          *
-         * A second handle onto the same object, which is what a duplicate is --
-         * not a copy of the object. Closing either leaves the other usable,
-         * which is the property a caller duplicates a handle to get.
-         *
-         * Either process may be another of the run's on this thread: a
-         * server hands its client the handles of the events it signals by
-         * duplicating them into the client, and the client uses the number
-         * it is sent. The duplicate is then in that process's table, under a
-         * number of its own. A process the run cannot reach (in a worker of
-         * its own) is taken for this one.
-         *
-         * The copy carries the source's rights with DUPLICATE_SAME_ACCESS and
-         * what was asked without it - nothing at all for 0 (`duplicateAccess`).
+         * NtDuplicateObject's answer as a Win32 one, bInheritHandle its
+         * OBJ_INHERIT.
          */
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([sourceProcess, source, targetProcess, target, desired, inherit, options])=>{
-                const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
-                /**
-                 * The copy's flags: the source's with DUPLICATE_SAME_ATTRIBUTES,
-                 * else inheritable as asked. A source protected from close is
-                 * not closed by DUPLICATE_CLOSE_SOURCE: both stay, as on Windows.
-                 *
-                 * @param {number | null} sourceFlags  null for a pseudo-handle
-                 */
-                const copying = sourceFlags=>({
-                    flags: (options >>> 0 & DUPLICATE_SAME_ATTRIBUTES) !== 0 ? sourceFlags ?? 0
-                        : inherit !== 0 ? HANDLE_FLAG_INHERIT : 0,
-                    closesSource: (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
-                        && sourceFlags !== null
-                        && (sourceFlags & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0,
-                });
-                /** The table a process handle names, or null for this process's own. */
-                const tableOf = (/** @type {number} */ process)=>{
-                    const record = (process >>> 0) === CURRENT_PROCESS ? null
-                        : object(process >>> 0, 'process');
-                    return record && !record.current && typeof record.id === 'number'
-                        ? host.processTable?.(record.id) ?? null : null;
-                };
-                const from = tableOf(sourceProcess);
-                const into = tableOf(targetProcess);
-                if (from)
+                const status = duplicate([sourceProcess, source, targetProcess, target, desired,
+                    inherit !== 0 ? OBJ_INHERIT : 0, options]);
+                if (status !== STATUS.SUCCESS)
                 {
-                    const foreign = from.resolve(source >>> 0);
-                    const foreignKind = from.typeOf(source >>> 0);
-                    if (!foreign || foreignKind === null || target === 0)
-                    {
-                        host.setLastError(ERROR_INVALID_HANDLE);
-                        return 0;
-                    }
-                    const rights = duplicateAccess(foreignKind, desired,
-                        from.access?.(source >>> 0) ?? null, same);
-                    if ('error' in rights)
-                    {
-                        host.setLastError(rights.error);
-                        return 0;
-                    }
-                    host.namedObjects.reference(foreign);
-                    const { flags, closesSource } = copying(from.flags(source >>> 0));
-                    const taken = (into ?? kernel.handles).open(foreignKind, foreign,
-                        rights.granted, flags);
-                    if (closesSource)
-                    {
-                        from.close(source >>> 0);
-                    }
-                    host.writeMemory(wholeAddress(target), new Uint8Array([
-                        taken & 0xff, taken >>> 8 & 0xff, taken >>> 16 & 0xff, taken >>> 24 & 0xff,
-                    ]));
-                    return 1;
-                }
-                // The console's own handles are the console wherever they are
-                // held: a duplicate is the same handle, as Windows 7 hands a
-                // console handle (a pseudo value) back.
-                if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
-                {
-                    host.writeMemory(wholeAddress(target), new Uint8Array([source >>> 0, 0, 0, 0]));
-                    return 1;
-                }
-                const held = object(source >>> 0);
-                const kind = kindOf(source >>> 0);
-                if (!held || target === 0 || kind === null)
-                {
-                    // Without the source handle's type there is nothing to
-                    // reopen the object under, and a duplicate filed under the
-                    // wrong type fails every later typed lookup -- a slower,
-                    // stranger failure than refusing here.
-                    host.setLastError(kind === null && held
-                        ? ERROR_NOT_SUPPORTED
-                        : ERROR_INVALID_HANDLE);
+                    host.setLastError(toDosError(status));
                     return 0;
-                }
-                const rights = duplicateAccess(kind, desired,
-                    pseudo(source) ? null
-                        : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
-                if ('error' in rights)
-                {
-                    host.setLastError(rights.error);
-                    return 0;
-                }
-                // A no-op on anything unnamed, and on a named object this is
-                // the reference CloseHandle will one day take back off -- a
-                // duplicate onto a mutex is a real handle onto it, the same
-                // as the one DuplicateHandle was given.
-                host.namedObjects.reference(held);
-                const { flags, closesSource } = copying(flagsOf(source));
-                // Into another process, an open file is that process's own open
-                // of it, which its table makes (`adoptFile`); here, one more hold.
-                if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
-                    && !closesSource)
-                {
-                    host.retainNode?.(held.node);
-                }
-                // A pipe end counts its handles in every process: it breaks
-                // the pipe with the last of them, not the first.
-                if (kind === 'pipe' && !closesSource)
-                {
-                    held.retain();
-                }
-                // Within the process, a duplicate that closes its source takes
-                // the source's slot, the first free one, as Windows hands it.
-                const reused = closesSource && !into && Boolean(kernel.handles.adopt)
-                    && kernel.handles.close(source >>> 0) !== null
-                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted, flags);
-                const duplicate = reused ? source >>> 0
-                    : (into ?? kernel.handles).open(kind, held, rights.granted, flags);
-                // A file the other process could not open as its own.
-                if (duplicate === 0)
-                {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                host.writeMemory(wholeAddress(target), new Uint8Array([
-                    duplicate & 0xff, duplicate >>> 8 & 0xff,
-                    duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
-                ]));
-                // A pseudo-handle cannot be closed: duplicating one and closing
-                // the source leaves both usable, as it does on Windows.
-                if (closesSource && !reused)
-                {
-                    kernel.handles.close(source >>> 0);
-                    host.namedObjects.forget(held);
-                    // The other process opened the file as its own: this
-                    // process's hold goes with its handle.
-                    if (into && kind === 'file' && held.node)
-                    {
-                        host.closeNode?.(held.node);
-                    }
                 }
                 return 1;
+            },
+            natives: {
+                /**
+                 * NTSTATUS NtDuplicateObject(HANDLE SourceProcess, HANDLE SourceHandle,
+                 *   HANDLE TargetProcess, PHANDLE TargetHandle, ACCESS_MASK DesiredAccess,
+                 *   ULONG HandleAttributes, ULONG Options)
+                 */
+                NtDuplicateObject: { argBytes: 28, handler: duplicate },
             },
         },
 
@@ -1644,14 +1673,43 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, mask, flags])=>{
-                if (flagsOf(handle) === null)
+                const now = flagsOf(handle);
+                const status = now === null ? STATUS.INVALID_HANDLE
+                    : setFlags(handle, (now & ~mask) | (flags & mask));
+                if (status !== STATUS.SUCCESS)
                 {
-                    host.setLastError(ERROR_INVALID_HANDLE);
+                    host.setLastError(toDosError(status));
                     return 0;
                 }
-                kernel.handles.setFlags(untagged(handle >>> 0),
-                    mask & (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE), flags);
                 return 1;
+            },
+            natives: {
+                /**
+                 * NTSTATUS NtSetInformationObject(HANDLE, OBJECT_INFORMATION_CLASS,
+                 *   PVOID Information, ULONG Length): ObjectHandleFlagInformation,
+                 *   OBJECT_HANDLE_FLAG_INFORMATION's two BOOLEANs, Inherit and
+                 *   ProtectFromClose. Another class is refused, and said.
+                 */
+                NtSetInformationObject: {
+                    argBytes: 16,
+                    /** @param {number[]} args */
+                    handler: ([handle, infoClass, information, length])=>{
+                        if ((infoClass >>> 0) !== OBJECT_HANDLE_FLAG_INFORMATION)
+                        {
+                            host.divergence?.('NtSetInformationObject',
+                                `information class ${infoClass >>> 0} is refused`);
+                            return STATUS.INVALID_INFO_CLASS;
+                        }
+                        if ((length >>> 0) < 2)
+                        {
+                            return STATUS.INFO_LENGTH_MISMATCH;
+                        }
+                        const [inheritable, protect] =
+                            host.readMemory(wholeAddress(information), 2);
+                        return setFlags(handle, (inheritable ? HANDLE_FLAG_INHERIT : 0)
+                            | (protect ? HANDLE_FLAG_PROTECT_FROM_CLOSE : 0));
+                    },
+                },
             },
         },
 
@@ -2136,28 +2194,6 @@ export function createThreadingFunctions(host){
             handler: ()=>{
                 host.setLastError(ERROR_NO_MORE_FILES);
                 return 0;
-            },
-        },
-
-        /** BOOL CloseHandle(HANDLE) */
-        CloseHandle: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                try
-                {
-                    const closed = kernel.handles.close(handle >>> 0);
-                    // A no-op on anything that was never named.
-                    host.namedObjects.forget(closed);
-                    // A completion port's waiters, and a file's association
-                    // with one, go with its handle (`iocp.js`).
-                    host.closed?.(handle >>> 0, closed);
-                    return 1;
-                }
-                catch (e){
-                    void e;
-                    return 0;
-                }
             },
         },
     };

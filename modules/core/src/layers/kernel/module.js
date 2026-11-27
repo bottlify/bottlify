@@ -1342,8 +1342,8 @@ export function createKernelModule(){
                         && state.handles.setFlags(handle, mask, flags),
                     /** @param {number} handle @param {string} [type] */
                     resolve: (handle, type)=>live() ? state.handles.resolve(handle, type) : null,
-                    /** @param {number} handle */
-                    close: handle=>live() ? state.handles.close(handle) : null,
+                    /** @param {number} handle @param {boolean} [ending]  the process's end */
+                    close: (handle, ending)=>live() ? state.handles.close(handle, ending) : null,
                     /**
                      * What kind of object a handle names, without resolving it.
                      *

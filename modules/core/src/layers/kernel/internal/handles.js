@@ -210,18 +210,19 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
          * Closes a handle. Closing one that is not open, or one protected from
          * close, is an error the caller turns into a failure code, not
          * something to ignore: a guest that closes twice is usually a guest
-         * whose bookkeeping has already gone wrong.
+         * whose bookkeeping has already gone wrong. The process's end closes
+         * every handle, protected or not (`ending`), as Windows' does.
          *
-         * @param {number} handle
+         * @param {number} handle @param {boolean} [ending]
          * @returns {any} the object the handle named
          */
-        close(handle){
+        close(handle, ending = false){
             const entry = entries.get(handle);
             if (!entry)
             {
                 throw new Error(`Cannot close invalid handle 0x${(handle >>> 0).toString(16)}`);
             }
-            if ((entry.flags & PROTECT_FROM_CLOSE) !== 0)
+            if ((entry.flags & PROTECT_FROM_CLOSE) !== 0 && !ending)
             {
                 throw new Error(`Handle 0x${(handle >>> 0).toString(16)} is protected from close`);
             }

@@ -77,11 +77,16 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
         },
         divergence,
     }));
-    /** Each end it inherits: its number in the process, and here. @type {Map<number, number>} */
+    /**
+     * Each end it inherits: its number in the process, its number here, and
+     * the handle's flags in its parent's table.
+     *
+     * @type {Map<number, { id: number, flags?: number }>}
+     */
     const handed = new Map();
     for (const entry of inherited ?? [])
     {
-        const { handle, type, object } = entry;
+        const { handle, type, object, flags } = /** @type {any} */ (entry);
         if (type === 'pipe' && typeof object?.across === 'function' && !handed.has(handle >>> 0))
         {
             // The handle its parent's CreateProcess held for it, or one more.
@@ -89,7 +94,7 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
             {
                 object.retain();
             }
-            handed.set(handle >>> 0, add(object));
+            handed.set(handle >>> 0, { id: add(object), flags });
         }
     }
     /** @param {number} id */
@@ -117,7 +122,8 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
     const invalid = { status: STATUS_INVALID_HANDLE };
     return {
         /** What the process is told of each end it inherits: its number, and what it is. */
-        described: [...handed].map(([handle, id])=>({ handle, ...described(id) })),
+        described: [...handed].map(([handle, { id, flags }])=>({ handle, flags,
+            ...described(id) })),
         pipes: {
             /** @param {string} name @param {any} asked @param {number} processId */
             create(name, asked, processId){
@@ -181,9 +187,10 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
          *
          * @param {number} handle  its number in the child
          * @param {number} id  the end's number here
+         * @param {number} [flags]  the handle's, as its parent's table has them
          * @returns {import('./layers/win32/kernel32/pipes.js').InheritedEnd | null}
          */
-        inherit(handle, id){
+        inherit(handle, id, flags){
             const held = ends.get(id >>> 0);
             if (!held || held.end.closed)
             {
@@ -191,7 +198,7 @@ export function pipeHandlers(inherited, table = new Map(), divergence = undefine
             }
             held.end.retain();
             /** @type {import('./layers/win32/kernel32/pipes.js').InheritedEnd} */
-            const entry = { handle, type: 'pipe', object: held.end, held: true,
+            const entry = { handle, type: 'pipe', object: held.end, held: true, flags,
                 drop(){
                     if (entry.held)
                     {

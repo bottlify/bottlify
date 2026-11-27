@@ -370,6 +370,7 @@ const DEVICE_CONTROLS = new Map([
  * @property {any} object     the end
  * @property {boolean} held   the child's handle is still the one taken for it
  * @property {() => void} drop  gives the held handle back
+ * @property {number} [flags]  the handle's HANDLE_FLAG_*, as the parent's table has them
  */
 
 /**
@@ -4176,20 +4177,14 @@ export function createNamedPipes(host){
         },
 
         /**
-         * The process has ended: every pipe handle it held is closed, as
-         * Windows closes a process's handles, so an end it shared with
-         * another process goes with its last handle -- a parent reading the
-         * output a child inherited reads to its end when the child exits.
+         * The process has ended: its reads, writes and flushes end with it,
+         * unanswered, and what a write of it had not had read is gone from
+         * the pipe, as Windows cancels a thread's I/O when it ends. Its
+         * handles close after, with every other it held (`closed`), so an
+         * end it shared with another process goes with its last handle.
          */
         processEnded(){
-            // Its reads, writes and flushes end with it, unanswered: what a
-            // write of it had not had read is gone from the pipe, as Windows
-            // cancels a thread's I/O when it ends.
             forEachEnd(end=>abort(end, op=>op.ctx === ctx, null));
-            for (const handle of pipeHandles())
-            {
-                closed(handle, endOf(handle) ?? standInOf(handle));
-            }
         },
     };
 }

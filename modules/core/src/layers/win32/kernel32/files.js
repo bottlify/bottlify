@@ -685,7 +685,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              resolve: (handle: number, type?: string) => any,
  *              access?: (handle: number) => number | null,
  *              setFlags: (handle: number, mask: number, flags: number) => boolean,
- *              close: (handle: number) => any,
+ *              close: (handle: number, ending?: boolean) => any,
  *              typeOf?: (handle: number) => string | null,
  *              holds?: (object: any) => boolean,
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
@@ -954,6 +954,12 @@ export function withSystemLibraries(real, libraries, where = {}){
         },
     });
 }
+
+/**
+ * The one close every kind of handle goes through (`createFileFunctions`):
+ * (handle, ending?) to its NTSTATUS, NtClose's and CloseHandle's.
+ */
+export const CLOSE_HANDLE = Symbol('closeHandle');
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -3607,12 +3613,14 @@ export function createFileFunctions(host){
 
     /**
      * Closes a handle of any kind, and whatever it held here with it: the
-     * volume's node, its locks, a file it was to delete.
+     * volume's node, its locks, a file it was to delete. NtClose's, which
+     * CloseHandle answers from; the process's end closes every handle
+     * through it, those protected from close too (`ending`).
      *
-     * @param {number} handle
-     * @returns {boolean} whether it was a handle
+     * @param {number} handle @param {boolean} [ending]
+     * @returns {number} the NTSTATUS
      */
-    const release = handle=>{
+    const release = (handle, ending = false)=>{
         try
         {
             // A file handle and a mapping over the file each hold
@@ -3620,7 +3628,7 @@ export function createFileFunctions(host){
             // the node closes with the last of them, in whichever
             // order the program closes them.
             const type = host.handles.typeOf?.(handle);
-            const closed = host.handles.close(handle);
+            const closed = host.handles.close(handle, ending);
             if (closed && closed.node
                 && (type === undefined || type === 'file' || type === 'mapping'))
             {
@@ -3695,11 +3703,13 @@ export function createFileFunctions(host){
             // is reading, and a thread parked on a port that has just
             // closed waits on something nothing can reach.
             host.ports?.closed(handle, closed);
-            return true;
+            return STATUS.SUCCESS;
         }
         catch (e){
             void e;
-            return false;
+            // Still open: the one close the table refuses is a protected one's.
+            return (host.handles.typeOf?.(handle) ?? null) === null ? STATUS.INVALID_HANDLE
+                : STATUS.HANDLE_NOT_CLOSABLE;
         }
     };
 
@@ -4242,6 +4252,13 @@ export function createFileFunctions(host){
     });
 
     const natives = {
+        /** NTSTATUS NtClose(HANDLE): every kind of handle, as CloseHandle closes it. */
+        NtClose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>release(handle >>> 0),
+        },
+
         /**
          * NTSTATUS NtReadFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
          *   PIO_STATUS_BLOCK, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset,
@@ -6131,7 +6148,10 @@ export function createFileFunctions(host){
         CloseHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(release(handle >>> 0) ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>{
+                const status = release(handle >>> 0);
+                return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
+            },
         },
 
         /** BOOL DeleteFile(LPCSTR) -- one body, both spellings. */
@@ -6578,9 +6598,10 @@ export function createFileFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (!release(handle >>> 0))
+                const status = release(handle >>> 0);
+                if (status !== STATUS.SUCCESS)
                 {
-                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                    return fail(toDosError(status), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return 0;
@@ -6814,5 +6835,5 @@ export function createFileFunctions(host){
 
     // The long spellings are the same calls on Win32, where every count is
     // 32 bits: _hread and _hwrite were _lread and _lwrite for a huge pointer.
-    return { ...table, _hread: table._lread, _hwrite: table._lwrite };
+    return { ...table, _hread: table._lread, _hwrite: table._lwrite, [CLOSE_HANDLE]: release };
 }

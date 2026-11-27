@@ -10,6 +10,7 @@ import { createThreadingFunctions, listProcesses } from './threading.js';
 import { COMPILED as SEMAPHORE_I386 } from './semaphore-guest.x86.js';
 import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
+import { CLOSE_HANDLE, createFileFunctions } from './files.js';
 import { createHandleTable, FIRST_HANDLE } from '../../kernel/internal/handles.js';
 
 const ERROR_SUCCESS = 0;
@@ -24,9 +25,8 @@ const ERROR_ALREADY_EXISTS = 183;
  * about the translation between the guest's vocabulary and the kernel's, not
  * about scheduling.
  */
-function fakeKernel(){
-    // The kernel's own table: a handle's number, rights and flags are its contract.
-    const handles = createHandleTable();
+/** @param {ReturnType<typeof createHandleTable>} [handles] */
+function fakeKernel(handles = createHandleTable()){
     const state = {
         created: /** @type {any[]} */ ([]),
         waits: /** @type {any[]} */ ([]),
@@ -291,9 +291,11 @@ function writtenU32(written, address){
  *   tests that are about the Win32 object namespace. Every other test passes
  *   nothing and every pointer reads as the empty name, which is no name at all.
  * @param {Partial<import('./threading.js').ThreadingHost>} [extra]  more of the host
+ * @param {ReturnType<typeof createHandleTable>} [handles]  the kernel's table: a
+ *   handle's number, rights and flags are its contract
  */
-function setup(names, extra = {}){
-    const kernel = fakeKernel();
+function setup(names, extra = {}, handles = createHandleTable()){
+    const kernel = fakeKernel(handles);
     /** @type {any} */
     const current = { name: 'caller' };
     /** @type {any[]} */
@@ -327,9 +329,23 @@ function setup(names, extra = {}){
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
         namedObjects: createNamedObjects(),
+        close: handle=>files[CLOSE_HANDLE](handle),
         ...extra,
     };
-    const fns = createThreadingFunctions(host);
+    // The close every kind of handle goes through is files.js's, as in the
+    // module, and its CloseHandle the one that answers.
+    const files = createFileFunctions({
+        readMemory: (address, length)=>host.readMemory(address, length),
+        writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
+        readCString: (address, max)=>host.readCString(address, max),
+        readWideString: (address, max)=>host.readWideString(address, max),
+        files: /** @type {any} */ ({}),
+        setLastError: code=>host.setLastError(code),
+        writeConsole: ()=>{},
+        handles: kernel.handles,
+        namedObjects: host.namedObjects,
+    });
+    const fns = { ...createThreadingFunctions(host), CloseHandle: files.CloseHandle };
     return { kernel, fns, host, parked, current, written, errors };
 }
 
@@ -1235,9 +1251,11 @@ test('DuplicateHandle puts a duplicate into another process of the run, and take
     // A server hands its client the event it signals: the duplicate is in
     // the client's table, under the client's number.
     const { fns, kernel, written, host } = setup();
-    const client = fakeKernel();
-    // The client's own table, as the module hands it over (win32/module.js).
-    const tables = new Map([[0x2008, client.handles]]);
+    const other = setup();
+    const client = other.kernel;
+    // The client's own table and its NtClose, as the module hands them over
+    // (win32/module.js).
+    const tables = new Map([[0x2008, { ...client.handles, close: other.host.close }]]);
     host.processTable = id=>tables.get(id) ?? null;
     const record = { id: 0x2008 };
     const process = kernel.handles.open('process', record);
@@ -1708,8 +1726,7 @@ test('a handle\'s flags go with it: its number reused reads none, a protected on
     ()=>{
         // The kernel's table with one number, so the next open reuses the
         // number just closed.
-        const { fns, host, kernel } = setup();
-        kernel.handles = createHandleTable({ limit: FIRST_HANDLE });
+        const { fns, host } = setup(undefined, {}, createHandleTable({ limit: FIRST_HANDLE }));
         const bytes = new Uint8Array(0x1000);
         host.readMemory = (address, length)=>bytes.slice(address, address + length);
         host.writeMemory = (address, data)=>bytes.set(data, address);

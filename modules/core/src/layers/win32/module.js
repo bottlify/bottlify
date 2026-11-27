@@ -20,7 +20,7 @@ import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
 import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
-import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
+import { CLOSE_HANDLE, createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
 import { createLazyLibraries, CLASS_SERVERS } from './lazy-libraries.js';
@@ -918,6 +918,17 @@ export function createWin32Module(){
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
+            /**
+             * NtClose of one of this process's handles, which every close goes
+             * through (`files.js`): CloseHandle's, DuplicateHandle's of its
+             * source, and the process's end's, which closes one protected from
+             * close too (`ending`).
+             *
+             * @param {number} handle @param {boolean} [ending]
+             * @returns {number} the NTSTATUS
+             */
+            const closeHandle = (handle, ending = false)=>
+                /** @type {any} */ (libraries['KERNEL32.dll'])[CLOSE_HANDLE](handle, ending);
             // This process's handle table, where another process of the run
             // duplicates a handle into it (DuplicateHandle).
             const table = {
@@ -941,15 +952,7 @@ export function createWin32Module(){
                 },
                 access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
                 flags: (/** @type {number} */ handle)=>kernel.handles.flags(handle),
-                close: (/** @type {number} */ handle)=>{
-                    const type = kernel.handles.typeOf(handle);
-                    const closed = kernel.handles.close(handle);
-                    if (type === 'file' && closed?.node)
-                    {
-                        volume.close(closed.node);
-                    }
-                    return closed;
-                },
+                close: (/** @type {number} */ handle)=>closeHandle(handle),
             };
             system?.processTables?.set(processId, table);
             // Only its own: a later process may have been given the same id.
@@ -1040,14 +1043,21 @@ export function createWin32Module(){
             /** @type {number | null} */
             let exitCode = null;
             /**
-             * What runs when the process ends, whichever way it ends: every handle
-             * a process held closes then, which is when a file opened to be
-             * deleted on close goes. Run once, after the code is recorded.
+             * What runs when the process ends, whichever way it ends, and last
+             * every handle it still holds closes, protected from close or not,
+             * which is when a file opened to be deleted on close goes. Run
+             * once, after the code is recorded.
              *
              * @type {(() => void)[]}
              */
             const endTasks = [];
-            const processEnded = ()=>endTasks.splice(0).forEach(task=>task());
+            const processEnded = ()=>{
+                endTasks.splice(0).forEach(task=>task());
+                for (const { handle } of kernel.handles.list())
+                {
+                    closeHandle(handle, true);
+                }
+            };
             // This process in the run's directory of processes, as a child its
             // parent started is there: a process it starts opens it by the id
             // it was told -- a helper watching the client that started it --
@@ -1263,8 +1273,8 @@ export function createWin32Module(){
                 access: handle=>kernel.handles.access?.(handle) ?? null,
                 /** @param {number} handle @param {number} mask @param {number} flags */
                 setFlags: (handle, mask, flags)=>kernel.handles.setFlags(handle, mask, flags),
-                /** @param {number} handle */
-                close: handle=>kernel.handles.close(handle),
+                /** @param {number} handle @param {boolean} [ending]  the process's end */
+                close: (handle, ending)=>kernel.handles.close(handle, ending),
                 /** @param {number} handle */
                 typeOf: handle=>kernel.handles.typeOf(handle),
                 /** @param {any} object */
@@ -1783,7 +1793,7 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // Its pipe handles close with it, as all of a process's handles do.
+            // Its pipe I/O ends with it; its handles close with every other.
             endTasks.push(()=>pipes.processEnded());
 
             // The handles a parent started this process with, under the
@@ -4005,8 +4015,7 @@ export function createWin32Module(){
                         writeMemory,
                         setLastError: setError,
                         namedObjects,
-                        /** @param {number} handle @param {any} object */
-                        closed: (handle, object)=>ports.closed(handle, object),
+                        close: handle=>closeHandle(handle),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         // Where a start routine returns to. Registered once, the
@@ -4031,8 +4040,6 @@ export function createWin32Module(){
                         processTable: id=>system?.processTables?.get(id) ?? null,
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
-                        /** @param {any} node */
-                        closeNode: node=>volume.close(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -7306,6 +7313,7 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
+                handleFlags: (/** @type {number} */ handle)=>kernel.handles.flags(handle),
                 openHandles: ()=>kernel.handles.list(),
                 processId,
                 processorName: config?.processorName,
