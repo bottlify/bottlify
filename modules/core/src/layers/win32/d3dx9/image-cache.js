@@ -29,6 +29,8 @@
  * format asked) are views of its bytes, which the next create reads again.
  */
 
+import { contentName } from '../../../system/hash.js';
+
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
 
 /**
@@ -58,25 +60,6 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/**
- * A digest of `bytes` to name them by: two 32-bit FNV-1a lanes, apart by
- * their seeds, and the length. Not a promise of no collision - the body's
- * copy of the file is - only a name short enough for the cache's table.
- *
- * @param {Uint8Array} bytes @returns {string}
- */
-function digestOf(bytes){
-    let a = 0x811c9dc5;
-    let b = 0x050c5d1f;
-    for (let i = 0; i < bytes.length; i++)
-    {
-        const byte = bytes[i];
-        a = Math.imul(a ^ byte, 0x01000193);
-        b = Math.imul(b ^ byte, 0x01000193) ^ b >>> 15;
-    }
-    return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
-        + `-${bytes.length.toString(36)}`;
-}
 
 /**
  * Whether the bytes of `body` from `at` are `bytes`, compared in place.
@@ -191,7 +174,7 @@ export function createImageCache(space = KEEP_NOTHING){
          * @param {string} asked @param {Uint8Array} file @returns {Decoded | null}
          */
         find(asked, file){
-            const name = `${digestOf(file)}/${asked}`;
+            const name = `${contentName(file)}/${asked}`;
             const found = space.with(name, body=>decode(body, asked, file)) ?? null;
             if (found === null)
             {
@@ -225,7 +208,7 @@ export function createImageCache(space = KEEP_NOTHING){
          *
          * @param {string} asked @param {Uint8Array} file @param {Plain} plain
          */
-        keep: (asked, file, plain)=>space.put(`${digestOf(file)}/${asked}`,
+        keep: (asked, file, plain)=>space.put(`${contentName(file)}/${asked}`,
             encode(asked, file, plain)),
     };
 }

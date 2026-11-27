@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
-import { FNV_OFFSET, crc32, fnv1a, fnv1aLowBytes, fnv1aString, fnv1aWord } from './hash.js';
+import {
+    FNV_OFFSET, contentName, crc32, fnv1a, fnv1aLowBytes, fnv1aString, fnv1aWord,
+} from './hash.js';
 
 const ascii = (/** @type {string} */ text)=>Uint8Array.from(text, c=>c.charCodeAt(0));
 
@@ -242,5 +244,47 @@ test('the CRC-32 copies it replaced answer what it answers, on seeded random inp
         assert.equal(ours, toolCrc32(bytes));
         assert.equal(ours, fixtureCrc(bytes));
         assert.equal(crc32(bytes, initial), ntdllCrc32(initial, bytes));
+    }
+});
+
+/** D3DX's compile cache's names, as it made them before `contentName`. @param {string} text */
+function compileNameBefore(text){
+    let a = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++)
+    {
+        a = Math.imul(a ^ text.charCodeAt(i), 0x01000193);
+    }
+    let b = 0x050c5d1f;
+    for (let i = 0; i < text.length; i++)
+    {
+        b = Math.imul(b ^ text.charCodeAt(i), 0x01000193) ^ b >>> 15;
+    }
+    return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
+        + `-${text.length.toString(36)}`;
+}
+
+/** D3DX's image cache's names, as it made them before `contentName`. @param {Uint8Array} bytes */
+function imageNameBefore(bytes){
+    let a = 0x811c9dc5;
+    let b = 0x050c5d1f;
+    for (let i = 0; i < bytes.length; i++)
+    {
+        const byte = bytes[i];
+        a = Math.imul(a ^ byte, 0x01000193);
+        b = Math.imul(b ^ byte, 0x01000193) ^ b >>> 15;
+    }
+    return `${(a >>> 0).toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
+        + `-${bytes.length.toString(36)}`;
+}
+
+test('a content name is the names the caches kept before, of a string and of bytes', ()=>{
+    assert.equal(contentName(''), compileNameBefore(''));
+    assert.equal(contentName(new Uint8Array(0)), imageNameBefore(new Uint8Array(0)));
+    for (let round = 0; round < ROUNDS; round++)
+    {
+        const text = textOf();
+        const bytes = bytesOf();
+        assert.equal(contentName(text), compileNameBefore(text));
+        assert.equal(contentName(bytes), imageNameBefore(bytes));
     }
 });

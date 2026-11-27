@@ -24,7 +24,7 @@
  * of the tokens and of the table (null for none).
  */
 
-import { FNV_PRIME, fnv1aString } from '../../../system/hash.js';
+import { contentName } from '../../../system/hash.js';
 
 /** @typedef {import('../../cache/module.js').CacheSpace} CacheSpace */
 
@@ -41,23 +41,12 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /**
- * A digest of `text` to name it by: FNV-1a over its UTF-16 units, and a
- * second lane from another seed that folds its high bits down at each step.
- * Not a promise of no collision -- the body's key is -- only a name short
- * enough for the cache's table; kept as it is, since the cache keeps the names.
+ * A compile's name in the cache, by its key's text: the body's key is what
+ * tells two keys that share a name apart.
  *
  * @param {string} text @returns {string}
  */
-export function compileName(text){
-    const a = fnv1aString(text);
-    let b = 0x050c5d1f;
-    for (let i = 0; i < text.length; i++)
-    {
-        b = Math.imul(b ^ text.charCodeAt(i), FNV_PRIME) ^ b >>> 15;
-    }
-    return `${a.toString(16).padStart(8, '0')}${(b >>> 0).toString(16).padStart(8, '0')}`
-        + `-${text.length.toString(36)}`;
-}
+export const compileName = text=>contentName(text);
 
 /**
  * A compile as the body the cache keeps.

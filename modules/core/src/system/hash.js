@@ -90,6 +90,55 @@ export function fnv1aWord(word, hash = FNV_OFFSET){
     return h >>> 0;
 }
 
+/**
+ * The second lane of a name made from content (`contentName`): FNV-1a's step
+ * from another seed, folding its high bits down after each step, so it does
+ * not collide where the first lane does.
+ */
+export const FOLDED_OFFSET = 0x050c5d1f;
+
+/**
+ * The folded lane over `units`, each element mixed whole, or over a string's
+ * UTF-16 units.
+ *
+ * @param {ArrayLike<number> | string} units
+ * @param {number} [hash]  the hash this continues from
+ * @returns {number} unsigned
+ */
+export function folded(units, hash = FOLDED_OFFSET){
+    let h = hash;
+    if (typeof units === 'string')
+    {
+        for (let at = 0; at < units.length; at++)
+        {
+            h = Math.imul(h ^ units.charCodeAt(at), FNV_PRIME) ^ h >>> 15;
+        }
+    }
+    else
+    {
+        for (let at = 0; at < units.length; at++)
+        {
+            h = Math.imul(h ^ units[at], FNV_PRIME) ^ h >>> 15;
+        }
+    }
+    return h >>> 0;
+}
+
+/**
+ * A name for a body of the run's cache by its content, a string or bytes:
+ * FNV-1a and the folded lane, sixteen hex digits, and the length in base 36.
+ * Not a promise of no collision - a cache keeping names this way compares
+ * what it holds - only a name short enough for the cache's table. The cache
+ * keeps these names, so the scheme is kept as it is.
+ *
+ * @param {ArrayLike<number> | string} content @returns {string}
+ */
+export function contentName(content){
+    const a = typeof content === 'string' ? fnv1aString(content) : fnv1a(content);
+    return `${a.toString(16).padStart(8, '0')}${folded(content).toString(16).padStart(8, '0')}`
+        + `-${content.length.toString(36)}`;
+}
+
 /** @type {Uint32Array | null} */
 let table = null;
 
