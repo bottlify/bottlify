@@ -3206,6 +3206,7 @@ export const POINTER_ARGUMENTS = Object.freeze({
     NtSetEvent: [1],
     NtSetInformationDebugObject: [2, 4],
     NtSetInformationFile: [1, 2],
+    NtSetInformationObject: [2],
     NtSetInformationProcess: [1, 2],
     NtSetInformationThread: [2],
     NtSetIoCompletion: [1, 2],

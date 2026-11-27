@@ -105,6 +105,7 @@ export const STATUS = Object.freeze({
     PIPE_CONNECTED: 0xc00000b2,
     /** A cancel that found no I/O to cancel. */
     NOT_FOUND: 0xc0000225,
+    HANDLE_NOT_CLOSABLE: 0xc0000235,
     /** A pipe end in no state for the request: a server cut from its client. */
     INVALID_PIPE_STATE: 0xc00000ad,
     /** A file-system or device control code the object does not answer. */
@@ -229,6 +230,7 @@ const TO_DOS_ERROR = new Map([
     [STATUS.INFO_LENGTH_MISMATCH, ERROR.BAD_LENGTH],
     [STATUS.ACCESS_VIOLATION, ERROR.NOACCESS],
     [STATUS.INVALID_HANDLE, ERROR.INVALID_HANDLE],
+    [STATUS.HANDLE_NOT_CLOSABLE, ERROR.INVALID_HANDLE],
     [STATUS.INVALID_PARAMETER, ERROR.INVALID_PARAMETER],
     [STATUS.NO_SUCH_DEVICE, ERROR.FILE_NOT_FOUND],
     [STATUS.NO_SUCH_FILE, ERROR.FILE_NOT_FOUND],

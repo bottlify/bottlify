@@ -140,7 +140,8 @@
   semaphores, waitable timers, processes and threads the same way, and its open files: the
   child opens the file as its own on the terms the parent's open agreed, sharing the parent's file
   pointer, and the file stays open until the last of their handles closes, as it does for a file
-  `DuplicateHandle` puts into another process of the run. A child in a worker of its own
+  `DuplicateHandle` puts into another process of the run. Each handle a child inherits keeps its
+  flags (inheritable, protected from close). A child in a worker of its own
   inherits pipe ends and open files: a file there is opened on the same terms, its pointer the
   parent's open's, read and moved across the link on each read and write, and the parent's hold
   on it lasts until that child ends. A file handed as a standard handle is one of these, so it

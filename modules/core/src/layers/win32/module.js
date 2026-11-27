@@ -20,7 +20,7 @@ import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
 import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
-import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
+import { CLOSE_HANDLE, createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
 import { createLazyLibraries, CLASS_SERVERS } from './lazy-libraries.js';
@@ -918,6 +918,17 @@ export function createWin32Module(){
             // What GetCurrentProcessId answers: a child is the process its parent
             // was told of in PROCESS_INFORMATION, not a second copy of the first.
             const processId = (config?.processId ?? 0x1000) >>> 0;
+            /**
+             * NtClose of one of this process's handles, which every close goes
+             * through (`files.js`): CloseHandle's, DuplicateHandle's of its
+             * source, and the process's end's, which closes one protected from
+             * close too (`ending`).
+             *
+             * @param {number} handle @param {boolean} [ending]
+             * @returns {number} the NTSTATUS
+             */
+            const closeHandle = (handle, ending = false)=>
+                /** @type {any} */ (libraries['KERNEL32.dll'])[CLOSE_HANDLE](handle, ending);
             // This process's handle table, where another process of the run
             // duplicates a handle into it (DuplicateHandle).
             const table = {
@@ -934,21 +945,14 @@ export function createWin32Module(){
                 // An open file comes here as this process's own open of it
                 // (`adoptFile`), sharing the other's file pointer.
                 open: (/** @type {string} */ type, /** @type {any} */ object,
-                    /** @type {number | null} */ access = null)=>
+                    /** @type {number | null} */ access = null, /** @type {number} */ flags = 0)=>
                 {
                     const mine = type === 'file' ? adoptFile(object) : object;
-                    return mine ? kernel.handles.open(type, mine, access) : 0;
+                    return mine ? kernel.handles.open(type, mine, access, flags) : 0;
                 },
                 access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
-                close: (/** @type {number} */ handle)=>{
-                    const type = kernel.handles.typeOf(handle);
-                    const closed = kernel.handles.close(handle);
-                    if (type === 'file' && closed?.node)
-                    {
-                        volume.close(closed.node);
-                    }
-                    return closed;
-                },
+                flags: (/** @type {number} */ handle)=>kernel.handles.flags(handle),
+                close: (/** @type {number} */ handle)=>closeHandle(handle),
             };
             system?.processTables?.set(processId, table);
             // Only its own: a later process may have been given the same id.
@@ -1039,14 +1043,21 @@ export function createWin32Module(){
             /** @type {number | null} */
             let exitCode = null;
             /**
-             * What runs when the process ends, whichever way it ends: every handle
-             * a process held closes then, which is when a file opened to be
-             * deleted on close goes. Run once, after the code is recorded.
+             * What runs when the process ends, whichever way it ends, and last
+             * every handle it still holds closes, protected from close or not,
+             * which is when a file opened to be deleted on close goes. Run
+             * once, after the code is recorded.
              *
              * @type {(() => void)[]}
              */
             const endTasks = [];
-            const processEnded = ()=>endTasks.splice(0).forEach(task=>task());
+            const processEnded = ()=>{
+                endTasks.splice(0).forEach(task=>task());
+                for (const { handle } of kernel.handles.list())
+                {
+                    closeHandle(handle, true);
+                }
+            };
             // This process in the run's directory of processes, as a child its
             // parent started is there: a process it starts opens it by the id
             // it was told -- a helper watching the client that started it --
@@ -1250,14 +1261,20 @@ export function createWin32Module(){
 
             /** Everything a table needs from the kernel's handle table. */
             const handles = {
-                /** @param {string} type @param {any} object @param {number | null} [access] */
-                open: (type, object, access)=>kernel.handles.open(type, object, access),
+                /**
+                 * @param {string} type @param {any} object @param {number | null} [access]
+                 * @param {number} [flags]  HANDLE_FLAG_*
+                 */
+                open: (type, object, access, flags)=>kernel.handles.open(type, object, access,
+                    flags),
                 /** @param {number} handle @param {string} [type] */
                 resolve: (handle, type)=>kernel.handles.resolve(handle, type),
                 /** The rights a handle holds, null for every one. @param {number} handle */
                 access: handle=>kernel.handles.access?.(handle) ?? null,
-                /** @param {number} handle */
-                close: handle=>kernel.handles.close(handle),
+                /** @param {number} handle @param {number} mask @param {number} flags */
+                setFlags: (handle, mask, flags)=>kernel.handles.setFlags(handle, mask, flags),
+                /** @param {number} handle @param {boolean} [ending]  the process's end */
+                close: (handle, ending)=>kernel.handles.close(handle, ending),
                 /** @param {number} handle */
                 typeOf: handle=>kernel.handles.typeOf(handle),
                 /** @param {any} object */
@@ -1663,30 +1680,33 @@ export function createWin32Module(){
 
             // Named pipes, in the run's namespace: their own calls, and ReadFile,
             // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
-            // HANDLE_FLAG_* by handle (threading.js's GetHandleInformation),
-            // read here for what a child started with bInheritHandles takes.
-            /** @type {Map<number, number>} */
-            const handleFlags = new Map();
             /**
-             * This process's inheritable synchronisation objects, processes and
-             * threads, or of those the ones a handle list names: a child on this
-             * thread holds the same objects under the same numbers, as Windows'
-             * child holds them (an NGen worker signals the event its parent
-             * named on its command line). The pipe ends are the pipes' own.
+             * What a child is handed of one of this process's handles, with
+             * the handle's flags: an open file or a pipe end held for it until
+             * it claims them, a synchronisation object, process or thread as
+             * it is. Nothing of any other kind.
+             *
+             * @param {{ handle: number, type: string, object: any, flags: number }} entry
+             * @returns {{ handle: number, type: string, object: any, flags: number }[]}
+             */
+            const handedOn = ({ handle, type, object, flags })=>
+                (type === 'file' ? [inheritedFile(handle)]
+                    : type === 'pipe' ? pipes.inherited([handle])
+                        : INHERITED_KINDS.has(type) ? [{ handle, type, object }] : [])
+                    .map(one=>Object.assign(one, { flags }));
+            /**
+             * This process's inheritable handles, as its table marks them, or
+             * of those the ones a handle list names: a child on this thread
+             * holds the same objects under the same numbers, as Windows' child
+             * holds them (an NGen worker signals the event its parent named on
+             * its command line).
              *
              * @param {number[] | null} only
-             * @returns {{ handle: number, type: string, object: any }[]}
              */
-            const inheritedObjects = only=>[...handleFlags].flatMap(([handle, flags])=>{
-                const type = (flags & 1) !== 0 && (only === null || only.includes(handle))
-                    ? kernel.handles.typeOf(handle) : null;
-                if (type === 'file')
-                {
-                    return [inheritedFile(handle)];
-                }
-                return type !== null && INHERITED_KINDS.has(type)
-                    ? [{ handle, type, object: kernel.handles.resolve(handle) }] : [];
-            });
+            const inheritedObjects = only=>kernel.handles.list().filter(
+                (/** @type {{ handle: number, flags: number }} */ { handle, flags })=>
+                    (flags & HANDLE_FLAG_INHERIT) !== 0 && (only === null || only.includes(handle)))
+                .flatMap(handedOn);
             /**
              * An open file a child inherits: Windows duplicates the handle into
              * the child at CreateProcess, so a parent that closes its own at
@@ -1773,42 +1793,37 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            // Its pipe handles close with it, as all of a process's handles do.
+            // Its pipe I/O ends with it; its handles close with every other.
             endTasks.push(()=>pipes.processEnded());
 
-            // The pipe ends a parent started this process with, under the
-            // numbers it has them by and told this one on its command line.
+            // The handles a parent started this process with, under the
+            // numbers it has them by and told this one on its command line,
+            // and with the flags the parent's had: inheritable again.
             for (const inherited of config?.inheritedHandles ?? [])
             {
-                if (inherited.type === 'pipe'
-                    && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
+                const flags = /** @type {any} */ (inherited).flags ?? HANDLE_FLAG_INHERIT;
+                if (inherited.type === 'pipe' && kernel.handles.adopt(inherited.handle,
+                    inherited.type, inherited.object, null, flags))
                 {
-                    pipes.adopted(inherited.handle, inherited.object, inherited);
-                    // Inheritable again, as GetHandleInformation reads it.
-                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
+                    pipes.adopted(inherited.object, inherited);
                 }
                 // The parent's open file, under its number and rights: the
                 // reference its CreateProcess took is this handle's.
                 else if (inherited.type === 'file')
                 {
                     const mine = adoptFile(inherited.object);
-                    if (mine && kernel.handles.adopt(inherited.handle, 'file', mine,
-                        inherited.access ?? null))
-                    {
-                        handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
-                    }
-                    else if (mine)
+                    if (mine && !kernel.handles.adopt(inherited.handle, 'file', mine,
+                        inherited.access ?? null, flags))
                     {
                         volume.close(mine.node);
                     }
                     // The hold its parent's CreateProcess kept until now.
                     /** @type {any} */ (inherited).drop?.();
                 }
-                // An object inherited is inheritable again, as the parent's was.
-                else if (INHERITED_KINDS.has(inherited.type)
-                    && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
+                else if (INHERITED_KINDS.has(inherited.type))
                 {
-                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
+                    kernel.handles.adopt(inherited.handle, inherited.type, inherited.object, null,
+                        flags);
                 }
             }
 
@@ -3991,7 +4006,6 @@ export function createWin32Module(){
                         kernel,
                         processes: runProcesses,
                         pipes,
-                        handleFlags,
                         // A thread made in a child, and one waited on there.
                         askChild,
                         setLastErrorFor: setErrorOn,
@@ -4001,8 +4015,7 @@ export function createWin32Module(){
                         writeMemory,
                         setLastError: setError,
                         namedObjects,
-                        /** @param {number} handle @param {any} object */
-                        closed: (handle, object)=>ports.closed(handle, object),
+                        close: handle=>closeHandle(handle),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         // Where a start routine returns to. Registered once, the
@@ -4025,12 +4038,8 @@ export function createWin32Module(){
                         // into it or out of it.
                         /** @param {number} id */
                         processTable: id=>system?.processTables?.get(id) ?? null,
-                        /** @param {number} handle */
-                        isSocket: handle=>sockets.isValid(handle),
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
-                        /** @param {any} node */
-                        closeNode: node=>volume.close(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -4564,20 +4573,16 @@ export function createWin32Module(){
                     }),
                     ...createSpawnFunctions({
                         // A child started with bInheritHandles takes this
-                        // process's inheritable pipe ends, by their numbers.
-                        inheritedHandles: only=>[...pipes.inherited(only),
-                            ...inheritedObjects(only)],
-                        inheritable: handle=>void handleFlags.set(handle, 1),
+                        // process's inheritable handles, by their numbers.
+                        inheritedHandles: inheritedObjects,
                         standardHandle: which=>/** @type {any} */ (libraries['KERNEL32.dll'])
                             .GetStdHandle.handler([which]),
                         // The open files and pipe ends among these, inheritable or
                         // not, each with its flags: duplicates a console child takes.
                         duplicates: asked=>asked.flatMap(handle=>{
                             const type = kernel.handles.typeOf(handle);
-                            const flags = handleFlags.get(handle) ?? 0;
-                            const found = type === 'file' ? [inheritedFile(handle)]
-                                : pipes.inherited([handle], true);
-                            return found.map(one=>Object.assign(one, { flags }));
+                            return type === 'file' || type === 'pipe' ? handedOn({ handle, type,
+                                object: null, flags: kernel.handles.flags(handle) ?? 0 }) : [];
                         }),
                         kernel,
                         processId,
@@ -4667,7 +4672,6 @@ export function createWin32Module(){
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
                         pointerSize,
-                        inheritable: handle=>void handleFlags.set(handle, 1),
                         divergence: config?.divergence,
                         // Asked when called: the table is assembled by then.
                         environmentVariable: name=>Object.entries(/** @type {any} */ (
@@ -7309,6 +7313,7 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
+                handleFlags: (/** @type {number} */ handle)=>kernel.handles.flags(handle),
                 openHandles: ()=>kernel.handles.list(),
                 processId,
                 processorName: config?.processorName,

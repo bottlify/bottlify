@@ -118,6 +118,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.INVALID_DEVICE_REQUEST, 1],
         [STATUS.PIPE_CONNECTED, 535],
         [STATUS.NOT_FOUND, 1168],
+        [STATUS.HANDLE_NOT_CLOSABLE, 6],
         [STATUS.BUFFER_TOO_SMALL, 122],
         [STATUS.OBJECT_NAME_INVALID, 123],
         [STATUS.OBJECT_NAME_NOT_FOUND, 2],

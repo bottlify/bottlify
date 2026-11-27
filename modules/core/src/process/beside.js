@@ -737,8 +737,9 @@ export function processesBeside(deps){
      *
      * @param {ReturnType<typeof openLink>} link  the parent's
      * @param {any} asked  the child, as values
-     * @param {(handle: number, id: number) => any} inheritPipe  one more handle onto
-     *     an end the parent's link serves, held for the child (`system-pipes.js`)
+     * @param {(handle: number, id: number, flags?: number) => any} inheritPipe  one more
+     *     handle onto an end the parent's link serves, held for the child, with the
+     *     handle's flags (`system-pipes.js`)
      * @returns {boolean}
      */
     const startAcrossFor = (link, asked, inheritPipe)=>{
@@ -754,7 +755,8 @@ export function processesBeside(deps){
             handle=>link.ask('parent', 'position', [asked.id, handle]),
             (handle, at)=>link.ask('parent', 'setPosition', [asked.id, handle, at]));
         const ends = (asked.inheritedPipes ?? [])
-            .map((/** @type {{ handle: number, id: number }} */ one)=>inheritPipe(one.handle, one.id))
+            .map((/** @type {{ handle: number, id: number, flags?: number }} */ one)=>
+                inheritPipe(one.handle, one.id, one.flags))
             .filter(Boolean);
         const handed = [...files, ...ends];
         const crossed = new Set(handed.map(one=>one.handle));
@@ -866,7 +868,8 @@ export function processesBeside(deps){
                 inheritedFiles: crossingFiles(request.inheritedHandles),
                 inheritedPipes: (request.inheritedHandles ?? [])
                     .filter((/** @type {any} */ one)=>one.type === 'pipe' && one.object?.standIn)
-                    .map((/** @type {any} */ one)=>({ handle: one.handle, id: one.object.id })),
+                    .map((/** @type {any} */ one)=>({ handle: one.handle, id: one.object.id,
+                        flags: one.flags })),
                 standardHandles: request.standardHandles,
                 consoleHandles: request.consoleHandles,
                 arena: sound?.options.beside.arena ?? null,

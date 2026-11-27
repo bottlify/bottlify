@@ -10,6 +10,8 @@ import { createThreadingFunctions, listProcesses } from './threading.js';
 import { COMPILED as SEMAPHORE_I386 } from './semaphore-guest.x86.js';
 import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
+import { CLOSE_HANDLE, createFileFunctions } from './files.js';
+import { createHandleTable, FIRST_HANDLE } from '../../kernel/internal/handles.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -23,10 +25,8 @@ const ERROR_ALREADY_EXISTS = 183;
  * about the translation between the guest's vocabulary and the kernel's, not
  * about scheduling.
  */
-function fakeKernel(){
-    /** @type {Map<number, { type: string, object: any, access?: number | null }>} */
-    const handles = new Map();
-    let nextHandle = 4;
+/** @param {ReturnType<typeof createHandleTable>} [handles] */
+function fakeKernel(handles = createHandleTable()){
     const state = {
         created: /** @type {any[]} */ ([]),
         waits: /** @type {any[]} */ ([]),
@@ -125,9 +125,8 @@ function fakeKernel(){
         state,
         /** @param {any} options */
         createThread(options){
-            const thread = { id: state.created.length + 2, handle: nextHandle, ...options };
-            handles.set(nextHandle, { type: 'thread', object: thread });
-            nextHandle += 4;
+            const thread = { id: state.created.length + 2, handle: 0, ...options };
+            thread.handle = handles.open('thread', thread);
             state.created.push(thread);
             return thread;
         },
@@ -266,55 +265,7 @@ function fakeKernel(){
         /** @param {any} thread @param {string} reason @param {any} [timed] */
         block: (thread, reason, timed)=>state.blocked.push(
             timed === undefined ? { thread, reason } : { thread, reason, timed }),
-        handles: {
-            /** @param {string} type @param {any} object @param {number | null} [access] */
-            open(type, object, access = null){
-                const handle = nextHandle;
-                handles.set(handle, { type, object, access });
-                nextHandle += 4;
-                return handle;
-            },
-            /** @param {number} handle @param {string} [type] */
-            resolve(handle, type){
-                const entry = handles.get(handle);
-                if (!entry)
-                {
-                    throw new Error('Invalid handle');
-                }
-                if (type && entry.type !== type)
-                {
-                    throw new Error('Wrong type');
-                }
-                return entry.object;
-            },
-            /** @param {number} handle */
-            close(handle){
-                const entry = handles.get(handle);
-                if (!entry || !handles.delete(handle))
-                {
-                    throw new Error('Invalid handle');
-                }
-                return entry.object;
-            },
-            /**
-             * @param {number} handle @param {string} type @param {any} object
-             * @param {number | null} [access]
-             */
-            adopt(handle, type, object, access = null){
-                if (handles.has(handle))
-                {
-                    return false;
-                }
-                handles.set(handle, { type, object, access });
-                return true;
-            },
-            /** @param {number} handle */
-            typeOf: handle=>handles.get(handle)?.type ?? null,
-            /** @param {number} handle */
-            access: handle=>handles.get(handle)?.access ?? null,
-            /** @param {any} object */
-            holds: object=>[...handles.values()].some(entry=>entry.object === object),
-        },
+        handles,
     };
     return kernel;
 }
@@ -340,9 +291,11 @@ function writtenU32(written, address){
  *   tests that are about the Win32 object namespace. Every other test passes
  *   nothing and every pointer reads as the empty name, which is no name at all.
  * @param {Partial<import('./threading.js').ThreadingHost>} [extra]  more of the host
+ * @param {ReturnType<typeof createHandleTable>} [handles]  the kernel's table: a
+ *   handle's number, rights and flags are its contract
  */
-function setup(names, extra = {}){
-    const kernel = fakeKernel();
+function setup(names, extra = {}, handles = createHandleTable()){
+    const kernel = fakeKernel(handles);
     /** @type {any} */
     const current = { name: 'caller' };
     /** @type {any[]} */
@@ -376,9 +329,23 @@ function setup(names, extra = {}){
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
         namedObjects: createNamedObjects(),
+        close: handle=>files[CLOSE_HANDLE](handle),
         ...extra,
     };
-    const fns = createThreadingFunctions(host);
+    // The close every kind of handle goes through is files.js's, as in the
+    // module, and its CloseHandle the one that answers.
+    const files = createFileFunctions({
+        readMemory: (address, length)=>host.readMemory(address, length),
+        writeMemory: (address, bytes)=>host.writeMemory(address, bytes),
+        readCString: (address, max)=>host.readCString(address, max),
+        readWideString: (address, max)=>host.readWideString(address, max),
+        files: /** @type {any} */ ({}),
+        setLastError: code=>host.setLastError(code),
+        writeConsole: ()=>{},
+        handles: kernel.handles,
+        namedObjects: host.namedObjects,
+    });
+    const fns = { ...createThreadingFunctions(host), CloseHandle: files.CloseHandle };
     return { kernel, fns, host, parked, current, written, errors };
 }
 
@@ -1284,27 +1251,32 @@ test('DuplicateHandle puts a duplicate into another process of the run, and take
     // A server hands its client the event it signals: the duplicate is in
     // the client's table, under the client's number.
     const { fns, kernel, written, host } = setup();
-    const client = fakeKernel();
-    const tables = new Map([[0x2008, {
-        typeOf: (/** @type {number} */ handle)=>client.handles.typeOf(handle),
-        resolve: (/** @type {number} */ handle)=>client.handles.resolve(handle),
-        open: (/** @type {string} */ type, /** @type {any} */ object)=>
-            client.handles.open(type, object),
-        close: (/** @type {number} */ handle)=>client.handles.close(handle),
-    }]]);
+    const other = setup();
+    const client = other.kernel;
+    // The client's own table and its NtClose, as the module hands them over
+    // (win32/module.js).
+    const tables = new Map([[0x2008, { ...client.handles, close: other.host.close }]]);
     host.processTable = id=>tables.get(id) ?? null;
     const record = { id: 0x2008 };
     const process = kernel.handles.open('process', record);
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);
-    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, process, 0x300, 0, 0, 0]), 1);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, process, 0x300, 0, 1, 0]), 1);
     const theirs = writtenU32(written, 0x300);
     assert.equal(client.handles.resolve(theirs, 'event'), kernel.handles.resolve(event, 'event'),
         'the same event, in the client\'s table');
+    assert.equal(client.handles.flags(theirs), 1, 'inheritable there, as asked');
+
+    // A source protected from close there stays, as one here does.
+    client.handles.setFlags(theirs, 2, 2);
+    assert.equal(fns.DuplicateHandle.handler([process, theirs, 0xffffffff, 0x308, 0, 0, 1]), 1);
+    assert.equal(client.handles.typeOf(theirs), 'event', 'protected from close');
+    client.handles.setFlags(theirs, 2, 0);
 
     // And back: the client's handle, taken into this process and closed there.
     assert.equal(fns.DuplicateHandle.handler([process, theirs, 0xffffffff, 0x304, 0, 0, 1]), 1);
     const ours = writtenU32(written, 0x304);
     assert.equal(kernel.handles.resolve(ours, 'event'), kernel.handles.resolve(event, 'event'));
+    assert.equal(kernel.handles.flags(ours), 0);
     assert.equal(client.handles.typeOf(theirs), null, 'DUPLICATE_CLOSE_SOURCE closed it there');
 });
 
@@ -1734,20 +1706,80 @@ test('a socket takes handle flags as a kernel object does', ()=>{
     // A SOCKET is a handle on Windows: a program keeps its sockets from the
     // children it starts with SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0),
     // and one that is told the handle is invalid gives up on its network.
-    const { fns, host, errors } = setup();
+    // Winsock files its sockets in the kernel's table (win32/module.js).
+    const { fns, host, errors, kernel } = setup();
     const bytes = new Uint8Array(0x1000);
     host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
-    /** @type {any} */ (host).isSocket = (/** @type {number} */ handle)=>handle === 3;
-    assert.equal(fns.SetHandleInformation.handler([3, 1, 0]), 1);
-    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    const socket = kernel.handles.open('socket', {});
+    assert.equal(fns.SetHandleInformation.handler([socket, 1, 0]), 1);
+    assert.equal(fns.GetHandleInformation.handler([socket, 0x200]), 1);
     assert.equal(bytes[0x200], 0);
-    assert.equal(fns.SetHandleInformation.handler([3, 1, 1]), 1);
-    assert.equal(fns.GetHandleInformation.handler([3, 0x200]), 1);
+    assert.equal(fns.SetHandleInformation.handler([socket, 1, 1]), 1);
+    assert.equal(fns.GetHandleInformation.handler([socket, 0x200]), 1);
     assert.equal(bytes[0x200], 1, 'HANDLE_FLAG_INHERIT reads back');
-    assert.equal(fns.SetHandleInformation.handler([5, 1, 0]), 0, 'not a socket, not an object');
+    assert.equal(fns.SetHandleInformation.handler([0x7770, 1, 0]), 0, 'not a handle');
     assert.deepEqual(errors.slice(-1), [6]);
 });
+
+test('a handle\'s flags go with it: its number reused reads none, a protected one stays open',
+    ()=>{
+        // The kernel's table with one number, so the next open reuses the
+        // number just closed.
+        const { fns, host } = setup(undefined, {}, createHandleTable({ limit: FIRST_HANDLE }));
+        const bytes = new Uint8Array(0x1000);
+        host.readMemory = (address, length)=>bytes.slice(address, address + length);
+        host.writeMemory = (address, data)=>bytes.set(data, address);
+        const view = new DataView(bytes.buffer);
+        [12, 0, 1].forEach((value, at)=>view.setUint32(0x300 + at * 4, value, true));
+        /** @param {number} handle */
+        const flagsOf = handle=>{
+            assert.equal(fns.GetHandleInformation.handler([handle, 0x200]), 1);
+            return view.getUint32(0x200, true);
+        };
+
+        const marked = fns.CreateEventA.handler([0x300, 1, 0, 0]);
+        assert.equal(flagsOf(marked), 1, 'bInheritHandle: HANDLE_FLAG_INHERIT');
+        assert.equal(fns.SetHandleInformation.handler([marked, 2, 2]), 1);
+        assert.equal(fns.CloseHandle.handler([marked]), 0, 'HANDLE_FLAG_PROTECT_FROM_CLOSE');
+        assert.equal(flagsOf(marked), 3, 'still open, its flags as they were');
+        assert.equal(fns.SetHandleInformation.handler([marked, 2, 0]), 1);
+        assert.equal(fns.CloseHandle.handler([marked]), 1);
+
+        const plain = fns.CreateEventA.handler([0, 1, 0, 0]);
+        assert.equal(plain, marked, 'the number reused');
+        assert.equal(flagsOf(plain), 0, 'none of the closed handle\'s flags');
+        assert.equal(fns.CloseHandle.handler([plain]), 1);
+    });
+
+test('DUPLICATE_SAME_ATTRIBUTES gives the duplicate its source\'s flags, not the asked inherit',
+    ()=>{
+        // Wine's process.c test_DuplicateHandle, "Test DUPLICATE_SAME_ATTRIBUTES":
+        // a pseudo-handle's are none.
+        const { fns, host, kernel } = setup();
+        const bytes = new Uint8Array(0x1000);
+        host.readMemory = (address, length)=>bytes.slice(address, address + length);
+        host.writeMemory = (address, data)=>bytes.set(data, address);
+        const view = new DataView(bytes.buffer);
+        /** @param {number} handle */
+        const flagsOf = handle=>{
+            assert.equal(fns.GetHandleInformation.handler([handle, 0x200]), 1);
+            return view.getUint32(0x200, true);
+        };
+        /** @param {number} source @param {number} inherit */
+        const same = (source, inherit)=>{
+            assert.equal(fns.DuplicateHandle.handler(
+                [0xffffffff, source, 0xffffffff, 0x300, 0, inherit, 2 | 4]), 1);
+            return view.getUint32(0x300, true);
+        };
+        const event = kernel.handles.open('event', { kind: 'event', signalled: false });
+        assert.equal(flagsOf(same(event, 1)), 0);
+        assert.equal(fns.SetHandleInformation.handler([event, 3, 3]), 1);
+        const out = same(event, 0);
+        assert.equal(flagsOf(out), 3);
+        assert.equal(fns.SetHandleInformation.handler([out, 2, 0]), 1);
+        assert.equal(flagsOf(same(0xffffffff, 1)), 0, 'GetCurrentProcess() has none');
+    });
 
 test('Process32FirstW and Process32NextW walk the same processes into a PROCESSENTRY32W', ()=>{
     // 556 bytes: the narrow entry's 36 before the name, then MAX_PATH wide

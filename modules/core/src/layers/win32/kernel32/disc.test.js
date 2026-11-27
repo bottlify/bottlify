@@ -19,6 +19,7 @@ import { openIso } from '../../filesystem/internal/iso/iso9660.js';
 import { createIsoSource } from '../../filesystem/internal/iso/source.js';
 import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
+import { createHandleTable } from '../../kernel/internal/handles.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const GENERIC_READ = 0x80000000;
@@ -60,9 +61,6 @@ async function setup(){
     fs.createDirectory('C:\\Game');
 
     const bytes = new Uint8Array(0x20000);
-    /** @type {Map<number, any>} */
-    const table = new Map();
-    let nextHandle = 4;
     /** @type {number[]} */
     const errors = [];
     const files = createFileFunctions({
@@ -82,27 +80,7 @@ async function setup(){
             errors.push(code);
         },
         writeConsole: ()=>{},
-        handles: {
-            open(type, object){
-                table.set(nextHandle, { type, object });
-                nextHandle += 4;
-                return nextHandle - 4;
-            },
-            resolve(handle, type){
-                const entry = table.get(handle);
-                if (!entry || (type && entry.type !== type))
-                {
-                    throw new Error('Invalid handle');
-                }
-                return entry.object;
-            },
-            close(handle){
-                const entry = table.get(handle);
-                table.delete(handle);
-                return entry?.object;
-            },
-            typeOf: handle=>table.get(handle)?.type,
-        },
+        handles: createHandleTable(),
     });
     const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
         /** @type {unknown} */ (files));

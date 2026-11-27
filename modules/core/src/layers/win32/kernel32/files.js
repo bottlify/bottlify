@@ -118,6 +118,8 @@ const FILE_NOTIFY_CHANGE_ALL = 0x17f;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
+/** A handle a child started with bInheritHandles takes. */
+const HANDLE_FLAG_INHERIT = 0x1;
 const INVALID_SET_FILE_POINTER = 0xffffffff;
 const INVALID_FILE_SIZE = 0xffffffff;
 const INVALID_FILE_ATTRIBUTES = 0xffffffff;
@@ -649,8 +651,6 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ closed: (object: any) => void }} [jobs]  Told of a job's handle closed.
  * @property {{ closed: (object: any) => void }} [debugObjects]  Told of a debug object's
  *           handle closed: with its last, its debuggees go as it says.
- * @property {(handle: number) => void} [inheritable]  A handle a child started with
- *           bInheritHandles takes.
  * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
  *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
  *           end is told, CancelIo and CancelIoEx cancel what waits on one.
@@ -684,11 +684,13 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ open: (type: string, object: any, access?: number | null) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              access?: (handle: number) => number | null,
- *              close: (handle: number) => any,
- *              typeOf?: (handle: number) => string | undefined,
+ *              setFlags: (handle: number, mask: number, flags: number) => boolean,
+ *              close: (handle: number, ending?: boolean) => any,
+ *              typeOf?: (handle: number) => string | null,
  *              holds?: (object: any) => boolean,
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
- *           The one handle table, shared with every other kind of object.
+ *           The one handle table, shared with every other kind of object: a
+ *           handle's HANDLE_FLAG_* flags are its own there.
  * @property {() => any} [currentThread]
  * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
  *           Calls guest code on a thread and answers what it returned: CopyFileEx's
@@ -952,6 +954,12 @@ export function withSystemLibraries(real, libraries, where = {}){
         },
     });
 }
+
+/**
+ * The one close every kind of handle goes through (`createFileFunctions`):
+ * (handle, ending?) to its NTSTATUS, NtClose's and CloseHandle's.
+ */
+export const CLOSE_HANDLE = Symbol('closeHandle');
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -3605,12 +3613,14 @@ export function createFileFunctions(host){
 
     /**
      * Closes a handle of any kind, and whatever it held here with it: the
-     * volume's node, its locks, a file it was to delete.
+     * volume's node, its locks, a file it was to delete. NtClose's, which
+     * CloseHandle answers from; the process's end closes every handle
+     * through it, those protected from close too (`ending`).
      *
-     * @param {number} handle
-     * @returns {boolean} whether it was a handle
+     * @param {number} handle @param {boolean} [ending]
+     * @returns {number} the NTSTATUS
      */
-    const release = handle=>{
+    const release = (handle, ending = false)=>{
         try
         {
             // A file handle and a mapping over the file each hold
@@ -3618,7 +3628,7 @@ export function createFileFunctions(host){
             // the node closes with the last of them, in whichever
             // order the program closes them.
             const type = host.handles.typeOf?.(handle);
-            const closed = host.handles.close(handle);
+            const closed = host.handles.close(handle, ending);
             if (closed && closed.node
                 && (type === undefined || type === 'file' || type === 'mapping'))
             {
@@ -3693,11 +3703,13 @@ export function createFileFunctions(host){
             // is reading, and a thread parked on a port that has just
             // closed waits on something nothing can reach.
             host.ports?.closed(handle, closed);
-            return true;
+            return STATUS.SUCCESS;
         }
         catch (e){
             void e;
-            return false;
+            // Still open: the one close the table refuses is a protected one's.
+            return (host.handles.typeOf?.(handle) ?? null) === null ? STATUS.INVALID_HANDLE
+                : STATUS.HANDLE_NOT_CLOSABLE;
         }
     };
 
@@ -4080,7 +4092,7 @@ export function createFileFunctions(host){
                 `control code 0x${(code >>> 0).toString(16)} sent to a file`);
             return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
         }
-        return { status: host.handles.typeOf?.(handle >>> 0) === undefined
+        return { status: (host.handles.typeOf?.(handle >>> 0) ?? null) === null
             ? STATUS_INVALID_HANDLE : STATUS_OBJECT_TYPE_MISMATCH, information: 0 };
     };
 
@@ -4240,6 +4252,13 @@ export function createFileFunctions(host){
     });
 
     const natives = {
+        /** NTSTATUS NtClose(HANDLE): every kind of handle, as CloseHandle closes it. */
+        NtClose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>release(handle >>> 0),
+        },
+
         /**
          * NTSTATUS NtReadFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID ApcContext,
          *   PIO_STATUS_BLOCK, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset,
@@ -5488,7 +5507,7 @@ export function createFileFunctions(host){
      * An open whose SECURITY_ATTRIBUTES (the fourth argument) asks for an
      * inheritable handle: a file opened so is a child's when the child is
      * started with bInheritHandles, as an installer hands its child a log as
-     * its output. A pipe end keeps its own flag, the pipes' own.
+     * its output. A pipe end the pipes open so themselves.
      *
      * @param {{ argBytes: number, handler: (args: number[]) => any }} open
      */
@@ -5498,7 +5517,7 @@ export function createFileFunctions(host){
         if (handle !== INVALID_HANDLE_VALUE && handle !== 0
             && host.handles.typeOf?.(handle) === 'file' && securityOf(attributes)?.inherit)
         {
-            host.inheritable?.(handle);
+            host.handles.setFlags(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         }
         return handle;
     } });
@@ -6129,7 +6148,10 @@ export function createFileFunctions(host){
         CloseHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(release(handle >>> 0) ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>{
+                const status = release(handle >>> 0);
+                return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
+            },
         },
 
         /** BOOL DeleteFile(LPCSTR) -- one body, both spellings. */
@@ -6576,9 +6598,10 @@ export function createFileFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                if (!release(handle >>> 0))
+                const status = release(handle >>> 0);
+                if (status !== STATUS.SUCCESS)
                 {
-                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                    return fail(toDosError(status), HFILE_ERROR);
                 }
                 host.setLastError(ERROR_SUCCESS);
                 return 0;
@@ -6812,5 +6835,5 @@ export function createFileFunctions(host){
 
     // The long spellings are the same calls on Win32, where every count is
     // 32 bits: _hread and _hwrite were _lread and _lwrite for a huge pointer.
-    return { ...table, _hread: table._lread, _hwrite: table._lwrite };
+    return { ...table, _hread: table._lread, _hwrite: table._lwrite, [CLOSE_HANDLE]: release };
 }

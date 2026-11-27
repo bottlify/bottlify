@@ -34,6 +34,12 @@ const HANDLE_STRIDE = 4;
 export const FIRST_HANDLE = 0x40;
 
 /**
+ * HANDLE_FLAG_PROTECT_FROM_CLOSE. A handle's flags are its own, as its rights
+ * are: they go with its close, and a number reused starts with none.
+ */
+const PROTECT_FROM_CLOSE = 0x2;
+
+/**
  * Reuse is deferred as long as possible: a fresh handle is issued while the
  * range lasts, and only then does the table fall back to closed ones. A
  * use-after-close therefore lands on nothing -- a diagnosable error -- rather
@@ -46,7 +52,8 @@ export const FIRST_HANDLE = 0x40;
  *     closed: (handle: number) => void }} [options.watch]  told of every open and close
  */
 export function createHandleTable({ limit = 0x40000000, watch } = {}){
-    /** @type {Map<number, { type: string, object: any, access: number | null }>} */
+    /** @typedef {{ type: string, object: any, access: number | null, flags: number }} Entry */
+    /** @type {Map<number, Entry>} */
     const entries = new Map();
     /** @type {number[]} */
     const free = [];
@@ -60,9 +67,10 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
          * @param {any} object
          * @param {number | null} [access]  The rights the handle was granted, where
          *        it was opened with fewer than all of them; null for every right.
+         * @param {number} [flags]  HANDLE_FLAG_*: inheritable, protected from close.
          * @returns {number} the handle
          */
-        open(type, object, access = null){
+        open(type, object, access = null, flags = 0){
             let handle;
             // Past the numbers a handle was adopted at.
             while (next <= limit && entries.has(next))
@@ -82,7 +90,7 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             {
                 throw new Error('Handle table exhausted');
             }
-            entries.set(handle, { type, object, access });
+            entries.set(handle, { type, object, access, flags });
             opened++;
             watch?.opened(handle, type, object, access);
             return handle;
@@ -91,14 +99,15 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
         /**
          * Files an object under a handle number chosen elsewhere: a handle a
          * child inherits has its parent's number, which the parent told it on
-         * its command line, and the rights its parent's handle was granted.
+         * its command line, and the rights and flags its parent's handle had.
          * Refused for a number taken or not a handle's.
          *
          * @param {number} handle @param {string} type @param {any} object
          * @param {number | null} [access]  null for all of them
+         * @param {number} [flags]  HANDLE_FLAG_*
          * @returns {boolean}
          */
-        adopt(handle, type, object, access = null){
+        adopt(handle, type, object, access = null, flags = 0){
             if (entries.has(handle) || handle < FIRST_HANDLE || handle % HANDLE_STRIDE !== 0
                 || handle > limit)
             {
@@ -110,7 +119,7 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             {
                 free.splice(freed, 1);
             }
-            entries.set(handle, { type, object, access });
+            entries.set(handle, { type, object, access, flags });
             opened++;
             watch?.opened(handle, type, object, access);
             return true;
@@ -178,19 +187,44 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             return entries.get(handle)?.access ?? null;
         },
 
+        /** A handle's HANDLE_FLAG_* flags, null for no handle. @param {number} handle */
+        flags(handle){
+            return entries.get(handle)?.flags ?? null;
+        },
+
         /**
-         * Closes a handle. Closing one that is not open is an error the caller
-         * turns into a failure code, not something to ignore: a guest that closes
-         * twice is usually a guest whose bookkeeping has already gone wrong.
+         * SetHandleInformation's: the flags `mask` names set to `flags`'.
+         * False for no handle. @param {number} handle @param {number} mask @param {number} flags
+         */
+        setFlags(handle, mask, flags){
+            const entry = entries.get(handle);
+            if (!entry)
+            {
+                return false;
+            }
+            entry.flags = (entry.flags & ~mask) | (flags & mask);
+            return true;
+        },
+
+        /**
+         * Closes a handle. Closing one that is not open, or one protected from
+         * close, is an error the caller turns into a failure code, not
+         * something to ignore: a guest that closes twice is usually a guest
+         * whose bookkeeping has already gone wrong. The process's end closes
+         * every handle, protected or not (`ending`), as Windows' does.
          *
-         * @param {number} handle
+         * @param {number} handle @param {boolean} [ending]
          * @returns {any} the object the handle named
          */
-        close(handle){
+        close(handle, ending = false){
             const entry = entries.get(handle);
             if (!entry)
             {
                 throw new Error(`Cannot close invalid handle 0x${(handle >>> 0).toString(16)}`);
+            }
+            if ((entry.flags & PROTECT_FROM_CLOSE) !== 0 && !ending)
+            {
+                throw new Error(`Handle 0x${(handle >>> 0).toString(16)} is protected from close`);
             }
             entries.delete(handle);
             free.push(handle);
@@ -199,10 +233,9 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             return entry.object;
         },
 
-        /** @returns {{ handle: number, type: string, object: any, access: number | null }[]} */
+        /** @returns {({ handle: number } & Entry)[]} */
         list(){
-            return [...entries.entries()].map(([handle, entry])=>({ handle, type: entry.type,
-                object: entry.object, access: entry.access }));
+            return [...entries].map(([handle, entry])=>({ handle, ...entry }));
         },
 
         diagnostics(){

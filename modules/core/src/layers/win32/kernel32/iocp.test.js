@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createIoCompletionPorts } from './iocp.js';
 import { readIntoBy } from './vfs.js';
 import { createFileFunctions } from './files.js';
@@ -78,9 +79,7 @@ function fakeMemory(size = 0x1000){
  * passes, and whoever queued it is told when that happens.
  */
 function fakeKernel(){
-    /** @type {Map<number, { type: string, object: any }>} */
-    const entries = new Map();
-    let next = 8;
+    const handles = createHandleTable();
     /** @type {((thread: any) => void)[]} */
     const onTimeout = [];
     /** @type {any[]} */
@@ -88,7 +87,6 @@ function fakeKernel(){
     let time = 0;
 
     const kernel = {
-        entries,
         threads,
         /** @param {string} name */
         thread(name){
@@ -160,30 +158,7 @@ function fakeKernel(){
         resetEvent(event){
             event.signalled = false;
         },
-        handles: {
-            /** @param {string} type @param {any} object */
-            open(type, object){
-                const handle = next;
-                next += 4;
-                entries.set(handle, { type, object });
-                return handle;
-            },
-            /** @param {number} handle @param {string} [type] */
-            resolve(handle, type){
-                const entry = entries.get(handle);
-                if (!entry || (type && entry.type !== type))
-                {
-                    throw new Error(`bad handle ${handle}`);
-                }
-                return entry.object;
-            },
-            /** @param {number} handle */
-            close(handle){
-                const entry = entries.get(handle);
-                entries.delete(handle);
-                return entry ? entry.object : null;
-            },
-        },
+        handles,
     };
     return kernel;
 }

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { volumeName } from './drives.js';
 import { createFileFunctions, withSystemLibraries, WIN32_FIND_DATAA } from './files.js';
+import { createHandleTable } from '../../kernel/internal/handles.js';
 import { HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
@@ -327,60 +328,11 @@ function parent(path){
     return at <= 2 ? path.slice(0, at + 1) : path.slice(0, at);
 }
 
-/** The handle table the real kernel provides, with the same reuse discipline. */
-function fakeHandles(){
-    /** @type {Map<number, { type: string, object: any, access: number | null }>} */
-    const entries = new Map();
-    let next = 4;
-    return {
-        /** @param {string} type @param {any} object @param {number | null} [access] */
-        open(type, object, access = null){
-            const handle = next;
-            next += 4;
-            entries.set(handle, { type, object, access });
-            return handle;
-        },
-        /** @param {number} handle */
-        access: handle=>entries.get(handle)?.access ?? null,
-        /** @param {number} handle @param {string} [type] */
-        resolve(handle, type){
-            const entry = entries.get(handle);
-            if (!entry)
-            {
-                throw new Error('Invalid handle');
-            }
-            if (type && entry.type !== type)
-            {
-                throw new Error('Wrong type');
-            }
-            return entry.object;
-        },
-        /** @param {number} handle */
-        typeOf(handle){
-            return entries.get(handle)?.type;
-        },
-        /** @param {number} handle */
-        close(handle){
-            const entry = entries.get(handle);
-            if (!entry)
-            {
-                throw new Error('Invalid handle');
-            }
-            entries.delete(handle);
-            return entry.object;
-        },
-        /** @param {number} handle */
-        has: handle=>entries.has(handle),
-        /** @param {any} object */
-        holds: object=>[...entries.values()].some(entry=>entry.object === object),
-    };
-}
-
 /** @param {Record<string, any>} [extra]  More of the host, for the calls that need it. */
 function setup(extra = {}){
     const memory = fakeMemory();
     const files = fakeFiles();
-    const handles = fakeHandles();
+    const handles = createHandleTable();
     /** @type {{ code: number }} */
     const error = { code: ERROR_SUCCESS };
     /** @type {{ handle: number, text: string }[]} */
@@ -4391,10 +4343,7 @@ test('a file opened with SECURITY_ATTRIBUTES is inheritable as it asks, at eithe
         const word = pointerSize;
         /** @param {number} descriptor @param {number} inherit */
         const marked = (descriptor, inherit)=>{
-            /** @type {number[]} */
-            const inheritable = [];
-            const { memory, files, fns, at } = setup({ pointerSize,
-                inheritable: (/** @type {number} */ handle)=>inheritable.push(handle) });
+            const { memory, files, fns, at, handles } = setup({ pointerSize });
             files.put('C:\\GAME\\LOG.TXT', 'log');
             const view = new DataView(memory.bytes.buffer);
             view.setUint32(0x600, 3 * word, true);
@@ -4403,7 +4352,7 @@ test('a file opened with SECURITY_ATTRIBUTES is inheritable as it asks, at eithe
             const handle = fns.CreateFileA.handler(
                 [at(NAME, 'C:\\GAME\\LOG.TXT'), GENERIC_READ, 0, 0x600, OPEN_EXISTING, 0, 0]);
             assert.notEqual(handle, INVALID_HANDLE_VALUE);
-            return inheritable.length;
+            return handles.flags(handle);
         };
         assert.equal(marked(0, 1), 1, `${pointerSize * 8}-bit: inheritable`);
         assert.equal(marked(0x2000, 0), 0, `${pointerSize * 8}-bit: a descriptor is not the flag`);
