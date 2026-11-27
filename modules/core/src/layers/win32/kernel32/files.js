@@ -118,6 +118,8 @@ const FILE_NOTIFY_CHANGE_ALL = 0x17f;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
+/** A handle a child started with bInheritHandles takes. */
+const HANDLE_FLAG_INHERIT = 0x1;
 const INVALID_SET_FILE_POINTER = 0xffffffff;
 const INVALID_FILE_SIZE = 0xffffffff;
 const INVALID_FILE_ATTRIBUTES = 0xffffffff;
@@ -649,8 +651,6 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ closed: (object: any) => void }} [jobs]  Told of a job's handle closed.
  * @property {{ closed: (object: any) => void }} [debugObjects]  Told of a debug object's
  *           handle closed: with its last, its debuggees go as it says.
- * @property {(handle: number) => void} [inheritable]  A handle a child started with
- *           bInheritHandles takes.
  * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
  *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
  *           end is told, CancelIo and CancelIoEx cancel what waits on one.
@@ -684,11 +684,13 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ open: (type: string, object: any, access?: number | null) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              access?: (handle: number) => number | null,
+ *              setFlags: (handle: number, mask: number, flags: number) => boolean,
  *              close: (handle: number) => any,
- *              typeOf?: (handle: number) => string | undefined,
+ *              typeOf?: (handle: number) => string | null,
  *              holds?: (object: any) => boolean,
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
- *           The one handle table, shared with every other kind of object.
+ *           The one handle table, shared with every other kind of object: a
+ *           handle's HANDLE_FLAG_* flags are its own there.
  * @property {() => any} [currentThread]
  * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
  *           Calls guest code on a thread and answers what it returned: CopyFileEx's
@@ -4080,7 +4082,7 @@ export function createFileFunctions(host){
                 `control code 0x${(code >>> 0).toString(16)} sent to a file`);
             return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
         }
-        return { status: host.handles.typeOf?.(handle >>> 0) === undefined
+        return { status: (host.handles.typeOf?.(handle >>> 0) ?? null) === null
             ? STATUS_INVALID_HANDLE : STATUS_OBJECT_TYPE_MISMATCH, information: 0 };
     };
 
@@ -5488,7 +5490,7 @@ export function createFileFunctions(host){
      * An open whose SECURITY_ATTRIBUTES (the fourth argument) asks for an
      * inheritable handle: a file opened so is a child's when the child is
      * started with bInheritHandles, as an installer hands its child a log as
-     * its output. A pipe end keeps its own flag, the pipes' own.
+     * its output. A pipe end the pipes open so themselves.
      *
      * @param {{ argBytes: number, handler: (args: number[]) => any }} open
      */
@@ -5498,7 +5500,7 @@ export function createFileFunctions(host){
         if (handle !== INVALID_HANDLE_VALUE && handle !== 0
             && host.handles.typeOf?.(handle) === 'file' && securityOf(attributes)?.inherit)
         {
-            host.inheritable?.(handle);
+            host.handles.setFlags(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         }
         return handle;
     } });

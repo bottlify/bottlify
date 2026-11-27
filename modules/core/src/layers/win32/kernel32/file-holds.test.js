@@ -21,6 +21,7 @@ import { testPageFile } from '../../../process/page-file.fixture.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from './vfs.js';
 import { createFileFunctions } from './files.js';
+import { createHandleTable } from '../../kernel/internal/handles.js';
 import { createMappingFunctions } from './mapping.js';
 import { createThreadingFunctions } from './threading.js';
 import { createNamedObjects } from './named-objects.js';
@@ -49,39 +50,7 @@ async function setup(){
 
     const bytes = new Uint8Array(0x10000);
     let nextAddress = 0x1000;
-    /** @type {Map<number, { type: string, object: any }>} */
-    const table = new Map();
-    let nextHandle = 4;
-    const handles = {
-        /** @param {string} type @param {any} object */
-        open(type, object){
-            const handle = nextHandle;
-            nextHandle += 4;
-            table.set(handle, { type, object });
-            return handle;
-        },
-        /** @param {number} handle @param {string} [type] */
-        resolve(handle, type){
-            const entry = table.get(handle);
-            if (!entry || (type && entry.type !== type))
-            {
-                throw new Error('Invalid handle');
-            }
-            return entry.object;
-        },
-        /** @param {number} handle */
-        typeOf: handle=>table.get(handle)?.type,
-        /** @param {number} handle */
-        close(handle){
-            const entry = table.get(handle);
-            if (!entry)
-            {
-                throw new Error('Invalid handle');
-            }
-            table.delete(handle);
-            return entry.object;
-        },
-    };
+    const handles = createHandleTable();
     const memory = {
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.slice(address, address + length),

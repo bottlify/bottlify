@@ -124,3 +124,28 @@ test('a closed number adopted again is not handed out a second time, and keeps i
     assert.equal(table.access(a), 0x80000000);
     assert.throws(()=>table.open('event', 'c'), /exhausted/, 'the slot is taken, not free');
 });
+
+test('a handle\'s flags are its own: set on it, read back, gone with it', ()=>{
+    // HANDLE_FLAG_INHERIT (1) and HANDLE_FLAG_PROTECT_FROM_CLOSE (2): a number
+    // reused after a close starts with none, whatever the closed handle had.
+    const table = createHandleTable({ limit: FIRST_HANDLE });
+    const marked = table.open('event', {}, null, 1);
+    assert.equal(table.flags(marked), 1);
+    assert.deepEqual(table.list().map(entry=>entry.flags), [1], 'listed with its flags');
+    assert.equal(table.setFlags(marked, 3, 2), true);
+    assert.equal(table.flags(marked), 2);
+    assert.equal(table.setFlags(0x7770, 1, 1), false, 'no handle, no flags');
+    assert.equal(table.flags(0x7770), null);
+
+    assert.throws(()=>table.close(marked), /protected from close/);
+    assert.equal(table.has(marked), true, 'a handle protected from close stays open');
+    table.setFlags(marked, 2, 0);
+    table.close(marked);
+    const reused = table.open('event', {});
+    assert.equal(reused, marked, 'the same number again');
+    assert.equal(table.flags(reused), 0, 'with none of the closed handle\'s flags');
+
+    table.close(reused);
+    assert.equal(table.adopt(reused, 'event', {}, null, 1), true);
+    assert.equal(table.flags(reused), 1, 'an adopted handle takes the flags it is given');
+});

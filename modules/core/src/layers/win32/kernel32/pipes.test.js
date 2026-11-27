@@ -64,7 +64,7 @@ const STATE = 0x700;
 function processOn(table, id = 1, extra = {}){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
-    /** @type {Map<number, { type: string, object: any, access?: number | null }>} */
+    /** @type {Map<number, { type: string, object: any, access?: number | null, flags?: number }>} */
     const handles = new Map();
     let next = 0x100;
     let now = 0;
@@ -123,11 +123,12 @@ function processOn(table, id = 1, extra = {}){
             },
         },
         handles: {
-            open: (type, object, access = null)=>{
+            open: (type, object, access = null, flags = 0)=>{
                 next += 4;
-                handles.set(next, { type, object, access });
+                handles.set(next, { type, object, access, flags });
                 return next;
             },
+            list: ()=>[...handles].map(([handle, entry])=>({ handle, ...entry })),
             access: handle=>handles.get(handle)?.access ?? null,
             resolve: (handle, type)=>{
                 const entry = handles.get(handle);
@@ -208,6 +209,15 @@ function processOn(table, id = 1, extra = {}){
     return {
         pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, timers, events,
         resets, packets, bound, handles, apcs,
+        /**
+         * CloseHandle's order: the table lets the handle go, then the pipes
+         * are told. @param {number} handle
+         */
+        close: handle=>{
+            const object = handles.get(handle)?.object;
+            handles.delete(handle);
+            pipes.closed(handle, object);
+        },
         error: ()=>lastError.get(current),
         errorOf: (/** @type {any} */ thread)=>lastError.get(thread),
         /** @param {string} thread */
@@ -473,7 +483,7 @@ test('a closed end breaks the pipe both ways, after what it wrote is read', ()=>
     const server = p.server();
     const client = p.client();
     p.write(client, 'last');
-    p.pipes.closed(client, p.handles.get(client)?.object);
+    p.close(client);
     assert.equal(p.read(server, 10), 1, 'what was written before the close is read');
     assert.equal(p.read(server, 10), 0);
     assert.equal(p.error(), ERROR_BROKEN_PIPE);
@@ -487,7 +497,7 @@ test('a closed end breaks the pipe both ways, after what it wrote is read', ()=>
     const other = q.client();
     q.as('q:reader');
     assert.equal(q.read(other, 10), 'parked');
-    q.pipes.closed(second, q.handles.get(second)?.object);
+    q.close(second);
     assert.deepEqual(q.woken.at(-1), { thread: 'q:reader', result: 0 });
     assert.equal(q.errorOf('q:reader'), ERROR_BROKEN_PIPE, 'a waiting read learns it');
 });
@@ -572,7 +582,7 @@ test('cancelled: a pending read ends ERROR_OPERATION_ABORTED; a closing handle\'
         // The pipe driver completes what is pending on the end being closed
         // as the pipe broken (Wine's ntdll:file test_iocp_fileio, recorded
         // on Windows), not as cancelled.
-        p.pipes.closed(server, p.handles.get(server)?.object);
+        p.close(server);
         assert.equal(p.errorOf('p1:reader'), ERROR_BROKEN_PIPE);
     });
 
@@ -619,23 +629,22 @@ test('a nowait end answers at once, and an end held twice breaks with its last h
     assert.equal(p.error(), ERROR_NO_DATA);
 });
 
-test('a handle made inheritable is one a child gets, and only those the list names', ()=>{
+test('an end opened inheritable is marked so in its table; a child holds what it is handed', ()=>{
     const p = processOn(new Map());
     p.putString(NAME_AT, NAME);
     p.view.setUint32(0x300, 12, true);
     p.view.setUint32(0x308, 1, true);
     const server = p.fns.CreateNamedPipeA.handler([NAME_AT, 3, 0, 2, 0, 0, 0, 0x300]);
     const kept = p.server(PIPE_ACCESS_DUPLEX, 0, 2);
-    assert.deepEqual(p.pipes.inherited(null).map(one=>one.handle), [server]);
-    p.pipes.setInheritable(kept, true);
-    assert.deepEqual(p.pipes.inherited(null).map(one=>one.handle), [server, kept]);
+    assert.deepEqual([p.handles.get(server)?.flags, p.handles.get(kept)?.flags], [1, 0],
+        'HANDLE_FLAG_INHERIT as SECURITY_ATTRIBUTES asked');
     assert.deepEqual(p.pipes.inherited([kept]).map(one=>one.handle), [kept]);
 
     const child = processOn(new Map(), 2);
     const entry = p.pipes.inherited([kept])[0];
     child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
-    child.pipes.adopted(entry.handle, entry.object);
-    p.pipes.closed(kept, entry.object);
+    child.pipes.adopted(entry.object);
+    p.close(kept);
     const client = p.client();
     assert.ok(client > 0, 'the instance the child holds still listens');
 });
@@ -646,12 +655,11 @@ test('a child\'s inherited end closes when the child ends: its reader reads to t
     const p = processOn(new Map());
     const server = p.server(PIPE_ACCESS_DUPLEX);
     const client = p.client();
-    p.pipes.setInheritable(client, true);
     const child = processOn(new Map(), 2);
     const entry = p.pipes.inherited([client])[0];
     child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
-    child.pipes.adopted(entry.handle, entry.object, entry);
-    p.pipes.closed(client, entry.object);
+    child.pipes.adopted(entry.object, entry);
+    p.close(client);
     assert.equal(child.write(entry.handle, 'out'), 1);
     child.pipes.processEnded();
     assert.equal(p.read(server, 10), 1, 'what the child wrote is still read');
@@ -666,14 +674,13 @@ test('a child\'s inherited end is its from CreateProcess: the parent closing its
     const p = processOn(new Map());
     const server = p.server(PIPE_ACCESS_DUPLEX);
     const client = p.client();
-    p.pipes.setInheritable(client, true);
     const entry = p.pipes.inherited([client])[0];
     assert.equal(entry.held, true, 'held for the child from CreateProcess');
-    p.pipes.closed(client, entry.object);
+    p.close(client);
     assert.equal(p.write(server, 'msg'), 1, 'the child\'s end is still there to write to');
     const child = processOn(new Map(), 2);
     child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
-    child.pipes.adopted(entry.handle, entry.object, entry);
+    child.pipes.adopted(entry.object, entry);
     assert.equal(entry.held, false, 'the child took the handle held for it');
     dropUnclaimed([entry]);
     assert.equal(child.read(entry.handle, 10), 1, 'taken, it is not given back again');
@@ -684,9 +691,8 @@ test('a child\'s inherited end is its from CreateProcess: the parent closing its
     const q = processOn(new Map());
     const listening = q.server(PIPE_ACCESS_DUPLEX);
     const handed = q.client();
-    q.pipes.setInheritable(handed, true);
     const never = q.pipes.inherited([handed]);
-    q.pipes.closed(handed, never[0].object);
+    q.close(handed);
     dropUnclaimed(never);
     assert.equal(q.write(listening, 'x'), 0, 'a child that never started holds nothing');
     assert.equal(q.error(), ERROR_NO_DATA);
@@ -801,7 +807,7 @@ test('describe says of each handle what is at the other end, and when it is gone
         `${client} ${NAME} client refs=1 peer=1 state=connected readers=0 unread=0`]);
     p.read(server, 3);
     assert.equal(p.read(client, 1), 'parked');
-    p.pipes.closed(server, p.handles.get(server)?.object);
+    p.close(server);
     assert.deepEqual(p.pipes.describe(), [
         `${client} ${NAME} client refs=1 peer=0 closed state=connected readers=0 unread=0`],
     'the server gone, the waiting read woken with the pipe broken');
@@ -862,7 +868,7 @@ function calling(){
                 case 'LocalFree':
                     return 0;
                 case 'CloseHandle':
-                    p.pipes.closed(args[0], p.handles.get(args[0])?.object);
+                    p.close(args[0]);
                     return 1;
                 default:
                     return p.fns[name].handler(args);
@@ -1408,7 +1414,7 @@ test('FSCTL_PIPE_TRANSCEIVE writes a message and reads the answer through its bl
         BLOCK, io, 0x3000, 4)).status, STATUS_INVALID_READ_MODE);
     // A server whose client is gone is in no state for one.
     const lone = bounded(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
-    lone.p.pipes.closed(lone.client, lone.p.handles.get(lone.client)?.object);
+    lone.p.close(lone.client);
     assert.equal(/** @type {any} */ (lone.p.pipes.control(lone.server, TRANSCEIVE, 0x8100, 64,
         BLOCK, io, 0x3000, 4)).status, STATUS_INVALID_PIPE_STATE);
 });
@@ -1507,7 +1513,7 @@ test('a flush waits for the reader to take everything; a closed or cut reader fa
 
         // The reader closes: the write waiting for it finds the pipe broken.
         assert.equal(write(server, 7000, W1), 0);
-        p.pipes.closed(client, p.handles.get(client)?.object);
+        p.close(client);
         assert.equal(p.u32(W1), STATUS_PIPE_BROKEN);
 
         // Disconnected: both ways' waiting writes are not connected.
@@ -1703,7 +1709,8 @@ test('CreatePipe\'s ends are inheritable as SECURITY_ATTRIBUTES asks, at either 
             p.view.setUint32(0x300 + 2 * word, inherit, true);
             const ends = p.pipes.anonymous(0x300, 4096);
             assert.ok(ends);
-            return { ends, inherited: p.pipes.inherited(null).map(one=>one.handle) };
+            return { ends, inherited: [ends.read, ends.write]
+                .filter(handle=>p.handles.get(handle)?.flags === 1) };
         };
         const asked = made(0, 1);
         assert.deepEqual(asked.inherited, [asked.ends.read, asked.ends.write],

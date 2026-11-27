@@ -254,10 +254,12 @@ const DEVICE_CONTROLS = new Map([
  * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel  block, wake, onTimeout, clock
- * @property {{ open: (type: string, object: any, access?: number | null) => number,
+ * @property {{ open: (type: string, object: any, access?: number | null, flags?: number) => number,
  *     resolve: (handle: number, type?: string) => any,
  *     typeOf?: (handle: number) => string | null,
- *     access?: (handle: number) => number | null }} handles
+ *     access?: (handle: number) => number | null,
+ *     list: () => { handle: number, type: string }[] }} handles
+ *     The process's handle table; a pipe handle's HANDLE_FLAG_INHERIT is its own there.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -598,12 +600,15 @@ export function createNamedPipes(host){
     /** What startRead answers a read made with `tell` that waits. */
     const WAITING = Symbol('waiting');
     /**
-     * Whether each of this process's pipe handles is inherited by the children
-     * it starts: what the security attributes said, then SetHandleInformation.
+     * This process's pipe handles, as its handle table holds them; whether a
+     * child inherits one is that handle's flag there.
      *
-     * @type {Map<number, boolean>}
+     * @returns {number[]}
      */
-    const inheritable = new Map();
+    const pipeHandles = ()=>host.handles.list().filter(({ type })=>type === 'pipe')
+        .map(({ handle })=>handle);
+    /** @param {boolean} inherit @returns {number} the handle's HANDLE_FLAG_INHERIT */
+    const inheritFlag = inherit=>(inherit ? 1 : 0);
 
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{
@@ -1697,8 +1702,7 @@ export function createNamedPipes(host){
         /** @type {any} */ (instance.server).serverProcess = host.processId ?? 0;
         pipe.instances.add(instance);
         const handle = host.handles.open('pipe', instance.server,
-            mappedAccess('pipe', asked.access));
-        inheritable.set(handle, asked.inherit);
+            mappedAccess('pipe', asked.access), inheritFlag(asked.inherit));
         listening(pipe);
         return { handle };
     };
@@ -1718,8 +1722,7 @@ export function createNamedPipes(host){
         }
         const standIn = pipeStandIn(made.id, made);
         standIn.refs = 1;
-        const handle = host.handles.open('pipe', standIn, made.access);
-        inheritable.set(handle, inherit);
+        const handle = host.handles.open('pipe', standIn, made.access, inheritFlag(inherit));
         return { handle };
     };
 
@@ -1812,8 +1815,8 @@ export function createNamedPipes(host){
         instance.state = 'connected';
         instance.heard = false;
         instance.clientProcess = host.processId ?? 0;
-        const handle = host.handles.open('pipe', client, mappedAccess('pipe', asked));
-        inheritable.set(handle, inheritsBy(attributes));
+        const handle = host.handles.open('pipe', client, mappedAccess('pipe', asked),
+            inheritFlag(inheritsBy(attributes)));
         connected(instance);
         return { handle };
     };
@@ -2556,7 +2559,6 @@ export function createNamedPipes(host){
      * @param {number} handle @param {any} object  what it named
      */
     const closed = (handle, object)=>{
-        inheritable.delete(handle >>> 0);
         ctx.modes.delete(handle >>> 0);
         letGo(object);
     };
@@ -4082,7 +4084,7 @@ export function createNamedPipes(host){
          * @returns {string[]}
          */
         describe(){
-            return [...inheritable.keys()].flatMap(handle=>{
+            return pipeHandles().flatMap(handle=>{
                 const end = endOf(handle);
                 if (!end)
                 {
@@ -4098,8 +4100,9 @@ export function createNamedPipes(host){
         },
 
         /**
-         * This process's pipe handles a child it starts inherits: the
-         * inheritable ones, or of those the ones the attribute list names.
+         * The pipe ends these handles of this process name, which a child it
+         * starts takes: its inheritable handles, or the standard handles a
+         * console child is handed duplicates of (whoever starts it chooses).
          *
          * Windows duplicates them into the child as CreateProcess returns, so
          * a parent that closes its own copy of the child's end at once (the
@@ -4107,48 +4110,30 @@ export function createNamedPipes(host){
          * child's handle is taken here, held until the child claims it
          * (`claimInherited`) or never starts (`dropUnclaimed`).
          *
-         * With `every`, those `only` names whether inheritable or not: the
-         * standard handles a console child is handed duplicates of.
-         *
-         * @param {number[] | null} only @param {boolean} [every]
+         * @param {number[]} handles
          * @returns {InheritedEnd[]}
          */
-        inherited(only, every = false){
-            return [...inheritable].filter(([handle, on])=>(on || every)
-                && (only === null || only.includes(handle)))
-                .flatMap(([handle])=>{
-                    // An end the run serves this process is handed on as its
-                    // stand-in, one more handle onto it.
-                    const end = endOf(handle) ?? standInOf(handle);
-                    if (!end || ('closed' in end && end.closed))
-                    {
-                        return [];
-                    }
-                    end.retain();
-                    /** @type {InheritedEnd} */
-                    const entry = { handle, type: 'pipe', object: end, held: true,
-                        drop(){
-                            if (entry.held)
-                            {
-                                entry.held = false;
-                                letGo(end);
-                            }
-                        } };
-                    return [entry];
-                });
-        },
-
-        /**
-         * A handle's inheritance as SetHandleInformation or DuplicateHandle
-         * set it. A handle that is no pipe end is let be.
-         *
-         * @param {number} handle @param {boolean} on
-         */
-        setInheritable(handle, on){
-            if (endOf(handle) || standInOf(handle))
-            {
-                inheritable.set(handle >>> 0, on);
-            }
+        inherited(handles){
+            return handles.flatMap(handle=>{
+                // An end the run serves this process is handed on as its
+                // stand-in, one more handle onto it.
+                const end = endOf(handle) ?? standInOf(handle);
+                if (!end || ('closed' in end && end.closed))
+                {
+                    return [];
+                }
+                end.retain();
+                /** @type {InheritedEnd} */
+                const entry = { handle, type: 'pipe', object: end, held: true,
+                    drop(){
+                        if (entry.held)
+                        {
+                            entry.held = false;
+                            letGo(end);
+                        }
+                    } };
+                return [entry];
+            });
         },
 
         /** Whether a handle is a pipe end. @param {number} handle */
@@ -4180,15 +4165,14 @@ export function createNamedPipes(host){
          * A pipe end handed to this process at its start (inherited) is one
          * more handle onto it, under the parent's number.
          *
-         * @param {number} handle @param {any} end
+         * @param {any} end
          * @param {Partial<InheritedEnd>} [entry]  what the parent's CreateProcess held
          */
-        adopted(handle, end, entry){
+        adopted(end, entry){
             if (!claimInherited(entry))
             {
                 end.retain();
             }
-            inheritable.set(handle >>> 0, true);
         },
 
         /**
@@ -4202,7 +4186,7 @@ export function createNamedPipes(host){
             // write of it had not had read is gone from the pipe, as Windows
             // cancels a thread's I/O when it ends.
             forEachEnd(end=>abort(end, op=>op.ctx === ctx, null));
-            for (const handle of [...inheritable.keys()])
+            for (const handle of pipeHandles())
             {
                 closed(handle, endOf(handle) ?? standInOf(handle));
             }

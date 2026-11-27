@@ -105,9 +105,13 @@ const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 /** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
 const CREATE_SUSPENDED = 0x4;
 
-/** DuplicateHandle's options: close the source, and give the copy the source's rights. */
+/**
+ * DuplicateHandle's options: close the source, give the copy the source's
+ * rights, and its flags (NtDuplicateObject's, which kernel32 passes on).
+ */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
 const DUPLICATE_SAME_ACCESS = 0x00000002;
+const DUPLICATE_SAME_ATTRIBUTES = 0x00000004;
 
 /**
  * @typedef {Object} ThreadingHost
@@ -165,16 +169,12 @@ const DUPLICATE_SAME_ACCESS = 0x00000002;
  * @property {(handle: number) => string | null} [handleType]
  * @property {(process: number) => ({ typeOf: (handle: number) => string | null,
  *     resolve: (handle: number) => any,
- *     open: (type: string, object: any, access?: number | null) => number,
+ *     open: (type: string, object: any, access?: number | null, flags?: number) => number,
  *     access?: (handle: number) => number | null,
+ *     flags: (handle: number) => number | null,
  *     close: (handle: number) => any } | null)} [processTable]
  *     The handle table of another process of the run on this thread, by its
  *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
- * @property {Map<number, number>} [handleFlags]  The process's handles' HANDLE_FLAG_*
- *     flags, kept by whoever starts its children; absent, its own.
- * @property {(handle: number) => boolean} [isSocket]
- *           Whether winsock holds a socket by this number, which the handle
- *           flags are kept for as for a kernel object's.
  * @property {(node: any) => void} [retainNode]
  * @property {(node: any) => void} [closeNode]  gives a hold back, closing the node
  *           with the last
@@ -196,9 +196,8 @@ const DUPLICATE_SAME_ACCESS = 0x00000002;
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
  *           without it DuplicateHandle refuses rather than guessing.
- * @property {{ setInheritable: (handle: number, on: boolean) => void,
- *     waitable?: (handle: number) => any }} [pipes]
- *           Told what a pipe handle's inheritance is set to, which a child reads.
+ * @property {{ waitable?: (handle: number) => any }} [pipes]
+ *           What a wait on a pipe handle waits for.
  */
 
 /** PROCESSENTRY32, as a caller of the era declares it: 296 bytes. */
@@ -538,27 +537,15 @@ export function createThreadingFunctions(host){
     };
 
     /**
-     * HANDLE_FLAG_INHERIT and HANDLE_FLAG_PROTECT_FROM_CLOSE, by handle: what
-     * a handle was made or opened inheritable with, a duplicate was made
-     * with and SetHandleInformation set; the process's own, which a child it
-     * starts with bInheritHandles takes (`inheritedObjects`). Handles are not
-     * reissued while the table has fresh ones, so an entry outliving its
-     * handle names nothing.
-     *
-     * @type {Map<number, number>}
-     */
-    const handleFlags = host.handleFlags ?? new Map();
-
-    /**
      * A handle made inheritable, as SECURITY_ATTRIBUTES' bInheritHandle or an
-     * open's bInheritHandle asks. Answers the handle.
+     * open's bInheritHandle asks, in the kernel's table. Answers the handle.
      *
      * @param {number} handle @param {boolean} inherit
      */
     const inheritIf = (handle, inherit)=>{
         if (inherit && handle !== 0)
         {
-            handleFlags.set(handle, HANDLE_FLAG_INHERIT);
+            kernel.handles.setFlags(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
         }
         return handle;
     };
@@ -568,13 +555,8 @@ export function createThreadingFunctions(host){
     /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
     const inherits = attributes=>securityOf(attributes)?.inherit ?? false;
 
-    /**
-     * Whether a handle is one GetHandleInformation and SetHandleInformation
-     * keep flags for: a kernel object's, or a socket's.
-     *
-     * @param {number} handle
-     */
-    const flagged = handle=>Boolean(object(handle)) || (host.isSocket?.(handle) ?? false);
+    /** A handle's HANDLE_FLAG_* flags, null for a pseudo-handle or none. @param {number} handle */
+    const flagsOf = handle=>(pseudo(handle) ? null : kernel.handles.flags(untagged(handle >>> 0)));
 
     /**
      * What kind of object a handle names, the pseudo-handles included.
@@ -1501,6 +1483,20 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([sourceProcess, source, targetProcess, target, desired, inherit, options])=>{
                 const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
+                /**
+                 * The copy's flags: the source's with DUPLICATE_SAME_ATTRIBUTES,
+                 * else inheritable as asked. A source protected from close is
+                 * not closed by DUPLICATE_CLOSE_SOURCE: both stay, as on Windows.
+                 *
+                 * @param {number | null} sourceFlags  null for a pseudo-handle
+                 */
+                const copying = sourceFlags=>({
+                    flags: (options >>> 0 & DUPLICATE_SAME_ATTRIBUTES) !== 0 ? sourceFlags ?? 0
+                        : inherit !== 0 ? HANDLE_FLAG_INHERIT : 0,
+                    closesSource: (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
+                        && sourceFlags !== null
+                        && (sourceFlags & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0,
+                });
                 /** The table a process handle names, or null for this process's own. */
                 const tableOf = (/** @type {number} */ process)=>{
                     const record = (process >>> 0) === CURRENT_PROCESS ? null
@@ -1527,9 +1523,10 @@ export function createThreadingFunctions(host){
                         return 0;
                     }
                     host.namedObjects.reference(foreign);
+                    const { flags, closesSource } = copying(from.flags(source >>> 0));
                     const taken = (into ?? kernel.handles).open(foreignKind, foreign,
-                        rights.granted);
-                    if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
+                        rights.granted, flags);
+                    if (closesSource)
                     {
                         from.close(source >>> 0);
                     }
@@ -1572,12 +1569,7 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
-                // A handle protected from close is not closed by
-                // DUPLICATE_CLOSE_SOURCE either: both stay, as on Windows.
-                const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
-                    && !pseudo(source)
-                    && ((handleFlags.get(untagged(source >>> 0)) ?? 0)
-                        & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0;
+                const { flags, closesSource } = copying(flagsOf(source));
                 // Into another process, an open file is that process's own open
                 // of it, which its table makes (`adoptFile`); here, one more hold.
                 if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
@@ -1595,19 +1587,14 @@ export function createThreadingFunctions(host){
                 // the source's slot, the first free one, as Windows hands it.
                 const reused = closesSource && !into && Boolean(kernel.handles.adopt)
                     && kernel.handles.close(source >>> 0) !== null
-                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted);
+                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted, flags);
                 const duplicate = reused ? source >>> 0
-                    : (into ?? kernel.handles).open(kind, held, rights.granted);
+                    : (into ?? kernel.handles).open(kind, held, rights.granted, flags);
                 // A file the other process could not open as its own.
                 if (duplicate === 0)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
-                }
-                if (!into)
-                {
-                    handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
-                    host.pipes?.setInheritable(duplicate, inherit !== 0);
                 }
                 host.writeMemory(wholeAddress(target), new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
@@ -1633,22 +1620,22 @@ export function createThreadingFunctions(host){
         /**
          * BOOL GetHandleInformation(HANDLE hObject, LPDWORD lpdwFlags) and
          * BOOL SetHandleInformation(HANDLE hObject, DWORD dwMask, DWORD dwFlags):
-         * a handle's inheritance and protection flags, which nothing here
-         * acts on but which read back as they were set. A socket is a handle
-         * on Windows, and a program that keeps its sockets from children
-         * clears their inherit flag through these, so winsock's sockets
-         * answer too.
+         * a handle's inheritance and protection flags, the handle's own in the
+         * kernel's table: a child started with bInheritHandles takes the
+         * inheritable ones, CloseHandle refuses a protected one. A socket is
+         * a handle there too, as on Windows, where a program keeps its
+         * sockets from children by clearing their inherit flag.
          */
         GetHandleInformation: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if (pseudo(handle) || !flagged(handle >>> 0) || wholeAddress(out) === 0)
+                const flags = flagsOf(handle);
+                if (flags === null || wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const flags = handleFlags.get(untagged(handle >>> 0)) ?? 0;
                 host.writeMemory(wholeAddress(out), new Uint8Array([flags, 0, 0, 0]));
                 return 1;
             },
@@ -1657,20 +1644,13 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, mask, flags])=>{
-                if (pseudo(handle) || !flagged(handle >>> 0))
+                if (flagsOf(handle) === null)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const key = untagged(handle >>> 0);
-                const kept = HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE;
-                handleFlags.set(key, ((handleFlags.get(key) ?? 0) & ~(mask & kept))
-                    | (flags & mask & kept));
-                // What a child inherits of the pipes is read from the pipes.
-                if ((mask & HANDLE_FLAG_INHERIT) !== 0)
-                {
-                    host.pipes?.setInheritable(key, (flags & HANDLE_FLAG_INHERIT) !== 0);
-                }
+                kernel.handles.setFlags(untagged(handle >>> 0),
+                    mask & (HANDLE_FLAG_INHERIT | HANDLE_FLAG_PROTECT_FROM_CLOSE), flags);
                 return 1;
             },
         },
