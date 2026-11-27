@@ -8260,3 +8260,26 @@ test('SetWindowPlacement keeps the normal place and shows the window as its show
     assert.equal(fns.IsIconic.handler([hwnd]), 0);
     assert.deepEqual(rect(), [70, 80, 370, 280], 'restored to the normal place it was given');
 });
+
+test('a 64-bit class whose name lies past 4 GiB is read where it lies, not at its low dword', ()=>{
+    // RegisterClass told an integral atom from a name by the pointer's low dword alone, and read
+    // the name there: a class named from an image past 4 GiB took whatever text its low-dword
+    // alias held. A pointer is an atom only when all of it is below 0x10000 (IS_INTRESOURCE).
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    const HIGH = 2 ** 32;
+    memory.putString(CLASS_NAME, 'MainWnd');
+    /** @type {number[]} */
+    const asked = [];
+    const readCString = memory.readCString.bind(memory);
+    memory.readCString = (address, limit)=>{
+        asked.push(address);
+        return readCString(address >= HIGH ? address - HIGH : address, limit);
+    };
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 1]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    assert.deepEqual(asked, [HIGH + CLASS_NAME]);
+});

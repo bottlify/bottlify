@@ -3211,7 +3211,7 @@ export function createWindowFunctions(host){
     const register = (fields, unicode = false)=>{
         // A name, or an integral atom, which is the class "#<number>"; a
         // string atom names the class its name does.
-        const given = fields.className >>> 0;
+        const given = fields.className;
         const asked = given > LAST_ATOM ? readText(host, given, unicode, MAX_CLASS_NAME)
             : given !== 0 && given < FIRST_STRING_ATOM ? `#${given}`
                 : directory.registeredName(given) ?? '';
