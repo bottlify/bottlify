@@ -664,6 +664,18 @@
    "tests": []
   },
   {
+   "path": "tools/checks/check-struct-tables.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "no structure's offsets are written down by hand past the baseline",
+   "command": "node tools/checks/check-struct-tables.mjs [--write] [--list]",
+   "tests": [],
+   "parts": [
+    "tools/checks/struct-tables-baseline.json"
+   ]
+  },
+  {
    "path": "tools/checks/check-package-files.mjs",
    "category": "checks",
    "kind": "check",
