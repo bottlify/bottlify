@@ -44,8 +44,8 @@ test('a scratch reused call after call is held once in the run\'s cache, counted
     cache.idle(10 * 60_000);
     assert.equal(blit.bytes(SCREEN)[SCREEN - 1], 0x5a,
         'what was written stays while it did not grow');
-    assert.deepEqual(scratches.figures(), { scratches: 1, held: 1, heldBytes: 4 * MIB, plain: 0,
-        plainBytes: 0, grows: 1, plainGrows: 0 });
+    assert.deepEqual(scratches.figures(), { scratches: 1, holds: 0, held: 1, heldBytes: 4 * MIB,
+        plain: 0, plainBytes: 0, grows: 1, plainGrows: 0 });
     const under = cache.keeper.under('scratch/');
     assert.equal(under.bodies, 1);
     assert.equal(under.hotBytes, 4 * MIB, 'in the run\'s budget');
@@ -85,7 +85,7 @@ test('without room in the cache a scratch is plain memory under the same contrac
     assert.equal(view.length, 2 * MIB);
     assert.ok(!(view.buffer instanceof SharedArrayBuffer));
     assert.equal(scratch.bytes(2 * MIB), view);
-    assert.deepEqual(scratches.figures(), { scratches: 1, held: 0, heldBytes: 0, plain: 1,
+    assert.deepEqual(scratches.figures(), { scratches: 1, holds: 0, held: 0, heldBytes: 0, plain: 1,
         plainBytes: 2 * MIB, grows: 1, plainGrows: 1 });
     // A room that fits is held again once it grows past the plain one: no
     // room is kept twice.
@@ -129,4 +129,53 @@ test('the cache layer hands out scratches and reports them; without a reader the
     none.scratch('blit').bytes(100);
     assert.equal(/** @type {any} */ (alone.diagnostics().metrics.scratch).plain, 1);
     assert.equal(noCache.scratch('tool').bytes(10).length, 10);
+});
+
+test('a hold is memory of its own length for an object\'s life: held in a block of the cache, '
+    + 'zero though the block was used before, let go of once', async()=>{
+    const cache = await testCache();
+    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    // A block used and let go: the next holder of it finds what was left.
+    const before = scratches.hold('resource', 70_000);
+    before.bytes.fill(0xee);
+    before.release();
+    cache.idle(1);
+    const held = scratches.hold('resource', 70_000);
+    assert.equal(held.bytes.length, 70_000);
+    assert.ok(held.bytes.buffer instanceof SharedArrayBuffer);
+    assert.equal(held.bytes.byteOffset, before.bytes.byteOffset, 'the same block again');
+    assert.ok(held.bytes.every(byte=>byte === 0), 'zero, as new memory is');
+    const other = scratches.hold('resource', 70_000);
+    assert.notEqual(other.bytes.byteOffset, held.bytes.byteOffset, 'two of one name, two holds');
+    // The keeper's sweep never takes it, however long it waits.
+    held.bytes.fill(5);
+    cache.idle(10 * 60_000);
+    assert.equal(held.bytes[69_999], 5);
+    assert.deepEqual(scratches.figures(), { scratches: 0, holds: 3, held: 2,
+        heldBytes: 2 * 128 * 1024, plain: 0, plainBytes: 0, grows: 0, plainGrows: 0 });
+    assert.equal(cache.keeper.under('scratch/').bodies, 2);
+    held.release();
+    held.release();
+    assert.equal(scratches.figures().held, 1, 'let go of once');
+    scratches.releaseAll();
+    cache.idle(1);
+    assert.equal(cache.keeper.under('scratch/').bodies, 0, 'the holder gone, nothing left');
+    other.release();
+    assert.equal(scratches.figures().held, 0);
+});
+
+test('a hold with no room in the cache is plain memory of its own length, counted', async()=>{
+    const cache = await testCache({ budget: MIB, segmentBytes: MIB });
+    const scratches = createScratches(cache.space('scratch').hold ?? null);
+    const large = scratches.hold('resource', 3 * MIB + 5);
+    assert.equal(large.bytes.length, 3 * MIB + 5);
+    assert.ok(!(large.bytes.buffer instanceof SharedArrayBuffer));
+    assert.equal(large.bytes.buffer.byteLength, 3 * MIB + 5, 'not rounded to a block');
+    assert.deepEqual(scratches.figures(), { scratches: 0, holds: 1, held: 0, heldBytes: 0,
+        plain: 1, plainBytes: 3 * MIB + 5, grows: 0, plainGrows: 0 });
+    large.release();
+    large.release();
+    assert.equal(scratches.figures().plain, 0);
+    assert.equal(createScratches(null).hold('none', 0).bytes.length, 0);
+    assert.equal(noCache.hold('tool', 10).bytes.length, 10);
 });

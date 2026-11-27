@@ -22,6 +22,12 @@
  * scratches. What the view holds is what was last written into it while the
  * scratch did not grow; a grown room holds nothing a caller may read before
  * writing it.
+ *
+ * A hold (`hold`) is memory of one length kept for the life of what keeps
+ * it - a Direct3D 10 resource's bytes - rather than between calls: held in
+ * the cache the same way, plain memory of its own length where there is no
+ * room, and zero either way, as new memory is, so that whoever keeps it
+ * cannot tell which it was given.
  */
 
 /** The smallest room: the cache's block, one page. */
@@ -59,8 +65,16 @@ export const roomFor = length=>{
  */
 
 /**
+ * Memory one object keeps for its life (`hold`): `bytes` until `release`,
+ * after which it is not touched again.
+ *
+ * @typedef {{ bytes: Uint8Array, release: () => void }} Held
+ */
+
+/**
  * @typedef {Object} ScratchFigures
  * @property {number} scratches  scratches made
+ * @property {number} holds  holds made
  * @property {number} held  rooms held in the cache now
  * @property {number} heldBytes  their bytes
  * @property {number} plain  rooms of plain memory now: no cache, no room in it
@@ -76,9 +90,9 @@ export const roomFor = length=>{
  * @param {Hold | null} hold
  */
 export function createScratches(hold){
-    const counts = { scratches: 0, held: 0, heldBytes: 0, plain: 0, plainBytes: 0, grows: 0,
-        plainGrows: 0 };
-    /** The scratches holding a room of the cache now, for `releaseAll`. @type {Set<() => void>} */
+    const counts = { scratches: 0, holds: 0, held: 0, heldBytes: 0, plain: 0, plainBytes: 0,
+        grows: 0, plainGrows: 0 };
+    /** The scratches and holds holding a room of the cache now, for `releaseAll`. @type {Set<() => void>} */
     const holding = new Set();
     return {
         /**
@@ -155,6 +169,48 @@ export function createScratches(hold){
                 },
                 release,
             };
+        },
+        /**
+         * Memory of `length` bytes, zero, kept until `release`: held in the
+         * cache under `name` (in a block of it, which the figures count), or
+         * plain memory of that length where there is no room. Every hold is
+         * one of its own, two of one name included.
+         *
+         * @param {string} name @param {number} length @returns {Held}
+         */
+        hold(name, length){
+            const number = ++counts.holds;
+            const size = roomFor(length);
+            const got = length > 0 ? hold?.(`${name}/${number}`, size) ?? null : null;
+            if (got === null)
+            {
+                const bytes = new Uint8Array(length);
+                counts.plain++;
+                counts.plainBytes += length;
+                let out = true;
+                return { bytes, release: ()=>{
+                    if (out)
+                    {
+                        out = false;
+                        counts.plain--;
+                        counts.plainBytes -= length;
+                    }
+                } };
+            }
+            // A block of the cache holds what its last holder left in it.
+            const bytes = got.bytes.subarray(0, length).fill(0);
+            counts.held++;
+            counts.heldBytes += size;
+            const release = ()=>{
+                if (holding.delete(release))
+                {
+                    counts.held--;
+                    counts.heldBytes -= size;
+                    got.release();
+                }
+            };
+            holding.add(release);
+            return { bytes, release };
         },
         /** @returns {ScratchFigures} */
         figures: ()=>({ ...counts }),

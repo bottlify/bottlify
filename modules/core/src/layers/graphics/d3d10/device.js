@@ -148,6 +148,9 @@ const PREDICATE_QUERIES = new Set([
  *     what the present waits on before it answers the program.
  * @property {import('./render.js').GuestStorage} [guest]  Guest memory for the bytes of
  *     the resources a program maps, which a map then hands out as they are.
+ * @property {(name: string, length: number) => import('../../cache/scratch.js').Held} [holds]
+ *     Where each resource's bytes are held for its life: the run's cache
+ *     (`cache/scratch.js` `hold`); absent, plain memory under the same contract.
  * @property {ReturnType<typeof createSharing>} [sharing]  The shared resources of every
  *     device made with the same options (`sharing.js`).
  */
@@ -741,6 +744,7 @@ function createDevice(options = {}){
         formatsTier1: options.formatsTier1,
         rg11b10Renderable: options.rg11b10Renderable,
         guest: options.guest,
+        holds: options.holds,
         featureLevel: options.featureLevel,
         liveDump: options.liveDump,
     });

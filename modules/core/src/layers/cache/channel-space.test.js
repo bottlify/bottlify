@@ -272,3 +272,152 @@ test('an owner on the keeper\'s own thread - an in-thread root\'s texels - is nu
         run.close();
     }
 });
+
+test('memory an owner in a worker holds is the run\'s cache, written there and read in place on '
+    + 'the keeper\'s thread, counted under the owner and in the budget, and taken back when it '
+    + 'goes', { timeout: 60_000 }, async()=>{
+    /** @type {import('./module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    const served = run.serve('resources');
+    const joined = run.join(()=>{});
+    const worker = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        import(workerData.url).then(async({ channelSpace })=>{
+            const owner = channelSpace(workerData.joined, workerData.served);
+            const next = ()=>new Promise(resolve=>parentPort.once('message', resolve));
+            const a = owner.space.hold('a', 100_000);
+            const b = owner.space.hold('b', 5000);
+            a.bytes.fill(7);
+            b.bytes.fill(8);
+            parentPort.postMessage({ a: a.bytes, b: b.bytes, holding: owner.holding() });
+            await next();
+            // What the keeper's thread wrote, read here in place.
+            const seen = [a.bytes[0], a.bytes[99_999]];
+            b.release();
+            b.release();
+            parentPort.postMessage({ seen, holding: owner.holding() });
+            await next();
+            const released = await owner.close();
+            parentPort.postMessage({ released, after: owner.space.hold('c', 10) });
+        });`, { eval: true, workerData: { url: new URL('./module.js', import.meta.url).href,
+        served, joined: { shared: joined.shared, segments: joined.segments } } });
+    const next = ()=>/** @type {Promise<any>} */ (new Promise((resolve, reject)=>{
+        worker.once('message', resolve);
+        worker.once('error', reject);
+    }));
+    try
+    {
+        const first = await next();
+        assert.ok(first.a.buffer instanceof SharedArrayBuffer, 'the cache\'s own memory');
+        assert.equal(first.a.length, 100_000);
+        assert.ok(first.a.every((/** @type {number} */ byte)=>byte === 7), 'read in place here');
+        assert.ok(first.b.every((/** @type {number} */ byte)=>byte === 8));
+        assert.deepEqual(first.holding, { holds: 2, bytes: 105_000 });
+        assert.deepEqual(run.under(served.prefix),
+            { bodies: 2, bytes: 105_000, hotBytes: 105_000, placedBytes: 131_072 + 8192 },
+            'counted under the owner, in blocks of the budget');
+        assert.ok(run.figures().placedBytes >= 131_072 + 8192, 'in the cache\'s budget');
+        first.a[0] = 1;
+        first.a[99_999] = 2;
+        worker.postMessage('read');
+        const second = await next();
+        assert.deepEqual(second.seen, [1, 2], 'the worker reads what this thread wrote');
+        assert.deepEqual(second.holding, { holds: 1, bytes: 100_000 });
+        assert.deepEqual(run.under(served.prefix),
+            { bodies: 1, bytes: 100_000, hotBytes: 100_000, placedBytes: 131_072 },
+            'one let go of, its room the keeper\'s');
+        worker.postMessage('go');
+        const third = await next();
+        assert.deepEqual(third.released, { bodies: 1, bytes: 100_000, waiting: 0 },
+            'what it still held taken back as it went, nothing left waiting');
+        assert.equal(third.after, null, 'nothing held once it went');
+        assert.deepEqual(run.under(served.prefix),
+            { bodies: 0, bytes: 0, hotBytes: 0, placedBytes: 0 }, 'no tail under its names');
+        assert.deepEqual(tails, []);
+    }
+    finally
+    {
+        await worker.terminate();
+        joined.leave();
+        run.close();
+    }
+});
+
+test('memory an owner on the keeper\'s own thread holds goes through its reader, under the same '
+    + 'contract', { timeout: 60_000 }, async()=>{
+    /** @type {import('./module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    try
+    {
+        const api = await createCacheModule().create({ reader: run.reader, join: run.join,
+            serve: run.serve });
+        const owned = /** @type {NonNullable<ReturnType<typeof api.owner>>} */ (
+            api.owner('resources'));
+        const held = owned.space.hold?.('a', 10_000) ?? null;
+        assert.ok(held && held.bytes.buffer instanceof SharedArrayBuffer);
+        held.bytes.fill(3);
+        assert.deepEqual(owned.holding(), { holds: 1, bytes: 10_000 });
+        assert.equal(run.under(owned.prefix).hotBytes, 10_000);
+        owned.space.hold?.('b', 20_000);
+        held.release();
+        assert.deepEqual(owned.holding(), { holds: 1, bytes: 20_000 });
+        assert.deepEqual(await owned.close(), { bodies: 1, bytes: 20_000, waiting: 0 });
+        assert.equal(owned.space.hold?.('c', 10), null, 'nothing held once it went');
+        assert.equal(run.under(owned.prefix).bodies, 0);
+        assert.deepEqual(tails, []);
+    }
+    finally
+    {
+        run.close();
+    }
+});
+
+test('a worker owner\'s scratches and holds are held under its names, plain where there is no '
+    + 'room, and nothing is left when it goes', { timeout: 60_000 }, async()=>{
+    /** @type {import('./module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    const served = run.serve('resources');
+    const joined = run.join(()=>{});
+    try
+    {
+        const said = await inWorker(`
+            const { createScratches } = await import(workerData.scratch);
+            const owner = channelSpace(joined, workerData.served);
+            const rooms = createScratches(owner.space.hold);
+            const blit = rooms.scratch('blit');
+            blit.bytes(1000).fill(1);
+            const grown = blit.bytes(300_000);
+            const resource = rooms.hold('resource', 50_000);
+            // Past a segment of the cache: no block holds it.
+            const large = rooms.hold('large', 20 << 20);
+            const during = { figures: rooms.figures(), holding: owner.holding(),
+                shared: [grown.buffer instanceof SharedArrayBuffer,
+                    resource.bytes.buffer instanceof SharedArrayBuffer,
+                    large.bytes.buffer instanceof SharedArrayBuffer],
+                zero: resource.bytes.every(byte=>byte === 0) };
+            rooms.releaseAll();
+            post({ during, after: owner.holding(), released: await owner.close() });`,
+        { joined: { shared: joined.shared, segments: joined.segments }, served,
+            scratch: new URL('./scratch.js', import.meta.url).href });
+        assert.deepEqual(said.during.shared, [true, true, false]);
+        assert.equal(said.during.zero, true);
+        assert.deepEqual(said.during.figures, { scratches: 1, holds: 2, held: 2,
+            heldBytes: 512 * 1024 + 64 * 1024, plain: 1, plainBytes: 20 << 20, grows: 2,
+            plainGrows: 0 });
+        assert.deepEqual(said.during.holding, { holds: 2, bytes: 512 * 1024 + 64 * 1024 },
+            'the owner counts what its scratches hold');
+        assert.deepEqual(said.after, { holds: 0, bytes: 0 });
+        assert.deepEqual(said.released, { bodies: 0, bytes: 0, waiting: 0 });
+        assert.deepEqual(run.under(served.prefix),
+            { bodies: 0, bytes: 0, hotBytes: 0, placedBytes: 0 });
+        assert.deepEqual(tails, []);
+    }
+    finally
+    {
+        joined.leave();
+        run.close();
+    }
+});

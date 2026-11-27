@@ -101,6 +101,7 @@ import { playedDirect3D10 } from './d3d10.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
 import { channelSpace } from '../../cache/module.js';
+import { createScratches } from '../../cache/scratch.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -588,6 +589,18 @@ export function serveGraphics(scope, deps){
         // its own it lets go of when it ends.
         const texelCache = options.cacheLink
             ? channelSpace(options.cacheLink, options.cacheLink) : null;
+        // What the root keeps between calls (its scratches) and for an
+        // object's life (a Direct3D 10 resource's bytes), held under its
+        // names: the worker waits for that room on the keeper's thread, so a
+        // root that lends, whose program's thread may wait on this one for a
+        // lend being read, holds plain memory instead.
+        const rooms = createScratches(texelCache && !lending
+            ? texelCache.space.hold ?? null : null);
+        const roomServices = {
+            scratches: (/** @type {string} */ name)=>rooms.scratch(name),
+            holds: (/** @type {string} */ name, /** @type {number} */ length)=>
+                rooms.hold(name, length),
+        };
         /**
          * What the played device wrote outside a call -- a read-back the
          * program waits on -- into guest memory: in place where it is shared,
@@ -655,6 +668,8 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D10(createDirect3D10, {
                 ...options,
+                cacheLink: undefined,
+                ...roomServices,
                 liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -697,6 +712,7 @@ export function serveGraphics(scope, deps){
                 ...options,
                 cacheLink: undefined,
                 texelCache,
+                ...roomServices,
                 liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -773,6 +789,8 @@ export function serveGraphics(scope, deps){
             ends.delete(end);
             receiver?.close();
             capture?.close(captured);
+            // What it still held let go of here, then every name with it.
+            rooms.releaseAll();
             texelCache?.close();
             const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
             if (source !== undefined && left === 0)
