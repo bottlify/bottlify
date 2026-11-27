@@ -1441,8 +1441,15 @@ export function createGraphicsModule(){
              * The font engine: the browser's own faces through a canvas, when the
              * platform has one. Made once for every context and every font, so a
              * glyph rasterised for one dialog is the same bitmap in the next.
+             * Its glyphs are pages of the run's cache (`glyphs/...`), named by
+             * what they hold, so the run's processes share them; a page the
+             * cache lets go of is drawn again.
              */
-            const fonts = createFontEngine();
+            const fonts = createFontEngine({
+                space: typeof cache?.space === 'function' && !isStub(cache)
+                    ? cache.space('glyphs') : null,
+                scratch: scratches('gdi/glyph-page'),
+            });
             /**
              * The cell a font measures as, with its glyphs, so an extent asked
              * without a device context is summed the way a drawn string is.
@@ -1456,7 +1463,7 @@ export function createGraphicsModule(){
                     cellWidth: measured.aveCharWidth,
                     cellHeight: measured.height,
                     ascent: measured.ascent,
-                    glyphs: code=>fonts.glyph(code, font),
+                    glyphs: (code, read, arg)=>fonts.glyph(code, font, read, arg),
                 } : null;
             };
 
@@ -1668,13 +1675,11 @@ export function createGraphicsModule(){
                  */
                 fontMetrics: font=>fonts.metrics(font),
                 /**
-                 * One character's coverage in a font, or null without an engine:
+                 * One character's coverage in a font, read in place
+                 * (`gdi/fonts.js` `GlyphReader`), or null without an engine:
                  * what D3DX's font draws its text from, as GDI does.
-                 *
-                 * @param {number} code
-                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
                  */
-                glyph: (code, font)=>fonts.glyph(code, font),
+                glyph: fonts.glyph,
                 /**
                  * A program's own font, under its family name, for as long as
                  * the run lasts: AddFontMemResourceEx's.

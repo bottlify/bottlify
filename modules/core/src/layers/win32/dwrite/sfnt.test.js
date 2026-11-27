@@ -68,8 +68,8 @@ test('a system face takes the engine\'s measurements where there is one', ()=>{
         metrics: request=>(asked.push(request), { ascent: 116, descent: 27, externalLeading: 4,
             aveCharWidth: 50, maxCharWidth: 120 }),
         textWidth: (_, text)=>(text === 'A' ? 85 : 64),
-        glyph: ()=>({ advance: 85, left: 1, top: 30, width: 80, height: 86,
-            coverage: new Uint8Array(80 * 86) }),
+        glyph: (code, request, read, arg)=>read({ advance: 85, left: 1, top: 30, width: 80,
+            height: 86, bytes: new Uint8Array(80 * 86), offset: 0 }, /** @type {any} */ (arg)),
     });
     assert.equal(asked[0].height, -128, 'measured at the probe size');
     assert.equal(face.advance(0x41), 85 * 16);

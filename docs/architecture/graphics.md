@@ -101,7 +101,16 @@ flowchart TB
   draws take their blocks from and its replay reads, is memory held in the run's cache
   (`d3d8/render.js` `createUniformArena`, `cache/scratch.js` `hold`), one hold a generation:
   outgrown mid-frame, it holds a larger one and lets the old go only at its next reset, after
-  the frame that read it replayed, and all of them when the device goes. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  the frame that read it replayed, and all of them when the device goes. The glyphs GDI draws
+  text with (`gdi/fonts.js`) are pages of the run's cache under `glyphs/`, each a face's request
+  and a run of 32 codes: a record a code (its advance, its box, where its coverage starts) and
+  the coverage of the glyphs drawn so far, a glyph drawn for the first time putting its page
+  again with it added. Named by what they hold (a family a program added a face to is named by
+  that face's bytes), they are shared by the run's processes; one the cache lets go of is drawn
+  again as it is asked for, and where the cache has no room a page is plain memory, let go of
+  all at once past 1 MiB. A glyph is read in place (`glyph(code, font, read, arg)`): TextOut,
+  GetGlyphOutline, DirectWrite's system faces and D3DX's font read its coverage inside the
+  read, and D3DX's font reads it again when it writes its page of the device. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of

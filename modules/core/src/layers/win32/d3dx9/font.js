@@ -65,9 +65,18 @@ const D3DPOOL_MANAGED = 1;
  * @property {(font: any) => { height: number, ascent: number, descent: number,
  *     internalLeading: number, externalLeading: number, aveCharWidth: number,
  *     maxCharWidth: number } | null} [fontMetrics]
- * @property {(code: number, font: any) => { advance: number, left: number, top: number,
- *     width: number, height: number, coverage: Uint8Array } | null} [glyph]
+ * @property {<T, A>(code: number, font: any, read: (glyph: GlyphRead, arg: A) => T, arg?: A)
+ *     => T | null} [glyph]  a glyph read in place inside `read`, whose answer is the call's
  */
+
+/** @typedef {import('../gdi32/drawing.js').GlyphRead} GlyphRead */
+
+/**
+ * A glyph's box and advance, taken out of the read: what a page places it by.
+ *
+ * @param {GlyphRead} glyph
+ */
+const boxOf = ({ advance, left, top, width, height })=>({ advance, left, top, width, height });
 
 /**
  * @param {FontHost} host
@@ -115,7 +124,9 @@ export function createFonts(host, sprites){
         {
             return known;
         }
-        const drawn = host.glyph?.(code, state.logFont) ?? null;
+        // Its box and advance only: its coverage is read again where the
+        // engine keeps it when the page is written (`upload`).
+        const drawn = host.glyph?.(code, state.logFont, boxOf) ?? null;
         const metrics = metricsOf(state);
         /** @type {any} */
         let entry;
@@ -149,13 +160,40 @@ export function createFonts(host, sprites){
             }
             entry = { advance: drawn.advance, left: drawn.left, top: drawn.top, width, height,
                 page: state.pages.length - 1, x: page.x, y: page.y };
-            page.writes.push({ x: page.x, y: page.y, width, height, coverage: drawn.coverage,
-                stride: drawn.width });
+            page.writes.push({ x: page.x, y: page.y, width, height, code });
             page.x += width + 1;
             page.row = Math.max(page.row, height);
         }
         state.glyphs.set(code, entry);
         return entry;
+    };
+
+    /** A row of a page as it is written: white, the glyph's coverage its alpha. */
+    const row = new Uint8Array(PAGE * 4);
+
+    /**
+     * One write of a page into its locked bits: a glyph's coverage, read
+     * where the engine keeps it, or transparent for none.
+     *
+     * @param {GlyphRead | null} glyph
+     * @param {{ bits: number, pitch: number,
+     *     write: { x: number, y: number, width: number, height: number } }} into
+     * @returns {true}
+     */
+    const writeRows = (glyph, { bits, pitch, write })=>{
+        const line = row.subarray(0, write.width * 4);
+        for (let y = 0; y < write.height; y++)
+        {
+            for (let x = 0; x < write.width; x++)
+            {
+                line[x * 4] = 255;
+                line[x * 4 + 1] = 255;
+                line[x * 4 + 2] = 255;
+                line[x * 4 + 3] = glyph ? glyph.bytes[glyph.offset + y * glyph.width + x] : 0;
+            }
+            host.writeMemory(bits + (write.y + y) * pitch + write.x * 4, line);
+        }
+        return true;
     };
 
     /**
@@ -191,8 +229,7 @@ export function createFonts(host, sprites){
                     page.texture = u32(scratch);
                     // A page starts transparent: what lies between glyphs is never drawn,
                     // but a filtered edge reads it.
-                    page.writes.unshift({ x: 0, y: 0, width: PAGE, height: PAGE,
-                        coverage: new Uint8Array(PAGE * PAGE), stride: PAGE });
+                    page.writes.unshift({ x: 0, y: 0, width: PAGE, height: PAGE, code: -1 });
                 }
                 const locked = await method(thread, page.texture, TEXTURE.LockRect,
                     [0, scratch + 4, 0, 0]);
@@ -202,16 +239,16 @@ export function createFonts(host, sprites){
                 }
                 const pitch = u32(scratch + 4);
                 const bits = u32(scratch + 8);
+                const into = { bits, pitch, write: page.writes[0] };
                 for (const write of page.writes)
                 {
-                    const row = new Uint8Array(write.width * 4);
-                    for (let y = 0; y < write.height; y++)
+                    into.write = write;
+                    // A glyph's coverage read where the engine keeps it; the
+                    // page's first write is transparent.
+                    if (write.code < 0 || host.glyph?.(write.code, state.logFont, writeRows, into)
+                        !== true)
                     {
-                        for (let x = 0; x < write.width; x++)
-                        {
-                            row.set([255, 255, 255, write.coverage[y * write.stride + x]], x * 4);
-                        }
-                        host.writeMemory(bits + (write.y + y) * pitch + write.x * 4, row);
+                        writeRows(null, into);
                     }
                 }
                 page.writes = [];
