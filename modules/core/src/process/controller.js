@@ -18,6 +18,12 @@ import {
     HOST_ANSWER_TICKS, IDLE_LOOK_MS, SOUND_PUMP_MS, answeringWhile, idleWait,
 } from './run-waits.js';
 
+/**
+ * A promise settled once, awaited for a microtask's turn: awaiting a value
+ * that is not a promise makes one to await, at every turn.
+ */
+const SETTLED = Promise.resolve();
+
 /** How many of the hottest sampled addresses a report carries the code around. */
 const HOT_CODE_SAMPLES = 64;
 
@@ -112,6 +118,43 @@ export function processController(deps){
             let othersRung = null;
             /** When the sound was last pumped (`SOUND_PUMP_MS`). */
             let pumpedAt = -Infinity;
+            // What a turn hands the pacing, kept for the run and filled in
+            // place: a record, an array and closures a turn were garbage at
+            // thousands of turns a second.
+            /** @type {import('../app-options.js').YieldPending} */
+            const pending = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
+            /** @type {Promise<unknown>[]} */
+            const wakes = [];
+            const until = { timer: false, sleep: false, deadlineMs: /** @type {number | null} */ (null),
+                wakes };
+            const answerExecutors = ()=>kernel.answerExecutors?.();
+            /** The executors' bell the yields answer on, and how (`answeringWhile`). */
+            let answeringBell = null;
+            /** @type {ReturnType<typeof answeringWhile> | null} */
+            let answering = null;
+            /**
+             * The name a wait's time is noted under, by its phase, the call on
+             * the host it waited for and whether the others ran: made once each.
+             * @type {Map<string, Map<string, string[]>>}
+             */
+            const noteNames = new Map();
+            /** @param {string} phase @param {string} call @param {boolean} others */
+            const noteName = (phase, call, others)=>{
+                let byCall = noteNames.get(phase);
+                if (byCall === undefined)
+                {
+                    byCall = new Map();
+                    noteNames.set(phase, byCall);
+                }
+                let names = byCall.get(call);
+                if (names === undefined)
+                {
+                    const named = call === '' ? phase : `${phase} ${call}`;
+                    names = [named, `${named} others`];
+                    byCall.set(call, names);
+                }
+                return names[others ? 1 : 0];
+            };
             while (worked < maxTurns && !expired() && !wasDisposed())
             {
                 if (paused())
@@ -147,7 +190,7 @@ export function processController(deps){
                     // resumed host call then does is this turn's cost, and it is
                     // charged to nothing if nobody opened a phase around it.
                     journal.begin('microtasks', journal.PhaseKind.HOST);
-                    await Promise.resolve();
+                    await SETTLED;
                     journal.end('microtasks');
 
                     // And a real one when the host says so, because that one
@@ -186,9 +229,11 @@ export function processController(deps){
                     // one: counted, a server compiling under such a call went to
                     // the event loop every turn and waited there longer than it ran.
                     const onHost = Math.max(0, bridge.waitingOnHost() - queued);
-                    const turnYield = pacing.yield({
-                        suspended: onHost, fetching: fetching(), idlers: queued, spun,
-                    });
+                    pending.suspended = onHost;
+                    pending.fetching = fetching();
+                    pending.idlers = queued;
+                    pending.spun = spun;
+                    const turnYield = pacing.yield(pending);
                     const pumpAt = pacing.now?.() ?? performance.now();
                     if (sound && pumpAt - pumpedAt >= SOUND_PUMP_MS)
                     {
@@ -200,8 +245,22 @@ export function processController(deps){
                     if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
-                        await answeringWhile(turnYield, cpu.executorBell?.(),
-                            ()=>kernel.answerExecutors?.());
+                        const bell = cpu.executorBell?.() ?? null;
+                        if (bell !== answeringBell)
+                        {
+                            answeringBell = bell;
+                            answering = bell?.waitAsync
+                                ? answeringWhile(bell, answerExecutors) : null;
+                        }
+                        answering?.begin();
+                        try
+                        {
+                            await turnYield;
+                        }
+                        finally
+                        {
+                            answering?.end();
+                        }
                         journal.end('yield');
                     }
 
@@ -239,7 +298,7 @@ export function processController(deps){
                         {
                             release();
                         }
-                        await Promise.resolve();
+                        await SETTLED;
                         journal.end('idlers');
                     }
 
@@ -297,8 +356,7 @@ export function processController(deps){
                         // the only event that can put one back on the
                         // processor, and sleeping through it costs the whole
                         // of the look interval for every call the guest makes.
-                        /** @type {Promise<void>[]} */
-                        const wakes = [];
+                        wakes.length = 0;
                         if (fetched() && wait.timer)
                         {
                             wakes.push(fetched());
@@ -311,10 +369,10 @@ export function processController(deps){
                         {
                             wakes.push(cpu.executorBell().waitAsync(othersRung, IDLE_LOOK_MS));
                         }
-                        await pacing.wait({
-                            timer: wait.timer, sleep: wait.timer,
-                            deadlineMs: nextDeadlineMs(), wakes,
-                        });
+                        until.timer = wait.timer;
+                        until.sleep = wait.timer;
+                        until.deadlineMs = nextDeadlineMs();
+                        await pacing.wait(until);
                         // This time passed for the guest too, and it is the only
                         // time nothing credits. A thread suspended on a host call
                         // is parked on `hlt` and still counts as runnable, so the
@@ -334,9 +392,9 @@ export function processController(deps){
                         // the host by name, the process's other executors.
                         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
                         {
-                            const call = onHost > 0 ? ` ${bridge.lastSuspended()}` : '';
-                            journal.note(`${wait.phase}${call}${othersRung !== null
-                                ? ' others' : ''}`, waitedMs);
+                            journal.note(noteName(wait.phase,
+                                onHost > 0 ? bridge.lastSuspended() : '',
+                                othersRung !== null), waitedMs);
                         }
                     }
 
@@ -428,7 +486,7 @@ export function processController(deps){
                         let tick = 0;
                         while (tick < HOST_ANSWER_TICKS && step.ran.awaitingHost)
                         {
-                            await null;
+                            await SETTLED;
                             tick++;
                         }
                         kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);

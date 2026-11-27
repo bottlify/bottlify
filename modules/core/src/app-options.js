@@ -480,8 +480,10 @@
  *     null to go straight on. `pending` says what the host may have an answer
  *     for -- calls suspended on it, ranges in flight, a turn that retired
  *     nothing -- so a host can yield only when there is something to deliver.
+ *     `pending`, and `until` below, are records the loop fills again at every
+ *     turn: read at once, not kept.
  * @property {(until: { timer: boolean, sleep: boolean, deadlineMs: number | null,
- *     wakes: Promise<void>[] }) => Promise<void>} wait
+ *     wakes: Promise<unknown>[] }) => Promise<void>} wait
  *     The turn found something waiting on the host. `sleep` says nothing at
  *     all can run until the host or the clock says so, and a host with a
  *     thread of its own may then sleep: `deadlineMs` is how long, in wall

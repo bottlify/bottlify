@@ -3142,6 +3142,8 @@ function twoBlockRuntime(image, low){
         (below(at) ? low : image)[name]?.(at, a, b);
     // Asked for at every crossing: taken once, not through the image's proxy each time.
     const { entryOf: imageEntryOf, run: imageRun } = image;
+    /** The two runtimes' slice counters, summed (`counters`). @type {Record<string, any>} */
+    const summed = {};
     const lowEntryOf = low.entryOf.bind(low);
     const lowRun = low.run.bind(low);
     /** @type {Record<string, any>} */
@@ -3196,12 +3198,17 @@ function twoBlockRuntime(image, low){
             return image.interpretWith?.(entry, entered);
         },
         diagnostics: ()=>({ ...image.diagnostics(), belowBlock: low.diagnostics() }),
+        // Into one record kept, as each runtime's own: asked at every slice.
         counters: ()=>{
-            const first = image.counters();
-            const second = low.counters();
-            return Object.fromEntries(Object.entries(first).map(([key, value])=>[key,
-                typeof value === 'number' && typeof second[key] === 'number'
-                    ? value + second[key] : value]));
+            const first = /** @type {Record<string, any>} */ (image.counters());
+            const second = /** @type {Record<string, any>} */ (low.counters());
+            for (const key in first)
+            {
+                const value = first[key];
+                summed[key] = typeof value === 'number' && typeof second[key] === 'number'
+                    ? value + second[key] : value;
+            }
+            return /** @type {any} */ (summed);
         },
     };
     // Whatever else is asked is the image's, through the prototype.

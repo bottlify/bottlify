@@ -752,7 +752,8 @@ export function engineContractProblem(engineModule, url){
  *     sorts and explains the exit targets, so it is not for a slice.
  * @property {() => Pick<EngineDiagnostics, 'regions' | 'modules' | 'invalidations'
  *     | 'translatedShare' | 'retired' | 'translateMs' | 'exits'> & { timed: boolean }} counters
- *     The slice-cheap subset, read by the frame counters every slice.
+ *     The slice-cheap subset, read by the frame counters every slice: one record the
+ *     runtime fills again at each call, read at once and not kept.
  */
 
 /**

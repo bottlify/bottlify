@@ -109,11 +109,14 @@ export function createBell(){
          * The same wait without blocking: for a caller whose other wake comes
          * through the event loop, which a blocking wait holds back.
          *
+         * Cellar's own promise, not one of this function's made around it: a
+         * yield looks at the bell every few milliseconds.
+         *
          * @param {number} seen @param {number} ms
-         * @returns {Promise<void>}
+         * @returns {Promise<import('@bottlify/cellar').WaitEnd>}
          */
-        async waitAsync(seen, ms){
-            await waitForAsync(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms));
+        waitAsync(seen, ms){
+            return waitForAsync(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms));
         },
         /**
          * Whether no ready thread waits for an executor: then one whose slice

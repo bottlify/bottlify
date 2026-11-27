@@ -24,6 +24,7 @@ import {
     createGuestView, createKernelGl, resolveOpenglEntry,
 } from './process/sidecar.js';
 import { idleWait, answeringWhile } from './process/run-waits.js';
+import { bytesPerAwait, bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
 import { allocateCleared, RESOURCE_ALIGNMENT } from './process/process-layout.js';
 import {
     resourceLookup, compatibilityOf, versionResourceOf, imageInMemory,
@@ -2313,11 +2314,13 @@ test('a yield answers the other executors each time their bell rings while it la
     let rung = 0;
     /** @type {(() => void)[]} */
     let sleepers = [];
+    let looks = 0;
     const bell = {
         rung: ()=>rung,
         waitAsync: (/** @type {number} */ seen, /** @type {number} */ ms)=>new Promise(wake=>{
             void seen;
             void ms;
+            looks++;
             sleepers.push(()=>wake(undefined));
         }),
     };
@@ -2327,27 +2330,69 @@ test('a yield answers the other executors each time their bell rings while it la
         sleepers = [];
         woken.forEach(wake=>wake());
     };
-    /** @type {() => void} */
-    let finish = ()=>{};
-    const pending = new Promise(done=>{
-        finish = ()=>done(undefined);
-    });
     let answers = 0;
-    const waited = answeringWhile(/** @type {Promise<void>} */ (pending), bell, ()=>{
+    const answering = answeringWhile(bell, ()=>{
         answers++;
     });
+    answering.begin();
     await Promise.resolve();
     ring();
     await new Promise(next=>setImmediate(next));
     ring();
     await new Promise(next=>setImmediate(next));
     assert.equal(answers, 2, 'each ring during the yield answered');
-    finish();
-    await waited;
+    answering.end();
     ring();
     await new Promise(next=>setImmediate(next));
     assert.equal(answers, 2, 'nothing answered once the yield is over');
-    assert.equal(await answeringWhile(Promise.resolve(), null, ()=>{
-        answers++;
-    }), undefined, 'no bell: the yield alone');
+    const armed = looks;
+    answering.begin();
+    answering.end();
+    answering.begin();
+    answering.end();
+    assert.equal(looks, armed + 1, 'a look parked on the bell serves the yields after it');
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'and answers none of the gaps between them');
+});
+
+test('a yield that answers the executors makes no garbage of its own', async()=>{
+    // The engine thread yields thousands of times a second; a promise, a race
+    // and closures a yield were 2.5 KB each (node).
+    const parked = new Promise(()=>{});
+    const answering = answeringWhile({ rung: ()=>0, waitAsync: ()=>parked }, ()=>{});
+    const settled = Promise.resolve();
+    const bytes = await bytesPerAwait(async()=>{
+        answering.begin();
+        await settled;
+        answering.end();
+    }, { empty: async()=>{
+        await settled;
+    } });
+    assert.ok(bytes < 16, `${bytes.toFixed(1)} bytes a yield`);
+});
+
+test('a turn waiting on the host is told how without a record made for it', async()=>{
+    const waiting = { fetching: 0, idlers: 1, suspended: 1, spun: 9, others: false };
+    assert.deepEqual(idleWait(waiting), { phase: 'idle-message-wait', timer: true });
+    // Kept, as the run loop keeps it across the wait: a record that escapes
+    // is made on the heap (105 bytes a wait, node, before).
+    /** @type {any} */
+    let kept = null;
+    const bytes = await bytesPerCall(()=>{
+        kept = idleWait(waiting);
+    });
+    assert.equal(kept.timer, true);
+    assert.ok(bytes < 8, `${bytes.toFixed(1)} bytes a wait`);
+});
+
+test('a trip to the event loop makes nothing beside the trip itself', async()=>{
+    const settled = Promise.resolve();
+    let clock = 0;
+    const trip = pacedYield({ macrotask: ()=>settled, now: ()=>clock++, intervalMs: 0 });
+    const pending = { suspended: 0, fetching: 0, idlers: 0, spun: 1 };
+    // The promise that resets the clock when the trip ends, and its reaction
+    // (168 bytes, node): no closure a trip, which made it 226.
+    const bytes = await bytesPerAwait(()=>/** @type {Promise<void>} */ (trip(pending)));
+    assert.ok(bytes < 200, `${bytes.toFixed(1)} bytes a trip`);
 });

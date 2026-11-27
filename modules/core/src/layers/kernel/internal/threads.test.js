@@ -12,6 +12,7 @@ import {
 } from './threads.js';
 import { createSwitcher } from './switch.js';
 import { createSyncObjects } from './sync.js';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 
 /**
  * A cpu whose slices retire a fixed number of instructions, so scheduling can
@@ -1968,4 +1969,31 @@ test('a ready thread whose own executor is busy runs here before a thread it out
     const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'sound' });
     Object.assign(sound, { home: 1, priority: 2 });
     assert.equal(sched.runOnce().ran, sound, 'the sound thread runs here, over main');
+});
+
+test('a turn on two executors chooses without making lists, records or iterators', async()=>{
+    // A game's engine thread turns thousands of times a second: the choice's
+    // splices, its Map of placements walked by iterators, a record and two
+    // closures a placement, and its lists emptied by their length (each push
+    // then made a new store) were 1.6 KB a turn of three threads on two
+    // executors (node). What is left is the turn's answer: some 100 bytes run
+    // alone, 370 once the other tests' cpus have made the scheduler's code polymorphic.
+    const { cpu } = twoExecutors();
+    // A context captured into the thread's own record, as the engine's is.
+    /** @type {any} */ (cpu).captureContext = (/** @type {any} */ context)=>context ?? { saved: true };
+    // The executors a list kept, and clocks whose readings are no numbers
+    // made on the heap: what is counted is the scheduler's own.
+    const remotes = cpu.executors();
+    cpu.executors = ()=>remotes;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        now: ()=>0, wall: ()=>0 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'third' });
+    sched.runOnce();
+    assert.equal(sched.processorOf(worker), 1, 'the worker holds the other executor');
+    const bytes = await bytesPerCall(()=>{
+        sched.runOnce();
+    });
+    assert.ok(bytes < 512, `${bytes.toFixed(0)} bytes a turn`);
 });

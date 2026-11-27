@@ -259,6 +259,49 @@ const readyNow = thread=>{
 };
 
 /**
+ * Takes the item at `at` out of `list` in place and answers it: a splice
+ * makes an array of what it took, and the scheduler takes threads and
+ * executors out of its lists at every turn.
+ *
+ * @template T @param {T[]} list @param {number} at @returns {T}
+ */
+function removeAt(list, at){
+    const item = list[at];
+    for (let i = at + 1; i < list.length; i++)
+    {
+        list[i - 1] = list[i];
+    }
+    list.pop();
+    return item;
+}
+
+/**
+ * Empties a list kept for reuse, keeping its room: an array's length set to 0
+ * lets its store go, and the next push makes a new one (152 bytes a turn, a
+ * list of three, node).
+ *
+ * @param {any[]} list
+ */
+function emptied(list){
+    while (list.length > 0)
+    {
+        list.pop();
+    }
+}
+
+/** Whether executor `index` is among `remotes`, walked. @param {any[]} remotes @param {number} index */
+function isOpen(remotes, index){
+    for (let at = 0; at < remotes.length; at++)
+    {
+        if (remotes[at].index === index)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @param {Object} options
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
@@ -651,12 +694,11 @@ export function createScheduler(options){
     let noDeadlineBefore = null;
 
     /**
-     * The threads that were ready when the running slice began: a thread
-     * among them was passed over by the choice that started it.
-     *
-     * @type {Set<any>}
+     * How many threads were ready when the running slice began, passed over
+     * by the choice that started it: a count, as a set of them emptied at
+     * every slice made its table again.
      */
-    const readyAtSlice = new Set();
+    let readyAtSlice = 0;
     /**
      * How parallel the process's threads are: the host milliseconds and the
      * instructions of every slice, by how many threads could have run during
@@ -773,6 +815,21 @@ export function createScheduler(options){
         noDeadlineBefore = soonest();
     };
 
+    /** What a thread ranks at time `at`: starved, or its priority. @param {any} thread @param {number} at */
+    const rankAt = (thread, at)=>(at - thread.readySince >= starvation
+        ? STARVED
+        : absolutePriority(thread.priority));
+    /** Whether a thread's host call answered later still owes it the processor. */
+    const continuesLate = ()=>{
+        for (let i = 0; i < threads.length; i++)
+        {
+            if (threads[i].hostContinues && threads[i].awaitingHost)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
     /**
      * The thread to run of the ready `candidates`: the highest priority, the
      * queue's order among equals, one passed over too long first of all.
@@ -795,17 +852,32 @@ export function createScheduler(options){
             // through the device's methods -- otherwise handed the processor
             // to every other ready thread for a whole slice each, per call.
             // Unless someone has starved or outranks it.
-            const resumed = candidates.find(thread=>thread.hostContinues);
-            if (resumed)
+            // Walked, not filtered: a choice is made at every turn.
+            let resumed = null;
+            for (let i = 0; i < candidates.length && resumed === null; i++)
+            {
+                resumed = candidates[i].hostContinues ? candidates[i] : null;
+            }
+            if (resumed !== null)
             {
                 resumed.hostContinues = false;
-                const others = candidates.filter(thread=>thread !== resumed);
-                if (others.some(thread=>at - thread.readySince >= starvation))
+                let starved = false;
+                let outranked = false;
+                for (let i = 0; i < candidates.length; i++)
+                {
+                    const other = candidates[i];
+                    if (other !== resumed)
+                    {
+                        starved ||= at - other.readySince >= starvation;
+                        outranked ||= absolutePriority(other.priority)
+                            > absolutePriority(resumed.priority);
+                    }
+                }
+                if (starved)
                 {
                     hostTurns.starved++;
                 }
-                else if (others.some(thread=>absolutePriority(thread.priority)
-                    > absolutePriority(resumed.priority)))
+                else if (outranked)
                 {
                     hostTurns.outranked++;
                 }
@@ -815,18 +887,14 @@ export function createScheduler(options){
                     return resumed;
                 }
             }
-            else if (threads.some(thread=>thread.hostContinues && thread.awaitingHost))
+            else if (continuesLate())
             {
                 hostTurns.late++;
             }
-            /** @param {any} thread */
-            const rank = thread=>(at - thread.readySince >= starvation
-                ? STARVED
-                : absolutePriority(thread.priority));
-            let best = rank(next);
+            let best = rankAt(next, at);
             for (let i = 1; i < candidates.length; i++)
             {
-                const contender = rank(candidates[i]);
+                const contender = rankAt(candidates[i], at);
                 if (contender > best)
                 {
                     best = contender;
@@ -955,7 +1023,7 @@ export function createScheduler(options){
             next.crossSeen = true;
         }
         next.crossingsAt = next.crossings;
-        const could = Math.min(readyAtSlice.size, 3);
+        const could = Math.min(readyAtSlice, 3);
         parallel.ms[could] += held;
         parallel.instructions[could] += instructions;
         const turn = recentTurns[recentAt];
@@ -1050,27 +1118,36 @@ export function createScheduler(options){
             next.state = ThreadState.READY;
             next.readySince = now();
             // To the back of the queue, so the next call picks someone else.
-            threads.splice(threads.indexOf(next), 1);
-            threads.push(next);
+            threads.push(removeAt(threads, threads.indexOf(next)));
         }
 
     };
 
     /**
-     * The thread each of the process's other executors is running, when and
-     * where its slice began, what this executor had retired by then
-     * (`hereFrom`), and whether this executor, left nothing to run, has called
-     * it back (`recalled`).
+     * The thread each of the process's other executors is running, in the
+     * order they were placed: the executor, when and where its slice began,
+     * what this executor had retired by then (`hereFrom`), and whether this
+     * executor, left nothing to run, has called it back (`recalled`).
      *
-     * @type {Map<any, { thread: any, began: number, from: number, hereFrom: number,
-     *     recalled?: boolean }>}
+     * A list walked by index, of one record per executor kept for the run
+     * (`placementOf`): a turn walks it several times, and a Map's iterators,
+     * its entries and a record a placement were garbage at every turn.
+     *
+     * @typedef {{ remote: any, thread: any, began: number, from: number, hereFrom: number,
+     *     recalled: boolean, takenAt: number }} Placement
+     * @type {Placement[]}
      */
-    const placed = new Map();
+    const placed = [];
+    /** Each executor's record, by its index. @type {Placement[]} */
+    const placements = [];
+    /** The record of executor `remote`, made at its first placement. @param {any} remote */
+    const placementOf = remote=>(placements[remote.index] ??= { remote, thread: null, began: 0,
+        from: 0, hereFrom: 0, recalled: false, takenAt: -1 });
     /** Whether `thread` runs on one of the other executors now. @param {any} thread */
     const placedElsewhere = thread=>{
-        for (const on of placed.values())
+        for (let at = 0; at < placed.length; at++)
         {
-            if (on.thread === thread)
+            if (placed[at].thread === thread)
             {
                 return true;
             }
@@ -1109,8 +1186,6 @@ export function createScheduler(options){
             : ms < 20 ? '20' : 'more';
         buckets[key]++;
     };
-    /** When each other executor's last slice was taken, for the gap before its next. @type {Map<any, number>} */
-    const takenAt = new Map();
     /** When the last shared turn returned, for the time the caller kept between turns. */
     let sharedTurnEnd = -1;
 
@@ -1371,7 +1446,7 @@ export function createScheduler(options){
         {
             return 0;
         }
-        if (here !== 0 && remotes.some(remote=>remote.index === here) && !pinnedHere)
+        if (here !== 0 && isOpen(remotes, here) && !pinnedHere)
         {
             return here;
         }
@@ -1407,7 +1482,7 @@ export function createScheduler(options){
      */
     const waitsForExecutor = (thread, remotes)=>{
         if (thread.affinityMask === undefined || allowedOn(thread, 0)
-            || remotes.some(remote=>allowedOn(thread, remote.index)))
+            || freeFor(remotes, thread) >= 0)
         {
             return false;
         }
@@ -1435,7 +1510,7 @@ export function createScheduler(options){
      */
     const homeOf = (thread, remotes)=>{
         if (thread.home !== undefined && allowedOn(thread, thread.home)
-            && (thread.home === 0 || remotes.some(remote=>remote.index === thread.home)))
+            && (thread.home === 0 || isOpen(remotes, thread.home)))
         {
             return thread.home;
         }
@@ -1498,9 +1573,10 @@ export function createScheduler(options){
     const runnable = (/** @type {any[]} */ into = [])=>{
         // Asked at every turn: into a list the caller keeps, the few placed
         // walked, nothing copied.
-        into.length = 0;
-        for (const thread of threads)
+        emptied(into);
+        for (let at = 0; at < threads.length; at++)
         {
+            const thread = threads[at];
             if (thread.state === ThreadState.READY && !thread.awaitingHost
                 && !(thread.suspendCount > 0) && !placedElsewhere(thread))
             {
@@ -1511,9 +1587,9 @@ export function createScheduler(options){
     };
     /** Whether a thread runs on another executor and may run here too. */
     const placedMayRunHere = ()=>{
-        for (const on of placed.values())
+        for (let at = 0; at < placed.length; at++)
         {
-            if (allowedOn(on.thread, 0))
+            if (allowedOn(placed[at].thread, 0))
             {
                 return true;
             }
@@ -1570,11 +1646,12 @@ export function createScheduler(options){
             beforeFirstSlice = null;
             first?.();
         }
-        for (const [remote, on] of placed)
+        for (let at = 0; at < placed.length; at++)
         {
-            if (on.thread === next)
+            if (placed[at].thread === next)
             {
-                throw new Error(`${next.name} started while executor ${remote.index} runs it`);
+                throw new Error(`${next.name} started while executor ${placed[at].remote.index}`
+                    + ' runs it');
             }
         }
     };
@@ -1592,25 +1669,31 @@ export function createScheduler(options){
             current.context = cpu.captureContext(current.context);
             current = null;
         }
-        const resume = resumeOf(next);
+        const on = placementOf(remote);
+        on.thread = next;
+        placing.on = on;
+        placing.resume = resumeOf(next);
         noteGap(next);
-        let from = 0;
-        cpu.onExecutor(remote.index, ()=>{
-            switcher.switchTo(null, next, resume);
-            watchStack(next);
-            from = cpu.eip?.() ?? 0;
-        });
+        cpu.onExecutor(remote.index, switchPlaced);
+        placing.on = null;
+        placing.resume = null;
         note(next, runsOn[remote.index] ??= `runs on executor ${remote.index}`);
         const began = wall();
-        const taken = takenAt.get(remote);
-        if (taken !== undefined)
+        if (on.takenAt >= 0)
         {
-            sharedTime.gapMs += began - taken;
+            sharedTime.gapMs += began - on.takenAt;
             sharedTime.gaps++;
-            bucket(sharedTime.gapsUnder, began - taken);
+            bucket(sharedTime.gapsUnder, began - on.takenAt);
         }
         startsRunning(next);
-        placed.set(remote, { thread: next, began, from, hereFrom: sharedTime.hereRetired });
+        on.began = began;
+        on.hereFrom = sharedTime.hereRetired;
+        on.recalled = false;
+        // Where it is placed already, it keeps its place in the order.
+        if (!placed.includes(on))
+        {
+            placed.push(on);
+        }
         // Kept as it was and said only when a report asks: a placement is made
         // thousands of times a second, and a string a time was garbage to collect.
         const record = placementRing[placementAt++ % placementRing.length];
@@ -1621,7 +1704,28 @@ export function createScheduler(options){
         record.trade = null;
         remote.start(quantum);
         executorSlices++;
-        mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
+        mostAtOnce = Math.max(mostAtOnce, placed.length + (inSlice ? 1 : 0));
+    };
+    /**
+     * What `switchPlaced` puts on the executor: one function for every
+     * placement, not a closure made for each.
+     * @type {{ on: Placement | null, resume: any }}
+     */
+    const placing = { on: null, resume: null };
+    const switchPlaced = ()=>{
+        const on = /** @type {Placement} */ (placing.on);
+        switcher.switchTo(null, on.thread, placing.resume);
+        watchStack(on.thread);
+        on.from = cpu.eip?.() ?? 0;
+    };
+    /** The placement whose slice `takeContext` takes off its executor. @type {Placement | null} */
+    let taking = null;
+    /** Where that slice ended. */
+    let takenEip = 0;
+    const takeContext = ()=>{
+        const on = /** @type {Placement} */ (taking);
+        on.thread.context = cpu.captureContext(on.thread.context);
+        takenEip = cpu.eip?.() ?? 0;
     };
 
     let crossingsUnclocked = 0;
@@ -1634,6 +1738,10 @@ export function createScheduler(options){
         }
     };
 
+    /** The ready threads a shared turn counts, a list kept. @type {any[]} */
+    const sharedReady = [];
+    /** The ready threads an answer inside a turn weighs, a list kept. @type {any[]} */
+    const answeredReady = [];
     /** What `answerExecutors` answers: one record, read by its caller at once. */
     const answeredTurn = { ran: /** @type {any} */ (null), instructions: 0 };
     /** The placement whose crossing `answerCrossing` answers. @type {any} */
@@ -1687,7 +1795,7 @@ export function createScheduler(options){
      * @returns {{ ran: any | null, instructions: number }} the last thread whose slice ended
      */
     const answerExecutors = ()=>{
-        if (answering || placed.size === 0)
+        if (answering || placed.length === 0)
         {
             answeredTurn.ran = null;
             answeredTurn.instructions = 0;
@@ -1704,22 +1812,24 @@ export function createScheduler(options){
         const from = wall();
         try
         {
-            for (const [remote, on] of placed)
+            for (let next = 0; next < placed.length;)
             {
+                const on = placed[next];
+                const remote = on.remote;
                 answeringOn = on;
                 const ended = remote.step(answerCrossing);
                 if (ended === null)
                 {
+                    next++;
                     continue;
                 }
-                placed.delete(remote);
-                takenAt.set(remote, wall());
+                removeAt(placed, next);
+                on.takenAt = wall();
                 sharedTime.heldMs += wall() - on.began;
-                let at = 0;
-                cpu.onExecutor(remote.index, ()=>{
-                    on.thread.context = cpu.captureContext(on.thread.context);
-                    at = cpu.eip?.() ?? 0;
-                });
+                taking = on;
+                cpu.onExecutor(remote.index, takeContext);
+                taking = null;
+                const at = takenEip;
                 if (ended.fault !== null)
                 {
                     cpu.remoteFault?.(ended.fault);
@@ -1776,11 +1886,12 @@ export function createScheduler(options){
         }
         else if (inTurn && (readiedInAnswer || ran !== null))
         {
-            for (const thread of runnable())
+            const readied = runnable(answeredReady);
+            for (let at = 0; at < readied.length; at++)
             {
-                if (thread !== current)
+                if (readied[at] !== current)
                 {
-                    noteReady(thread);
+                    noteReady(readied[at]);
                 }
             }
         }
@@ -1842,16 +1953,16 @@ export function createScheduler(options){
         watchStack(next);
         const from = cpu.eip?.() ?? 0;
         const began = wall();
-        readyAtSlice.clear();
-        for (const thread of threads)
+        readyAtSlice = 0;
+        for (let at = 0; at < threads.length; at++)
         {
-            if (thread !== next && thread.state === ThreadState.READY)
+            if (threads[at] !== next && threads[at].state === ThreadState.READY)
             {
-                readyAtSlice.add(thread);
+                readyAtSlice++;
             }
         }
         inSlice = true;
-        mostAtOnce = Math.max(mostAtOnce, placed.size + 1);
+        mostAtOnce = Math.max(mostAtOnce, placed.length + 1);
         // A thread nobody else is ready beside has nobody to be fair to: its
         // turn is longer, as the turn itself -- the host's account, the next
         // choice, the event loop's look -- was a quarter of the time of a
@@ -1875,8 +1986,8 @@ export function createScheduler(options){
         // interrupt this one's slice (`interruptible`), at its next back edge,
         // its turns are as long with them running as without.
         const clear = noDeadlineBefore === null ? Infinity : noDeadlineBefore - now();
-        const others = placed.size === 0 || cpu.interruptible?.() === true;
-        const solo = (!shared || others) && readyAtSlice.size === 0
+        const others = placed.length === 0 || cpu.interruptible?.() === true;
+        const solo = (!shared || others) && readyAtSlice === 0
             && clear > SOLO_CLEAR_MS;
         // No turn past the soonest deadline, at this executor's measured rate:
         // the wait due then ends at the turn's end, as a timer's interrupt
@@ -1957,25 +2068,25 @@ export function createScheduler(options){
         const candidates = runnable(chosenCandidates);
         // One whose processor this executor is about to play takes nothing new.
         const free = chosenFree;
-        free.length = 0;
-        for (const remote of remotes)
+        emptied(free);
+        for (let at = 0; at < remotes.length; at++)
         {
-            if (!remote.busy() && remote.index !== tradeWanted)
+            if (!remotes[at].busy() && remotes[at].index !== tradeWanted)
             {
-                free.push(remote);
+                free.push(remotes[at]);
             }
         }
         /** @type {any} */
         let here = null;
         const waiting = chosenWaiting;
-        waiting.length = 0;
-        goingThreads.length = 0;
-        goingRemotes.length = 0;
+        emptied(waiting);
+        emptied(goingThreads);
+        emptied(goingRemotes);
         while (candidates.length > 0 && (here === null || free.length > 0))
         {
             const next = pick(candidates);
             // A list of this turn's (`runnable`): the one taken goes from it in place.
-            candidates.splice(candidates.indexOf(next), 1);
+            removeAt(candidates, candidates.indexOf(next));
             const home = keptHere(next) ? 0 : homeOf(next, remotes);
             let remoteAt = -1;
             for (let at = 0; at < free.length; at++)
@@ -1994,7 +2105,7 @@ export function createScheduler(options){
             {
                 goingRemotes.push(free[remoteAt]);
                 goingThreads.push(next);
-                free.splice(remoteAt, 1);
+                removeAt(free, remoteAt);
             }
             else
             {
@@ -2013,8 +2124,8 @@ export function createScheduler(options){
                 {
                     here = goingThreads[at];
                     free.push(goingRemotes[at]);
-                    goingThreads.splice(at, 1);
-                    goingRemotes.splice(at, 1);
+                    removeAt(goingThreads, at);
+                    removeAt(goingRemotes, at);
                     break;
                 }
             }
@@ -2023,8 +2134,9 @@ export function createScheduler(options){
         {
             place(goingRemotes[at], goingThreads[at]);
         }
-        for (const next of waiting)
+        for (let waited = 0; waited < waiting.length; waited++)
         {
+            const next = waiting[waited];
             if (here === null && allowedOn(next, 0))
             {
                 here = next;
@@ -2041,9 +2153,7 @@ export function createScheduler(options){
                 const at = freeFor(free, here);
                 if (at >= 0)
                 {
-                    const remote = free[at];
-                    free.splice(at, 1);
-                    place(remote, here);
+                    place(removeAt(free, at), here);
                 }
                 here = next;
                 continue;
@@ -2055,7 +2165,7 @@ export function createScheduler(options){
                 const at = here === null || keptHere(here) ? -1 : freeFor(free, here);
                 if (at >= 0)
                 {
-                    place(free.splice(at, 1)[0], here);
+                    place(removeAt(free, at), here);
                     here = next;
                 }
                 continue;
@@ -2063,9 +2173,7 @@ export function createScheduler(options){
             const at = freeFor(free, next);
             if (at >= 0)
             {
-                const remote = free[at];
-                free.splice(at, 1);
-                place(remote, next);
+                place(removeAt(free, at), next);
                 continue;
             }
             // One that may run only here takes this executor's turn from one
@@ -2076,7 +2184,7 @@ export function createScheduler(options){
                 : freeFor(free, here);
             if (there >= 0)
             {
-                place(free.splice(there, 1)[0], here);
+                place(removeAt(free, there), here);
                 here = next;
             }
             else if (here !== null && free.length === 0)
@@ -2089,16 +2197,17 @@ export function createScheduler(options){
         // bound to the host waits for this executor and wants no other.
         let unplaced = 0;
         let left = false;
-        for (const thread of candidates)
+        for (let at = 0; at < candidates.length; at++)
         {
-            if (!keptHere(thread))
+            if (!keptHere(candidates[at]))
             {
                 unplaced++;
                 left = true;
             }
         }
-        for (const thread of waiting)
+        for (let at = 0; at < waiting.length; at++)
         {
+            const thread = waiting[at];
             if (thread !== here && !keptHere(thread) && thread.state === ThreadState.READY)
             {
                 left = true;
@@ -2120,16 +2229,16 @@ export function createScheduler(options){
         {
             idleSince = idleSince < 0 ? wall() : idleSince;
             let handsOff = false;
-            for (const on of placed.values())
+            for (let at = 0; at < placed.length; at++)
             {
-                handsOff ||= wall() - (on.thread.wokeHereAt ?? -Infinity) < HANDOFF_MS;
+                handsOff ||= wall() - (placed[at].thread.wokeHereAt ?? -Infinity) < HANDOFF_MS;
             }
             recall = wall() - idleSince >= (handsOff ? RECALL_MS : IDLE_RECALL_MS);
             if (recall)
             {
-                for (const on of placed.values())
+                for (let at = 0; at < placed.length; at++)
                 {
-                    on.recalled = true;
+                    placed[at].recalled = true;
                 }
             }
         }
@@ -2145,8 +2254,9 @@ export function createScheduler(options){
         // left, it runs this turn, still ready until it does; one bound to the
         // host waits for this executor, not for them.
         let wanted = recall || tradeWanted >= 0;
-        for (const on of placed.values())
+        for (let at = 0; at < placed.length; at++)
         {
+            const on = placed[at];
             wanted ||= on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0
                 || keptHere(on.thread);
         }
@@ -2197,6 +2307,20 @@ export function createScheduler(options){
     };
 
     /**
+     * Whether another executor's slice is ending, or its thread waits for a
+     * host call's later answer (`takeEnding`).
+     */
+    const anyEnding = ()=>{
+        for (let at = 0; at < placed.length; at++)
+        {
+            if (placed[at].remote.ending?.() || placed[at].thread.awaitingHost === true)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    /**
      * The turn's result once every other executor whose thread waits for a
      * host call's later answer (`awaitingHost`), or which an answer halted or
      * stopped, has given it back: it is parked, so its slice ends at once. The
@@ -2212,8 +2336,7 @@ export function createScheduler(options){
     const takeEnding = turn=>{
         const bell = cpu.executorBell();
         const from = wall();
-        while ([...placed].some(([remote, on])=>remote.ending?.()
-            || on.thread.awaitingHost === true) && wall() - from < ENDING_WAIT_MS)
+        while (anyEnding() && wall() - from < ENDING_WAIT_MS)
         {
             const seen = bell.rung();
             const taken = answerExecutors();
@@ -2252,11 +2375,11 @@ export function createScheduler(options){
                 return { ran: turn.ran, instructions: turn.instructions + instructions
                     + after.instructions, switched: turn.switched };
             }
-            if (placed.size === 0 && awaitingExecutor)
+            if (placed.length === 0 && awaitingExecutor)
             {
                 return { ran, instructions, switched: false, elsewhere: true };
             }
-            if (placed.size === 0)
+            if (placed.length === 0)
             {
                 // Nothing runs anywhere: the clock to the soonest deadline, as with
                 // one executor, and a thread that woke there runs in this turn --
@@ -2265,7 +2388,7 @@ export function createScheduler(options){
                 if (deadline !== null && skipTo(deadline) !== 0)
                 {
                     expire();
-                    if (runnable().length > 0)
+                    if (runnable(sharedReady).length > 0)
                     {
                         continue;
                     }
@@ -2283,7 +2406,7 @@ export function createScheduler(options){
                 return { ran, instructions, switched: true };
             }
             // A thread made ready runs here next round: this executor is free.
-            if (runnable().length === 0)
+            if (runnable(sharedReady).length === 0)
             {
                 // A host call still to answer through the event loop, which a
                 // wait here holds back: its caller waits for the answer and the
@@ -2322,7 +2445,7 @@ export function createScheduler(options){
 
     // Something the other executors said since they were last answered: the
     // translator forming regions here stops at the next one to let it be.
-    cpu.awaitedBy?.(()=>placed.size > 0 && cpu.executorBell().rung() !== answeredAt);
+    cpu.awaitedBy?.(()=>placed.length > 0 && cpu.executorBell().rung() !== answeredAt);
 
     // Another executor's crossing is answered here with its thread made
     // current (`answerExecutors`): its call is timed as one of this one's.
@@ -2362,7 +2485,7 @@ export function createScheduler(options){
             current.crossings++;
             clockCrossing();
         }
-        if (placed.size === 0)
+        if (placed.length === 0)
         {
             return true;
         }
@@ -2549,11 +2672,11 @@ export function createScheduler(options){
          * @returns {number}
          */
         processorOf(thread){
-            for (const [remote, on] of placed)
+            for (let at = 0; at < placed.length; at++)
             {
-                if (on.thread === thread)
+                if (placed[at].thread === thread)
                 {
-                    return playedBy(remote.index);
+                    return playedBy(placed[at].remote.index);
                 }
             }
             return playedBy(0);

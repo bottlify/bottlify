@@ -183,19 +183,19 @@ export function createMacrotask(){
     {
         // Nothing to close: an immediate holds the process open only until it
         // runs, and whoever is mid-yield is answered when it does.
-        return Object.assign(
-            ()=>new Promise(resolve=>{
-                setImmediate(resolve);
-            }),
-            { close: ()=>{} });
+        /** @param {(value?: any) => void} resolve */
+        const park = resolve=>{
+            setImmediate(resolve);
+        };
+        return Object.assign(()=>new Promise(park), { close: ()=>{} });
     }
     if (typeof MessageChannel !== 'function')
     {
-        return Object.assign(
-            ()=>new Promise(resolve=>{
-                setTimeout(resolve, 0);
-            }),
-            { close: ()=>{} });
+        /** @param {(value?: any) => void} resolve */
+        const park = resolve=>{
+            setTimeout(resolve, 0);
+        };
+        return Object.assign(()=>new Promise(park), { close: ()=>{} });
     }
     const channel = new MessageChannel();
     /** @type {(() => void)[]} */
@@ -205,11 +205,14 @@ export function createMacrotask(){
     // is the cost this was meant to remove.
     channel.port1.onmessage = ()=>waiting.shift()?.();
     channel.port1.start?.();
+    // The promise's executor made once, not once a yield.
+    /** @param {(value?: any) => void} resolve */
+    const park = resolve=>{
+        waiting.push(/** @type {() => void} */ (resolve));
+        channel.port2.postMessage(0);
+    };
     return Object.assign(
-        ()=>new Promise(resolve=>{
-            waiting.push(/** @type {() => void} */ (resolve));
-            channel.port2.postMessage(0);
-        }),
+        ()=>new Promise(park),
         {
             close(){
                 channel.port1.close();
@@ -311,6 +314,10 @@ export const PENDING_YIELD_MS = 1;
  */
 export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, counts }){
     let rested = now();
+    // Made once: a closure a trip was garbage at a trip a turn.
+    const rest = ()=>{
+        rested = now();
+    };
     return pending=>{
         // An answer outstanding is looked for at once only when the turn ran
         // nothing; while other threads run it waits out PENDING_YIELD_MS, since a
@@ -332,9 +339,7 @@ export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false, 
         {
             return null;
         }
-        return macrotask().then(()=>{
-            rested = now();
-        });
+        return macrotask().then(rest);
     };
 }
 
