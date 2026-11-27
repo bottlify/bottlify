@@ -290,10 +290,11 @@ export async function openRunCache(opened = {}){
                  * @param {string} prefix @param {SharedArrayBuffer} channel
                  */
                 served(prefix, channel){
-                    if (!(channel instanceof SharedArrayBuffer) || !mine.delete(prefix)
-                        || !ownersOut.delete(prefix))
+                    const shared = typeof SharedArrayBuffer === 'function'
+                        && channel instanceof SharedArrayBuffer;
+                    if (!shared || !mine.delete(prefix) || !ownersOut.delete(prefix))
                     {
-                        if (channel instanceof SharedArrayBuffer)
+                        if (shared)
                         {
                             openServer(channel).close();
                         }

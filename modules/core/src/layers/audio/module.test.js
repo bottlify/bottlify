@@ -834,13 +834,13 @@ test('a program that writes the primary buffer itself is heard from it', async()
 
 test('a stubbed win32 leaves DirectMusic and the MP3 codec out; a real one refusing is a failure',
     async()=>{
+        const cache = (await testCache({ budget: 32 << 20, segmentBytes: 32 << 20 })).api;
         /** @param {any} win32 */
         const create = win32=>{
             const f = fixture();
             return audioModule.create({ ...f.config, drained: true }, {
                 requireApi: (/** @type {string} */ name)=>({
-                    bridge: { callGuest: async()=>0 }, win32,
-                    cache: { space: ()=>({ hold: ()=>null }) }, memory: f.memory,
+                    bridge: { callGuest: async()=>0 }, win32, cache, memory: f.memory,
                 })[name],
                 provide: ()=>{},
             });

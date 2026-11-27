@@ -19,6 +19,7 @@ import {
     byModule, guestSamples, seedFiles, bundleStoreOptions, drainTable, presentingProcess,
 } from './harness.js';
 import { createMixer } from '../../../src/layers/audio/output/mixer.js';
+import { soundMemory } from '../../../src/layers/audio/output/sound.fixture.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
 function fakeApp(){
@@ -342,7 +343,7 @@ test('the table drain captures each block as mixed, not added onto the one befor
     // A worklet zeroes its block before mixing into it; the harness's stand-in
     // did not, and a steady signal came out of a capture as a ramp to full
     // scale.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer({ shared: true, made: soundMemory() });
     const track = mixer.open({ sampleRate: 48000, channels: 2, bitsPerSample: 16 });
     const level = 1000;
     const steady = new Uint8Array(48000 * 4);
