@@ -246,11 +246,7 @@ export async function layerAt(base){
  *
  * @type {Map<string, string>}
  */
-export const KNOWN_CUTS = new Map([
-    ['ADVAPI32.dll!BuildTrusteeWithObjectsAndSidA',
-        'OBJECTS_AND_SID is laid out 32-bit, its SID pointer a dword: the 64-bit layout'
-            + ' is the fix'],
-]);
+export const KNOWN_CUTS = new Map([]);
 
 /**
  * The handlers that cut an argument the bridge hands them whole (`addresses`,

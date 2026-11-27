@@ -6,9 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { longCall } from './long-call.fixture.js';
 import {
-    declareAddresses, declaringOnRead, forwarded, paramsOf, pointerArg, pointerWidth,
-    wholeAddress, wholeAnswer, wideOf, wideParams,
+    answersAddress, declareAddresses, declaringOnRead, forwarded, paramsOf, pointerArg,
+    pointerWidth, wholeAddress, wholeAnswer, wideOf, wideParams,
 } from './pointers.js';
 
 test('a 32-bit pointer is a dword', ()=>{
@@ -159,3 +160,36 @@ test('a layer\'s library is declared as it is first read, and not made before', 
     assert.deepEqual(all['GLU32.dll'].gluPickMatrix.addresses, [8]);
     assert.deepEqual(Object.keys(all), ['GLU32.dll']);
 });
+
+test('a C++ function whose decorated name answers an address answers it whole past 4 GiB',
+    async()=>{
+        const self = 0x140010000;
+        /** @param {(args: number[]) => number} handler */
+        const member = handler=>({ convention: 'thiscall', argBytes: 8, handler });
+        const table = {
+            '??0exception@@QAE@XZ': member(([at])=>at),
+            '??0exception@@QEAA@XZ': member(([at])=>at),
+            '??_Eexception@@UAEPAXI@Z': member(([at])=>at),
+            '?what@exception@@UEBAPEBDXZ': member(([at])=>at + 8),
+            '??4type_info@@AAEAAV0@ABV0@@Z': member(([at])=>at),
+            '?_query_new_handler@@YAP6AHI@ZXZ': { argBytes: 0, handler: ()=>self },
+            // Answers that are no address: a destructor, an int, void.
+            '??1exception@@UAE@XZ': member(()=>0),
+            '??8type_info@@QBEHABV0@@Z': member(()=>-1),
+            '??_Fbad_cast@@QAEXXZ': member(()=>0),
+        };
+        declareAddresses({ 'msvcrt.dll': table }, {});
+        for (const name of Object.keys(table))
+        {
+            assert.equal(answersAddress(name), /** @type {any} */ (table)[name].returns === 'pointer',
+                name);
+        }
+        assert.equal(await longCall(table['??0exception@@QAE@XZ'], [self, 0]), BigInt(self),
+            'this, whole, both ways in');
+        assert.equal(await longCall(table['?what@exception@@UEBAPEBDXZ'], [self, 0]),
+            BigInt(self + 8));
+        assert.equal(await longCall(table['?_query_new_handler@@YAP6AHI@ZXZ'], []), BigInt(self));
+        assert.equal(await longCall(table['??8type_info@@QBEHABV0@@Z'], [self, 0]),
+            0xffffffffffffffffn, 'an int sign-extended as ever');
+        assert.equal(answersAddress('??1exception@@UAE@XZ'), false);
+    });

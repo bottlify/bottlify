@@ -86,11 +86,7 @@ export const KNOWN = new Map([
  *
  * @type {Map<string, string>}
  */
-export const KNOWN_CUTS = new Map([
-    ['modules/core/src/layers/win32/advapi32/security.js :: BuildTrusteeWithObjectsAndSid',
-        'OBJECTS_AND_SID and TRUSTEE are laid out 32-bit, the pointers in them dwords:'
-            + ' their 64-bit layout is the fix, not the argument'],
-]);
+export const KNOWN_CUTS = new Map([]);
 
 /**
  * @typedef {Object} Layout

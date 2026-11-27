@@ -2249,7 +2249,7 @@ export function createWin32Module(){
                 }
                 try
                 {
-                    memory.assert(address >>> 0, Math.max(1, length), 'write');
+                    memory.assert(wholeAddress(address), Math.max(1, length), 'write');
                     return true;
                 }
                 catch (e){
@@ -5520,6 +5520,7 @@ export function createWin32Module(){
                 // and descriptors, calling the program's own overrides through
                 // their vtables.
                 'MSVCIRT.dll': ()=>createIostreamFunctions({
+                    pointerSize,
                     readMemory,
                     writeMemory,
                     readCString,
@@ -6499,6 +6500,7 @@ export function createWin32Module(){
 
                 'ADVAPI32.dll': ()=>({
                     ...createRegistryFunctions({
+                        pointerSize,
                         readMemory,
                         writeMemory,
                         readCString,
