@@ -1170,13 +1170,6 @@
    "accessor u32": 1,
    "copy readMemory().slice()": 2
   },
-  "rpcrt4/ndr.js": {
-   "accessor i16": 1,
-   "accessor u16": 1,
-   "accessor u32": 1,
-   "accessor u8": 1,
-   "copy readMemory().slice()": 10
-  },
   "rpcrt4/proxyfile.js": {
    "accessor u16": 1,
    "accessor u32": 1,
