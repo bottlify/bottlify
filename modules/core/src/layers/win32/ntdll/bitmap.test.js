@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createBitmapFunctions } from './bitmap.js';
 import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
+import { guestWindow } from '../msvcrt/guest-window.fixture.js';
 
 const HEADER = 0x10;
 const RUNS = 0x40;
@@ -22,11 +23,7 @@ const BITS = 2048;
 function machine(){
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
-    const fns = createBitmapFunctions({
-        readMemory: (at, length)=>memory.slice(at, at + length),
-        writeMemory: (at, bytes)=>memory.set(bytes, at),
-        guest: guestOver(memory),
-    });
+    const fns = createBitmapFunctions({ guest: guestOver(memory) });
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>/** @type {any} */ (fns)[name].handler([HEADER, ...args]);
     call('RtlInitializeBitMap', BUFFER, BITS);
@@ -119,4 +116,61 @@ test('the most and least significant bits of a 64-bit value, -1 for none', ()=>{
     assert.equal(fns.RtlFindMostSignificantBit.handler([0xffff, 0]), 15);
     assert.equal(fns.RtlFindLeastSignificantBit.handler([0, 0x10]), 36);
     assert.equal(fns.RtlFindLeastSignificantBit.handler([0, 0]), 0xff);
+});
+
+test('a 64-bit bitmap past 4 GiB: Buffer pointer-wide at 8, its padding not read or written', ()=>{
+    // RTL_BITMAP's Buffer is aligned to the pointer: at 8 in a 64-bit
+    // process, after four bytes of padding, and every routine finds the bits
+    // through it whole.
+    const base = 0x1_4000_0000;
+    const memory = new Uint8Array(0x1000);
+    const view = new DataView(memory.buffer);
+    const fns = /** @type {any} */ (createBitmapFunctions({
+        guest: guestWindow(memory, { base, pointerSize: 8 }) }));
+    /** @param {number[]} whole  as the bridge hands a 64-bit call's: low dwords, `high` beside */
+    const args = whole=>Object.assign(whole.map(v=>v % 2 ** 32),
+        { high: whole.map(v=>Math.floor(v / 2 ** 32)) });
+    /** @param {string} name @param {...number} rest */
+    const call = (name, ...rest)=>fns[name].handler(args([base + HEADER, ...rest]));
+    const runs = (/** @type {number} */ n)=>Array.from({ length: n * 2 },
+        (_, i)=>view.getUint32(RUNS + i * 4, true));
+    view.setUint32(HEADER + 4, 0xdeadbeef, true);
+    call('RtlInitializeBitMap', base + BUFFER, 64);
+    assert.equal(view.getUint32(HEADER, true), 64);
+    assert.equal(view.getUint32(HEADER + 4, true), 0xdeadbeef, 'the padding as it was');
+    assert.equal(view.getBigUint64(HEADER + 8, true), BigInt(base + BUFFER));
+    const bits = memory.subarray(BUFFER, BUFFER + 8);
+
+    call('RtlSetAllBits');
+    assert.deepEqual([...bits], Array(8).fill(0xff));
+    assert.equal(call('RtlNumberOfSetBits'), 64);
+    call('RtlClearAllBits');
+    assert.deepEqual([...bits], Array(8).fill(0));
+    assert.equal(call('RtlNumberOfClearBits'), 64);
+    call('RtlSetBits', 3, 5);
+    assert.equal(bits[0], 0xf8);
+    assert.equal(call('RtlAreBitsSet', 3, 5), 1);
+    assert.equal(call('RtlAreBitsClear', 8, 56), 1);
+    assert.equal(call('RtlCheckBit', 4), 1);
+    call('RtlClearBits', 4, 1);
+    assert.equal(bits[0], 0xe8);
+    assert.equal(call('RtlFindSetBits', 2, 0), 5);
+    assert.equal(call('RtlFindClearBits', 3, 0), 0);
+    assert.equal(call('RtlFindSetBitsAndClear', 2, 0), 5);
+    assert.equal(bits[0], 0x88);
+    assert.equal(call('RtlFindClearBitsAndSet', 3, 8), 8);
+    assert.equal(bits[1], 0x07);
+    assert.equal(call('RtlFindSetRuns', base + RUNS, 4, 0), 2);
+    assert.deepEqual(runs(2), [3, 1, 7, 4]);
+    assert.equal(call('RtlFindClearRuns', base + RUNS, 1, 1), 1);
+    assert.deepEqual(runs(1), [11, 53]);
+    assert.equal(call('RtlFindNextForwardRunSet', 4, base + OUT), 4);
+    assert.equal(view.getUint32(OUT, true), 7);
+    assert.equal(call('RtlFindNextForwardRunClear', 4, base + OUT), 3);
+    assert.equal(view.getUint32(OUT, true), 4);
+    assert.equal(call('RtlFindLongestRunSet', base + OUT), 4);
+    assert.equal(view.getUint32(OUT, true), 7);
+    assert.equal(call('RtlFindLongestRunClear', base + OUT), 53);
+    assert.equal(view.getUint32(OUT, true), 11);
+    assert.equal(view.getUint32(HEADER + 4, true), 0xdeadbeef, 'the padding untouched');
 });
