@@ -2802,7 +2802,7 @@ export function createWindowFunctions(host){
         if (at !== 0)
         {
             const bytes = new Uint8Array(L.CBTACTIVATESTRUCT.SIZE);
-            putFields(new DataView(bytes.buffer), 0, L, L.CBTACTIVATESTRUCT,
+            putFields(new DataView(bytes.buffer), 0, L.CBTACTIVATESTRUCT,
                 { fMouse: how === WA_CLICKACTIVE ? 1 : 0, hWndActive: active });
             host.writeMemory(at, bytes);
         }
@@ -4275,7 +4275,7 @@ export function createWindowFunctions(host){
         {
             // The WINDOWPOS's address after the three rectangles, a pointer wide.
             const pointer = new DataView(new ArrayBuffer(L.pointerSize));
-            putFields(pointer, -L.NCCALCSIZE_PARAMS.lppos, L, L.NCCALCSIZE_PARAMS,
+            putFields(pointer, -L.NCCALCSIZE_PARAMS.lppos, L.NCCALCSIZE_PARAMS,
                 { lppos: pos });
             host.writeMemory(at + L.NCCALCSIZE_PARAMS.lppos, new Uint8Array(pointer.buffer));
         }
@@ -4650,7 +4650,7 @@ export function createWindowFunctions(host){
         }
         const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         const view = new DataView(bytes.buffer);
-        putFields(view, 0, L, CREATESTRUCTA, {
+        putFields(view, 0, CREATESTRUCTA, {
             lpCreateParams: params ?? 0,
             hInstance: instance,
             hMenu: menu,
@@ -4664,7 +4664,7 @@ export function createWindowFunctions(host){
             lpszClass: classBytes === null ? className : create + classAt,
             dwExStyle: asked,
         });
-        putFields(view, CREATESTRUCTA.SIZE, L, CBT_CREATEWNDA,
+        putFields(view, CREATESTRUCTA.SIZE, CBT_CREATEWNDA,
             { lpcs: create, hwndInsertAfter: 0 });
         host.writeMemory(create, bytes);
         if (nameBytes !== null)
@@ -6377,7 +6377,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         const bytes = new Uint8Array(L.MOUSEHOOKSTRUCT.SIZE);
-        putFields(new DataView(bytes.buffer), 0, L, L.MOUSEHOOKSTRUCT, {
+        putFields(new DataView(bytes.buffer), 0, L.MOUSEHOOKSTRUCT, {
             ptX: entry.x | 0, ptY: entry.y | 0, hwnd: entry.hwnd >>> 0,
             wHitTestCode: client ? HTCLIENT : entry.wParam & 0xffff, dwExtraInfo: 0,
         });

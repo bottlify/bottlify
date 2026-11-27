@@ -5,174 +5,96 @@
  */
 
 /**
- * The user32 structures, laid out the way the guest compiled them.
+ * The user32 structures, declared once as winuser.h and windef.h declare
+ * them (`system/layout.js`): their offsets and sizes at either pointer width
+ * are derived from the declaration, so a field read from the wrong place - a
+ * plausible-looking value rather than an error - is not a typo in a table.
  *
- * Every field of every one of these is four bytes on a 32-bit target, so each
- * offset is just its position in the declaration times four. They are written
- * out anyway, because an offset is part of the ABI: a field read from the wrong
- * place is a plausible-looking value rather than an error, and the guest is the
- * only one who can tell the difference.
- *
- * Reading and writing them lives here too, so that the offsets and the code
+ * Reading and writing them lives here too, so that the layouts and the code
  * that uses them cannot drift apart.
  */
 import { paramsOf, wideParams } from '../common/pointers.js';
+import { POINT, RECT as RECT_LAYOUT, fieldOf, highOf, struct, union }
+    from '../../../system/layout.js';
 
+/** @typedef {import('../../../system/layout.js').Table} Table */
 
+/** WNDCLASSA's fields, which WNDCLASSEXA has between its cbSize and its hIconSm. */
+const WNDCLASS_FIELDS = /** @type {const} */ ([
+    ['style', 'u32'], ['lpfnWndProc', 'ptr'], ['cbClsExtra', 'i32'], ['cbWndExtra', 'i32'],
+    ['hInstance', 'ptr'], ['hIcon', 'handle'], ['hCursor', 'handle'],
+    ['hbrBackground', 'handle'], ['lpszMenuName', 'ptr'], ['lpszClassName', 'ptr'],
+]);
 /** WNDCLASSA, the classic form RegisterClassA takes. */
-export const WNDCLASSA = Object.freeze({
-    style: 0,
-    lpfnWndProc: 4,
-    cbClsExtra: 8,
-    cbWndExtra: 12,
-    hInstance: 16,
-    hIcon: 20,
-    hCursor: 24,
-    hbrBackground: 28,
-    lpszMenuName: 32,
-    lpszClassName: 36,
-    SIZE: 40,
-});
-
+const WNDCLASSA_LAYOUT = struct(WNDCLASS_FIELDS);
 /**
  * WNDCLASSEXA. Not WNDCLASSA with two fields bolted on: cbSize comes first, so
- * every other field sits four bytes further along than its classic twin.
+ * at 32 bits every other field sits four bytes further along than its classic
+ * twin.
  */
-export const WNDCLASSEXA = Object.freeze({
-    cbSize: 0,
-    style: 4,
-    lpfnWndProc: 8,
-    cbClsExtra: 12,
-    cbWndExtra: 16,
-    hInstance: 20,
-    hIcon: 24,
-    hCursor: 28,
-    hbrBackground: 32,
-    lpszMenuName: 36,
-    lpszClassName: 40,
-    hIconSm: 44,
-    SIZE: 48,
-});
-
+const WNDCLASSEXA_LAYOUT = struct([['cbSize', 'u32'], ...WNDCLASS_FIELDS, ['hIconSm', 'handle']]);
 /** MSG. Its `pt` member is a POINT inlined at the end, hence two fields here. */
-export const MSG = Object.freeze({
-    hwnd: 0,
-    message: 4,
-    wParam: 8,
-    lParam: 12,
-    time: 16,
-    ptX: 20,
-    ptY: 24,
-    SIZE: 28,
-});
-
-/** RECT, in the order a guest reads it back. */
-export const RECT = Object.freeze({
-    left: 0,
-    top: 4,
-    right: 8,
-    bottom: 12,
-    SIZE: 16,
-});
-
+const MSG_LAYOUT = struct([['hwnd', 'handle'], ['message', 'u32'], ['wParam', 'ptr'],
+    ['lParam', 'handle'], ['time', 'u32'], ['ptX', 'i32'], ['ptY', 'i32']]);
 /**
- * The structures whose fields include pointers, handles or WPARAM-sized
- * values, laid out for a 64-bit process: those fields are eight bytes and on
- * an eight-byte boundary, which moves every field after them and pads the
- * end to eight. `WIDE` names each such field and how a 32-bit value the
- * engine holds widens into it -- a pointer or a handle, and an LPARAM or an
- * LRESULT, sign-extended as a LONG is, so -1 is -1 whole; a WPARAM or a
- * UINT_PTR zero-extended as a UINT is. The offsets are winuser.h's under
- * _WIN64.
+ * PAINTSTRUCT. The trailing reserved bytes are part of the size a guest
+ * allocated, so they are named here even though nothing writes them.
  */
-const WNDCLASSA64 = Object.freeze({
-    style: 0, lpfnWndProc: 8, cbClsExtra: 16, cbWndExtra: 20, hInstance: 24, hIcon: 32,
-    hCursor: 40, hbrBackground: 48, lpszMenuName: 56, lpszClassName: 64, SIZE: 72,
-});
-const WNDCLASSEXA64 = Object.freeze({
-    cbSize: 0, style: 4, lpfnWndProc: 8, cbClsExtra: 16, cbWndExtra: 20, hInstance: 24,
-    hIcon: 32, hCursor: 40, hbrBackground: 48, lpszMenuName: 56, lpszClassName: 64,
-    hIconSm: 72, SIZE: 80,
-});
-const MSG64 = Object.freeze({
-    hwnd: 0, message: 8, wParam: 16, lParam: 24, time: 32, ptX: 36, ptY: 40, SIZE: 48,
-});
-const PAINTSTRUCT64 = Object.freeze({
-    hdc: 0, fErase: 8, rcPaint: 12, fRestore: 28, fIncUpdate: 32, rgbReserved: 36, SIZE: 72,
-});
-const CREATESTRUCTA64 = Object.freeze({
-    lpCreateParams: 0, hInstance: 8, hMenu: 16, hwndParent: 24, cy: 32, cx: 36, y: 40, x: 44,
-    style: 48, lpszName: 56, lpszClass: 64, dwExStyle: 72, SIZE: 80,
-});
-const CREATESTRUCTA32 = Object.freeze({
-    lpCreateParams: 0x00, hInstance: 0x04, hMenu: 0x08, hwndParent: 0x0c, cy: 0x10, cx: 0x14,
-    y: 0x18, x: 0x1c, style: 0x20, lpszName: 0x24, lpszClass: 0x28, dwExStyle: 0x2c, SIZE: 0x30,
-});
-const CBT_CREATEWNDA32 = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
-const CBT_CREATEWNDA64 = Object.freeze({ lpcs: 0, hwndInsertAfter: 8, SIZE: 16 });
-const WINDOWPOS32 = Object.freeze({
-    hwnd: 0, hwndInsertAfter: 4, x: 8, y: 12, cx: 16, cy: 20, flags: 24, SIZE: 28,
-});
-const WINDOWPOS64 = Object.freeze({
-    hwnd: 0, hwndInsertAfter: 8, x: 16, y: 20, cx: 24, cy: 28, flags: 32, SIZE: 40,
-});
+const PAINTSTRUCT_LAYOUT = struct([['hdc', 'handle'], ['fErase', 'i32'],
+    ['rcPaint', RECT_LAYOUT], ['fRestore', 'i32'], ['fIncUpdate', 'i32'],
+    ['rgbReserved', 'u8', 32]]);
+const CREATESTRUCTA_LAYOUT = struct([['lpCreateParams', 'ptr'], ['hInstance', 'ptr'],
+    ['hMenu', 'handle'], ['hwndParent', 'handle'], ['cy', 'i32'], ['cx', 'i32'], ['y', 'i32'],
+    ['x', 'i32'], ['style', 'i32'], ['lpszName', 'ptr'], ['lpszClass', 'ptr'],
+    ['dwExStyle', 'u32']]);
+const CBT_CREATEWNDA_LAYOUT = struct([['lpcs', 'ptr'], ['hwndInsertAfter', 'handle']]);
+const WINDOWPOS_LAYOUT = struct([['hwnd', 'handle'], ['hwndInsertAfter', 'handle'],
+    ['x', 'i32'], ['y', 'i32'], ['cx', 'i32'], ['cy', 'i32'], ['flags', 'u32']]);
 /** CBTACTIVATESTRUCT: whether a click did it, and the window active until now. */
-const CBTACTIVATESTRUCT32 = Object.freeze({ fMouse: 0, hWndActive: 4, SIZE: 8 });
-const CBTACTIVATESTRUCT64 = Object.freeze({ fMouse: 0, hWndActive: 8, SIZE: 16 });
+const CBTACTIVATESTRUCT_LAYOUT = struct([['fMouse', 'i32'], ['hWndActive', 'handle']]);
 /** MOUSEHOOKSTRUCT: the point on the screen, the window, the hit, the extra word. */
-const MOUSEHOOKSTRUCT32 = Object.freeze({
-    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 12, dwExtraInfo: 16, SIZE: 20,
-});
-const MOUSEHOOKSTRUCT64 = Object.freeze({
-    ptX: 0, ptY: 4, hwnd: 8, wHitTestCode: 16, dwExtraInfo: 24, SIZE: 32,
-});
+const MOUSEHOOKSTRUCT_LAYOUT = struct([['ptX', 'i32'], ['ptY', 'i32'], ['hwnd', 'handle'],
+    ['wHitTestCode', 'u32'], ['dwExtraInfo', 'ptr']]);
 /**
  * INPUT, as SendInput reads it: the type, then the union of MOUSEINPUT,
  * KEYBDINPUT and HARDWAREINPUT, whose dwExtraInfo puts it on an eight-byte
- * boundary at 64 bits. The offsets are the union members' from the INPUT.
+ * boundary at 64 bits. The members' fields are named in the INPUT itself, the
+ * keyboard's dwFlags and each member's dwExtraInfo by their member.
  */
-const INPUT32 = Object.freeze({
-    type: 0, dx: 4, dy: 8, mouseData: 12, dwFlags: 16, wVk: 4, wScan: 6, keyFlags: 8,
-    mouseExtra: 24, keyExtra: 16, SIZE: 28,
-});
-const INPUT64 = Object.freeze({
-    type: 0, dx: 8, dy: 12, mouseData: 16, dwFlags: 20, wVk: 8, wScan: 10, keyFlags: 12,
-    mouseExtra: 32, keyExtra: 24, SIZE: 40,
-});
-
+const INPUT_LAYOUT = struct([['type', 'u32'], [null, union([
+    [['dx', 'i32'], ['dy', 'i32'], ['mouseData', 'u32'], ['dwFlags', 'u32'], [null, 'u32'],
+        ['mouseExtra', 'ptr']],
+    [['wVk', 'u16'], ['wScan', 'u16'], ['keyFlags', 'u32'], [null, 'u32'], ['keyExtra', 'ptr']],
+    [[null, 'u32'], [null, 'u16'], [null, 'u16']],
+])]]);
 /** NCCALCSIZE_PARAMS: three RECTs, then the WINDOWPOS's address. */
-const NCCALCSIZE_PARAMS32 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 52 });
-const NCCALCSIZE_PARAMS64 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 56 });
+const NCCALCSIZE_PARAMS_LAYOUT = struct([['rgrc', RECT_LAYOUT, 3], ['lppos', 'ptr']]);
 
-/**
- * How each eight-byte field widens a 32-bit value: a handle and an LPARAM as a
- * LONG (HWND_TOPMOST is -1 whole), an address and a WPARAM as a UINT. An address
- * - a window procedure, a string, lpCreateParams, a module's base (HINSTANCE) -
- * past 2 GiB in a program linked /LARGEADDRESSAWARE stays itself.
- */
-const WIDE = Object.freeze({
-    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'unsigned', hInstance: 'unsigned',
-    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'unsigned',
-    lpszClassName: 'unsigned', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
-    hdc: 'signed', lpCreateParams: 'unsigned', hMenu: 'signed', hwndParent: 'signed',
-    lpszName: 'unsigned', lpszClass: 'unsigned', lpcs: 'unsigned', lppos: 'unsigned',
-    hWndActive: 'signed', dwExtraInfo: 'unsigned',
-});
+/** WNDCLASSA at 32 bits (`userLayouts` for a process's width). */
+export const WNDCLASSA = WNDCLASSA_LAYOUT.at(4);
+/** WNDCLASSEXA at 32 bits. */
+export const WNDCLASSEXA = WNDCLASSEXA_LAYOUT.at(4);
+/** MSG at 32 bits. */
+export const MSG = MSG_LAYOUT.at(4);
+/** RECT, in the order a guest reads it back. */
+export const RECT = RECT_LAYOUT.at(4);
+/** PAINTSTRUCT at 32 bits. */
+export const PAINTSTRUCT = PAINTSTRUCT_LAYOUT.at(4);
 
 /**
  * @typedef {Object} UserLayouts
  * @property {4 | 8} pointerSize
- * @property {Record<string, number>} WNDCLASSA
- * @property {Record<string, number>} WNDCLASSEXA
- * @property {Record<string, number>} MSG
- * @property {Record<string, number>} PAINTSTRUCT
- * @property {Record<string, number>} CREATESTRUCTA
- * @property {Record<string, number>} CBT_CREATEWNDA
- * @property {Record<string, number>} WINDOWPOS
- * @property {Record<string, number>} NCCALCSIZE_PARAMS
- * @property {Record<string, number>} CBTACTIVATESTRUCT
- * @property {Record<string, number>} MOUSEHOOKSTRUCT
- * @property {Record<string, number>} INPUT
+ * @property {Table} WNDCLASSA
+ * @property {Table} WNDCLASSEXA
+ * @property {Table} MSG
+ * @property {Table} PAINTSTRUCT
+ * @property {Table} CREATESTRUCTA
+ * @property {Table} CBT_CREATEWNDA
+ * @property {Table} WINDOWPOS
+ * @property {Table} NCCALCSIZE_PARAMS
+ * @property {Table} CBTACTIVATESTRUCT
+ * @property {Table} MOUSEHOOKSTRUCT
+ * @property {Table} INPUT
  */
 
 /** @type {Map<number, UserLayouts>} */
@@ -185,49 +107,55 @@ const LAYOUTS = new Map();
  * @returns {UserLayouts}
  */
 export function userLayouts(pointerSize = 4){
-    const wide = pointerSize === 8;
-    let layouts = LAYOUTS.get(pointerSize);
+    const width = pointerSize === 8 ? 8 : 4;
+    let layouts = LAYOUTS.get(width);
     if (!layouts)
     {
         layouts = Object.freeze({
-            pointerSize: wide ? 8 : 4,
-            WNDCLASSA: wide ? WNDCLASSA64 : WNDCLASSA,
-            WNDCLASSEXA: wide ? WNDCLASSEXA64 : WNDCLASSEXA,
-            MSG: wide ? MSG64 : MSG,
-            PAINTSTRUCT: wide ? PAINTSTRUCT64 : PAINTSTRUCT,
-            CREATESTRUCTA: wide ? CREATESTRUCTA64 : CREATESTRUCTA32,
-            CBT_CREATEWNDA: wide ? CBT_CREATEWNDA64 : CBT_CREATEWNDA32,
-            WINDOWPOS: wide ? WINDOWPOS64 : WINDOWPOS32,
-            NCCALCSIZE_PARAMS: wide ? NCCALCSIZE_PARAMS64 : NCCALCSIZE_PARAMS32,
-            CBTACTIVATESTRUCT: wide ? CBTACTIVATESTRUCT64 : CBTACTIVATESTRUCT32,
-            MOUSEHOOKSTRUCT: wide ? MOUSEHOOKSTRUCT64 : MOUSEHOOKSTRUCT32,
-            INPUT: wide ? INPUT64 : INPUT32,
+            pointerSize: width,
+            WNDCLASSA: WNDCLASSA_LAYOUT.at(width),
+            WNDCLASSEXA: WNDCLASSEXA_LAYOUT.at(width),
+            MSG: MSG_LAYOUT.at(width),
+            PAINTSTRUCT: PAINTSTRUCT_LAYOUT.at(width),
+            CREATESTRUCTA: CREATESTRUCTA_LAYOUT.at(width),
+            CBT_CREATEWNDA: CBT_CREATEWNDA_LAYOUT.at(width),
+            WINDOWPOS: WINDOWPOS_LAYOUT.at(width),
+            NCCALCSIZE_PARAMS: NCCALCSIZE_PARAMS_LAYOUT.at(width),
+            CBTACTIVATESTRUCT: CBTACTIVATESTRUCT_LAYOUT.at(width),
+            MOUSEHOOKSTRUCT: MOUSEHOOKSTRUCT_LAYOUT.at(width),
+            INPUT: INPUT_LAYOUT.at(width),
         });
-        LAYOUTS.set(pointerSize, layouts);
+        LAYOUTS.set(width, layouts);
     }
     return layouts;
 }
 
 /**
- * Lays named fields of a structure into `view` at `base`: a field `WIDE`
- * names is eight bytes at 64 bits, widened as it says, every other one a
- * DWORD.
+ * Whether a field is pointer-sized at the table's width: eight bytes at 64
+ * bits, its high dword the kind's (`highOf`).
  *
- * @param {DataView} view @param {number} base @param {UserLayouts} layouts
- * @param {Record<string, number>} layout @param {Record<string, number>} values
+ * @param {Table} layout @param {string} name
  */
-export function putFields(view, base, layouts, layout, values){
+const wideField = (layout, name)=>fieldOf(layout, name)?.size === 8;
+
+/**
+ * Lays named fields of a structure into `view` at `base`: every one a DWORD
+ * as the engine holds it, and a pointer-sized field at 64 bits its high dword
+ * after - an address's zero, or its own past 4 GiB, a handle's or an LPARAM's
+ * sign, so HWND_TOPMOST is -1 whole.
+ *
+ * @param {DataView} view @param {number} base
+ * @param {Table} layout @param {Record<string, number>} values
+ */
+export function putFields(view, base, layout, values){
     for (const [name, value] of Object.entries(values))
     {
         const at = base + layout[name];
         view.setUint32(at, value >>> 0, true);
-        if (layouts.pointerSize === 8 && Object.hasOwn(WIDE, name))
+        if (wideField(layout, name))
         {
-            const signed = WIDE[/** @type {keyof typeof WIDE} */ (name)] === 'signed';
-            // An address past 4 GiB - an image a 64-bit program keeps at its
-            // own base there - is held whole and goes back whole.
-            view.setUint32(at + 4, value >= 2 ** 32 ? Math.floor(value / 2 ** 32) >>> 0
-                : signed && (value | 0) < 0 ? 0xffffffff : 0, true);
+            view.setUint32(at + 4, highOf(value,
+                /** @type {'ptr' | 'handle'} */ (fieldOf(layout, name)?.kind)), true);
         }
     }
 }
@@ -236,15 +164,14 @@ export function putFields(view, base, layouts, layout, values){
  * Writes named fields of a structure in guest memory, each in place: the
  * fields not named are left as they were.
  *
- * @param {StructMemory} memory @param {number} address @param {UserLayouts} layouts
- * @param {Record<string, number>} layout @param {Record<string, number>} values
+ * @param {StructMemory} memory @param {number} address
+ * @param {Table} layout @param {Record<string, number>} values
  */
-export function writeFields(memory, address, layouts, layout, values){
+export function writeFields(memory, address, layout, values){
     for (const [name, value] of Object.entries(values))
     {
-        const wide = layouts.pointerSize === 8 && Object.hasOwn(WIDE, name);
-        const bytes = new Uint8Array(wide ? 8 : 4);
-        putFields(new DataView(bytes.buffer), -layout[name], layouts, layout, { [name]: value });
+        const bytes = new Uint8Array(wideField(layout, name) ? 8 : 4);
+        putFields(new DataView(bytes.buffer), -layout[name], layout, { [name]: value });
         memory.writeMemory((address + layout[name]) >>> 0, bytes);
     }
 }
@@ -302,9 +229,6 @@ export function writeU32s(memory, address, values){
  * @property {number} iconSm      Zero for the classic form, which has no such field.
  */
 
-/** @param {Record<string, number>} layout  whether it is a class structure at 64 bits */
-const wide64 = layout=>layout === WNDCLASSA64 || layout === WNDCLASSEXA64;
-
 /**
  * Reads either form of the class structure. The layout decides which fields
  * exist; everything past that is the same set of values, which is why the two
@@ -312,7 +236,7 @@ const wide64 = layout=>layout === WNDCLASSA64 || layout === WNDCLASSEXA64;
  *
  * @param {StructMemory} memory
  * @param {number} address
- * @param {Record<string, number>} layout  A WNDCLASS or WNDCLASSEX at either width.
+ * @param {Table} layout  A WNDCLASS or WNDCLASSEX at either width.
  * @returns {WindowClassFields}
  */
 export function readWindowClass(memory, address, layout){
@@ -322,21 +246,22 @@ export function readWindowClass(memory, address, layout){
      * An address field, whole in a 64-bit structure: a procedure or a name in
      * an image past 4 GiB is not its low dword.
      *
-     * @param {number} offset
+     * @param {string} name
      */
-    const address64 = offset=>(wide64(layout)
-        ? field(offset) + readU32(memory, address + offset + 4) * 2 ** 32 : field(offset));
+    const address64 = name=>(wideField(layout, name)
+        ? field(layout[name]) + readU32(memory, address + layout[name] + 4) * 2 ** 32
+        : field(layout[name]));
     return {
         style: field(layout.style),
-        wndProc: address64(layout.lpfnWndProc),
+        wndProc: address64('lpfnWndProc'),
         classExtra: field(layout.cbClsExtra) | 0,
         windowExtra: field(layout.cbWndExtra) | 0,
-        instance: address64(layout.hInstance),
+        instance: address64('hInstance'),
         icon: field(layout.hIcon),
         cursor: field(layout.hCursor),
         background: field(layout.hbrBackground),
-        menuName: address64(layout.lpszMenuName),
-        className: address64(layout.lpszClassName),
+        menuName: address64('lpszMenuName'),
+        className: address64('lpszClassName'),
         iconSm: 'hIconSm' in layout ? field(layout.hIconSm) : 0,
     };
 }
@@ -352,12 +277,12 @@ export function readWindowClass(memory, address, layout){
  * @param {number} address
  * @param {WindowClassFields} fields
  * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
- * @param {Record<string, number>} [layout]  WNDCLASSA by default.
+ * @param {Table} [layout]  WNDCLASSA by default.
  */
 export function writeWindowClass(memory, address, fields, layouts = userLayouts(4),
     layout = layouts.WNDCLASSA)
 {
-    writeFields(memory, address, layouts, layout, {
+    writeFields(memory, address, layout, {
         style: fields.style,
         lpfnWndProc: fields.wndProc,
         cbClsExtra: fields.classExtra,
@@ -393,7 +318,7 @@ export function writeWindowClass(memory, address, fields, layouts = userLayouts(
 export function writeMessage(memory, address, message, layouts = userLayouts(4)){
     const layout = layouts.MSG;
     const bytes = new Uint8Array(layout.SIZE);
-    putFields(new DataView(bytes.buffer), 0, layouts, layout, {
+    putFields(new DataView(bytes.buffer), 0, layout, {
         hwnd: message.hwnd,
         message: message.message,
         wParam: message.wParam,
@@ -461,136 +386,70 @@ export function writeRect(memory, address, rect){
     writeU32s(memory, address, [rect.left, rect.top, rect.right, rect.bottom]);
 }
 
-/**
- * PAINTSTRUCT. The trailing reserved bytes are part of the size a guest
- * allocated, so they are named here even though nothing writes them.
- */
-export const PAINTSTRUCT = Object.freeze({
-    hdc: 0,
-    fErase: 4,
-    rcPaint: 8,
-    fRestore: 24,
-    fIncUpdate: 28,
-    rgbReserved: 32,
-    SIZE: 64,
-});
-
 /** MONITORINFO. cbSize is written by the caller and tells us which it wants. */
-export const MONITORINFO = Object.freeze({
-    cbSize: 0,
-    rcMonitor: 4,
-    rcWork: 20,
-    dwFlags: 36,
-    SIZE: 40,
-});
+const MONITORINFO_FIELDS = /** @type {const} */ ([['cbSize', 'u32'], ['rcMonitor', RECT_LAYOUT],
+    ['rcWork', RECT_LAYOUT], ['dwFlags', 'u32']]);
+export const MONITORINFO = struct(MONITORINFO_FIELDS).at(4);
 
 /** MONITORINFOEXA is MONITORINFO plus a device name. */
-export const MONITORINFOEXA_SIZE = 40 + 32;
+export const MONITORINFOEXA_SIZE = struct([...MONITORINFO_FIELDS, ['szDevice', 'u8', 32]])
+    .sizeOf(4);
 
 /**
  * DISPLAY_DEVICE, both spellings. Four fixed-length strings with the state
  * word between the second and the third, which is why the wide form is not
  * the ANSI one doubled: every field past cb sits at its own place in each,
  * and the size the caller declares says which of the two it built.
+ *
+ * @param {'u8' | 'u16'} char
  */
-export const DISPLAY_DEVICEA = Object.freeze({
-    cb: 0,
-    DeviceName: 4,
-    DeviceString: 36,
-    StateFlags: 164,
-    DeviceID: 168,
-    DeviceKey: 296,
-    SIZE: 424,
-});
-
-export const DISPLAY_DEVICEW = Object.freeze({
-    cb: 0,
-    DeviceName: 4,
-    DeviceString: 68,
-    StateFlags: 324,
-    DeviceID: 328,
-    DeviceKey: 584,
-    SIZE: 840,
-});
+const displayDevice = char=>struct([['cb', 'u32'], ['DeviceName', char, 32],
+    ['DeviceString', char, 128], ['StateFlags', 'u32'], ['DeviceID', char, 128],
+    ['DeviceKey', char, 128]]).at(4);
+export const DISPLAY_DEVICEA = displayDevice('u8');
+export const DISPLAY_DEVICEW = displayDevice('u16');
 
 /** The characters each DISPLAY_DEVICE string field holds, in either spelling. */
-export const DISPLAY_DEVICE_CHARS = Object.freeze({
-    DeviceName: 32,
-    DeviceString: 128,
-    DeviceID: 128,
-    DeviceKey: 128,
-});
+export const DISPLAY_DEVICE_CHARS = Object.freeze(Object.fromEntries(
+    ['DeviceName', 'DeviceString', 'DeviceID', 'DeviceKey'].map(name=>[name,
+        /** @type {import('../../../system/layout.js').Field} */ (
+            fieldOf(DISPLAY_DEVICEA, name)).count])));
 
 /**
  * WINDOWINFO. The last two members are WORDs, which is why the structure ends
  * at 60 rather than at a multiple of four fields.
  */
-export const WINDOWINFO = Object.freeze({
-    cbSize: 0,
-    rcWindow: 4,
-    rcClient: 20,
-    dwStyle: 36,
-    dwExStyle: 40,
-    dwWindowStatus: 44,
-    cxWindowBorders: 48,
-    cyWindowBorders: 52,
-    atomWindowType: 56,
-    wCreatorVersion: 58,
-    SIZE: 60,
-});
+export const WINDOWINFO = struct([['cbSize', 'u32'], ['rcWindow', RECT_LAYOUT],
+    ['rcClient', RECT_LAYOUT], ['dwStyle', 'u32'], ['dwExStyle', 'u32'],
+    ['dwWindowStatus', 'u32'], ['cxWindowBorders', 'u32'], ['cyWindowBorders', 'u32'],
+    ['atomWindowType', 'u16'], ['wCreatorVersion', 'u16']]).at(4);
 
 /** WINDOWPLACEMENT. */
-export const WINDOWPLACEMENT = Object.freeze({
-    length: 0,
-    flags: 4,
-    showCmd: 8,
-    ptMinPosition: 12,
-    ptMaxPosition: 20,
-    rcNormalPosition: 28,
-    SIZE: 44,
-});
+export const WINDOWPLACEMENT = struct([['length', 'u32'], ['flags', 'u32'], ['showCmd', 'u32'],
+    ['ptMinPosition', POINT], ['ptMaxPosition', POINT], ['rcNormalPosition', RECT_LAYOUT]]).at(4);
 
 /**
- * DEVMODEA, only the members a display-mode enumeration touches. The union at
- * 44 and the printer members after it are skipped deliberately: naming a field
- * this layer never reads or writes would suggest it means something here.
+ * DEVMODE, either spelling. Only the members a display-mode enumeration
+ * touches are named: the printer members and the union at 44 are room, and
+ * naming a field this layer never reads or writes would suggest it means
+ * something here. The wide form's two names move every member after the
+ * first by 32 and those after the second by 64.
+ *
+ * @param {'u8' | 'u16'} char
  */
-export const DEVMODEA = Object.freeze({
-    dmDeviceName: 0,
-    dmSpecVersion: 32,
-    dmDriverVersion: 34,
-    dmSize: 36,
-    dmDriverExtra: 38,
-    dmFields: 40,
-    dmDisplayOrientation: 52,
-    dmBitsPerPel: 104,
-    dmPelsWidth: 108,
-    dmPelsHeight: 112,
-    dmDisplayFlags: 116,
-    dmDisplayFrequency: 120,
-    SIZE: 156,
-});
-
-/**
- * DEVMODEW, the same members with both names wide: the device name's 32 more
- * bytes move every member after it along by 32, and the form name's move the
- * ones after that by 64.
- */
-export const DEVMODEW = Object.freeze({
-    dmDeviceName: 0,
-    dmSpecVersion: 64,
-    dmDriverVersion: 66,
-    dmSize: 68,
-    dmDriverExtra: 70,
-    dmFields: 72,
-    dmDisplayOrientation: 84,
-    dmBitsPerPel: 168,
-    dmPelsWidth: 172,
-    dmPelsHeight: 176,
-    dmDisplayFlags: 180,
-    dmDisplayFrequency: 184,
-    SIZE: 220,
-});
+const devMode = char=>struct([['dmDeviceName', char, 32], ['dmSpecVersion', 'u16'],
+    ['dmDriverVersion', 'u16'], ['dmSize', 'u16'], ['dmDriverExtra', 'u16'], ['dmFields', 'u32'],
+    // The printer's eight shorts, or the display's dmPosition, then its orientation.
+    [null, union([[[null, 'i16', 8]], [[null, 'i32', 2], ['dmDisplayOrientation', 'u32'],
+        [null, 'u32']]])],
+    // dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate, dmFormName, dmLogPixels.
+    [null, 'i16', 5], [null, char, 32], [null, 'u16'],
+    ['dmBitsPerPel', 'u32'], ['dmPelsWidth', 'u32'], ['dmPelsHeight', 'u32'],
+    ['dmDisplayFlags', 'u32'], ['dmDisplayFrequency', 'u32'],
+    // dmICMMethod to dmPanningHeight.
+    [null, 'u32', 8]]).at(4);
+export const DEVMODEA = devMode('u8');
+export const DEVMODEW = devMode('u16');
 
 /** The dmFields bits this layer fills in. */
 export const DM_BITSPERPEL = 0x00040000;

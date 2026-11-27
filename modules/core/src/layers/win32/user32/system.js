@@ -1451,7 +1451,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         const posBytes = values=>{
             const bytes = new Uint8Array(WINDOWPOS.SIZE);
             const [hwnd, hwndInsertAfter, x, y, cx, cy, flags] = values;
-            putFields(new DataView(bytes.buffer), 0, layouts, WINDOWPOS,
+            putFields(new DataView(bytes.buffer), 0, WINDOWPOS,
                 { hwnd, hwndInsertAfter, x, y, cx, cy, flags });
             return bytes;
         };
