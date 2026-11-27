@@ -49,6 +49,7 @@
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { isMain } from '../lib/common.mjs';
@@ -71,6 +72,9 @@ export const STAND_IN = 'STAND_IN';
  * below a buffer of a guest's length.
  */
 export const GROWTH = 64 * 2 ** 20;
+
+/** Milliseconds between reads of external memory while a collection's sweep ends. */
+const SWEEP_DELAY = 2;
 
 /** Calls whose answer is the end of the process or thread, not a return. */
 const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAndExitThread|RtlExitUserThread|RtlExitUserProcess|(Nt|Zw)Terminate(Process|Thread)|Terminate(Process|Thread|JobObject)|_?_?c?exit|_Exit|_amsg_exit|quick_exit|abort)$/;
@@ -143,6 +147,29 @@ function collector(){
 }
 
 /**
+ * External memory once a collection has finished: a forced collection frees
+ * buffers whose sweep ends on another thread after it returns, and a sweep
+ * still going when the next call starts reads as that call growing less -
+ * under load, a call that made a buffer past the bound read under it.
+ *
+ * @param {() => void} collect @returns {Promise<number>}
+ */
+async function collected(collect){
+    collect();
+    let count = process.memoryUsage().external;
+    for (;;)
+    {
+        await delay(SWEEP_DELAY);
+        const now = process.memoryUsage().external;
+        if (now === count)
+        {
+            return now;
+        }
+        count = now;
+    }
+}
+
+/**
  * Calls every handler of every library once per argument set and keeps what
  * threw other than a fault.
  *
@@ -165,10 +192,9 @@ function collector(){
  */
 export async function sweep(libraries, sets, prepare = ()=>{}, growth = GROWTH){
     const collect = collector();
-    collect();
     // What survives a collection is what the libraries keep: the floor rises
     // with it, so a kept cache does not collect before every call.
-    let floor = process.memoryUsage().external;
+    let floor = await collected(collect);
     /** @type {Growth[]} */
     const growths = [];
     /** @type {Set<Function>} */
@@ -200,8 +226,7 @@ export async function sweep(libraries, sets, prepare = ()=>{}, growth = GROWTH){
                 prepare();
                 if (process.memoryUsage().external > floor + growth)
                 {
-                    collect();
-                    floor = process.memoryUsage().external;
+                    floor = await collected(collect);
                 }
                 const before = process.memoryUsage().external;
                 const error = await outcome(handler, new Array(count).fill(value));
