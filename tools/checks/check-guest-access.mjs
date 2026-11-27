@@ -14,6 +14,12 @@
  * memory layer; the layer had grown hundreds of copies of it, each a closure
  * and a buffer per read, and a read already a copy was copied once more.
  *
+ * Guest code is not counted: a function documented `@guestCode` is compiled
+ * to the guest's own instructions and reads its memory as the processor does,
+ * and the view such a function is handed when it runs as a handler defines
+ * the names its typedef (`Guest`, documented as `@guestCode`'s) declares. A
+ * definition that takes no parameter takes no address, and reads no memory.
+ *
  * What is there today is the baseline (`guest-access-baseline.json`), by file
  * and by name, so the check passes now and a new definition fails it. The
  * baseline only shrinks: a file holding fewer than its baseline fails too,
@@ -54,6 +60,21 @@ export function blank(code){
         match=>match.replace(/[^\n]/g, ' '));
 }
 
+/** A doc comment's text, the last one closing right before `at` (an `export` between). */
+const DOC_BEFORE = /\/\*\*((?:(?!\*\/)[\s\S])*)\*\/\s*(?:export\s+(?:default\s+)?)?$/;
+/** A typedef's property name, its type braces nested once. */
+const PROPERTY = /@property\s+\{(?:[^{}]|\{[^{}]*\})*\}\s+\[?([A-Za-z_$][\w$]*)/g;
+
+/**
+ * The names a guest-code view declares in this file: the properties of each
+ * typedef whose doc says it is what a `@guestCode` function is handed.
+ *
+ * @param {string} text
+ */
+const guestCodeView = text=>new Set([...text.matchAll(/\/\*\*((?:(?!\*\/)[\s\S])*)\*\//g)]
+    .filter(([, doc])=>/@typedef\b/.test(doc) && /`@guestCode`/.test(doc))
+    .flatMap(([, doc])=>[...doc.matchAll(PROPERTY)].map(property=>property[1])));
+
 /**
  * Every occurrence in one file's text, by its key: the accessor's or string
  * helper's name (`accessor readU32`, `string wide`), or `copy` for a read
@@ -64,6 +85,7 @@ export function blank(code){
  */
 export function occurrences(text){
     const code = blank(text);
+    const view = guestCodeView(text);
     /** @type {Record<string, number>} */
     const found = {};
     /** @param {string} key */
@@ -73,6 +95,16 @@ export function occurrences(text){
     for (const match of code.matchAll(DEFINITION))
     {
         const name = match[1] ?? match[2];
+        const start = /** @type {number} */ (match.index);
+        const end = start + match[0].length;
+        const noParameter = match[1] ? /^\s*\)/.test(code.slice(end, end + 20))
+            : /\(\s*\)\s*=>$/.test(match[0]);
+        const doc = DOC_BEFORE.exec(text.slice(Math.max(0, start - 4000), start + 1)
+            .replace(/[^\s\w$]$/, ''));
+        if (noParameter || view.has(name) || (doc && /^\s*\*\s*@guestCode\b/m.test(doc[1])))
+        {
+            continue;
+        }
         if (ACCESSOR.test(name))
         {
             add(`accessor ${name}`);

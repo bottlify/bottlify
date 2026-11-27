@@ -219,9 +219,6 @@
   "d3dx10/loaders.js": {
    "accessor writeU32": 1
   },
-  "d3dx9/constants-setters.js": {
-   "accessor SetFloat": 1
-  },
   "d3dx9/constants.js": {
    "accessor dword": 1,
    "accessor f32": 1,
@@ -238,10 +235,6 @@
   },
   "d3dx9/effect-binary.js": {
    "accessor u32": 1
-  },
-  "d3dx9/effect-setters.js": {
-   "accessor SetFloat": 1,
-   "accessor SetInt": 1
   },
   "d3dx9/effect.js": {
    "accessor putU32": 1,
@@ -710,20 +703,10 @@
   "msvcrt/float.js": {
    "accessor readDouble": 1
   },
-  "msvcrt/format.js": {
-   "accessor word": 1
-  },
   "msvcrt/functions.js": {
    "string readString": 1,
    "string readWide": 1,
    "string writeString": 1
-  },
-  "msvcrt/guest-code.js": {
-   "accessor setU8": 1,
-   "accessor u8": 1
-  },
-  "msvcrt/inguest-string.js": {
-   "string stringAt": 1
   },
   "msvcrt/io.js": {
    "string wide": 1
@@ -791,9 +774,6 @@
    "accessor getU32": 1,
    "accessor setU32": 1,
    "copy readMemory().slice()": 4
-  },
-  "msvfw32/video1.js": {
-   "accessor word": 1
   },
   "msxml/dom.js": {
    "accessor readU32": 1,
@@ -942,7 +922,7 @@
    "string readWide": 1
   },
   "ole32/ole2.js": {
-   "accessor word": 2,
+   "accessor word": 1,
    "copy readMemory().slice()": 1,
    "string ansi": 1,
    "string string": 1,
