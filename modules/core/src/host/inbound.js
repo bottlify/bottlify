@@ -23,8 +23,7 @@
  * posted message, so the two channels keep the page's order.
  */
 
-import { RingClosed, openRing } from '@bottlify/cellar';
-import { textOf } from '../system/codec.js';
+import { RingClosed, openRing, textOf } from '@bottlify/cellar';
 
 /** The inbound ring's size: input arrives in bursts of a few hundred bytes a message. */
 export const INBOUND_BYTES = 1 << 20;

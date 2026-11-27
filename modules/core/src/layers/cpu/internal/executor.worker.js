@@ -10,8 +10,8 @@
  * (`executorLayout`), running the slices the process's thread asks for.
  *
  * It has no handlers of its own. A trap or a fault is the process's to answer
- * -- Win32 and the kernel live there -- so it is said on the channel and the
- * slice waits, in the middle of the instruction that raised it, for the reply
+ * -- Win32 and the kernel live there -- so it is asked across the link and the
+ * slice waits, in the middle of the instruction that raised it, for the answer
  * (`executor-channel.js`). Between slices it waits without blocking, so the
  * translations its runtime asked for come back meanwhile.
  *
@@ -22,27 +22,25 @@ import { createCorkHost } from './cork-host.js';
 import { startGcNudge } from './gc-nudge.js';
 import { storeClient } from './store-relay.js';
 import { openSync } from '../../../system/opfs-file.js';
-import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor }
-    from './executor-channel.js';
-import { deadlineOf, waitFor, waitForAsync } from '@bottlify/cellar';
+import { ANSWER_BOUNDS_US, Bell, Said, Word, lookFor } from './executor-channel.js';
+import { openLink } from '@bottlify/cellar';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**
  * What the process sends once: where the engine is, the host's configuration,
- * the memory and the channel.
+ * the memory and its side of the link.
  *
  * @typedef {Object} ExecutorStart
  * @property {string} engineUrl
  * @property {Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory'>} config
  * @property {WebAssembly.Memory} memory
- * @property {SharedArrayBuffer} channel
+ * @property {import('@bottlify/cellar').LinkEnd} link
+ * @property {SharedArrayBuffer} state  the words beside the link (`Word`)
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
  * @property {SharedArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
  * @property {import('../../cache/module.js').Joined | null} [cache]  the run's cache as
  *     the process joined this executor to it, where it reads the records put there
- * @property {SharedArrayBuffer} [emittedHere]  where it writes the milliseconds its
- *     translator emitted on its own thread, read by a pool that lends it workers
  */
 
 /** How long the executor waits in place for the next slice before its event loop does. */
@@ -70,8 +68,6 @@ const FEED_MS = 1;
 
 /** The executor's host, once started. @type {any} */
 let running = null;
-/** Where the translator's own-thread milliseconds are written for the process. @type {Int32Array | null} */
-let emitted = null;
 /** Workers of the run's pool lent to this executor, by token. @type {Map<number, any>} */
 const lent = new Map();
 /** Lent before the translator was up. @type {any[]} */
@@ -104,7 +100,7 @@ const portTranslator = port=>({
         port.close();
     },
 });
-/** Its side of the channel's wakes and sleeps (`channelOf`), once started. @type {any} */
+/** Its side of the link, whose diagnostics say its sends and sleeps, once started. @type {any} */
 let waits = null;
 
 /**
@@ -136,7 +132,8 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
  * @param {(message: any, transfer?: any[]) => void} send
  */
 async function serve(
-    { engineUrl, config, memory, channel: buffer, bell, unbroken, store, emittedHere, cache }, send)
+    { engineUrl, config, memory, link: linked, state: stateBuffer, bell, unbroken, store, cache },
+    send)
 {
     storeRelay?.join(cache);
     const engine = await import(engineUrl);
@@ -147,7 +144,6 @@ async function serve(
             ...store === true && storeRelay !== null ? { store: storeRelay.store } : {},
             ...kept === null ? {} : { kept } } });
     running = host;
-    emitted = emittedHere ? new Int32Array(emittedHere) : null;
     for (const adapter of lentWaiting.splice(0))
     {
         host.cork().attachTranslator?.(adapter);
@@ -162,9 +158,10 @@ async function serve(
     // How long a wait looks before it sleeps: longer while the host has a core
     // to spare, which the slices out say (`Bell.RUNNING`).
     const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency);
-    const channel = channelOf(buffer, bellWords, look);
-    const { words } = channel;
-    waits = channel.counts;
+    // Each send interrupts the process's own slice too: it answers between its own turns.
+    const link = openLink(linked, {}, { spinMs: look, afterSend: ()=>host.interruptProcess() });
+    const words = new Int32Array(stateBuffer);
+    waits = link;
     /**
      * A slice, its run of guest code counted (`Word.EPOCH`), what it retired
      * (`Word.RETIRED`), and the processor it plays (`Word.PLAYS`).
@@ -214,15 +211,15 @@ async function serve(
     host.onTrap((/** @type {number} */ value)=>{
         const asked = performance.now();
         Atomics.add(words, Word.EPOCH, 1);
-        channel.say(Turn.TRAP, value);
-        // The process's slice ends at its next back edge to answer, not at its
-        // next crossing or its end.
-        host.interruptProcess();
-        channel.await(Turn.TRAP);
+        // The process's slice ends at its next back edge to answer (`afterSend`),
+        // not at its next crossing or its end.
+        link.request[0] = value;
+        link.sendWords();
+        link.waitWords();
         Atomics.add(words, Word.EPOCH, 1);
         noteWaited(performance.now() - asked);
         spent.traps++;
-        const flags = channel.flags();
+        const flags = link.answer[0];
         if ((flags & Said.HALTED) !== 0)
         {
             host.halt();
@@ -234,13 +231,10 @@ async function serve(
     });
     host.onFault((/** @type {any} */ fault)=>{
         const asked = performance.now();
-        channel.write(fault);
-        channel.say(Turn.FAULT);
-        host.interruptProcess();
-        channel.await(Turn.FAULT);
+        const flags = link.ask('executor', 'fault', [fault]);
         noteWaited(performance.now() - asked);
         spent.faults++;
-        return (channel.flags() & Said.CLAIMED) !== 0;
+        return (flags & Said.CLAIMED) !== 0;
     });
     send({ type: 'ready' });
     // A turn of the event loop that waits for no timer: node's setImmediate,
@@ -269,22 +263,30 @@ async function serve(
     for (;;)
     {
         const idleFrom = performance.now();
-        let state = Atomics.load(words, 0);
-        if (state !== Turn.RUN && state !== Turn.CLOSE)
+        let run = link.takeWords();
+        for (let tries = 0; run === null && !link.closed(); tries++)
         {
-            // The process mostly asks again soon after a slice's end, and a
-            // wake through the event loop costs more: a short wait in place first.
-            waitFor(words, Word.STATE, state, Word.SLEEPING, deadlineOf(IDLE_MS), look());
-            state = Atomics.load(words, 0);
-        }
-        while (state !== Turn.RUN && state !== Turn.CLOSE)
-        {
-            // `waitAsync`: the event loop goes on meanwhile, and the
-            // translations the runtime asked for come back through it.
-            spent.asyncWaits++;
-            await waitForAsync(words, Word.STATE, state, Word.SLEEPING);
-            state = Atomics.load(words, 0);
-            yieldedAt = performance.now();
+            const seen = link.bell.seen();
+            run = link.takeWords();
+            if (run !== null || link.closed())
+            {
+                break;
+            }
+            if (tries === 0)
+            {
+                // The process mostly asks again soon after a slice's end, and a
+                // wake through the event loop costs more: a short wait in place first.
+                link.bell.wait(seen, IDLE_MS, look());
+            }
+            else
+            {
+                // `waitAsync`: the event loop goes on meanwhile, and the
+                // translations the runtime asked for come back through it.
+                spent.asyncWaits++;
+                await link.bell.waitAsync(seen);
+                yieldedAt = performance.now();
+            }
+            run = link.takeWords();
         }
         if (performance.now() - yieldedAt >= YIELD_MS)
         {
@@ -295,11 +297,11 @@ async function serve(
             yieldedAt = performance.now();
             spent.yieldMs += yieldedAt - yieldFrom;
         }
-        if (state === Turn.CLOSE)
+        if (run === null)
         {
             return;
         }
-        const budget = channel.value();
+        const budget = run[0];
         const chained = performance.now();
         spent.idleMs += chained - idleFrom;
         spent.slices++;
@@ -354,23 +356,21 @@ async function serve(
         const fault = host.fault();
         if (fault !== null)
         {
-            channel.write(fault);
+            // Said before the slice's end, which carries only words.
+            link.ask('executor', 'ended', [fault]);
             host.clearFault();
         }
         Atomics.sub(bellWords, Bell.RUNNING, 1);
-        channel.say(Turn.DONE, retired, (host.halted() ? Said.HALTED : 0)
-            | (fault !== null ? Said.FAULTED : 0));
-        // Taken now, so this executor is given its next thread now.
-        host.interruptProcess();
+        link.reply[0] = retired;
+        link.reply[1] = (host.halted() ? Said.HALTED : 0) | (fault !== null ? Said.FAULTED : 0);
+        // Taken now (`afterSend`), so this executor is given its next thread now.
+        link.answerWords();
         // The executor's own feed, as the process's is once a frame: what its
         // interpreters found hot is formed while it waits for the next slice.
         const feedFrom = performance.now();
         host.cork().translatePending().catch(()=>{});
         spent.feedMs += performance.now() - feedFrom;
-        if (emitted !== null)
-        {
-            Atomics.store(emitted, 0, Math.round(host.cork().translatedHere?.() ?? 0));
-        }
+        Atomics.store(words, Word.EMITTED, Math.round(host.cork().translatedHere?.() ?? 0));
     }
 }
 
@@ -435,7 +435,7 @@ function bind(listen, send){
             send({ type: 'diagnostics', id: data.id,
                 value: running === null ? null : { ...running.cork().diagnostics(),
                     spent: { ...spent, wallMs: performance.now() - spent.startedAt,
-                        waits: { ...waits } },
+                        waits: waits?.diagnostics() ?? null },
                     storeRecords: { ...storeRelay?.counts } } });
         }
     });

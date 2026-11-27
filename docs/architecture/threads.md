@@ -160,12 +160,12 @@ A name is one key in that table whatever its spelling: kernel32's `Global\X`, `L
 native call's `\BaseNamedObjects\X` take the object namespace's one walk to the same object
 (decisions.md A271).
 The engine thread answers a process thread across a link: two rings in shared memory, one each
-way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
+way, with a doorbell word per side (Cellar's `link`, values encoded by its `codec`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the
 engine asks it about its windows); a message longer than a ring holds goes in parts. Each side
 looks at its doorbell for a few microseconds before it sleeps on it, since a thread woken from
 sleep costs far more than the answer. The rings and every wait between two threads of a run - the
-link, the page's input ring, the executors' channel, the graphics worker's rings and lends, the
+link, the page's input ring, the executors' links, the graphics worker's rings and lends, the
 sharing table's lock - are one mechanism, Cellar's bell: a wait looks, then sleeps counted beside its word,
 and whoever moves the word notifies only when one sleeps. When a process ends, however it ends, its link is closed:
 every call still waiting on it fails (a COM call into it answers `RPC_E_SERVER_DIED`), a call made

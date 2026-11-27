@@ -6,7 +6,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRingMemory } from '@bottlify/cellar';
 
 test('the engine reads the page\'s messages out of their shared ring as a browser reads one,'
     + ' which decodes no shared view', async()=>{
@@ -27,7 +26,8 @@ test('the engine reads the page\'s messages out of their shared ring as a browse
     try
     {
         const stamp = Date.now();
-        await import(`../system/codec.js?browser=${stamp}`);
+        // Cellar loaded first here, its decoder the browser's.
+        const { createRingMemory } = await import('@bottlify/cellar');
         const { createInboundReader, createInboundWriter } =
             await import(`./inbound.js?browser=${stamp}`);
         const memory = createRingMemory(4096);
