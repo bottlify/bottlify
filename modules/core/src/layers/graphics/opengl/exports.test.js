@@ -94,6 +94,7 @@ function library(options = {}){
         callGuest: options.callGuest,
         now: options.now,
         waitUntil: options.waitUntil,
+        divergence: options.divergence,
     });
     return { box, opengl, presented, presentedFor, table: /** @type {Table} */ (opengl.table) };
 }
@@ -235,8 +236,12 @@ test('glGetString answers with a pointer into guest memory', ()=>{
     assert.equal(text, 'Bottlify Project');
 });
 
-test('an unimplemented export cleans its stack, answers zero, and is counted', ()=>{
-    const { table, opengl } = library();
+test('an unimplemented export cleans its stack, answers zero, and is a loss each call', ()=>{
+    /** @type {[string, string, string | undefined][]} */
+    const said = [];
+    const { table } = library({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail, /** @type {string | undefined} */ severity)=>
+        said.push([api, detail, severity]) });
     startDrawing(table);
 
     // Selection is a part of GL 1.1 nothing here implements.
@@ -245,8 +250,12 @@ test('an unimplemented export cleans its stack, answers zero, and is counted', (
     table.glPushName.handler([7]);
     table.glLoadName.handler([8]);
 
-    assert.deepEqual(opengl.diagnostics().unimplemented, { glPushName: 2, glLoadName: 1 },
-        'which entry points a program reached for is what a run that drew nothing has to say');
+    // What the program asked for did not happen: the report counts each call.
+    assert.deepEqual(said.filter(([, detail])=>/not implemented/.test(detail)), [
+        ['OpenGL', 'glPushName is not implemented: answered 0', 'loss'],
+        ['OpenGL', 'glPushName is not implemented: answered 0', 'loss'],
+        ['OpenGL', 'glLoadName is not implemented: answered 0', 'loss'],
+    ]);
 });
 
 test('wglGetProcAddress refuses a core entry point', ()=>{
