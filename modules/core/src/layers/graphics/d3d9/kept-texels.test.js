@@ -9,9 +9,11 @@
  * (`d3d8/render.js` `uploadTexels`, `internal/texel-store.js`): seeded
  * programs of textures made in several formats, written whole and in part
  * while a frame that already samples them is being recorded, and drawn, run
- * with the run's cache under the store and without one. The device must be
- * given the same calls with the same bytes, and the cache must hold nothing
- * once the frames are let go of.
+ * with the run's cache under the store and without one: the names a root in
+ * the graphics worker holds (`channelSpace`) and those a root drawn on the
+ * run's own thread holds (`ownedSpace`). The device must be given the same
+ * calls with the same bytes, and the cache must hold nothing once the frames
+ * are let go of.
  */
 
 import { test } from 'node:test';
@@ -23,7 +25,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { openRunCache } from '../../../process/run-cache.js';
-import { channelSpace } from '../../cache/module.js';
+import { channelSpace, ownedSpace } from '../../cache/module.js';
 
 const RAM_BASE = 0x40000000;
 const ok = (/** @type {number} */ value)=>assert.equal(value, D3D_OK);
@@ -57,20 +59,40 @@ const callText = call=>JSON.stringify({ op: call.op, size: call.size, layout: ca
  * One run of a seeded program: the calls the device was given, the store's
  * figures, and what the cache held under the root's names at the end.
  *
- * @param {number} seed @param {boolean} cached
+ * @param {number} seed @param {'plain' | 'worker' | 'thread'} where  the texels' store:
+ *     plain memory, or the run's cache from the graphics worker or from the run's thread
+ * @param {{ mutate?: boolean }} [options]  `mutate`: the cache's read of a body is wrong
+ *     in its first byte, which the gate must see
  */
-async function run(seed, cached){
+async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
-    const runCache = cached ? await openRunCache({ budget: 64 << 20 }) : null;
-    /** @type {ReturnType<typeof channelSpace> | null} */
+    const runCache = where === 'plain' ? null : await openRunCache({ budget: 64 << 20 });
+    /** @type {ReturnType<typeof channelSpace> | ReturnType<typeof ownedSpace> | null} */
     let texels = null;
-    if (runCache)
+    if (runCache && where === 'worker')
     {
-        const joined = runCache.join(message=>texels?.adopt(message));
-        texels = channelSpace(joined, runCache.serve('texels'));
+        /** @type {ReturnType<typeof channelSpace> | null} */
+        let worker = null;
+        worker = channelSpace(runCache.join(message=>worker?.adopt(message)),
+            runCache.serve('texels'));
+        texels = worker;
+    }
+    else if (runCache)
+    {
+        texels = ownedSpace(runCache.reader, runCache.serve('texels'));
+    }
+    if (texels && mutate)
+    {
+        const space = texels.space;
+        const read = space.with;
+        space.with = (key, reader, options)=>read(key, body=>{
+            const wrong = body.slice();
+            wrong[0] ^= 0xff;
+            return reader(wrong);
+        }, options);
     }
     const ram = new Uint8Array(8 << 20);
     let free = RAM_BASE + (1 << 20);
@@ -240,32 +262,50 @@ async function run(seed, cached){
 
 test('an upload that waits for its frame gives the device the same bytes from the run\'s cache '
     + 'as from plain memory, and leaves nothing there', { timeout: 120_000 }, async()=>{
-    let moved = 0;
-    let puts = 0;
-    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
+    for (const where of /** @type {const} */ (['worker', 'thread']))
     {
-        const plain = await run(seed, false);
-        const cached = await run(seed, true);
-        assert.deepEqual(plain.failures, [], `seed ${seed}`);
-        assert.deepEqual(cached.failures, [], `seed ${seed}`);
-        assert.ok(plain.calls.some(call=>call.includes('"writeTexture"')
-            || call.includes('"copyBufferToTexture"')), `seed ${seed}: textures uploaded`);
-        assert.equal(cached.calls.length, plain.calls.length, `seed ${seed}`);
-        for (let at = 0; at < plain.calls.length; at++)
+        let moved = 0;
+        let puts = 0;
+        for (const seed of [1, 2, 3, 4, 5, 6, 7, 8])
         {
-            assert.equal(cached.calls[at], plain.calls[at], `seed ${seed}: call ${at}`);
+            const plain = await run(seed, 'plain');
+            const cached = await run(seed, where);
+            const at = `${where}, seed ${seed}`;
+            assert.deepEqual(plain.failures, [], at);
+            assert.deepEqual(cached.failures, [], at);
+            assert.ok(plain.calls.some(call=>call.includes('"writeTexture"')
+                || call.includes('"copyBufferToTexture"')), `${at}: textures uploaded`);
+            assert.equal(cached.calls.length, plain.calls.length, at);
+            for (let call = 0; call < plain.calls.length; call++)
+            {
+                assert.equal(cached.calls[call], plain.calls[call], `${at}: call ${call}`);
+            }
+            assert.equal(plain.kept.put, cached.kept.put, `${at}: the same uploads kept`);
+            assert.equal(cached.kept.lost, 0, at);
+            assert.deepEqual([...plain.losses, ...cached.losses], [], at);
+            assert.equal(cached.kept.bodies, 0, `${at}: every frame let its texels go`);
+            assert.equal(plain.kept.bodies, 0, at);
+            assert.equal(cached.left, 0, `${at}: nothing left under the root's names`);
+            assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, at);
+            assert.equal(plain.kept.cache, false);
+            moved += cached.kept.moved;
+            puts += cached.kept.put;
         }
-        assert.equal(plain.kept.put, cached.kept.put, `seed ${seed}: the same uploads kept`);
-        assert.equal(cached.kept.lost, 0, `seed ${seed}`);
-        assert.deepEqual([...plain.losses, ...cached.losses], [], `seed ${seed}`);
-        assert.equal(cached.kept.bodies, 0, `seed ${seed}: every frame let its texels go`);
-        assert.equal(plain.kept.bodies, 0, `seed ${seed}`);
-        assert.equal(cached.left, 0, `seed ${seed}: nothing left under the root's names`);
-        assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, `seed ${seed}`);
-        assert.equal(plain.kept.cache, false);
-        moved += cached.kept.moved;
-        puts += cached.kept.put;
+        assert.ok(puts > 0, `${where}: uploads waited for their frames`);
+        assert.ok(moved > 0, `${where}: some of their texels waited in the run's cache`);
     }
-    assert.ok(puts > 0, 'uploads waited for their frames');
-    assert.ok(moved > 0, 'some of their texels waited in the run\'s cache');
+});
+
+test('the gate sees a wrong read of the run\'s cache', { timeout: 120_000 }, async()=>{
+    for (const where of /** @type {const} */ (['worker', 'thread']))
+    {
+        let differed = 0;
+        for (const seed of [1, 2, 3, 4])
+        {
+            const plain = await run(seed, 'plain');
+            const wrong = await run(seed, where, { mutate: true });
+            differed += wrong.calls.some((call, at)=>call !== plain.calls[at]) ? 1 : 0;
+        }
+        assert.ok(differed > 0, `${where}: a body read wrong reaches the device`);
+    }
 });

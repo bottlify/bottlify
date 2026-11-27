@@ -59,6 +59,7 @@ import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
 import { D3DFMT as D3DFMT9, FORMAT_INFO, isCompressed, sampledOnes } from '../d3d9/constants.js';
 import { floatBits, toHalf } from '../../../system/floats.js';
+import { decodeS3tc } from '../../media/internal/s3tc.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -2446,6 +2447,52 @@ test('a DXT1 base narrower than one block is refused; a decoded one lies in B, G
         assert.deepEqual([...written.bytes.subarray(4, 8)], [58, 227, 0, 0xff],
             'blue byte first');
     });
+
+test('a decoded DXT5 chain gives each level its own texels, decoded in the call, with the '
+    + 'larger level\'s room reused', async()=>{
+    const h = harness({ compressedTextures: false });
+    const { device, gpu } = h;
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture(16, 16, 0, 0, D3DFMT.DXT5, D3DPOOL.MANAGED, out), D3D_OK);
+    const texture = out.texture;
+    /** @type {Uint8Array[]} */
+    const levels = [];
+    for (let level = 0; level < texture.levels; level++)
+    {
+        const side = Math.max(1, 16 >> level);
+        const bytes = new Uint8Array(Math.ceil(side / 4) ** 2 * 16)
+            .map((_, at)=>(at * 37 + level * 101 + 13) & 0xff);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(texture.LockRect(level, locked, null, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), bytes);
+        assert.equal(texture.UnlockRect(level), D3D_OK);
+        levels.push(bytes);
+    }
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    selectTexture(device);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const surface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
+    const written = gpu.of('writeTexture').filter(w=>w.destination.texture === surface.texture);
+    assert.equal(written.length, levels.length, 'every level travelled');
+    for (const upload of written)
+    {
+        const level = upload.destination.mipLevel;
+        const side = Math.max(1, 16 >> level);
+        const decoded = /** @type {Uint8Array} */ (decodeS3tc(levels[level], 'dxt5', side, side));
+        for (let at = 0; at < decoded.length; at += 4)
+        {
+            [decoded[at], decoded[at + 2]] = [decoded[at + 2], decoded[at]];
+        }
+        assert.deepEqual([...upload.bytes], [...decoded], `level ${level}`);
+    }
+});
 
 test('recorded: a block-aligned DXT5 surface decodes with compressedTextures off and takes'
     + ' the BC path with it on', async()=>{
