@@ -1050,25 +1050,25 @@ export function createDataStructureFunctions(host){
         '#71': {
             returns: 'pointer',
             argBytes: 4,
-            handler: (/** @type {number[]} */ [bytes])=>kernel('LocalAlloc', [LMEM_ZEROINIT,
-                bytes >>> 0]) >>> 0,
+            handler: (/** @type {number[]} */ [bytes])=>wholeAddress(kernel('LocalAlloc', [LMEM_ZEROINIT,
+                bytes >>> 0])),
         },
 
         /** LPVOID ReAlloc(LPVOID lpSrc, DWORD cb) - #72: NULL is a new block; the growth zeroed. */
         '#72': {
             returns: 'pointer',
             argBytes: 8,
-            handler: (/** @type {number[]} */ [block, bytes])=>(block >>> 0 === 0
+            handler: (/** @type {number[]} */ [block, bytes])=>wholeAddress(block >>> 0 === 0
                 ? kernel('LocalAlloc', [LMEM_ZEROINIT, bytes >>> 0])
-                : kernel('LocalReAlloc', [block >>> 0, bytes >>> 0,
-                    LMEM_ZEROINIT | LMEM_MOVEABLE])) >>> 0,
+                : kernel('LocalReAlloc', [wholeAddress(block), bytes >>> 0,
+                    LMEM_ZEROINIT | LMEM_MOVEABLE])),
         },
 
         /** BOOL Free(LPVOID lpMem) - #73: NULL is nothing to free, TRUE. */
         '#73': {
             argBytes: 4,
             handler: (/** @type {number[]} */ [block])=>
-                block >>> 0 === 0 || kernel('LocalFree', [block >>> 0]) >>> 0 === 0 ? 1 : 0,
+                block >>> 0 === 0 || kernel('LocalFree', [wholeAddress(block)]) >>> 0 === 0 ? 1 : 0,
         },
 
         /** DWORD GetSize(LPVOID lpMem) - #74: what the block was asked for. */

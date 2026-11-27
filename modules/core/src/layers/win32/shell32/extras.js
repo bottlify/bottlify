@@ -602,7 +602,7 @@ export function createShellExtras(host, parts){
                     return E_INVALIDARG;
                 }
                 const csidl = KNOWN_FOLDERS[/** @type {keyof typeof KNOWN_FOLDERS} */ (
-                    readGuid(host, id >>> 0))];
+                    readGuid(host, wholeAddress(id)))];
                 if (csidl === undefined)
                 {
                     writeU32(out, 0);
@@ -630,7 +630,7 @@ export function createShellExtras(host, parts){
                 writeU32(out, 0);
                 const csidl = (id >>> 0) === 0 ? undefined
                     : KNOWN_FOLDERS[/** @type {keyof typeof KNOWN_FOLDERS} */ (
-                        readGuid(host, id >>> 0))];
+                        readGuid(host, wholeAddress(id)))];
                 if (csidl === undefined)
                 {
                     return E_INVALIDARG;
@@ -746,7 +746,7 @@ export function createShellExtras(host, parts){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const iid = (riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0);
+                const iid = (riid >>> 0) === 0 ? null : readGuid(host, wholeAddress(riid));
                 if (iid !== IID_IUNKNOWN && iid !== IID_IPROPERTYSTORE)
                 {
                     return E_NOINTERFACE;
@@ -816,7 +816,7 @@ export function createShellExtras(host, parts){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const iid = (riid >>> 0) === 0 ? null : readGuid(host, riid >>> 0);
+                const iid = (riid >>> 0) === 0 ? null : readGuid(host, wholeAddress(riid));
                 if ((index >>> 0) >= IMAGE_SIZES.length)
                 {
                     return E_INVALIDARG;

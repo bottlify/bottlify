@@ -1273,7 +1273,8 @@ export function createRuntime(host){
             handler: (/** @type {number[]} */ [message, memory, fc])=>{
                 try
                 {
-                    ndr.simple({ message: message >>> 0 }, memory >>> 0, fc & 0xff, direction);
+                    ndr.simple({ message: wholeAddress(message) }, wholeAddress(memory),
+                        fc & 0xff, direction);
                     return 0;
                 }
                 catch (e){

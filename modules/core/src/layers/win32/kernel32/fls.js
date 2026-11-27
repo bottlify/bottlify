@@ -267,7 +267,7 @@ export function createFiberLocalStorage(host){
         {
             return block;
         }
-        const made = host.allocate(slot(FLS_SLOTS)) >>> 0;
+        const made = wholeAddress(host.allocate(slot(FLS_SLOTS)));
         if (made !== 0)
         {
             blocks.add(made);

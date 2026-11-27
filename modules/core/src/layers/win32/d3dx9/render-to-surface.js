@@ -6,6 +6,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, SURFACE, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXRenderToSurface: a scene drawn into a surface of the program's,
@@ -265,7 +266,7 @@ export function createRenderToSurface(host, textures){
         }
         let pointer = 0;
         const object = createComObject(IID_ID3DXRENDERTOSURFACE, { interfaces: [renderToSurface],
-            state: { device: device >>> 0, desc: { width: width >>> 0, height: height >>> 0,
+            state: { device: wholeAddress(device), desc: { width: width >>> 0, height: height >>> 0,
                 format: format >>> 0, depthStencil: depthStencil ? 1 : 0,
                 depthFormat: depthFormat >>> 0 },
             inScene: false, saved: null, surface: 0, ownTarget: 0, ownDepth: 0 },

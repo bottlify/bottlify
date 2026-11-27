@@ -152,7 +152,7 @@ export function createBrowsers(host){
         new Uint8Array(new Uint16Array([value & 0xffff]).buffer));
     /** @param {number} bytes */
     const allocate = bytes=>{
-        const at = host.heap.allocate(bytes) >>> 0;
+        const at = wholeAddress(host.heap.allocate(bytes));
         if (at !== 0)
         {
             host.writeMemory(at, new Uint8Array(bytes));

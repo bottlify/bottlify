@@ -66,7 +66,7 @@ export function createClassInfo(host){
             {
                 return E_INVALIDARG;
             }
-            const at = host.heap.allocate(TYPEATTR_SIZE) >>> 0;
+            const at = wholeAddress(host.heap.allocate(TYPEATTR_SIZE));
             if (at === 0)
             {
                 return E_OUTOFMEMORY;

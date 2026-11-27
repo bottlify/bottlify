@@ -4668,7 +4668,7 @@ export function createSetupapiFunctions(host){
             handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
                 destinationPointer, style, callback])=>installFile(handle, context,
                 textOf(sourcePointer, wide), textOf(rootPointer, wide),
-                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, 0,
+                textOf(destinationPointer, wide), style >>> 0, wholeAddress(callback), 0,
                 `SetupInstallFile${wide ? 'W' : 'A'}`),
         })),
 
@@ -4684,7 +4684,8 @@ export function createSetupapiFunctions(host){
             handler: (/** @type {number[]} */ [handle, context, sourcePointer, rootPointer,
                 destinationPointer, style, callback, , inUse])=>installFile(handle, context,
                 textOf(sourcePointer, wide), textOf(rootPointer, wide),
-                textOf(destinationPointer, wide), style >>> 0, callback >>> 0, inUse >>> 0,
+                textOf(destinationPointer, wide), style >>> 0, wholeAddress(callback),
+                wholeAddress(inUse),
                 `SetupInstallFileEx${wide ? 'W' : 'A'}`),
         })),
 
@@ -4827,7 +4828,8 @@ export function createSetupapiFunctions(host){
                     || directoryOf(open.path).replace(/\\$/, '');
                 const thread = host.callerThread();
                 const done = installSection(open, section, { wanted, relative, root,
-                    copyFlags: copyFlags >>> 0, callback: callback >>> 0, context: context >>> 0,
+                    copyFlags: copyFlags >>> 0, callback: wholeAddress(callback),
+                    context: wholeAddress(context),
                     thread, wide, api });
                 /** @param {number | null} code  null: the callback's own last error stands. */
                 const answer = code=>{

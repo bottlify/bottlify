@@ -353,6 +353,16 @@ function seamed(build = {}){
     };
 }
 
+test('DirectDrawCreateClipper refuses an outer object past 4 GiB as any other', ()=>{
+    // Its low dword is zero: cut to it, the clipper was made unaggregated.
+    const h = seamed();
+    h.box.memory.writeU32(0x4100, 0xcccccccc);
+    assert.equal(h.ddrawDll.DirectDrawCreateClipper.handler([0, 0x4100, 0x1_0000_0000]) >>> 0,
+        0x80040110, 'CLASS_E_NOAGGREGATION');
+    assert.equal(h.ddrawDll.DirectDrawCreateClipper.handler([0, 0x4100, 0]), DD_OK);
+    assert.equal(h.release(h.box.memory.readU32(0x4100)), 0);
+});
+
 test('DirectDrawCreate hands back the first generation and CreateEx the seventh', ()=>{
     const h = seamed();
     assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);

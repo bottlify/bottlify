@@ -1296,8 +1296,8 @@ export function createWinsockFunctions(host){
         for (let at = addresses.length - 1; at >= 0; at--)
         {
             const name = at === 0 && canonical !== null ? sz(canonical) : null;
-            const block = host.heap.allocate(ADDRINFO.SIZE + SOCKADDR_IN_SIZE
-                + (name ? name.length : 0)) >>> 0;
+            const block = wholeAddress(host.heap.allocate(ADDRINFO.SIZE + SOCKADDR_IN_SIZE
+                + (name ? name.length : 0)));
             if (block === 0)
             {
                 return 0;
@@ -3198,10 +3198,10 @@ export function createWinsockFunctions(host){
                     tail: taken(readDword(wholeAddress(buffers) + 8),
                         readDword(wholeAddress(buffers) + 12)),
                 };
-                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
+                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(wholeAddress(overlapped));
                 const wanted = total >>> 0;
                 const scratch = (file >>> 0) === 0 ? 0
-                    : host.heap.allocate(TRANSMIT_CHUNK + 4) >>> 0;
+                    : wholeAddress(host.heap.allocate(TRANSMIT_CHUNK + 4));
                 if ((file >>> 0) !== 0 && scratch === 0)
                 {
                     return fail(WSA_NOT_ENOUGH_MEMORY, 0);
@@ -3246,8 +3246,8 @@ export function createWinsockFunctions(host){
                     }
                     if ((overlapped >>> 0) !== 0)
                     {
-                        complete(overlapped >>> 0, event, { error: 0, bytes: outcome.value },
-                            socket, (file >>> 0) === 0);
+                        complete(wholeAddress(overlapped), event,
+                            { error: 0, bytes: outcome.value }, socket, (file >>> 0) === 0);
                     }
                     return 1;
                 };

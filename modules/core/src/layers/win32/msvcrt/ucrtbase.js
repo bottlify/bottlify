@@ -157,16 +157,6 @@ export function createUcrtbaseFunctions(crt, host){
     };
 
     /**
-     * The arguments of a printer in the guest whose options quadword comes
-     * first, as 32 bits lay them out: its code reads them as one register at
-     * 64 bits and takes no quadwords, so the slots after it come a slot
-     * nearer there.
-     *
-     * @param {number[]} args
-     */
-    const optionsFirst = args=>(pointer === 8 ? [args[0], 0, ...args.slice(1)] : args);
-
-    /**
      * A narrow `_vsnprintf`-family answer under either behaviour the options
      * word picks.
      *
@@ -369,11 +359,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vsprintf, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>narrowCounted(options, buffer, count, format, list));
-                },
+                handler: ([options, , buffer, count, format, , list])=>styled(options,
+                    ()=>narrowCounted(options, buffer, count, format, list)),
             }),
 
         /** The same in wide characters. */
@@ -381,10 +368,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vswprintf, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return styled(options, ()=>wideCounted(options, buffer, count, format, list));
-                },
+                handler: ([options, , buffer, count, format, , list])=>styled(options,
+                    ()=>wideCounted(options, buffer, count, format, list)),
             }),
 
 
@@ -396,11 +381,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vsprintf_s, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, size, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>crt.vsprintf_s.handler([buffer, size, format, list]));
-                },
+                handler: ([options, , buffer, size, format, , list])=>styled(options,
+                    ()=>crt.vsprintf_s.handler([buffer, size, format, list])),
             }),
 
         /**
@@ -912,11 +894,8 @@ export function createUcrtbaseFunctions(crt, host){
             PRINT_CODE.__stdio_common_vswprintf_s, host, {
                 argBytes: 28,
                 /** @param {number[]} args */
-                handler: args=>{
-                    const [options, , buffer, size, format, , list] = optionsFirst(args);
-                    return styled(options,
-                        ()=>crt.vswprintf_s.handler([buffer, size, format, list]));
-                },
+                handler: ([options, , buffer, size, format, , list])=>styled(options,
+                    ()=>crt.vswprintf_s.handler([buffer, size, format, list])),
             }),
 
 

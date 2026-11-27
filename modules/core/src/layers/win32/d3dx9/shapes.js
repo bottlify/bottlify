@@ -6,6 +6,7 @@
 
 import { createDeviceCalls } from './device.js';
 import { adjacencyFromPointReps, pointRepsFromPositions } from './mesh-topology.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DX's shapes -- a box, a sphere, a cylinder, a torus and a regular
@@ -341,7 +342,7 @@ export function createShapes(host, meshes, buffers){
         ...marshal,
         /** @param {number[]} args */
         handler: args=>{
-            const [device, ...rest] = args.map(a=>a >>> 0);
+            const [device, ...rest] = args.map(wholeAddress);
             const [out, adjacencyOut] = rest.slice(-2);
             for (const at of [out, adjacencyOut])
             {

@@ -1244,7 +1244,7 @@ export function createTokenFunctions(host){
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
             }
-            writeDword(at + slot, sid >>> 0);
+            writeDword(at + slot, wholeAddress(sid));
             const control = readWord(at + SD.CONTROL);
             writeWord(at + SD.CONTROL, defaulted ? control | bit : control & ~bit);
             return 1;
@@ -1673,7 +1673,7 @@ export function createTokenFunctions(host){
             }
             for (let index = 0; index < total; index++)
             {
-                const entry = (entries >>> 0) + index * EXPLICIT_ACCESS.SIZE;
+                const entry = wholeAddress(entries) + index * EXPLICIT_ACCESS.SIZE;
                 const mode = readDword(entry + EXPLICIT_ACCESS.MODE);
                 if (mode === NOT_USED_ACCESS)
                 {

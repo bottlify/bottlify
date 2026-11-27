@@ -61,6 +61,27 @@ export function find({ u8 }, from, count, byte){
 }
 
 /**
+ * Where a byte is last: a pointer declared so that starts as null and is
+ * given a pointer later.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} from @param {i32} byte
+ * @returns {ptr}
+ */
+export function last({ u8 }, from, byte){
+    /** @type {ptr} */
+    let found = 0;
+    for (let at = from; u8(at) !== 0; at++)
+    {
+        if (u8(at) === (byte & 0xff))
+        {
+            found = at;
+        }
+    }
+    return found;
+}
+
+/**
  * Bytes written backwards: pointers stepped by -= and +=, a pointer less an
  * index answered.
  *
@@ -239,6 +260,7 @@ test('pointers below 4 GiB: the i386 and the x86-64 against the JavaScript', asy
         const at = DATA + next() % 64;
         same('length', { stack: [at], memory });
         same('find', { stack: [at, next() % 80, next() & 0xff], memory });
+        same('last', { stack: [at, bytes[at - DATA + next() % 8]], memory });
         same('reverse', { stack: [DATA + 100 + next() % 16, at, next() % 30], memory });
         same('around', { stack: [DATA + 64 + (next() % 8) * 4, next() % 9, next() % 40],
             memory });
@@ -360,6 +382,7 @@ test('pointers past 4 GiB: the x86-64 carries each whole, where a u32 reads the 
             const at = HIGH + next() % 64;
             same('length', bytes, [at]);
             same('find', bytes, [at, next() % 80, next() & 0xff]);
+            same('last', bytes, [at, bytes[at - HIGH + next() % 8]]);
             same('reverse', bytes, [HIGH + 256 + next() % 16, at, next() % 30]);
             same('around', bytes, [HIGH + 64 + (next() % 8) * 4, next() % 9, next() % 40]);
             const from = HIGH + 8 + next() % 32;
@@ -447,6 +470,7 @@ ${body}
         ['    p >>>= 1;\n    return 0;', />>>= on a pointer/],
         ['    return (p === n ? 1 : 0) | 0;', /compared with a pointer or a constant/],
         ['    return (Math.imul(p, 3)) | 0;', /p is a pointer/],
+        ['    /** @type {ptr} */\n    let r = n;\n    return (r * 2) | 0;', /r is a pointer/],
     ]);
     for (const [body, message, returns] of cases)
     {

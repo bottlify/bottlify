@@ -87,7 +87,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     FlushInstructionCache: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['u32', 'ptr', 'u32'],
         returns: 'i32',
         uses: [],
         leaf: true,

@@ -67,7 +67,7 @@ const u32 = (access, at)=>new DataView(access.readMemory(wholeAddress(at), 4).bu
  * @returns {Promise<T>}
  */
 export async function withBlock(access, bytes, use){
-    const at = access.heap.allocate(Math.max(4, bytes)) >>> 0;
+    const at = wholeAddress(access.heap.allocate(Math.max(4, bytes)));
     if (at === 0)
     {
         throw new CodecError(0x8007000e | 0, 'no memory for a block a guest method fills');

@@ -11,9 +11,9 @@
 export const COMPILED = /** @type {const} */ ({
     _strtoi64: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'i64',
-        uses: ['u8', 'setU32', 'host', 'pointerBytes', 'int64'],
+        uses: ['u8', 'host', 'int64', 'setPtr'],
         host: 535,
         tables: { HIGH_BELOW_CARRY: 540, DIGITS_64: 688 },
         code: Uint8Array.of(
@@ -100,9 +100,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     _strtoui64: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'i32'],
+        params: ['ptr', 'ptr', 'i32'],
         returns: 'i64',
-        uses: ['u8', 'setU32', 'host', 'pointerBytes', 'int64'],
+        uses: ['u8', 'host', 'int64', 'setPtr'],
         host: 487,
         tables: { HIGH_BELOW_CARRY: 492, DIGITS_64: 640 },
         code: Uint8Array.of(
@@ -185,7 +185,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _atoi64: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i64',
         uses: ['u8', 'host', 'int64'],
         host: 318,
@@ -221,7 +221,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     text64: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'i32', 'i32', 'i32'],
+        params: ['u32', 'u32', 'ptr', 'i32', 'i32', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16'],
         tables: { TENS_LOW: 776, TENS_HIGH: 856 },
@@ -308,7 +308,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _i64toa: {
         convention: 'cdecl',
-        params: ['i64', 'u32', 'i32'],
+        params: ['i64', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host', 'low64', 'high64'],
         host: 107,
@@ -405,7 +405,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _ui64toa: {
         convention: 'cdecl',
-        params: ['i64', 'u32', 'i32'],
+        params: ['i64', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host', 'low64', 'high64'],
         host: 104,
@@ -501,7 +501,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _i64tow: {
         convention: 'cdecl',
-        params: ['i64', 'u32', 'i32'],
+        params: ['i64', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host', 'low64', 'high64'],
         host: 110,
@@ -598,7 +598,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _ui64tow: {
         convention: 'cdecl',
-        params: ['i64', 'u32', 'i32'],
+        params: ['i64', 'ptr', 'i32'],
         returns: 'ptr',
         uses: ['setU8', 'setU16', 'host', 'low64', 'high64'],
         host: 107,

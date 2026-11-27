@@ -513,7 +513,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3TransformCoordArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'ptr', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32', 'ptr', 'u32'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(

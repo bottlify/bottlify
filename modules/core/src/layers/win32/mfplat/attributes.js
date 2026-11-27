@@ -272,7 +272,7 @@ export function createAttributes(kit, host){
             return own.state.items;
         }
         return drive((function* (){
-            const scratch = host.heap.allocate(4 + 16 + PROPVARIANT_SIZE) >>> 0;
+            const scratch = wholeAddress(host.heap.allocate(4 + 16 + PROPVARIANT_SIZE));
             /** @type {Map<string, Item>} */
             const found = new Map();
             try
@@ -338,7 +338,7 @@ export function createAttributes(kit, host){
         }
         return drive((function* (){
             yield kit.guest(thread, pointer, ATTRIBUTES_SLOT.DeleteAllItems, []);
-            const scratch = host.heap.allocate(16 + PROPVARIANT_SIZE) >>> 0;
+            const scratch = wholeAddress(host.heap.allocate(16 + PROPVARIANT_SIZE));
             try
             {
                 for (const [key, item] of items)

@@ -494,7 +494,7 @@ export function createMmioFunctions(host){
             return false;
         }
         const size = file.size + Math.ceil((needed - file.size) / step) * step;
-        const block = host.allocate(size) >>> 0;
+        const block = wholeAddress(host.allocate(size));
         if (block === 0)
         {
             return false;
@@ -981,7 +981,7 @@ export function createMmioFunctions(host){
         if (allocating && host.allocate)
         {
             size ||= MMIO_DEFAULTBUFFER;
-            buffer = host.allocate(size) >>> 0;
+            buffer = wholeAddress(host.allocate(size));
             if (buffer === 0)
             {
                 abandon();
@@ -1093,7 +1093,7 @@ export function createMmioFunctions(host){
                 {
                     return 0;
                 }
-                procedures.set(code, { entry: proc >>> 0, wide });
+                procedures.set(code, { entry: wholeAddress(proc), wide });
                 return wholeAddress(proc);
             }
             if (((flags >>> 0) & MMIO_REMOVEPROC) !== 0)

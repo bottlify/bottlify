@@ -888,8 +888,8 @@ export function createWin32Module(){
                 setLastError: code=>setError(code),
                 windowRect: (hwnd, out)=>libraries['USER32.dll'].GetWindowRect
                     .handler([hwnd, out]) >>> 0,
-                allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc
-                    .handler([0x40, bytes]) >>> 0,
+                allocate: bytes=>wholeAddress(libraries['KERNEL32.dll'].LocalAlloc
+                    .handler([0x40, bytes])),
                 free: address=>void libraries['KERNEL32.dll'].LocalFree.handler([address]),
                 userName: USER_NAME,
                 computerName: COMPUTER_NAME,
@@ -3351,14 +3351,15 @@ export function createWin32Module(){
                     /** @param {number} bytes */
                     allocate: bytes=>{
                         const kernel32 = libraries['KERNEL32.dll'];
-                        return kernel32.HeapAlloc.handler([kernel32.GetProcessHeap.handler([]),
-                            HEAP_ZERO_MEMORY, bytes >>> 0]) >>> 0;
+                        // Whole past 4 GiB: a pool's object is its address there.
+                        return wholeAddress(kernel32.HeapAlloc.handler([
+                            kernel32.GetProcessHeap.handler([]), HEAP_ZERO_MEMORY, bytes >>> 0]));
                     },
                     /** @param {number} address */
                     free: address=>{
                         const kernel32 = libraries['KERNEL32.dll'];
                         kernel32.HeapFree.handler([kernel32.GetProcessHeap.handler([]), 0,
-                            address >>> 0]);
+                            wholeAddress(address)]);
                     },
                 },
                 writeMemory,
@@ -4925,8 +4926,8 @@ export function createWin32Module(){
                     pointerSize,
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                     // MIB tables the caller frees with FreeMibTable.
-                    allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc
-                        .handler([0x40, bytes]) >>> 0,
+                    allocate: bytes=>wholeAddress(libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes])),
                     free: address=>void libraries['KERNEL32.dll'].LocalFree
                         .handler([address]),
                     handles, sockets: ()=>sockets.all(), hostName: ()=>HOSTNAME,
@@ -5079,8 +5080,8 @@ export function createWin32Module(){
                     // ApplyPatchToFileByBuffers' own buffer, which the program
                     // frees with VirtualFree.
                     /** @param {number} bytes */
-                    virtualAlloc: bytes=>libraries['KERNEL32.dll'].VirtualAlloc
-                        .handler([0, bytes, 0x3000, 0x04]) >>> 0,
+                    virtualAlloc: bytes=>wholeAddress(libraries['KERNEL32.dll'].VirtualAlloc
+                        .handler([0, bytes, 0x3000, 0x04])),
                     /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
@@ -5239,8 +5240,8 @@ export function createWin32Module(){
                     readCString,
                     pointerSize,
                     // LPTR: fixed and zeroed, as the caller's LocalFree expects.
-                    localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
-                        .handler([0x40, bytes]) >>> 0,
+                    localAlloc: bytes=>wholeAddress(libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes])),
                     localFree: address=>void libraries['KERNEL32.dll'].LocalFree
                         .handler([address]),
                     now: ()=>kernel.clock.wallClock(),
@@ -5276,8 +5277,8 @@ export function createWin32Module(){
                 'POWRPROF.dll': ()=>createPowrprofFunctions({ writeMemory, readMemory,
                     setLastError: setError,
                     processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz,
-                    localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
-                        .handler([0x40, bytes]) >>> 0 }),
+                    localAlloc: bytes=>wholeAddress(libraries['KERNEL32.dll'].LocalAlloc
+                        .handler([0x40, bytes])) }),
                 'pdh.dll': ()=>createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
                 'bcrypt.dll': ()=>createBcryptFunctions({ writeMemory, readMemory, guest }),
@@ -5456,8 +5457,8 @@ export function createWin32Module(){
                     // A codec's DriverProc is the program's code, called as it calls one.
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
-                    allocate: bytes=>libraries['KERNEL32.dll'].GlobalAlloc
-                        .handler([0x40, bytes]) >>> 0,
+                    allocate: bytes=>wholeAddress(libraries['KERNEL32.dll'].GlobalAlloc
+                        .handler([0x40, bytes])),
                     free: address=>void libraries['KERNEL32.dll'].GlobalFree.handler([address]),
                     stretchDIBits: args=>libraries['GDI32.dll'].StretchDIBits.handler(args),
                     // A codec DLL a game installed: loaded as the program loads a
@@ -5465,7 +5466,7 @@ export function createWin32Module(){
                     loadDriver: async file=>{
                         const kernel32 = libraries['KERNEL32.dll'];
                         const names = encodeAnsi(`${file}\0DriverProc\0`);
-                        const at = kernel32.GlobalAlloc.handler([0x40, names.length]) >>> 0;
+                        const at = wholeAddress(kernel32.GlobalAlloc.handler([0x40, names.length]));
                         writeMemory(at, names);
                         const module = await kernel32.LoadLibraryA.handler([at]) >>> 0;
                         const proc = module
@@ -5479,7 +5480,8 @@ export function createWin32Module(){
                     iniDriver: name=>{
                         const kernel32 = libraries['KERNEL32.dll'];
                         const strings = encodeAnsi(`drivers32\0${name}\0\0system.ini\0`);
-                        const at = kernel32.GlobalAlloc.handler([0x40, strings.length + 260]) >>> 0;
+                        const at = wholeAddress(kernel32.GlobalAlloc.handler([0x40,
+                            strings.length + 260]));
                         writeMemory(at, strings);
                         const key = at + 10;
                         const none = key + name.length + 1;
@@ -5522,7 +5524,7 @@ export function createWin32Module(){
                     writeMemory,
                     readCString,
                     addressOf: name=>modules.find('msvcirt.dll')?.addressOf?.(name) ?? 0,
-                    allocate: bytes=>libraries['msvcrt.dll'].malloc.handler([bytes]) >>> 0,
+                    allocate: bytes=>wholeAddress(libraries['msvcrt.dll'].malloc.handler([bytes])),
                     release: address=>void libraries['msvcrt.dll'].free.handler([address]),
                     locks: {
                         init: cs=>libraries['KERNEL32.dll'].InitializeCriticalSection.handler([cs]),
@@ -6072,7 +6074,8 @@ export function createWin32Module(){
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     currentThread: ()=>kernel.currentThread(),
                     commandLine: ()=>readWideString(
-                        libraries['KERNEL32.dll'].GetCommandLineW.handler([]) >>> 0, 0x8000),
+                        wholeAddress(libraries['KERNEL32.dll'].GetCommandLineW.handler([])),
+                        0x8000),
                     log: text=>trace(`libcef: ${text}`),
                     divergence: config?.divergence }),
                 'USERENV.dll': ()=>createUserenvFunctions({

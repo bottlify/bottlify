@@ -425,7 +425,7 @@ export function createLines(host){
         }
         let pointer = 0;
         const object = createComObject(IID_ID3DXLINE, { interfaces: [line],
-            state: { device: device >>> 0, width: 1, pattern: SOLID, patternScale: 1,
+            state: { device: wholeAddress(device), width: 1, pattern: SOLID, patternScale: 1,
                 antialias: 0, glLines: 0, begun: false, saved: 0 },
             destroy: ()=>byPointer.delete(pointer) });
         pointer = host.vtables.publish(object, IID_ID3DXLINE) >>> 0;

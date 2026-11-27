@@ -193,9 +193,9 @@ export function createSecurityFunctions(host){
             {
                 return 0;
             }
-            const end = (acl >>> 0) + word(acl + 2);
+            const end = wholeAddress(acl) + word(acl + 2);
             const count = word(acl + 4);
-            let at = (acl >>> 0) + ACL_HEADER;
+            let at = wholeAddress(acl) + ACL_HEADER;
             for (let index = 0; index < count; index++)
             {
                 if (at >= end)

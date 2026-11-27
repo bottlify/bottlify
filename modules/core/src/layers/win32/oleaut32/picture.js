@@ -159,7 +159,7 @@ export function createPictureObjects(host){
      * @returns {T | null}
      */
     const lend = (bytes, use)=>{
-        const at = host.allocate(Math.max(bytes.length, 4)) >>> 0;
+        const at = wholeAddress(host.allocate(Math.max(bytes.length, 4)));
         if (at === 0)
         {
             return null;
@@ -183,7 +183,7 @@ export function createPictureObjects(host){
      * @returns {number | Promise<number>}
      */
     const lendUntil = (bytes, use)=>{
-        const at = host.allocate(Math.max(bytes.length, 4)) >>> 0;
+        const at = wholeAddress(host.allocate(Math.max(bytes.length, 4)));
         if (at === 0)
         {
             return E_OUTOFMEMORY;
@@ -1248,7 +1248,7 @@ export function createPictureObjects(host){
      * @returns {Promise<Uint8Array | null>}
      */
     const readStream = async(stream, limit, thread)=>{
-        const block = host.allocate(READ_PIECE + 4) >>> 0;
+        const block = wholeAddress(host.allocate(READ_PIECE + 4));
         if (block === 0)
         {
             return null;

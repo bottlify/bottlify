@@ -35,6 +35,7 @@
  */
 
 import { decodeJpeg, readJpegHeader } from './jpeg.js';
+import { wholeAddress } from '../../../system/address.js';
 import { utf8 } from '../../../system/text.js';
 
 const OFFSET = {
@@ -385,9 +386,9 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
                 }
                 // The DIB and JPEG halves start empty and the quality at the
                 // library's default; a caller reads back what it did not set.
-                writeMemory(props >>> 0, new Uint8Array(OFFSET.jquality + 4));
-                put32((props >>> 0) + OFFSET.jquality, 75);
-                open.set(props >>> 0, { header: null });
+                writeMemory(wholeAddress(props), new Uint8Array(OFFSET.jquality + 4));
+                put32(wholeAddress(props) + OFFSET.jquality, 75);
+                open.set(wholeAddress(props), { header: null });
                 return IJL.OK;
             },
         },
@@ -395,14 +396,14 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
         ijlFree: {
             argBytes: 4,
             handler: ([props])=>{
-                open.delete(props >>> 0);
+                open.delete(wholeAddress(props));
                 return IJL.OK;
             },
         },
         /** IJLERR ijlRead(JPEG_CORE_PROPERTIES* jcprops, IJLIOTYPE iotype) */
         ijlRead: {
             argBytes: 8,
-            handler: ([props, iotype])=>read(props >>> 0, iotype | 0),
+            handler: ([props, iotype])=>read(wholeAddress(props), iotype | 0),
         },
         /** IJLERR ijlWrite(JPEG_CORE_PROPERTIES* jcprops, IJLIOTYPE iotype) */
         ijlWrite: {

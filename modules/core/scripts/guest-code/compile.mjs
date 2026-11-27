@@ -172,10 +172,12 @@
  *
  * A pointer (`ptr`) is the exception, and the one value the x86-64 keeps as
  * a quadword: where a 64-bit process's memory reaches past 4 GiB, an address
- * is more than a dword. A pointer variable is a `ptr` parameter, or a `let`
+ * is more than a dword. A pointer variable is a `ptr` parameter, a `let`
  * or `const` given a pointer expression - a pointer variable, or one with
  * constants and integers added or taken away (`p + n`, `p - 4`, `p + (i <<
- * 2) + j`; the integers are summed in 32 bits first, signed).
+ * 2) + j`; the integers are summed in 32 bits first, signed) - or one
+ * declared `@type {ptr}`, which may start as an integer (`let found = 0`, a
+ * null that a pointer is given later), extended by zeros.
  * It is whole where a pointer stands: the address of a load, a store, a
  * copy or a fill; a side of a comparison with another pointer or a constant
  * (unsigned); what a pointer variable is given (`=`, `+=`, `-=`, `++`,
@@ -2326,9 +2328,9 @@ class FunctionCompiler {
             this.fail(node, 'a variable is let or const');
         }
         const annotated = /@type\s+\{(\w+)\}/.exec(leadingDoc(this.scope, node))?.[1];
-        if (annotated !== undefined && !['i32', 'u32', 'f64', 'f32'].includes(annotated))
+        if (annotated !== undefined && !['i32', 'u32', 'ptr', 'f64', 'f32'].includes(annotated))
         {
-            this.fail(node, `@type {${annotated}}: a variable is i32, u32, f64 or f32`);
+            this.fail(node, `@type {${annotated}}: a variable is i32, u32, ptr, f64 or f32`);
         }
         for (const declarator of node.declarations)
         {
@@ -2365,6 +2367,22 @@ class FunctionCompiler {
                 continue;
             }
             const value = this.expr(declarator.init);
+            if (annotated === 'ptr')
+            {
+                // A pointer given an integer, a null among them: the quadword
+                // JavaScript holds, a dword extended by zeros at 64 bits.
+                const v = this.declare(declarator.id, name, 'u32', node.kind === 'let', true);
+                if (!this.long)
+                {
+                    this.store(v, value, declarator.init);
+                    continue;
+                }
+                this.assignable(v, value.type, declarator.init);
+                this.toEax(value, declarator.init);
+                this.a.emit(0x89, 0xc0);                                   // mov eax, eax
+                this.quad(0x89, EAX, v);                                   // mov [v], rax
+                continue;
+            }
             /** @type {Variable['type']} */
             let type;
             if (annotated !== undefined)
@@ -5339,7 +5357,10 @@ class FunctionCompiler {
                     && v.pointer === true);
             }
         }
-        if (![...scopes[0].values()].some(Boolean) && !this.helpers.has(POINTER_LOAD))
+        /** Whether a declaration is annotated `@type {ptr}`. @param {any} node */
+        const declaredPointer = node=>/@type\s+\{ptr\}/.test(leadingDoc(this.scope, node));
+        if (![...scopes[0].values()].some(Boolean) && !this.helpers.has(POINTER_LOAD)
+            && !/@type\s+\{ptr\}/.test(this.scope.text.slice(...this.node.range)))
         {
             return;
         }
@@ -5380,7 +5401,8 @@ class FunctionCompiler {
                 case 'VariableDeclaration':
                     for (const declarator of node.declarations)
                     {
-                        const pointer = declarator.init ? isPointer(declarator.init) : false;
+                        const pointer = declarator.init ? isPointer(declarator.init)
+                            || declaredPointer(node) : false;
                         visit(declarator.init, 'pointer');
                         if (declarator.id.type === 'Identifier')
                         {

@@ -1385,7 +1385,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 // A DWORD_PTR: the LRESULT whole at 64 bits, a dword widened
                 // by its sign where the procedure answered no more.
                 const whole = wholeAnswer(answer, wide);
-                writeU32s(host, result >>> 0, host.pointerSize === 8
+                writeU32s(host, wholeAddress(result), host.pointerSize === 8
                     ? typeof whole === 'bigint'
                         ? [Number(whole & 0xffffffffn), Number(whole >> 32n & 0xffffffffn)]
                         : [answer >>> 0, (answer | 0) < 0 ? 0xffffffff : 0]
@@ -2031,7 +2031,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             {
                 return 0;
             }
-            return (wide ? writeWideString : writeString)(buffer >>> 0,
+            return (wide ? writeWideString : writeString)(wholeAddress(buffer),
                 keyNameOf(lParam >>> 0), size | 0);
         },
     });
@@ -2949,7 +2949,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         const key = wide ? 'wide' : 'ansi';
         if (schemeNames[key] === 0 && host.allocate)
         {
-            schemeNames[key] = host.allocate(2) >>> 0;
+            schemeNames[key] = wholeAddress(host.allocate(2));
             host.writeMemory(schemeNames[key], new Uint8Array(2));
         }
         return schemeNames[key];
@@ -5257,7 +5257,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
                 const varargs = varargsSlots(host.readMemory,
-                    address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
+                    address=>host.regionAt?.(address) ?? null, wholeAddress(list), VA_LIST_SLOTS);
                 const text = formatWsprintf(readString(format), varargs,
                     { readString, readWideString: wideOrNull, byteChar });
                 return writeString(out, text, text.length + 1);
@@ -5277,7 +5277,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
                 const varargs = varargsSlots(host.readMemory,
-                    address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
+                    address=>host.regionAt?.(address) ?? null, wholeAddress(list), VA_LIST_SLOTS);
                 const text = formatWsprintf(wideOrNull(format), varargs,
                     { readString, readWideString: wideOrNull, byteChar, wide: true });
                 return writeWideString(out, text, text.length + 1);

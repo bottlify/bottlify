@@ -444,7 +444,7 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
-                const block = host.allocate(8 + secret.length + 2) >>> 0;
+                const block = wholeAddress(host.allocate(8 + secret.length + 2));
                 const bytes = new Uint8Array(8 + secret.length + 2);
                 const view = new DataView(bytes.buffer);
                 view.setUint16(0, secret.length, true);
