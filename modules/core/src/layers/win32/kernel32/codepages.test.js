@@ -6,7 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bestFit, codePage } from './codepages.js';
+import { runTables } from '../common/run-tables.js';
+import { bestFit, codePages } from './codepages.js';
+
+const codePage = codePages(runTables(null));
 
 /** @param {number} id */
 const page = id=>{

@@ -6,7 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CT_CTYPE1, CT_CTYPE2, CT_CTYPE3, stringType } from './string-types.js';
+import { runTables } from '../common/run-tables.js';
+import { CT_CTYPE1, CT_CTYPE2, CT_CTYPE3, stringTypes } from './string-types.js';
+
+const types = stringTypes(runTables(null));
+/** The word for one unit, or null for an info type not taken. @param {number} type @param {number} code */
+const stringType = (type, code)=>types(type, String.fromCharCode(code))?.[0] ?? null;
 
 /** @param {number[]} codes @param {number} type */
 const typesOf = (codes, type = CT_CTYPE1)=>codes.map(code=>stringType(type, code));

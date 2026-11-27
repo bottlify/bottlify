@@ -10,17 +10,18 @@ import { verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
 import { decodeUtf7, encodeUtf7 } from './utf7.js';
 import { unitsFromUtf8, utf8FromUnits } from './utf8.js';
-import { bestFit, codePage } from './codepages.js';
+import { bestFit, codePages } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
 import { forwarded, wholeAddress } from '../common/pointers.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
-import { stringType } from './string-types.js';
+import { isStringType, stringTypes } from './string-types.js';
+import { runTables } from '../common/run-tables.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
     from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
     from './locale-data.js';
-import { utf16 } from '../common/utf16.js';
+import { bytesOfUnits, utf16 } from '../common/utf16.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -781,6 +782,9 @@ export const mapCaseAnsi = (bytes, upper)=>{
  *           string the callback reads; absent, enumerations do not call.
  * @property {(address: number) => void} [free]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {import('../common/run-tables.js').RunTables} [tables]  The run's
+ *           constant tables the code pages and string types are read from;
+ *           absent, this machine's own.
  */
 
 /**
@@ -798,6 +802,9 @@ export function compareStrings(first, second, flags){
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
+    const tables = host.tables ?? runTables(null);
+    const codePage = codePages(tables);
+    const stringType = stringTypes(tables);
     /**
      * The locale each thread set for itself, by thread; one slot where there
      * is no thread to tell them apart.
@@ -2882,7 +2889,7 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, infoType, source, count, types])=>{
                 void locale;
-                if (stringType(infoType >>> 0, 0) === null || wholeAddress(source) === 0
+                if (!isStringType(infoType >>> 0) || wholeAddress(source) === 0
                     || wholeAddress(types) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2891,14 +2898,8 @@ export function createLocaleFunctions(host){
                 const span = sourceSpan(wholeAddress(source), count, 1);
                 const raw = host.readMemory(wholeAddress(source), span.length);
                 const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
-                const out = new Uint8Array(text.length * 2);
-                const view = new DataView(out.buffer);
-                for (let at = 0; at < text.length; at++)
-                {
-                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
-                        text.charCodeAt(at))), true);
-                }
-                host.writeMemory(wholeAddress(types), out);
+                host.writeMemory(wholeAddress(types),
+                    bytesOfUnits(/** @type {Uint16Array} */ (stringType(infoType >>> 0, text))));
                 return 1;
             },
         },
@@ -2914,7 +2915,7 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoType, source, count, types])=>{
-                if (stringType(infoType >>> 0, 0) === null || wholeAddress(source) === 0
+                if (!isStringType(infoType >>> 0) || wholeAddress(source) === 0
                     || wholeAddress(types) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2922,14 +2923,8 @@ export function createLocaleFunctions(host){
                 }
                 const span = sourceSpan(wholeAddress(source), count, 2);
                 const text = readWide(wholeAddress(source), span.length);
-                const out = new Uint8Array(text.length * 2);
-                const view = new DataView(out.buffer);
-                for (let at = 0; at < text.length; at++)
-                {
-                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
-                        text.charCodeAt(at))), true);
-                }
-                host.writeMemory(wholeAddress(types), out);
+                host.writeMemory(wholeAddress(types),
+                    bytesOfUnits(/** @type {Uint16Array} */ (stringType(infoType >>> 0, text))));
                 return 1;
             },
         },
