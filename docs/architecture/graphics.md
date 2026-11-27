@@ -97,7 +97,11 @@ flowchart TB
   way, where the graphics layer made them; the run's presenter, which the run makes outside
   the layer, holds them under names of the run's own (`RunCache.scratch`), and the backend in
   the graphics worker under names the run hands it when the run starts (`remote/connect.js`
-  `lendBackend`), plain memory until then. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  `lendBackend`), plain memory until then. A Direct3D 8 or 9 frame's uniform arena, which its
+  draws take their blocks from and its replay reads, is memory held in the run's cache
+  (`d3d8/render.js` `createUniformArena`, `cache/scratch.js` `hold`), one hold a generation:
+  outgrown mid-frame, it holds a larger one and lets the old go only at its next reset, after
+  the frame that read it replayed, and all of them when the device goes. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
