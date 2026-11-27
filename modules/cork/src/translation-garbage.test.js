@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
+import { allocationPerCall, bytesPerCall, heapPerCall } from '../../../tools/fixtures/allocation.mjs';
 import { decode, MODE_64 } from './decode/decoder.js';
 import { formRegion, formShared } from './region.js';
 import { emitBatch } from './runtime/emit-built.js';
@@ -149,7 +149,10 @@ for (const variant of /** @type {const} */ (['x87', 'x64']))
             }
         }
         let next = 0;
-        const bytes = await bytesPerCall(()=>{
+        // The heap alone: a batch collects garbage within itself, so no call of
+        // it runs clear of a collection and its buffers cannot be read here -
+        // the next test reads them a region at a time.
+        const bytes = await heapPerCall(()=>{
             emitBatch(emitted.slice(next * BATCH, (next + 1) * BATCH)
                 .map(region=>({ region, entryTop: 0 })), layout, FEATURES,
             { hash: true, trapPort: 0xb077, resume: true, callReturn: true });
@@ -159,4 +162,33 @@ for (const variant of /** @type {const} */ (['x87', 'x64']))
         t.diagnostic(`${perEmitted.toFixed(0)} bytes an instruction`);
         assert.ok(perEmitted < bound.emit, `${perEmitted.toFixed(0)} bytes an instruction`);
     });
+
+    test(`emitting one of the ${variant} image's regions makes no buffer but its module`,
+        { todo: 'the emitter makes about 17 KB of buffers a region beside a module of about'
+            + ' 7.7 KB, x87 and x64 alike (2026-11-27); where in it they are made is not traced' },
+        async t=>{
+            const layout = ownLayout({ ramSize: 64 << 20,
+                ...wide ? { ramBase: 0, bits: 64 } : {} });
+            const emitted = regions.slice(0, EMITTED);
+            /** @param {number} at */
+            const emitOne = at=>emitBatch([{ region: emitted[at], entryTop: 0 }], layout, FEATURES,
+                { hash: true, trapPort: 0xb077, resume: true, callReturn: true });
+            // The module a call answers is what it is for: the buffers it may
+            // make are that module's bytes, as they average over these regions.
+            let modules = 0;
+            for (let at = 0; at < emitted.length; at++)
+            {
+                modules += emitOne(at).module.buffer.byteLength;
+            }
+            const modulePerCall = modules / emitted.length;
+            let next = 0;
+            const { buffers } = await allocationPerCall(()=>{
+                emitOne(next);
+                next = next + 1 === emitted.length ? 0 : next + 1;
+            }, { calls: emitted.length });
+            t.diagnostic(`${buffers.toFixed(0)} buffer bytes a region beside its module of`
+                + ` ${modulePerCall.toFixed(0)}`);
+            assert.ok(buffers <= modulePerCall * 1.25, `${buffers.toFixed(0)} buffer bytes a region`
+                + ` beside its module of ${modulePerCall.toFixed(0)}`);
+        });
 }

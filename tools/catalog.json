@@ -1141,9 +1141,12 @@
    "category": "fixtures",
    "kind": "fixture",
    "browser": false,
-   "question": "How many bytes a function allocates a call, for the tests that hold a hot path to making no garbage",
+   "question": "How many bytes a function allocates a call, JS heap and ArrayBuffer backing stores apart, for the tests that hold a hot path to making no garbage",
    "command": "",
-   "tests": []
+   "tests": ["tools/fixtures/allocation.test.js"],
+   "sample": "made {\"heap\":186.64,\"buffers\":3145728}\nreused {\"heap\":0.88,\"buffers\":0}\nobject {\"heap\":32.306,\"buffers\":0}",
+   "source": "allocationPerCall over three bodies in node 22.23: `new Uint8Array(3 << 20)` a call (200 calls), a kept 3 MiB array filled in place (200 calls), `{ a: 1 }` a call (20000 calls)",
+   "read": "`heap` is the sampler's JS objects a call, `buffers` the backing stores a call: the 3 MiB array is a 186-byte header to the heap and its 3 MiB in buffers. `bytesPerCall`/`bytesPerAwait` answer the two summed. A buffers figure it cannot read (every call ran a collection) is an error `buffer bytes not measured`, never 0."
   },
   {
    "path": "tools/fixtures/make-pe.mjs",
