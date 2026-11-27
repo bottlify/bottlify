@@ -460,8 +460,8 @@ test('a lost device is said as a loss with WebGPU\'s reason and message', ()=>{
     end.dispose();
 });
 
-test('an OpenGL root owns names of its own in the run\'s cache and lets go of its join with its '
-    + 'process; a root that keeps no texels is given none', async()=>{
+test('a root that keeps texels owns names of its own in the run\'s cache and lets go of its join '
+    + 'with its process; a root that keeps none is given none', async()=>{
     const run = await openRunCache();
     const worker = fakeWorker();
     const end = connectGraphicsWorker({ worker });
@@ -474,13 +474,14 @@ test('an OpenGL root owns names of its own in the run\'s cache and lets go of it
         end.root('opengl', factory, services, run);
         end.root('d3d9', factory,
             { ...services, vertexShaderVersion: { major: 2, minor: 0 } }, run);
+        end.root('d3d10', factory, services, run);
         const roots = worker.posted.filter(posted=>posted.type === 'root');
         const prefixes = roots.map(root=>root.cache?.prefix ?? null);
-        assert.equal(prefixes[2], null, 'a Direct3D root keeps no texels in the cache');
-        assert.ok(prefixes[0] && prefixes[1] && prefixes[0] !== prefixes[1],
-            'two roots, two owners');
-        assert.equal(run.figures().joined, 2);
-        assert.equal(run.figures().served, 2);
+        assert.equal(prefixes[3], null, 'a Direct3D 10 root keeps no texels in the cache');
+        assert.equal(new Set(prefixes.slice(0, 3)).size, 3, 'three roots, three owners');
+        assert.ok(prefixes.slice(0, 3).every(Boolean));
+        assert.equal(run.figures().joined, 3);
+        assert.equal(run.figures().served, 3);
         end.dispose();
         assert.equal(run.figures().joined, 0, 'the process gone, its roots are joined no more');
     }
