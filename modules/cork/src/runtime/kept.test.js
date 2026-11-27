@@ -279,7 +279,7 @@ test('translators on threads of their own read what the writing thread keeps, ne
         const cellarUrl = JSON.stringify(import.meta.resolve('@bottlify/cellar'));
         const source = `
             const { parentPort, workerData } = require('node:worker_threads');
-            Promise.all([import(${keptUrl}), import(${cellarUrl})]).then(([kept, cellar])=>{
+            Promise.all([import(${keptUrl}), import(${cellarUrl})]).then(async([kept, cellar])=>{
                 const reader = cellar.createReader({ shared: workerData.joined.shared,
                     segments: workerData.joined.segments,
                     keeper: { reserve: ()=>null, raise: ()=>false, raiseLater(){}, drop(){} } });
@@ -294,8 +294,15 @@ test('translators on threads of their own read what the writing thread keeps, ne
                 // machine schedules late still reads the newest.
                 let after = 0;
                 const until = Date.now() + 10000;
-                while (Date.now() < until && after < 200)
+                for (let turn = 0; Date.now() < until && after < 200; turn++)
                 {
+                    // Between its turns a thread hears of the segments the
+                    // keeper made (adopt): one that never yields reads only
+                    // the segments it was joined with.
+                    if (turn % 64 === 63)
+                    {
+                        await new Promise(resolve=>setImmediate(resolve));
+                    }
                     const done = Atomics.load(progress, 0);
                     if (done === 0)
                     {
