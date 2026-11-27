@@ -370,9 +370,8 @@ function countingTables(){
             stores++;
             this.values[row * width + column] += amount;
         },
-        used(){},
+        use(){},
         advance(){ return advances++ % rows; },
-        describe(){ return { buffer: new ArrayBuffer(0), rows, columns: [] }; },
     });
     return {
         cost: ()=>({ stores, advances }),

@@ -214,7 +214,7 @@ const copyFrame = frame=>({
  * @param {Object} options
  * @param {() => number} options.now
  * @param {number} [options.frames]  Frames of history kept.
- * @param {{ frames: import('./table.js').TableWriter, phases: import('./table.js').TableWriter }}
+ * @param {{ frames: import('@bottlify/cellar').Table, phases: import('@bottlify/cellar').Table }}
  *     [options.tables]  Where each frame and each phase row is mirrored for a reader elsewhere.
  * @param {(text: string) => number} [options.intern]  Names as ids, for those tables.
  * @returns {any}
@@ -304,7 +304,7 @@ export function createProfiler(options){
      * numbers, which is the whole cost of a reader elsewhere seeing frames.
      *
      * @param {FrameRecord} frame
-     * @param {import('./table.js').TableWriter} table
+     * @param {import('@bottlify/cellar').Table} table
      */
     const publishFrame = (frame, table)=>{
         const row = table.advance();
@@ -427,7 +427,7 @@ export function createProfiler(options){
                 {
                     tables.phases.set(slot, 0, intern(entry.name));
                     tables.phases.set(slot, 1, KINDS.indexOf(entry.kind));
-                    tables.phases.used(rows.size);
+                    tables.phases.use(rows.size);
                 }
             }
             row.count += weight;

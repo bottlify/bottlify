@@ -12,7 +12,7 @@ import { createParking, isParkedCall } from './parking.js';
 import { createDispatcher } from './dispatch.js';
 import { longMachine as machine64 } from './long-machine.fixture.js';
 import { WRITER_COLUMNS, createWriterAccount } from '../../memory/internal/writers.js';
-import { createTable, readTable } from '../../log/internal/table.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 
 /**
  * A CPU and an address space stood in for, so these tests are about marshalling
@@ -916,7 +916,7 @@ test('a write into guest memory is charged to the call in flight, however it nes
     // against the layer that will answer it rather than against a spy.
     /** @type {string[]} */
     const words = [];
-    const table = createTable({ rows: 8, columns: WRITER_COLUMNS });
+    const table = openTable(createTableMemory({ rows: 8, columns: WRITER_COLUMNS }));
     const account = createWriterAccount({
         table,
         intern: text=>{
@@ -954,7 +954,7 @@ test('a write into guest memory is charged to the call in flight, however it nes
     account.charge(7);
     void memory;
 
-    const rows = Object.fromEntries(readTable(table.describe()).all()
+    const rows = Object.fromEntries(openTable(table.memory).all()
         .filter(row=>row.writes > 0)
         .map(row=>[words[row.name], [row.bytes, row.writes]]));
     assert.deepEqual(rows, {

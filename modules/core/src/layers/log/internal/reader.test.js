@@ -130,7 +130,7 @@ test('a layer\'s counters and tables are read from the same memory the layer wri
     kernel[0] = 42;
     threads.set(0, 0, journal.intern('main'));
     threads.set(0, 1, 2);
-    threads.used(1);
+    threads.use(1);
 
     assert.deepEqual(reader.counters('kernel'), { turns: 42 });
     const rows = reader.table('kernel', 'threads')?.all() ?? [];
@@ -183,7 +183,7 @@ test('the reader names where the guest ran from the kernel\'s pages and the memo
         regions.set(1, 0, journal.intern('storm.dll'));
         regions.set(1, 1, 0x800000);
         regions.set(1, 2, 0x100000);
-        regions.used(2);
+        regions.use(2);
         pages.values[0x40] = 300;
         pages.values[0x41] = 200;
         pages.values[0x80] = 400;
@@ -246,7 +246,7 @@ test('a frame says what the program did and what it cost us, without a second ru
     regions.set(0, 0, api.intern('Storm.dll'));
     regions.set(0, 1, 0x6f00000);
     regions.set(0, 2, 0x100000);
-    regions.used(1);
+    regions.use(1);
     const reader = createLogReader({ memory: api.memory() });
 
     /**
@@ -325,7 +325,7 @@ test('the writers table reads back as names, heaviest first', async()=>{
     put(0, '<no host call>', 0, 0);
     put(1, 'LockRect', 900, 3);
     put(2, 'WriteFile', 9000, 1);
-    table.used(3);
+    table.use(3);
 
     const reader = createLogReader({ memory: api.memory() });
     assert.deepEqual(reader.writers(), [

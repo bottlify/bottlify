@@ -76,7 +76,7 @@ const SHOWN_ROWS = 32;
  * @param {{ counters: (layer: string, names: string[]) => Float64Array,
  *     table: (layer: string, name: string, spec: { rows: number, columns: string[] }) =>
  *         { set: (row: number, column: number, value: number) => void,
- *             used: (count: number) => void } }} options.metrics
+ *             use: (count: number) => void } }} options.metrics
  *     The log's registry (`log.metrics`).
  * @param {(text: string) => number} options.intern
  * @param {() => { count: number, by: Readonly<Record<string, number>> } | null} options.shown
@@ -110,7 +110,7 @@ export function publishFigures({ metrics, intern, shown, figures, worker }){
                 shownBy.set(row, 1, canvas.by[name]);
                 row++;
             }
-            shownBy.used(row);
+            shownBy.use(row);
         }
         const device = figures();
         counters[1] = device ? 1 : 0;
@@ -125,7 +125,7 @@ export function publishFigures({ metrics, intern, shown, figures, worker }){
                 last.set(0, column, /** @type {any} */ (frame)[LAST_FRAME_COLUMNS[column]]);
             }
         }
-        last.used(frame ? 1 : 0);
+        last.use(frame ? 1 : 0);
         const phases = worker();
         counters[5] = phases ? 1 : 0;
         counters[6] = phases?.['batch-read'].count ?? 0;

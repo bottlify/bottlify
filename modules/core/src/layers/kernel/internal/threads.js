@@ -336,10 +336,8 @@ function isOpen(remotes, index){
  *        Retired instructions by 64 KiB page, one entry per page of guest
  *        memory and a last one for anywhere else. Credited in place.
  * @param {Float64Array} [options.counters]   One entry per `SCHEDULER_COUNTERS`.
- * @param {{ set: (row: number, column: number, value: number) => void,
- *     used: (count: number) => void, rows: number }} [options.threadTable]
- * @param {{ set: (row: number, column: number, value: number) => void,
- *     used: (count: number) => void, rows: number }} [options.slowSliceTable]
+ * @param {import('@bottlify/cellar').Table} [options.threadTable]
+ * @param {import('@bottlify/cellar').Table} [options.slowSliceTable]
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
  * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
  *        the schedulers of the processes beside or after this one.
@@ -1074,7 +1072,7 @@ export function createScheduler(options){
                     slowSliceTable.set(row, 3, slice.at);
                     slowSliceTable.set(row, 4, intern(slice.thread ?? '?'));
                 }
-                slowSliceTable.used(slowSlices.length);
+                slowSliceTable.use(slowSlices.length);
             }
         }
         creditPage(from, instructions);
@@ -3197,7 +3195,7 @@ export function createScheduler(options){
             }
             counters[12] = busiest;
             counters[13] = busiestRetired;
-            table?.used(rows);
+            table?.use(rows);
         },
 
         diagnostics(){

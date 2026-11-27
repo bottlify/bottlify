@@ -67,7 +67,7 @@ const RESERVED = 2;
 
 /**
  * @param {Object} options
- * @param {import('../../log/internal/table.js').TableWriter} options.table
+ * @param {import('@bottlify/cellar').Table} options.table
  * @param {(text: string) => number} options.intern
  * @returns {WriterAccount}
  */
@@ -91,7 +91,7 @@ export function createWriterAccount({ table, intern }){
     };
     name(NO_CALL, names[NO_CALL]);
     name(BEYOND, names[BEYOND]);
-    table.used(RESERVED);
+    table.use(RESERVED);
 
     /**
      * The row a name writes into, taken now because it is writing. Off the hot
@@ -106,7 +106,7 @@ export function createWriterAccount({ table, intern }){
         if (row !== BEYOND)
         {
             name(row, names[id]);
-            table.used(taken);
+            table.use(taken);
         }
         return row;
     };

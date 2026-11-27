@@ -180,7 +180,7 @@ export function createMemoryModule(){
                     table.set(row, 2, region.size);
                     table.set(row, 3, Object.values(Access).indexOf(region.access));
                 }
-                table.used(rows);
+                table.use(rows);
             };
 
             /**

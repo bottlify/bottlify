@@ -6,7 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
-import { mayWait } from '../../system/may-wait.js';
+import { mayWait } from '@bottlify/cellar';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE } from './internal/store-relay.js';

@@ -15,7 +15,7 @@
 
 import { createSender, sharedNow } from './channel.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
-import { mayWait } from '../../../system/may-wait.js';
+import { mayWait } from '@bottlify/cellar';
 import { createLendingBuffers } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';

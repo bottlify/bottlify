@@ -430,7 +430,7 @@ export function createBridgeModule(){
                         table.set(row, 1, hooks[row].calls);
                         table.set(row, 2, hooks[row].ms);
                     }
-                    table.used(rows);
+                    table.use(rows);
                 });
             }
 

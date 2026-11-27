@@ -207,7 +207,7 @@ export function createLogModule(){
                 for (const entry of FRAME_MIRROR)
                 {
                     const table = registry.find(entry.layer, 'counters');
-                    const index = table ? table.describe().columns.indexOf(entry.counter) : -1;
+                    const index = table ? table.columns.indexOf(entry.counter) : -1;
                     rows.push(index >= 0 && table ? table.values : null);
                     indices.push(index >= 0 ? index : 0);
                     if (index < 0)

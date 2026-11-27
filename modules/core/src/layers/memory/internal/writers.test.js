@@ -7,13 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './writers.js';
-import { createTable, readTable } from '../../log/internal/table.js';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 
 /** The account over a real table, with a dictionary that numbers words in order. */
 function account(rows = WRITER_ROWS){
     /** @type {string[]} */
     const words = [];
-    const table = createTable({ rows, columns: WRITER_COLUMNS });
+    const table = openTable(createTableMemory({ rows, columns: WRITER_COLUMNS }));
     const made = createWriterAccount({
         table,
         intern: text=>{
@@ -21,7 +21,7 @@ function account(rows = WRITER_ROWS){
             return at >= 0 ? at : words.push(text) - 1;
         },
     });
-    const reader = readTable(table.describe());
+    const reader = openTable(table.memory);
     return {
         ...made,
         words,
