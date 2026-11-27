@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createLinkMemory, openLink } from './system/link.js';
+import { createLinkMemory, openLink } from '@bottlify/cellar';
 import { REGISTRY, remoteSystem, systemHandlers } from './system-link.js';
 import { createRegistryService } from './layers/win32/advapi32/registry-service.js';
 import { HKEY_LOCAL_MACHINE, createHive } from './layers/win32/advapi32/registry.js';
@@ -45,7 +45,7 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
                     import(workerData.link), import(workerData.system)]);
                 const link = openLink(workerData.end, {});
                 const system = remoteSystem((target, method, args)=>
-                    link.callWaiting(target, method, args));
+                    link.ask(target, method, args));
                 const machine = system.registry.root(workerData.machine);
                 const made = system.registry.create(machine, 'SOFTWARE\\\\Child');
                 system.registry.setValue(made.key, 'Ran', 4, Uint8Array.of(1, 0, 0, 0));
@@ -56,7 +56,7 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
                 parentPort.postMessage({ ids, hello, found, described });
             })().catch(e=>parentPort.postMessage({ error: String(e && e.stack || e) }));`,
         { eval: true, workerData: { end: b, machine: HKEY_LOCAL_MACHINE,
-            link: new URL('./system/link.js', import.meta.url).href,
+            link: import.meta.resolve('@bottlify/cellar'),
             system: new URL('./system-link.js', import.meta.url).href } });
         worker.once('message', message=>{
             worker.terminate();

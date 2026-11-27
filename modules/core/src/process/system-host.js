@@ -233,7 +233,7 @@ const CALLS_OFF = Object.freeze({
  *     translationStore: any, reader: import('@bottlify/cellar').Reader | null,
  *     now: () => number,
  *     across: () => { image: string, id: number,
- *         link: ReturnType<typeof import('../system/link.js').openLink> }[],
+ *         link: ReturnType<typeof import('@bottlify/cellar').openLink> }[],
  *     libraries: () => string[] }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
  *     the system libraries the run's own program knew, once it is over; `reader`:

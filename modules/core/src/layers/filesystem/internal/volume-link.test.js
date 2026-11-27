@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createFilesystemModule } from '../module.js';
-import { createLinkMemory, openLink } from '../../../system/link.js';
+import { createLinkMemory, openLink } from '@bottlify/cellar';
 import { remoteVolume, volumeHandlers } from './volume-link.js';
 
 const here = (/** @type {string} */ path)=>new URL(path, import.meta.url).href;
@@ -40,7 +40,7 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
                 const link = openLink(workerData.end, {});
                 const fs = await createFilesystemModule().create({
                     volume: remoteVolume((method, args)=>
-                        link.callWaiting('volume', method, args)) });
+                        link.ask('volume', method, args)) });
                 const code = run=>{ try { run(); return null; } catch (e) { return e.code; } };
                 const size = fs.stat('C:\\\\Save\\\\a.txt').size;
                 const refused = code(()=>fs.open('C:\\\\Save\\\\A.TXT', { read: true }));
@@ -52,7 +52,7 @@ test('a process in another thread stands on the run\'s volume: it reads and writ
                 const names = fs.list('C:\\\\Save').map(entry=>entry.name).sort();
                 parentPort.postMessage({ size, refused, missing, names });
             })().catch(e=>parentPort.postMessage({ error: String(e && e.stack || e) }));`,
-        { eval: true, workerData: { end: b, link: here('../../../system/link.js'),
+        { eval: true, workerData: { end: b, link: import.meta.resolve('@bottlify/cellar'),
             module: here('../module.js'), remote: here('./volume-link.js') } });
         worker.once('message', message=>{
             worker.terminate();

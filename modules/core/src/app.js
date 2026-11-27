@@ -4523,7 +4523,7 @@ export async function createApp(options){
      * diagnostics are asked for across its link, and those of every process
      * running beside it there.
      *
-     * @type {Set<{ image: string, id: number, link: ReturnType<typeof import('./system/link.js').openLink>,
+     * @type {Set<{ image: string, id: number, link: import('@bottlify/cellar').Link,
      *     diagnostics: () => Promise<any>,
      *     frames: (count: number) => Promise<any[] | null>,
      *     read: (address: number, length: number) => Promise<Uint8Array | null>,

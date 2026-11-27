@@ -8,7 +8,7 @@ import { FIRST_PROCESS_ID } from './process-layout.js';
 import { createSyncObjects } from '../layers/kernel/internal/sync.js';
 import { STILL_ACTIVE } from '../layers/kernel/internal/processes.js';
 import { STEAM_PATH, announceSteamClient } from '../layers/win32/steamclient/functions.js';
-import { createLinkMemory, openLink } from '../system/link.js';
+import { createLinkMemory, openLink } from '@bottlify/cellar';
 import { comHandlers } from '../com-link.js';
 import { pipeHandlers } from '../system-pipes.js';
 import { dropUnclaimed } from '../layers/win32/kernel32/pipes.js';
@@ -256,7 +256,7 @@ export function processesBeside(deps){
         const cacheAcross = runCache?.across() ?? null;
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
-                (target, method, args)=>link.callWaiting(target, method, args), windowsAcross),
+                (target, method, args)=>link.ask(target, method, args), windowsAcross),
             ...objects,
             com: com.handlers,
             pipes,
@@ -749,8 +749,8 @@ export function processesBeside(deps){
         // ends are the run's already, served to the parent here: the child
         // holds one more handle onto each.
         const files = handedFiles(asked.inheritedFiles,
-            handle=>link.callWaiting('parent', 'position', [asked.id, handle]),
-            (handle, at)=>link.callWaiting('parent', 'setPosition', [asked.id, handle, at]));
+            handle=>link.ask('parent', 'position', [asked.id, handle]),
+            (handle, at)=>link.ask('parent', 'setPosition', [asked.id, handle, at]));
         const ends = (asked.inheritedPipes ?? [])
             .map((/** @type {{ handle: number, id: number }} */ one)=>inheritPipe(one.handle, one.id))
             .filter(Boolean);

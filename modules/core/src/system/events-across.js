@@ -10,7 +10,7 @@
  * The page subscribes on the run's bus, on the thread that started the
  * process, so what happens to the process -- a library it loaded, a call it
  * made that is missing, a failure it cannot see -- has to cross the link as
- * values (`codec.js`). A payload is mostly values already; what is not is
+ * values (Cellar's `codec.js`). A payload is mostly values already; what is not is
  * turned into what a subscriber reads of it: an error into its name, message,
  * stack and own properties, which `eventFrom` makes an error again, a map
  * into its entries, a set into its members. A function, a symbol or an object

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeValue, encodeValue } from './system/codec.js';
+import { decodeValue, encodeValue } from '@bottlify/cellar';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { comHandlers, remoteClassTable } from './com-link.js';
 
