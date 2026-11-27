@@ -250,7 +250,7 @@ test('a live view is answered by the keeper from what the layers published', asy
     const { metrics } = log;
 
     const cpu = metrics.counters('cpu', ['running', 'instructions']);
-    cpu[1] = 5_000_000;
+    cpu.set(0, 1, 5_000_000);
     const samples = createSampleTable(metrics.table('cpu', 'samples',
         { rows: BUCKET_CAP, columns: SAMPLE_COLUMNS }));
     creditSample(samples, 0x401000, 300);
@@ -267,10 +267,11 @@ test('a live view is answered by the keeper from what the layers published', asy
     regions.set(0, 1, 0x400000);
     regions.set(0, 2, 0x10000);
     regions.use(1);
-    const hooks = metrics.table('bridge', 'hooks', { rows: 4, columns: ['name', 'calls', 'ms'] });
+    const hooks = metrics.table('bridge', 'hooks',
+        { rows: 4, columns: ['name', 'calls', 'hookNs'] });
     hooks.set(0, 0, log.intern('memcpy'));
     hooks.set(0, 1, 40);
-    hooks.set(0, 2, 1.5);
+    hooks.set(0, 2, 1.5e6);
     hooks.use(1);
 
     let device = /** @type {any} */ (null);

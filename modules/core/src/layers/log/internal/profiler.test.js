@@ -5,6 +5,7 @@
  */
 
 import { test } from 'node:test';
+import { createTableMemory, openTable } from '@bottlify/cellar';
 import assert from 'node:assert/strict';
 import {
     FRAME_COLUMNS, FRAME_MIRROR, PHASE_ROWS, PhaseKind, createProfiler,
@@ -409,7 +410,8 @@ test('closing a frame stores one row and nothing more, whatever the frame held',
 test('a frame carries the counters of the layers it was given, and zero for the rest', ()=>{
     const counted = countingTables();
     const { profiler, at } = harness({ tables: counted.tables, frames: 8 });
-    const cpu = new Float64Array([0, 1000, 0]);
+    const cpu = openTable(createTableMemory({ rows: 1, columns: ['a', 'instructions', 'b'] }));
+    cpu.set(0, 1, 1000);
 
     // One column answered, the rest absent: the row's layout is the same either way.
     profiler.mirror(FRAME_MIRROR.map(entry=>entry.column === 'retired' ? cpu : null),
@@ -421,7 +423,7 @@ test('a frame carries the counters of the layers it was given, and zero for the 
     assert.equal(column('retired'), 1000, 'as the counter stood when the frame closed');
     assert.equal(column('trapCrossings'), 0, 'a column no layer answers');
 
-    cpu[1] = 4000;
+    cpu.set(0, 1, 4000);
     at(10).beginFrame();
     at(20).endFrame();
     assert.equal(row[FRAME_COLUMNS.length + FRAME_COLUMNS.indexOf('retired')], 4000,

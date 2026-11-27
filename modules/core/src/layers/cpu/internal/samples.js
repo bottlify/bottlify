@@ -81,7 +81,7 @@ export function creditSample(table, eip, instructions, hot = Infinity){
         bucket.eip = eip >>> 0;
         if (table.published)
         {
-            table.published.values[bucket.row * 2 + 1] = bucket.instructions;
+            table.published.set(bucket.row, 1, bucket.instructions);
         }
     }
     else if (table.buckets.size >= BUCKET_CAP)

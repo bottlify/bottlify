@@ -144,8 +144,8 @@ export function createMemoryModule(){
                 const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
                 log.metrics.onFrame(()=>{
                     const busiest = account.publish();
-                    counters[0] = busiest.writer;
-                    counters[1] = busiest.bytes;
+                    counters.set(0, 0, busiest.writer);
+                    counters.set(0, 1, busiest.bytes);
                 });
             }
             state.reader = typeof cpu.readU32 === 'function'

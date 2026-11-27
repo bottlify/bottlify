@@ -12,9 +12,9 @@ import { openTable } from '@bottlify/cellar';
 test('a layer registers its counters once and updates them in place', ()=>{
     const metrics = createMetrics();
     const cpu = metrics.counters('cpu', ['instructions', 'eip']);
-    cpu[0] += 1000;
-    cpu[0] += 500;
-    cpu[1] = 0x401000;
+    cpu.add(0, 0, 1000);
+    cpu.add(0, 0, 500);
+    cpu.set(0, 1, 0x401000);
 
     const description = metrics.describe();
     assert.deepEqual(Object.keys(description), ['cpu']);

@@ -72,8 +72,6 @@ const RESERVED = 2;
  * @returns {WriterAccount}
  */
 export function createWriterAccount({ table, intern }){
-    const values = table.values;
-    const width = table.width;
     /** Each row's name as a dictionary id, so publishing touches no string. */
     const ids = new Int32Array(table.rows).fill(-1);
     /** Every name that has been numbered; the first two are the reserved rows. */
@@ -154,9 +152,8 @@ export function createWriterAccount({ table, intern }){
             {
                 row = rowFor(current);
             }
-            const at = row * width;
-            values[at + 1] += length;
-            values[at + 2] += 1;
+            table.add(row, 1, length);
+            table.add(row, 2, 1);
             if (frameStamp[row] !== generation)
             {
                 frameStamp[row] = generation;

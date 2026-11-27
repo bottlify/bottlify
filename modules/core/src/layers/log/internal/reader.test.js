@@ -32,7 +32,7 @@ const mirroredBy = (api, layer)=>{
     return (column, value)=>{
         const at = wanted.findIndex(entry=>entry.column === column);
         assert.notEqual(at, -1, `no frame column named "${column}"`);
-        row[at] = value;
+        row.set(0, at, value);
     };
 };
 
@@ -127,7 +127,7 @@ test('a layer\'s counters and tables are read from the same memory the layer wri
         memory: { journal: journal.memory(), tables: metrics.describe() },
     });
 
-    kernel[0] = 42;
+    kernel.set(0, 0, 42);
     threads.set(0, 0, journal.intern('main'));
     threads.set(0, 1, 2);
     threads.use(1);
@@ -184,11 +184,11 @@ test('the reader names where the guest ran from the kernel\'s pages and the memo
         regions.set(1, 1, 0x800000);
         regions.set(1, 2, 0x100000);
         regions.use(2);
-        pages.values[0x40] = 300;
-        pages.values[0x41] = 200;
-        pages.values[0x80] = 400;
-        pages.values[0xf0] = 50;
-        pages.values[0xff] = 5;
+        pages.set(0x40, 0, 300);
+        pages.set(0x41, 0, 200);
+        pages.set(0x80, 0, 400);
+        pages.set(0xf0, 0, 50);
+        pages.set(0xff, 0, 5);
 
         const reader = createLogReader({
             memory: { journal: journal.memory(), tables: metrics.describe() },

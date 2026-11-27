@@ -420,7 +420,7 @@ export function createBridgeModule(){
                 && typeof log.metrics?.table === 'function')
             {
                 const table = log.metrics.table('bridge', 'hooks',
-                    { rows: HOOK_ROWS, columns: ['name', 'calls', 'ms'] });
+                    { rows: HOOK_ROWS, columns: ['name', 'calls', 'hookNs'] });
                 log.metrics.onFrame(()=>{
                     const hooks = state.dispatcher.hooks();
                     const rows = Math.min(hooks.length, HOOK_ROWS);
@@ -428,7 +428,7 @@ export function createBridgeModule(){
                     {
                         table.set(row, 0, log.intern(hooks[row].name));
                         table.set(row, 1, hooks[row].calls);
-                        table.set(row, 2, hooks[row].ms);
+                        table.set(row, 2, hooks[row].ms * 1e6);
                     }
                     table.use(rows);
                 });

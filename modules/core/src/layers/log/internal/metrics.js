@@ -21,11 +21,16 @@ import { createTableMemory, openTable } from '@bottlify/cellar';
  * into their table once a frame, by a sampler the layer registers here and
  * the profiler runs when the frame closes -- one moment on the engine thread,
  * a few dozen stores, instead of a walk on every request.
+ *
+ * A cell is an integer (Cellar's table). A figure with a fraction is stored
+ * in millionths, as its column's name says: a time in nanoseconds (`…Ns`,
+ * milliseconds times 1e6), a share or an amount in parts per million
+ * (`…Ppm`). The reader turns them back (`reader.js`, `readable`).
  */
 
 /**
  * @typedef {Object} MetricsRegistry
- * @property {(layer: string, names: string[]) => Float64Array} counters
+ * @property {(layer: string, names: string[]) => import('@bottlify/cellar').Table} counters
  * @property {(layer: string, name: string) => import('@bottlify/cellar').Table | null} find
  * @property {(layer: string, name: string, spec: { rows: number, columns: string[] })
  *     => import('@bottlify/cellar').Table} table
@@ -74,14 +79,15 @@ export function createMetrics(){
         find: (layer, name)=>layers.get(layer)?.get(name) ?? null,
 
         /**
-         * One row of named counters, for the figures a layer keeps as it runs.
+         * A table of one row of named counters, for the figures a layer keeps
+         * as it runs.
          *
          * @param {string} layer @param {string[]} names
          */
         counters(layer, names){
             const made = table(layer, 'counters', { rows: 1, columns: names });
             made.use(1);
-            return made.values;
+            return made;
         },
 
         onFrame(sampler){

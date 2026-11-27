@@ -380,7 +380,7 @@ test('the kernel publishes its figures as tables and keeps the object tables col
     const threads = openTable(tables.threads).all();
     assert.equal(threads.length, 1);
     assert.equal(log.words[threads[0].name], 'main');
-    assert.equal(openTable(tables.pages).values[0], 100, 'the slice at 0x1000 is on page 0');
+    assert.equal(openTable(tables.pages).get(0, 0), 100, 'the slice at 0x1000 is on page 0');
     assert.equal(openTable(tables.counters).row(0).turns, 1);
 
     const metrics = /** @type {any} */ (kernelModule.diagnostics().metrics);
