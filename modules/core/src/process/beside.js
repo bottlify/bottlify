@@ -9,6 +9,7 @@ import { createSyncObjects } from '../layers/kernel/internal/sync.js';
 import { STILL_ACTIVE } from '../layers/kernel/internal/processes.js';
 import { STEAM_PATH, announceSteamClient } from '../layers/win32/steamclient/functions.js';
 import { createLinkMemory, openLink } from '@bottlify/cellar';
+import { CACHE_CALLS } from './run-cache.js';
 import { comHandlers } from '../com-link.js';
 import { pipeHandlers } from '../system-pipes.js';
 import { dropUnclaimed } from '../layers/win32/kernel32/pipes.js';
@@ -218,7 +219,8 @@ export function processesBeside(deps){
                 detail: `${request.imagePath} is not on the volume, and did not start` });
             return { code: 2 };
         }
-        const memory = createLinkMemory();
+        // Its calls in place are the run's cache's: room for a name, a few out at once.
+        const memory = createLinkMemory(CACHE_CALLS);
         // Its classes, served to and from every other process of the run.
         const com = comHandlers(/** @type {any} */ (classTable), {
             call: (method, args)=>link.call('com', method, args),
@@ -323,7 +325,7 @@ export function processesBeside(deps){
                     }
                 },
             },
-        });
+        }, { words: cacheAcross?.words });
         const answering = link.serve();
         /**
          * What the teardown lets go, as far as the start got: a start that

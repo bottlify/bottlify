@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLinkMemory, createReader, linkCarrier, openKeeperClient, openLink }
     from '@bottlify/cellar';
-import { openRunCache } from './run-cache.js';
+import { CACHE_CALLS, openRunCache } from './run-cache.js';
 import { relayedJoin } from '../layers/cache/module.js';
 
 /**
@@ -18,8 +18,8 @@ import { relayedJoin } from '../layers/cache/module.js';
  * @param {import('./run-cache.js').RunCache} run @param {ReturnType<import('./run-cache.js').RunCache['across']>} [across]
  */
 const acrossOf = (run, across = run.across())=>{
-    const { a, b } = createLinkMemory({ capacity: 1 << 16 });
-    openLink(a, across.handlers);
+    const { a, b } = createLinkMemory({ capacity: 1 << 16, ...CACHE_CALLS });
+    openLink(a, {}, { words: across.words });
     return openKeeperClient(linkCarrier(openLink(b)));
 };
 
@@ -249,8 +249,8 @@ test('a process in a worker of its own is served names of its own: its scratches
     const tails = [];
     const run = await openRunCache({ onTail: tail=>tails.push(tail) });
     const across = run.across();
-    const { a, b } = createLinkMemory();
-    const system = openLink(a, across.handlers);
+    const { a, b } = createLinkMemory(CACHE_CALLS);
+    const system = openLink(a, {}, { words: across.words });
     const serving = system.serve();
     const joined = run.join(()=>{});
     const worker = new Worker(PROCESS, { eval: true, workerData: {

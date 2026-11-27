@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createLinkMemory, openLink } from '@bottlify/cellar';
-import { openRunCache } from './run-cache.js';
+import { CACHE_CALLS, openRunCache } from './run-cache.js';
 
 const NAMES = 48;
 
@@ -167,8 +167,8 @@ for (const seed of [1, 2, 3, 0x5eed])
 
             const remote = await openRunCache({ budget });
             const across = remote.across();
-            const { a, b } = createLinkMemory();
-            const system = openLink(a, across.handlers);
+            const { a, b } = createLinkMemory(CACHE_CALLS);
+            const system = openLink(a, {}, { words: across.words });
             const serving = system.serve();
             const joined = remote.join(()=>{});
             const worker = new Worker(PROCESS, { eval: true, workerData: {

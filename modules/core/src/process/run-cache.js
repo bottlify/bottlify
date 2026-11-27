@@ -27,7 +27,7 @@
  * cache layer's default), and the next run finds nothing in it.
  */
 
-import { answerKeeper, createChannel, createReader, keeperHandlers, linkCarrier, openKeeper,
+import { answerKeeper, createChannel, createReader, keeperWords, linkCarrier, openKeeper,
     openKeeperClient, openServer, serveKeeperChannel } from '@bottlify/cellar';
 import { ownedSpace } from '../layers/cache/module.js';
 import { createScratches } from '../layers/cache/scratch.js';
@@ -47,6 +47,13 @@ export const RUN_CACHE_BYTES = 160 * MIB;
  * in it; a body over a quarter of it has a segment of its own.
  */
 const SEGMENT_BYTES = 16 * MIB;
+
+/**
+ * The calls in place of a process's link, which are the run's cache's: a
+ * request of the longest name a path makes, 1004 bytes of UTF-8 past its
+ * words, and as many out at once as a process nests or sends unwaited.
+ */
+export const CACHE_CALLS = Object.freeze({ words: 256, slots: 8 });
 
 /** A body idle so long goes: the reads kept before were let go after as long. */
 const IDLE_MS = 30_000;
@@ -260,10 +267,11 @@ export async function openRunCache(opened = {}){
         reader,
 
         /**
-         * A process in a worker of its own, as the keeper serves it: the link
-         * handlers it calls the keeper through (`handlers`), the names its
-         * owners there are given (`cache.own`, numbered here as every owner of
-         * the run is) and let go of (`cache.release`), and the channel of one
+         * A process in a worker of its own, as the keeper serves it: the
+         * handler of its link's calls in place it calls the keeper through
+         * (`words`, the link made with `CACHE_CALLS`), the names its owners
+         * there are given (`own`, numbered here as every owner of the run is)
+         * and let go of (`release`), and the channel of one
          * of them that a graphics worker writes through, which comes as a
          * message, since the link carries no shared memory (`served`). `end`:
          * the process went, and every owner of it still out is let go of -
@@ -274,7 +282,7 @@ export async function openRunCache(opened = {}){
             /** Its owners out, by prefix. @type {Set<string>} */
             const mine = new Set();
             return {
-                handlers: keeperHandlers(answerKeeper({ keeper: remote, owners: {
+                words: keeperWords(answerKeeper({ keeper: remote, owners: {
                     own: kind=>{
                         const { prefix } = own(kind);
                         mine.add(prefix);
