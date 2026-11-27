@@ -13,8 +13,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DLIGHT7, D3DLOCKED_BOX64, D3DLOCKED_RECT64, D3DPRESENT_PARAMETERS9,
-    D3DPRESENT_PARAMETERS9_64, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf,
+    D3DCAPS8, D3DDEVICEDESC7, D3DLIGHT7, D3DLOCKED_BOX64, D3DLOCKED_RECT64,
+    D3DPRESENT_PARAMETERS8, D3DPRESENT_PARAMETERS9, D3DPRESENT_PARAMETERS9_64, DDBLTFX, DDCAPS,
+    D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf,
     intsOf, lockRectInto, putLight,
 } from './structs.js';
 import { D3DDEVICE_CREATION_PARAMETERS64 } from '../d3d8/structs.js';
@@ -269,12 +270,33 @@ test('a 64-bit process\'s Direct3D structures lay a handle or a pointer out in e
 });
 
 test('a rectangle lock in a 64-bit process writes the address whole', ()=>{
-    /** @type {any[]} */
-    const written = [];
-    const fields = { writeStruct: (/** @type {number} */ address, /** @type {any} */ layout,
-        /** @type {any} */ values)=>written.push([address, layout, values]) };
-    lockRectInto(fields, 0x40, locked=>(Object.assign(locked, { Pitch: 64, pBits: 0x2000 }), 0),
-        D3DLOCKED_RECT64);
-    assert.deepEqual(written, [[0x40, D3DLOCKED_RECT64, { Pitch: 64, pBits: 0x2000,
-        pBitsHigh: 0 }]]);
+    // Over memory that held something else: the high dword is the address's
+    // own, never what was there.
+    const memory = recording();
+    const view = new DataView(memory.bytes.buffer);
+    lockRectInto(createFields(memory), 0x40,
+        locked=>(Object.assign(locked, { Pitch: 64, pBits: 0x2000 }), 0), D3DLOCKED_RECT64);
+    assert.equal(view.getInt32(0x40 + D3DLOCKED_RECT64.Pitch, true), 64);
+    assert.equal(view.getBigUint64(0x40 + D3DLOCKED_RECT64.pBits, true), 0x2000n);
+    assert.equal(view.getUint32(0x40 + 4, true), 0xcdcdcdcd, 'the padding is left as it was');
+    // A handle of a 64-bit structure is sign-extended as the engine's dword of it.
+    createFields(memory).writeStruct(0x80, D3DPRESENT_PARAMETERS9_64,
+        { SwapEffect: 1, hDeviceWindow: -1, Windowed: 1 });
+    assert.equal(view.getBigInt64(0x80 + D3DPRESENT_PARAMETERS9_64.hDeviceWindow, true), -1n);
+    assert.equal(view.getUint32(0x80 + D3DPRESENT_PARAMETERS9_64.Windowed, true), 1);
+});
+
+test('the Direct3D and DirectDraw structures have their headers\' sizes', ()=>{
+    // sizeof of each, worked out from d3d8types.h, d3d9types.h, d3d8caps.h,
+    // d3dcaps.h, d3dtypes.h and ddraw.h (DDCAPS_DX7) by the x86 compiler's rule.
+    assert.deepEqual([D3DPRESENT_PARAMETERS8.SIZE, D3DPRESENT_PARAMETERS9.SIZE, D3DCAPS8.SIZE,
+        D3DDEVICEDESC7.SIZE, D3DLIGHT7.SIZE, DDBLTFX.SIZE, DDCAPS.SIZE],
+    [0x34, 0x38, 0xd4, 0xec, 0x68, 0x64, 0x17c]);
+    assert.deepEqual([D3DCAPS8.MaxVertexW, D3DCAPS8.StencilCaps, D3DCAPS8.MaxPixelShaderValue],
+        [0x70, 0x88, 0xd0]);
+    assert.deepEqual([D3DDEVICEDESC7.dpcTriCaps, D3DDEVICEDESC7.deviceGUID,
+        D3DDEVICEDESC7.dwVertexProcessingCaps], [0x3c, 0xc4, 0xd8]);
+    assert.deepEqual([DDBLTFX.dwFillColor, DDBLTFX.ddckSrcColorkey], [0x50, 0x5c]);
+    assert.deepEqual([DDCAPS.dwRops, DDCAPS.dwSVBCaps, DDCAPS.dwNLVBCaps, DDCAPS.ddsCaps],
+        [0x64, 0xac, 0x13c, 0x16c]);
 });

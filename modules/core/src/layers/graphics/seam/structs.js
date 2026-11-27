@@ -7,243 +7,126 @@
 /**
  * The Direct3D structures a guest call passes by pointer.
  *
- * Every offset is spelled out rather than counted, for the reason the
- * DirectDraw structures give: a field read one slot early is a plausible
- * number, and a plausible number is what makes this class of mistake survive
- * into a picture that is merely wrong rather than into a crash.
+ * Each is declared once as its header declares it (`system/layout.js`), its
+ * offsets derived: a field read one slot early is a plausible number, and a
+ * plausible number is what makes this class of mistake survive into a
+ * picture that is merely wrong rather than into a crash.
  *
  * D3DPRESENT_PARAMETERS is the one that matters most and the one that differs
  * between versions. Direct3D 8 has no `Flags` before the refresh rate and no
  * `PresentationInterval` at the end in the place 9 puts them, so the two
- * layouts are declared separately rather than shared with an offset table --
- * reading a 9 structure with 8's offsets finds the windowed flag in the depth
- * format's field, which is a boolean that happens to be true.
+ * layouts are declared separately rather than shared -- reading a 9 structure
+ * with 8's offsets finds the windowed flag in the depth format's field, which
+ * is a boolean that happens to be true.
  */
 
+import { GUID, POINT as POINT_LAYOUT, RECT as RECT_LAYOUT, fieldOf, highOf, struct, union }
+    from '../../../system/layout.js';
+
+/** @typedef {import('../../../system/layout.js').Declared} Declared */
+
+/** @param {string[]} names @param {'u32' | 'i32' | 'f32'} kind @returns {Declared[]} */
+const all = (names, kind)=>names.map(name=>[name, kind]);
+
+const PRESENT_HEAD = /** @type {const} */ ([['BackBufferWidth', 'u32'],
+    ['BackBufferHeight', 'u32'], ['BackBufferFormat', 'u32'], ['BackBufferCount', 'u32'],
+    ['MultiSampleType', 'u32']]);
+const PRESENT_TAIL = /** @type {const} */ ([['SwapEffect', 'u32'], ['hDeviceWindow', 'handle'],
+    ['Windowed', 'i32'], ['EnableAutoDepthStencil', 'i32'], ['AutoDepthStencilFormat', 'u32'],
+    ['Flags', 'u32'], ['FullScreen_RefreshRateInHz', 'u32']]);
+
 /** D3DPRESENT_PARAMETERS as Direct3D 8 declares it. */
-export const D3DPRESENT_PARAMETERS8 = Object.freeze({
-    BackBufferWidth: 0x00,
-    BackBufferHeight: 0x04,
-    BackBufferFormat: 0x08,
-    BackBufferCount: 0x0c,
-    MultiSampleType: 0x10,
-    SwapEffect: 0x14,
-    hDeviceWindow: 0x18,
-    Windowed: 0x1c,
-    EnableAutoDepthStencil: 0x20,
-    AutoDepthStencilFormat: 0x24,
-    Flags: 0x28,
-    FullScreen_RefreshRateInHz: 0x2c,
-    FullScreen_PresentationInterval: 0x30,
-    SIZE: 0x34,
-});
+export const D3DPRESENT_PARAMETERS8 = struct([...PRESENT_HEAD, ...PRESENT_TAIL,
+    ['FullScreen_PresentationInterval', 'u32']]).at(4);
 
 /**
  * D3DPRESENT_PARAMETERS as Direct3D 9 declares it.
  *
  * MultiSampleQuality is inserted after MultiSampleType, and the trailing pair
  * is renamed -- windowed presentation gained an interval, so the field is no
- * longer full-screen only.
+ * longer full-screen only. In a 64-bit process hDeviceWindow is a handle,
+ * eight bytes on an eight-byte boundary, which moves every field after it.
  */
-export const D3DPRESENT_PARAMETERS9 = Object.freeze({
-    BackBufferWidth: 0x00,
-    BackBufferHeight: 0x04,
-    BackBufferFormat: 0x08,
-    BackBufferCount: 0x0c,
-    MultiSampleType: 0x10,
-    MultiSampleQuality: 0x14,
-    SwapEffect: 0x18,
-    hDeviceWindow: 0x1c,
-    Windowed: 0x20,
-    EnableAutoDepthStencil: 0x24,
-    AutoDepthStencilFormat: 0x28,
-    Flags: 0x2c,
-    FullScreen_RefreshRateInHz: 0x30,
-    PresentationInterval: 0x34,
-    SIZE: 0x38,
-});
-
-/**
- * D3DPRESENT_PARAMETERS in a 64-bit process: hDeviceWindow is a handle, eight
- * bytes on an eight-byte boundary, which moves every field after it by eight.
- * The handle's high half has a name of its own so that a write puts its zero
- * there; the engine's handles fit the low half.
- */
-export const D3DPRESENT_PARAMETERS9_64 = Object.freeze({
-    BackBufferWidth: 0x00,
-    BackBufferHeight: 0x04,
-    BackBufferFormat: 0x08,
-    BackBufferCount: 0x0c,
-    MultiSampleType: 0x10,
-    MultiSampleQuality: 0x14,
-    SwapEffect: 0x18,
-    hDeviceWindow: 0x20,
-    hDeviceWindowHigh: 0x24,
-    Windowed: 0x28,
-    EnableAutoDepthStencil: 0x2c,
-    AutoDepthStencilFormat: 0x30,
-    Flags: 0x34,
-    FullScreen_RefreshRateInHz: 0x38,
-    PresentationInterval: 0x3c,
-    SIZE: 0x40,
-});
+const PRESENT_PARAMETERS9 = struct([...PRESENT_HEAD, ['MultiSampleQuality', 'u32'],
+    ...PRESENT_TAIL, ['PresentationInterval', 'u32']]);
+export const D3DPRESENT_PARAMETERS9 = PRESENT_PARAMETERS9.at(4);
+export const D3DPRESENT_PARAMETERS9_64 = PRESENT_PARAMETERS9.at(8);
 
 /** D3DDISPLAYMODE. The same in both versions. */
-export const D3DDISPLAYMODE = Object.freeze({
-    Width: 0x00,
-    Height: 0x04,
-    RefreshRate: 0x08,
-    Format: 0x0c,
-    SIZE: 0x10,
-});
+export const D3DDISPLAYMODE = struct(all(['Width', 'Height', 'RefreshRate', 'Format'], 'u32'))
+    .at(4);
 
 /** D3DVIEWPORT8. Six dwords, the last two of which are floats. */
-export const D3DVIEWPORT8 = Object.freeze({
-    X: 0x00,
-    Y: 0x04,
-    Width: 0x08,
-    Height: 0x0c,
-    MinZ: 0x10,
-    MaxZ: 0x14,
-    SIZE: 0x18,
-});
+export const D3DVIEWPORT8 = struct([...all(['X', 'Y', 'Width', 'Height'], 'u32'),
+    ['MinZ', 'f32'], ['MaxZ', 'f32']]).at(4);
 
 /**
  * D3DVIEWPORT7: the same six dwords as D3D8's viewport, under the older
  * names. Declared separately so the name a reader checks against the header
  * is the one they find there.
  */
-export const D3DVIEWPORT7 = Object.freeze({
-    dwX: 0x00,
-    dwY: 0x04,
-    dwWidth: 0x08,
-    dwHeight: 0x0c,
-    dvMinZ: 0x10,
-    dvMaxZ: 0x14,
-    SIZE: 0x18,
-});
+export const D3DVIEWPORT7 = struct([...all(['dwX', 'dwY', 'dwWidth', 'dwHeight'], 'u32'),
+    ['dvMinZ', 'f32'], ['dvMaxZ', 'f32']]).at(4);
 
 /** D3DVERTEXBUFFERDESC. */
-export const D3DVERTEXBUFFERDESC = Object.freeze({
-    dwSize: 0x00,
-    dwCaps: 0x04,
-    dwFVF: 0x08,
-    dwNumVertices: 0x0c,
-    SIZE: 0x10,
-});
+export const D3DVERTEXBUFFERDESC = struct(all(['dwSize', 'dwCaps', 'dwFVF', 'dwNumVertices'],
+    'u32')).at(4);
 
 /** D3DCLIPSTATUS: two dwords and six floats. */
-export const D3DCLIPSTATUS = Object.freeze({
-    dwFlags: 0x00,
-    dwStatus: 0x04,
-    minx: 0x08,
-    maxx: 0x0c,
-    miny: 0x10,
-    maxy: 0x14,
-    minz: 0x18,
-    maxz: 0x1c,
-    SIZE: 0x20,
-});
+export const D3DCLIPSTATUS = struct([['dwFlags', 'u32'], ['dwStatus', 'u32'],
+    ...all(['minx', 'maxx', 'miny', 'maxy', 'minz', 'maxz'], 'f32')]).at(4);
+
+const COLORVALUE = struct(all(['r', 'g', 'b', 'a'], 'f32'));
+const VECTOR = struct(all(['x', 'y', 'z'], 'f32'));
 
 /**
  * D3DLIGHT7: a type, three colours, two vectors and seven floats. The same
  * layout D3D8's light has.
  */
-export const D3DLIGHT7 = Object.freeze({
-    dltType: 0x00,
-    dcvDiffuse: 0x04,
-    dcvSpecular: 0x14,
-    dcvAmbient: 0x24,
-    dvPosition: 0x34,
-    dvDirection: 0x40,
-    dvRange: 0x4c,
-    dvFalloff: 0x50,
-    dvAttenuation0: 0x54,
-    dvAttenuation1: 0x58,
-    dvAttenuation2: 0x5c,
-    dvTheta: 0x60,
-    dvPhi: 0x64,
-    SIZE: 0x68,
-});
+export const D3DLIGHT7 = struct([['dltType', 'u32'], ['dcvDiffuse', COLORVALUE],
+    ['dcvSpecular', COLORVALUE], ['dcvAmbient', COLORVALUE], ['dvPosition', VECTOR],
+    ['dvDirection', VECTOR], ...all(['dvRange', 'dvFalloff', 'dvAttenuation0', 'dvAttenuation1',
+        'dvAttenuation2', 'dvTheta', 'dvPhi'], 'f32')]).at(4);
 
 /** D3DPRIMCAPS, which a device description holds two of. */
-export const D3DPRIMCAPS = Object.freeze({
-    dwSize: 0x00,
-    dwMiscCaps: 0x04,
-    dwRasterCaps: 0x08,
-    dwZCmpCaps: 0x0c,
-    dwSrcBlendCaps: 0x10,
-    dwDestBlendCaps: 0x14,
-    dwAlphaCmpCaps: 0x18,
-    dwShadeCaps: 0x1c,
-    dwTextureCaps: 0x20,
-    dwTextureFilterCaps: 0x24,
-    dwTextureBlendCaps: 0x28,
-    dwTextureAddressCaps: 0x2c,
-    dwStippleWidth: 0x30,
-    dwStippleHeight: 0x34,
-    SIZE: 0x38,
-});
+const PRIMCAPS = struct(all(['dwSize', 'dwMiscCaps', 'dwRasterCaps', 'dwZCmpCaps',
+    'dwSrcBlendCaps', 'dwDestBlendCaps', 'dwAlphaCmpCaps', 'dwShadeCaps', 'dwTextureCaps',
+    'dwTextureFilterCaps', 'dwTextureBlendCaps', 'dwTextureAddressCaps', 'dwStippleWidth',
+    'dwStippleHeight'], 'u32'));
+export const D3DPRIMCAPS = PRIMCAPS.at(4);
 
 /**
  * D3DDEVICEDESC7. No size field of its own: the first dword is the device
  * capabilities. The three WORD pairs are the only fields narrower than a
  * dword, and the GUID is four-byte aligned, so nothing is padded.
  */
-export const D3DDEVICEDESC7 = Object.freeze({
-    dwDevCaps: 0x00,
-    dpcLineCaps: 0x04,
-    dpcTriCaps: 0x3c,
-    dwDeviceRenderBitDepth: 0x74,
-    dwDeviceZBufferBitDepth: 0x78,
-    dwMinTextureWidth: 0x7c,
-    dwMinTextureHeight: 0x80,
-    dwMaxTextureWidth: 0x84,
-    dwMaxTextureHeight: 0x88,
-    dwMaxTextureRepeat: 0x8c,
-    dwMaxTextureAspectRatio: 0x90,
-    dwMaxAnisotropy: 0x94,
-    dvGuardBandLeft: 0x98,
-    dvGuardBandTop: 0x9c,
-    dvGuardBandRight: 0xa0,
-    dvGuardBandBottom: 0xa4,
-    dvExtentsAdjust: 0xa8,
-    dwStencilCaps: 0xac,
-    dwFVFCaps: 0xb0,
-    dwTextureOpCaps: 0xb4,
-    wMaxTextureBlendStages: 0xb8,
-    wMaxSimultaneousTextures: 0xba,
-    dwMaxActiveLights: 0xbc,
-    dvMaxVertexW: 0xc0,
-    deviceGUID: 0xc4,
-    wMaxUserClipPlanes: 0xd4,
-    wMaxVertexBlendMatrices: 0xd6,
-    dwVertexProcessingCaps: 0xd8,
-    SIZE: 0xec,
-});
+export const D3DDEVICEDESC7 = struct([['dwDevCaps', 'u32'], ['dpcLineCaps', PRIMCAPS],
+    ['dpcTriCaps', PRIMCAPS], ...all(['dwDeviceRenderBitDepth', 'dwDeviceZBufferBitDepth',
+        'dwMinTextureWidth', 'dwMinTextureHeight', 'dwMaxTextureWidth', 'dwMaxTextureHeight',
+        'dwMaxTextureRepeat', 'dwMaxTextureAspectRatio', 'dwMaxAnisotropy'], 'u32'),
+    ...all(['dvGuardBandLeft', 'dvGuardBandTop', 'dvGuardBandRight', 'dvGuardBandBottom',
+        'dvExtentsAdjust'], 'f32'),
+    ...all(['dwStencilCaps', 'dwFVFCaps', 'dwTextureOpCaps'], 'u32'),
+    ['wMaxTextureBlendStages', 'u16'], ['wMaxSimultaneousTextures', 'u16'],
+    ['dwMaxActiveLights', 'u32'], ['dvMaxVertexW', 'f32'], ['deviceGUID', GUID],
+    ['wMaxUserClipPlanes', 'u16'], ['wMaxVertexBlendMatrices', 'u16'],
+    ['dwVertexProcessingCaps', 'u32'], [null, 'u32', 4]]).at(4);
 
 /** D3DRECT: four longs, and the order is left, top, right, bottom. */
-export const D3DRECT = Object.freeze({
-    x1: 0x00,
-    y1: 0x04,
-    x2: 0x08,
-    y2: 0x0c,
-    SIZE: 0x10,
-});
+export const D3DRECT = struct(all(['x1', 'y1', 'x2', 'y2'], 'i32')).at(4);
 
 /** POINT, which CopyRects takes an array of. */
-export const POINT = Object.freeze({ x: 0x00, y: 0x04, SIZE: 0x08 });
+export const POINT = POINT_LAYOUT.at(4);
 
 /**
  * D3DLOCKED_RECT, written back by a lock: the row stride first, then the
  * address of the first byte. A caller that reads them the other way round
  * treats a pointer as a pitch and walks off the surface on its second row.
+ * In a 64-bit process the address is eight bytes, on an eight-byte boundary.
  */
-export const D3DLOCKED_RECT = Object.freeze({ Pitch: 0x00, pBits: 0x04, SIZE: 0x08 });
-/** D3DLOCKED_RECT in a 64-bit process: the address eight bytes, on an eight-byte boundary. */
-export const D3DLOCKED_RECT64 = Object.freeze({
-    Pitch: 0x00, pBits: 0x08, pBitsHigh: 0x0c, SIZE: 0x10,
-});
+const LOCKED_RECT = struct([['Pitch', 'i32'], ['pBits', 'ptr']]);
+export const D3DLOCKED_RECT = LOCKED_RECT.at(4);
+export const D3DLOCKED_RECT64 = LOCKED_RECT.at(8);
 
 /**
  * A rectangle lock -- a surface's, a texture level's, a cube face's -- with
@@ -267,8 +150,7 @@ export function lockRectInto(fields, out, lock, layout = D3DLOCKED_RECT){
         if (hr === 0 && (out >>> 0) !== 0)
         {
             fields.writeStruct(out >>> 0, layout, { Pitch: locked.Pitch ?? 0,
-                pBits: locked.pBits ?? 0,
-                ...layout.pBitsHigh === undefined ? {} : { pBitsHigh: 0 } });
+                pBits: locked.pBits ?? 0 });
         }
         return hr;
     };
@@ -276,50 +158,33 @@ export function lockRectInto(fields, out, lock, layout = D3DLOCKED_RECT){
     return hr instanceof Promise ? hr.then(answer) : answer(hr);
 }
 
+const DESC_HEAD = /** @type {const} */ ([['Format', 'u32'], ['Type', 'u32'], ['Usage', 'u32'],
+    ['Pool', 'u32'], ['Size', 'u32']]);
+
 /** D3DSURFACE_DESC as Direct3D 8 declares it. */
-export const D3DSURFACE_DESC8 = Object.freeze({
-    Format: 0x00,
-    Type: 0x04,
-    Usage: 0x08,
-    Pool: 0x0c,
-    Size: 0x10,
-    MultiSampleType: 0x14,
-    Width: 0x18,
-    Height: 0x1c,
-    SIZE: 0x20,
-});
+export const D3DSURFACE_DESC8 = struct([...DESC_HEAD, ['MultiSampleType', 'u32'],
+    ['Width', 'u32'], ['Height', 'u32']]).at(4);
 
 /** D3DVOLUME_DESC as Direct3D 8 declares it, with the size Direct3D 9 dropped. */
-export const D3DVOLUME_DESC8 = Object.freeze({
-    Format: 0x00,
-    Type: 0x04,
-    Usage: 0x08,
-    Pool: 0x0c,
-    Size: 0x10,
-    Width: 0x14,
-    Height: 0x18,
-    Depth: 0x1c,
-    SIZE: 0x20,
-});
+export const D3DVOLUME_DESC8 = struct([...DESC_HEAD, ['Width', 'u32'], ['Height', 'u32'],
+    ['Depth', 'u32']]).at(4);
 
-/** D3DLOCKED_BOX, the same in both versions: two pitches, then the address. */
-export const D3DLOCKED_BOX = Object.freeze({
-    RowPitch: 0x00, SlicePitch: 0x04, pBits: 0x08, SIZE: 0x0c,
-});
-/** D3DLOCKED_BOX in a 64-bit process: the address eight bytes, the end padded to eight. */
-export const D3DLOCKED_BOX64 = Object.freeze({
-    RowPitch: 0x00, SlicePitch: 0x04, pBits: 0x08, pBitsHigh: 0x0c, SIZE: 0x10,
-});
+/**
+ * D3DLOCKED_BOX, the same in both versions: two pitches, then the address;
+ * in a 64-bit process the address is eight bytes and the end padded to eight.
+ */
+const LOCKED_BOX = struct([['RowPitch', 'i32'], ['SlicePitch', 'i32'], ['pBits', 'ptr']]);
+export const D3DLOCKED_BOX = LOCKED_BOX.at(4);
+export const D3DLOCKED_BOX64 = LOCKED_BOX.at(8);
 
 /** D3DBOX, the same in both versions: the rectangle's four edges, then front and back. */
-export const D3DBOX = Object.freeze({
-    Left: 0x00, Top: 0x04, Right: 0x08, Bottom: 0x0c, Front: 0x10, Back: 0x14, SIZE: 0x18,
-});
+export const D3DBOX = struct(all(['Left', 'Top', 'Right', 'Bottom', 'Front', 'Back'], 'u32'))
+    .at(4);
 
 /**
  * D3DCAPS8, every field of it.
  *
- * Written out in full rather than as the handful anyone fills in, because a
+ * Declared in full rather than as the handful anyone fills in, because a
  * partial table is where the offsets go wrong: five guard-band floats and an
  * adjustment sit between the texture limits and the blend-stage counts, and a
  * table that skips them puts every later field somewhere else. That is not a
@@ -327,120 +192,63 @@ export const D3DBOX = Object.freeze({
  * the repeat limit leaves the real maximum reading as zero, and a program that
  * halves a texture until it fits a maximum of zero halves it for ever.
  */
-export const D3DCAPS8 = Object.freeze({
-    DeviceType: 0x00,
-    AdapterOrdinal: 0x04,
-    Caps: 0x08,
-    Caps2: 0x0c,
-    Caps3: 0x10,
-    PresentationIntervals: 0x14,
-    CursorCaps: 0x18,
-    DevCaps: 0x1c,
-    PrimitiveMiscCaps: 0x20,
-    RasterCaps: 0x24,
-    ZCmpCaps: 0x28,
-    SrcBlendCaps: 0x2c,
-    DestBlendCaps: 0x30,
-    AlphaCmpCaps: 0x34,
-    ShadeCaps: 0x38,
-    TextureCaps: 0x3c,
-    TextureFilterCaps: 0x40,
-    CubeTextureFilterCaps: 0x44,
-    VolumeTextureFilterCaps: 0x48,
-    TextureAddressCaps: 0x4c,
-    VolumeTextureAddressCaps: 0x50,
-    LineCaps: 0x54,
-    MaxTextureWidth: 0x58,
-    MaxTextureHeight: 0x5c,
-    MaxVolumeExtent: 0x60,
-    MaxTextureRepeat: 0x64,
-    MaxTextureAspectRatio: 0x68,
-    MaxAnisotropy: 0x6c,
-    MaxVertexW: 0x70,
-    GuardBandLeft: 0x74,
-    GuardBandTop: 0x78,
-    GuardBandRight: 0x7c,
-    GuardBandBottom: 0x80,
-    ExtentsAdjust: 0x84,
-    StencilCaps: 0x88,
-    FVFCaps: 0x8c,
-    TextureOpCaps: 0x90,
-    MaxTextureBlendStages: 0x94,
-    MaxSimultaneousTextures: 0x98,
-    VertexProcessingCaps: 0x9c,
-    MaxActiveLights: 0xa0,
-    MaxUserClipPlanes: 0xa4,
-    MaxVertexBlendMatrices: 0xa8,
-    MaxVertexBlendMatrixIndex: 0xac,
-    MaxPointSize: 0xb0,
-    MaxPrimitiveCount: 0xb4,
-    MaxVertexIndex: 0xb8,
-    MaxStreams: 0xbc,
-    MaxStreamStride: 0xc0,
-    VertexShaderVersion: 0xc4,
-    MaxVertexShaderConst: 0xc8,
-    PixelShaderVersion: 0xcc,
-    MaxPixelShaderValue: 0xd0,
-    SIZE: 0xd4,
-});
+export const D3DCAPS8 = struct([...all(['DeviceType', 'AdapterOrdinal', 'Caps', 'Caps2', 'Caps3',
+    'PresentationIntervals', 'CursorCaps', 'DevCaps', 'PrimitiveMiscCaps', 'RasterCaps',
+    'ZCmpCaps', 'SrcBlendCaps', 'DestBlendCaps', 'AlphaCmpCaps', 'ShadeCaps', 'TextureCaps',
+    'TextureFilterCaps', 'CubeTextureFilterCaps', 'VolumeTextureFilterCaps', 'TextureAddressCaps',
+    'VolumeTextureAddressCaps', 'LineCaps', 'MaxTextureWidth', 'MaxTextureHeight',
+    'MaxVolumeExtent', 'MaxTextureRepeat', 'MaxTextureAspectRatio', 'MaxAnisotropy'], 'u32'),
+...all(['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
+    'ExtentsAdjust'], 'f32'),
+...all(['StencilCaps', 'FVFCaps', 'TextureOpCaps', 'MaxTextureBlendStages',
+    'MaxSimultaneousTextures', 'VertexProcessingCaps', 'MaxActiveLights', 'MaxUserClipPlanes',
+    'MaxVertexBlendMatrices', 'MaxVertexBlendMatrixIndex'], 'u32'),
+['MaxPointSize', 'f32'],
+...all(['MaxPrimitiveCount', 'MaxVertexIndex', 'MaxStreams', 'MaxStreamStride',
+    'VertexShaderVersion', 'MaxVertexShaderConst', 'PixelShaderVersion'], 'u32'),
+['MaxPixelShaderValue', 'f32']]).at(4);
+
 /** RECT, as DirectDraw's Blt and Lock take it: four longs. */
-export const RECT = Object.freeze({ left: 0x00, top: 0x04, right: 0x08, bottom: 0x0c, SIZE: 0x10 });
+export const RECT = RECT_LAYOUT.at(4);
 
 /** DDCOLORKEY: a low and a high value, inclusive. */
-export const DDCOLORKEY = Object.freeze({ low: 0x00, high: 0x04, SIZE: 0x08 });
+const COLORKEY = struct([['low', 'u32'], ['high', 'u32']]);
+export const DDCOLORKEY = COLORKEY.at(4);
 
 /** DDSCAPS2, which the newer surface generations take where the old took one dword. */
-export const DDSCAPS2 = Object.freeze({
-    dwCaps: 0x00,
-    dwCaps2: 0x04,
-    dwCaps3: 0x08,
-    dwCaps4: 0x0c,
-    SIZE: 0x10,
-});
+const SCAPS2 = struct(all(['dwCaps', 'dwCaps2', 'dwCaps3', 'dwCaps4'], 'u32'));
+export const DDSCAPS2 = SCAPS2.at(4);
+
+/** One of DDBLTFX's constants: a value, or the surface it is taken from. @type {Declared} */
+const CONSTANT = [null, union([[null, 'u32'], [null, 'ptr']])];
 
 /**
  * DDBLTFX. Only the fields a blit here reads are named; the rest is depth
- * and alpha state this layer does not honour. The fill colour is a union
- * with the fill depth and the pattern surface, all at one offset.
+ * and alpha state this layer does not honour: the ROP's and the Z buffer's
+ * words, and the four constants each with its bit depth before it. The fill
+ * colour is a union with the fill depth, the fill pixel and the pattern
+ * surface, all at one offset.
  */
-export const DDBLTFX = Object.freeze({
-    dwSize: 0x00,
-    dwDDFX: 0x04,
-    dwROP: 0x08,
-    dwFillColor: 0x50,
-    ddckDestColorkey: 0x54,
-    ddckSrcColorkey: 0x5c,
-    SIZE: 0x64,
-});
+export const DDBLTFX = struct([['dwSize', 'u32'], ['dwDDFX', 'u32'], ['dwROP', 'u32'],
+    [null, 'u32', 7], CONSTANT, [null, 'u32'], CONSTANT, [null, 'u32', 4], CONSTANT,
+    [null, 'u32'], CONSTANT, [null, union([['dwFillColor', 'u32'], [null, 'ptr']])],
+    ['ddckDestColorkey', COLORKEY], ['ddckSrcColorkey', COLORKEY]]).at(4);
 
 /**
  * DDCAPS as DirectX 7 lays it out. The structure grew twice, and a caller
  * says which one it allocated through dwSize; the three sizes are the ones
  * GetCaps accepts, and everything a caller's version lacks is simply not
- * written.
+ * written. The members nothing here fills in are room: the alpha bit depths,
+ * the overlay counts and alignments, the stretch limits and the reserved
+ * words, and each blit direction's colour-key, FX and ROP words after its caps.
  */
-export const DDCAPS = Object.freeze({
-    dwSize: 0x00,
-    dwCaps: 0x04,
-    dwCaps2: 0x08,
-    dwCKeyCaps: 0x0c,
-    dwFXCaps: 0x10,
-    dwFXAlphaCaps: 0x14,
-    dwPalCaps: 0x18,
-    dwSVCaps: 0x1c,
-    dwZBufferBitDepths: 0x38,
-    dwVidMemTotal: 0x3c,
-    dwVidMemFree: 0x40,
-    dwNumFourCCCodes: 0x4c,
-    dwRops: 0x64,
-    ddsOldCaps: 0x84,
-    dwSVBCaps: 0xac,
-    dwVSBCaps: 0xd8,
-    dwSSBCaps: 0x104,
-    dwNLVBCaps: 0x13c,
-    ddsCaps: 0x16c,
-    SIZE: 0x17c,
-});
+export const DDCAPS = struct([...all(['dwSize', 'dwCaps', 'dwCaps2', 'dwCKeyCaps', 'dwFXCaps',
+    'dwFXAlphaCaps', 'dwPalCaps', 'dwSVCaps'], 'u32'), [null, 'u32', 6],
+['dwZBufferBitDepths', 'u32'], ['dwVidMemTotal', 'u32'], ['dwVidMemFree', 'u32'],
+[null, 'u32', 2], ['dwNumFourCCCodes', 'u32'], [null, 'u32', 5], ['dwRops', 'u32', 8],
+['ddsOldCaps', 'u32'], [null, 'u32', 9], ['dwSVBCaps', 'u32'], [null, 'u32', 10],
+['dwVSBCaps', 'u32'], [null, 'u32', 10], ['dwSSBCaps', 'u32'], [null, 'u32', 13],
+['dwNLVBCaps', 'u32'], [null, 'u32', 11], ['ddsCaps', SCAPS2]]).at(4);
 
 /** The sizes of DDCAPS across the versions that declared it. */
 export const DDCAPS_SIZES = Object.freeze([0x13c, 0x16c, 0x17c]);
@@ -723,6 +531,19 @@ function fieldOrder(layout){
 }
 
 /**
+ * How a field eight bytes wide widens - an address or a handle of a 64-bit
+ * layout - or null for a dword, and for any field of a table no layout made.
+ *
+ * @param {Record<string, number>} layout @param {string} name
+ * @returns {'ptr' | 'handle' | null}
+ */
+const wideKind = (layout, name)=>{
+    const field = fieldOf(layout, name);
+    return field?.size === 8 && (field.kind === 'ptr' || field.kind === 'handle')
+        ? field.kind : null;
+};
+
+/**
  * Reading and writing dwords through the memory service, in one place.
  *
  * What a call answers through a structure or an array is written as one
@@ -895,7 +716,9 @@ export function createFields(memory){
          * that follow one another -- the whole of it, where every field is
          * named. A field not named is left as it was, and so is a field of
          * a layout whose fields share an offset, which is written one at a
-         * time in the order `values` names them.
+         * time in the order `values` names them. A pointer-sized field of a
+         * 64-bit layout (`system/layout.js`) is its two dwords, the high one
+         * as its kind widens it.
          *
          * @param {number} address
          * @param {Record<string, number>} layout
@@ -922,10 +745,15 @@ export function createFields(memory){
                     {
                         writeU32(address + offset, value);
                     }
+                    const wide = wideKind(layout, name);
+                    if (wide)
+                    {
+                        writeU32(address + offset + 4, highOf(value, wide));
+                    }
                 }
                 return;
             }
-            const block = staged(order.length);
+            const block = staged(2 * order.length);
             // The run being put together: its first field's offset, and
             // where its next field would have to start to join it.
             let first = -1;
@@ -957,6 +785,12 @@ export function createFields(memory){
                 }
                 at++;
                 end = offset + 4;
+                const wide = wideKind(layout, name);
+                if (wide)
+                {
+                    block.dwords[at++] = highOf(values[name], wide);
+                    end += 4;
+                }
             }
             if (first >= 0)
             {

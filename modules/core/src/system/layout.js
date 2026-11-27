@@ -196,12 +196,13 @@ const madeOf = table=>{
 export const fieldsOf = table=>madeOf(table).fields;
 
 /**
- * A table's field by name, or undefined.
+ * A table's field by name; undefined for a name it does not have, or for a
+ * table no layout made (a caller handed either kind asks what a field is).
  *
- * @param {Table} table @param {string} name
+ * @param {Readonly<Record<string, number>>} table @param {string} name
  * @returns {Field | undefined}
  */
-export const fieldOf = (table, name)=>madeOf(table).byName.get(name);
+export const fieldOf = (table, name)=>made.get(table)?.byName.get(name);
 
 /** The width a table was laid out at. @param {Table} table @returns {4 | 8} */
 export const widthOf = table=>madeOf(table).width;
@@ -329,3 +330,7 @@ export const POINT = struct([['x', 'i32'], ['y', 'i32']]);
 
 /** windef.h's RECT: left, top, right, bottom. */
 export const RECT = struct([['left', 'i32'], ['top', 'i32'], ['right', 'i32'], ['bottom', 'i32']]);
+
+/** guiddef.h's GUID: a DWORD, two WORDs and eight bytes, on a four-byte boundary. */
+export const GUID = struct([['Data1', 'u32'], ['Data2', 'u16'], ['Data3', 'u16'],
+    ['Data4', 'u8', 8]]);

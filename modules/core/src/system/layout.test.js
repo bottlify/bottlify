@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    POINT, RECT, bytesView, fieldOf, fieldsOf, highOf, read, struct, union, widthOf, write,
+    GUID, POINT, RECT, bytesView, fieldOf, fieldsOf, highOf, read, struct, union, widthOf, write,
 } from './layout.js';
 
 test('a field sits on its natural alignment and the end is padded to the most aligned', ()=>{
@@ -113,11 +113,14 @@ test('a field that is no scalar is not read or written as one', ()=>{
     assert.throws(()=>read(view, 0, table, 'missing'), RangeError);
 });
 
-test('windef.h: POINT is 8 and RECT 16 at both widths', ()=>{
+test('windef.h: POINT is 8 and RECT 16 at both widths; guiddef.h: GUID 16, on four', ()=>{
     for (const width of [4, 8])
     {
         assert.deepEqual({ ...POINT.at(width) }, { x: 0, y: 4, SIZE: 8 });
         assert.deepEqual({ ...RECT.at(width) },
             { left: 0, top: 4, right: 8, bottom: 12, SIZE: 16 });
+        assert.deepEqual({ ...GUID.at(width) },
+            { Data1: 0, Data2: 4, Data3: 6, Data4: 8, SIZE: 16 });
+        assert.equal(GUID.alignOf(width), 4);
     }
 });
