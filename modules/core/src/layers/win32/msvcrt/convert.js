@@ -311,9 +311,6 @@ for (const c of ' \t\n\v\f\r+-.0123456789eEdD')
 /** How many bytes of a number's text strtod and atof read before reading it whole. */
 const DECIMAL_WINDOW = 64;
 
-/** The window a number is read into: one, as a call reads it and is done. */
-const decimalWindow = new Uint8Array(DECIMAL_WINDOW);
-
 /**
  * The double strtod reads, where it stops, and whether it is out of range:
  * an infinity from finite digits, or a zero from digits that were not all
@@ -1083,38 +1080,27 @@ export function createConversionFunctions(host, { inGuest: guestCode = true } = 
 
     /**
      * The text of the number at `pointer`, as far as `DECIMAL` could read it:
-     * a window's bytes up to the first that spells no number, or the whole
-     * string where the window holds no such byte or runs past what is mapped.
-     * A call here is one the guest's code handed over -- a sixteenth digit, a
-     * larger scale -- and the whole string's read and decode cost it more than
-     * the rest of the call.
+     * a window's text up to the first character that spells no number, or the
+     * whole string where the window holds none. The window stops at the
+     * string's NUL and at its region's end, as the memory layer scans one, so
+     * a string near the end of what is mapped is read in it too. A call here
+     * is one the guest's code handed over - a sixteenth digit, a larger scale -
+     * and the whole string's read and decode cost it more than the rest of the call.
      *
      * @param {number} pointer
      */
     const decimalText = pointer=>{
-        let read = 0;
-        try
+        const head = guest.cstr(pointer, DECIMAL_WINDOW);
+        for (let at = 0; at < head.length; at++)
         {
-            guest.bytes(pointer, DECIMAL_WINDOW, decimalWindow);
-            read = DECIMAL_WINDOW;
-        }
-        catch {
-            // The window runs past the string's region: the walk below
-            // stops at the region's end.
-        }
-        for (let at = 0; at < read; at++)
-        {
-            if (SPELLS_DECIMAL[decimalWindow[at]] === 0)
+            // A byte past ASCII decodes to no character a number is spelt with.
+            const code = head.charCodeAt(at);
+            if (code > 0xff || SPELLS_DECIMAL[code] === 0)
             {
-                let text = '';
-                for (let i = 0; i < at; i++)
-                {
-                    text += String.fromCharCode(decimalWindow[i]);
-                }
-                return text;
+                return head.slice(0, at);
             }
         }
-        return guest.cstr(pointer, MAX_STRING);
+        return head.length < DECIMAL_WINDOW ? head : guest.cstr(pointer, MAX_STRING);
     };
 
     /**
