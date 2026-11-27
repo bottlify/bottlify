@@ -123,10 +123,10 @@
 
 /**
  * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
- *     timeout: number, deadline: number, once: boolean, inWaitThread: boolean,
+ *     timeout: number, id: number, once: boolean, inWaitThread: boolean,
  *     cancelled: boolean, spent: boolean, home?: any, owner?: Owner,
  *     argsFor?: (result: number) => number[], lane?: Lane, instanced?: boolean }} Wait
- *     `deadline`: when its time runs out, in guest milliseconds; `spent`: a wait
+ *     `id`: its time-out's in its wait thread's deadlines, -1 off one; `spent`: a wait
  *     that fires once has fired; `home`: the wait thread it is on, while it is;
  *     `lane`: the pool its callback runs on, the process's unless a thread
  *     pool wait's own.

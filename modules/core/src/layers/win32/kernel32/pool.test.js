@@ -1147,3 +1147,23 @@ test('a thread pool I/O object hands each expected completion of its file to its
     assert.ok(m.freed.includes(io), 'and the object');
 });
 
+
+test('waits whose time ran out together fire in the order their time-outs came', ()=>{
+    const m = waitMachine();
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 1, 200, 0]);
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x48, 0x401000, 2, 100, 0]);
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x4c, 0x401000, 3, 100, 0]);
+    const [home] = m.threads('registered waits');
+    assert.equal(m.step(home).milliseconds, 100, 'until the nearer time-out');
+    m.tick(250);
+    assert.equal(m.done(home, 0x102), 1);
+    const [worker] = m.threads('thread pool');
+    /** @type {number[]} */
+    const contexts = [];
+    for (let record = m.ask(worker); record !== null; record = m.ask(worker))
+    {
+        contexts.push(record[1]);
+    }
+    assert.deepEqual(contexts, [2, 3, 1], 'the soonest first, those due together as registered');
+    assert.equal(m.step(home).milliseconds, 100, 'each waits its time-out again from now');
+});
