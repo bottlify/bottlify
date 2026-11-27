@@ -44,6 +44,7 @@
 
 import { parsePe, readExports, readImports } from './pe.js';
 import { readDelayImports } from './delayload.js';
+import { foldName } from '../../../system/text.js';
 
 /**
  * @typedef {Object} Dependency
@@ -97,7 +98,7 @@ export async function planDependencies(options){
     /** @type {string[]} */
     const absent = [];
     /** Lower-cased, because an import descriptor's spelling is not dependable. */
-    const seen = new Set(entryName ? [entryName.toLowerCase()] : []);
+    const seen = new Set(entryName ? [foldName(entryName)] : []);
 
     /**
      * The libraries this image imports, the delay-loaded ones with them: the
@@ -171,7 +172,7 @@ export async function planDependencies(options){
     const visit = async imports=>{
         for (const { dll: name, entries, delayed } of imports)
         {
-            const key = name.toLowerCase();
+            const key = foldName(name);
             if (seen.has(key) || isKnownDll(name))
             {
                 continue;

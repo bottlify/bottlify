@@ -8,6 +8,7 @@ import { bindDelayImports } from './internal/delayload.js';
 import { bindImports, buildImage, mapImage } from './internal/image.js';
 import { synthesiseModule } from './internal/synth.js';
 import { jumpBytes, parseHexBytes, planHook, planSiteHook } from './internal/hooks.js';
+import { foldName } from '../../system/text.js';
 
 /**
  * The slice of the `memory` api a bind needs: typed guest access plus the
@@ -512,7 +513,7 @@ export function createLoaderModule(){
                     const pending = [];
                     for (const entry of spec.hooks ?? [])
                     {
-                        if (entry.image.toLowerCase() !== image.name.toLowerCase())
+                        if (foldName(entry.image) !== foldName(image.name))
                         {
                             // Another image's entry: bound when that image is
                             // placed (a library the program loads at run time),
