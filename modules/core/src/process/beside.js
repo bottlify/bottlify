@@ -253,7 +253,7 @@ export function processesBeside(deps){
         /** The processes whose windows it answers for, by id: detached as it goes. @type {Set<number>} */
         const windowsAcross = new Set();
         // Its owners of the run's cache, numbered here and let go of with it.
-        const cacheAcross = runCache?.across() ?? null;
+        const cacheAcross = runCache.across();
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
                 (target, method, args)=>link.ask(target, method, args), windowsAcross),
@@ -263,7 +263,7 @@ export function processesBeside(deps){
             // The run's translation store, which only this thread can hold open.
             ...translationStore ? storeHandlers(translationStore) : {},
             // The run's cache, whose keeper only this thread runs.
-            ...cacheAcross ? cacheAcross.handlers : {},
+            ...cacheAcross.handlers,
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -379,7 +379,9 @@ export function processesBeside(deps){
             lending.worker = worker;
             // The run's cache as the process reads it there, the segments the
             // keeper makes and lets go told to it as they come.
-            held.cache = runCache?.join((/** @type {any} */ message)=>worker.post({ type: 'cache', message })) ?? null;
+            const joined = runCache.join((/** @type {any} */ message)=>
+                worker.post({ type: 'cache', message }));
+            held.cache = joined;
             translationPool?.addProcess(request.id, /** @type {PoolProcess} */ ({
                 lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
                 recall: token=>worker.post({ type: 'recall', token }),
@@ -428,7 +430,7 @@ export function processesBeside(deps){
                     else if (data?.type === 'cache-serve')
                     {
                         // The channel of an owner of its own, which a link cannot carry.
-                        cacheAcross?.served(data.prefix, data.channel);
+                        cacheAcross.served(data.prefix, data.channel);
                     }
                     else if (data?.type === 'module')
                     {
@@ -463,8 +465,7 @@ export function processesBeside(deps){
                     // The run's foreground window, focus and captured window,
                     // read where the run keeps them.
                     windowCells: system.windows?.cells ?? null,
-                    cache: held.cache === null ? null
-                        : { shared: held.cache.shared, segments: held.cache.segments },
+                    cache: { shared: joined.shared, segments: joined.segments },
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {
@@ -560,7 +561,7 @@ export function processesBeside(deps){
                 },
                 // Once its link answers no more: an owner it did not let go of
                 // goes with it, said as a tail.
-                ()=>cacheAcross?.end(),
+                ()=>cacheAcross.end(),
                 ()=>held.sound?.giveBack(),
                 ()=>held.shown?.dispose(),
                 ()=>held.display?.port1.close(),

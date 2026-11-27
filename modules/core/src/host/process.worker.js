@@ -146,7 +146,7 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
  *     windowCells?: Int32Array | null, memories?: any[],
- *     cache?: { shared: any, segments: (SharedArrayBuffer | null)[] } | null }} start
+ *     cache: { shared: any, segments: (SharedArrayBuffer | null)[] } }} start
  *     `memories`: the run's memories of gone processes (`SpareMemory`) the
  *     process takes from, and puts its own back into as it goes
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any,
@@ -156,7 +156,7 @@ export const plainOf = (read, failed = ()=>null)=>{
  */
 export async function serveProcess(start){
     const { end, volume, graphics, display, options, run, windowCells = null,
-        memories = [], cache = null } = start;
+        memories = [], cache } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -193,26 +193,23 @@ export async function serveProcess(start){
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.ask(target, method, args);
     // The run's cache, read here in place, its keeper asked across the link.
-    const cacheReader = cache === null ? null : remoteCacheReader(cache, {
+    if (!cache)
+    {
+        throw new Error('a process in a worker of its own is started without the run\'s cache');
+    }
+    const cacheReader = remoteCacheReader(cache, {
         ask: (method, args)=>ask('cache', method, args),
         call: (method, args)=>link.call('cache', method, args),
     });
     // And passed on to the process's executors, each a reader of its own.
-    const cacheRelay = cache === null ? null : relayedJoin(cache);
+    const cacheRelay = relayedJoin(cache);
     // Its owners' names, numbered by the keeper as every owner of the run is.
-    const cacheOwners = cache === null ? null : remoteCacheOwners(
+    const cacheOwners = remoteCacheOwners(
         { ask: (method, args)=>ask('cache', method, args) }, toRun);
-    if (cacheReader !== null)
-    {
-        cacheReaders.add(cacheReader);
-    }
-    if (cacheRelay !== null)
-    {
-        cacheReaders.add(cacheRelay);
-    }
+    cacheReaders.add(cacheReader);
+    cacheReaders.add(cacheRelay);
     // The names its pictures are held under while the run's thread shows them.
-    const framesOwned = display && cacheReader !== null ? cacheOwners?.own('frames') ?? null
-        : null;
+    const framesOwned = display ? cacheOwners.own('frames') : null;
     const frames = framesOwned ? ownedSpace(/** @type {any} */ (cacheReader), framesOwned)
         : null;
     const system = remoteSystem(ask, handlers, (target, method, args)=>
@@ -329,9 +326,8 @@ export async function serveProcess(start){
             // The translator rings the link's bell after each batch it posts, so
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
-            ...cacheReader === null ? {}
-                : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null,
-                    own: cacheOwners?.own ?? null, serve: cacheOwners?.serve ?? null } },
+            cache: { reader: cacheReader, join: cacheRelay.join, own: cacheOwners.own,
+                serve: cacheOwners.serve },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'
@@ -348,14 +344,8 @@ export async function serveProcess(start){
     catch (e){
         madeNow();
         await frames?.close();
-        if (cacheRelay !== null)
-        {
-            cacheReaders.delete(cacheRelay);
-        }
-        if (cacheReader !== null)
-        {
-            cacheReaders.delete(cacheReader);
-        }
+        cacheReaders.delete(cacheRelay);
+        cacheReaders.delete(cacheReader);
         link.close();
         await serving;
         throw e;
@@ -406,14 +396,8 @@ export async function serveProcess(start){
     {
         await app.dispose();
         await frames?.close();
-        if (cacheRelay !== null)
-        {
-            cacheReaders.delete(cacheRelay);
-        }
-        if (cacheReader !== null)
-        {
-            cacheReaders.delete(cacheReader);
-        }
+        cacheReaders.delete(cacheRelay);
+        cacheReaders.delete(cacheReader);
         link.close();
         await serving;
         graphics?.postMessage({ type: 'close' });

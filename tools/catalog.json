@@ -581,7 +581,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "No site keeps a store of its own beside the run's cache for no cache or no room",
+   "question": "No site keeps a store of its own beside the run's cache for no cache or no room, and no layer stands in for a missing one",
    "command": "node tools/checks/check-cache-fallbacks.mjs",
    "tests": []
   },
