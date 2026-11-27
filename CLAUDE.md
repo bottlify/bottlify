@@ -67,7 +67,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   memory read in place, one keeper, idle bodies on OPFS), a project of its own and core's
   dependency from npm (`roadmap/decisions.md` A291). Changed there, not here: work goes to its
   `dev` branch, and only a critical or important fix goes to its `main`, whose CI publishes the
-  version to npm once its checks pass; core takes it by its `package.json` range.
+  version to npm once its checks pass; core takes it by its `package.json` range (until the
+  next release, a pinned commit of `dev`: A293).
 - `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
   derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):

@@ -2810,3 +2810,11 @@ charged to the machine's memory as the engine's, are bodies of the run's cache (
 under its budget beside the rest of it, and shared by every process of the run rather than one
 process's executors. The run cache's budget is not yet inside the machine's (board U6); until it is,
 the machine's memory no longer counts those functions. *2026-11-26.*
+
+**A293. Core and cork take Cellar from a commit of its `dev` branch (temporary).** Until Cellar's
+next release, both depend on `github:bottlify/cellar#<commit>` rather than the npm range of A291:
+the owner gathers Cellar's work into one release, and what Bottlify needs meanwhile - memory held
+in the cache (`Reader.hold`, the sound output's table), waits and channel calls that make no
+garbage - lives on `dev`. The commit is pinned, so an install is the same bytes everywhere; Cellar
+builds its `dist` on install (`prepare`). The next Cellar release puts both back on the npm range
+and removes this entry. *2026-11-27.*
