@@ -152,34 +152,28 @@ const CTRL_Z = 0x1a;
  */
 const READ_AHEAD = 4096;
 
-/** `struct _stat` with msvcrt.dll's 32-bit times: 36 bytes. */
-const STAT = Object.freeze({
-    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 20, WIDE_SIZE: false,
-    ATIME: 24, MTIME: 28, CTIME: 32, BYTES: 36,
-});
-
 /**
- * `struct _stati64`: the same fields with a 64-bit size, which the structure's
- * 8-byte alignment puts at 24 rather than 20, and the whole rounded up to 48.
+ * The `struct _stat` family as sys/stat.h declares it, each field on its
+ * natural alignment (a 64-bit size or time on eight). None holds a pointer:
+ * each is the same at either width.
+ *
+ * @param {'i32' | 'i64'} size  `_off_t` or `__int64`
+ * @param {'i32' | 'i64'} time  `__time32_t` or `__time64_t`
  */
-const STATI64 = Object.freeze({
-    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 24, WIDE_SIZE: true,
-    ATIME: 32, MTIME: 36, CTIME: 40, BYTES: 48,
-});
+const statOf = (size, time)=>struct([['st_dev', 'u32'], ['st_ino', 'u16'], ['st_mode', 'u16'],
+    ['st_nlink', 'i16'], ['st_uid', 'i16'], ['st_gid', 'i16'], ['st_rdev', 'u32'],
+    ['st_size', size], ['st_atime', time], ['st_mtime', time], ['st_ctime', time]]);
 
-/** `struct _stat64`: 64-bit size and times, each on its 8-byte alignment. */
-const STAT64 = Object.freeze({
-    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 24, WIDE_SIZE: true,
-    ATIME: 32, MTIME: 40, CTIME: 48, WIDE_TIME: true, BYTES: 56,
-});
+/** `struct _stat32` (a 32-bit msvcrt.dll's `_stat`): 36 bytes. */
+const STAT32 = statOf('i32', 'i32').at();
+/** `struct _stat32i64` (its `_stati64`): the size on eight at 24, 48 bytes. */
+const STAT32I64 = statOf('i64', 'i32').at();
+/** `struct _stat64i32` (a 64-bit msvcrt.dll's `_stat`): 64-bit times, 48 bytes. */
+const STAT64I32 = statOf('i32', 'i64').at();
+/** `struct _stat64` (a 64-bit msvcrt.dll's `_stati64`): 56 bytes. */
+const STAT64 = statOf('i64', 'i64').at();
 
-/** `struct _stat64i32`: 64-bit times, a 32-bit size. */
-const STAT64I32 = Object.freeze({
-    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 20, WIDE_SIZE: false,
-    ATIME: 24, MTIME: 32, CTIME: 40, WIDE_TIME: true, BYTES: 48,
-});
-
-/** @typedef {typeof STAT | typeof STATI64 | typeof STAT64 | typeof STAT64I32} StatLayout */
+/** @typedef {import('../../../system/layout.js').Table} StatLayout */
 
 /** `st_mode` bits, as sys/stat.h numbers them. */
 const S_IFDIR = 0x4000;
@@ -1100,6 +1094,15 @@ export function createDescriptors(host){
 export function createIoFunctions(host, descriptors){
     const { guest } = host;
     /**
+     * A 64-bit process, whose time_t is an __int64: there `_stat` is
+     * `_stat64i32`, `_stati64` `_stat64`, `_utime` `_utime64`, as its
+     * msvcrt.dll exports them and the headers name them (Wine's win64 spec
+     * entries).
+     */
+    const time64 = guest.pointerSize === 8;
+    /** Bytes of a time in `_utime`'s and `_futime`'s structure. */
+    const timeBytes = time64 ? 8 : 4;
+    /**
      * A path argument, ANSI or UTF-16, as far as MAX_STRING reaches.
      *
      * @param {number} path @param {boolean} wide
@@ -1181,40 +1184,27 @@ export function createIoFunctions(host, descriptors){
     };
 
     /**
-     * Fills a whole `struct _stat` or `_stati64`, so no field keeps what the
-     * caller's buffer held. The volume keeps one time per file, the last
-     * write, and it stands for all three.
+     * Fills a whole record of the `struct _stat` family, so no field keeps
+     * what the caller's buffer held, each as wide as its layout declares it.
+     * The volume keeps one time per file, the last write, and it stands for
+     * all three.
      *
      * @param {number} address
      * @param {{ device: number, mode: number, size: number, modified: number }} entry
-     * @param {StatLayout} [layout]
+     * @param {StatLayout} layout
      */
-    const writeStat = (address, entry, layout = STAT)=>{
-        const bytes = new Uint8Array(layout.BYTES);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(layout.DEV, entry.device, true);
-        view.setUint16(layout.MODE, entry.mode, true);
-        view.setInt16(layout.NLINK, 1, true);
-        view.setUint32(layout.RDEV, entry.device, true);
-        if (layout.WIDE_SIZE)
-        {
-            view.setBigUint64(layout.SIZE, BigInt(entry.size), true);
-        }
-        else
-        {
-            view.setUint32(layout.SIZE, entry.size >>> 0, true);
-        }
+    const writeStat = (address, entry, layout)=>{
+        const bytes = new Uint8Array(layout.SIZE);
+        const view = bytesView(bytes);
+        write(view, 0, layout, 'st_dev', entry.device);
+        write(view, 0, layout, 'st_mode', entry.mode);
+        write(view, 0, layout, 'st_nlink', 1);
+        write(view, 0, layout, 'st_rdev', entry.device);
+        write(view, 0, layout, 'st_size', entry.size);
         const time = seconds(entry.modified);
-        for (const at of [layout.ATIME, layout.MTIME, layout.CTIME])
+        for (const field of ['st_atime', 'st_mtime', 'st_ctime'])
         {
-            if ('WIDE_TIME' in layout)
-            {
-                view.setBigUint64(at, BigInt(time), true);
-            }
-            else
-            {
-                view.setUint32(at, time, true);
-            }
+            write(view, 0, layout, field, time);
         }
         guest.setBytes(wholeAddress(address), bytes);
     };
@@ -1794,38 +1784,40 @@ export function createIoFunctions(host, descriptors){
          * A file is a regular file anyone may read and write, on device 0; a
          * console descriptor is a character device whose device is its number.
          */
-        _fstat: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT)),
+        _fstat: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, time64 ? STAT64I32 : STAT32)),
 
         /** int _fstati64(int fd, struct _stati64 *buffer) -- `_fstat` with the 64-bit size. */
-        _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STATI64)),
+        _fstati64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer,
+            time64 ? STAT64 : STAT32I64)),
 
-        // The time stamps: __utimbuf64 is two __time64_t, __utimbuf32 (and
-        // msvcrt's own _utimbuf) two longs; a null one is now.
+        // The time stamps: __utimbuf64 is two __time64_t, __utimbuf32 two
+        // longs, and msvcrt's own _utimbuf two of the process's time_t; a
+        // null one is now.
         /** int _utime64(const char *filename, struct __utimbuf64 *times) */
         _utime64: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 8)),
         /** int _utime32(const char *filename, struct __utimbuf32 *times) */
         _utime32: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
-        _utime: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, 4)),
+        _utime: cdecl(8, ([path, times])=>stamp(namedFile(path, false), times, timeBytes)),
         _wutime64: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 8)),
         _wutime32: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
-        _wutime: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, 4)),
+        _wutime: cdecl(8, ([path, times])=>stamp(namedFile(path, true), times, timeBytes)),
         /** int _futime64(int fd, struct __utimbuf64 *times) */
         _futime64: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 8,
             EBADF)),
         _futime32: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
             EBADF)),
-        _futime: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times, 4,
-            EBADF)),
+        _futime: cdecl(8, ([fd, times])=>stamp(descriptors.get(fd | 0)?.path ?? null, times,
+            timeBytes, EBADF)),
 
         /** int _stat(const char *path, struct _stat *buffer) */
-        _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT)),
+        _stat: cdecl(8, ([path, buffer])=>statPath(path, buffer, time64 ? STAT64I32 : STAT32)),
 
         /**
          * int _stati64(const char *path, struct _stati64 *buffer)
          *
          * `_stat` with a size that goes past 4 GiB, and the same answers.
          */
-        _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64)),
+        _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, time64 ? STAT64 : STAT32I64)),
 
         /** int _stat64(const char *path, struct _stat64 *buffer) */
         _stat64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64)),
@@ -1838,9 +1830,11 @@ export function createIoFunctions(host, descriptors){
 
         // The same over a wide path, which is read from memory as it lies.
         /** int _wstat(const wchar_t *path, struct _stat *buffer) */
-        _wstat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT, true)),
+        _wstat: cdecl(8, ([path, buffer])=>statPath(path, buffer, time64 ? STAT64I32 : STAT32,
+            true)),
         /** int _wstati64(const wchar_t *path, struct _stati64 *buffer) */
-        _wstati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64, true)),
+        _wstati64: cdecl(8, ([path, buffer])=>statPath(path, buffer,
+            time64 ? STAT64 : STAT32I64, true)),
         /** int _wstat64(const wchar_t *path, struct _stat64 *buffer) */
         _wstat64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64, true)),
         /** int _wstat64i32(const wchar_t *path, struct _stat64i32 *buffer) */

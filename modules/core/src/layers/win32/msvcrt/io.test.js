@@ -1209,3 +1209,56 @@ test('at 64 bits past 4 GiB: a wide path is read where it lies, and a block whos
     assert.equal(fns._pipe.handler([base, 64, O_BINARY]), 0);
     assert.notEqual(guest.i32(base), guest.i32(base + 4), 'two descriptors, at the start');
 });
+
+test('in a 64-bit process _stat is _stat64i32, _stati64 _stat64 and _utime _utime64: time_t'
+    + ' whole', ()=>{
+    // A 64-bit msvcrt.dll's time_t is an __int64: _stat64i32 has its size a
+    // long at 20 and its times at 24, 32 and 40; _stat64 its size whole at
+    // 24 and its times at 32, 40 and 48; a _utimbuf two __time64_t.
+    const base = 2 ** 32;
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    // A time past 2038, which only a 64-bit time_t holds.
+    const modified = Date.UTC(2040, 0, 1);
+    const seconds = BigInt(modified / 1000);
+    const files = fakeVolume({ 'C:\\game\\data.bin': bytesOf('data') },
+        { directories: ['C:\\', 'C:\\game'], modified });
+    /** @type {[string, number][]} */
+    const stamps = [];
+    /** @type {any} */ (files).setModified = (/** @type {string} */ path,
+        /** @type {number} */ ms)=>void stamps.push([path, ms]);
+    const descriptors = createDescriptors({ files, errno: ()=>{}, fmode: ()=>0,
+        write: ()=>{} });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ guest, files,
+        errno: ()=>{} }, descriptors));
+    guest.writeAnsi(base + 0x800, 'C:\\game\\data.bin');
+    guest.writeWide(base + 0x900, 'C:\\game\\data.bin');
+    const fd = fns._open.handler([base + 0x800, O_RDONLY | O_BINARY, 0]);
+    /** @param {string} name @param {number[]} args @param {boolean} long */
+    const stat = (name, args, long)=>{
+        bytes.fill(0xcc, 0, 0x100);
+        assert.equal(fns[name].handler([...args, base]), 0, name);
+        assert.equal(long ? view.getBigInt64(24, true) : BigInt(view.getInt32(20, true)), 4n,
+            `${name}: the size`);
+        assert.deepEqual((long ? [32, 40, 48] : [24, 32, 40]).map(at=>view.getBigInt64(at, true)),
+            [seconds, seconds, seconds], `${name}: the three times whole`);
+        assert.equal(bytes[long ? 56 : 48], 0xcc, `${name}: nothing past the record`);
+    };
+    stat('_stat', [base + 0x800], false);
+    stat('_wstat', [base + 0x900], false);
+    stat('_fstat', [fd], false);
+    stat('_stati64', [base + 0x800], true);
+    stat('_wstati64', [base + 0x900], true);
+    stat('_fstati64', [fd], true);
+    guest.set64(base + 0x200, 100n);
+    guest.set64(base + 0x208, 2208988800n);
+    for (const [name, target] of [['_utime', base + 0x800], ['_wutime', base + 0x900],
+        ['_futime', fd]])
+    {
+        stamps.length = 0;
+        assert.equal(fns[name].handler([target, base + 0x200]), 0, name);
+        assert.deepEqual(stamps, [['C:\\game\\data.bin', 2208988800000]],
+            `${name}: the modification time, an __int64 after the access time's`);
+    }
+});
