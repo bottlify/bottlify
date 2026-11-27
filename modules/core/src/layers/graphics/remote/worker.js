@@ -479,7 +479,7 @@ export function serveGraphics(scope, deps){
             // The one copy: a mapped range is the buffer's until it is unmapped.
             // Into memory held in the run's cache, read in place by the
             // program's thread; the frame before, one in flight at a time, was
-            // shown, and its name held anew takes its room back at once.
+            // shown, and the room it let go of is the keeper's again at this hold.
             letGoHeld();
             const held = backendCache?.space.hold?.('frame', bytesPerRow * height) ?? null;
             if (held === null)

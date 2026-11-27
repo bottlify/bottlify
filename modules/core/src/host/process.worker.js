@@ -69,9 +69,10 @@ const heapNow = ()=>{
  * the GPU to show: each written into memory held in the run's cache (`hold`),
  * whose view the message carries for that thread to read in place, and let go
  * of at its answer, which is not waited on - this thread blocks while it idles.
- * A frame in flight is held under the lowest free `frame/<n>`, so the next
- * hold of that name takes back at once the room a shown one let go of. One
- * with no room is not sent, and said once (`lost`).
+ * A frame in flight is held under the lowest free `frame/<n>`, so a run of
+ * frames names as many as are in flight at once, not one each; the room a
+ * shown one let go of is the keeper's again at the next hold. One with no
+ * room is not sent, and said once (`lost`).
  *
  * @param {MessagePort} port
  * @param {import('../layers/cache/scratch.js').Hold | null} hold  the process's frame names
