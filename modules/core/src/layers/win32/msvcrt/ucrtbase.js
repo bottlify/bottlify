@@ -97,8 +97,6 @@ export function createUcrtbaseFunctions(crt, host){
     const { guest } = host;
     /** A pointer's bytes: four, or eight in a 64-bit process. */
     const pointer = guest.pointerSize;
-    /** A pointer read and written whole. */
-    const { ptr: readPointer, setPtr: writePointer } = guest;
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         guest.set32(crt._errno.handler([]), code);
@@ -241,7 +239,7 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} list
      */
     const pointersAt = list=>Array.from({ length: VARIADIC_SLOTS },
-        (_, index)=>readPointer(wholeAddress(list) + index * pointer));
+        (_, index)=>guest.ptr(wholeAddress(list) + index * pointer));
 
     /** What `_register_thread_local_exe_atexit_callback` was given, until exit calls it. */
     let threadLocalExit = 0;
@@ -493,7 +491,7 @@ export function createUcrtbaseFunctions(crt, host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>readPointer(crt.__p__environ.handler([])),
+            handler: ()=>guest.ptr(crt.__p__environ.handler([])),
         },
 
         /** wchar_t **_get_initial_wide_environment(void) */
@@ -501,7 +499,7 @@ export function createUcrtbaseFunctions(crt, host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>readPointer(crt.__p__wenviron.handler([])),
+            handler: ()=>guest.ptr(crt.__p__wenviron.handler([])),
         },
 
         /** int _crt_atexit(_PVFV function): `atexit` as the start-up registers it. */
@@ -579,9 +577,9 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = wholeAddress(table);
-                let first = readPointer(at);
-                let last = readPointer(at + pointer);
-                let end = readPointer(at + 2 * pointer);
+                let first = guest.ptr(at);
+                let last = guest.ptr(at + pointer);
+                let end = guest.ptr(at + 2 * pointer);
                 if (last === end)
                 {
                     const used = first === 0 ? 0 : (last - first) / pointer;
@@ -595,10 +593,10 @@ export function createUcrtbaseFunctions(crt, host){
                     last = grown + used * pointer;
                     end = grown + room * pointer;
                 }
-                writePointer(last, fn);
-                writePointer(at, first);
-                writePointer(at + pointer, last + pointer);
-                writePointer(at + 2 * pointer, end);
+                guest.setPtr(last, fn);
+                guest.setPtr(at, first);
+                guest.setPtr(at + pointer, last + pointer);
+                guest.setPtr(at + 2 * pointer, end);
                 return 0;
             },
         },
@@ -620,11 +618,11 @@ export function createUcrtbaseFunctions(crt, host){
                     return -1;
                 }
                 const at = wholeAddress(table);
-                const first = readPointer(at);
-                const last = readPointer(at + pointer);
+                const first = guest.ptr(at);
+                const last = guest.ptr(at + pointer);
                 const functions = first === 0 ? [] : Array.from(
                     { length: (last - first) / pointer },
-                    (_, index)=>readPointer(first + index * pointer));
+                    (_, index)=>guest.ptr(first + index * pointer));
                 guest.fill(at, 0, 3 * pointer);
                 if (first !== 0)
                 {
@@ -776,7 +774,7 @@ export function createUcrtbaseFunctions(crt, host){
                         : scanStandardDecimal(guest.cstr(text, 1024));
                     if (wholeAddress(end) !== 0)
                     {
-                        writePointer(end, scanned ? text + scanned.end : text);
+                        guest.setPtr(end, scanned ? text + scanned.end : text);
                     }
                     const value = Math.fround(scanned?.value ?? 0);
                     // Past a float's range from a finite double; an infinity or
@@ -960,7 +958,7 @@ export function createUcrtbaseFunctions(crt, host){
                     .forEach(([out, field])=>{
                         if ((out >>> 0) !== 0)
                         {
-                            writePointer(out, field);
+                            guest.setPtr(out, field);
                         }
                     });
                 return 0;
