@@ -527,7 +527,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
         retiredSoFar: ()=>(running ? Atomics.load(state, Word.RETIRED) >>> 0 : 0),
         /** The process's side of its link: what it sent, and the executor's sleeps it woke. */
-        waits: ()=>({ ...link.counts }),
+        waits: ()=>link.diagnostics(),
         /**
          * The processor it plays from its next slice, the one `cpuid` names
          * there (`Word.PLAYS`); undefined, its own.

@@ -100,7 +100,7 @@ const portTranslator = port=>({
         port.close();
     },
 });
-/** Its side of the link's sends and sleeps, once started. @type {any} */
+/** Its side of the link, whose diagnostics say its sends and sleeps, once started. @type {any} */
 let waits = null;
 
 /**
@@ -161,7 +161,7 @@ async function serve(
     // Each send interrupts the process's own slice too: it answers between its own turns.
     const link = openLink(linked, {}, { spinMs: look, afterSend: ()=>host.interruptProcess() });
     const words = new Int32Array(stateBuffer);
-    waits = link.counts;
+    waits = link;
     /**
      * A slice, its run of guest code counted (`Word.EPOCH`), what it retired
      * (`Word.RETIRED`), and the processor it plays (`Word.PLAYS`).
@@ -435,7 +435,7 @@ function bind(listen, send){
             send({ type: 'diagnostics', id: data.id,
                 value: running === null ? null : { ...running.cork().diagnostics(),
                     spent: { ...spent, wallMs: performance.now() - spent.startedAt,
-                        waits: { ...waits } },
+                        waits: waits?.diagnostics() ?? null },
                     storeRecords: { ...storeRelay?.counts } } });
         }
     });
