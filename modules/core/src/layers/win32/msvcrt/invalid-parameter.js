@@ -30,6 +30,7 @@
  */
 
 import { EINVAL } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** STATUS_INVALID_CRUNTIME_PARAMETER: how `_invoke_watson` ends the process. */
 export const INVALID_CRUNTIME_PARAMETER = 0xc0000417;
@@ -136,13 +137,13 @@ export function createInvalidParameterRuntime(host){
         library: host.library,
         set: handler=>{
             const before = global;
-            global = handler >>> 0;
+            global = wholeAddress(handler);
             return before;
         },
         get: ()=>global,
         setThread: host.threadLocal ? handler=>{
             const before = own();
-            perThread.set(thread(), handler >>> 0);
+            perThread.set(thread(), wholeAddress(handler));
             return before;
         } : undefined,
         getThread: host.threadLocal ? own : undefined,

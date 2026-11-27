@@ -731,12 +731,14 @@ export function createMultiByteFunctions(narrow, host){
      * the faster walk.
      *
      * @param {string} name @param {string} byte
+     * @param {'pointer'} [returns]  it answers a place in the string
      */
-    const byPage = (name, byte)=>{
+    const byPage = (name, byte, returns)=>{
         const twin = narrow[byte];
         const handler = /** @type {Record<string, (args: number[]) => number>} */ (
             handlers)[name];
         return {
+            ...returns ? { returns } : {},
             convention: 'cdecl',
             argBytes: twin?.argBytes ?? 8,
             /** @param {number[]} args */
@@ -744,8 +746,12 @@ export function createMultiByteFunctions(narrow, host){
         };
     };
 
-    /** @param {string} name @param {number} argBytes */
-    const onHost = (name, argBytes)=>({
+    /**
+     * @param {string} name @param {number} argBytes
+     * @param {'pointer'} [returns]  it answers a place in the string
+     */
+    const onHost = (name, argBytes, returns)=>({
+        ...returns ? { returns } : {},
         convention: 'cdecl',
         argBytes,
         handler: /** @type {Record<string, (args: number[]) => number>} */ (handlers)[name],
@@ -785,16 +791,16 @@ export function createMultiByteFunctions(narrow, host){
         _mbsnbicmp: guestCoded('_mbsnbicmp', '_mbsnicmp'),
         _mbsnbcpy: guestCoded('_mbsnbcpy', '_mbsncpy'),
 
-        _mbspbrk: byPage('_mbspbrk', 'strpbrk'),
+        _mbspbrk: byPage('_mbspbrk', 'strpbrk', 'pointer'),
         _mbsspn: byPage('_mbsspn', 'strspn'),
         _mbscspn: byPage('_mbscspn', 'strcspn'),
-        _mbsncat: byPage('_mbsncat', 'strncat'),
-        _mbsnbcat: byPage('_mbsnbcat', 'strncat'),
-        _mbsrev: byPage('_mbsrev', '_strrev'),
+        _mbsncat: byPage('_mbsncat', 'strncat', 'pointer'),
+        _mbsnbcat: byPage('_mbsnbcat', 'strncat', 'pointer'),
+        _mbsrev: byPage('_mbsrev', '_strrev', 'pointer'),
 
-        _mbsspnp: onHost('_mbsspnp', 8),
-        _mbstok: onHost('_mbstok', 8),
-        _mbsninc: onHost('_mbsninc', 8),
+        _mbsspnp: onHost('_mbsspnp', 8, 'pointer'),
+        _mbstok: onHost('_mbstok', 8, 'pointer'),
+        _mbsninc: onHost('_mbsninc', 8, 'pointer'),
         _mbsnextc: onHost('_mbsnextc', 4),
         _mbccpy: onHost('_mbccpy', 8),
         _ismbbtrail: onHost('_ismbbtrail', 4),
@@ -816,8 +822,13 @@ export function createMultiByteFunctions(narrow, host){
         _mbsnextc_l: onHost('_mbsnextc', 8),
         _mbscmp_l: { ...guestCoded('_mbscmp'), argBytes: 12 },
 
-        // The Japanese conversions and tests (kana.js): under any page but
-        // 932 a conversion is its argument and a test is false.
+        /**
+         * unsigned int _mbcjistojms/_mbcjmstojis/_mbctohira/_mbctokata/_mbbtombc/_mbctombb(
+         *     unsigned int c)
+         *
+         * The Japanese conversions and tests (kana.js): under any page but
+         * 932 a conversion is its argument and a test is false.
+         */
         _mbcjistojms: underShiftJis(jisToShiftJis),
         _mbcjmstojis: underShiftJis(shiftJisToJis),
         _mbctohira: underShiftJis(toHiragana),

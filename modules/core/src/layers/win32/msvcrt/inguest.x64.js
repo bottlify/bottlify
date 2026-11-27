@@ -2458,12 +2458,12 @@ export const COMPILED = /** @type {const} */ ({
     },
     encodePointer: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: [],
         leaf: true,
         code: Uint8Array.of(
-            0x48, 0x89, 0x4c, 0x24, 0x08, 0x8b, 0x44, 0x24, 0x08, 0xc3,
+            0x48, 0x89, 0x4c, 0x24, 0x08, 0x48, 0x8b, 0x44, 0x24, 0x08, 0xc3,
         ),
     },
     encodedNull: {

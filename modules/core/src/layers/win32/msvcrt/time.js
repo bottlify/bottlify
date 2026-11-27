@@ -921,8 +921,10 @@ export function createTimeFunctions(host){
      * @param {(seconds: number) => BrokenDown | null} convert
      */
     const intoStatic = (read, convert)=>({
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [pointer])=>{
             const tm = wholeAddress(pointer) === 0 ? null : convert(read(pointer));
@@ -945,6 +947,7 @@ export function createTimeFunctions(host){
     const intoCaller = (read, convert)=>({
         convention: 'cdecl',
         argBytes: 8,
+        addresses: [0, 1],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [block, pointer])=>{
             if (wholeAddress(block) === 0)
@@ -1008,8 +1011,10 @@ export function createTimeFunctions(host){
      * @param {boolean} [wide]
      */
     const ctime = (read, wide = false)=>({
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [pointer])=>{
             const tm = wholeAddress(pointer) === 0 ? null : localtimeOf(read(pointer));
@@ -1033,6 +1038,7 @@ export function createTimeFunctions(host){
     const ctimeInto = read=>({
         convention: 'cdecl',
         argBytes: 12,
+        addresses: [0, 2],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size, pointer])=>{
             if (wholeAddress(buffer) === 0 || (size >>> 0) === 0)
@@ -1068,6 +1074,7 @@ export function createTimeFunctions(host){
     const stampInto = format=>({
         convention: 'cdecl',
         argBytes: 8,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size])=>{
             if (wholeAddress(buffer) === 0 || (size >>> 0) === 0)
@@ -1107,6 +1114,7 @@ export function createTimeFunctions(host){
     const getter = name=>({
         convention: 'cdecl',
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [out])=>{
             if (wholeAddress(out) === 0)
@@ -1126,6 +1134,7 @@ export function createTimeFunctions(host){
     const time32 = {
         convention: 'cdecl',
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [destination])=>{
             const now = seconds();
@@ -1177,6 +1186,7 @@ export function createTimeFunctions(host){
         return {
             convention: 'cdecl',
             argBytes: 4,
+            addresses: [0],
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [result])=>{
                 const milliseconds = host.systemTimeMs();
@@ -1281,6 +1291,7 @@ export function createTimeFunctions(host){
         _mktime32: {
             convention: 'cdecl',
             argBytes: 4,
+            addresses: [0],
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [block])=>mktime32(block) | 0,
         },
@@ -1295,6 +1306,7 @@ export function createTimeFunctions(host){
         _mkgmtime32: {
             convention: 'cdecl',
             argBytes: 4,
+            addresses: [0],
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [block])=>mkgmtime32(block) | 0,
         },
@@ -1382,6 +1394,7 @@ export function createTimeFunctions(host){
                 .map((name, at)=>`:${name}:${C_TIME_NAMES.days[at]}`).join('')),
         },
         _Getmonths: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>publishText(C_TIME_NAMES.shortMonths

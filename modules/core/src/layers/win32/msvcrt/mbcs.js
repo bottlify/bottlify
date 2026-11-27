@@ -565,7 +565,11 @@ export function createMultiByteHandlers(host, page){
             return previous;
         },
 
-        /** @param {number[]} args */
+        /**
+         * unsigned char *_mbsninc(const unsigned char *string, size_t count)
+         *
+         * @param {number[]} args
+         */
         _mbsninc: ([string, count])=>{
             if (wholeAddress(string) === 0)
             {
@@ -583,7 +587,11 @@ export function createMultiByteHandlers(host, page){
             return at;
         },
 
-        /** @param {number[]} args */
+        /**
+         * unsigned int _mbsnextc(const unsigned char *string)
+         *
+         * @param {number[]} args
+         */
         _mbsnextc: ([at])=>charAt(at),
 
         /** @param {number[]} args */
@@ -592,7 +600,11 @@ export function createMultiByteHandlers(host, page){
         /** @param {number[]} args */
         _ismbbtrail: ([c])=>(page.isTrail(c) ? 1 : 0),
 
-        /** @param {number[]} args */
+        /**
+         * int _ismbslead(const unsigned char *start, const unsigned char *at)
+         *
+         * @param {number[]} args
+         */
         _ismbslead: ([start, at])=>{
             for (let walk = start; walk <= at;)
             {
@@ -623,7 +635,11 @@ export function createMultiByteHandlers(host, page){
             return 0;
         },
 
-        /** @param {number[]} args */
+        /**
+         * int _ismbstrail(const unsigned char *start, const unsigned char *at)
+         *
+         * @param {number[]} args
+         */
         _ismbstrail: ([start, at])=>{
             for (let walk = start; walk < at;)
             {
@@ -664,7 +680,11 @@ export function createMultiByteHandlers(host, page){
             return byte >= 0x20 && byte <= 0x7e ? MBC_SINGLE : MBC_ILLEGAL;
         },
 
-        /** @param {number[]} args */
+        /**
+         * int _mbsbtype(const unsigned char *string, size_t index)
+         *
+         * @param {number[]} args
+         */
         _mbsbtype: ([string, index])=>{
             if (wholeAddress(string) === 0)
             {
@@ -700,7 +720,11 @@ export function createMultiByteHandlers(host, page){
             }
         },
 
-        /** @param {number[]} args */
+        /**
+         * void _mbccpy(unsigned char *dest, const unsigned char *src)
+         *
+         * @param {number[]} args
+         */
         _mbccpy: ([destination, source])=>{
             const c = u8(source);
             set8(destination, c);
@@ -871,22 +895,40 @@ export function createMultiByteHandlers(host, page){
         _mbslwr: caseMap(0),
         _mbsupr: caseMap(1),
 
-        /** @param {number[]} args */
+        /**
+         * size_t _mbsspn(const unsigned char *string, const unsigned char *set)
+         *
+         * @param {number[]} args
+         */
         _mbsspn: ([string, set])=>span(string, set, true) - string,
-        /** @param {number[]} args */
+        /**
+         * size_t _mbscspn(const unsigned char *string, const unsigned char *set)
+         *
+         * @param {number[]} args
+         */
         _mbscspn: ([string, set])=>span(string, set, false) - string,
-        /** @param {number[]} args */
+        /**
+         * unsigned char *_mbsspnp(const unsigned char *string, const unsigned char *set)
+         *
+         * @param {number[]} args
+         */
         _mbsspnp: ([string, set])=>{
             const at = span(string, set, true);
             return u8(at) === 0 ? 0 : at;
         },
-        /** @param {number[]} args */
+        /**
+         * unsigned char *_mbspbrk(const unsigned char *string, const unsigned char *set)
+         *
+         * @param {number[]} args
+         */
         _mbspbrk: ([string, set])=>{
             const at = span(string, set, false);
             return u8(at) === 0 ? 0 : at;
         },
 
         /**
+         * unsigned char *_mbsrev(unsigned char *string)
+         *
          * In place, character by character: a pair keeps its order, and a
          * lead byte the terminator follows is dropped.
          *
@@ -918,7 +960,11 @@ export function createMultiByteHandlers(host, page){
             return string;
         },
 
-        /** @param {number[]} args */
+        /**
+         * unsigned char *_mbsncat(unsigned char *dest, const unsigned char *src, size_t count)
+         *
+         * @param {number[]} args
+         */
         _mbsncat: ([destination, source, count])=>{
             let end = destination;
             while (u8(end) !== 0)
@@ -937,7 +983,11 @@ export function createMultiByteHandlers(host, page){
             return destination;
         },
 
-        /** @param {number[]} args */
+        /**
+         * unsigned char *_mbsnbcat(unsigned char *dest, const unsigned char *src, size_t count)
+         *
+         * @param {number[]} args
+         */
         _mbsnbcat: ([destination, source, count])=>{
             let end = destination;
             while (u8(end) !== 0)
@@ -963,6 +1013,8 @@ export function createMultiByteHandlers(host, page){
         },
 
         /**
+         * unsigned char *_mbstok(unsigned char *string, const unsigned char *delimiters)
+         *
          * As strtok, by characters: the delimiters skipped, the token ended
          * with a terminator written over the delimiter after it.
          *
@@ -1089,7 +1141,11 @@ export function createMultiByteHandlers(host, page){
          * @param {number[]} args
          */
         _mbscpy_s: ([destination, size, source])=>secureAppend(destination, size, source, false),
-        /** @param {number[]} args */
+        /**
+         * errno_t _mbscat_s(unsigned char *dest, size_t size, const unsigned char *src)
+         *
+         * @param {number[]} args
+         */
         _mbscat_s: ([destination, size, source])=>secureAppend(destination, size, source, true),
 
         /**
@@ -1189,7 +1245,11 @@ export function createMultiByteHandlers(host, page){
          * @param {number[]} args
          */
         _mbsupr_s: ([string, size])=>secureCase(string, size, 1),
-        /** @param {number[]} args */
+        /**
+         * errno_t _mbslwr_s(unsigned char *string, size_t size)
+         *
+         * @param {number[]} args
+         */
         _mbslwr_s: ([string, size])=>secureCase(string, size, 0),
     };
 }

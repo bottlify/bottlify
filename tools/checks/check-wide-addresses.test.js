@@ -58,6 +58,22 @@ test('a written dword may differ by the distance where it points into the window
     assert.deepEqual(writeDifferences(before, low, before, high, LOW, HIGH), [4, 8]);
 });
 
+test('a pointer written whole past 4 GiB is moved by the distance, both its dwords', ()=>{
+    const before = new Uint8Array(16);
+    const low = new Uint8Array(16);
+    const high = new Uint8Array(16);
+    const far = 0x140000000;
+    const lowView = new DataView(low.buffer);
+    const highView = new DataView(high.buffer);
+    lowView.setUint32(0, LOW + 0x10, true);
+    highView.setUint32(0, (far + 0x10) % 2 ** 32, true);
+    highView.setUint32(4, 1, true);
+    assert.deepEqual(writeDifferences(before, low, before, high, LOW, far), []);
+    // Its upper dword anything but the distance's is a difference.
+    highView.setUint32(4, 2, true);
+    assert.deepEqual(writeDifferences(before, low, before, high, LOW, far), [4]);
+});
+
 test('what a call did not write is not its own, however the windows had parted', ()=>{
     const lowBefore = Uint8Array.of(1, 0, 0, 0);
     const highBefore = Uint8Array.of(2, 0, 0, 0);

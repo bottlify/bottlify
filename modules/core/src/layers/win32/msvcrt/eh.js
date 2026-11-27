@@ -47,6 +47,7 @@
 import { Disposition, EH_UNWINDING, EXCEPTION_EXIT_UNWIND, EXCEPTION_NONCONTINUABLE, RECORD }
     from '../kernel32/seh.js';
 import { wholeAddress } from '../common/pointers.js';
+import { struct } from '../../../system/layout.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
 export const EH_EXCEPTION_NUMBER = 0xe06d7363;
@@ -143,9 +144,14 @@ const WALK_LIMIT = 4096;
  */
 export const UNIVERSAL_EH = Symbol('universal exception state');
 
-const THREAD_DATA = Object.freeze({
-    TRANSLATOR: 0, CURRENT_EXCEPTION: 8, CURRENT_CONTEXT: 12, PROCESSING_THROW: 16, SIZE: 20,
-});
+/**
+ * A thread's exception state, as vcruntime's per-thread block keeps it: the
+ * translator, a slot this runtime does not use, the record and context a
+ * catch block handles, and the count in flight - each pointer a pointer wide,
+ * as the universal runtime's accessors hand them to a 64-bit program too.
+ */
+const THREAD_DATA = struct([['TRANSLATOR', 'ptr'], [null, 'ptr'], ['CURRENT_EXCEPTION', 'ptr'],
+    ['CURRENT_CONTEXT', 'ptr'], ['PROCESSING_THROW', 'i32']]);
 
 /**
  * One catch the thread is inside.
@@ -165,8 +171,11 @@ const THREAD_DATA = Object.freeze({
  * @param {CxxEhHost} host
  */
 export function createCxxExceptions(host){
-    // The i386's frames, tables and thrown objects: every field a dword.
+    // The i386's frames, tables and thrown objects: every field a dword; the
+    // thread's block at the process's width.
     const { guest } = host;
+    const { ptr, setPtr } = guest;
+    const THREAD = THREAD_DATA.at(guest.pointerSize);
 
     /**
      * The catches each thread is inside, innermost last.
@@ -201,8 +210,8 @@ export function createCxxExceptions(host){
         {
             return known;
         }
-        const at = host.allocate(THREAD_DATA.SIZE) >>> 0;
-        guest.fill(at, 0, THREAD_DATA.SIZE);
+        const at = wholeAddress(host.allocate(THREAD.SIZE));
+        guest.fill(at, 0, THREAD.SIZE);
         if (thread !== null && typeof thread === 'object')
         {
             blocks.set(thread, at);
@@ -214,10 +223,10 @@ export function createCxxExceptions(host){
         return at;
     };
     /** Exceptions thrown on the thread and not yet caught. @param {any} thread */
-    const inFlight = thread=>guest.u32(threadData(thread) + THREAD_DATA.PROCESSING_THROW);
+    const inFlight = thread=>guest.u32(threadData(thread) + THREAD.PROCESSING_THROW);
     /** @param {any} thread @param {number} count */
     const setInFlight = (thread, count)=>
-        guest.set32(threadData(thread) + THREAD_DATA.PROCESSING_THROW, Math.max(0, count));
+        guest.set32(threadData(thread) + THREAD.PROCESSING_THROW, Math.max(0, count));
 
     let terminateHandler = 0;
     let unexpectedHandler = 0;
@@ -513,10 +522,9 @@ export function createCxxExceptions(host){
         // The exception the block handles is the thread's current one while it
         // runs, the one before it again once it is done.
         const block = threadData(thread);
-        const outer = [guest.u32(block + THREAD_DATA.CURRENT_EXCEPTION),
-            guest.u32(block + THREAD_DATA.CURRENT_CONTEXT)];
-        guest.set32(block + THREAD_DATA.CURRENT_EXCEPTION, record);
-        guest.set32(block + THREAD_DATA.CURRENT_CONTEXT, context);
+        const outer = [ptr(block + THREAD.CURRENT_EXCEPTION), ptr(block + THREAD.CURRENT_CONTEXT)];
+        setPtr(block + THREAD.CURRENT_EXCEPTION, record);
+        setPtr(block + THREAD.CURRENT_CONTEXT, context);
 
         const continuation = await host.callGuest({
             entry: guest.u32(handler + HANDLER.ADDRESS),
@@ -526,8 +534,8 @@ export function createCxxExceptions(host){
             registers: { ebp: frame + EH_FRAME.EBP },
         }) >>> 0;
 
-        guest.set32(block + THREAD_DATA.CURRENT_EXCEPTION, outer[0]);
-        guest.set32(block + THREAD_DATA.CURRENT_CONTEXT, outer[1]);
+        setPtr(block + THREAD.CURRENT_EXCEPTION, outer[0]);
+        setPtr(block + THREAD.CURRENT_CONTEXT, outer[1]);
         // The block ended by returning, so it is still the innermost catch.
         const at = list.lastIndexOf(mine);
         if (at >= 0)
@@ -585,7 +593,7 @@ export function createCxxExceptions(host){
             && knownMagic(guest.u32(wholeAddress(record) + RECORD.INFORMATION));
         const state = stateOf(at);
 
-        const translator = guest.u32(threadData(thread) + THREAD_DATA.TRANSLATOR);
+        const translator = ptr(threadData(thread) + THREAD.TRANSLATOR);
         if (!isCxx && translator !== 0)
         {
             // The program's translator turns a structured exception into a C++
@@ -696,13 +704,15 @@ export function createCxxExceptions(host){
 
     /** The thread's own: a translator is set for each thread. */
     const setTranslator = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        addresses: [0],
         /** @param {number[]} args */
         handler: ([handler])=>{
-            const slot = threadData(host.currentThread()) + THREAD_DATA.TRANSLATOR;
-            const previous = guest.u32(slot);
-            guest.set32(slot, handler >>> 0);
+            const slot = threadData(host.currentThread()) + THREAD.TRANSLATOR;
+            const previous = ptr(slot);
+            setPtr(slot, wholeAddress(handler));
             return previous;
         },
     };
@@ -728,9 +738,9 @@ export function createCxxExceptions(host){
              * in flight: always the same addresses for a thread.
              */
             [UNIVERSAL_EH]: {
-                __current_exception: slotOfThread(THREAD_DATA.CURRENT_EXCEPTION),
-                __current_exception_context: slotOfThread(THREAD_DATA.CURRENT_CONTEXT),
-                __processing_throw: slotOfThread(THREAD_DATA.PROCESSING_THROW),
+                __current_exception: slotOfThread(THREAD.CURRENT_EXCEPTION),
+                __current_exception_context: slotOfThread(THREAD.CURRENT_CONTEXT),
+                __processing_throw: slotOfThread(THREAD.PROCESSING_THROW),
                 // The C name the universal runtime gave the translator's setter.
                 _set_se_translator: setTranslator,
             },

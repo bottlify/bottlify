@@ -11,6 +11,7 @@ import {
 } from './eh.js';
 import { Disposition, EH_UNWINDING, RECORD } from '../kernel32/seh.js';
 import { guestWindow } from './guest-window.fixture.js';
+import { declaredTable, longCall } from '../common/long-call.fixture.js';
 
 /** The registration frame of the function being handled, and its body's stack. */
 const FRAME = 0x2f000;
@@ -511,3 +512,23 @@ test('__DestructExceptionObject destroys a C++ exception\'s object and leaves an
         await m.eh.table.__DestructExceptionObject.handler([RECORD_AT]);
         assert.equal(m.calls.length, 1, 'an access violation carries no object');
     });
+
+test('at 64 bits past 4 GiB: the thread\'s exception state is a pointer wide, its slots and'
+    + ' its translator whole', async()=>{
+    const base = 0x140000000;
+    const bytes = new Uint8Array(0x1000);
+    const guest = guestWindow(bytes, { base, pointerSize: 8 });
+    const eh = createCxxExceptions(/** @type {any} */ ({ guest, currentThread: ()=>THREAD,
+        allocate: ()=>base + 0x100 }));
+    const state = declaredTable(/** @type {any} */ (eh.table)[UNIVERSAL_EH]);
+    const translator = base + 0x800;
+    assert.equal(await longCall(state._set_se_translator, [translator]), 0n);
+    assert.equal(await longCall(state._set_se_translator, [translator + 0x10]),
+        BigInt(translator), 'the one before, whole');
+    const current = Number(await longCall(state.__current_exception, []));
+    const context = Number(await longCall(state.__current_exception_context, []));
+    const count = Number(await longCall(state.__processing_throw, []));
+    assert.deepEqual([current - base, context - current, count - current], [0x110, 8, 16],
+        'a pointer a slot: the translator two before the record, the count two after');
+    assert.equal(guest.ptr(current - 16), translator + 0x10);
+});

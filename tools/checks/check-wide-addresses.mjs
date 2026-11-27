@@ -246,11 +246,7 @@ export async function layerAt(base){
  *
  * @type {Map<string, string>}
  */
-export const KNOWN_CUTS = new Map([
-    ['ADVAPI32.dll!BuildTrusteeWithObjectsAndSidA',
-        'OBJECTS_AND_SID is laid out 32-bit, its SID pointer a dword: the 64-bit layout'
-            + ' is the fix'],
-]);
+export const KNOWN_CUTS = new Map([]);
 
 /**
  * The handlers that cut an argument the bridge hands them whole (`addresses`,
@@ -523,7 +519,10 @@ export function sameAnswer(low, high, lowBase, highBase, kind){
  * The offsets of the dwords one call wrote that differ between the two
  * windows other than by a pointer moved by the bases' distance: a dword at a
  * 4-byte boundary whose value is the low one's plus the distance, mod 2^32,
- * and points into the low window. Only what the call changed is compared - a
+ * and points into the low window; or the two dwords of a quadword at an
+ * 8-byte boundary whose whole value is the low one's plus the distance - a
+ * 64-bit pointer written whole into a window past 4 GiB, its upper dword 1
+ * where the low window's is 0. Only what the call changed is compared - a
  * window the layers had already parted on before it is not this call's.
  *
  * @param {Uint8Array} lowBefore @param {Uint8Array} low
@@ -537,10 +536,19 @@ export function writeDifferences(lowBefore, low, highBefore, high, lowBase, high
     const view = (/** @type {Uint8Array} */ b)=>new DataView(b.buffer, b.byteOffset, b.length);
     const [lb, la, hb, ha] = [lowBefore, low, highBefore, high].map(view);
     const distance = (highBase - lowBase) >>> 0;
+    /** @param {DataView} v @param {number} at */
+    const quad = (v, at)=>v.getUint32(at, true) + v.getUint32(at + 4, true) * 2 ** 32;
     for (let at = 0; at + 4 <= low.length && found.length < 4; at += 4)
     {
         const a = la.getUint32(at, true);
         const b = ha.getUint32(at, true);
+        const whole = at % 8 === 0 && at + 8 <= low.length ? quad(la, at) : -1;
+        if (whole >= lowBase && whole < lowBase + WINDOW
+            && whole + highBase - lowBase === quad(ha, at))
+        {
+            at += 4;
+            continue;
+        }
         if (a === lb.getUint32(at, true) && b === hb.getUint32(at, true))
         {
             continue;
