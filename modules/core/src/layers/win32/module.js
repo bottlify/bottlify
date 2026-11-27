@@ -5294,7 +5294,7 @@ export function createWin32Module(){
                         .handler([0x40, bytes]) >>> 0 }),
                 'pdh.dll': ()=>createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
-                'bcrypt.dll': ()=>createBcryptFunctions({ writeMemory, readMemory }),
+                'bcrypt.dll': ()=>createBcryptFunctions({ writeMemory, readMemory, guest }),
                 // GDI+'s bitmaps over guest memory; its codecs and drawing say they are not here.
                 'gdiplus.dll': ()=>createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
                     allocate: bytes=>allocator.allocate(bytes),
@@ -5347,7 +5347,7 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes), free: address=>heap.free(address),
                     divergence: config?.divergence }),
                 'bcryptprimitives.dll': ()=>createBcryptPrimitivesFunctions({ writeMemory,
-                    readMemory }),
+                    readMemory, guest }),
                 // No security package and no key storage provider: what a library
                 // that offers the system's TLS or a proxy sign-in falls back from.
                 'Secur32.dll': ()=>createSecur32Functions({ writeMemory, readMemory,
@@ -7298,6 +7298,7 @@ export function createWin32Module(){
                 pointerSize,
                 readMemory,
                 writeMemory,
+                guest,
                 readCString,
                 readWideString,
                 kernel32: libraries['KERNEL32.dll'],

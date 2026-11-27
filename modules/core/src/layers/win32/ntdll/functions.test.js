@@ -11,6 +11,7 @@ import { createNtdllFunctions } from './functions.js';
 import { STATUS } from './status.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES } from '../advapi32/tokens.js';
+import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
 
 const PROCESS_HEAP = 0x8;
 
@@ -83,6 +84,7 @@ function fakeHost({ registers = true } = {}){
         crt,
         readMemory,
         writeMemory,
+        guest: guestOver(bytes),
         /** @param {number} address */
         readCString: address=>String(address),
         /** @param {number} address */
@@ -182,8 +184,40 @@ test('a native call answers a pointer it cannot reach with STATUS_ACCESS_VIOLATI
         STATUS.ACCESS_VIOLATION);
     assert.equal(fns.ZwQuerySystemInformation.handler([35, 0x2000, 2, 0]),
         STATUS.ACCESS_VIOLATION, 'under its Zw name too');
-    assert.throws(()=>fns.RtlFillMemoryUlong.handler([0x2000, 4, 1]), /no page/,
-        'a user-mode Rtl function faults');
+    assert.throws(()=>fns.RtlFillMemoryUlong.handler([0x2000, 4, 1]),
+        (/** @type {any} */ e)=>e.code === 'GUEST_ACCESS', 'a user-mode Rtl function faults');
+});
+
+test('the dword fills write their pattern where it goes, and fault where the memory ends', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    fns.RtlFillMemoryUlong.handler([0x100, 11, 0x11223344]);
+    assert.deepEqual([0x100, 0x104].map(at=>view.getUint32(at, true)), [0x11223344, 0x11223344]);
+    assert.equal(host.bytes[0x108], 0, 'whole dwords only');
+    fns.RtlFillMemoryUlonglong.handler([0x200, 23, 0x55667788, 0x11223344]);
+    assert.deepEqual([0x200, 0x204, 0x208, 0x20c].map(at=>view.getUint32(at, true)),
+        [0x55667788, 0x11223344, 0x55667788, 0x11223344]);
+    assert.equal(host.bytes[0x210], 0, 'whole quadwords only');
+    fns.RtlFillMemoryUlong.handler([0x300, 8, 0xabababab]);
+    assert.deepEqual([...host.bytes.subarray(0x300, 0x309)], [...new Array(8).fill(0xab), 0],
+        'one byte repeated');
+
+    // Windows' loop faults at the first dword that is not there; a host buffer
+    // of the length first is gigabytes for a wrong one.
+    for (const [name, call] of /** @type {[string, () => unknown][]} */ ([
+        ['RtlFillMemoryUlong', ()=>fns.RtlFillMemoryUlong.handler([0xff0, 0xdeadbeef, 0x01020304])],
+        ['RtlFillMemoryUlong unmapped', ()=>fns.RtlFillMemoryUlong.handler([0xdeadbeef,
+            0xdeadbeef, 0xdeadbeef])],
+        ['RtlFillMemoryUlonglong', ()=>fns.RtlFillMemoryUlonglong.handler([0xff0, 0xdeadbeef,
+            1, 2])],
+        ['RtlFillMemoryUlong of zero', ()=>fns.RtlFillMemoryUlong.handler([0xff0, 0xdeadbeef, 0])],
+    ]))
+    {
+        const { grown, error } = externalGrowth(call);
+        assert.equal(error?.code, 'GUEST_ACCESS', `${name}: a fault`);
+        assert.ok(grown < IN_PLACE, `${name}: ${grown} bytes grown`);
+    }
 });
 
 test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{

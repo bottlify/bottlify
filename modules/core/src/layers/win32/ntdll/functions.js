@@ -195,6 +195,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @typedef {Object} NtdllHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest  The guest's memory at the
+ *     process's pointer width.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
@@ -397,6 +399,34 @@ export function createNtdllFunctions(host){
     /** @param {number} address */
     const free = address=>kernel32.HeapFree.handler([processHeap, 0, address]) !== 0;
 
+    /**
+     * `length` bytes of a pattern of dwords, written where they go: one byte
+     * value repeated is the memory layer's fill, any other pattern made a
+     * chunk at a time. A length the destination does not have faults where
+     * it ends, as Windows' loop does, with no host buffer of that length.
+     *
+     * @param {number} destination @param {number} length  a whole number of patterns
+     * @param {number[]} dwords
+     */
+    const fillPattern = (destination, length, dwords)=>{
+        if (length === 0)
+        {
+            return;
+        }
+        const pattern = new Uint8Array(Uint32Array.from(dwords, dword=>dword >>> 0).buffer);
+        if (pattern.every(byte=>byte === pattern[0]))
+        {
+            host.guest.fill(wholeAddress(destination), pattern[0], length);
+            return;
+        }
+        host.guest.setMade(wholeAddress(destination), length, chunk=>{
+            for (let at = 0; at < chunk.length; at++)
+            {
+                chunk[at] = pattern[at % pattern.length];
+            }
+        });
+    };
+
     // Native calls a kernel32 table builds over state only it holds -- the
     // APC queues -- ride on the entry that shares the state, since nothing
     // here reaches it.
@@ -564,7 +594,8 @@ export function createNtdllFunctions(host){
         ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             readWideString: host.readWideString, allocate, free }),
 
-        ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            guest: host.guest }),
 
         ...time.table,
 
@@ -1177,17 +1208,7 @@ export function createNtdllFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length, pattern])=>{
-                const words = (length >>> 0) >>> 2;
-                const bytes = new Uint8Array(words * 4);
-                const view = new DataView(bytes.buffer);
-                for (let at = 0; at < words; at++)
-                {
-                    view.setUint32(at * 4, pattern >>> 0, true);
-                }
-                if (words > 0)
-                {
-                    host.writeMemory(wholeAddress(destination), bytes);
-                }
+                fillPattern(destination, (length & ~3) >>> 0, [pattern]);
                 return 0;
             },
         },
@@ -1198,18 +1219,7 @@ export function createNtdllFunctions(host){
             quadwords: [2],
             /** @param {number[]} args */
             handler: ([destination, length, low, high])=>{
-                const words = (length >>> 0) >>> 3;
-                const bytes = new Uint8Array(words * 8);
-                const view = new DataView(bytes.buffer);
-                for (let at = 0; at < words; at++)
-                {
-                    view.setUint32(at * 8, low >>> 0, true);
-                    view.setUint32(at * 8 + 4, high >>> 0, true);
-                }
-                if (words > 0)
-                {
-                    host.writeMemory(wholeAddress(destination), bytes);
-                }
+                fillPattern(destination, (length & ~7) >>> 0, [low, high]);
                 return 0;
             },
         },

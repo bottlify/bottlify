@@ -26,6 +26,7 @@ const NOT_FOUND = 0xffffffff;
  * @typedef {Object} BitmapHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {import('../common/guest.js').Guest} guest
  */
 
 /**
@@ -73,9 +74,10 @@ export function createBitmapFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([header])=>{
-            // Whole ULONGs, as the buffer is laid out in them.
+            // Whole ULONGs, as the buffer is laid out in them, filled where
+            // they lie: a size the buffer does not have faults where it ends.
             const bytes = Math.ceil(u32(header) / 32) * 4;
-            host.writeMemory(u32(header + 4), new Uint8Array(bytes).fill(on ? 0xff : 0));
+            host.guest.fill(u32(header + 4), on ? 0xff : 0, bytes);
             return 0;
         },
     });
