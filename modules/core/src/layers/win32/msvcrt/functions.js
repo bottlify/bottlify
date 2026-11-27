@@ -1234,9 +1234,9 @@ export function createMsvcrtFunctions(host){
     const narrow = {
         ...table,
         ...createStringFunctions({
+            guest: host.guest,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
-            readCString: host.readCString,
             scanCString: host.scanCString,
             allocate,
             errno,

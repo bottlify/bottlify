@@ -18,21 +18,20 @@
  * position between calls, because that is what the C library promises.
  */
 
-import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { wholeAddress } from '../common/pointers.js';
-
-/** A string's terminator, where a string ends: never itself written. */
-const NUL = new Uint8Array(1);
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} StringHost
+ * @property {import('../common/guest.js').Guest} guest  What the handlers read and
+ *     write, at the process's pointer width.
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ *     With writeMemory, what the routines that run in the guest read and write
+ *     when they answer as handlers (`guestEntry`).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, limit: number, wanted: Uint8Array) =>
  *            { index: number, byte: number }} scanCString
  *     Walks a guest string's bytes in chunks and answers with the first one a
@@ -42,7 +41,8 @@ const NUL = new Uint8Array(1);
  *     the largest host cost in an install that scans while it copies.
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
  * @property {(code: number) => void} [errno]  Where a refused parameter says why.
- * @property {number} [pointerSize]  8 in a 64-bit process, where `_pctype` is a quadword.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where the routines in the
+ *     guest read pointers of eight bytes.
  */
 
 /** A string is scanned no further than this, since nothing in C bounds one. */
@@ -81,13 +81,7 @@ const CT_LEADBYTE = 0x8000;
  * @param {StringHost} host
  */
 export function createStringFunctions(host){
-    /** @param {number} pointer */
-    const readString = pointer=>host.readCString(pointer, MAX_STRING);
-
-    /** In the ANSI page the string was read in. @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        host.writeMemory(pointer, encodeAnsi(`${text}\0`));
-    };
+    const { guest } = host;
 
     /**
      * strtok's saved position.
@@ -116,7 +110,8 @@ export function createStringFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([string])=>{
-            writeString(string, transform(readString(string)));
+            // In the ANSI page the string was read in.
+            guest.writeAnsi(string, transform(guest.cstr(string, MAX_STRING)));
             return string;
         },
     });
@@ -172,8 +167,8 @@ export function createStringFunctions(host){
                     return 0;
                 }
 
-                const separators = new Set(readString(delimiters));
-                const rest = readString(tokenAt);
+                const separators = new Set(guest.cstr(delimiters, MAX_STRING));
+                const rest = guest.cstr(tokenAt, MAX_STRING);
                 let start = 0;
                 while (start < rest.length && separators.has(rest[start]))
                 {
@@ -196,7 +191,7 @@ export function createStringFunctions(host){
                 const token = tokenAt + start;
                 if (end < rest.length)
                 {
-                    host.writeMemory(tokenAt + end, NUL);
+                    guest.set8(tokenAt + end, 0);
                     tokenAt = tokenAt + end + 1;
                 }
                 else
@@ -224,13 +219,13 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                const text = readString(string);
+                const text = guest.cstr(string, MAX_STRING);
                 const address = host.allocate(text.length + 1);
                 if (address === 0)
                 {
                     return 0;
                 }
-                writeString(address, text);
+                guest.writeAnsi(address, text);
                 return address;
             },
         },
@@ -252,14 +247,14 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(source, length);
+                const bytes = guest.bytes(source, length);
                 for (let at = 0; at < length; at += 2)
                 {
                     const first = bytes[at];
                     bytes[at] = bytes[at + 1];
                     bytes[at + 1] = first;
                 }
-                host.writeMemory(destination, bytes);
+                guest.setBytes(destination, bytes);
                 return 0;
             },
         },
@@ -282,7 +277,7 @@ export function createStringFunctions(host){
                     return NLS_COMPARE_ERROR;
                 }
                 /** @param {number} at */
-                const bytesOf = at=>host.readMemory(at,
+                const bytesOf = at=>guest.bytes(at,
                     host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1);
                 const a = bytesOf(wholeAddress(left));
                 const b = bytesOf(wholeAddress(right));
@@ -323,8 +318,7 @@ export function createStringFunctions(host){
                 const length = host.scanCString(source, MAX_STRING, scanTable.fill(0)).index;
                 if (room !== 0)
                 {
-                    host.writeMemory(destination,
-                        host.readMemory(source, Math.min(room, length + 1)));
+                    guest.copy(destination, source, Math.min(room, length + 1));
                 }
                 return length;
             },
@@ -346,13 +340,13 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                if ((left >>> 0) === 0 || (right >>> 0) === 0)
+                if (wholeAddress(left) === 0 || wholeAddress(right) === 0)
                 {
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
-                const a = host.readMemory(left, length);
-                const b = host.readMemory(right, length);
+                const a = guest.bytes(left, length);
+                const b = guest.bytes(right, length);
                 for (let at = 0; at < length; at++)
                 {
                     const difference = inGuest.LOWER[a[at]] - inGuest.LOWER[b[at]];
@@ -487,7 +481,7 @@ export function createStringFunctions(host){
             const address = host.allocate(ctypeTable.byteLength);
             if (address !== 0)
             {
-                host.writeMemory(address, new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
+                guest.setBytes(address, new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
                     ctypeTable.byteLength));
                 published = address + 2;
             }
@@ -495,11 +489,9 @@ export function createStringFunctions(host){
         return published;
     };
     table._pctype = {
-        data: ()=>{
-            const pointer = new Uint8Array(host.pointerSize ?? 4);
-            new DataView(pointer.buffer).setUint32(0, publishedTable(), true);
-            return pointer;
-        },
+        // A pointer of the process's width, whole: a table placed past 4 GiB
+        // is pointed at there.
+        data: ()=>pointerWidth(guest.pointerSize).bytes(publishedTable()),
     };
 
     /** const unsigned short *__pctype_func(void): `_pctype`'s value, through a call. */

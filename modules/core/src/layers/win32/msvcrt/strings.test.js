@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStringFunctions } from './strings.js';
 import { fakeMemory } from './harness.test.js';
+import { guestWindow } from './guest-window.fixture.js';
 
 const build = ()=>{
     const memory = fakeMemory();
@@ -98,7 +99,7 @@ test('_strdup of no string is null, nothing read or allocated', ()=>{
     const { memory } = build();
     const table = createStringFunctions({
         ...memory,
-        readCString: ()=>assert.fail('address zero read'),
+        guest: { ...memory.guest, cstr: ()=>assert.fail('address zero read') },
         allocate: ()=>assert.fail('allocated for nothing'),
     });
     assert.equal(table._strdup.handler([0]), 0);
@@ -172,6 +173,39 @@ test('_pctype publishes a table a guest can index straight through, EOF included
     // before ever comparing against EOF, and real msvcrt answers nothing there.
     assert.equal(view.getUint16(pointer - 2, true), 0);
 });
+
+test('at 64 bits past 4 GiB: _pctype is a whole pointer, strtok and _strdup whole addresses',
+    ()=>{
+        const base = 0x140000000;
+        const bytes = new Uint8Array(0x2000);
+        const view = new DataView(bytes.buffer);
+        let next = base + 0x1000;
+        const table = createStringFunctions({
+            guest: guestWindow(bytes, { base, pointerSize: 8 }),
+            readMemory: (at, length)=>bytes.slice(at - base, at - base + length),
+            writeMemory: (at, data)=>bytes.set(data, at - base),
+            scanCString: ()=>assert.fail('no scan here'),
+            allocate: size=>{
+                const at = next;
+                next += size + 15 & ~15;
+                return at;
+            },
+            pointerSize: 8,
+        });
+        const pointer = table._pctype.data();
+        assert.equal(pointer.length, 8);
+        const at = new DataView(pointer.buffer).getUint32(0, true)
+            + new DataView(pointer.buffer).getUint32(4, true) * 2 ** 32;
+        assert.equal(at, base + 0x1002, 'one element into the table, whole');
+        assert.equal(view.getUint16(at - base + 'A'.charCodeAt(0) * 2, true) & 1, 1);
+        bytes.set([...'a,b\0,\0'].map(c=>c.charCodeAt(0)), 0x100);
+        assert.equal(table.strtok.handler([base + 0x100, base + 0x104]), base + 0x100);
+        assert.equal(bytes[0x101], 0, 'the delimiter ended');
+        assert.equal(table.strtok.handler([0, base + 0x104]), base + 0x102);
+        const copy = table._strdup.handler([base + 0x102]);
+        assert.ok(copy > base);
+        assert.deepEqual([...bytes.subarray(copy - base, copy - base + 2)], [0x62, 0]);
+    });
 
 /**
  * A megabyte whose answer sits at byte 3, laid down once for the scans below:

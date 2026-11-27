@@ -729,10 +729,6 @@
    "string readString": 1,
    "string readWide": 1
   },
-  "msvcrt/strings.js": {
-   "string readString": 1,
-   "string writeString": 1
-  },
   "msvcrt/time.js": {
    "accessor dword": 1,
    "accessor readInt": 1,
