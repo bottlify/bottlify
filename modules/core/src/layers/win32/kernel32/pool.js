@@ -31,6 +31,7 @@
 
 import { createThreadpoolApi } from './threadpool-api.js';
 import { wholeAddress } from '../common/pointers.js';
+import { createDeadlines } from '../../../system/deadlines.js';
 
 /** A pool this size runs more callbacks at once than a program has reason to ask for. */
 const MAX_THREADS = 32;
@@ -847,6 +848,10 @@ export function createThreadPool(host){
      * @property {any} thread
      * @property {number} handles  where the objects are written for the wait
      * @property {Wait[]} waits  in the order they were registered
+     * @property {import('../../../system/deadlines.js').Deadlines} deadlines  when each
+     *     wait's time runs out, under its `id`; a wait for ever has none
+     * @property {Wait[]} byId  the waits by `id`
+     * @property {(id: number) => void} ranOut  fires the wait under `id`, its time out
      * @property {Wait[][]} asked  the waits the wait under way was asked for, by object in
  *     its order: two waits on one object are one entry, which fires the first of them
      * @property {boolean} leaving  out of waits, its loop ending
@@ -871,6 +876,26 @@ export function createThreadPool(host){
     };
 
     /**
+     * The wait leaves its thread, its time-out with it. Its thread is not
+     * told (`detach`).
+     *
+     * @param {Wait} wait
+     * @returns {WaitThread | undefined}  the thread it left
+     */
+    const leave = wait=>{
+        const home = wait.home;
+        wait.home = undefined;
+        if (home)
+        {
+            home.waits.splice(home.waits.indexOf(wait), 1);
+            home.deadlines.release(wait.id);
+            home.byId[wait.id] = undefined;
+            wait.id = -1;
+        }
+        return home;
+    };
+
+    /**
      * The wait leaves its thread, which is told so: blocked, it is taken out
      * of its wait and waits again for what is left. Left in its wait, it
      * would take the next signal for a wait nobody has any more -- a
@@ -880,19 +905,20 @@ export function createThreadPool(host){
      * @param {Wait} wait
      */
     const detach = wait=>{
-        const home = wait.home;
-        wait.home = undefined;
-        if (!home)
+        const home = leave(wait);
+        if (home)
         {
-            return;
+            kernel.alert(home.thread, WAIT_IO_COMPLETION);
         }
-        home.waits.splice(home.waits.indexOf(wait), 1);
-        kernel.alert(home.thread, WAIT_IO_COMPLETION);
     };
 
-    /** @param {Wait} wait */
-    const deadlineOf = wait=>(wait.timeout === INFINITE ? Infinity
-        : kernel.clock.virtualTime() + wait.timeout);
+    /** The wait's time runs out its time-out from now. @param {Wait} wait */
+    const startTimeout = wait=>{
+        if (wait.timeout !== INFINITE && wait.home)
+        {
+            wait.home.deadlines.move(wait.id, kernel.clock.virtualTime() + wait.timeout);
+        }
+    };
 
     /**
      * The wait thread asks: a wait for any of its waits' objects, alertable,
@@ -921,7 +947,7 @@ export function createThreadPool(host){
             objects.push(never);
         }
         const now = kernel.clock.virtualTime();
-        const nearest = Math.min(...home.waits.map(wait=>wait.deadline));
+        const nearest = home.deadlines.soonest();
         const bytes = new Uint8Array(objects.length * 4);
         const view = new DataView(bytes.buffer);
         objects.forEach((object, index)=>view.setUint32(index * 4, object, true));
@@ -960,13 +986,11 @@ export function createThreadPool(host){
         if (wait.once)
         {
             wait.spent = true;
-            const home = wait.home;
-            wait.home = undefined;
-            home?.waits.splice(home.waits.indexOf(wait), 1);
+            leave(wait);
         }
         else
         {
-            wait.deadline = deadlineOf(wait);
+            startTimeout(wait);
         }
     };
 
@@ -992,11 +1016,7 @@ export function createThreadPool(host){
         }
         else if (result === WAIT_TIMEOUT)
         {
-            const now = kernel.clock.virtualTime();
-            for (const wait of home.waits.filter(each=>live(each) && each.deadline <= now))
-            {
-                fireWait(wait, WAIT_TIMEOUT);
-            }
+            home.deadlines.takeDue(kernel.clock.virtualTime(), home.ranOut);
         }
         else if (result !== WAIT_IO_COMPLETION)
         {
@@ -1009,8 +1029,7 @@ export function createThreadPool(host){
                 host.divergence?.('RegisterWaitForSingleObject',
                     `the object 0x${wait.object.toString(16)} was closed under its wait,`
                     + ' which will never fire');
-                wait.home = undefined;
-                home.waits.splice(home.waits.indexOf(wait), 1);
+                leave(wait);
             }
         }
         if (home.waits.length === 0)
@@ -1085,7 +1104,9 @@ export function createThreadPool(host){
         }
         host.threadBlock?.(thread);
         /** @type {WaitThread} */
-        const home = { id, thread, handles, waits: [], asked: [], leaving: false };
+        const home = { id, thread, handles, waits: [], asked: [], leaving: false,
+            deadlines: createDeadlines(MAXIMUM_WAIT_OBJECTS), byId: [],
+            ranOut: slot=>fireWait(/** @type {Wait} */ (home.byId[slot]), WAIT_TIMEOUT) };
         waitThreads.set(id, home);
         return home;
     };
@@ -1115,14 +1136,15 @@ export function createThreadPool(host){
         }
         /** @type {Wait} */
         const wait = { handle, object: object >>> 0, callback: callback >>> 0,
-            context: context >>> 0, timeout: timeout >>> 0, deadline: Infinity,
+            context: context >>> 0, timeout: timeout >>> 0, id: home.deadlines.claim(),
             once: (flags & WT_EXECUTEONLYONCE) !== 0,
             inWaitThread: (flags & WT_EXECUTEINWAITTHREAD) !== 0, cancelled: false,
             spent: false, outstanding: 0, waiters: [] };
-        wait.deadline = deadlineOf(wait);
         wait.settled = ()=>forget(wait);
         wait.home = home;
         home.waits.push(wait);
+        home.byId[wait.id] = wait;
+        startTimeout(wait);
         waits.set(handle, wait);
         // Waiting already, the thread starts its wait again with this one in it.
         kernel.alert(home.thread, WAIT_IO_COMPLETION);

@@ -761,9 +761,14 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             object.period = Math.max(0, period);
             object.token = scheduler.addTimer(due, object.period, (/** @type {number} */ next)=>{
                 // A periodic timer moves on to its next boundary; a one-shot
-                // has fired for the last time.
+                // has fired for the last time, and its token is spent: the
+                // scheduler may hand it to the next timer armed.
                 const at = object.due;
                 object.due = object.period > 0 ? next : null;
+                if (object.period === 0)
+                {
+                    object.token = null;
+                }
                 api.setEvent(object);
                 object.fired?.(at);
             });

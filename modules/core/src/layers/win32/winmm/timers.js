@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { createDeadlines } from '../../../system/deadlines.js';
+
 /** SetThreadPriority's relative value for the highest priority there is. */
 const THREAD_PRIORITY_TIME_CRITICAL = 15;
 
@@ -174,11 +176,33 @@ export function createTimerService(deps){
      * @property {number} user
      * @property {number} flags
      * @property {() => boolean} [when]  An event set only while this holds.
-     * @property {boolean} [firing]  A one shot whose routine is running now.
+     * @property {number} slot  Its due time's id in `loop`, the loop's timers
+     *     only; -1 for an event timer the kernel's clock fires.
      * @property {any} [clock]  The kernel's timer firing it, for an event timer.
      */
     /** @type {Map<number, Timer>} */
     const timers = new Map();
+    /**
+     * The due times of the timers the loop fires, by `slot`: a one-shot whose
+     * routine is running is out of it, so the loop does not call it twice.
+     */
+    const loop = createDeadlines();
+    /** @type {(Timer | undefined)[]} */
+    const bySlot = [];
+
+    /** A timer gone, from the table and the loop. @param {Timer} timer */
+    const drop = timer=>{
+        if (timers.get(timer.id) !== timer)
+        {
+            return;
+        }
+        timers.delete(timer.id);
+        if (timer.slot >= 0)
+        {
+            loop.release(timer.slot);
+            bySlot[timer.slot] = undefined;
+        }
+    };
     let nextId = 1;
     /** @type {any} */
     let thread = null;
@@ -225,24 +249,6 @@ export function createTimerService(deps){
         late.worstMs = Math.max(late.worstMs, Math.round(ms * 10) / 10);
     };
 
-    /** The timer due soonest, or null. */
-    const earliest = ()=>{
-        /** @type {Timer | null} */
-        let found = null;
-        for (const timer of timers.values())
-        {
-            if (timer.firing || timer.clock)
-            {
-                continue;
-            }
-            if (found === null || timer.due < found.due)
-            {
-                found = timer;
-            }
-        }
-        return found;
-    };
-
     /**
      * Settles one due timer: a one shot leaves the table, a periodic one is
      * moved on by its period from when it was due, not from now, so a late
@@ -268,10 +274,11 @@ export function createTimerService(deps){
                 timer.due += missed * timer.period;
                 skipped += missed;
             }
+            loop.move(timer.slot, timer.due);
         }
         else
         {
-            timers.delete(timer.id);
+            drop(timer);
         }
     };
 
@@ -283,12 +290,13 @@ export function createTimerService(deps){
         const me = deps.currentThread();
         if (calling !== null)
         {
-            timers.delete(calling.id);
+            drop(calling);
             calling = null;
         }
         for (;;)
         {
-            const timer = earliest();
+            const slot = loop.first();
+            const timer = slot < 0 ? null : /** @type {Timer} */ (bySlot[slot]);
             if (timer === null)
             {
                 waiting = me;
@@ -328,7 +336,7 @@ export function createTimerService(deps){
             else
             {
                 fired++;
-                timer.firing = true;
+                loop.remove(timer.slot);
                 calling = timer;
             }
             return record;
@@ -370,7 +378,7 @@ export function createTimerService(deps){
             /** @type {Timer} */
             const timer = {
                 id, due: deps.now() + delay, period: (flags & TIME_PERIODIC) ? delay : 0,
-                target, user, flags, when,
+                target, user, flags, when, slot: -1,
             };
             timers.set(id, timer);
             const kind = flags & CALLBACK_MASK;
@@ -382,7 +390,7 @@ export function createTimerService(deps){
                     noteLate(deps.now() - at);
                     if (timer.period === 0)
                     {
-                        timers.delete(id);
+                        drop(timer);
                         spareClocks.push(timer.clock);
                     }
                     if (kind === TIME_CALLBACK_EVENT_PULSE)
@@ -396,6 +404,9 @@ export function createTimerService(deps){
                 });
                 return id;
             }
+            timer.slot = loop.claim();
+            bySlot[timer.slot] = timer;
+            loop.add(timer.due, timer.slot);
             if (thread === null)
             {
                 start();
@@ -421,7 +432,7 @@ export function createTimerService(deps){
                     deps.cancelClockTimer?.(timer.clock);
                     spareClocks.push(timer.clock);
                 }
-                timers.delete(id);
+                drop(timer);
                 return 0;
             }
             return id > 0 && id < nextId ? TIMERR_NOCANDO : MMSYSERR_INVALPARAM;
