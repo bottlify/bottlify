@@ -14,6 +14,7 @@ import { TABLE_BYTES } from './output/mix.js';
 import { createMp3Provider } from './asi/provider.js';
 import { createMinimp3Decoder } from './asi/minimp3.js';
 import { splitFrames } from './asi/mp3.js';
+import { isStub } from '../../system/stub.js';
 
 /** The level at which the program writes the primary buffer itself. */
 const DSSCL_WRITEPRIMARY = 4;
@@ -101,27 +102,16 @@ export function createAudioModule(){
             const win32 = host.requireApi('win32');
             // A build with win32 stubbed -- one where nothing asked for win32
             // and it was switched off -- has no class registry to put
-            // DirectMusic's classes in. Asking for it would throw the stub's
-            // refusal, which is the right answer to a *call* and the wrong
-            // one to a graph being assembled: DirectMusic is simply absent.
+            // DirectMusic's classes in, nor the codec manager Windows keeps
+            // the MPEG Layer-3 codec in, for an engine that decodes its MP3
+            // WAVs there: both are simply absent. A real win32 that refuses
+            // either is a failure, and goes to the caller.
+            const win32Here = win32 && !isStub(win32);
             /** @type {any} */
-            let com;
-            try
+            const com = win32Here ? win32.com?.() ?? null : null;
+            if (win32Here)
             {
-                com = win32?.com?.() ?? null;
-            }
-            catch {
-                com = null;
-            }
-            // The MPEG Layer-3 codec Windows has in its codec manager, for an
-            // engine that decodes its MP3 WAVs there; absent, like DirectMusic,
-            // where win32 is.
-            try
-            {
-                win32?.installAcmCodec?.(createMp3AcmCodec());
-            }
-            catch {
-                // win32 stubbed: no codec manager to install into.
+                win32.installAcmCodec?.(createMp3AcmCodec());
             }
             /** @type {any} */
             let dmusic = null;
